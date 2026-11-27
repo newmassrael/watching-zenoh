@@ -57,11 +57,11 @@ pub struct ActionTrace {
     /// population in one pass.
     pub record_established_at: u32,
     /// R89 — incremented on every `cookie_valid()` guard invocation
-    /// (SentInitAck -> SentOpenAck transition condition). Tests
-    /// assert this counter to confirm the dynamic guard fired
+    /// (the admission of the SentInitAck -> Established transition).
+    /// Tests assert this counter to confirm the dynamic guard fired
     /// instead of a constant-true fallback. The verdict itself is
     /// observed indirectly via FSM state after the transition: if
-    /// guard returned true the FSM advances to SentOpenAck, if
+    /// guard returned true the FSM advances to Established, if
     /// false it stays at SentInitAck.
     pub cookie_valid_check: u32,
 }

@@ -776,9 +776,11 @@ What wz holds so that a change of the runtime's turn needs no wz change but the 
 - the class the requests below rely on is held against the generated tables of the build that
   links them (`wz-session-core`'s `machine_class_tests`): no `<history>`, no `<parallel>`, no
   transition of more than one target, selection by rows, every `<final>` at the top level and no
-  eventless transition. The link and slot machines and the session machine of a build that only
-  opens are of it; the session machine of a build that accepts is not (the step from SentOpenAck
-  to Established is eventless), and the test says so, so that build keeps the general turn;
+  eventless transition. The link and slot machines and the session machine are of it in every
+  build: the acceptor's OpenAck is the effect of the OpenSyn's own transition into Established
+  (`docs/c-abi-migration/peer-proportion.md` F4), not the entry of a state left by an eventless
+  step, and the test asserts the runtime's own `DocumentTables::reactive_class` beside its own
+  reading;
 - every one of the three declares an internal queue the generator proves empty
   (`INTERNAL_QUEUE_BOUND = Some(0)`), and none has an `<invoke>`, a `<finalize>` or an
   autoforward.

@@ -49,7 +49,7 @@
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 
-use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
+use crate::bounded::{BoundedVec, Profile, Storage};
 use crate::caps;
 use crate::registry_error::RegisterError;
 
@@ -214,31 +214,6 @@ impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, Profile> {
     }
 }
 
-impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, Lent> {
-    /// An empty pair whose two lists are lent from `arena`, `rows` rows each: the
-    /// `MAX_DECL_OBSERVERS` a session's open resolved, under the build's. Refused, the list lent so
-    /// far going back with the arena, past the build's value or past what the arena has left.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
-        Ok(Self {
-            on_decl: arena.lend(rows)?,
-            on_undecl: arena.lend(rows)?,
-            ..Self::default()
-        })
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes for `rows` rows: its two lists, each a span of
-    /// its own. `None` past the address space.
-    pub const fn arena_bytes(rows: usize) -> Option<usize> {
-        match (
-            Arena::table_bytes::<KeyedSink<D>>(rows),
-            Arena::table_bytes::<KeyedSink<U>>(rows),
-        ) {
-            (Some(on_decl), Some(on_undecl)) => on_decl.checked_add(on_undecl),
-            _ => None,
-        }
-    }
-}
-
 #[cfg(feature = "alloc")]
 impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, crate::bounded::OnUse> {
     /// An empty pair whose two lists hold at most `rows` rows each, under the build's bound, taken
@@ -252,8 +227,8 @@ impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, crate::bounded::OnUse> {
     }
 }
 
-/// The rows of a [`DeclObserverPair`] of the region policy, which a region lays out beside it:
-/// each list's, at the build's bound.
+/// The rows of a [`DeclObserverPair`] of a policy a description places, which a region lays out
+/// beside it: each list's, at the build's bound. Of no policy: a list's row is a sink and its id.
 pub struct DeclObserverRows<D, U> {
     on_decl: [core::mem::MaybeUninit<KeyedSink<D>>; caps::MAX_DECL_OBSERVERS],
     on_undecl: [core::mem::MaybeUninit<KeyedSink<U>>; caps::MAX_DECL_OBSERVERS],
@@ -262,8 +237,7 @@ pub struct DeclObserverRows<D, U> {
 // SAFETY: both lists' rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
 unsafe impl<D, U> crate::bounded::ZeroEmpty for DeclObserverRows<D, U> {}
 
-/// The lines a region's description holds for one [`DeclObserverPair`] of the region policy: its
-/// two lists' rows.
+/// The lines a description holds for one [`DeclObserverPair`]: its two lists' rows.
 pub const DECL_OBSERVER_LINES: usize = 2;
 
 // SAFETY: of the region policy, at all zero bytes: each list is a `LentSeq` of no rows, the quota a
@@ -274,28 +248,30 @@ unsafe impl<D: DeclSink, U: UndeclSink> crate::bounded::ZeroEmpty
 {
 }
 
-impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, crate::bounded::Region> {
-    /// The description of a pair of the region policy at `at` in a region and its
-    /// [`DeclObserverRows`] at `rows`: the lines of its two lists' rows.
+impl<D: DeclSink, U: UndeclSink, P: crate::bounded::LaidOut> DeclObserverPair<D, U, P> {
+    /// The description of a pair at `at` and, in a region, its [`DeclObserverRows`] at `rows`:
+    /// the lines of its two lists' rows, each lent the session's `MAX_DECL_OBSERVERS` by a plan
+    /// (`RowCount::DeclWatchers`). A pair is written as [`Default`] makes it before it is placed
+    /// or lent, and held to the session's limit after ([`Self::limit_to`]).
     pub const fn places(
         at: usize,
         rows: usize,
     ) -> crate::bounded::RegionLines<DECL_OBSERVER_LINES> {
         crate::bounded::RegionLines::EMPTY
-            .seq(crate::bounded::SeqPlace::of_room::<
-                KeyedSink<D>,
-                { caps::MAX_DECL_OBSERVERS },
-            >(
-                at.wrapping_add(core::mem::offset_of!(Self, on_decl)),
-                rows.wrapping_add(core::mem::offset_of!(DeclObserverRows<D, U>, on_decl)),
-            ))
-            .seq(crate::bounded::SeqPlace::of_room::<
-                KeyedSink<U>,
-                { caps::MAX_DECL_OBSERVERS },
-            >(
-                at.wrapping_add(core::mem::offset_of!(Self, on_undecl)),
-                rows.wrapping_add(core::mem::offset_of!(DeclObserverRows<D, U>, on_undecl)),
-            ))
+            .seq(
+                crate::bounded::SeqPlace::of_room::<KeyedSink<D>, { caps::MAX_DECL_OBSERVERS }>(
+                    at.wrapping_add(core::mem::offset_of!(Self, on_decl)),
+                    rows.wrapping_add(core::mem::offset_of!(DeclObserverRows<D, U>, on_decl)),
+                )
+                .counted(crate::bounded::RowCount::DeclWatchers),
+            )
+            .seq(
+                crate::bounded::SeqPlace::of_room::<KeyedSink<U>, { caps::MAX_DECL_OBSERVERS }>(
+                    at.wrapping_add(core::mem::offset_of!(Self, on_undecl)),
+                    rows.wrapping_add(core::mem::offset_of!(DeclObserverRows<D, U>, on_undecl)),
+                )
+                .counted(crate::bounded::RowCount::DeclWatchers),
+            )
     }
 }
 
@@ -748,11 +724,15 @@ mod tests {
         assert_eq!(sinks.len(), 1);
     }
 
-    /// A pair lent from an arena holds the rows its open lent each list and refuses one more,
-    /// whatever the build's ceiling, with the observers in kept; an arena without the room for
-    /// both lists refuses the pair. Turned red by a pair lent the build's ceiling, or one list.
+    /// A pair lent from an arena through its description holds the rows its open lent each list
+    /// and refuses one more, whatever the build's ceiling, with the observers in kept; the arena
+    /// takes the lines summed, and one without the room for both lists refuses the pair. Turned
+    /// red by a line lent the build's ceiling and not the watchers' count, or by one list.
     #[test]
     fn a_lent_pair_refuses_an_observer_past_its_rows() {
+        use crate::bounded::{
+            lend_seqs, seq_bytes, Arena, LendRefused, Lent, RowCount, RowCounts, TableLender,
+        };
         /// Memory an arena may start on: aligned as its spans are.
         #[derive(Clone, Copy)]
         #[repr(C, align(16))]
@@ -772,11 +752,37 @@ mod tests {
         }
 
         type Pair = DeclObserverPair<CountingDeclSink, CountingUndeclSink, Lent>;
+        /// Lend `pair` its lists from `arena` through its description, `counts` stating them.
+        fn lend(pair: &mut Pair, arena: &mut Arena, counts: &RowCounts) -> Result<(), LendRefused> {
+            let mut lend = TableLender::new(arena);
+            // SAFETY: the lines are the pair's own description, from its start: each names a list
+            // of `pair`, which holds no observer, and states its rows' bytes; nothing else reaches
+            // `pair` during the call.
+            unsafe {
+                lend_seqs(
+                    core::ptr::NonNull::from(pair).cast::<u8>(),
+                    Pair::places(0, 0).seq_lines(),
+                    counts,
+                    &mut lend,
+                );
+            }
+            lend.finish()
+        }
         let rows = caps::MAX_DECL_OBSERVERS.min(2);
-        let bytes = Pair::arena_bytes(rows).expect("within the address space");
+        let counts = RowCounts::NONE.with(RowCount::DeclWatchers, rows);
+        let bytes =
+            seq_bytes(Pair::places(0, 0).seq_lines(), &counts).expect("within the address space");
+        assert_eq!(
+            Some(bytes),
+            Arena::table_bytes::<KeyedSink<CountingDeclSink>>(rows)
+                .zip(Arena::table_bytes::<KeyedSink<CountingUndeclSink>>(rows))
+                .map(|(on_decl, on_undecl)| on_decl + on_undecl),
+            "each list a span of the watchers' rows"
+        );
         let mut memory = std::vec![Block([0; 16]); bytes / 16 + 1];
         let mut arena = arena_over(&mut memory, bytes);
-        let mut pair = Pair::lent(&mut arena, rows).expect("the arena holds both lists");
+        let mut pair = Pair::default();
+        lend(&mut pair, &mut arena, &counts).expect("the arena holds both lists");
         assert_eq!(arena.high_water(), bytes, "both lists, and no more");
         for _ in 0..rows {
             pair.install_decl(CountingDeclSink::default())
@@ -797,7 +803,7 @@ mod tests {
         let mut other = std::vec![Block([0; 16]); bytes / 16 + 1];
         let mut short = arena_over(&mut other, bytes - 1);
         assert!(
-            Pair::lent(&mut short, rows).is_err(),
+            lend(&mut Pair::default(), &mut short, &counts).is_err(),
             "an arena one byte short holds no pair"
         );
     }

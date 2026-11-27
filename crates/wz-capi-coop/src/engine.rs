@@ -298,12 +298,12 @@ pub(crate) use registry::placed::{RegistryRegion, REGISTRY_REGION_LINES};
 // The values the state owns and its tasks reach by handles, as fields of the region.
 #[cfg(not(feature = "runtime-plan"))]
 mod state_places;
-#[cfg(feature = "runtime-plan")]
-pub(crate) use registry::FACE_SET_BYTES;
-#[cfg(any(feature = "listen", feature = "group"))]
-pub(crate) use registry::HELD_SET_BYTES;
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
+pub(crate) use registry::set_get_bytes;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
+#[cfg(feature = "runtime-plan")]
+pub(crate) use registry::{registry_bytes, registry_row_bytes, set_peer_bytes};
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
 #[cfg(all(
     any(feature = "query", feature = "queryable"),
@@ -7107,7 +7107,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(feature = "link-admission")]
         let link_admission = unsafe { admission.share() }.map(as_link_admission::<C>);
         // The faces' links keep the places the registry lends their tables at: one table of them.
-        let places = lent.registry.places();
+        let places = lent.registry.face_places();
         // The waits a read makes at once, reserved here while the links hold nothing of what was
         // lent: none grows after.
         let room =

@@ -70,11 +70,8 @@
 //! emits them through the sink. Wire ordering is preserved — every
 //! `DeclToken` precedes the terminating `DeclFinal`.
 
-use crate::bounded::{
-    Arena, BoundedVec, CapacityFull, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Storage,
-};
+use crate::bounded::{BoundedVec, CapacityFull, KeyMaker, KeyUnkept, Profile, Storage};
 use crate::caps;
-use crate::key_arena::{KeySpace, LentKeys};
 use crate::keyexpr_match::keyexpr_intersects;
 use crate::registry_error::RegisterError;
 
@@ -215,8 +212,8 @@ pub struct LocalTokenRegistry<P: Storage = Profile> {
     /// alone.
     key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// Where the tokens keep their keys ([`Storage::Keys`]): the session's key arena on the lent
-    /// policy ([`Self::lent`]). A key with no room there is refused as a full table refuses the
-    /// token ([`RegisterError::TableFull`]).
+    /// policy, joined by the registry's description ([`Self::places`]). A key with no room there
+    /// is refused as a full table refuses the token ([`RegisterError::TableFull`]).
     keys: P::Keys,
 }
 
@@ -242,17 +239,21 @@ impl LocalTokenRegistry<Profile> {
     }
 }
 
-/// The rows of a [`LocalTokenRegistry`] of the region policy, `N` tokens, which a region lays out
-/// beside it: none where the session's tables keep its tokens as rows, and the registry holds none.
-pub struct LocalTokenRows<const N: usize> {
-    tokens: [core::mem::MaybeUninit<LocalToken<crate::bounded::Region>>; N],
+/// The rows of a [`LocalTokenRegistry`] of a policy a description places, `N` tokens, which a
+/// region lays out beside it: none where the session's tables keep its tokens as rows, and the
+/// registry holds none. The lent policy's are no value and stand only for the region's offsets.
+pub struct LocalTokenRows<const N: usize, P: crate::bounded::LaidOut = crate::bounded::Region> {
+    tokens: [core::mem::MaybeUninit<LocalToken<P>>; N],
 }
 
 // SAFETY: the rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
-unsafe impl<const N: usize> crate::bounded::ZeroEmpty for LocalTokenRows<N> {}
+unsafe impl<const N: usize, P: crate::bounded::LaidOut> crate::bounded::ZeroEmpty
+    for LocalTokenRows<N, P>
+{
+}
 
-/// The lines a region's description holds for one [`LocalTokenRegistry`] of the region policy: its
-/// tokens' rows, and its handle to the key arena.
+/// The lines a description holds for one [`LocalTokenRegistry`]: its tokens' rows, and its handle
+/// to the key arena.
 pub const LOCAL_TOKEN_LINES: usize = 1;
 
 // SAFETY: of the region policy, at all zero bytes: the tokens are a `LentSeq` of no rows, each bound
@@ -260,27 +261,30 @@ pub const LOCAL_TOKEN_LINES: usize = 1;
 // key arena a `LentKeys` of none. Nothing drops a value, the table holding none.
 unsafe impl crate::bounded::ZeroEmpty for LocalTokenRegistry<crate::bounded::Region> {}
 
-impl LocalTokenRegistry<crate::bounded::Region> {
-    /// The description of a registry of the region policy at `at` in a region and its
-    /// [`LocalTokenRows`] of `N` tokens at `rows`: the line of its tokens' rows and its handle to
-    /// the region's key arena. `N` past the build's `MAX_LOCAL_TOKENS` stops the build.
+impl<P: crate::bounded::LaidOut> LocalTokenRegistry<P> {
+    /// The description of a registry at `at` and, in a region, its [`LocalTokenRows`] of `N`
+    /// tokens at `rows`: the line of its tokens' rows, `N` at most, which a plan lends the
+    /// session's own tokens' count (`RowCount::LocalTokens`), and its handle to the key arena. `N`
+    /// past the build's `MAX_LOCAL_TOKENS` stops the build. A registry is written as [`Default`]
+    /// makes it before it is placed or lent, and held to the session's limits after.
     pub const fn places<const N: usize>(
         at: usize,
         rows: usize,
     ) -> crate::bounded::RegionLines<LOCAL_TOKEN_LINES> {
         assert!(
             N <= caps::MAX_LOCAL_TOKENS,
-            "a region lays out no token past the build's bound"
+            "a description holds no token past the build's bound"
         );
         crate::bounded::RegionLines::EMPTY
             .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
-            .seq(crate::bounded::SeqPlace::of::<
-                LocalToken<crate::bounded::Region>,
-            >(
-                at.wrapping_add(core::mem::offset_of!(Self, tokens)),
-                rows.wrapping_add(core::mem::offset_of!(LocalTokenRows<N>, tokens)),
-                N,
-            ))
+            .seq(
+                crate::bounded::SeqPlace::of::<LocalToken<P>>(
+                    at.wrapping_add(core::mem::offset_of!(Self, tokens)),
+                    rows.wrapping_add(core::mem::offset_of!(LocalTokenRows<N, P>, tokens)),
+                    N,
+                )
+                .counted(crate::bounded::RowCount::LocalTokens),
+            )
     }
 }
 
@@ -295,19 +299,6 @@ impl LocalTokenRegistry<crate::bounded::OnUse> {
             keys,
             ..Self::default()
         }
-    }
-}
-
-impl LocalTokenRegistry<Lent> {
-    /// An empty registry whose tokens are `rows` rows lent from `arena`, at most
-    /// `MAX_LOCAL_TOKENS`, their keys kept in `keys`, the session's key arena: a session's, at
-    /// its open. Refused, taking nothing, past that ceiling or past what the arena has left.
-    pub fn lent(arena: &mut Arena, keys: KeySpace, rows: usize) -> Result<Self, LendRefused> {
-        Ok(Self {
-            tokens: arena.lend(rows)?,
-            keys: LentKeys::from(keys),
-            ..Self::default()
-        })
     }
 }
 

@@ -21104,7 +21104,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// into `inbound_opensyn_cookie`; this admits it only if this node
     /// minted it (the MAC) in THIS handshake (the nonce). Mismatch ->
     /// `false` -> the dispatcher drops the `OpenSynReceived` event so the FSM
-    /// stays at SentInitAck instead of advancing to SentOpenAck.
+    /// stays at SentInitAck instead of sending its OpenAck and advancing to
+    /// Established.
     ///
     /// R2782 — the peer's zid is no longer an input. R86 bound the cookie to
     /// the zid held from the InitSyn; since R2769 the zid rides INSIDE the

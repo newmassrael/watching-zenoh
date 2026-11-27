@@ -129,11 +129,11 @@ says where a step is larger there.
 | step | what changes | peer case, B | release case `pico-api-coop-nostd`, B | receive Ir, and why | turns red | owner |
 |---|---|---:|---:|---|---|---|
 | **F1 (landed with this note)** | the runtime's task table of a build whose read steps every face itself is no table (`RuntimeForm::Taskless`) whether it dials, listens or reads on a thread: chosen by the fact that no link runs as a task (`not(wz_round)`), not by the feature `listen` or `threads`; a build that joins groups keeps its cells | -2,500 to -2,700: `run_among` 1,209, `claim_among` 540, `drop_among` 341, `settle` 160, `classify` 147, the wakers 67, `TaskCell::write_owned` 53, `RuntimeTables::runtime`'s 240, less the no-cell table's 102 | 0: it joins groups, whose sessions are tasks | none: the direct form runs no pass (`Core::run_tasks` is `wz_round`'s), and the read never calls the executor | `tests::direct_runtime::a_listening_session_whose_read_steps_its_faces_opens_a_runtime_of_no_cell` | this lane |
-| F4 | the accepting session machine of the reactive class: its eventless step from `SentOpenAck` to `Established` made an evented one in its SCXML source, so the reactive turn SCE is asked for (`docs/win-budget/size.md` section 10.3) covers the accepting build too | -1,500 to -2,500 (`Turn::run` 664 -> 1,336, `event_queue` +502, the general turn's other bodies) | -1,500 to -2,500 | per transport event fewer checks, never per sample | `machine_class_tests` with `session-unicast-accept`: the accepting machine of the class | the SCXML source here, the turn SCE's |
+| **F4 (landed, section 9.1)** | the accepting session machine of the reactive class: its eventless step from `SentOpenAck` to `Established` made an evented one in its SCXML source, so the reactive turn SCE is asked for (`docs/win-budget/size.md` section 10.3) covers the accepting build too | -1,500 to -2,500 (`Turn::run` 664 -> 1,336, `event_queue` +502, the general turn's other bodies) | -1,500 to -2,500 | per transport event fewer checks, never per sample | `machine_class_tests` with `session-unicast-accept`: the accepting machine of the class | the SCXML source here, the turn SCE's |
 | F5 | the read of many faces: `read_faces`, `wait_on_faces` and `face_turn` hold 10,949 against the client's 5,008 for the same face's turn; the inlined attribution of the three bodies says which part is the walk and which a form | to be measured; at most -3,000 | as the peer case | to be held to none | the read's tests over several faces | this lane, after a measurement cell |
 | F2 | the held operations as one hold and the operation in its caller where every face keeps its send place (W6 on): each face's hold kept by its site and let go of in reverse by one guard's drop, the held face found by a mark in the face rather than by the chain on the stack | 0 in the zenoh-pico preset (W6 off compiles none); today -2,100 to -2,900 (11 copies, 8,745 B: `declare_write_filter` 2,354, `undeclare_subscriber` 1,916, `declare_subscriber_on_wire` 1,126, `face_turn`'s replay 991; eight of them measured at 2,137 B over their client callers) | -4,500 to -6,000 (21 copies, 22,902 B) | none: an operation is a declaration, a query or a reply, never the read; `face_turn`'s replay hold is a turn's, not a message's | `direct::held_operation_tests`, the engine's declaration tests over faces | this lane; the send place's protocol is `wz-runtime-coop`'s `FaceSite` |
-| F3 | the plan form's lend by a description walked once (as the region's `place_region` walks `RegionLines`), not each table's constructor inlined into the registry's | 0 on the on-use twin (no plan); today -4,000 to -7,000 (`RegistryOf<ManyHolders>::new` 4,925, `ArenaPlan::lay_out` 2,284, `lend_set` 1,286, `pool_rows` 616) | -4,000 to -7,000 | none: the open only | the arena's plan tests, and a description's lines test as the region's | the arena's owner (D12 form) |
-| F6 | one UDP driver for a dialled socket and a port's peer (`feat-peer.md` S2) | 0 (`udp-listen` off) | -1,500 to -2,500 (`UdpDriver<PortPeer<..>>` 3,699 beside `UdpDriver<PosixUdpSocket>` 1,836) | none: `recv_with` an arm per socket kind | the driver's tests over both sockets | lane T-LINK |
+| F3 (in steps: sections 9.3, 9.4) | the plan form's lend by a description walked once (as the region's `place_region` walks `RegionLines`), not each table's constructor inlined into the registry's | 0 on the on-use twin (no plan); today -4,000 to -7,000 (`RegistryOf<ManyHolders>::new` 4,925, `ArenaPlan::lay_out` 2,284, `lend_set` 1,286, `pool_rows` 616) | -4,000 to -7,000 | none: the open only | the arena's plan tests, and a description's lines test as the region's | the arena's owner (D12 form) |
+| **F6 (landed, section 9.2)** | one UDP driver for a dialled socket and a port's peer (`feat-peer.md` S2) | 0 (`udp-listen` off) | -1,500 to -2,500 (`UdpDriver<PortPeer<..>>` 3,699 beside `UdpDriver<PosixUdpSocket>` 1,836) | none: `recv_with` an arm per socket kind | the driver's tests over both sockets | lane T-LINK |
 
 No two forms of one thing are compiled side by side in the peer case: the client's region and the
 peer's plan are one each (`capi_coop::region` leaves with `listen`), and the session tables are
@@ -235,3 +235,272 @@ and, where each link runs as a task, `Reserved` for a listener and `ForOne` for 
 - The perf matrix's receive arm on `pico-client-coop-nostd`: its receive Ir as its last reading.
 - `python3 scripts/lib/size_ledger_gate.py --per-feature pico-api-coop-nostd pico-peer-coop` again,
   so the head of `feat-peer.md` reads the step without W3, W4 and S1.
+
+## 9. The steps landed after F1, and where F3 stands
+
+### 9.1 F4: the acceptor's OpenAck on the OpenSyn's own step
+
+`sources/session/session_fsm_unicast.scxml` had `Accepting.SentOpenAck`, entered by the admitted
+`open_syn.received` (its entry sending the OpenAck) and left at once by an eventless transition to
+`Established`: `docs/session-fsm.md` section 2.2 gives that state an immediate exit, so no event
+ever found it current (`drive.rs`'s `awaited_in` said so). It was the machine's only eventless
+transition, and it kept the accepting build's session machine out of the reactive class. The state
+is now the transition's effect: `SentInitAck` takes `open_syn.received` to `Established` with
+`send_open_ack` on the transition. The order of effects is the same (the OpenAck, then
+`Established`'s entry; neither `SentInitAck` nor `Accepting` has an exit action), the admission
+of the OpenSyn is the dispatcher's as before, and the accepting deadline keys on the two
+`Accepting` children left (`session_timeouts`). The generated machine
+(`out/wz-session-core/session_fsm_unicast_sm.rs`) was regenerated with the pinned generator (the
+store's build of `vendor/sce` at its pin, the xtask's arguments and strip); the regeneration also
+carries three `compile_error!` guards the feature model gained since the file was last made, each
+already implied by the crate's own features.
+
+- What SCE provides at the pin, read from `vendor/sce`: the reactive turn of ADR 0148 is there.
+  `DocumentTables::reactive_class` and `StatePolicy::REACTIVE_TURN` decide it, and
+  `Turn::run(initial, reactive)` skips the macrostep completion for a reactive machine. With F4
+  every machine the peer case links (session, link, reassembly slot, scouting) is of the class, so
+  every call of the one out-of-line `Turn::run` hands it `true`; the general turn's
+  `complete_macrostep` and the internal queue's drain have no caller left in the case when the
+  compiler folds the constant through the shared body, which the runtime's own comment relies on.
+- What SCE is still asked (SCE ADR 0155, an SCE session's): the reactive turn as a body of its own
+  for a policy whose `REACTIVE_TURN` is `true` (the compiled reactive machine), so that the general
+  turn's bodies leave the image by construction rather than by the compiler's constant
+  propagation through an out-of-line function, and section 10.3 items 2 and 3 of
+  `docs/win-budget/size.md`. Nothing on the wz side waits on it: the machines' sources are of the
+  class and the tests hold them there.
+- Expected: `pico-peer-coop` and `pico-api-coop-nostd` -1,500 to -2,500 in transport where the
+  fold happens (`Turn::run` back towards its 664-byte client form, the `event_queue` internal
+  half); 0 where it does not, until ADR 0155. Receive Ir: per transport event the eventless
+  selection and the internal queue's check fewer; never per sample.
+- Tests (`wz-session-core`'s `machine_class_tests`):
+  `the_session_machine_is_of_the_reactive_class` now runs in every build (it replaced the accepting
+  build's test that asserted the eventless step) and asserts the runtime's `reactive_class` beside
+  the file's own reading: red, with `session-unicast-accept`, on any accepting state left without
+  an event. `the_acceptors_open_syn_takes_it_to_established_sending_the_open_ack` reads the
+  OpenSyn's candidate from `SentInitAck`: red on a target other than `Established` or a transition
+  with no content. `the_scouting_machine_is_of_the_reactive_class` (`scouting-active`): red on an
+  eventless or raising step in the scouting source. `session_timeouts` keeps its accepting tests
+  over the two children; `wz-runtime-tokio`'s accepting-path tests assert the same traces as
+  before (`send_open_ack` once, Established's entry actions once).
+
+### 9.2 F6: one UDP driver for a dialled socket and a port's peer
+
+`IpLinks` made `UdpDriver<U, ..>` for a dial and an acceptor bound to a port of its own, and
+`UdpDriver<PortPeer<U, ..>, ..>` for each peer a `udp/` port took: two instances of the whole
+driver and its two tables (`BoxedLinkDriver`, `SessionDatagramLink`). `udp_link::LinkSocket` is
+now the one socket type of every datagram link of a stack that listens on `udp/`: `Own(U)` or
+`Port(PortPeer<U, N>)`, each call a match on the kind that forwards to the kind's own answer
+(the share's `times_out` and `set_receive_timeout` stay `false`, so a peer's link still waits the
+tick and never arms the port's socket). `LinkPlace::own_datagram` wraps a socket of the stack's own
+where the build listens on `udp/` and hands it on unchanged otherwise, so a build without
+`udp-listen` compiles what it compiled before; `LINK_CELL_BYTES` reads the one driver type.
+
+- Expected: `pico-api-coop-nostd` (and every case with `udp-listen`) -1,500 to -2,500 in the
+  driver area: `UdpDriver<PortPeer<..>>`'s 3,699 less the matches added to the remaining instance;
+  `pico-peer-coop` 0 (no `udp-listen`). Receive Ir: one match on the kind per socket call of a
+  `udp/` link, no call added; none on `tcp/`.
+- Test: `udp_link::tests::one_driver_reads_a_socket_of_its_own_and_a_ports_share_alike` makes both
+  links through one function returning one type, reads a datagram over each, and asserts the share
+  answers its own `times_out` and `set_receive_timeout` (`false`) and leaves the port's socket
+  unarmed: red on a kind that forwards to the other's path. Compiled with `udp-listen`, with and
+  without `udp-port-lent-only` (the port is made over lent rows and slots, which both have).
+
+### 9.3 F3: what reading the plan form found, and the design
+
+The premise holds for part of the bytes and not for the rest. `RegistryOf::new` (the plan form,
+`runtime-plan`) builds each table by value through its type's `lent` (`App::lent`,
+`PeerPools::lent`, `Gets::lent`, `FaceTables::lend` through `lend_set`), each `?` after a table
+leaving a drop path for what was built before it, and moves them into the registry; the region form
+(`placed.rs`) places the zeroed registry by one walk of `RegistryRegion::places`. But the plan
+form's lends already go through one untyped, out-of-line body (`Arena::lend_rows`,
+`TableLender::lend_stride`), and a share of the bodies named for F3 is not placement at all:
+`ArenaPlan::lay_out` and `pool_rows` are the plan's own count, which a description of the lend does
+not remove; the pools' hand-out (`keep_rows_in`), the spare sets reserved for faces to come
+(`adding::SpareSets`) and the declaration watches are values built at the open, not rows placed.
+
+The design that closes it is one description for both forms, not a second family beside the
+region's: each table type's `places` gives, for each of its sequences, the sequence's offset, its
+row's stride and alignment, and which count of the plan sets its room (a count slot), and its key
+handles; the region form reads each room as its type's constant and its rows at the region's
+offsets, as now, and the plan form lends each line's rows from the arena in order and reads its
+room from the plan's counts, writing the sequences of a registry placed zeroed where it lies, as
+`place_region` does. The plan's byte count is then the same lines summed (one fact in one layer:
+`arena_bytes` of each type goes), and `RegistryOf::new` becomes `write_parts`, one walk and
+`bind`, the form `placed.rs` has. It touches the fifteen `places` of `wz-session-core`'s tables
+(`session_tables`, `slot_observer` twice, `peer_tables`, `reply`, `reply_stage` twice,
+`reply_hold`, `slot_map`, `decl_sink`, `pubsub`, and the `declare` tables), `RegionLines` and
+`place_seqs`, the arena plan's count of the registry's rows, and the registry's two forms. It is
+the next step of this lane: it was not written blind in this run, because every line of it is a
+layout the region's and the plan's tests must hold together, and the plan form is the release
+case's (`pico-api-coop-nostd`); a description wrong in one offset writes a sequence over another.
+Expected as section 5 says (-4,000 to -7,000 on the release case, 0 on the on-use twin, which has
+no plan); receive Ir none.
+
+### 9.4 F3: the steps landed, and the ones left
+
+The description is now one: a line of it (`bounded::SeqPlace`) states where a table's sequence
+lies, the bytes of one row (`stride`), the build's bound (`room`, which a region keeps and a plan
+lends at most) and which count of a plan sets the rows it is lent (`count`, a `bounded::RowCount`
+slot), beside the region's offset of the rows. A region walks it by `place_seqs` as before; a plan
+walks the same lines by `lend_seqs`, each line lent the next span of the arena, and counts them by
+`seq_bytes`, the lines summed, so the lend and the count of a table are one fact.
+`key_arena::lend_region` is `place_region`'s plan form, the key handles joined by one body for
+both. The fifteen descriptions are written over `bounded::LaidOut` (the two policies whose
+sequences are `LentSeq`), so `Lent` and `Region` read one const fn each; a type's region rows
+struct is generic over the policy with `Region` the default, standing only for the region's
+offsets in the plan form.
+
+| commit | what it did | what its tests hold |
+|---|---|---|
+| `abe9ff7cd4` | the line's `stride` and `count`, `lend_seqs`, `seq_bytes`, `seq_rows`; lines in 32 bits; `SessionTables::lent` and `arena_bytes` read `SessionTables::places` (the per-table `Presence::lent_from`, `LentTable` and `kept_bytes` go) | `bounded::tests::a_plan_lends_the_description_a_region_places` (each table at the offset the count says, a count past the room refused and every later table rowless); `session_tables::tests::lent_tables_lie_where_their_description_counts_them` (the lent and the region's lines agree but for offsets, every line held to a limit, no two sequences or row spans meet, the arena took `arena_bytes`) |
+| `2b770ef192` | `Requesters::lent` and `arena_bytes` read `Requesters::places` through `lend_region`; `ReplyRegistry`'s and `LivelinessGetRegistry`'s own `lent` and `arena_bytes` go; counts `Queries` and `LivelinessGets` | `slot_observer::requester_region_tests::lent_requesters_lie_where_their_description_counts_them`, through the shared `bounded::assert_lent_as_described` |
+| `90a32d53ae` | the observer's own lists: `DeclObserverPair`, the three watcher tables and `LocalTokenRegistry` describe themselves over `LaidOut` (`LocalTokenRows` and `ObserverRegionRows` generic over the policy), each watcher line counted `DeclWatchers`, the tokens' `LocalTokens`; `SlotObserverOf::lent` lends the application tables, then one `lend_region` over the observer's description; `SlotObserverOf::arena_bytes(watchers, local_tokens)` is the lines summed and replaces `decl_watcher_bytes`; the per-table `lent`/`arena_bytes` of the pair, the three tables and the token registry go | `slot_observer::lent_tests::lent_observer_lists_lie_where_their_description_counts_them` (offsets, counts, no overlap, `arena_bytes` equal to the lines laid, one key line with `liveliness-token`, a token count past the build's bound refused); `decl_sink::tests::a_lent_pair_refuses_an_observer_past_its_rows` now lends through `lend_seqs` and holds the lines' sum to the two lists' spans |
+| `cda04a0c1a` | a face's peer tables: `SubscriberPeer`, `ReplyStage` (`ReplyStageRows` generic), `FinalStage` and `PeerTables` describe themselves over `LaidOut`, the key lines generic too; counts `PendingDeclares`, `Replies`, `ReplyBytes` (a line of one-byte rows) and `Finals` (`PeerRows::counts`); `PeerTables::lend_rows` keeps its keys and pools as before, walks `LINES` (its own lines, the reply stage's two, the Finals') by `lend_seqs`, then lends the side's compose row, which a region keeps inline and so is no line; `arena_bytes` is the lines summed and the compose row; `ReplyStage`'s and `FinalStage`'s `lent`/`arena_bytes` and `SubscriberPeer`'s `lent`/`lend_rows`/`arena_bytes` go (`lend_compose_row` and `compose_bytes` stay, public) | `peer_tables::lent_tests::lent_peer_tables_lie_where_their_description_counts_them` (line count by feature, the reply bytes a stride-1 line, offsets, counts, no overlap, lines plus compose row equal to `arena_bytes` and to the arena's high water); the existing in-place, refusal and over-the-build tests hold the order and the refusals |
+| `1db0387513` | the coop plan's row of the observer's lists reads the engine's own observer (`engine::app_list_bytes`, `App::arena_bytes(watchers, 0)`) instead of `SlotObserverOf<HeapSinks, Lent>`: the part of step 4 that needs no step 3 | `tests::arena::the_plan_lays_out_the_watcher_lists_the_limits_state` compares the plan's row with `app_list_bytes` at the build's and a lowered limit |
+
+Size: a line was 24 bytes on a 64-bit target and is 20 now (four `u32` and the count), so the
+region's description statics shrink there; on a 32-bit target a line was 12 bytes and is 20, and a
+`RegionLines<MAX>` holds `MAX` lines whether it uses them or not, so the region form's statics grow
+by 8 bytes a line there (the registry region's description most). The text the two steps take out
+is the per-table lends inlined into `SessionTables::lent` (nine `SlotMap::lent_from` and the held
+replies' `lend_with`) and into `Requesters::lent` (three `arena.lend`); each `lent` now carries one
+description static of its own. Receive Ir: none, the open only.
+
+Size of the two steps after them: the text that goes is the per-table lends the two `lent` bodies
+inlined (four `arena.lend` and the three tables' `lent` wrappers in the observer, four in a face's
+peer tables), each `lent` now one walk over one description static of its own; the plan's counts
+are the same bytes as before, in the same order for the observer and with the side's compose row
+moved after the stagings for a face, which no count reads. The region form's lines now carry their
+count; a region ignores it. Receive Ir: none, the open only. The coop plan still counts the
+watchers by `HeapSinks`' row type, not the engine's own, which over-counts a build whose watcher
+sink is a unit; `1db0387513` closes it (the row shrinks by `MAX_DECL_OBSERVERS` times the difference of
+the two sinks' rows, per list, where the build installs no watch). What `peer-row-pools`
+keeps in the session's pools is no line of a face's: the pools stay `PeerPools::lent`, and
+`keep_rows_in` stays the hand-out.
+
+Left, in order, each a step of its own over the same line:
+
+3. Landed (section 9.5): the registry's plan form walks its own lines and the dial face's set at
+   the open; the sets of the places no face took yet are walked when a face first takes each.
+4. Landed (section 9.7): `ArenaPlan`'s count of the registry's rows reads the same lines the open
+   walks (`RegistryOf::LINES` and `FaceTables::LINES`), so `app_list_bytes`, the per-set
+   `PeerTables::arena_bytes` and `FaceGets::arena_bytes` and the `FACE_SET_BYTES` and
+   `HELD_SET_BYTES` rows go from the plan, and with them the last run-time readers of the per-type
+   description statics (`SlotObserverOf::LINES`, `PeerTables::LINES`, `Requesters::LINES`, and
+   `SessionTables::LINES` through `CoopTables::arena_bytes`). The plan's rows by part
+   (`ArenaPart`) are a report other readers use; they are kept, each counted from the lines of its
+   part, so the step changes how they are counted and not what they say.
+5. The description statics on a 32-bit target (section 9.6); measured before it is chosen.
+
+What reading the registry for step 3 found, before any of it was written:
+
+- Not every set is a line of the open. `SpareSets::reserved` splits one span for the sets of the
+  places no face took yet and builds each when a face first takes its place (`build_to`), so the
+  pages of sets for faces that never come stay unresident; one walk at the open would write them.
+  The plan form's walk is therefore the registry's own lines (the application's tables and lists,
+  the sets' table, the held index, the owed tokens' table, the session's own gets) and the dial
+  face's set, and each later set is one walk of the set's description by `lend_set`, as now.
+- Not everything the open lends is a line: `PeerPools::lent` (the pools, their directory and key
+  ids), `H::lent` (the held index, a table of `FaceId`, which is a line) and `DeclWatches::under`
+  are values or spans with a hand-out of their own; the pools stay a lend of their own beside the
+  walk, as section 9.4 step 2 left them.
+- The set's description differs by form: `placed.rs`'s `FaceTables::places` lays the reply stage no
+  rows (the region stages replies outside the session's lock) and lives only in the region build.
+  Section 9.5 settles it the other way from the one first read here: the plan lends that stage no
+  row either (`arena::peer_rows` states `replies` and `reply_bytes` 0 for every build of this
+  engine), so the one description has no reply line, rather than a line lent zero rows.
+- Order: the open lent the application, the pools, the owed table, the sets' table, the held
+  index, the dial set, the spare span, then the session's own gets. The plan's total does not move
+  with the order (every span starts on the arena's alignment); section 9.5 gives the new one.
+
+### 9.5 F3 step 3: the registry lent by one walk of its description
+
+| commit | what it did | what its tests hold |
+|---|---|---|
+| `278ddeab46` | `engine/registry/described.rs` holds the descriptions both laid-out forms read. A set's (`FaceTables::places`): its peer's stagings, its Finals where the build answers queries, its gets where it asks them, and no reply stage. The registry's (`RegistryOf::places`): the application's lists (`SlotObserverOf::places::<0>`, the session's own tokens being rows of its table set) and tables (`SessionTables::places`), the sets' table (`RowCount::FaceSets`), the index of their holders where the form keeps one (`Holders::LINES`, counted `FaceSets`), the owed tokens' table where faces go (`RowCount::OwedTokens`) and the session's own gets. The region's description (`placed.rs`) is `RegistryOf::places` over its rows (`RegistryRowsAt`) and each set's `FaceTables::places`. `RegistryOf::new` lends the pools, the reserve of the sets to come, then the registry made of no rows (`SlotObserverOf::over(SessionTables::rowless())`, `Holders::rowless`) by one `lend_region` over `RegistryOf::LINES` under one `RowCounts` (the tables', the lists' by `SlotObserverOf::list_counts`, the gets', the sets', the owed tokens', joined by `RowCounts::and`), then holds the tables to the limits, names the index's rows (`Holders::hold_sets`) and lends the dial face's set. `FaceTables::lend` is one `lend_region` over the set's description and the row its peer's side composes keys in; `FaceTables::arena_bytes` is those summed, which `SpareSets::reserved` reads. `App::lent`, `Gets::lent`, the three `arena.lend` of the sets, the index and the owed table, `Holders::lent` and `PeerTables::lend_rows` leave the open. | `registry::tests::every_table_of_the_registry_lies_where_its_description_counts_it` (every line of the registry at the offset the count of the lines before it says, each table its count, no two sequences or row spans meet, `seq_bytes` of the lines what the walk took; the dial face's set from the first byte past the registry's rows; the reserve right before the registry's rows; a set built when a face comes laid as the dial face's). `a_registry_of_one_face_lies_where_its_description_counts_it` (the form of one face describes no index line, and lays out as described). `a_count_past_a_lines_room_refuses_the_open` (`liveliness`: one own token counted is `OverCeiling { rows: 1, ceiling: 0 }`, none is the CONTROL). `bounded::tests::joined_counts_state_each_parts_count`. The region's tests (`a_state_regions_lines_lie_inside_it_and_name_nothing_twice`, `placed::tests`) hold the region form over the shared functions. |
+
+The lines whose change turns each new test red: in `RegistryOf::places`, the sets' line counted
+other than `RowCount::FaceSets` or `.with(&H::LINES, ..)` left out (the first test: a table not at
+its counted offset, the index's rows not lent); `App::places::<0>` made `::<{ MAX_LOCAL_TOKENS }>`
+(the refusal test); the reserve split off after the walk in `RegistryOf::new` (the first test's
+reserve assertion); a holder line in `OneHolder::LINES` (the second test); `RowCounts::and` adding
+the two counts or keeping one side (its test).
+
+What changes for the engine: nothing a session sees. The open's spans lie in another order
+(pools, reserve, the registry's lines, the dial face's set and its compose row), the total the
+same. A face's reply stage and, without `queryable`, its Finals stage are no line now where they
+were lines lent zero rows; either is a stage of no room, which refuses and counts what it is handed
+as before. The registry's own tests lent a face one reply and one Final in every build; they lend
+no reply now, and `holds_one_final` asserts a stage of no room in a build that answers no query.
+
+Size, expected on `pico-api-coop-nostd` and `pico-peer-coop`: text -1,500 to -3,500 (the
+by-value observer `App::lent` built with a drop path after each table, the own gets' `Gets::lent`,
+three `arena.lend` and `Holders::lent` out of `RegistryOf<ManyHolders>::new`; `Gets::lent` by
+value and `PeerTables::lend_rows` out of `lend_set`), against +600 to +1,200 of read-only data
+for the two description statics the walks read (`RegistryOf::LINES`, `FaceTables::LINES`, each a
+`RegionLines<MAX>` of 20-byte lines and word-sized key offsets) while the per-type statics stay
+read by the plan's count until step 4. 0 on the on-use twin, which has no plan. Receive Ir: none,
+the open only.
+
+### 9.6 Step 5: the description statics on a 32-bit target, prepared for both readings
+
+A line (`SeqPlace`) is 20 bytes on every target, four `u32` and the count. A `RegionLines<MAX>`
+holds `MAX` lines and `MAX` key offsets (`usize`) and two counts whatever it uses, so each
+description static carries the unused tail of its bound; on a 32-bit target a line was 12 bytes
+before the line took its stride and count. The reading asked of the main session: the i686 build of
+`pico-api-coop-nostd`, the bytes of each `RegionLines` static (`nm -S --size-sort` on the
+library, the symbols of the `LINES` and `DESCRIPTION` consts), and the library's read-only data
+against the same build at `99c88e8372`.
+
+- If the statics are material there (their growth over the 12-byte form more than the text step 3
+  took out on that target): each description read at run time becomes a static of exactly the
+  lines and key offsets it uses. `RegionLines` gains `const fn trimmed<const SEQS: usize, const
+  KEYS: usize>(&self) -> Described<SEQS, KEYS>`, the counts read from the description itself
+  (`DESC.seq_lines().len()`, `DESC.key_lines().len()`) in the item that names it, key offsets
+  held as `u32` as the lines' are; `place_region` and `lend_region` take the trimmed form's
+  slices. The unused tail goes on every target, the 64-bit one too. Its test: each trimmed static
+  states the description's lines and key offsets in order, and a description of none is a static
+  of none.
+- If they are within the noise of that build: no change; the reading is recorded here and step 5
+  closes. Trimming the tail is then a size step of its own only where a 64-bit reading shows it.
+
+### 9.7 F3 step 4: the plan's rows of the registry read off its lines
+
+| commit | what it did | what its tests hold |
+|---|---|---|
+| `b77a6dda0c` | `ArenaPlan::lay_out` counts every row of the registry from the descriptions the open walks (`engine/registry/described.rs`): `registry_bytes(counts)` is `seq_bytes` of `RegistryOf::LINES` (the build's registry) under counts that state only the part's, every line of another count lent none; `registry_row_bytes(count)` is the stride of the registry's table lent by `count`, none where the build describes no such table; `set_get_bytes` and `set_peer_bytes` are a set's lines (`FaceTables::LINES`) of the gets' and of the peer's counts, the peer's with its compose row. The rows by part stay as they were: "declaration watchers" (1, the registry's lines of `DeclWatchers`), "pending gets" (a table for each face and the session's own, the set's gets' lines), "face tables", "held faces" and "owed tokens" (their table's count of rows of the line's stride, each only where the registry describes the line, so the "held faces" and "owed tokens" rows lose their `#[cfg]`s), "peer tables" (a table for each face, the set's peer's lines and compose row), "session tables" (1, the registry's lines of the table counts). The index of held sets is lent by a count of its own, `RowCount::HeldSets`, beside the sets' `FaceSets` (`held::ManyHolders::LINES`, `RegistryOf::new`'s counts), so each part is the lines of its counts. `app_list_bytes`, `FACE_SET_BYTES`, `HELD_SET_BYTES` and the plan's `FaceGets` go; the plan reads no `SlotObserverOf::arena_bytes`, `Requesters::arena_bytes`, `PeerTables::arena_bytes` or `SessionTables::arena_bytes`, so no run-time body of this crate reads those types' own description statics. `FaceTables::arena_bytes` is compiled only where sets are built after the open (`listen`, `group`, the tests). | `registry::tests::the_plans_parts_of_the_registry_are_the_lines_of_their_counts` (the build's registry, `BuildHolders`, of three faces where it takes faces and of one where not): the lists' part equals the engine's own observer's `App::arena_bytes(watchers, 0)`, the tables' part `CoopTables::arena_bytes`, the sets' row is `size_of::<FaceTables>()`, the index's `size_of::<FaceId>()` exactly where the build takes faces, the owed tokens' `size_of::<OwedTokens>()` exactly where faces go and peers declare tokens, the session's own gets the set's gets' lines with `local-queryable` and none without; the parts sum to what the open's walk lent; a set's peer part equals `PeerTables::arena_bytes` (its Finals only where the build answers queries), its gets part `Gets::arena_bytes`, and the two parts `FaceTables::arena_bytes`. `tests::arena::the_plan_lays_out_the_watcher_lists_the_limits_state` reads the watcher row against the registry's lines at the build's and a lowered limit. The plan's existing tests hold the rows' counts and bytes as before (`face tables` and `held faces` counts, `peer tables` against `PeerTables::arena_bytes`, `session tables` against `CoopTables::arena_bytes`, the owed tokens' count). |
+
+The lines whose change turns the new test red: `registry_bytes` reading other lines than
+`RegistryOf::LINES` of the build's holders (the parts no longer sum to the walk);
+`held::ManyHolders::LINES` counted `FaceSets` again (the index's row found nowhere and the parts a
+table short of the walk);
+`set_peer_bytes` without the compose row (unequal to `PeerTables::arena_bytes` in a build with
+`storage-profile`); `stride_of` answering the last line of a count rather than the first, or a
+line's room rather than its stride.
+
+What changes for the engine: nothing a session sees. Every row of the plan states the count and
+the bytes it stated before, so the plan's total, the order of its rows and the open's spans are
+unchanged; `RowCounts` holds one count more.
+
+Size, expected on `pico-api-coop-nostd` and `pico-peer-coop`: read-only data -700 to -1,200 on a
+64-bit target (the four per-type description statics the plan's count read at run time,
+`SessionTables::LINES` of 17 lines, `PeerTables::LINES` of 8, `SlotObserverOf::LINES` and
+`Requesters::LINES`, each a `RegionLines` of 20-byte lines and word-sized key offsets, or the
+strides an unrolled count folded into its text where the compiler did that instead), which takes
+back the growth section 9.5 expected; text -200 to +300 (four count bodies out of `lay_out`,
+three walks of the registry's lines under one-part counts and the stride lookup in, over statics
+the open already holds). `pico-client-coop-nostd` has no plan: 0. 0 on the on-use twin. Receive
+Ir: none, the open only.
+
+Verification (the main session's):
+
+- `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --lib --features listen the_plans_parts_of_the_registry`: 1 test.
+- `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --lib --features runtime-plan the_plans_parts_of_the_registry`: 1 test (one face, no index).
+- `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --lib --features listen,liveliness,local-queryable registry::tests`: the registry's tests over the new count.
+- `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --lib --features listen tests::arena`: the plan's tests, rows unchanged.
+- `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib bounded`.
+- Clippy of `wz-capi-coop` with its defaults, with `--features runtime-plan`, with `--features listen`,
+  with `--features group`, with `--no-default-features --features std,key-matching-listener,listen,query,queryable`;
+  of `wz-session-core` with its defaults.
+- Layer C1cs: `pico-api-coop-nostd` and `pico-peer-coop` read-only data lower, `nm -S` of the
+  library holding no symbol of the four per-type `LINES` consts.

@@ -13,7 +13,7 @@
 //! that may never come. A set once built stays where it lies, emptied for the next face.
 
 use super::held::{Holders, ManyHolders};
-use super::{lend_set, names_face, FaceId, FaceTables, Gets, HeldFace, Peer, RegistryOf, NO_FACE};
+use super::{lend_set, names_face, FaceId, FaceTables, HeldFace, RegistryOf, NO_FACE};
 use crate::arena::MAX_FACE_SETS;
 use crate::RowPolicy;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused};
@@ -58,11 +58,9 @@ impl SpareSets {
         limits: SessionLimits,
         spare: usize,
     ) -> Result<Self, LendRefused> {
-        // The span of one set, as `lend_set` lends it and the plan counts it.
-        let one = match (Gets::arena_bytes(gets), Peer::arena_bytes(peer)) {
-            (Some(gets), Some(peer)) => gets.checked_add(peer),
-            _ => None,
-        };
+        // The span of one set, as `lend_set` lends it: its description's lines and its peer's row
+        // to compose keys in.
+        let one = FaceTables::arena_bytes(gets, peer);
         let arena = arena.split_off(one.and_then(|one| one.checked_mul(spare)))?;
         Ok(Self {
             arena,

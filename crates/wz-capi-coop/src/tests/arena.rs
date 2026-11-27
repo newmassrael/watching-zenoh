@@ -344,13 +344,16 @@ fn a_limit_lowered_at_open_lowers_its_row() {
 }
 
 /// The watchers' lists of the application's observer take the row the plan lays out for them: the
-/// session's `MAX_DECL_OBSERVERS` rows of each list, as the observer lent under the same limits
-/// takes them, so a lowered value lowers the row. Turned red by a plan that leaves the lists out,
-/// or an observer that lends them other rows than the plan counts. A build of the region's form
+/// registry's lines of the lists, lent the session's `MAX_DECL_OBSERVERS` rows each, as the
+/// registry's walk lends them under the same limits, so a lowered value lowers the row. Turned red
+/// by a plan that leaves the lists out or counts them at another limit's rows. That the lines are
+/// the engine's own observer's is the registry's test
+/// (`the_plans_parts_of_the_registry_are_the_lines_of_their_counts`). A build of the region's form
 /// lends no list from its arena (`crate::region::StateRegion`).
 #[cfg(feature = "runtime-plan")]
 #[test]
 fn the_plan_lays_out_the_watcher_lists_the_limits_state() {
+    use wz_session_core::bounded::{RowCount, RowCounts};
     use wz_session_core::slot_observer::{HeapSinks, SlotObserverOf};
     type App = SlotObserverOf<HeapSinks, Lent>;
     let built =
@@ -359,7 +362,9 @@ fn the_plan_lays_out_the_watcher_lists_the_limits_state() {
     let rows = App::decl_watcher_rows(&SessionLimits::defaults()).expect("the build's value");
     assert_eq!(rows, caps::MAX_DECL_OBSERVERS);
     assert_eq!(watchers.count, 1, "one row of the lists' spans");
-    assert_eq!(Some(watchers.entry_bytes), App::decl_watcher_bytes(rows));
+    let lists =
+        |rows| crate::engine::registry_bytes(&RowCounts::NONE.with(RowCount::DeclWatchers, rows));
+    assert_eq!(Some(watchers.entry_bytes), lists(rows));
     assert!(
         watchers.entry_bytes > 0,
         "a build that reads what a peer declares has watchers"
@@ -369,7 +374,7 @@ fn the_plan_lays_out_the_watcher_lists_the_limits_state() {
         let plan = ArenaPlan::of(&client_config(), &one).expect("lays an arena out");
         assert_eq!(
             Some(row(&plan, "declaration watchers").entry_bytes),
-            App::decl_watcher_bytes(1)
+            lists(1)
         );
         assert!(plan.reserved_bytes() < built.reserved_bytes());
     }

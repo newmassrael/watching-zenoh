@@ -1699,8 +1699,8 @@ fn replay_held_answer<R: SessionRuntime, T: TimeSource>(
 }
 
 /// The establishment message the machine's `state` reads next, or `None` outside the
-/// establishment. `SentOpenAck` is not one: the machine leaves it for `Established` in the same
-/// step that enters it, so no message ever finds it current.
+/// establishment. The acceptor's OpenAck is sent on the OpenSyn's own step into `Established`,
+/// so no state of the establishment awaits nothing.
 #[cfg(all(
     any(
         feature = "alloc",

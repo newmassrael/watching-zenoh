@@ -1706,6 +1706,125 @@ impl<S: DatagramSocket, N: CountKind> DatagramSocket for PortPeer<S, N> {
     }
 }
 
+/// The socket of a datagram link of a stack that listens on `udp/`: a socket of the link's own (a
+/// dial's, an acceptor's bound to its port) or its peer's share of a port ([`PortPeer`]). Every
+/// datagram link of such a stack holds one, so the driver over it is one body whichever kind a
+/// link holds ([`UdpDriver`] is generic over its socket, and a type of socket for each kind would
+/// be a copy of the driver for each); each call is a match on the kind, and none adds a call.
+///
+/// The constants are the platform socket's: a share has no receive timeout of its own and says so
+/// when asked (`set_receive_timeout`), and the link then waits the tick as it would over the share.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+pub enum LinkSocket<S: DatagramSocket, N: CountKind = OneTask> {
+    /// A socket of the link's own.
+    Own(S),
+    /// The link's peer's share of a port.
+    Port(PortPeer<S, N>),
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl<S: DatagramSocket, N: CountKind> DatagramSocket for LinkSocket<S, N> {
+    type Error = PortPeerError<S::Error>;
+
+    type Waits = S::Waits;
+
+    const CARRIED: bool = S::CARRIED;
+
+    const IPV6: bool = S::IPV6;
+
+    const NAMES_INPUT_WAIT: bool = S::NAMES_INPUT_WAIT;
+
+    const CAN_SET_RECEIVE_TIMEOUT: bool = S::CAN_SET_RECEIVE_TIMEOUT;
+
+    const RESOLVES: bool = S::RESOLVES;
+
+    /// A socket of its own: a share is made by its port's listener and never bound.
+    fn bind(at: SocketAddr) -> Result<Self, Self::Error> {
+        S::bind(at).map(Self::Own).map_err(PortPeerError::Socket)
+    }
+
+    fn refuses_address(error: &Self::Error) -> bool {
+        match error {
+            PortPeerError::Socket(error) => S::refuses_address(error),
+            PortPeerError::Unbound => false,
+        }
+    }
+
+    fn address_in_use(error: &Self::Error) -> bool {
+        match error {
+            PortPeerError::Socket(error) => S::address_in_use(error),
+            PortPeerError::Unbound => false,
+        }
+    }
+
+    fn resolve(name: &crate::locator_text::NamedHost<'_>, found: &mut [SocketAddr]) -> usize {
+        S::resolve(name, found)
+    }
+
+    fn local(&self) -> SocketAddr {
+        match self {
+            Self::Own(socket) => socket.local(),
+            Self::Port(share) => share.local(),
+        }
+    }
+
+    fn send_to(&self, to: SocketAddr, bytes: &[u8]) -> Result<(), Self::Error> {
+        match self {
+            Self::Own(socket) => socket.send_to(to, bytes).map_err(PortPeerError::Socket),
+            Self::Port(share) => share.send_to(to, bytes),
+        }
+    }
+
+    fn wait_readable(&self, timeout_ms: c_int) {
+        match self {
+            Self::Own(socket) => socket.wait_readable(timeout_ms),
+            Self::Port(share) => share.wait_readable(timeout_ms),
+        }
+    }
+
+    fn times_out(&self) -> bool {
+        match self {
+            Self::Own(socket) => socket.times_out(),
+            Self::Port(share) => share.times_out(),
+        }
+    }
+
+    fn set_receive_timeout(&self, ms: c_int) -> bool {
+        match self {
+            Self::Own(socket) => socket.set_receive_timeout(ms),
+            Self::Port(share) => share.set_receive_timeout(ms),
+        }
+    }
+
+    fn recv_waiting(&self, buf: &mut [u8]) -> Result<Option<Received>, Self::Error> {
+        match self {
+            Self::Own(socket) => socket.recv_waiting(buf).map_err(PortPeerError::Socket),
+            Self::Port(share) => share.recv_waiting(buf),
+        }
+    }
+
+    fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, Self::Error> {
+        match self {
+            Self::Own(socket) => socket.try_recv(buf).map_err(PortPeerError::Socket),
+            Self::Port(share) => share.try_recv(buf),
+        }
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        match self {
+            Self::Own(socket) => socket.input_wait(),
+            Self::Port(share) => share.input_wait(),
+        }
+    }
+
+    fn holds_datagram(&self) -> bool {
+        match self {
+            Self::Own(socket) => socket.holds_datagram(),
+            Self::Port(share) => share.holds_datagram(),
+        }
+    }
+}
+
 /// A platform's sockets as a stack of the slot profile's session host: the driver in the
 /// session's slot is a [`FixedUdpDriver`] over the socket `S`, and the drive loop pumps it through
 /// the driver itself ([`DriverPump`]), because the platform has no input path of its own for the
@@ -2268,6 +2387,77 @@ mod tests {
             .expect("CONTROL: the peer a lent row takes");
         assert_eq!(peer.try_recv(&mut buf), Ok(Some((SYN.len(), PEER))));
         assert_eq!(lent.overflows(), 0);
+    }
+
+    /// A link over a socket of its own and one over a port's peer's share are one driver type
+    /// (`LinkSocket`), each kind reading its own datagrams: the own socket's off the socket, the
+    /// share's as its port sorted them. A share answers for itself where the port's socket would
+    /// answer otherwise: it has no blocking read and no receive timeout of its own, so its link
+    /// waits the tick and the port's socket is never armed for it. Turned red by a kind that reads
+    /// through the other's path, or by a share that forwards a timeout to its port's socket.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[test]
+    fn one_driver_reads_a_socket_of_its_own_and_a_ports_share_alike() {
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        fn link(socket: LinkSocket<Loop>) -> UdpDriver<LinkSocket<Loop>, Vec<u8>, HeapTx> {
+            UdpDriver::initiator_with_buffers(socket, PEER, 64, HeapTx::new(2, 32))
+        }
+
+        fn armable() -> Loop {
+            Loop {
+                timeouts: true,
+                can_arm: true,
+                ..Loop::default()
+            }
+        }
+
+        let socket = armable();
+        queued(&socket, b"own");
+        let own = link(LinkSocket::Own(socket));
+        assert_eq!(received(&own).as_deref(), Some(&b"own"[..]));
+        assert!(own.socket.times_out(), "the socket's own answer");
+        assert!(own.socket.set_receive_timeout(8), "the socket's own answer");
+
+        let bytes = Arena::byte_cells_bytes(64, 4)
+            .and_then(|cells| Arena::table_bytes::<PortPeerRow>(1).map(|peers| cells + peers))
+            .and_then(|lent| Arena::table_bytes::<QueuedDatagram>(2).map(|queue| lent + queue))
+            .expect("within the address space");
+        let region: &'static mut [Block] =
+            std::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+        // leaked, so nothing else uses it and it outlives every slot and row lent from it.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        let table = arena.lend_byte_cells(64, 4).expect("the port's table");
+        let rows = PortRows::over(
+            arena.lend(1).expect("the peers' rows"),
+            arena.lend(2).expect("the queue's rows"),
+        );
+        let book = shared_book::<OneTask>(Some(rows)).expect("the heap has room");
+        let port =
+            shared(UdpPort::lent_in_book(armable(), table, &book).expect("a slot to read into"));
+        queued(&port.socket, SYN);
+        let share = UdpPort::take_fresh(&port)
+            .expect("the socket reads")
+            .expect("the share of the peer whose InitSyn came");
+        let shared_link = link(LinkSocket::Port(share));
+        assert_eq!(received(&shared_link).as_deref(), Some(SYN));
+        queued(&port.socket, b"put");
+        assert_eq!(received(&shared_link).as_deref(), Some(&b"put"[..]));
+        assert!(
+            !shared_link.socket.times_out(),
+            "a share reads what was sorted"
+        );
+        assert!(!shared_link.socket.set_receive_timeout(8));
+        assert!(
+            !port.socket.arms.borrow().contains(&8),
+            "the port's socket is not armed for one peer"
+        );
     }
 
     /// A datagram is the bytes the socket reported, cut to the buffer it was read into.

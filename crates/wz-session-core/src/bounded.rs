@@ -1715,22 +1715,155 @@ impl<T, const N: usize> BoundedVec<T, N, Region> {
     }
 }
 
-/// Where a region the build lays out keeps the rows of one table of the [`Lent`] shape: a line of
-/// the region's own description, which [`place_seqs`] reads. Offsets are bytes from the region's
-/// start, so the description is a constant of the region's type (`core::mem::offset_of!`).
+/// A policy whose every sequence is a [`LentSeq`] and whose every table of rows is a
+/// [`BoundedVec`] of it: the two whose tables a description places ([`Lent`], whose plan lends
+/// the rows from an arena, and [`Region`], whose build lays them out), so one description of a
+/// table's sequences, written once over this bound, is read by both.
+///
+/// # Safety
+/// For every `T` and `N`, `Self::Seq<T, N>` is `LentSeq<T>` and `Self::Rows<T, N>` is
+/// `BoundedVec<T, N, Self>`.
+pub unsafe trait LaidOut: Storage {}
+
+// SAFETY: the two associated types are those, as `Lent`'s `Storage` states them.
+unsafe impl LaidOut for Lent {}
+// SAFETY: as `Lent`'s.
+unsafe impl LaidOut for Region {}
+
+/// Which of a plan's counts sets the rows a line of a description is lent ([`RowCounts`]): the
+/// session's limit a table is held to, named once, so a region and a plan read one description and
+/// differ only in where a line's rows come from and how many there are.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RowCount {
+    /// The build's bound of the table, the line's `room`: a table a plan lends as a region lays it
+    /// out.
+    Bound,
+    /// `MAX_DECLARED_KEYEXPRS`.
+    Keyexprs,
+    /// `MAX_SUBSCRIPTIONS`.
+    Subscribers,
+    /// `MAX_QUERYABLES`.
+    Queryables,
+    /// `MAX_LOCAL_TOKENS`.
+    Tokens,
+    /// `MAX_LIVELINESS_SUBSCRIPTIONS`.
+    LivelinessSubscribers,
+    /// The write filters' one table: the publishers', the queriers' and the key listeners'.
+    WriteFilters,
+    /// `MAX_MATCHING_LISTENERS`.
+    MatchingListeners,
+    /// `MAX_PENDING_QUERIES`.
+    PendingGets,
+    /// `MAX_PENDING_REPLIES`: the replies the consolidating gets hold back.
+    HeldReplies,
+    /// `MAX_PENDING_QUERIES` of one face's requesters: the gets pending on it.
+    Queries,
+    /// `MAX_PENDING_LIVELINESS_GETS` of one face's requesters.
+    LivelinessGets,
+    /// `MAX_DECL_OBSERVERS` of each of the application's lists of declaration watchers.
+    DeclWatchers,
+    /// `MAX_LOCAL_TOKENS` of the registry of the session's own tokens beside its tables.
+    LocalTokens,
+    /// `MAX_PENDING_DECLARES` of each staging of the answers to one face's peer's interests.
+    PendingDeclares,
+    /// `MAX_PENDING_REPLIES` staged for one face's peer's queries.
+    Replies,
+    /// The bytes the replies staged for one face's peer lie in, a line of rows of one byte.
+    ReplyBytes,
+    /// `MAX_PENDING_FINALS` owed to one face's peer's queries.
+    Finals,
+    /// The sets of face tables an engine holds, one for each face its config admits.
+    FaceSets,
+    /// The rows of an engine's index of which face holds each of its sets of face tables, one for
+    /// each set: a table of its own beside the sets', so a plan reads each from its own lines.
+    HeldSets,
+    /// The tables of tokens the faces that went still owe the liveliness subscribers, one for each
+    /// row of the session's pool of its peers' tokens.
+    OwedTokens,
+}
+
+impl RowCount {
+    /// The last count: a count added after it moves this.
+    const LAST: Self = Self::OwedTokens;
+    /// The counts a plan states, `Bound`'s place among them unused.
+    const SLOTS: usize = (Self::LAST as usize).wrapping_add(1);
+}
+
+/// The rows a plan states for each [`RowCount`]: what the lines of a description are lent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowCounts {
+    rows: [usize; RowCount::SLOTS],
+}
+
+impl RowCounts {
+    /// No count stated: a line of a count is lent no row, one of the build's bound its room.
+    pub const NONE: Self = Self {
+        rows: [0; RowCount::SLOTS],
+    };
+
+    /// These counts, `count`'s set to `rows`. `Bound` is the line's own and is set by nothing.
+    pub const fn with(mut self, count: RowCount, rows: usize) -> Self {
+        if let Some((_, [slot, ..])) = self.rows.split_at_mut_checked(count as usize) {
+            *slot = rows;
+        }
+        self
+    }
+
+    /// These counts and `other`'s, each the larger of the two: the counts of two parts, each
+    /// stating its own, joined for one description that holds the lines of both.
+    pub const fn and(mut self, other: &Self) -> Self {
+        let mut mine: &mut [usize] = &mut self.rows;
+        let mut theirs: &[usize] = &other.rows;
+        while let ([row, rest @ ..], [their, tail @ ..]) = (mine, theirs) {
+            if *their > *row {
+                *row = *their;
+            }
+            mine = rest;
+            theirs = tail;
+        }
+        self
+    }
+
+    /// The rows `line` is lent: its count's, or its room where it is of the build's bound.
+    pub const fn of(&self, line: &SeqPlace) -> usize {
+        match line.count {
+            RowCount::Bound => line.room as usize,
+            count => match self.rows.split_at_checked(count as usize) {
+                Some((_, [rows, ..])) => *rows,
+                _ => 0,
+            },
+        }
+    }
+}
+
+/// One table's sequence in a description: where its [`LentSeq`] lies, the bytes and the bound of
+/// its rows and the count of a plan that sets how many it is lent, and where a region the build
+/// lays out keeps them. Offsets are bytes from the start of what the description describes, so a
+/// description is a constant of that type (`core::mem::offset_of!`). A region places each table
+/// over its rows by [`place_seqs`]; a plan lends each its rows from an arena by [`lend_seqs`] and
+/// counts them by [`seq_bytes`], reading the same lines.
+// Offsets and sizes in 32 bits: a description is a static the image carries, one line for each
+// sequence of a session, and no type a session lays out is 4 GiB.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SeqPlace {
     /// Where the table's [`LentSeq`] lies.
-    pub seq: usize,
-    /// Where its rows lie.
-    pub rows: usize,
-    /// How many rows lie there.
+    pub seq: u32,
+    /// Where a region keeps its rows.
+    pub rows: u32,
+    /// The build's bound of its rows: how many a region keeps, the most a plan lends.
     pub room: u32,
+    /// The bytes of one row: how far apart a plan lays them.
+    pub stride: u32,
+    /// Which count of a plan sets the rows it is lent.
+    pub count: RowCount,
 }
 
 impl SeqPlace {
-    /// The place of a table of rows of `T` whose sequence lies at `seq`, its `room` rows at `rows`.
-    /// A room past what a lent table counts stops the build that describes it.
+    /// The place of a table of rows of `T` whose sequence lies at `seq`, its `room` rows at `rows`
+    /// in a region, lent `room` rows by a plan until a count is named ([`Self::counted`]). A room
+    /// past what a lent table counts, or a row an arena's span does not align, stops the build that
+    /// describes it.
     pub const fn of<T>(seq: usize, rows: usize, room: usize) -> Self {
         assert!(
             room <= u32::MAX as usize,
@@ -1740,11 +1873,32 @@ impl SeqPlace {
             matches!(rows.checked_rem(core::mem::align_of::<T>()), Some(0)),
             "a table's rows start where their type's alignment allows"
         );
+        assert!(
+            core::mem::align_of::<T>() <= ARENA_ALIGN,
+            "a row of a lent table asks for more alignment than an arena's spans start on"
+        );
         Self {
-            seq,
-            rows,
+            seq: Self::offset(seq),
+            rows: Self::offset(rows),
             room: room as u32,
+            stride: Self::offset(core::mem::size_of::<T>()),
+            count: RowCount::Bound,
         }
+    }
+
+    /// `at`, an offset or a size of what a description lays out, in the line's 32 bits; past them
+    /// it stops the build that describes it.
+    const fn offset(at: usize) -> u32 {
+        assert!(
+            at <= u32::MAX as usize,
+            "a description lays out less than 4 GiB"
+        );
+        at as u32
+    }
+
+    /// This line, lent by a plan the rows `count` states, at most its room.
+    pub const fn counted(self, count: RowCount) -> Self {
+        Self { count, ..self }
     }
 
     /// [`Self::of`] for a table whose rows are `ROOM`, the length of the array the region's type
@@ -1764,20 +1918,99 @@ impl SeqPlace {
 /// are reached by nothing but that table for as long as it lives; no two places name the same rows.
 pub unsafe fn place_seqs(region: NonNull<u8>, places: &[SeqPlace]) {
     for place in places {
-        // `LentSeq` is `repr(C)`, so its fields lie at the same offsets whatever its row type.
-        let seq = region
-            .as_ptr()
-            .wrapping_add(place.seq)
-            .cast::<LentSeq<u8>>();
-        // SAFETY: the caller's contract: `seq` is a sequence in the region and `rows` its rows,
-        // inside the region, which is not null; the fields are written through the raw pointer, so
-        // no reference to the sequence or its rows is made.
+        // SAFETY: the caller's contract: a sequence lies at `seq` in the region and its `room`
+        // rows at `rows`, inside the region, which is not null.
         unsafe {
-            let rows = NonNull::new_unchecked(region.as_ptr().add(place.rows));
-            core::ptr::addr_of_mut!((*seq).base).write(Some(rows));
-            core::ptr::addr_of_mut!((*seq).len).write(0);
-            core::ptr::addr_of_mut!((*seq).room).write(place.room);
+            let rows = NonNull::new_unchecked(region.as_ptr().add(place.rows as usize));
+            write_seq(region, place.seq as usize, rows, place.room);
         }
+    }
+}
+
+/// Lend each table `lines` names its rows by `lend`, as many as `counts` states for its line and at
+/// most its room, and tell it where they lie: the plan's walk of the description a region's
+/// [`place_seqs`] walks, each table's rows the arena's next span in the lines' order. Once a table
+/// is refused it and every table after it are lent no rows, and `lend` keeps the refusal
+/// ([`TableLender::finish`]). The arena takes [`seq_bytes`] of the lines under `counts`.
+///
+/// # Safety
+/// For each line: a [`LentSeq`] of a table of rows of some `T` lies at `seq` from `base` and holds
+/// no value, `T`'s size is the line's `stride` (as [`SeqPlace::of`] states it, which holds `T`'s
+/// alignment to an arena's spans), and nothing reaches the sequence during the call.
+#[inline(never)]
+pub unsafe fn lend_seqs(
+    base: NonNull<u8>,
+    lines: &[SeqPlace],
+    counts: &RowCounts,
+    lend: &mut TableLender<'_>,
+) {
+    for line in lines {
+        let (rows, room) =
+            lend.lend_stride(counts.of(line), line.room as usize, line.stride as usize);
+        // SAFETY: the caller's contract for the sequence; the rows are a span the arena lent to
+        // this table alone, of `room` rows of `stride` bytes, or a span of no rows, either starting
+        // on `ARENA_ALIGN`, which is at least the rows' alignment.
+        unsafe { write_seq(base, line.seq as usize, rows, room) };
+    }
+}
+
+/// The bytes [`lend_seqs`] takes of an arena for `lines` under `counts`: each line's span, as the
+/// arena rounds it. The plan's count of what a description names, so the plan and the lend read
+/// one fact. `None` past the address space.
+pub const fn seq_bytes(lines: &[SeqPlace], counts: &RowCounts) -> Option<usize> {
+    let mut sum = 0usize;
+    let mut rest = lines;
+    while let [line, tail @ ..] = rest {
+        sum = match Arena::stride_bytes(counts.of(line), line.stride as usize) {
+            Some(span) => match sum.checked_add(span) {
+                Some(sum) => sum,
+                None => return None,
+            },
+            None => return None,
+        };
+        rest = tail;
+    }
+    Some(sum)
+}
+
+/// Where the table `line` names, its sequence at `base`, keeps its rows, and how many it was given:
+/// what a test of a description reads to hold the rows of each table where the description says.
+///
+/// # Safety
+/// A [`LentSeq`] lies at the line's `seq` from `base`, aligned, and nothing writes it during the
+/// call.
+pub unsafe fn seq_rows(base: NonNull<u8>, line: &SeqPlace) -> (Option<NonNull<u8>>, u32) {
+    let seq = base
+        .as_ptr()
+        .wrapping_add(line.seq as usize)
+        .cast::<LentSeq<u8>>()
+        .cast_const();
+    // SAFETY: the caller's contract; the fields are read through the raw pointer, as `LentSeq` is
+    // `repr(C)` and lies at the same offsets whatever its row type.
+    unsafe {
+        (
+            core::ptr::addr_of!((*seq).base).read(),
+            core::ptr::addr_of!((*seq).room).read(),
+        )
+    }
+}
+
+/// Tell the [`LentSeq`] at `seq` from `base` that its `room` rows lie at `rows` and none holds a
+/// value: the write both walks of a description end in, one body for every row type.
+///
+/// # Safety
+/// A [`LentSeq`] of rows of some `T` lies at `seq` from `base`, aligned, and holds no value; the
+/// `room` rows of `T` at `rows` are aligned for `T` and reached by nothing but that sequence for
+/// as long as it lives.
+unsafe fn write_seq(base: NonNull<u8>, seq: usize, rows: NonNull<u8>, room: u32) {
+    // `LentSeq` is `repr(C)`, so its fields lie at the same offsets whatever its row type; they are
+    // written through the raw pointer, so no reference to the sequence or its rows is made.
+    let seq = base.as_ptr().wrapping_add(seq).cast::<LentSeq<u8>>();
+    // SAFETY: the caller's contract.
+    unsafe {
+        core::ptr::addr_of_mut!((*seq).base).write(Some(rows));
+        core::ptr::addr_of_mut!((*seq).len).write(0);
+        core::ptr::addr_of_mut!((*seq).room).write(room);
     }
 }
 
@@ -1842,6 +2075,8 @@ impl<const MAX: usize> RegionLines<MAX> {
             seq: 0,
             rows: 0,
             room: 0,
+            stride: 0,
+            count: RowCount::Bound,
         }; MAX],
         seq_count: 0,
         keys: [0; MAX],
@@ -1900,9 +2135,9 @@ impl<const MAX: usize> RegionLines<MAX> {
         let mut seqs = other.seq_lines();
         while let [line, tail @ ..] = seqs {
             self = self.seq(SeqPlace {
-                seq: line.seq.wrapping_add(by),
-                rows: line.rows.wrapping_add(by),
-                room: line.room,
+                seq: SeqPlace::offset((line.seq as usize).wrapping_add(by)),
+                rows: SeqPlace::offset((line.rows as usize).wrapping_add(by)),
+                ..*line
             });
             seqs = tail;
         }
@@ -4245,6 +4480,114 @@ mod tests {
         unsafe { std::alloc::dealloc(block, layout) };
     }
 
+    /// Two parts' counts joined state each count either part states: a line of either part is lent
+    /// its own count, a line of neither none, and a count both state is the larger. Turned red by a
+    /// join that keeps one side's count alone or adds the two.
+    #[test]
+    fn joined_counts_state_each_parts_count() {
+        let tables = RowCounts::NONE
+            .with(RowCount::Keyexprs, 3)
+            .with(RowCount::Queries, 1);
+        let sets = RowCounts::NONE
+            .with(RowCount::FaceSets, 4)
+            .with(RowCount::Queries, 2);
+        let joined = tables.and(&sets);
+        let line = |count| TWO_TABLES[0].counted(count);
+        assert_eq!(joined.of(&line(RowCount::Keyexprs)), 3);
+        assert_eq!(joined.of(&line(RowCount::FaceSets)), 4);
+        assert_eq!(
+            joined.of(&line(RowCount::Queries)),
+            2,
+            "the larger of the two"
+        );
+        assert_eq!(
+            joined.of(&line(RowCount::OwedTokens)),
+            0,
+            "stated by neither"
+        );
+        assert_eq!(sets.and(&tables), joined, "either order");
+    }
+
+    /// The plan's walk of the same description lends each table the rows its count states, at most
+    /// its room, from the arena's next span in the lines' order: each table's rows lie at the
+    /// offset the plan's count of the lines before it says, no two tables' rows meet, and the arena
+    /// took what the count of every line says. A count past a table's room is refused, and that
+    /// table and every one after it are lent no rows. Turned red by `lend_seqs` lending a count
+    /// other than the line's, or past its room, by `seq_bytes` counting a span the lend does not
+    /// take, or by a refusal that leaves a later table rows.
+    #[test]
+    fn a_plan_lends_the_description_a_region_places() {
+        const LINES: [SeqPlace; 2] = [
+            TWO_TABLES[0].counted(RowCount::Keyexprs),
+            TWO_TABLES[1].counted(RowCount::Subscribers),
+        ];
+        let counts = RowCounts::NONE
+            .with(RowCount::Keyexprs, 3)
+            .with(RowCount::Subscribers, 2);
+        let bytes = seq_bytes(&LINES, &counts).expect("within the address space");
+        let first = Arena::stride_bytes(3, core::mem::size_of::<u32>()).expect("small");
+        let second = Arena::stride_bytes(2, core::mem::size_of::<u64>()).expect("small");
+        assert_eq!(bytes, first + second, "the count is each line's span");
+        let layout = std::alloc::Layout::from_size_align(bytes, ARENA_ALIGN).expect("a layout");
+        // SAFETY: the layout is of some bytes.
+        let block = unsafe { std::alloc::alloc_zeroed(layout) };
+        let base = NonNull::new(block).expect("the test allocator answers");
+        // SAFETY: the block is aligned to `ARENA_ALIGN` and used by this arena alone until it
+        // goes back below, after every table lent from it.
+        let mut arena = unsafe { Arena::over(base, bytes) };
+        let mut tables = zeroed::<TwoTables>();
+        let at = NonNull::from(&mut tables).cast::<u8>();
+        let mut lend = TableLender::new(&mut arena);
+        // SAFETY: the lines name the two sequences of `tables`, rows of `u32` and `u64`, empty.
+        unsafe { lend_seqs(at, &LINES, &counts, &mut lend) };
+        assert_eq!(lend.finish(), Ok(()));
+        assert_eq!(
+            arena.high_water(),
+            bytes,
+            "the lend took what the plan counted"
+        );
+        let mut spans = std::vec::Vec::new();
+        let mut offset = 0;
+        for (line, rows) in LINES.iter().zip([3usize, 2]) {
+            // SAFETY: the line names a sequence of `tables`, read and not written.
+            let (lent, room) = unsafe { seq_rows(at, line) };
+            let lent = lent.expect("a lent table has rows").as_ptr() as usize - block as usize;
+            assert_eq!(lent, offset, "the rows lie where the plan's count says");
+            assert_eq!(room as usize, rows, "the table holds its count's rows");
+            let span = Arena::stride_bytes(rows, line.stride as usize).expect("small");
+            spans.push(lent..lent + span);
+            offset += span;
+        }
+        assert!(spans[0].end <= spans[1].start, "no two tables' rows meet");
+        for name in 0..3 {
+            assert!(tables.names.push(name).is_ok());
+        }
+        assert!(tables.names.push(9).is_err(), "three rows were counted");
+        assert!(tables.words.push(1).is_ok() && tables.words.push(2).is_ok());
+        assert!(tables.words.push(3).is_err(), "two rows were counted");
+
+        let over = RowCounts::NONE
+            .with(RowCount::Keyexprs, 5)
+            .with(RowCount::Subscribers, 1);
+        let mut short = Arena::empty();
+        let mut refused = zeroed::<TwoTables>();
+        let at = NonNull::from(&mut refused).cast::<u8>();
+        let mut lend = TableLender::new(&mut short);
+        // SAFETY: as above.
+        unsafe { lend_seqs(at, &LINES, &over, &mut lend) };
+        assert_eq!(
+            lend.finish(),
+            Err(LendRefused::OverCeiling {
+                rows: 5,
+                ceiling: 4
+            })
+        );
+        assert!(refused.names.push(1).is_err() && refused.words.push(1).is_err());
+        drop(tables);
+        // SAFETY: the tables lent from the block are gone; it goes back with its layout.
+        unsafe { std::alloc::dealloc(block, layout) };
+    }
+
     /// The region's room composes a key in the row it holds, and of all zero bytes holds none.
     #[cfg(feature = "storage-profile")]
     #[test]
@@ -4256,6 +4599,57 @@ mod tests {
         assert!(room.buffer(&mut ()).push_str("demo/key").is_ok());
         assert_eq!(room.buffer(&mut ()).as_str(), "demo/key");
     }
+}
+
+/// Hold what a plan lent through `lines` at `base`, a value of `size` bytes, to its description:
+/// each line's sequence lies inside the value and no two share a place, each table holds its line's
+/// count, its rows lie at the offset the plan's count of the lines before it says from the first
+/// table's, and no two tables' rows meet. Answers the bytes the lines take, which the arena that
+/// lent them took.
+///
+/// # Safety
+/// Each line names a [`LentSeq`] at `base` that a plan lent its rows, which nothing writes during
+/// the call.
+#[cfg(test)]
+pub(crate) unsafe fn assert_lent_as_described(
+    base: NonNull<u8>,
+    size: usize,
+    lines: &[SeqPlace],
+    counts: &RowCounts,
+) -> usize {
+    let seq = core::mem::size_of::<LentSeq<u8>>();
+    let mut first = None;
+    let mut offset = 0;
+    let mut spans: std::vec::Vec<(core::ops::Range<usize>, core::ops::Range<usize>)> =
+        std::vec::Vec::new();
+    for line in lines {
+        // SAFETY: the caller's contract.
+        let (at, room) = unsafe { seq_rows(base, line) };
+        let at = at.expect("a lent table has rows").as_ptr() as usize;
+        let start = *first.get_or_insert(at);
+        assert_eq!(
+            at - start,
+            offset,
+            "the rows lie where the plan's count says"
+        );
+        assert_eq!(room as usize, counts.of(line), "the table holds its count");
+        let span = Arena::stride_bytes(counts.of(line), line.stride as usize).expect("small");
+        let place = line.seq as usize..line.seq as usize + seq;
+        assert!(place.end <= size, "a sequence lies in what is described");
+        for (other_place, other_rows) in &spans {
+            assert!(
+                place.end <= other_place.start || other_place.end <= place.start,
+                "no two lines name one sequence"
+            );
+            assert!(
+                at + span <= other_rows.start || other_rows.end <= at,
+                "no two tables' rows meet"
+            );
+        }
+        spans.push((place, at..at + span));
+        offset += span;
+    }
+    offset
 }
 
 #[cfg(test)]
