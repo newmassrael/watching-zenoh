@@ -565,6 +565,30 @@ another thread finds is what it finds today. Each decision is written before its
   then read through a field rather than through a counted handle: the same instructions or fewer a
   message.
 
+### 7.4 R2, landed so far, and what is left of it
+
+- **One table of the faces' records** (`crates/wz-runtime-coop/src/faces.rs` @
+  `pub struct FaceRows<S>(S);`): `OneFace` and `ManyFaces` are one table whose one parameter is
+  where its places lie (`OneRow`, inline, where the build takes no face beside the dial role's;
+  `ReservedRows`, reserved at the open, past it), as section 7.3 decided. The first place is read
+  with no look at its mark (`TablePlace::get_at`), so a reach of the dial role's face over the
+  inline storage is a constant, as `OneFace`'s was; the inline place carries its mark, one byte
+  and its padding more than `OneFace`. Held by the table tests of the module, now over the one
+  table and either storage (`a_table_of_one_face_holds_its_dial_role_alone`,
+  `a_table_of_many_faces_walks_its_places_up_to_the_last_face_held`,
+  `a_places_row_of_the_dials_goes_with_its_face`).
+- **One turn body** (`crates/wz-capi-coop/src/engine/direct.rs` @ `fn face_turn(`): `link_turn` is
+  gone; the open and the client's read make their wait and hand it to `face_turn`, out of line in
+  every build. Held by `a_client_reads_its_one_face_through_a_table_of_one_row` (one row, turned
+  once a read through the body `Takes::face_turns` counts) and `a_read_turns_every_face_once`.
+- **Left of R2**, in this order: the read slots' table (`DirectFaces`'s field and table one
+  table, row 0 inline where the bound is 1 and laid with the table past it, section 7.3's plan
+  decision); the one read body (`read_dial` and `read_faces`, section 7.3's read decision); the
+  cost gate's forbidden names (`link_turn`, `faces::OneFace`), held in its table of pending
+  controls with why. `announce_on` is one source already
+  (`crates/wz-capi-coop/src/engine/replay.rs` @ `fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(`),
+  and is now one body over `FaceRows` in each build.
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)
