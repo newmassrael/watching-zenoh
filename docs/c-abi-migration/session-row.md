@@ -1,9 +1,12 @@
 # Migration lane session-row: one session, one row
 
-Status: design of the lane, with its first step (R1) landed beside it. Nothing here was built or
-measured by this lane: every byte figure is an **estimate** read off the types in the source, and
-every count of instructions is a reading of the code, not a run. Line references are to the tree
-this lane branched from (`a9126d3242`) unless they name `reach.rs` after R1.
+Status: design of the lane. R1 landed beside it; R2 (the seat goes, the doors' count held by the
+row table, the row table's locking bodies out of line) and R4 (the kernel's token places) are
+written after it, unbuilt; R3 is design only (section 4, the generated files it needs). Nothing
+here was built or measured by this lane: every byte figure is an **estimate** read off the types
+in the source or off size reports of other trees, and every count of instructions is a reading of
+the code, not a run. Line references are to the tree this lane branched from (`a9126d3242`)
+unless they name `reach.rs` after R1.
 
 ## 1. The reading: one session is counted twice
 
@@ -95,9 +98,9 @@ keep a weak handle of the session (`_z_session_weak_t _zn` in
 | step | what | where |
 |------|------|-------|
 | R1 (landed with this note) | The row table takes its rows by the storage policy: `RowSource` of `Profile`, `Heap` naming a table of no static row that takes rows of the heap and keeps them, `Static` naming `ENGINE_ROWS` static rows. A reach names its row by where it lies (no row is ever given back on either policy), so no index is checked. | `crates/wz-capi-coop/src/engine/reach.rs`, the open's refusal text in `engine.rs`, `tests/engine_rows.rs`, `ENGINE_ROWS`'s help |
-| R2 | The seat goes. On the cooperative engine the doors' `sessions` count becomes the row table's: the door that reserves the pools takes that many rows (of the heap on the heap policy, after which the table grows no more; on the fixed policy the count is held to the table's rows, as a count past its limit's bound is held to it today), and the open past them is refused by the row claim, `NoEngineRow` answered as `_Z_ERR_SYSTEM_OUT_OF_MEMORY` as the seat's refusal was. `SessionSeat`, `SessionTail.seat`, `OpenRequest.seat`, the seat's take in `z_open`, its plan entry, `Kind::Session` on the cooperative engine and its size row are deleted. | `wz-capi-pico`: `session.rs`, `process_pool.rs`, `object_slot.rs`, `object_pool.rs`; `reach.rs` |
+| R2 (written, section 7) | The seat goes. On the cooperative engine the doors' `sessions` count becomes the row table's: the door that reserves the pools takes that many rows (of the heap on the heap policy, after which the table grows no more; on the fixed policy the count is held to the table's rows, as a count past its limit's bound is held to it today), and the open past them is refused by the row claim, `NoEngineRow` answered as `_Z_ERR_SYSTEM_OUT_OF_MEMORY` as the seat's refusal was. `SessionSeat`, `SessionTail.seat`, `OpenRequest.seat`, the seat's take in `z_open`, its plan entry, `Kind::Session` on the cooperative engine and its size row are deleted. The row table's bodies that take its lock and are asked from more than one place (the claim, a claim let go of unfilled, the close) go out of line, the claim with one taking of the lock. | `wz-capi-pico`: `session.rs`, `process_pool.rs`, `object_slot.rs`, `object_pool.rs`; `reach.rs` |
 | R3 | One Kconfig name (section 4). | `deploy/wz-config.toml` and what it generates, `caps.rs`, the conformance vectors |
-| R4 | The kernel build's token places follow the storage policy: boxed on the heap policy as a host's are, static places of the one count on the fixed policy. | `crates/wz-capi-port/src/cancellation.rs` |
+| R4 (written, section 7) | The kernel build's token places follow the storage policy: boxed on the heap policy as a host's are, static places of the one count on the fixed policy. | `crates/wz-capi-port/src/cancellation.rs` |
 
 ## 4. One name for the count (R3, design only)
 
@@ -132,6 +135,15 @@ What the deletion of `ENGINE_ROWS` touches that a deployer or a program sees:
   tree names either symbol, and a config document cannot state `HELD_SESSIONS` (its statement is
   refused by name, `crates/wz-capi-pico/src/config_limits.rs:319`), so no program's document
   changes.
+
+R3 is not written on this lane's branch. Its source is the `[[limit]]` of `deploy/wz-config.toml`,
+and every file above but `caps.rs` and the documents is derived from it by
+`scripts/lib/wz_config.py`, which holds each to the source; the digests of
+`statement_vectors.json` are computed by it, and a digest written by hand would be a guess. The
+step is the source edit and one run of the generator, with the Rust that reads the count:
+`RowSource for Static` in `reach.rs` and its size test, `TOKEN_PLACES` and its test in
+`cancellation.rs`, `tests/engine_rows.rs` and the eleven-session test in `src/tests.rs`, each
+reading `caps::HELD_SESSIONS` where it reads `caps::ENGINE_ROWS`.
 
 ## 5. The size case `pico-client-coop-nostd` under this structure
 
@@ -188,3 +200,96 @@ In `crates/wz-capi-coop/tests/engine_rows.rs` (the process's table, a binary of 
 `ENGINE_ROWS` rows held, a fixed build refuses the open (`NoEngineRow`, no arena reserved) and a
 heap build's opens go on past the rows. Red if the open's claim is refused past the count on the
 heap policy, or a failed open keeps its row.
+
+## 7. R2 and R4 as written (unbuilt)
+
+### 7.1 The doors' count is the row table's
+
+- `RowClaim::hold_to(sessions)` (`reach.rs`) holds the process's table to a count. It is refused
+  (`RowsRefused::Open`) while a row holds an engine or is claimed. On the heap policy the rows the
+  table lacks are taken of the heap at once, in one block (`GrownRow::vacant_block`, all or
+  nothing: `RowsRefused::NoMemory` takes nothing), and the table's flag `held` is set, after which
+  a claim that finds no vacant row takes none of the heap. The rows past the count are marked
+  `WITHHELD` (a third bit of the mark; the generation now moves by 8), which `is_vacant` reads
+  beside `CLAIMED`. On the fixed policy a count past the table's rows withholds none: it is held to
+  them.
+- `RowClaim::let_go_of_count()` answers `false` while a row is open, and otherwise clears every
+  `WITHHELD` and the flag.
+- `process_pool::install` (under both doors, `zext_object_pool_reserve` and `_place`) holds the
+  table under the pools' lock, once it found no pools reserved and before it lays them: the pools'
+  lock, then the rows', an order no other path reverses. `Open` answers `Z_EINVAL`, as counts
+  stated over pools held do; `NoMemory` answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY`.
+- `process_pool::release` asks `let_go_of_count` where pools are reserved and hold no object, so a
+  session open keeps the pools and its count, as its seat did.
+- The build's own pools (the first object's, the first open's) hold no count. On the heap policy a
+  program that states none opens sessions with no bound but the heap, as zenoh-pico's; before, a
+  build with the doors held such a program to `HELD_SESSIONS` seats. On the fixed policy the
+  table's rows bound it as before.
+- The open past the count is refused by the engine's claim, after the scout of an open that names
+  no locator: the seat was taken before it. Nothing is bound or dialled either way.
+
+### 7.2 The row table's locking bodies out of line
+
+Read from the size ledger's explain reports of `pico-client-coop-nostd` dated 2026-11-27, one of a
+tree before R1 and one of a tree with R1 and other lanes' commits; bytes each body holds of
+`reach.rs`'s lines and of the lock's (`wz-host-sync`'s):
+
+| body (what of `reach.rs` it holds) | `reach.rs`, before R1 | with R1 | lock, before R1 | with R1 |
+|------|-----:|-----:|-----:|-----:|
+| `assemble` (the claim, the let-go of a claim on each failure after it) | 119 | 193 | 264 | 362 |
+| `close` (the clear) | 88 | 45 | 60 | 65 |
+| `last_placed` (the clear of the engine's last drop) | 88 | 45 | under 60 | under 60 |
+| `link_turn` (the end) | 85 | 44 | under 60 | 80 |
+| `engine_of` (the fill) | 66 | 21 | 60 | 76 |
+
+The lock of `assemble` holds its other locks too. R1's growth is the claim inlined into `assemble`
+with two takings of the lock and the row of the heap: one taking of the lock costs about 60 to 80
+bytes where it is inlined. R2 makes the claim one body out of line with one taking of the lock (the
+heap's row taken under it: the allocator takes no lock of the rows), and the let-go of an unfilled
+claim and the clear one body each (`let_go_unfilled`, `clear_row`), called from where they were
+inlined. The end and the fill have one caller each in this case and stay inline.
+
+### 7.3 Expected bytes, all estimates
+
+| case | what moves | expected |
+|------|-----------|---------:|
+| `pico-client-coop-nostd` | `assemble` keeps two calls of the claim's (about -370); the claim and the let-go out of line (about +240, the count's flag read once among it); the clear once for two callers (about -80) | about -210 against R1, so about -110 against the tree before it (from -60 to -170) |
+| `pico-api-coop-nostd`, `pico-peer-coop` | the same bodies, with the same callers | the same order |
+| a build with `object-pool` (no case of the gate has it) | the seat's take, field and give-back go (about -100); `hold_to`, `let_go_of_count` and the doors' glue come (about +250 to +350) | about +150 to +250 of text; the pools' allocation `sessions` x 16 bytes less, the heap `sessions` x 24 more at the reservation on the heap policy |
+
+The receive of a sample calls none of these bodies, so its Ir is expected to stay where it is.
+
+### 7.4 R4
+
+A kernel's build (neither `std` nor `os-sys`) places its tokens by `TokenSource` of the build's
+`Profile`: `Heap` boxes each, as a host does; `Static` lodges each in `TOKEN_PLACES` places of a
+static of its own, the static's one reader, so the heap policy's image carries none of it. A host's
+build boxes each token on either policy, as before. `TOKEN_PLACES` is still `ENGINE_ROWS` times the
+pending gets of a session until R3.
+
+### 7.5 Tests, and the line whose change turns each red
+
+In `crates/wz-capi-coop/src/engine/reach.rs` (tables of their own):
+
+- `a_fixed_table_held_to_a_count_refuses_the_open_past_it_until_the_count_is_let_go_of`: red if
+  `is_vacant` stops reading `WITHHELD`, or `let_go_of_count` stops asking `is_open`.
+- `a_heap_table_held_to_a_count_takes_its_rows_at_once_and_none_past_them`: red if `claim` grows a
+  held table (`self.held` in `claim`), or `hold_to` takes no block.
+- `a_count_withholds_the_kept_rows_past_it`: red if the withholding walk skips the kept rows.
+- `a_count_the_heap_cannot_give_rows_for_is_refused_and_holds_nothing`: red if `held` is set
+  before the block is taken.
+- `a_count_asked_while_a_session_is_open_is_refused_and_withholds_nothing`: red if `hold_to` stops
+  asking `is_open`.
+- `a_count_past_a_fixed_tables_rows_is_held_to_them_and_a_count_of_none_refuses_every_open`: red if
+  a fixed table grows for a count, or a count of none lets an open take a row.
+- `a_policy_names_its_table_and_a_row_is_its_engine_and_its_mark`: the heap table is now two words
+  (its rows' word and the flag).
+
+In `crates/wz-capi-pico/tests/object_pool_doors.rs`: ARM 7 (the second open refused, on the
+cooperative engine by its claim), ARM 9 (the release refused while the session is open and the
+pools hold no object; red if `release` stops asking `let_go_of_count`) and ARM 10 (two sessions open
+after the release; red if the release leaves the table held to one row).
+
+In `crates/wz-capi-port/src/cancellation.rs`:
+`a_kernels_token_lies_where_the_storage_policy_places_it` (`TOKEN_PLACES + 1` tokens of `Heap`;
+`TOKEN_PLACES` of `Static` and the next refused): red if either impl lodges in the other's source.
