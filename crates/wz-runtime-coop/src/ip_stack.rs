@@ -3468,11 +3468,17 @@ mod tests {
             assert_eq!(slots.in_use(), 0, "a port that goes gives its slot back");
         }
 
-        /// A stack listens on `udp/` where its datagram socket binds, at the port the socket chose,
-        /// and a stack that carries no datagram refuses it as unsupported.
+        /// A stack whose session gave its ports their memory listens on `udp/` where its datagram
+        /// socket binds, at the port the socket chose, and a stack that carries no datagram refuses
+        /// it as unsupported, whatever its ports were given.
         #[test]
         fn a_stack_listens_on_udp_where_it_carries_datagrams() {
-            let links = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
+            let mut links = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
+            let (ports, _slots) = crate::udp_link::leaked_ports(1, 1, 64);
+            assert!(
+                links.lend_ports(Some(ports)).is_ok(),
+                "the heap has room for the book"
+            );
             let listener = links
                 .open_listener(Locator::udp(SocketAddr::new(NODE, 0)))
                 .unwrap_or_else(|_| panic!("a datagram socket binds"));
