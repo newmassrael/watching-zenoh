@@ -26,7 +26,8 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use wz_session_core::lifecycle_node::Commander;
+use wz_session_core::lifecycle_monitor::{Grant, Monitor, NoRecord, Policy};
+use wz_session_core::lifecycle_node::Verb;
 use wz_session_core::lifecycle_wire::{OpenMode, OpenOutcome, RefusedReason};
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::peer_tables::PeerTables;
@@ -121,9 +122,18 @@ impl Recording {
     }
 }
 
-impl NodeOpening for Recording {
-    fn permitted(&self, _commander: Commander<'_>) -> bool {
+/// The node's write permit, which names no subject.
+impl Policy for Recording {
+    fn write_permission(&self, _verb: Verb) -> bool {
         self.permitted
+    }
+
+    fn each_grant(&self, _verb: Verb, _visit: &mut dyn FnMut(Grant<'_>) -> bool) {}
+}
+
+impl NodeOpening for Recording {
+    fn monitor(&self) -> Monitor<'_> {
+        Monitor::new(self, &NoRecord)
     }
 
     fn open(&self, zid: &[u8; 16], _mode: OpenMode) -> OpenOutcome {
@@ -190,8 +200,12 @@ fn ask<O: InBand>(opener: &'static O, key: &str) -> (Vec<(String, String)>, usiz
     .expect("a fresh registry takes the admin queryable");
     let mut peers = session();
     let messages = [get(1, key)];
+    // The link the GET arrives on proved the commander's zid (decision D12), as a secure session's
+    // does.
+    let mut asking = QueryPeer::default();
+    asking.set_requester(Some(COMMANDER));
     let (_, allocations) = allocations_during(|| {
-        QueryPeer::default().dispatch_messages(
+        asking.dispatch_messages(
             &mut registry,
             &messages,
             peers.subscribers.mapping_spaces(),
@@ -204,6 +218,9 @@ fn ask<O: InBand>(opener: &'static O, key: &str) -> (Vec<(String, String)>, usiz
 }
 
 const OPEN_KEY: &str = "@/a1b2/peer/session/open/1f";
+
+/// The zid the link of every GET here proved.
+const COMMANDER: [u8; 16] = [0x5c; 16];
 
 #[test]
 fn an_open_is_answered_in_the_words_of_the_heap_profile_with_nothing_allocated() {
@@ -358,17 +375,25 @@ fn the_in_band_query_conforms_to_the_contract_every_transport_is_held_to() {
 #[cfg(all(feature = "lifecycle-verbs", feature = "test-support"))]
 mod binding {
     use super::*;
-    use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, LifecycleNode, Verb};
+    use wz_session_core::lifecycle_monitor::{Asker, Channel, Object, Request};
+    use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Commander, LifecycleNode};
     use wz_session_core::text_out::FixedText;
     use wz_session_mcu::admin_fixed::Verbs;
-    use wz_session_mcu::connect_manager::{LifecyclePermits, PeerStore, StoreNode};
+    use wz_session_mcu::connect_manager::{PeerStore, StoreNode};
 
-    /// Every verb is permitted, so that a refusal is for want of a binding and for nothing else.
+    /// Every verb is granted to the pipe and to [`COMMANDER`], so that a refusal is for want of a
+    /// binding and for nothing else.
     struct Yes;
 
-    impl LifecyclePermits for Yes {
-        fn permits(&self, _verb: Verb, _commander: Commander<'_>) -> bool {
+    impl Policy for Yes {
+        fn pipe_commands(&self, _verb: Verb) -> bool {
             true
+        }
+        fn each_grant(&self, _verb: Verb, visit: &mut dyn FnMut(Grant<'_>) -> bool) {
+            visit(Grant {
+                commander: &COMMANDER,
+                key: None,
+            });
         }
     }
 
@@ -389,8 +414,18 @@ mod binding {
         let node = &node().0;
         for (verb, name, bound) in BOUND {
             assert_eq!(node.binds(verb), bound, "{name}");
+            let request = Request {
+                subject: Commander::Pipe,
+                verb,
+                object: Object {
+                    peer: "1f",
+                    generation: None,
+                    key: None,
+                },
+                channel: Channel::Pipe,
+            };
             assert_eq!(
-                node.permits(verb, Commander::Pipe),
+                node.monitor().decide(node.binds(verb), &request).permits(),
                 bound,
                 "{name}: a bound verb is permitted by Yes"
             );
@@ -422,7 +457,7 @@ mod binding {
             ),
         ] {
             let mut out = FixedText::<256>::new();
-            lifecycle_verdict(node, command, Commander::Pipe, &mut out);
+            lifecycle_verdict(node, command, Asker::PIPE, &mut out);
             assert_eq!(
                 out.prefix() == refused(reason),
                 !bound,
@@ -479,21 +514,29 @@ mod verbs {
     use wz_session_core::lifecycle_contract::verbs::{
         judge_session, Permits, Profile, Request, SessionCase, HELD, SESSION_CASES,
     };
-    use wz_session_core::lifecycle_node::{Generation, LifecycleNode, Verb, Zid};
+    use wz_session_core::lifecycle_node::{Generation, LifecycleNode, Zid};
     use wz_session_core::lifecycle_wire::{CloseOrder, MachineReport, SessionLinks};
     use wz_session_core::peer_connection::PeerConnectionState;
     use wz_session_mcu::admin_fixed::Verbs;
-    use wz_session_mcu::connect_manager::{LifecyclePermits, PeerStore, StoreNode};
+    use wz_session_mcu::connect_manager::{PeerStore, StoreNode};
 
+    /// The verbs the case permits, granted to [`COMMANDER`], the zid the link of every GET here
+    /// proved.
     struct CasePermits(Permits);
 
-    impl LifecyclePermits for CasePermits {
-        fn permits(&self, verb: Verb, _commander: Commander<'_>) -> bool {
-            match verb {
+    impl Policy for CasePermits {
+        fn each_grant(&self, verb: Verb, visit: &mut dyn FnMut(Grant<'_>) -> bool) {
+            let granted = match verb {
                 Verb::Open => true,
                 Verb::Close => self.0.close,
                 Verb::Reset => self.0.reset,
                 Verb::Status => self.0.status,
+            };
+            if granted {
+                visit(Grant {
+                    commander: &COMMANDER,
+                    key: None,
+                });
             }
         }
     }
@@ -505,8 +548,11 @@ mod verbs {
     }
 
     impl LifecycleNode for Counting {
-        fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
-            self.inner.permits(verb, commander)
+        fn binds(&self, verb: Verb) -> bool {
+            self.inner.binds(verb)
+        }
+        fn monitor(&self) -> Monitor<'_> {
+            self.inner.monitor()
         }
         fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome {
             self.inner.open(peer, mode)

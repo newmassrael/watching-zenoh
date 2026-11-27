@@ -58,7 +58,7 @@ use wz_session_core::slot_observer::{NoSink, ObserverSinks, RegistryTables};
 use wz_session_core::text_out::{FixedText, TextOut};
 
 use crate::node_opening::open_verdict;
-use wz_session_core::lifecycle_node::Commander;
+use wz_session_core::lifecycle_monitor::Asker;
 
 use crate::admin_status::{
     write_connect_status, ConfigView, ConnectStatusSource, DialStatus, CONNECT_STATUS_TAIL,
@@ -611,7 +611,7 @@ fn serve_open<const BODY: usize, O: NodeOpening>(
         opener,
         parsed.peer_zid,
         parsed.mode,
-        Commander::of_requester(requester.as_ref()),
+        Asker::query(requester.as_ref(), key),
     );
     // The key's own tail, `session/open/<peer>`: it follows `@/<zid>/<whatami>/`, which the
     // parse has just held to name this node. A reply the arena refuses is counted there; the
@@ -652,7 +652,7 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
     whatami: &str,
     node: &N,
 ) {
-    use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Commander, Verb};
+    use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Verb};
     use wz_session_core::lifecycle_wire::{CLOSE_VERB, RESET_VERB, STATUS_VERB};
     // The capability document says what the node KNOWS, not whether this caller may use it: the
     // verbs the build compiled in, in the order the heap profile lists them.
@@ -732,12 +732,7 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
         tail,
         AdminLegEncoding::Json,
         |body| {
-            lifecycle_verdict(
-                node,
-                command,
-                Commander::of_requester(requester.as_ref()),
-                body,
-            );
+            lifecycle_verdict(node, command, Asker::query(requester.as_ref(), key), body);
         },
     );
 }
