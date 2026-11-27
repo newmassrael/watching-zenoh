@@ -237,6 +237,18 @@ impl<V, const N: usize> FixedIdMap<V, N> {
     pub const fn capacity(&self) -> usize {
         N
     }
+
+    /// The ids the table holds with their values, as a table of their own, in the order they were
+    /// bound; this one is left holding none and binding new ids, its refusals kept. The rows lie
+    /// inline, so they move with the table taken, as a pooled table's stay in its pool when it is
+    /// split (`PooledIdMap::split_off`). Needs no space and takes no memory.
+    pub fn split_off(&mut self) -> Self {
+        Self {
+            rows: core::mem::take(&mut self.rows),
+            refused: 0,
+            high: crate::pool_gauge::HighWater::new(),
+        }
+    }
 }
 
 impl<V, const N: usize> crate::pool_gauge::PoolGauge for FixedIdMap<V, N> {
@@ -1247,6 +1259,34 @@ mod tests {
             (1, 1),
             "and keeps the counts, read off the heads"
         );
+    }
+
+    /// A table split off a fixed one holds its ids and their values in the order they were bound;
+    /// the table it came from holds none, keeps the refusals it counted and binds new ids. Turned
+    /// red by a split that leaves the rows behind, or that hands the refusals to the table split
+    /// off.
+    #[test]
+    fn a_split_off_fixed_table_takes_its_rows_whole() {
+        let mut table: FixedIdMap<u32, 2> = FixedIdMap::new();
+        assert!(table.bind(2, 20).is_ok() && table.bind(1, 10).is_ok());
+        assert!(
+            table.bind(3, 30).is_err(),
+            "CONTROL: a full table refuses a new id, counted"
+        );
+        let owed = table.split_off();
+        assert_eq!(
+            owed.entries().collect::<std::vec::Vec<_>>(),
+            [(2, &20), (1, &10)],
+            "in the order bound"
+        );
+        assert_eq!(
+            owed.refusals(),
+            0,
+            "the refusals stay where they were counted"
+        );
+        assert_eq!((table.count(), table.refusals()), (0, 1));
+        assert!(table.bind(5, 50).is_ok(), "and it binds new ids");
+        assert_eq!(table.count(), 1);
     }
 
     /// A table split off a pooled one holds its ids in the order they were bound and keeps their
