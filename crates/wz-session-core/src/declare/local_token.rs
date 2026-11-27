@@ -72,8 +72,11 @@
 //! emits them through the sink. Wire ordering is preserved — every
 //! `DeclToken` precedes the terminating `DeclFinal`.
 
-use crate::bounded::{BoundedVec, CapacityFull, KeyMaker, KeyUnkept, Profile, Storage};
+use crate::bounded::{
+    Arena, BoundedVec, CapacityFull, KeyMaker, KeyUnkept, LendRefused, Lent, Profile, Storage,
+};
 use crate::caps;
+use crate::key_arena::{KeySpace, LentKeys};
 use crate::keyexpr_match::keyexpr_intersects;
 use crate::registry_error::RegisterError;
 

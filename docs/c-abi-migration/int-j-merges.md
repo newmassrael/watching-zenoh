@@ -116,3 +116,15 @@ The lane states the tables' policy once, in the build script (`wz_lent`,
   `RxOf<N>`, `TxOf<N>`); base-td's closed link type and its in-place
   makers take them the same way, and the gate takes the cells as the lane
   states them. Both lanes' stack tests are kept.
+
+## Fixes after main's build of c780b02348
+
+- `crates/wz-session-core/src/declare/local_token.rs`: the l3-queryable
+  resolution dropped the imports of `LocalTokenRegistry::lent` with
+  peer-prop's region form. The lent form stays: l3-queryable's D9b
+  (`arch-l3-rows.md`) moves the session's tokens into
+  `RegistryTables::local_tokens`, lent by `RegistryRows::local_tokens`
+  through `LentTables::lend` as the subscriber, queryable and liveliness
+  subscriber tables are, and removes only the observer's field and the
+  registry's region and counted forms. The imports (`Arena`, `LendRefused`,
+  `Lent`, `KeySpace`, `LentKeys`) are restored as l3-queryable had them.
