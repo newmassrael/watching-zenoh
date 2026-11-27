@@ -12697,7 +12697,6 @@ mod hand_back_tests {
 mod leg_outcome_tests {
     //! What a publish's leg answers for each way its send ended.
     use super::leg_outcome;
-    use wz_capi_port::FanoutError;
     use wz_session_core::send_wire_error::SendWireError;
 
     /// A send the link refused for want of a slot is a failed send, where a link that is down is
@@ -12706,6 +12705,7 @@ mod leg_outcome_tests {
     #[cfg(feature = "tx-lend-only")]
     #[test]
     fn a_frame_the_link_lent_no_slot_for_is_a_failed_send() {
+        use wz_capi_port::FanoutError;
         use wz_session_core::link::LinkDropCause;
         assert_eq!(
             leg_outcome(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot))),
