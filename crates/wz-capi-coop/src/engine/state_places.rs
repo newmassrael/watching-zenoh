@@ -626,7 +626,7 @@ mod tests {
     /// allocation back.
     #[cfg(wz_on_use)]
     #[test]
-    fn an_own_vacant_allocation_holds_nothing_until_it_is_filled() {
+    fn an_on_use_vacant_allocation_holds_nothing_until_it_is_filled() {
         use core::cell::Cell;
 
         struct Counted<'d>(&'d Cell<usize>, u32);
