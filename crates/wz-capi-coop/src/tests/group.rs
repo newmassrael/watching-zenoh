@@ -525,6 +525,34 @@ fn a_members_put_tries_no_send_place_of_a_face_at_rest() {
     SessionDrive::close(&*member);
 }
 
+/// Every row of a member's face table past the dial role's rests from its making, the group's
+/// among them: a group's session is stepped by the group's read, which no look of a face makes,
+/// so its row stays at rest through the group's steps, and a walk of the faces that reaches past
+/// it, as a listener's does once a face takes a row after the group's, tries no leg on it and
+/// finds it no face awake beside another's. CONTROL: the table keeps a row past the dial role's,
+/// the group's place. Turned red by a row made awake (`DirectFace::init_at` writing `rests`
+/// false past the dial role's row), or a group's step that wakes its row.
+#[test]
+fn every_row_past_the_dial_roles_rests_from_its_making_the_groups_among_them() {
+    let network = Arc::new(Network::default());
+    let first = open_member(&network, 1, member_config(1, GROUP)).expect("the first joins");
+    let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
+    SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+    SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+    until_members_know_each_other(&first, &second);
+    let rows = first.rows_at_rest();
+    assert!(
+        rows.len() >= 2,
+        "CONTROL: the table keeps a row past the dial role's, the group's place"
+    );
+    assert!(
+        rows[1..].iter().all(|rests| *rests),
+        "every row past the dial role's rests: {rows:?}"
+    );
+    SessionDrive::close(&*second);
+    SessionDrive::close(&*first);
+}
+
 /// What a member's group received is in the session's message reading, and stays there when the
 /// group's join is replaced by a join again and when the session closes. Turned red by a reading of
 /// the links alone, or by a join replaced or let go of at the close with its count not retired

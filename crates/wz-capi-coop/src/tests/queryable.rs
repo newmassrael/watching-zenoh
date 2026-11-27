@@ -104,7 +104,7 @@ fn an_answers_replies_are_held_to_leave_with_its_final() {
 /// A query asked in one frame between two Pushes is answered as one asked alone is: its reply,
 /// then its Final, each once. Its Final is owed by its own record's dispatch and taken there, so the
 /// drain after the Push that follows it in the frame finds none owed, which a debug build asserts
-/// (`RegistryOf::settle`). Turned red by a Final left owed past its Request's record, or by
+/// (`Registry::settle`). Turned red by a Final left owed past its Request's record, or by
 /// a drain after a run of Pushes that sends one again.
 #[cfg(feature = "std")]
 #[test]

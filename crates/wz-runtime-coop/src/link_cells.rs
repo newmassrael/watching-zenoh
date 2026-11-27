@@ -35,13 +35,14 @@ use portable_atomic::AtomicUsize as CountWord;
 use wz_session_core::bounded::ARENA_ALIGN;
 use wz_session_core::byte_cells::{ByteBuf, CellFlag, LentByteCells};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::placed::PlacedRef;
 
 use crate::session_drive::SessionDatagramLink;
 
 /// What a cell keeps before its value: how many handles name it and where the value lies, where its
 /// memory came from, which is where it goes back once none does, and what drops the whole value
 /// placed in it, which its last handle calls whatever view of the value it is
-/// ([`CellRc::unsize`], [`CellRc::halves`]). `F` is the form of the flag of the table a cell
+/// ([`CellRc::unsize`], [`CellRc::part_in_of`]). `F` is the form of the flag of the table a cell
 /// is claimed from, which its handles' kind names ([`CountKind::Flag`]).
 struct CellHead<F: CellFlag = Cell<bool>> {
     /// The handles that name the value, counted in [`ONE_HANDLE`]s, above the place of the value
@@ -246,6 +247,43 @@ impl CountKind for OneFace {
     #[inline]
     fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
         OneTask::try_with_local(local, f)
+    }
+}
+
+/// How the actions of a link hold their two halves, the link's own state and the session's kernel
+/// (`SessionRuntime::Shared`): a counted handle each, or a reference that counts nothing. A lock
+/// kind names its form (`crate::sync::LockKind::Halves`).
+pub trait HalvesForm: 'static {
+    /// A handle on a half, as the actions hold it.
+    type Held<U>: Clone + Deref<Target = U>;
+}
+
+/// Each half in a cell of its own counted by `N`: what a session whose halves are shared through
+/// the heap holds (`ShareValues`), with no cell of the session to own them.
+pub struct CountedHalves<N: CountKind>(PhantomData<fn() -> N>);
+
+impl<N: CountKind> HalvesForm for CountedHalves<N> {
+    type Held<U> = CellRc<U, N>;
+}
+
+/// The halves in the actions' own cell, beside them, reached by references that count nothing
+/// (`PlacedRef`): the last handle on the actions drops the three.
+pub enum PlacedHalves {}
+
+impl HalvesForm for PlacedHalves {
+    type Held<U> = PlacedRef<U>;
+}
+
+/// A form whose handle on a half can be made of the half as a value, in a cell of the heap.
+pub trait HeapHalves: HalvesForm {
+    /// `value` in a cell of its own on the heap; `None`, with `value` let go of, when the heap
+    /// refuses the cell.
+    fn on_heap<U>(value: U) -> Option<Self::Held<U>>;
+}
+
+impl<N: CountKind> HeapHalves for CountedHalves<N> {
+    fn on_heap<U>(value: U) -> Option<CellRc<U, N>> {
+        CellRc::try_on_heap(value)
     }
 }
 
@@ -650,64 +688,36 @@ impl<K, N: CountKind> Drop for CellClaim<K, N> {
     }
 }
 
-impl<A, B> CellRc<(A, B)> {
-    /// `first` and `second` together in one cell of `cells` ([`Self::in_cells`], or one of the
-    /// heap when no table is lent), and a handle on each: two values that are made together and
-    /// shared apart, the cell given back with the last handle on either, which drops both. Both
-    /// back when no cell takes them or the heap refuses one.
-    pub fn halves(
-        cells: Option<&LentByteCells>,
-        first: A,
-        second: B,
-    ) -> Result<(CellRc<A>, CellRc<B>), (A, B)> {
-        let pair = Self::in_cells(cells, (first, second))?;
-        Ok(pair.into_halves())
-    }
-
-    /// Two values `write` writes together in one cell of `cells` ([`Self::in_cells`], or one of
-    /// the heap when no table is lent), where they stay, and a handle on each, as [`Self::halves`]
-    /// answers: neither value is made in a frame and moved into the cell. `None` when no cell
-    /// takes them or the heap refuses one, `write` not called and let go of with what it holds.
+impl<K, N: CountKind> CellRc<K, N> {
+    /// A value `write` writes in one cell of `cells` ([`Self::in_cells_of`], or one of the heap
+    /// when no table is lent), where it stays, and a handle on the part of it `as_part` answers:
+    /// the parts of the value that the part reaches lie beside it and are dropped with it, by the
+    /// last handle, whatever part it names. `None` when no cell takes the value or the heap
+    /// refuses one, `write` not called and let go of with what it holds.
     ///
     /// # Safety
-    /// `write` leaves a whole `A` at the first place it is handed and a whole `B` at the second
-    /// when it returns. One that unwinds keeps the cell, which is then never given back.
-    pub unsafe fn halves_in(
-        cells: Option<&LentByteCells>,
-        write: impl FnOnce(*mut A, *mut B),
-    ) -> Option<(CellRc<A>, CellRc<B>)> {
-        // SAFETY: the caller's contract, which is this call's.
-        unsafe { Self::halves_in_of(cells, write) }
-    }
-}
-
-impl<A, B, N: CountKind> CellRc<(A, B), N> {
-    /// [`CellRc::halves_in`] for handles counted by `N`, of a table whose flags are the form
-    /// `N` gives a cell back by.
-    ///
-    /// # Safety
-    /// As [`CellRc::halves_in`].
-    pub unsafe fn halves_in_of(
+    /// `write` leaves a whole `K` at the place it is handed when it returns; one that unwinds
+    /// keeps the cell, which is then never given back. `as_part` answers a pointer to a value
+    /// that lives as long as the value it is handed.
+    pub unsafe fn part_in_of<P>(
         cells: Option<&LentByteCells<N::Flag>>,
-        write: impl FnOnce(*mut A, *mut B),
-    ) -> Option<(CellRc<A, N>, CellRc<B, N>)> {
+        write: impl FnOnce(*mut K),
+        as_part: impl FnOnce(NonNull<K>) -> NonNull<P>,
+    ) -> Option<CellRc<P, N>> {
         let head = head_in(
             cells,
-            Layout::new::<Slot<(A, B), N::Flag>>(),
-            Slot::<(A, B), N::Flag>::WHOLE,
-            Slot::<(A, B), N::Flag>::PLACE,
+            Layout::new::<Slot<K, N::Flag>>(),
+            Slot::<K, N::Flag>::WHOLE,
+            Slot::<K, N::Flag>::PLACE,
         )?;
-        let slot = head.cast::<Slot<(A, B), N::Flag>>().as_ptr();
-        // SAFETY: the head heads a cell of `Slot<(A, B)>`'s layout, written with one handle and
-        // named by none, whose value is not written: its two fields are places of `A` and `B`,
-        // aligned, apart and this call's alone, which `write` leaves whole (the caller's
-        // contract), so the pair is whole when the handle names it.
-        let pair = unsafe {
+        let slot = head.cast::<Slot<K, N::Flag>>().as_ptr();
+        // SAFETY: the head heads a cell of `Slot<K>`'s layout, written with one handle and named
+        // by none, whose value is not written: its place is aligned for `K` and this call's
+        // alone, which `write` leaves whole (the caller's contract), so the value is whole when
+        // the handle names it.
+        let whole = unsafe {
             let at = core::ptr::addr_of_mut!((*slot).value);
-            write(
-                core::ptr::addr_of_mut!((*at).0),
-                core::ptr::addr_of_mut!((*at).1),
-            );
+            write(at);
             Self {
                 head,
                 value: NonNull::new_unchecked(at),
@@ -715,25 +725,8 @@ impl<A, B, N: CountKind> CellRc<(A, B), N> {
                 _count: PhantomData,
             }
         };
-        Some(pair.into_halves())
-    }
-
-    /// This handle on a pair as one handle on each of its halves, the cell given back with the
-    /// last of them, which drops the pair whole.
-    fn into_halves(self) -> (CellRc<A, N>, CellRc<B, N>) {
-        let other = self.clone();
-        // SAFETY: each closure answers a pointer to a field of the pair the handle names, which
-        // lives as long as the cell does; the cell's `whole` drops the pair it was placed as.
-        unsafe {
-            (
-                self.part(|pair| {
-                    NonNull::new_unchecked(core::ptr::addr_of_mut!((*pair.as_ptr()).0))
-                }),
-                other.part(|pair| {
-                    NonNull::new_unchecked(core::ptr::addr_of_mut!((*pair.as_ptr()).1))
-                }),
-            )
-        }
+        // SAFETY: the caller's contract on `as_part`; the cell's `whole` drops the value placed.
+        Some(unsafe { whole.part(as_part) })
     }
 }
 
@@ -1185,28 +1178,25 @@ mod tests {
         assert_eq!(cells.in_use(), 0);
     }
 
-    /// A value lent no table whose cell the heap refuses is handed back, a claim of such a cell
-    /// is none and halves are both handed back: the refusal is the caller's to answer, and the
-    /// program goes on. Turned red by a heap cell that ends the program when the heap refuses it.
+    /// A value lent no table whose cell the heap refuses is handed back and a claim of such a
+    /// cell is none: the refusal is the caller's to answer, and the program goes on. Turned red by a heap cell that ends the program when the heap refuses it.
     #[cfg(feature = "alloc")]
     #[test]
     fn a_cell_the_heap_refuses_hands_its_value_back() {
         let drops = Rc::new(Cell::new(0));
-        let (one, claimed, pair) = crate::table_tests::refused(|| {
+        let (one, claimed) = crate::table_tests::refused(|| {
             (
                 CellRc::in_cells(None, Counted(drops.clone())),
                 CellRc::<Counted>::claim(None).is_some(),
-                CellRc::halves(None, Counted(drops.clone()), 7u32),
             )
         });
         let one = one.err().expect("the value handed back");
-        let (first, second) = pair.err().expect("both halves handed back");
-        assert_eq!((claimed, second, drops.get()), (false, 7, 0));
-        drop((one, first));
+        assert_eq!((claimed, drops.get()), (false, 0));
+        drop(one);
         assert_eq!(
             drops.get(),
-            2,
-            "each value is the caller's again, dropped once"
+            1,
+            "the value is the caller's again, dropped once"
         );
         let placed = CellRc::in_cells(None, Counted(drops.clone()))
             .ok()
@@ -1522,108 +1512,100 @@ mod tests {
         );
     }
 
-    /// Two values placed as halves share one cell: each handle names its own value, the cell
-    /// keeps both until the last handle on either goes, and halves placed in a lent table take
-    /// no memory of the heap. Turned red by halves boxed while a table is lent, or by a cell
-    /// given back while a handle on one half lives.
+    /// A value written in place and named by a handle on a part of it: the handle names the part
+    /// of the place the writer wrote, the cell keeps the whole value until the last handle on the
+    /// part goes, which drops the whole and gives the cell back, and a lent table's cell takes no
+    /// memory of the heap. With every cell taken the writer is not called. Turned red by a last
+    /// handle that drops its part alone, by a cell given back while a handle on the part lives, or
+    /// by a writer called with no cell to write in.
     #[cfg(feature = "alloc")]
     #[test]
-    fn halves_share_one_cell_until_the_last_handle_on_either() {
-        let cells = table(CellRc::<(Counted, u32)>::cell_bytes());
+    fn a_handle_on_a_part_keeps_the_whole_value_written_in_place() {
+        type Pair = (u32, Counted);
+        fn first(whole: core::ptr::NonNull<Pair>) -> core::ptr::NonNull<u32> {
+            // SAFETY: the first field of a live pair, whose place is never null.
+            unsafe {
+                core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!((*whole.as_ptr()).0))
+            }
+        }
+        let cells = table(CellRc::<Pair>::cell_bytes());
         let drops = Rc::new(Cell::new(0));
+        let mut written = core::ptr::null_mut::<Pair>();
+        let counted = Counted(drops.clone());
         let (placed, made) = crate::table_tests::allocations(|| {
-            CellRc::halves(Some(&cells), Counted(drops.clone()), 7u32)
+            // SAFETY: the writer writes a whole pair, and the part is its first field.
+            unsafe {
+                CellRc::<Pair>::part_in_of(
+                    Some(&cells),
+                    |at: *mut Pair| {
+                        at.write((7, counted));
+                        written = at;
+                    },
+                    first,
+                )
+            }
         });
-        let (first, second) = placed.ok().expect("a cell");
-        assert_eq!(made, 0, "halves in a lent table take no memory of the heap");
-        assert_eq!((cells.in_use(), *second), (1, 7), "one cell holds both");
-        drop(first);
+        let part = placed.expect("a cell");
         assert_eq!(
-            (drops.get(), cells.in_use()),
-            (0, 1),
-            "the other half keeps the cell and both values"
+            made, 0,
+            "a value written in a lent table takes no memory of the heap"
         );
-        drop(second);
+        assert_eq!(
+            CellRc::as_ptr(&part),
+            // SAFETY: the place the writer wrote, which the cell still holds.
+            unsafe { core::ptr::addr_of!((*written).0) },
+            "the handle names the part of the place the writer wrote"
+        );
+        let other = part.clone();
+        drop(part);
+        assert_eq!(
+            (*other, drops.get(), cells.in_use()),
+            (7, 0, 1),
+            "a handle on the part keeps the whole value and its cell"
+        );
+        drop(other);
         assert_eq!(
             (drops.get(), cells.in_use()),
             (1, 0),
-            "the last handle drops both and gives the cell back"
+            "the last handle drops the whole value and gives the cell back"
         );
-        let (_, boxed) = CellRc::halves(None, Counted(drops.clone()), 8u32)
-            .ok()
-            .expect("the heap when no table is lent");
-        assert_eq!((*boxed, cells.in_use()), (8, 0), "the heap's takes no cell");
-    }
-
-    /// Halves written in place lie where their writer wrote them: the places it is handed are the
-    /// ones the handles name, in the table's cell, and no memory of the heap is taken. With every
-    /// cell taken the writer is not called and what it holds is let go of, once. Turned red by
-    /// halves made in a frame and moved into the cell, or by a writer called with no cell to
-    /// write in.
-    #[cfg(feature = "alloc")]
-    #[test]
-    fn halves_written_in_place_lie_where_they_were_written() {
-        let cells = table(CellRc::<(Counted, u32)>::cell_bytes());
-        let drops = Rc::new(Cell::new(0));
-        let mut written = (
-            core::ptr::null_mut::<Counted>(),
-            core::ptr::null_mut::<u32>(),
-        );
-        let counted = Counted(drops.clone());
-        let (placed, made) = crate::table_tests::allocations(|| {
-            // SAFETY: the writer writes a whole value at each place it is handed.
+        let take = |value: u32| {
+            let counted = Counted(drops.clone());
+            // SAFETY: as above.
             unsafe {
-                CellRc::halves_in(Some(&cells), |first: *mut Counted, second: *mut u32| {
-                    first.write(counted);
-                    second.write(7);
-                    written = (first, second);
-                })
+                CellRc::<Pair>::part_in_of(
+                    Some(&cells),
+                    |at: *mut Pair| at.write((value, counted)),
+                    first,
+                )
             }
-        });
-        let (first, second) = placed.expect("a cell");
-        assert_eq!(
-            made, 0,
-            "halves written in a lent table take no memory of the heap"
-        );
-        assert_eq!(
-            (CellRc::as_ptr(&first), CellRc::as_ptr(&second)),
-            (written.0.cast_const(), written.1.cast_const()),
-            "the handles name the places the writer wrote"
-        );
-        assert_eq!((first.name(), *second, cells.in_use()), (7, 7, 1));
-        // SAFETY: as above.
-        let other = unsafe {
-            CellRc::halves_in(Some(&cells), |first: *mut Counted, second: *mut u32| {
-                first.write(Counted(drops.clone()));
-                second.write(8);
-            })
-        }
-        .expect("the table's second cell");
-        let refused_drops = Rc::new(Cell::new(0));
-        let held = Counted(refused_drops.clone());
+        };
+        let both = (take(8), take(9));
         let mut called = false;
         // SAFETY: as above.
         let refused = unsafe {
-            CellRc::halves_in(Some(&cells), |first: *mut Counted, second: *mut u32| {
-                called = true;
-                first.write(held);
-                second.write(9);
-            })
+            CellRc::<Pair>::part_in_of(
+                Some(&cells),
+                |at: *mut Pair| {
+                    called = true;
+                    at.write((10, Counted(drops.clone())));
+                },
+                first,
+            )
         };
-        assert!(refused.is_none(), "every cell is taken");
-        assert_eq!(
-            (called, refused_drops.get(), cells.in_use()),
-            (false, 1, 2),
-            "the writer is let go of uncalled, what it held dropped once"
+        assert!(
+            refused.is_none() && !called,
+            "no cell left, the writer is not called"
         );
-        drop((first, other));
+        assert_eq!(
+            (both.0.map(|part| *part), both.1.map(|part| *part)),
+            (Some(8), Some(9))
+        );
         assert_eq!(
             (drops.get(), cells.in_use()),
-            (1, 1),
-            "a pair goes whole with its last handle, the other stays"
+            (3, 0),
+            "each value written is dropped once, and the refused writer wrote none"
         );
-        drop(second);
-        assert_eq!((drops.get(), cells.in_use()), (2, 0));
     }
 
     /// The parts of a face in the tests below: two handles on one value.

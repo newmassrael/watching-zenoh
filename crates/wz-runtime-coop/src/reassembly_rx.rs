@@ -100,6 +100,20 @@ pub fn mcu_reassembly(policy: &SessionPolicy) -> CoopReassembly {
     CoopReassembly::new(mcu_reassembly_config(policy))
 }
 
+/// [`mcu_reassembly`] built in `place` and lent back: the Router a session that keeps it in a
+/// longer-lived place (a group's) makes there, so its slot machines never pass through the stack
+/// of the call that builds the session. `place` is overwritten without dropping what it held.
+pub fn mcu_reassembly_in<'a>(
+    place: &'a mut core::mem::MaybeUninit<CoopReassembly>,
+    policy: &SessionPolicy,
+) -> &'a mut CoopReassembly {
+    CoopReassembly::init_in(
+        place,
+        mcu_reassembly_config(policy),
+        wz_session_core::chain_staging::BuildsOwnStorage::new(),
+    )
+}
+
 /// How many chains of one link's copying receive are staged at once in buffers its session lent:
 /// the chains the per-peer quota admits, since a unicast link carries one peer. It is also how many
 /// buffers the session's one table holds, which its links share, each claimed when a chain's first
@@ -777,6 +791,35 @@ mod tests {
     use wz_session_core::reassembly_dispatch::OnePeer;
 
     const ZID: &[u8] = &[0x11; 16];
+
+    /// A Router built in its place is the one built as a value: its bound, its free slots and its
+    /// open chains, and it reassembles as that one does.
+    #[test]
+    fn a_router_built_in_its_place_is_the_one_built_as_a_value() {
+        let policy = SessionPolicy::defaults();
+        let value = mcu_reassembly(&policy);
+        let mut place = core::mem::MaybeUninit::uninit();
+        let placed = mcu_reassembly_in(&mut place, &policy);
+        assert_eq!(placed.max_message_bytes(), value.max_message_bytes());
+        assert_eq!(placed.staging_available(), value.staging_available());
+        assert_eq!(placed.staging_available(), MCU_REASSEMBLY_SLOTS);
+        assert_eq!(placed.active_chains(), 0);
+        assert_eq!(
+            placed.ingest(frag(1, 1, b"ab"), MASK, 0, |_| panic!("not final")),
+            IngestOutcome::Begun
+        );
+        let mut delivered = false;
+        assert_eq!(
+            placed.ingest(frag(2, 0, b"cd"), MASK, 0, |message| {
+                assert_eq!(message, &b"abcd"[..]);
+                delivered = true;
+            }),
+            IngestOutcome::Reassembled
+        );
+        assert!(delivered);
+        // SAFETY: `mcu_reassembly_in` wrote the Router whole.
+        unsafe { place.assume_init_drop() };
+    }
 
     /// The default-resolution (0x02, 28-bit) ring the tests compare at.
     const MASK: wz_session_core::sn::Sn = wz_session_core::sn::mask_from_res(0x02);

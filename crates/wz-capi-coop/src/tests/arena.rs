@@ -557,9 +557,11 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
         assert_eq!(row(&plan, "room places").count, plan.peers().sets());
         #[cfg(not(feature = "runtime-plan"))]
         assert!(plan.rows().all(|laid| laid.part() != "room places"));
-        // The index of held sets is a row of a build that takes faces beside the dial role's.
+        // The marks of the places are a row of a build that takes faces beside the dial role's,
+        // a mark for each place past the dial role's, whose place is its face's for the table's
+        // life.
         if crate::arena::TAKES_FACES {
-            assert_eq!(row(&plan, "held faces").count, plan.peers().sets());
+            assert_eq!(row(&plan, "held faces").count, plan.peers().sets() - 1);
         } else {
             assert!(plan.rows().all(|laid| laid.part() != "held faces"));
         }
@@ -2248,15 +2250,16 @@ fn a_redial_takes_the_buffers_the_lost_link_held() {
     drop(router);
 }
 
-/// The two halves a link's actions hold (the link's own state and the session's kernel) lie in
-/// the link's cell of the session's table: the dial role's link holds one, and the link dialled
-/// again after the first is lost holds one, the lost link's given back first, so a link made
-/// after the open takes no memory of the heap for them. The arena holds one link, so a lost link
-/// whose cell is not given back leaves the next dial no cell. Turned red by halves held on the
-/// heap (`McuActions::build` in `start_wire`), which take no cell of the table.
+/// A link's actions and the two halves they hold (the link's own state and the session's kernel)
+/// lie in the link's one cell of the session's table of actions: the dial role's link holds one,
+/// and the link dialled again after the first is lost holds one, the lost link's given back first
+/// with its halves, so a link made after the open takes no memory of the heap for them. The arena
+/// holds one link, so a lost link whose cell is not given back leaves the next dial no cell.
+/// Turned red by actions held on the heap, which take no cell of the table, or by a cell too small
+/// for the halves beside the actions, which refuses the link.
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
-fn a_links_halves_lie_in_its_cell_across_a_redial() {
+fn a_links_actions_and_halves_lie_in_its_cell_across_a_redial() {
     let router = Router::start(CatchAll::None);
     let port = router.port;
     let engine = open_with(CoopConfig {
@@ -2267,9 +2270,9 @@ fn a_links_halves_lie_in_its_cell_across_a_redial() {
     });
     until(&engine, "the first link", || engine.faces_up() == 1);
     assert_eq!(
-        engine.link_halves_in_use(),
+        engine.link_actions_in_use(),
         Some(1),
-        "the dial role's link holds its halves in one cell"
+        "the dial role's link holds its actions and their halves in one cell"
     );
     router.send(Command::Close);
     drop(router);
@@ -2279,7 +2282,7 @@ fn a_links_halves_lie_in_its_cell_across_a_redial() {
     until(
         &engine,
         "the lost link's cell to go back and the link dialled again to hold one",
-        || engine.faces_up() == 1 && engine.link_halves_in_use() == Some(1),
+        || engine.faces_up() == 1 && engine.link_actions_in_use() == Some(1),
     );
     drop(router);
 }
@@ -2895,9 +2898,14 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             ours.count * (faces + handshakes)
         } else if theirs.part() == "peer tables" {
             ours.count * faces
-        } else if ["face tables", "held faces", "room places"].contains(&theirs.part()) {
+        } else if ["face tables", "room places"].contains(&theirs.part()) {
             // Its dial role's face holds a set of no rows all the same, first, beside the faces'.
             ours.count * (1 + faces)
+        } else if theirs.part() == "held faces" {
+            // The dial role's place is its face's for the table's life and has no mark of its own:
+            // a mark for each face past it, of which the client's one face has none.
+            assert_eq!(ours.count, 0, "the client's one place is the dial role's");
+            faces
         } else if FACE_PARTS.contains(&theirs.part()) {
             // The gets' tables, and the ends of their legs, hold the session's own once.
             ours.count / (1 + own) * (faces + own)
@@ -3330,7 +3338,6 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         driver: 64,
         gate: 64,
         actions: 64,
-        halves: 64,
     })
     .expect("the build's limits lay the cells out");
     plan.holding_rooms(64)
@@ -3877,13 +3884,15 @@ fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
 
 /// Where each face is read where it lies (no `wz_round`), each face's Router stages its chains
 /// apart: the reassembly table holds one face's share for each face read where it lies, and the
-/// faces past the dial role's are laid out a row each, of one face's read slot and send place.
-/// Only a session that listens reads a face past the dial role's where it lies: a build without
-/// `listen`, groups and all, has one share and no such row whatever its face table's places, a
-/// group's place being read through the group's own session. Turned red by a table of one share
-/// whatever the faces of a build that listens (`ArenaPlan::lay_out`), by a row or a share for
-/// each place of a build that does not (`read_faces`), or by a row for the dial role's face,
-/// which lies in the engine's place (`ArenaPlan::lay_direct_faces`).
+/// faces are laid out a row each, of one face's read slot and send place, the dial role's among
+/// them. Only a session that listens reads a face past the dial role's where it lies: a build
+/// without `listen` has one share whatever its face table's places. The table of read slots is
+/// lent wherever the face table has places past the dial role's (`TAKES_FACES`), a group's
+/// among them, whose row holds the group's session; a build of the dial role's face alone keeps
+/// its one row inline in the engine's place. Turned red by a table of one share whatever the faces
+/// of a build that listens (`ArenaPlan::lay_out`), by a share for each place of a build that does
+/// not (`read_faces`), by a build with groups and no `listen` that lends no table, or, where the
+/// table is lent, by a table without a row for each place (`ArenaPlan::lay_direct_faces`).
 #[cfg(not(wz_round))]
 #[test]
 fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
@@ -3905,14 +3914,17 @@ fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
         caps::REASSEMBLY_CHAINS * read
     );
     let direct = plan.rows().find(|row| row.part() == "direct faces");
-    if read > 1 {
-        let direct = direct.expect("a row of the faces past the dial role's");
-        assert_eq!(direct.count, read - 1);
+    if crate::arena::TAKES_FACES {
+        let direct = direct.expect("a row of the faces' table, the dial role's among them");
+        assert_eq!(
+            direct.count, sets,
+            "a row for each place, a group's among them"
+        );
         assert_eq!(direct.entry_bytes, Engine::DIRECT_FACE_BYTES);
     } else {
         assert!(
             direct.is_none(),
-            "the dial role's face lies in the engine's place"
+            "the table of one row lies in the engine's place"
         );
     }
 }

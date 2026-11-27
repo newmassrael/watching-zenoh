@@ -164,7 +164,6 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
                 driver: 64,
                 gate: 64,
                 actions: 64,
-                halves: 64,
             },
             held: &HeldPlaces::NONE,
             runtime: 64,

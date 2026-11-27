@@ -54,6 +54,8 @@ pub(super) fn declare_token<C: ClockSource + 'static>(
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L, C> {
     /// Tell each group the session joined of the token `handle` names, as its row in the
     /// session's tables states it (`group`).
+    // Out of line, as a subscriber's is (`Core::announce_subscriber_to_groups`).
+    #[inline(never)]
     pub(super) fn announce_token_to_groups(
         &self,
         handle: wz_session_core::session_tables::TokenHandle,

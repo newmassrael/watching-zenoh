@@ -731,7 +731,7 @@ mod group {
     /// period later, its new session built in the place of the read slot its first join was
     /// given: the members learn each other again and a put crosses the group joined again, and
     /// the member made one place for the group's session in all. Turned red by a join again that
-    /// gives the group's session a place of its own (`Core::seat_group`). Twin of
+    /// gives the group's session a place of its own (`DirectSlot::seat_group`). Twin of
     /// `group::a_member_whose_group_link_is_lost_joins_the_group_again`.
     #[test]
     fn a_member_of_one_thread_whose_group_link_is_lost_joins_again_in_the_same_place() {
@@ -782,6 +782,54 @@ mod group {
             second.call(|engine| engine.group_places_made()),
             1,
             "the join again built its session in the place of the first"
+        );
+    }
+
+    /// A group's session lies in the row of the group's place in the read slots' table, the place
+    /// its tables hold in the registry, and a join again builds the session in that same row:
+    /// the member steps the group from there, so the members learn each other before and after
+    /// the loss. Turned red by a session kept apart from the face table's rows (no row holds it),
+    /// by one built in another row than its place's, or by a join again that moves it.
+    #[test]
+    fn a_groups_session_lies_in_the_row_of_its_place() {
+        let network = Arc::new(Network::default());
+        let member = |id: u8| {
+            let network = Arc::clone(&network);
+            OwnThread::open(move || {
+                let config = CoopConfig {
+                    redial_ms: Some(100),
+                    ..member_config(id, GROUP)
+                };
+                open_member(&network, id, config).expect("the member joins")
+            })
+        };
+        let first = member(1);
+        let second = member(2);
+        eventually("each member to list the other", || {
+            first.call(|engine| engine.group_member_zids()) == [vec![2u8; 4]]
+                && second.call(|engine| engine.group_member_zids()) == [vec![1u8; 4]]
+        });
+        let (rows, places) = second.call(|engine| engine.group_rows_and_places());
+        assert_eq!(places.len(), 1, "CONTROL: the member joined one group");
+        assert!(
+            places[0] > 0,
+            "CONTROL: the dial role's place is not the group's"
+        );
+        assert_eq!(rows, places, "the group's session lies in its place's row");
+
+        network.cut(2);
+        eventually(
+            "the second member's stack to be asked to join again",
+            || network.joins_of(2) == 2,
+        );
+        eventually("each member to list the other again", || {
+            first.call(|engine| engine.group_member_zids()) == [vec![2u8; 4]]
+                && second.call(|engine| engine.group_member_zids()) == [vec![1u8; 4]]
+        });
+        assert_eq!(
+            second.call(|engine| engine.group_rows_and_places()),
+            (rows.clone(), rows),
+            "the join again built its session in the same row"
         );
     }
 }

@@ -12,8 +12,7 @@
 //! its rows are lent, so a set built for each place at the open wrote pages of the arena for faces
 //! that may never come. A set once built stays where it lies, emptied for the next face.
 
-use super::held::{Holders, ManyHolders};
-use super::{lend_set, names_face, FaceId, FaceTables, Gets, HeldFace, Peer, RegistryOf, NO_FACE};
+use super::{lend_set, names_face, FaceId, FaceTables, Gets, HeldFace, Peer, Registry};
 use crate::arena::MAX_FACE_SETS;
 use crate::RowPolicy;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused};
@@ -92,7 +91,7 @@ impl SpareSets {
     }
 }
 
-impl RegistryOf<ManyHolders> {
+impl Registry {
     /// Tables for a face that has come: those at the first place no face holds and no tomb keeps,
     /// empty, as its peer has said nothing yet, built there first when no face took the place
     /// before; the key of the face, whose place its link and its room keep as well. [`FacesFull`]
@@ -100,16 +99,11 @@ impl RegistryOf<ManyHolders> {
     /// session refuses such a face before it comes.
     pub(in crate::engine) fn add_face(&mut self, id: FaceId) -> Result<HeldFace, FacesFull> {
         debug_assert!(names_face(id), "no face is numbered as a free or kept row");
-        // The index has a row for each place the open reserved, so its first free row is the first
-        // free place.
-        let at = self
-            .holders
-            .rows()
-            .iter()
-            .position(|holder| *holder == NO_FACE)
-            .ok_or(FacesFull)?;
+        // The table of places has a mark for each place the open reserved, so its first free mark
+        // is the first free place.
+        let at = self.holders.free().ok_or(FacesFull)?;
         self.build_to(at).map_err(|_| FacesFull)?;
-        let holder = self.holders.rows_mut().get_mut(at).ok_or(FacesFull)?;
+        let holder = self.holders.mark_mut(at).ok_or(FacesFull)?;
         *holder = id;
         self.writing();
         Ok(HeldFace::new(at, id))

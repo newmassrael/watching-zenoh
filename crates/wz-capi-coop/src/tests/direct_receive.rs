@@ -580,7 +580,7 @@ fn a_stream_of_batches_still_sends_the_keep_alive_on_time() {
 /// or not the read waited. Each such read reads the clock once, for that look, and none for a
 /// wait. The CONTROL is the leg halfway to its deadline: still open. Turned red by a read on held
 /// input that leaves the look at the life or the pump's due work to the next read that waits
-/// (`CoopEngine::link_turn`), or that still reads the clock for its wait (`link_wait`).
+/// (`CoopEngine::face_turn`), or that still reads the clock for its wait (`link_wait`).
 #[cfg(all(feature = "query", not(wz_round)))]
 #[test]
 fn reads_on_held_input_still_serve_what_falls_due() {
@@ -1126,9 +1126,8 @@ fn a_callback_inside_the_reads_step_finds_the_send_place_free() {
 /// it rests beside another, `DirectFace::rests`), and each past it whose row holds a face, and no
 /// row that holds none. A client that took no face turns its dial role's face alone, whatever rows
 /// its table keeps for faces to come. Turned red by a read that turns a face twice, a row no face
-/// holds, or no face at all, as a walk that reads the dial role's row by the marks of the rows
-/// past it would (`CoopEngine::read_faces` over `DirectFaces::turned`, or
-/// `CoopEngine::read_dial` where the dial role's face is the only face).
+/// holds, or no face at all, as a dial role's row whose mark is not held for the table's life
+/// would (`DirectFace::init_at`, `CoopEngine::read_faces` over `DirectFaces::turned`).
 #[cfg(not(wz_round))]
 #[test]
 fn a_read_turns_every_face_once() {
@@ -1150,6 +1149,90 @@ fn a_read_turns_every_face_once() {
         faces,
         "one turn of each face"
     );
+}
+
+/// A client reads its one face through a table of one row: the read slots' table holds the dial
+/// role's row alone, and each read turns that row once, through the one turn body every build
+/// turns a face through. Turned red by a client read that turns its face in a body of its own
+/// (a turn the body's count does not see), by a read that turns the row twice, or by a client
+/// table of more than one row.
+#[cfg(all(not(wz_round), not(any(feature = "listen", feature = "group"))))]
+#[test]
+fn a_client_reads_its_one_face_through_a_table_of_one_row() {
+    const {
+        assert!(
+            !crate::arena::TAKES_FACES,
+            "CONTROL: the build takes no face beside its dial role's"
+        )
+    };
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.direct_faces(),
+        (1, 1),
+        "one row, the dial role's, turned by every read"
+    );
+    for read in 1..=3 {
+        let before = engine.takes.face_turns.load(Ordering::SeqCst);
+        let _ = SessionDrive::read(&*engine, false);
+        assert_eq!(
+            engine.takes.face_turns.load(Ordering::SeqCst) - before,
+            1,
+            "read {read} turns row 0 once"
+        );
+    }
+}
+
+/// The faces' table lies where the build's bound puts it: inline in the engine's place where the
+/// session has no place past the dial role's (neither `listen` nor `group`), its one row the
+/// dial role's, so a reach of that row is a constant offset of the engine; lent from the session's
+/// arena elsewhere, the dial role's row the first of the table, so the engine holds no face of its
+/// own. Turned red by a table of one row lent from the arena (`FaceSlots`), by a build of groups
+/// without `listen` that keeps its one row inline, or by a build that keeps the dial role's row in
+/// the engine beside the rows past it (`DirectFaces::lent_in` laying the rows past it alone).
+#[cfg(not(wz_round))]
+#[test]
+fn the_dial_roles_row_lies_where_the_faces_table_does() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let (rows, turned) = engine.direct_faces();
+    assert!(
+        rows >= 1 && turned >= 1,
+        "CONTROL: the table holds the dial role's row, which a read turns"
+    );
+    assert_eq!(
+        engine.dial_row_lies_in_the_engine(),
+        !crate::arena::TAKES_FACES,
+        "the dial role's row lies inline exactly where the session has no place past it"
+    );
+}
+
+/// A read takes the read slot of the face it turns once, and holds it across its wait, exactly
+/// where its table is the dial role's one row and no group is joined; elsewhere it tries the slot
+/// before the wait, lets it go so a read on another thread may turn a row this one does not, and
+/// takes it again to turn it. Turned red by a client read that lets its slot go before its wait
+/// (two tries a read), or by a read of a build that takes faces holding its slot across the wait
+/// (one), the choice `CoopEngine::read_faces` makes by the build (`crate::arena::TAKES_FACES`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_read_holds_its_slot_across_its_wait_exactly_where_one_row_is_read() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.direct_faces().1,
+        1,
+        "CONTROL: the dial role's face is the one face a read turns"
+    );
+    let tries = if crate::arena::TAKES_FACES { 2 } else { 1 };
+    for read in 1..=3 {
+        let before = engine.takes.read_slot_takes.load(Ordering::SeqCst);
+        let _ = SessionDrive::read(&*engine, false);
+        assert_eq!(
+            engine.takes.read_slot_takes.load(Ordering::SeqCst) - before,
+            tries,
+            "read {read} tries the slot as the build's table asks"
+        );
+    }
 }
 
 /// What a read waits for is the earliest due of the faces as their slots hold it: each turn of a
