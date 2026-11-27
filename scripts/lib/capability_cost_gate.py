@@ -220,6 +220,9 @@ SHIP_PROFILE = "ship"
 # The configuration of the library without `std` (`crates/.cargo/capi-nostd.toml`), which a case
 # composes with the profile of the same name.
 NOSTD_CONFIG = ".cargo/capi-nostd.toml"
+# The code generation flag that file gives an x86 or x64 library on any host: no innermost loop's
+# head aligned with no-ops (docs/c-abi-migration/arch-win-ext.md, step W1).
+NOSTD_LOOP_ALIGNMENT = "llvm-args=-x86-experimental-pref-innermost-loop-alignment=0"
 # The crate a C program links for a case's ABI crate, and the name that crate's manifest gives its
 # dependency on the ABI: the pico ABI is an rlib (`wz-capi-pico`), and its C library is
 # `wz-capi-pico-lib`, which takes the ABI's capabilities through its dependency `abi`. A case names
@@ -2729,10 +2732,14 @@ def cmd_selftest() -> int:
            encoded == {"CARGO_ENCODED_RUSTFLAGS": "-C\x1fa b\x1fx"})
     # The configuration files a case names: the tables that hold for the target, joined, and
     # every other shape refused rather than skipped.
-    linux_gnu = {"unix", 'target_family="unix"', 'target_os="linux"', 'target_env="gnu"'}
-    linux_musl = {"unix", 'target_family="unix"', 'target_os="linux"', 'target_env="musl"'}
+    linux_gnu = {"unix", 'target_family="unix"', 'target_os="linux"', 'target_env="gnu"',
+                 'target_arch="x86_64"'}
+    linux_musl = {"unix", 'target_family="unix"', 'target_os="linux"', 'target_env="musl"',
+                  'target_arch="x86_64"'}
+    linux_arm64 = (linux_gnu - {'target_arch="x86_64"'}) | {'target_arch="aarch64"'}
     windows_msvc = {"windows", 'target_family="windows"', 'target_os="windows"',
-                    'target_env="msvc"'}
+                    'target_env="msvc"', 'target_arch="x86_64"'}
+    windows_msvc_x86 = (windows_msvc - {'target_arch="x86_64"'}) | {'target_arch="x86"'}
     expect("a name, a key and value, and all, any and not of them are read",
            cfg_matches("unix", linux_gnu) and not cfg_matches("windows", linux_gnu)
            and cfg_matches('all(target_os = "linux", target_env = "gnu")', linux_gnu)
@@ -2802,14 +2809,18 @@ def cmd_selftest() -> int:
     expect("a file merged that cannot be read is refused by its name",
            refused_by.startswith("crates/x.toml: ") and "`build`" in refused_by)
     nostd = (CRATES / NOSTD_CONFIG).read_text(encoding="utf-8")
-    expect("the configuration without std drops the unwind tables on a POSIX host only",
+    expect("the configuration without std drops the unwind tables on a POSIX host only, and aligns "
+           "no innermost loop of an x86 or x64 library",
            config_rustflags(nostd, "x86_64-unknown-linux-gnu", linux_gnu)
+           == ["-C", "force-unwind-tables=no", "-C", NOSTD_LOOP_ALIGNMENT]
+           and config_rustflags(nostd, "aarch64-unknown-linux-gnu", linux_arm64)
            == ["-C", "force-unwind-tables=no"]
            and config_linker(nostd, "x86_64-unknown-linux-gnu") is None)
     expect("the configuration without std links a Windows library by the toolchain's own linker",
-           all(config_rustflags(nostd, t, windows_msvc) == ["-C", "linker-flavor=lld-link"]
+           all(config_rustflags(nostd, t, cfg)
+               == ["-C", "linker-flavor=lld-link", "-C", NOSTD_LOOP_ALIGNMENT]
                and config_linker(nostd, t) == "rust-lld"
-               for t in (win, "i686-pc-windows-msvc")))
+               for t, cfg in ((win, windows_msvc), ("i686-pc-windows-msvc", windows_msvc_x86))))
 
     def readable(path: str) -> bool:
         try:
@@ -2939,6 +2950,8 @@ def cmd_selftest() -> int:
            == TARGET / "x86_64-unknown-linux-gnu" / "capi-nostd" / "libwz_capi_pico.so"
            and "force-unwind-tables=no"
            in bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
+           and NOSTD_LOOP_ALIGNMENT
+           in bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
            and discards_unwind_tables(bare_build.link_args)
            and PACKED_RELOCS_LINK in bare_build.link_args
            and not any(k.endswith("_LINKER") for k in bare_build.env))
@@ -2947,6 +2960,8 @@ def cmd_selftest() -> int:
     expect("a case built for a target its file names a linker for is linked by it, over the caller's",
            win_build.env[target_linker_env(win)] == "rust-lld"
            and "linker-flavor=lld-link"
+           in win_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
+           and NOSTD_LOOP_ALIGNMENT
            in win_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
            and "force-unwind-tables=no"
            not in win_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f"))
