@@ -6,3 +6,9 @@ commit = "ac7f3e14c3cfb38ad414be712d3c4f621506ca70"
 base = "a65d67caa3d2c15e5d3bf4781fa9e89e775af497"
 machine = "mf977c53d872e"
 at = 1795815969
+
+[return]
+reason = "conflict"
+detail = "crates/wz-capi-coop/build.rs crates/wz-capi-coop/src/tests/on_use.rs docs/reason-review-pins.md"
+report = "mb2af4e1c456c:0000000301-384b0eb98e73/attempt-1.log"
+at = 1795815995
