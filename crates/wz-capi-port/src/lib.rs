@@ -937,15 +937,16 @@ pub enum FilteredPut {
 /// table.
 ///
 /// An ABI whose declarations are retracted by an object of its own rather than by that count has
-/// the key [`keep`](Self::keeping) the object alive, and the entry holding the key holds it. Entries
-/// are always released OUTSIDE an engine's locks, so what they keep may re-enter the session as it
-/// drops (a keyexpr retraction does).
+/// the key keep the object alive (`WireKey::keeping`, in a build with `key-anchors`), and the
+/// entry holding the key holds it. Entries are always released OUTSIDE an engine's locks, so what
+/// they keep may re-enter the session as it drops (a keyexpr retraction does).
 #[derive(Default)]
 pub struct WireKey {
     /// The keyexpr declaration the wire names, `0` for none.
     pub mapping_id: wz_session_core::wire_id::ExprId,
     /// What follows the declared prefix ([`Self::names_in`]).
     suffix: Suffix,
+    #[cfg(feature = "key-anchors")]
     keeps: Keeps,
     /// The declaration of the key of the entity this key announces, when the declaring ABI made
     /// one besides the one the wire names, `0` for none: the record of the entity holds it too
@@ -958,13 +959,14 @@ pub struct WireKey {
 }
 
 /// The rest of a key past its declared prefix: none, a copy of its own, text that lies in what
-/// the key keeps ([`WireKey::aliased_in`]), or the end of the key the wire key is handed with
+/// the key keeps (`WireKey::aliased_in`, with `key-anchors`), or the end of the key the wire key is handed with
 /// ([`WireKey::aliased_tail`]), which every engine call takes beside it.
 #[derive(Default)]
 enum Suffix {
     #[default]
     None,
     Owned(String),
+    #[cfg(feature = "key-anchors")]
     Lent {
         at: core::ptr::NonNull<u8>,
         len: usize,
@@ -982,6 +984,7 @@ impl Suffix {
             Self::Owned(rest) => Some(rest),
             // SAFETY: lent text lies, unchanged, in what the key keeps (`WireKey::aliased_in`),
             // and was a `str` there.
+            #[cfg(feature = "key-anchors")]
             Self::Lent { at, len } => Some(unsafe {
                 core::str::from_utf8_unchecked(core::slice::from_raw_parts(at.as_ptr(), *len))
             }),
@@ -1000,11 +1003,14 @@ impl core::fmt::Debug for Suffix {
 
 // SAFETY: lent text is read only, through shared borrows, and lies in what the key keeps, which
 // is `Send + Sync`.
+#[cfg(feature = "key-anchors")]
 unsafe impl Send for Suffix {}
 // SAFETY: as `Send`.
+#[cfg(feature = "key-anchors")]
 unsafe impl Sync for Suffix {}
 
 /// What a key keeps alive for as long as a declaration made on it stays recorded.
+#[cfg(feature = "key-anchors")]
 #[derive(Default)]
 enum Keeps {
     /// Nothing.
@@ -1017,13 +1023,12 @@ enum Keeps {
 
 impl core::fmt::Debug for WireKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("WireKey")
-            .field("mapping_id", &self.mapping_id)
-            .field("suffix", &self.suffix)
-            .field("keeps", &!matches!(self.keeps, Keeps::Nothing))
-            .field("own", &self.own)
-            .field("row", &self.row)
-            .finish()
+        let mut key = f.debug_struct("WireKey");
+        key.field("mapping_id", &self.mapping_id)
+            .field("suffix", &self.suffix);
+        #[cfg(feature = "key-anchors")]
+        key.field("keeps", &!matches!(self.keeps, Keeps::Nothing));
+        key.field("own", &self.own).field("row", &self.row).finish()
     }
 }
 
@@ -1398,8 +1403,14 @@ impl OwnKey {
 /// ([`WireKey::into_anchor`]): an object of the ABI's that retracts a declaration when its last
 /// holder lets it go, or nothing. Dropping it lets the object go, which may reach the session, so
 /// an engine drops it, with the row that keeps it, where it holds no lock of the session.
+///
+/// Only an ABI that retracts a declaration by an object of its own makes one (`key-anchors`: the
+/// advanced subscriber's host, which the pico ABI's advanced plane and the zenoh-c ABI run, and the
+/// Rust API); in a build without it no key keeps anything, and an anchor, which every row of an
+/// entity holds, is of no size.
 #[derive(Default)]
 pub struct KeyAnchor {
+    #[cfg(feature = "key-anchors")]
     _keeps: Keeps,
 }
 
@@ -1434,6 +1445,7 @@ impl WireKey {
         Self {
             mapping_id,
             suffix: suffix.map_or(Suffix::None, Suffix::Owned),
+            #[cfg(feature = "key-anchors")]
             keeps: Keeps::Nothing,
             own: 0,
             row: None,
@@ -1447,6 +1459,7 @@ impl WireKey {
     /// # Safety
     /// `rest` lies in the value `kept` counts and stays there, unchanged, while any count of it
     /// is held.
+    #[cfg(feature = "key-anchors")]
     pub unsafe fn aliased_in(
         mapping_id: wz_session_core::wire_id::ExprId,
         rest: &str,
@@ -1479,6 +1492,7 @@ impl WireKey {
             } else {
                 Suffix::Tail(rest_len)
             },
+            #[cfg(feature = "key-anchors")]
             keeps: Keeps::Nothing,
             own: 0,
             row: None,
@@ -1511,6 +1525,7 @@ impl WireKey {
 
     /// A lent rest copied into the key, before what it lies in is let go of. A tail lies in no
     /// keep, so it stays as it is.
+    #[cfg(feature = "key-anchors")]
     fn own_suffix(&mut self) {
         if let Suffix::Lent { .. } = self.suffix {
             self.suffix = self
@@ -1521,6 +1536,7 @@ impl WireKey {
     }
 
     /// This key, holding `anchor` alive for as long as a declaration made on it stays recorded.
+    #[cfg(feature = "key-anchors")]
     pub fn keeping(mut self, anchor: lodge::Kept) -> Self {
         self.own_suffix();
         self.keeps = Keeps::Anchor { _held: anchor };
@@ -1559,7 +1575,10 @@ impl WireKey {
     /// What the key kept alive, the key let go of: the one place an anchor leaves a key, so the
     /// row that records an entity keeps it, and lets it go with the row.
     pub fn into_anchor(self) -> KeyAnchor {
-        KeyAnchor { _keeps: self.keeps }
+        KeyAnchor {
+            #[cfg(feature = "key-anchors")]
+            _keeps: self.keeps,
+        }
     }
 
     /// Whether the key goes on the wire as its literal, naming no declaration.
@@ -2181,8 +2200,11 @@ mod tests {
         let key = WireKey::literal().with_own(5);
         assert!(key.is_literal(), "the wire still names no declaration");
         assert_eq!(key.own_declaration(), 5);
-        let kept = key.keeping(crate::lodge::Kept::shared(Arc::new(())));
-        assert_eq!(kept.own_declaration(), 5);
+        #[cfg(feature = "key-anchors")]
+        {
+            let kept = key.keeping(crate::lodge::Kept::shared(Arc::new(())));
+            assert_eq!(kept.own_declaration(), 5);
+        }
     }
 
     /// A key names its declaration with the row its holder gave, kept through `keeping` and
@@ -2197,8 +2219,12 @@ mod tests {
         assert_eq!(WireKey::literal().declared(), KeyexprRef::default());
         assert_eq!(WireKey::aliased(7, None).declared(), KeyexprRef::by_id(7));
         let key = WireKey::aliased_tail(7, 0).at_row(row).with_own(5);
-        let kept = key.keeping(crate::lodge::Kept::shared(Arc::new(())));
-        assert_eq!(kept.declared(), KeyexprRef { id: 7, row });
+        assert_eq!(key.declared(), KeyexprRef { id: 7, row });
+        #[cfg(feature = "key-anchors")]
+        {
+            let kept = key.keeping(crate::lodge::Kept::shared(Arc::new(())));
+            assert_eq!(kept.declared(), KeyexprRef { id: 7, row });
+        }
     }
 
     /// A tail is read against the key the wire key is handed with: the end of it, of the length
@@ -2233,6 +2259,7 @@ mod tests {
     ///
     /// A key that copies the rest it is given reds the first assertion; a `keeping` that leaves
     /// the rest lent reds the last.
+    #[cfg(feature = "key-anchors")]
     #[test]
     fn a_kept_rest_is_lent_to_the_key() {
         let text: Arc<String> = Arc::new(String::from("demo/data/rest"));
@@ -2258,6 +2285,7 @@ mod tests {
     /// A kept anchor lives as long as the key, and as what the key kept once it is let go of,
     /// until that is dropped. Turned red by an `into_anchor` that leaves the anchor behind with
     /// the key.
+    #[cfg(feature = "key-anchors")]
     #[test]
     fn a_kept_anchor_lives_until_what_the_key_kept_is_dropped() {
         let anchor: Arc<dyn Send + Sync> = Arc::new(());
@@ -2268,6 +2296,18 @@ mod tests {
         assert_eq!(Arc::strong_count(&anchor), 2, "what the key kept keeps it");
         drop(kept);
         assert_eq!(Arc::strong_count(&anchor), 1);
+    }
+
+    /// A build in which no ABI keeps an anchor makes one of no size, so the row of every entity,
+    /// which holds one, is no larger for it, and a key holds nothing but its name. Turned red by
+    /// an anchor or a key that keeps an object's place in a build without `key-anchors`.
+    #[cfg(not(feature = "key-anchors"))]
+    #[test]
+    fn an_anchor_is_of_no_size_where_no_abi_keeps_one() {
+        assert_eq!(core::mem::size_of::<KeyAnchor>(), 0);
+        let named = WireKey::aliased(7, Some(String::from("/rest")));
+        assert_eq!(named.names_in("demo/rest"), (7, Some("/rest")));
+        drop(named.into_anchor());
     }
 
     /// A session's count of a declaration's holders as a test keeps it: each hold taken and each

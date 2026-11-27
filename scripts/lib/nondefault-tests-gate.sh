@@ -717,6 +717,10 @@ files::decl_watch_doors::"
     # engine with a Rust API hands the port and a C library never does (`shared-sinks`): the call
     # through each arm and the hold let go with the sink (`shared_sink_tests::`).
     "wz-capi-port|hook|shared-sinks|shared_sink_tests::"
+    # A key that keeps an object of the ABI's alive past its declaration (`key-anchors`), which the
+    # advanced subscriber's host and the Rust API make and a build without them never does: the
+    # rest lent from what the key keeps, and the anchor that outlives the key (`tests::a_kept_`).
+    "wz-capi-port|hook|key-anchors|tests::a_kept_"
     # The port's `os` made of the host's own calls (`os-sys`, `wz-host-sync`), which a host library
     # without `std` runs its read task and holds its locks on: a test build with `std` compiles the
     # module beside `std`'s for its own tests (`os::sys::tests::`), a spawned thread's identity and

@@ -579,8 +579,9 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "declare-queryable",
 ] }
 # The tests hand the engine their own closures as callbacks (`shared-sinks`), which the C library
-# over this engine never does.
-wz-capi-port = { path = "../wz-capi-port", default-features = false, features = ["shared-sinks"] }
+# over this engine never does, and keys that keep an object of their own (`key-anchors`), as the
+# advanced plane's do.
+wz-capi-port = { path = "../wz-capi-port", default-features = false, features = ["shared-sinks", "key-anchors"] }
 
 [lints]
 workspace = true

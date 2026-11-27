@@ -77,6 +77,13 @@ os-sys = ["dep:wz-host-sync", "wz-node-time?/host-sync"]
 # build without it holds and calls a sink in that form only, and a row's call and drop carry no
 # shared arm.
 shared-sinks = []
+# An object of the ABI's a key keeps alive past its declaration (`WireKey::keeping`,
+# `WireKey::aliased_in`), which the row of the entity declared on it holds (`KeyAnchor`): the form
+# of an ABI whose declarations are retracted by an object of its own rather than by the session's
+# count of holders, the advanced subscriber's host (`wz-ext-pubsub`'s `engine-host`, which the
+# pico ABI's advanced plane and the zenoh-c ABI run) and the Rust API. A build without it keeps
+# nothing beside a key's name, and an anchor is of no size in every row of an entity.
+key-anchors = []
 
 [dependencies]
 # The lock of a build without `std` (src/sync.rs): the image links the implementation, as it does
