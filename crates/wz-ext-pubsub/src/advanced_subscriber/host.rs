@@ -622,6 +622,7 @@ pub struct EngineSubscriber<E: EngineHolder = Arc<dyn SessionEngine>> {
     // the detection token.
     subscriber: Held<Subscription<E>>,
     periodic: Option<Ticker<E>>,
+    #[cfg(feature = "advanced-retention")]
     retention: Option<Ticker<E>>,
     cancel: GetCancel<E>,
     late_publishers: Option<Held<Subscription<E>>>,
@@ -791,7 +792,9 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         )?;
         let id = identity_of(zid, subscriber.entity.id, forms.as_ref());
 
-        // The retention sweep and the periodic re-ask: jobs the engine runs.
+        // The retention sweep and the periodic re-ask: jobs the engine runs. The sweep is a build's
+        // that lets go of the sources that went away (`advanced-retention`).
+        #[cfg(feature = "advanced-retention")]
         let retention = match recovery.map(|c| c.retention_period()) {
             Some(period) => {
                 let weak = Strong::downgrade(&shared);
@@ -901,6 +904,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         Ok(Self {
             subscriber,
             periodic,
+            #[cfg(feature = "advanced-retention")]
             retention,
             cancel: GetCancel {
                 shared: shared.clone(),
@@ -961,6 +965,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         let Self {
             subscriber,
             periodic,
+            #[cfg(feature = "advanced-retention")]
             retention,
             mut cancel,
             late_publishers,
@@ -979,7 +984,11 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         let Held { mut entity, keeps } = subscriber;
         entity.retract = false;
         retain(keeps);
-        for ticker in [periodic, retention].into_iter().flatten() {
+        if let Some(ticker) = periodic {
+            ticker.detach();
+        }
+        #[cfg(feature = "advanced-retention")]
+        if let Some(ticker) = retention {
             ticker.detach();
         }
         for held in [late_publishers, heartbeat].into_iter().flatten() {
@@ -1348,6 +1357,7 @@ fn on_late_publisher_detected<E: EngineHolder>(
     if kind != LivelinessSampleKind::Put {
         // A departed publisher has nothing to recover, but its retention flag is how the sweep
         // learns it is not alive any more.
+        #[cfg(feature = "advanced-retention")]
         if let Some(source) = parse_heartbeat_source(token_keyexpr) {
             if let Some((zid, eid)) = match source {
                 AdvPublisherSource::Sequenced { zid, eid } => Some((zid, Some(eid))),
@@ -1365,7 +1375,7 @@ fn on_late_publisher_detected<E: EngineHolder>(
             let issue = {
                 let mut state = shared.lock();
                 let issue = state.handle_late_publisher(zid.clone(), eid, now);
-                state.set_source_alive(&zid, Some(eid), true);
+                mark_alive(&mut state, &zid, Some(eid));
                 issue
             };
             if issue {
@@ -1376,7 +1386,7 @@ fn on_late_publisher_detected<E: EngineHolder>(
             let issue = {
                 let mut state = shared.lock();
                 let issue = state.handle_late_timestamped_publisher(zid.clone(), now);
-                state.set_source_alive(&zid, None, true);
+                mark_alive(&mut state, &zid, None);
                 issue
             };
             if issue {
@@ -1389,6 +1399,15 @@ fn on_late_publisher_detected<E: EngineHolder>(
         }
         None => {}
     }
+}
+
+/// Mark the publisher `(zid, eid)` alive, as its liveliness token says, for the sweep that spares
+/// a live source. A build without the sweep (`advanced-retention`) reads no such word.
+fn mark_alive(state: &mut State, zid: &[u8], eid: Option<u32>) {
+    #[cfg(feature = "advanced-retention")]
+    state.set_source_alive(zid, eid, true);
+    #[cfg(not(feature = "advanced-retention"))]
+    let _ = (state, zid, eid);
 }
 
 /// One periodic recovery tick: collect each source's `_sn=last+1..` request under the state lock,

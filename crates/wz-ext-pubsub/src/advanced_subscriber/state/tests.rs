@@ -11,7 +11,7 @@ use super::*;
 use std::sync::Arc;
 #[cfg(feature = "advanced-recovery")]
 use std::sync::Mutex;
-#[cfg(feature = "advanced-recovery")]
+#[cfg(feature = "advanced-retention")]
 use std::time::Duration;
 #[cfg(feature = "advanced-recovery")]
 use wz_session_core::sample::SourceInfo;
@@ -316,7 +316,7 @@ fn handle_heartbeat_requests_bounded_get_when_ahead() {
 /// `last_delivered`, and the next sample from it reads as a gap. The third
 /// arm is the anti-vacuity control — without it "reclaims a quiet source" is
 /// equally consistent with a sweep that empties the map unconditionally.
-#[cfg(feature = "advanced-recovery")]
+#[cfg(feature = "advanced-retention")]
 #[test]
 fn the_retention_sweep_reclaims_only_quiet_sources_that_no_token_calls_live() {
     let mut state = silent(true);

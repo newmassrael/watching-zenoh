@@ -98,6 +98,9 @@ default = [
     "config-limits",
     "multicast-locator-keys",
     "query-replies-with-final",
+    # The advanced subscriber's sweep of the sources that went away (deploy/wz-config.toml,
+    # `advanced-source-retention`).
+    "advanced-source-retention",
     "config-verdict",
     "transport_compression",
     "auth_usrpwd",
@@ -344,6 +347,10 @@ multicast-locator-keys = []
 # the tokio engine's runtime takes the session core with its defaults, which hold a query's
 # replies for its Final, so the feature only carries the capability's name.
 query-replies-with-final = []
+# The advanced subscriber's sweep of the sources that went away
+# (`wz-capi-pico/advanced-source-retention`): this engine's runtime runs it with `advanced`
+# whatever is named, so the feature only carries the capability's name.
+advanced-source-retention = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

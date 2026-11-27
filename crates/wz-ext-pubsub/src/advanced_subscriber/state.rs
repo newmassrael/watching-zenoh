@@ -13,7 +13,7 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Weak;
 use core::ffi::c_void;
-#[cfg(feature = "advanced-recovery")]
+#[cfg(feature = "advanced-retention")]
 use core::time::Duration;
 
 #[cfg(feature = "advanced-recovery")]
@@ -427,14 +427,16 @@ impl core::fmt::Debug for SampleMissListener {
 /// source is first seen, so creation IS the first access: it starts at the
 /// reading the host gave the call that created it, and not alive.
 ///
-/// ⚠ SCOPED TO THE RECOVERY FEATURE, and the limit is stated rather than hidden:
-/// the retention PERIOD is configured through `RecoveryConfig`, because that
-/// is where upstream puts it, so a subscriber built without recovery has no
-/// knob, no sweep, and keeps the unbounded growth this closes. Upstream has the
-/// same scope — its `gc_task` is spawned from the recovery path — and compiling
-/// the bookkeeping into a build that can never sweep would be the dead surface
-/// this module refuses elsewhere.
-#[cfg(feature = "advanced-recovery")]
+/// ⚠ SCOPED TO THE RETENTION FEATURE (`advanced-retention`, which implies
+/// recovery), and the limit is stated rather than hidden: the retention PERIOD is
+/// configured through `RecoveryConfig`, because that is where upstream puts it,
+/// and upstream spawns its `gc_task` from the recovery path. A build without the
+/// feature (the zenoh-pico preset's, whose subscriber keeps each source until it
+/// goes) has no flag and no sweep: a source keeps its row until a new source takes
+/// the one met longest ago among those that hold nothing back. Compiling the
+/// bookkeeping into a build that can never sweep would be the dead surface this
+/// module refuses elsewhere.
+#[cfg(feature = "advanced-retention")]
 struct Retention {
     /// When this source was last touched, in the host's milliseconds. Upstream's
     /// `latest_access`, which its sweep compares against `now` and its heartbeat
@@ -455,7 +457,7 @@ struct Retention {
     alive: bool,
 }
 
-#[cfg(feature = "advanced-recovery")]
+#[cfg(feature = "advanced-retention")]
 impl Retention {
     /// A source seen for the first time at `now_ms`.
     fn new(now_ms: u64) -> Self {
@@ -476,7 +478,7 @@ impl Retention {
 struct SourceState {
     /// R2621 — see [`Retention`]. Carried by both shapes, because the gap this
     /// closes is the SUBSCRIBER surface's and not either shape's.
-    #[cfg(feature = "advanced-recovery")]
+    #[cfg(feature = "advanced-retention")]
     retention: Retention,
     /// Last in-order delivered sequence number (`None` before the first
     /// sample from this source).
@@ -491,12 +493,12 @@ struct SourceState {
 
 impl SourceState {
     /// A source first seen at `now_ms`. The reading is the retention clock's, so a build
-    /// without recovery, which has none, ignores it.
+    /// without the sweep, which has none, ignores it.
     fn new(now_ms: u64) -> Self {
-        #[cfg(not(feature = "advanced-recovery"))]
+        #[cfg(not(feature = "advanced-retention"))]
         let _ = now_ms;
         Self {
-            #[cfg(feature = "advanced-recovery")]
+            #[cfg(feature = "advanced-retention")]
             retention: Retention::new(now_ms),
             last_delivered: None,
             #[cfg(feature = "advanced-recovery")]
@@ -550,7 +552,7 @@ impl SourceState {
 struct TimestampedState {
     /// R2621 — see [`Retention`]. The `alive` flag this doc used to say was
     /// waiting for a sweep now HAS that sweep, so it lands here.
-    #[cfg(feature = "advanced-recovery")]
+    #[cfg(feature = "advanced-retention")]
     retention: Retention,
     /// Newest instant delivered for this timestamp-id (`None` before the
     /// first). Upstream's `last_delivered: Option<T>` at `T = Timestamp`.
@@ -567,10 +569,10 @@ struct TimestampedState {
 impl TimestampedState {
     /// A timestamp-id first seen at `now_ms`.
     fn new(now_ms: u64) -> Self {
-        #[cfg(not(feature = "advanced-recovery"))]
+        #[cfg(not(feature = "advanced-retention"))]
         let _ = now_ms;
         Self {
-            #[cfg(feature = "advanced-recovery")]
+            #[cfg(feature = "advanced-retention")]
             retention: Retention::new(now_ms),
             last_delivered: None,
             pending_queries: 0,
@@ -589,7 +591,7 @@ struct TimestampedState {
     /// unreclaimed map grows the same either way, so the retention surface is
     /// not a history feature — though it IS a recovery one, because that is
     /// where its period is configured.
-    #[cfg(feature = "advanced-recovery")]
+    #[cfg(feature = "advanced-retention")]
     retention: Retention,
     /// Newest instant delivered for this timestamp-id (`None` before the first).
     last_delivered: Option<wz_session_core::sample::TimestampHint>,
@@ -599,10 +601,10 @@ struct TimestampedState {
 impl TimestampedState {
     /// A timestamp-id first seen at `now_ms`.
     fn new(now_ms: u64) -> Self {
-        #[cfg(not(feature = "advanced-recovery"))]
+        #[cfg(not(feature = "advanced-retention"))]
         let _ = now_ms;
         Self {
-            #[cfg(feature = "advanced-recovery")]
+            #[cfg(feature = "advanced-retention")]
             retention: Retention::new(now_ms),
             last_delivered: None,
         }
@@ -1028,7 +1030,7 @@ impl State {
         #[cfg(not(feature = "advanced-history"))]
         let _ = slot;
         // R2621 — a sample IS being heard from, so the retention clock restarts.
-        #[cfg(feature = "advanced-recovery")]
+        #[cfg(feature = "advanced-retention")]
         state.retention.touch(now_ms);
 
         // STRICTLY newer, so a retransmission at an equal instant and a late
@@ -1327,6 +1329,7 @@ impl State {
         };
         let owner = sequenced_owner(slot);
         // R2621 — delivery is activity, as on the two paths above.
+        #[cfg(feature = "advanced-retention")]
         state.retention.touch(now_ms);
 
         match state.last_delivered {
@@ -1517,6 +1520,7 @@ impl State {
     /// be a second index to keep coherent with two maps that are otherwise
     /// keyed lookups — and it is bounded by the same retention period, which is
     /// hours by default rather than milliseconds.
+    #[cfg(feature = "advanced-retention")]
     pub fn reclaim_expired_sources(&mut self, now_ms: u64, retention_period: Duration) -> usize {
         /// Whether the source whose retention is `retention` stays.
         fn stays(retention: &mut Retention, now_ms: u64, retention_period_ms: u64) -> bool {
@@ -1560,10 +1564,11 @@ impl State {
     /// `(zid, eid)` and the timestamped one by `zid` alone, which is why a token
     /// naming only a zid reaches every sequenced entry sharing it.
     ///
-    /// Gated with its callers: the liveliness subscriber that drives it exists
-    /// only under the history feature, and a writer compiled where nothing can
-    /// call it is the dead code this module already refuses.
-    #[cfg(feature = "advanced-history")]
+    /// Gated with its callers and its reader: the liveliness subscriber that drives
+    /// it exists only under the history feature and the sweep that reads the flag
+    /// only under the retention one, and a writer compiled where nothing can call it
+    /// is the dead code this module already refuses.
+    #[cfg(all(feature = "advanced-history", feature = "advanced-retention"))]
     pub fn set_source_alive(&mut self, zid: &[u8], eid: Option<u32>, alive: bool) {
         for (_, source, state) in self.sequenced.iter_mut() {
             if source.zid() == zid && eid.is_none_or(|e| e == source.eid()) {
@@ -1663,6 +1668,7 @@ impl State {
         )?;
         // R2621 — a beacon is the publisher saying it is still there, which is
         // exactly what upstream's heartbeat arm refreshes `latest_access` for.
+        #[cfg(feature = "advanced-retention")]
         state.retention.touch(now_ms);
         if newly_seen && global_pull_in_flight {
             return None;

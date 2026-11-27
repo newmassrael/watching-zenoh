@@ -1022,8 +1022,14 @@ files::decl_watch_doors::"
     # only with `advanced-subscriber`, `advanced-recovery` and `advanced-history`; the leg is the
     # crate's, with no filter. The subscriber hosted on an engine's port and its tests (a scripted
     # engine) are compiled only with `engine-host`. MEASURED: 64 passed with all of them.
-    "wz-ext-pubsub|hook|transport-shm,advanced-publisher,advanced-history,engine-host,pubsub-qos,\
-pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
+    # `advanced-retention` joins: the sweep of the sources that went away and its tests.
+    "wz-ext-pubsub|hook|transport-shm,advanced-publisher,advanced-history,advanced-retention,\
+engine-host,pubsub-qos,pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
+    # The same crate without the sweep, as the zenoh-pico preset builds it (its
+    # `advanced-source-retention` off): the hosted subscriber starts no retention job and keeps a
+    # quiet source, and the host's tests read the events of that build. NOT YET MEASURED.
+    "wz-ext-pubsub|hook|advanced-publisher,advanced-history,engine-host,\
+ext-pubsub-sample-miss-detection|advanced_subscriber::host::tests::"
     # The node's time (the wall clock, the node HLC with its per-role switch, the stamper). The HLC,
     # the Push stamp and its tests are compiled only with the three features, which the tokio
     # runtime forwards; the leg is the crate's, with no filter. MEASURED: 6 passed with default

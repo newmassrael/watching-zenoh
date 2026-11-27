@@ -427,6 +427,9 @@ ext-pubsub-advanced-subscriber = [
 ext-pubsub-advanced-recovery = [
     "ext-pubsub-advanced-subscriber",
     "wz-ext-pubsub/advanced-recovery",
+    # The sweep of the sources that went away, which this runtime's subscriber runs whatever its
+    # build names (the pico ABI's `advanced-source-retention` is the switch of its other engine).
+    "wz-ext-pubsub/advanced-retention",
     "ext-pubsub-serde-codec",
     "query-get",
     "query-selector-parameters",

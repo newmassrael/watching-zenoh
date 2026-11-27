@@ -1007,6 +1007,20 @@ abis = ["core", "pico", "c"]
 implies = ["liveliness", "queryable", "timestamping", "unstable-api"]
 help = "The advanced publisher and subscriber (cache, history, miss detection)."
 
+# The advanced subscriber's sweep of the sources that went away (upstream zenoh's `gc_task`). On in
+# a build that names nothing, which has had it with `advanced`, and off in the zenoh-pico preset:
+# zenoh-pico's subscriber keeps each source until the subscriber goes and runs no such job. A
+# behaviour of the advanced subscriber, not a door, so it implies nothing: without `advanced` there
+# is no subscriber to sweep. The tokio engine's runtime runs it whatever is named.
+[[capability]]
+id = "advanced-source-retention"
+kconfig = "WZ_CAP_ADVANCED_SOURCE_RETENTION"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "The advanced subscriber's sweep of its sources: every retention period a source not heard from and whose token is gone lets go of its row. Off, a source keeps its row until the subscriber goes or a new source takes the row met longest ago, as zenoh-pico's subscriber keeps its sources."
+
 # A clock the application registers (the observation plane's time, a clock with a quality): a
 # hardware clock or a time
 # master the device has, which the node reads in place of the system clock. wz's own door, with no

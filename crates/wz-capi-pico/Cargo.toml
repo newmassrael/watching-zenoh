@@ -118,6 +118,7 @@ default = [
     "config-limits",
     "multicast-locator-keys",
     "query-replies-with-final",
+    "advanced-source-retention",
 ]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
@@ -699,6 +700,16 @@ multicast-locator-keys = [
 query-replies-with-final = [
     "wz-capi-core?/query-replies-with-final",
     "wz-capi-coop?/query-replies-with-final",
+]
+# `advanced-source-retention`: the advanced subscriber's sweep of the sources that went away,
+# upstream zenoh's, which zenoh-pico's subscriber does not run (it keeps each source until the
+# subscriber goes). On in a build that names nothing, which has had it with `advanced`, and off in
+# the zenoh-pico preset, whose library then links no retention job and no bookkeeping per source.
+# The tokio engine's runtime runs it whatever is named; a build without `advanced` has no
+# subscriber to sweep, so the forward to the plane's rules is weak.
+advanced-source-retention = [
+    "wz-capi-core?/advanced-source-retention",
+    "wz-ext-pubsub?/advanced-retention",
 ]
 # `config-document`: `zext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's

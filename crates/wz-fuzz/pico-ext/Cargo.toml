@@ -66,6 +66,7 @@ tx-stream-owed = ["wz-capi-pico/tx-stream-owed"]
 config-limits = ["wz-capi-pico/config-limits"]
 multicast-locator-keys = ["wz-capi-pico/multicast-locator-keys"]
 query-replies-with-final = ["wz-capi-pico/query-replies-with-final"]
+advanced-source-retention = ["wz-capi-pico/advanced-source-retention"]
 
 [dependencies]
 libfuzzer-sys = "0.4.10"

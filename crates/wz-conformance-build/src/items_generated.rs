@@ -35,6 +35,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("liveliness", &["core", "pico", "c"]),
     ("liveliness-get", &["core", "pico", "c"]),
     ("advanced", &["core", "pico", "c"]),
+    ("advanced-source-retention", &["core", "pico"]),
     ("clock-source", &["core", "pico", "c"]),
     ("event-ring", &["core", "pico", "c"]),
     ("supervision", &["core", "pico", "c"]),
