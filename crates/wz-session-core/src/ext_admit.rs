@@ -643,7 +643,7 @@ enum BodyRule {
     /// nibble is the zid's length less one, a zid that is not zero
     /// (`commons/zenoh-codec/src/core/zenohid.rs` @
     /// `ZenohIdProto::try_from(&id[..self.length]).map_err(|_| DidntRead)`), and a ZInt entity id
-    /// of at most 32 bits.
+    /// ([`read_low_u32`]).
     EntityGlobalId,
     /// An undeclaration's `WireExprType` (`commons/zenoh-codec/src/network/declare.rs` @
     /// `String::from_utf8(buff).map_err(|_| DidntRead)?`): a flags byte, a ZInt scope of at most
@@ -652,7 +652,7 @@ enum BodyRule {
     WireExpr,
     /// A `SourceInfoType` (`commons/zenoh-codec/src/zenoh/mod.rs` @
     /// `RCodec<(ext::SourceInfoType<{ ID }>, bool), &mut R>`): the entity id of
-    /// [`Self::EntityGlobalId`] and a ZInt sequence number of at most 32 bits.
+    /// [`Self::EntityGlobalId`] and a ZInt sequence number ([`read_low_u32`]).
     SourceInfo,
     /// A Query's value read as bytes (`commons/zenoh-codec/src/zenoh/mod.rs` @
     /// `let Some(len) = header.len.checked_sub(start - end) else {`): an `Encoding` that fits the
@@ -741,7 +741,7 @@ fn body_reads(rule: BodyRule, body: JudgedBody<'_>) -> bool {
         BodyRule::EntityGlobalId => read_entity_global_id(&mut cursor),
         BodyRule::WireExpr => read_wire_expr(&mut cursor),
         BodyRule::SourceInfo => {
-            read_entity_global_id(&mut cursor).and_then(|()| read_u32(&mut cursor))
+            read_entity_global_id(&mut cursor).and_then(|()| read_low_u32(&mut cursor))
         }
         BodyRule::QueryValue => read_encoding(&mut cursor),
         BodyRule::QueryTarget => Some(()),
@@ -782,9 +782,11 @@ fn read_len(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<usiz
     usize::try_from(cursor.read_vle_u64().ok()?).ok()
 }
 
-/// A ZInt of at most 32 bits, as upstream reads a `u32`.
-fn read_u32(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<()> {
-    cursor.read_vle_u32().ok().map(|_| ())
+/// A ZInt upstream reads as a `u32` through plain `Zenoh080`, which reads the whole ZInt and keeps
+/// its low 32 bits (`commons/zenoh-codec/src/core/zint.rs` @ `Ok(x as $uint)`): any ZInt of 64
+/// bits is read, and one past 32 bits is not refused.
+fn read_low_u32(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<()> {
+    cursor.read_vle_u64().ok().map(|_| ())
 }
 
 /// `len` bytes of a zid: one to sixteen of them, not all zero, as upstream's `ZenohIdProto` and
@@ -829,7 +831,7 @@ fn read_ts_stack(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option
 fn read_entity_global_id(cursor: &mut sce_forge_runtime::codec::SceCursor<'_>) -> Option<()> {
     let flags = read_u8(cursor)?;
     read_zid(cursor, usize::from(flags >> 4).saturating_add(1))?;
-    read_u32(cursor)
+    read_low_u32(cursor)
 }
 
 /// [`BodyRule::WireExpr`].
@@ -1299,7 +1301,8 @@ mod tests {
             // A Request's target: 0, 1 or 2.
             (ExtCarrier::Network(N::Request), zint(0x34, 2), true),
             (ExtCarrier::Network(N::Request), zint(0x34, 3), false),
-            // A responder: a zid that is not zero and a 32-bit entity id.
+            // A responder: a zid that is not zero and an entity id, any ZInt upstream cuts to 32
+            // bits, so one past them is read.
             (
                 ExtCarrier::Network(N::Response),
                 zbuf(0x43, &[0x00, 0x01, 0x07]),
@@ -1313,7 +1316,7 @@ mod tests {
             (
                 ExtCarrier::Network(N::Response),
                 zbuf(0x43, &[0x00, 0x01, 0x80, 0x80, 0x80, 0x80, 0x10]),
-                false,
+                true,
             ),
             // An undeclaration's key: a 16-bit scope and a suffix that is UTF-8.
             (
@@ -1536,6 +1539,34 @@ mod tests {
             &[0x00, 0x01, 0x07, 0x04],
             &[0x00, 0x01, 0x07],
             &[0x00, 0x01, 0x07, 0x04, 0x04],
+        );
+    }
+
+    /// An entity id and a sequence number past 32 bits are read, as upstream reads them through
+    /// plain `Zenoh080` and keeps their low 32 bits: a responder and a source info carrying one are
+    /// admitted. Turned red by reading either at 32 bits, which refuses the message.
+    #[test]
+    fn an_entity_id_and_a_sequence_number_past_32_bits_are_read_as_upstream_reads_them() {
+        // A flags byte, a one-byte zid, then 2^32 as a ZInt (and again for the sequence number).
+        assert_eq!(
+            judge_ext_entries(
+                ExtCarrier::Network(NetworkEnvelope::Response),
+                [zbuf(
+                    crate::ext_header::network_eid::RESPONDER,
+                    &[0x00, 0x01, 0x80, 0x80, 0x80, 0x80, 0x10]
+                )]
+            ),
+            ExtAdmission::Admissible
+        );
+        assert_eq!(
+            judge_ext_entries(
+                ExtCarrier::Zenoh(ZenohBody::Put),
+                [zbuf(
+                    crate::ext_header::body_eid::SOURCE_INFO,
+                    &[0x00, 0x01, 0x80, 0x80, 0x80, 0x80, 0x10, 0x80, 0x80, 0x80, 0x80, 0x10]
+                )]
+            ),
+            ExtAdmission::Admissible
         );
     }
 
