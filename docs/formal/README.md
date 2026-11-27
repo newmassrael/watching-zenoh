@@ -24,6 +24,9 @@ promises those levels will be held to.
 | `FaceCollisionService.tla` | 1, promise | The faces a loop holds to one node: at most one, and the routing graph holds a link to the node exactly while one is held |
 | `FaceCollisions.tla` | 2, protocol | The tokio loop's collision tables (S4 26): a kept link parked behind the face it replaces until that face's departure is processed, a third link refused meanwhile |
 | `SecondLinks*.cfg`, `FaceCollisions*.cfg` | bounded exploration | Two crossing links, every order of their six steps; three links to one node, each kept or refused |
+| `E2eCounterService.tla` | 1, promise | A receiver of one stream of end-to-end protected frames judges each frame by what it is: the baseline's message again a repetition, 1 to `max_gap` messages on in range with the exact count of messages lost, further on out of range; a message the sender refused is never counted as lost |
+| `E2eCounters.tla` | 2, protocol | How the two ends keep it: the sender's counter and its rollover (`sources/algorithms/counter_after.scxml`), and the receiver's step and verdict (`e2e_counter_step`, `e2e_counter_verdict`). `Refines` checks it against the promise |
+| `E2eCounters*.cfg` | bounded exploration | A two-bit counter made with 1, nine messages (twice round the ring), a gap of two, under `Wrap` and under `Refuse`; one configuration per part taken out |
 | `models.json` | manifest | Every module and configuration, in the format of SCE's `schemas/sce-formal-models.v1.schema.json` (`"v": 1`, no tool pin) |
 
 ## 2. Each part of the query's Final has a configuration that fails without it
@@ -85,6 +88,27 @@ Not modelled there: links that went the same way and a superseded row's own refu
 confirmation, which with two crossing links decides no order (the loser is refused at its
 acceptor first); the release of a closed link's rows; a face that cannot be closed alone; the
 progress of a parked link, which waits on the departure of a face asked to close.
+
+### The end-to-end counter: the sender's rollover and the receiver's verdict (2026-11-28)
+
+Written with the move of the two senders' rollover rules into one SCE algorithm (W12, S11 3 and
+S10 8): `counter_after`, asked by the end-to-end stream sender with `Wrap` restarting at 0 and by
+the segment sender with `Restart` at its first number. Neither upstream preset has an end-to-end
+counter; the frame is the application's payload.
+
+| Part (constant) | What it keeps | Without it TLC is to find | Promise |
+|---|---|---|---|
+| `RefusalKeeps` | a refused message does not ask `counter_after`, so consumes no value | the next frame judged one message further on than it is, a loss that never happened (`Exact`) | broken |
+| `WrapToZero` | past the largest value the stream sender restarts at 0, the bottom of the ring the receiver takes its step in | the frame after the wrap judged two messages on (`Exact`): a restart at the first number, the segment sender's rule, is right only for a reader that tells transfers apart by the number changing | broken |
+| `RepeatAtZero` | a step of 0 is a repetition (`e2e_counter_verdict`'s first guard) | the baseline's frame again judged in range (`Exact`) | broken |
+| `GapBound` | a step is in range only up to `max_gap` (its second guard) | a frame past the gap judged in range (`Exact`) | broken |
+
+Not modelled: a stream that loses a whole ring of frames in a row, which no counter of that width
+can tell from one that lost none (the promise's `Horizon`); a reordered stream; `set`, which puts
+the value a caller names on the next frame; the profile's rule that keeps the baseline on a step
+out of range, the joined report of a repetition and a step out of range, the CRC and the timeout.
+The test `across_the_wrap_the_receiver_reads_every_loss_and_repetition_the_sender_made` of
+`crates/wz-app-frame/src/e2e_rules_tests.rs` runs the same sequence on the code.
 
 ## 3. The judge is SCE's, and the SCE revision wz pins cannot run it on this manifest
 

@@ -216,6 +216,62 @@
       "decision": "docs/zenoh-logic-as-sce-kinds.md, S4 26",
       "runs": [],
       "abstract": true
+    },
+    {
+      "module": "E2eCounters",
+      "decision": "docs/zenoh-logic-as-sce-kinds.md, W12 (S11 3, S10 8)",
+      "parts": {
+        "RefusalKeeps": "TRUE",
+        "WrapToZero": "TRUE",
+        "RepeatAtZero": "TRUE",
+        "GapBound": "TRUE"
+      },
+      "runs": [
+        {
+          "config": "E2eCounters.cfg",
+          "expect": "holds"
+        },
+        {
+          "config": "E2eCounters_refuse.cfg",
+          "expect": "holds"
+        },
+        {
+          "config": "E2eCounters_without_refusal_keeps.cfg",
+          "expect": "violates",
+          "invariant": "Exact",
+          "without": "RefusalKeeps",
+          "promise": "broken"
+        },
+        {
+          "config": "E2eCounters_without_wrap_to_zero.cfg",
+          "expect": "violates",
+          "invariant": "Exact",
+          "without": "WrapToZero",
+          "promise": "broken"
+        },
+        {
+          "config": "E2eCounters_without_repeat_at_zero.cfg",
+          "expect": "violates",
+          "invariant": "Exact",
+          "without": "RepeatAtZero",
+          "promise": "broken"
+        },
+        {
+          "config": "E2eCounters_without_gap_bound.cfg",
+          "expect": "violates",
+          "invariant": "Exact",
+          "without": "GapBound",
+          "promise": "broken"
+        }
+      ],
+      "promise": "Refines",
+      "refines": "E2eCounterService"
+    },
+    {
+      "module": "E2eCounterService",
+      "decision": "docs/zenoh-logic-as-sce-kinds.md, W12 (S11 3, S10 8)",
+      "runs": [],
+      "abstract": true
     }
   ]
 }
