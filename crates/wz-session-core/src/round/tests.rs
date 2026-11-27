@@ -185,6 +185,28 @@ impl RoundCalls for KeptSingle {
     type TablePolicy = Lent;
 }
 
+/// [`Kept`] in a session whose tables take their rows at their first value.
+enum KeptOnUse {}
+
+impl RoundCalls for KeptOnUse {
+    type Subscriber = Call;
+    type Liveliness = Call;
+    type Queryable = Call;
+    type Watch = Call;
+    type Leg = u32;
+    type ReplyCallback = ();
+    type Tokens = Present;
+    type Replies = Present;
+    type Queries = Present;
+    type Watches = Present;
+    type Capture = Present;
+    type Group = Present;
+    type Locks = StdLocks;
+    type Tally = Counted;
+    type Form = crate::row_callback::Threads;
+    type TablePolicy = crate::bounded::OnUse;
+}
+
 /// One block of an arena's memory, aligned as an arena's spans start.
 #[derive(Clone, Copy)]
 #[repr(C, align(16))]
@@ -192,13 +214,16 @@ struct Block([u8; ARENA_ALIGN]);
 
 /// A round of a few records, placed with its tables in an arena over memory the test process
 /// leaks, so the memory outlives the round, which its owner drops.
-pub(crate) fn round<C: RoundCalls>() -> Placed<Round<C>> {
+pub(crate) fn round<C: RoundCalls<TablePolicy = Lent>>() -> Placed<Round<C>> {
     round_of(4, 4)
 }
 
 /// A round of `records` records owing `callbacks` callbacks at most, each no more than the build's
 /// bound, as [`round`] makes one.
-fn round_of<C: RoundCalls>(records: usize, callbacks: usize) -> Placed<Round<C>> {
+fn round_of<C: RoundCalls<TablePolicy = Lent>>(
+    records: usize,
+    callbacks: usize,
+) -> Placed<Round<C>> {
     let counts = RoundRowCounts {
         records: caps::DELIVERY_LANE_EVENTS.min(records),
         callbacks: caps::DELIVERY_LANE_CALLBACKS.min(callbacks),
@@ -265,7 +290,7 @@ fn a_round_placed_in_an_arena_is_built_there_whole() {
 /// region keeps (`BoundedVec::placed_over`), or keys sized by the other form's count.
 #[test]
 fn a_rounds_tables_placed_in_a_region_take_its_rows_at_most() {
-    fn check<C: RoundCalls>() {
+    fn check<C: RoundCalls<TablePolicy = Lent>>() {
         let mut places = std::boxed::Box::new(MaybeUninit::<RoundRowPlaces<C>>::uninit());
         let at = NonNull::from(&mut *places).cast::<RoundRowPlaces<C>>();
         let start = at.as_ptr() as usize;
@@ -1528,4 +1553,110 @@ fn a_given_back_group_buffer_is_kept_while_a_record_reads_in_it() {
     // SAFETY: as above.
     unsafe { round.settle() };
     assert_eq!(RX.in_use(), 0, "settled, the buffer is its table's again");
+}
+
+/// A round of `records` records owing `callbacks` callbacks at most, each no more than the
+/// build's bound, whose tables take their rows at its first record; the round itself is placed in
+/// an arena over memory the test process leaks.
+fn counted_round<C: RoundCalls<TablePolicy = crate::bounded::OnUse>>(
+    records: usize,
+    callbacks: usize,
+) -> Placed<Round<C>> {
+    let counts = RoundRowCounts {
+        records: caps::DELIVERY_LANE_EVENTS.min(records),
+        callbacks: caps::DELIVERY_LANE_CALLBACKS.min(callbacks),
+        longest_key: caps::MAX_KEYEXPR_BYTES,
+    };
+    let bytes = Arena::table_bytes::<Round<C>>(1).expect("in the address space");
+    let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+    let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+    // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds `blocks` whole
+    // blocks, and is leaked, so nothing else uses it and it outlives the round.
+    let mut arena =
+        unsafe { Arena::over(NonNull::from(region).cast::<u8>(), blocks * ARENA_ALIGN) };
+    Round::placed_over(&mut arena, RoundRows::counted(counts)).expect("the arena has the round")
+}
+
+/// Whether the round's records and its callbacks have taken their rows.
+fn rows_taken(round: &Round<KeptOnUse>) -> (bool, bool) {
+    // SAFETY: the test is the round's one writer and holds no other borrow of its table.
+    let table = unsafe { &*round.table.get() };
+    (table.entries.holds_rows(), table.callbacks.holds_rows())
+}
+
+/// A round of a session whose tables take their rows on use holds no row until its first record,
+/// which has its records and its callbacks take theirs, and holds its records to the count its
+/// session resolved: a record past it is refused for want of room. Turned red by
+/// `RoundRows::counted` making tables that take their rows when made, or that hold the build's
+/// bound in place of the count.
+#[test]
+fn a_round_counted_on_use_takes_its_rows_at_its_first_record() {
+    let round = counted_round::<KeptOnUse>(1, 1);
+    assert_eq!(rows_taken(&round), (false, false), "no record, no row");
+    let log = Arc::new(Log::default());
+    // SAFETY (each block): the test is the round's one writer, as a holder of the session's lock
+    // is.
+    unsafe { fan_out(&round, &[1], &Sample("k/1"), &log) };
+    assert_eq!(
+        rows_taken(&round),
+        (true, true),
+        "the first record took the rows"
+    );
+    unsafe { fan_out(&round, &[2], &Sample("k/2"), &log) };
+    assert_eq!(
+        round.counts(),
+        RoundCounts {
+            dropped: 1,
+            held_over: 0,
+            unplaced: 0
+        },
+        "the record past the count is refused for want of room"
+    );
+    unsafe { round.seal() };
+    assert!(round.deliver());
+    assert_eq!(log.handed(), ["1 sample k/1"]);
+}
+
+/// The key of a sample a test lends the round where it lies, so the round asks the heap for no
+/// part of the sample: its tables' rows are the only memory a record of it takes.
+static LENT_KEY: &str = "k/lent";
+
+/// A record offered to a round counted on use while the heap has no room for its tables' rows is
+/// refused as one with a part that found no place, counted with the records that hold their
+/// sender, and its call ended; with room again, the next record takes the rows and is handed out.
+/// Turned red by an offer that writes a record before its rows are had (`Round::take_rows` left
+/// out): the record is then lost uncounted, or a debug build stops at the round's check of its
+/// room.
+#[test]
+fn a_record_whose_rows_the_heap_refuses_is_counted_unplaced() {
+    let round = counted_round::<KeptOnUse>(2, 2);
+    let log = Arc::new(Log::default());
+    let first = Call {
+        row: 1,
+        log: log.clone(),
+    };
+    // SAFETY (each block): the test is the round's one writer, as a holder of the session's lock
+    // is, and the key is static, so it lies where it is while the round reads it.
+    unsafe { round.set_lending(Some(LENT_KEY.as_bytes())) };
+    crate::test_heap::refused(|| unsafe { round.offer_sample(first, &Blocking(LENT_KEY), true) });
+    assert_eq!(
+        round.counts(),
+        RoundCounts {
+            dropped: 0,
+            held_over: 1,
+            unplaced: 1
+        }
+    );
+    assert_eq!(log.ended(), 1, "the refused call is ended");
+    assert_eq!(rows_taken(&round), (false, false), "nothing was taken");
+    let second = Call {
+        row: 2,
+        log: log.clone(),
+    };
+    unsafe {
+        round.offer_sample(second, &Blocking(LENT_KEY), true);
+        round.seal();
+    }
+    assert!(round.deliver());
+    assert_eq!(log.handed(), ["2 sample k/lent"]);
 }

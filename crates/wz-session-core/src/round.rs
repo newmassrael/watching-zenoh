@@ -58,7 +58,7 @@ use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize};
 use portable_atomic::{AtomicU64, AtomicU8, AtomicUsize};
 
 use crate::bounded::{
-    Arena, BoundedVec, CapacityFull, LendRefused, Lent, Static, Storage, ZeroEmpty,
+    Arena, BoundedVec, CapacityFull, LendRefused, Lent, OnUse, Static, Storage, Taken, ZeroEmpty,
 };
 use crate::byte_cells::{ByteBuf, KeptBytes};
 use crate::caps;
@@ -198,8 +198,9 @@ pub const ONE_THREAD_RECORDS: usize = 2;
 /// lends. A round of one thread is handed out after each message, so it keeps the records of one
 /// ([`ONE_THREAD_RECORDS`]) in itself and its arena lends it none.
 pub trait RecordForm: ThreadForm {
-    /// The records of a round of this form, each a `T`.
-    type Records<T>: RecordRows<T>;
+    /// The records of a round of this form, each a `T`: a table of the policy `P` where the form
+    /// keeps them in rows of the session's, and the round's own where it keeps them in itself.
+    type Records<T, P: Storage>: RecordRows<T>;
 
     /// Whether the session's arena lends the records' rows ([`RoundRows::RECORD_BYTES`]).
     const LENT: bool;
@@ -212,7 +213,12 @@ pub trait RecordForm: ThreadForm {
     ///
     /// # Errors
     /// Refused past the build's bound of the table or past what the arena has left.
-    fn records<T>(arena: &mut Arena, rows: usize) -> Result<Self::Records<T>, LendRefused>;
+    fn records<T>(arena: &mut Arena, rows: usize) -> Result<Self::Records<T, Lent>, LendRefused>;
+
+    /// The records of a round of `rows` records, at most the build's bound, that take their rows at
+    /// the round's first record where the form keeps them in rows of the session's
+    /// ([`RoundRows::counted`]).
+    fn counted<T>(rows: usize) -> Self::Records<T, OnUse>;
 
     /// The rows a region the build lays out keeps the records of a round of this form in
     /// ([`RoundRowPlaces`]): the build's bound of them where an arena would lend them, none where
@@ -231,7 +237,7 @@ pub trait RecordForm: ThreadForm {
     unsafe fn records_in<T>(
         places: NonNull<Self::RecordPlaces<T>>,
         rows: usize,
-    ) -> Self::Records<T>;
+    ) -> Self::Records<T, Lent>;
 
     /// The keys of a round of `bytes` bytes of them over `places`, at most the bytes there.
     ///
@@ -255,6 +261,10 @@ pub trait RecordRows<T>: Default + core::ops::Deref<Target = [T]> + core::ops::D
     /// How many more records the rows take.
     fn free_slots(&self) -> usize;
 
+    /// Whether the next record is taken, its row made now where the rows are taken at the first
+    /// record ([`BoundedVec::make_room`]).
+    fn make_room(&mut self) -> bool;
+
     /// Hold no record.
     fn clear(&mut self);
 }
@@ -268,13 +278,17 @@ impl<T, const N: usize, P: Storage> RecordRows<T> for BoundedVec<T, N, P> {
         BoundedVec::free_slots(self)
     }
 
+    fn make_room(&mut self) -> bool {
+        BoundedVec::make_room(self)
+    }
+
     fn clear(&mut self) {
         BoundedVec::clear(self);
     }
 }
 
 impl RecordForm for crate::row_callback::Threads {
-    type Records<T> = BoundedVec<T, { caps::DELIVERY_LANE_EVENTS }, Lent>;
+    type Records<T, P: Storage> = BoundedVec<T, { caps::DELIVERY_LANE_EVENTS }, P>;
 
     const LENT: bool = true;
 
@@ -282,8 +296,12 @@ impl RecordForm for crate::row_callback::Threads {
     // messages before it ([`Round::has_room`]), so two let it take more than one.
     const KEYS: usize = 2;
 
-    fn records<T>(arena: &mut Arena, rows: usize) -> Result<Self::Records<T>, LendRefused> {
+    fn records<T>(arena: &mut Arena, rows: usize) -> Result<Self::Records<T, Lent>, LendRefused> {
         arena.lend(rows)
+    }
+
+    fn counted<T>(rows: usize) -> Self::Records<T, OnUse> {
+        BoundedVec::counted(rows)
     }
 
     type RecordPlaces<T> = [MaybeUninit<T>; caps::DELIVERY_LANE_EVENTS];
@@ -293,7 +311,7 @@ impl RecordForm for crate::row_callback::Threads {
     unsafe fn records_in<T>(
         places: NonNull<Self::RecordPlaces<T>>,
         rows: usize,
-    ) -> Self::Records<T> {
+    ) -> Self::Records<T, Lent> {
         // SAFETY: the caller's contract.
         unsafe { BoundedVec::placed_over(places, rows) }
     }
@@ -305,7 +323,7 @@ impl RecordForm for crate::row_callback::Threads {
 }
 
 impl RecordForm for crate::row_callback::OneThread {
-    type Records<T> = BoundedVec<T, ONE_THREAD_RECORDS, Static>;
+    type Records<T, P: Storage> = BoundedVec<T, ONE_THREAD_RECORDS, Static>;
 
     const LENT: bool = false;
 
@@ -313,8 +331,12 @@ impl RecordForm for crate::row_callback::OneThread {
     // records unasked key one of them a round.
     const KEYS: usize = 1;
 
-    fn records<T>(_arena: &mut Arena, _rows: usize) -> Result<Self::Records<T>, LendRefused> {
+    fn records<T>(_arena: &mut Arena, _rows: usize) -> Result<Self::Records<T, Lent>, LendRefused> {
         Ok(BoundedVec::new_static())
+    }
+
+    fn counted<T>(_rows: usize) -> Self::Records<T, OnUse> {
+        BoundedVec::new_static()
     }
 
     type RecordPlaces<T> = ();
@@ -324,7 +346,7 @@ impl RecordForm for crate::row_callback::OneThread {
     unsafe fn records_in<T>(
         _places: NonNull<Self::RecordPlaces<T>>,
         _rows: usize,
-    ) -> Self::Records<T> {
+    ) -> Self::Records<T, Lent> {
         BoundedVec::new_static()
     }
 
@@ -437,7 +459,8 @@ pub struct RoundCounts {
     pub held_over: u64,
     /// Of the records above, those refused for a part that lies nowhere the round reads it, as the
     /// round keeps no area to copy it into: a datagram its transport does not lend, or a key the
-    /// round's keys have no room for.
+    /// round's keys have no room for; and, where the round's tables take their rows at its first
+    /// record, those whose rows the allocator refused.
     pub unplaced: u64,
 }
 
@@ -776,11 +799,13 @@ impl RoundRowCounts {
     }
 }
 
-/// The tables of a round, lent from its session's arena ([`RoundRows::lent`]).
+/// The tables of a round, of the policy its engine names ([`RoundCalls::TablePolicy`]): lent from
+/// its session's arena ([`RoundRows::lent`]) or placed in its region ([`RoundRows::placed_in`]),
+/// or counted, each taking its rows at the round's first record ([`RoundRows::counted`]).
 pub struct RoundRows<C: RoundCalls> {
-    records: <C::Form as RecordForm>::Records<Entry<C>>,
-    callbacks: BoundedVec<Owed<C>, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
-    keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>,
+    records: <C::Form as RecordForm>::Records<Entry<C>, C::TablePolicy>,
+    callbacks: BoundedVec<Owed<C>, { caps::DELIVERY_LANE_CALLBACKS }, C::TablePolicy>,
+    keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, C::TablePolicy>,
     longest_key: usize,
 }
 
@@ -795,7 +820,9 @@ impl<C: RoundCalls> RoundRows<C> {
 
     /// The bytes of one callback a record of a round owes.
     pub const CALLBACK_BYTES: usize = core::mem::size_of::<Owed<C>>();
+}
 
+impl<C: RoundCalls<TablePolicy = Lent>> RoundRows<C> {
     /// The tables of a round of `counts`, lent from `arena` in the order the plan counts them:
     /// the records, the callbacks, the keys. Refused past the build's bound of a table or past what
     /// the arena has left.
@@ -852,6 +879,32 @@ impl<C: RoundCalls> RoundRows<C> {
     }
 }
 
+impl<C: RoundCalls<TablePolicy = OnUse>> RoundRows<C> {
+    /// The tables of a round of `counts` that take their rows at its first record, all of each
+    /// table's count at once, and keep them: what a session whose tables take their memory on use
+    /// keeps in place of [`Self::lent`]'s. A record whose rows the allocator refuses is refused as
+    /// one with a part that found no place ([`RoundCounts::unplaced`]).
+    pub fn counted(counts: RoundRowCounts) -> Self {
+        const {
+            // As `Self::lent` holds them, for the rows this form takes on use.
+            assert!(
+                core::mem::align_of::<Entry<C>>() == core::mem::align_of::<Span>(),
+                "a record holds nothing aligned wider than its spans"
+            );
+            assert!(
+                <C::Form as RecordForm>::LENT || Round::<C>::MESSAGE_RECORDS <= ONE_THREAD_RECORDS,
+                "a round of one thread keeps the records of one message"
+            );
+        }
+        Self {
+            records: <C::Form as RecordForm>::counted(counts.records),
+            callbacks: BoundedVec::counted(counts.callbacks),
+            keys: BoundedVec::counted(counts.key_bytes::<C::Form>()),
+            longest_key: counts.longest_key,
+        }
+    }
+}
+
 /// The rows of a round's tables where a region the build lays out keeps them, beside the round
 /// instead of lent from an arena ([`RoundRows::placed_in`]): the build's bound of each table, as
 /// the form keeps it ([`RecordForm::RecordPlaces`], [`RecordForm::KeyPlaces`]).
@@ -889,14 +942,14 @@ struct Table<C: RoundCalls> {
     /// holder's to let go of before the next record is written ([`Self::clear`]).
     spent: bool,
     /// The records, kept where the round's form keeps them ([`RecordForm`]): as many as the
-    /// session's `DELIVERY_LANE_EVENTS`, rows its arena lent, or those of one message.
-    entries: <C::Form as RecordForm>::Records<Entry<C>>,
+    /// session's `DELIVERY_LANE_EVENTS`, rows of the round's policy, or those of one message.
+    entries: <C::Form as RecordForm>::Records<Entry<C>, C::TablePolicy>,
     /// The callbacks the records owe at most, one for each subscriber each of them reaches: as
-    /// many as the session's `DELIVERY_LANE_CALLBACKS`, rows its arena lent.
-    callbacks: BoundedVec<Owed<C>, { caps::DELIVERY_LANE_CALLBACKS }, Lent>,
+    /// many as the session's `DELIVERY_LANE_CALLBACKS`, rows of the round's policy.
+    callbacks: BoundedVec<Owed<C>, { caps::DELIVERY_LANE_CALLBACKS }, C::TablePolicy>,
     /// The keys written, as many of the session's longest as the form holds
-    /// ([`RecordForm::KEYS`]), bytes its arena lent.
-    keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>,
+    /// ([`RecordForm::KEYS`]), bytes of the round's policy.
+    keys: BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, C::TablePolicy>,
     /// The session's longest key: the room a record's key may take of `keys`.
     longest_key: usize,
     /// The key written last, which the records on it that follow share.
@@ -1685,6 +1738,16 @@ impl<C: RoundCalls> Round<C> {
         table.callbacks.free_slots() > 0
     }
 
+    /// Have `table`'s records and callbacks take their rows now, where the round's policy takes a
+    /// table's rows at its first value: what an offer asks once [`Self::takes`] found the room by
+    /// count, before it writes. `false` only where the allocator refused them, which the offer
+    /// counts as a record with a part that found no place ([`RoundCounts::unplaced`]) and not as a
+    /// record the gate let through past its room. On every other policy the rows are there already.
+    fn take_rows(table: &mut Table<C>) -> bool {
+        !matches!(<C::TablePolicy as Storage>::TAKEN, Taken::AtFirstUse)
+            || (table.entries.make_room() && table.callbacks.make_room())
+    }
+
     /// Count a record that found no room, apart when it holds its sender. A record a link's gate
     /// let through waited for the room one record can take (the engine's gate on each link), so one that holds its
     /// sender and finds no room is a defect of that bound, and a debug build stops there.
@@ -1830,11 +1893,14 @@ impl<C: RoundCalls> Round<C> {
             let holds_sender = holds_its_sender(sample.reliability, sample.qos);
             // SAFETY: the caller's contract.
             let lending = unsafe { self.lending() };
-            // No room is refused as a part that found no place is, and counted apart from it.
-            let placed = if Self::takes(table, 1) {
+            // No room is refused as a part that found no place is, and counted apart from it; rows
+            // the allocator refused are a place not found.
+            let placed = if !Self::takes(table, 1) {
+                Err(false)
+            } else if Self::take_rows(table) {
                 Self::place_sample(table, sample, lending).ok_or(true)
             } else {
-                Err(false)
+                Err(true)
             };
             let (key, payload, rest) = match placed {
                 Ok(parts) => parts,
@@ -1972,9 +2038,14 @@ impl<C: RoundCalls> Round<C> {
             self.released.end_liveliness(call);
             return;
         }
-        let placed = match held.and_then(|held| table.held_key(held)) {
-            Some(at) => Some(at),
-            None => table.place_key(key, lending),
+        // Rows the allocator refused are a place not found.
+        let placed = if Self::take_rows(table) {
+            match held.and_then(|held| table.held_key(held)) {
+                Some(at) => Some(at),
+                None => table.place_key(key, lending),
+            }
+        } else {
+            None
         };
         let Some(at) = placed else {
             self.refuse_unplaced(true);
@@ -2079,9 +2150,14 @@ impl<C: RoundCalls> Round<C> {
             self.released.end_watch(call);
             return false;
         }
-        let placed = match held.and_then(|held| table.held_key(held)) {
-            Some(at) => Some(at),
-            None => table.place_key(key, lending),
+        // Rows the allocator refused are a place not found.
+        let placed = if Self::take_rows(table) {
+            match held.and_then(|held| table.held_key(held)) {
+                Some(at) => Some(at),
+                None => table.place_key(key, lending),
+            }
+        } else {
+            None
         };
         let (Some(at), Some(peer)) = (placed, PeerZid::of(event.peer)) else {
             self.refuse_unplaced(false);
@@ -2163,7 +2239,13 @@ impl<C: RoundCalls> Round<C> {
             return;
         }
         let held = view.keyexpr_held();
-        let Some(reply) = Self::place_reply(table, view, held, lending) else {
+        // Rows the allocator refused are a place not found.
+        let placed = if Self::take_rows(table) {
+            Self::place_reply(table, view, held, lending)
+        } else {
+            None
+        };
+        let Some(reply) = placed else {
             self.refuse_unplaced(true);
             return;
         };
@@ -2363,7 +2445,13 @@ impl<C: RoundCalls> Round<C> {
             self.released.end_query(call);
             return false;
         }
-        let Some(query) = Self::place_query(table, view, generation, lending) else {
+        // Rows the allocator refused are a place not found.
+        let placed = if Self::take_rows(table) {
+            Self::place_query(table, view, generation, lending)
+        } else {
+            None
+        };
+        let Some(query) = placed else {
             self.refuse_unplaced(true);
             self.released.end_query(call);
             return false;

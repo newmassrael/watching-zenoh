@@ -253,7 +253,7 @@ fn plane_on_use<C: GetCalls<TablePolicy = OnUse>>(rows: usize, held: usize) -> P
 }
 
 /// A round of a few records, placed with its tables in an arena over leaked memory.
-fn round<C: RoundCalls>() -> Placed<Round<C>> {
+fn round<C: RoundCalls<TablePolicy = Lent>>() -> Placed<Round<C>> {
     let counts = RoundRowCounts {
         records: caps::DELIVERY_LANE_EVENTS.min(4),
         callbacks: caps::DELIVERY_LANE_CALLBACKS.min(4),
