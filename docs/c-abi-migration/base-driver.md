@@ -94,7 +94,7 @@ it up is not landed.
 | 3 | S2 | shape: over-generalization | whether the owner waits for every link becomes the stack's type, so a driver of such a stack has no wait of its own (`size.md` 3.4, first item) | 798 + about 120 of the stream's `service` | -800 to -1,000 | 0 or less (the `owner_waits` load goes) | base-driver; touches every heap link family |
 | 4 | **S4** (changed into the switch `dial-address-reader`, section 8) | shape: overlapping layers | on a stack that `RESOLVES`, a literal address goes to the host's resolver (one `getaddrinfo` asked for a numeric host) and wz's literal parser is not linked; a stack without a resolver keeps it | 994 | -600 to -850 | 0 | base-driver |
 | 5 | **S6** (part landed with `size.md` 9.2 step 1, the rest is its steps 2 and 3; section 9) | shape: over-generalization | one table a link (the session's sends and the loop's pump through one `dyn` entry set), and `try_recv` out of the table of a build whose receive lends | 1,285 | -400 to -800 | must not rise: `recv_with` is reached through the table | base-driver |
-| 6 | S3 | shape: generic copy | one out-of-line drop path for the last holder of a kept value, the type's drop handed as a function | 909 | -300 to -450 | 0 (no kept value is let go on a message) | base-driver |
+| 6 | **S3** (stopped: four types' own drops, no copy to fold; section 10) | shape: generic copy | one out-of-line drop path for the last holder of a kept value, the type's drop handed as a function | 909 | -300 to -450 | 0 (no kept value is let go on a message) | base-driver |
 | 7 | S5 | shape: moved by value | a link built where it lies: the driver's fields written once into the cell, not assembled and copied (273 B and 217 B of `MaybeUninit::write`) | 2,958 | -200 to -400 | 0 (an open) | base-driver |
 
 Steps 1 to 7 together are about -4,200 to -6,200 of the area's +12,883, and with L0 about -5,500 to
@@ -296,3 +296,23 @@ step 3 then leaves the closed set no table on the receive or the put at all. So 
 carry it: the rows are measured against size.md 9.2's steps in that lane, whose design already
 names the receive's count (`recv_with` reached through the table now, through the enum's match
 after step 3) as the instruction reading it must hold.
+
+## 10. Step S3: the last holders' drops, read again: no generic copy to fold
+
+The four `Shared::last_placed` bodies of section 1 (469, 204, 105 and 54 bytes in the area; 817,
+204, 105 and 54 in all areas in the reading of section 9) are four types' own drops: the engine's
+(`CoopEngine`), the runtime's state (`RuntimeInner`), the task table's (`TaskStore`) and the local
+set's owner (`SetOwner`). The explain document has no out-of-line `drop_in_place` of any of the
+four, so each type's drop is in the binary once, inlined into its own `last_placed`, and what the
+four bodies share is the read of the memory's count before the value goes and the call that gives
+it back (`give_back`, out of line already, `crates/wz-runtime-coop/src/kept.rs`): a dozen bytes a
+type. Handing the type's drop to one out-of-line body as a function would put a function pointer in
+each held value's head, make each last drop an indirect call, and take out those dozen bytes; the
+estimate of -300 to -450 read the four as one body copied per type, which the code does not have.
+The step is stopped, and no code changes with it.
+
+What the engine's 817 bytes are is its fields' drops (its faces, its lent tables and rows, most of
+it in the sessions and language areas): a value placed in an arena whose memory goes back whole
+still drops each field that holds a count of something outside it, so the reading to make there is
+which of the engine's fields hold such a count and which only borrow arena memory, and that is the
+engine assembly's row of section 1 (the sessions lane), not a driver step.
