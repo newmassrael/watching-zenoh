@@ -217,3 +217,8 @@ group's buffer taken through the links' kind (`CountKind::Ports`,
 - `crates/wz-capi-coop/src/arena.rs`: `Lent` is imported under
   `all(feature = "query", wz_lent)`, its one reader (the held replies' row);
   the lane dropped the `udp-listen` arm, as the arena names no port row.
+- `crates/wz-runtime-coop/src/ip_stack.rs`: base-td's test
+  `a_closed_link_in_a_lent_cell_gives_it_back_whole` lent its links a table
+  of cells bare, where heap-native makes a link's cells through its kind's
+  source (`CountKind::Cells`, `Option<LentByteCells>` for the lent kinds);
+  it lends `Some(cells)`, as the lane's own stack tests do.

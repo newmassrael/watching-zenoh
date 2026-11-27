@@ -3189,7 +3189,7 @@ mod tests {
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
         let cells = arena.lend_byte_cells(size, 1).expect("one cell");
-        links.lend_cells(cells);
+        links.lend_cells(Some(cells));
 
         for to in [Locator::tcp(ROUTER), Locator::udp(ROUTER)] {
             let opened = links.open_initiator(to).expect("a link in the cell");
