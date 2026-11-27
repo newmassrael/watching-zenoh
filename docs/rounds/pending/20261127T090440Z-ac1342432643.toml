@@ -1,0 +1,16 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Read a non-blocking Windows UDP socket with no poll first: a group
+datagram costs one Winsock call fewer, as zenoh-pico reads it (win-perf S1).
+'''
+changes = '''
+- runtime-posix windows net: try_recv calls recvfrom alone when non-blocking.
+- docs/c-abi-migration/win-perf.md: Windows calls per message vs zenoh-pico.
+'''
+verification = '''
+- clippy x86_64-pc-windows-msvc wz-runtime-posix host-multicast all targets.
+- Linux unchanged: the module is cfg(windows).
+'''
+carry = '''
+- none for this lane.
+'''
