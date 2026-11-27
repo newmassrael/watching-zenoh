@@ -6,6 +6,7 @@
 //! deadline passes, its token is cancelled or its link goes, each time as the drop of its
 //! callback.
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -122,6 +123,28 @@ fn a_snapshot_on_a_closed_session_is_refused_as_closed() {
         leg.replies.is_empty() && !leg.ended,
         "no leg was minted, so none ended"
     );
+}
+
+/// A snapshot of the link's peer alone holds the session once to find it open, once to hold its
+/// leg and once to find no face left, and its asker's own leg ends in that last hold: none is
+/// taken after the walk only to end it. The CONTROL is the snapshot's end, which says it was
+/// asked. Turned red by the asker's leg ended in a hold of its own once the issue returned.
+#[test]
+fn a_snapshot_of_one_peer_ends_its_askers_leg_in_the_walks_last_hold() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let takes = || engine.takes.core.load(Ordering::SeqCst);
+    let before = takes();
+    let (issued, leg) = ask(&engine, "demo/snap/**", 0, None, None);
+    let held = takes() - before;
+    assert_eq!(issued, Ok(1), "one leg: the link's peer");
+    assert_eq!(
+        held, 3,
+        "the open session, the face's leg and the walk's end"
+    );
+    until(&engine, "CONTROL: the snapshot to end", || {
+        leg.lock().unwrap().ended
+    });
 }
 
 /// A snapshot of a key nothing is alive on ends with the DeclFinal alone: no reply, no timeout.

@@ -4208,9 +4208,10 @@ struct LegAsk<'a> {
     /// that waits with no timeout.
     deadline_ms: Option<u64>,
     mint: &'a mut dyn FnMut() -> ReplyCallback,
-    /// The get's row, begun at its first leg with one leg of its own, the asker's, which the
-    /// caller ends once every leg was issued (`CoopEngine::end_asker`): written where the caller
-    /// reads it on every way out of the issue.
+    /// The get's row, begun at its first leg with one leg of its own, the asker's, which ends in
+    /// the hold of the get's last leg (`CoopEngine::end_asker_in`), naming none after: written
+    /// where the caller reads it on every way out of the issue, to end the asker's leg the issue
+    /// left standing (`CoopEngine::end_asker`).
     get: &'a mut Option<PendingGetHandle>,
 }
 
@@ -10256,7 +10257,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     ask.deadline_ms =
                         (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
                 }
+                // The links' legs are the get's last where no group is asked after them, nor the
+                // session's own queryables: the asker's own leg then ends in the hold that issues
+                // the last of them, or finds no face left.
+                #[cfg(feature = "local-queryable")]
+                let links_last = !cfg!(feature = "group") && own.is_none();
+                #[cfg(not(feature = "local-queryable"))]
+                let links_last = !cfg!(feature = "group");
                 let Some(face) = core.transport.next_up_face(remote, asked) else {
+                    if links_last {
+                        self.end_asker_in(core, &mut *ask.get);
+                    }
                     return LegTurn::Done;
                 };
                 asked = Some(face);
@@ -10323,6 +10334,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     return LegTurn::Skipped;
                 }
                 more = core.transport.next_up_face(remote, asked).is_some();
+                if !more && links_last {
+                    self.end_asker_in(core, &mut *ask.get);
+                }
                 LegTurn::Issued
             });
             if refused {
@@ -10362,6 +10376,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             let core = &mut guard.0;
             let Some(face) = core.transport.next_group_to_ask(remote, asked) else {
+                // The groups' legs are the get's last where the session's own queryables are not
+                // asked after them: the asker's own leg ends in the hold that finds no group left.
+                #[cfg(feature = "local-queryable")]
+                let groups_last = own.is_none();
+                #[cfg(not(feature = "local-queryable"))]
+                let groups_last = true;
+                if groups_last {
+                    self.end_asker_in(core, &mut *ask.get);
+                }
                 break;
             };
             asked = Some(face);
@@ -10422,7 +10445,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             let core = &mut guard.0;
             let rid = own.rid();
-            match self.hold_leg(
+            let asked = match self.hold_leg(
                 &mut core.session.registry,
                 &mut core.ledger,
                 &mut ask,
@@ -10432,17 +10455,25 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     finals: 1,
                 },
             ) {
-                LegHeld::Held { .. } => {
-                    // Asked once the legs to the peers were, as zenoh-pico asks it only once the
-                    // send succeeded.
-                    let asked = self.ask_own_queryables(core, own, keyexpr, opts);
-                    drop(guard);
-                    issued = issued.saturating_add(1);
-                    let _ = self.cut_short(fan, tag);
-                    self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
+                // Asked once the legs to the peers were, as zenoh-pico asks it only once the send
+                // succeeded.
+                LegHeld::Held { .. } => Some(self.ask_own_queryables(core, own, keyexpr, opts)),
+                LegHeld::Refused { row, .. } => {
+                    unbegun = Some(row);
+                    None
                 }
-                LegHeld::Refused { row, .. } => unbegun = Some(row),
-                LegHeld::NoRoom | LegHeld::Gone => unheld = unheld.saturating_add(1),
+                LegHeld::NoRoom | LegHeld::Gone => {
+                    unheld = unheld.saturating_add(1);
+                    None
+                }
+            };
+            // The session's own leg is the get's last: the asker's own leg ends in its hold.
+            self.end_asker_in(core, &mut *ask.get);
+            drop(guard);
+            if let Some(asked) = asked {
+                issued = issued.saturating_add(1);
+                let _ = self.cut_short(fan, tag);
+                self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
             }
         }
         drop(unbegun);
@@ -10450,8 +10481,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// [`SessionEngine::liveliness_get_on_wire`]'s issue of the legs: the snapshot's row begun at
-    /// its first leg with one leg of its own, the asker's, written to `get`, which the caller ends
-    /// once every leg was issued (`Self::end_asker`).
+    /// its first leg with one leg of its own, the asker's, written to `get`, which ends in the hold
+    /// that finds no face left (`Self::end_asker_in`), or after the issue where it returned before
+    /// that hold (`Self::end_asker`).
     #[cfg(feature = "liveliness-get")]
     fn ask_snapshot_legs(
         &self,
@@ -10486,6 +10518,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         loop {
             let turn = self.live_on_link(|core, tx| {
                 let Some(face) = core.transport.next_up_face(true, asked) else {
+                    // The walk's last hold: the asker's own leg ends in it.
+                    self.end_asker_in(core, &mut *get);
                     return LegTurn::Done;
                 };
                 asked = Some(face);
@@ -10677,17 +10711,29 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         LegHeld::Held { rid }
     }
 
-    /// The legs of the get `get` names were issued: its asker's own leg ends, the last leg
-    /// ending the get answered, which the delivery after this hold hands out. Nothing for a get
-    /// none was begun for, or for a session closed meanwhile, whose close retired it.
+    /// The issue of the get `get` names returned before the hold of its last leg (its fan was
+    /// cancelled meanwhile, or no leg was held): its asker's own leg ends in a hold of its own
+    /// ([`Self::end_asker_in`]). Nothing for a get none was begun for or whose asker ended in the
+    /// hold of its last leg, nor for a session closed meanwhile, whose close retired it.
     #[cfg(feature = "query")]
-    fn end_asker(&self, get: Option<PendingGetHandle>) {
-        let Some(get) = get else {
+    fn end_asker(&self, mut get: Option<PendingGetHandle>) {
+        if get.is_none() {
             return;
-        };
+        }
         if let Some(mut core) = self.live() {
-            let _ = tables_mut(&mut core.0.session.registry).end_leg(get);
-            self.note_ended_gets(&core.0);
+            self.end_asker_in(&mut core.0, &mut get);
+        }
+    }
+
+    /// The asker's own leg of the get `get` names ends under the hold `core` is, the last leg
+    /// ending the get answered, which the delivery after the hold hands out; `get` then names
+    /// none, so the issue's caller ends nothing more. Called in the hold of the get's last leg, so
+    /// the issue takes no hold of its own to end it.
+    #[cfg(feature = "query")]
+    fn end_asker_in(&self, core: &mut Core<L, C>, get: &mut Option<PendingGetHandle>) {
+        if let Some(get) = get.take() {
+            let _ = tables_mut(&mut core.session.registry).end_leg(get);
+            self.note_ended_gets(core);
         }
     }
 
