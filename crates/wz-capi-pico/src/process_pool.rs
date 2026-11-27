@@ -87,10 +87,13 @@ use wz_session_core::limits::SessionLimits;
 use crate::object_slot::Kind;
 
 /// How many slot sizes the pools are reported by, the smallest 16 bytes and each one twice the one
-/// before, up to 16 KiB.
+/// before, up to 16 KiB. The classes size no slot, so they are kept, as the counts are
+/// (`ClassCount`), only where the doors that report the pools read them (`object-pool`).
+#[cfg(any(test, feature = "object-pool"))]
 pub(crate) const CLASSES: usize = 11;
 
 /// The slots of the smallest size, in bytes.
+#[cfg(any(test, feature = "object-pool"))]
 const SMALLEST_SLOT: usize = 16;
 
 /// The alignment of every slot: the most any object of this ABI asks for, which the build checks
@@ -430,12 +433,14 @@ impl Stage {
 }
 
 /// The bytes of each slot of size class `class`.
+#[cfg(any(test, feature = "object-pool"))]
 pub(crate) const fn slot_bytes(class: usize) -> usize {
     SMALLEST_SLOT << class
 }
 
 /// The size class of an object of `size` bytes aligned to `align`: the smallest slot that holds
 /// it, or none.
+#[cfg(any(test, feature = "object-pool"))]
 pub(crate) const fn class_of(size: usize, align: usize) -> Option<usize> {
     if align > SLOT_ALIGN || size > slot_bytes(CLASSES - 1) {
         return None;
