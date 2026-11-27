@@ -2238,7 +2238,8 @@ pub mod session_timeouts;
 pub mod session_actions;
 
 /// What one transport transmits with, held apart from the session around it so that a transport
-/// that is not a unicast session holds the same state: the conduits and the frame numbers.
+/// that is not a unicast session holds the same state: the conduits, the frame numbers and what
+/// its emit counts.
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod transport_tx;
 

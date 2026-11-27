@@ -190,7 +190,7 @@ fn count_rx_network_message<R: SessionRuntime, T: TimeSource>(
     let class = actions.stats_keys_of(class, || {
         crate::network_message::stats_keyexpr(msg, |_id| None)
     });
-    actions.stats.inc_rx_network(&class);
+    actions.tx.stats.inc_rx_network(&class);
     // R2825 — the registry: the payload observed, and the message counted
     // on the link that received it, under the message's own band.
     let priority = crate::network_message::network_message_priority(msg);
@@ -212,7 +212,7 @@ fn count_rx_record<R: SessionRuntime, T: TimeSource>(
     record: &crate::network_message::RecordClass<'_>,
 ) {
     let class = actions.stats_keys_of(record.class, || record.keyexpr());
-    actions.stats.inc_rx_network(&class);
+    actions.tx.stats.inc_rx_network(&class);
     let rx = crate::stats_registry::StatsDirection::Rx;
     actions.observe_payload(rx, record.priority, &class);
     actions.count_network_message(rx, &actions.link, record.priority, &class);
@@ -243,7 +243,7 @@ fn count_rx_plain_puts<R: SessionRuntime, T: TimeSource>(
         let class = actions.stats_keys_of(class, || {
             crate::network_message::stats_keyexpr_of_key(put.id, suffix, &|_id| None)
         });
-        actions.stats.inc_rx_network(&class);
+        actions.tx.stats.inc_rx_network(&class);
         let priority = crate::declare_ext_qos::qos_of_raw(put.qos.map(u64::from)).priority();
         actions.observe_payload(rx, priority, &class);
         actions.count_network_message(rx, &actions.link, priority, &class);
@@ -263,8 +263,8 @@ fn count_rx_plain_puts<R: SessionRuntime, T: TimeSource>(
 fn note_rx_transport_message<R: SessionRuntime, T: TimeSource>(actions: &SessionLinkActions<R, T>) {
     #[cfg(feature = "transport-stats")]
     {
-        actions.stats.inc_rx_transport_message();
-        actions.record_on_link(&actions.link, |metrics, slot| {
+        actions.tx.stats.inc_rx_transport_message();
+        actions.tx.record_on_link(&actions.link, |metrics, slot| {
             metrics.inc_transport_message(crate::stats_registry::StatsDirection::Rx, slot, 1)
         });
     }
@@ -329,12 +329,12 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
             // kind funnels through.
             #[cfg(feature = "transport-stats")]
             {
-                actions.stats.inc_rx(rx.bytes.len());
+                actions.tx.stats.inc_rx(rx.bytes.len());
                 // R2825 — the same bytes on this link's registry cell. The
                 // transport-message count is NOT here: a unit carries as many
                 // as the peer batched, and `dispatch_unit` counts each.
                 let bytes = rx.bytes.len() as u64;
-                actions.record_on_link(&actions.link, |metrics, slot| {
+                actions.tx.record_on_link(&actions.link, |metrics, slot| {
                     metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
                 });
             }
@@ -2692,9 +2692,9 @@ fn account_bytes_in_place<R: SessionRuntime, T: TimeSource>(
 ) {
     #[cfg(feature = "transport-stats")]
     {
-        actions.stats.inc_rx(unit.len());
+        actions.tx.stats.inc_rx(unit.len());
         let bytes = unit.len() as u64;
-        actions.record_on_link(&actions.link, |metrics, slot| {
+        actions.tx.record_on_link(&actions.link, |metrics, slot| {
             metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
         });
     }

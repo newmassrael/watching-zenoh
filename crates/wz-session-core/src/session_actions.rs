@@ -2049,12 +2049,6 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     #[cfg(feature = "resource-snapshot")]
     pub rx_intervals:
         crate::interval_meter::IntervalMeter<{ crate::caps::SNAPSHOT_HISTOGRAM_BUCKETS }>,
-    /// R311y9 — per-session wire byte/message counters (`transport-stats`).
-    /// Interior-mutable atomics, incremented at the `Self::send_wire` (TX)
-    /// and [`crate::drive::dispatch_link_event`] (RX) seams; read via
-    /// `Self::stats_report`. Off by default (the adminspace consumer is P4).
-    #[cfg(feature = "transport-stats")]
-    pub stats: crate::stats::TransportStats,
     /// R2678 (`session-close-ingress`) — a take-once request to close THIS
     /// session, raised by an ingress that cannot reach the FSM engine.
     ///
@@ -2609,15 +2603,6 @@ pub(crate) enum OpenAckAdmission {
 pub struct SessionFacts {
     /// The handshake's row.
     pub handshake: HandshakeFacts,
-    /// R2825 (`transport-stats`) — this session's partition of the node's
-    /// stats registry: the labelled families the metrics document is written
-    /// from. Recorded here, under a per-session lock, at the same seams as
-    /// [`SessionCore::stats`]; the host copies it into its registry when it answers a
-    /// query and once more when the session closes
-    /// ([`crate::stats_registry::StatsRegistry::set_transport_metrics`]), so no
-    /// message ever takes a node-wide lock.
-    #[cfg(feature = "transport-stats")]
-    pub metrics: crate::stats_registry::TransportMetrics,
     /// R2238 (open-debt item 580) — how many more `T_MID_FRAGMENT` messages
     /// this session may put on the wire. Each fragment of a chain draws ONE
     /// credit through `SessionLinkActions::take_fragment_tx_credit` (private,
@@ -2660,11 +2645,6 @@ pub struct SessionFacts {
     /// A fact and not an atomic: ARMv6-M has no `target_has_atomic = "ptr"`.
     #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
     pub fragment_tx_budget: usize,
-    /// Fixed-memory step S4 -- the sends this session refused because its link
-    /// lent no slot (`tx-lend-only`): see [`TxRefusalCounts`]. A fact for
-    /// the reason `Self::fragment_tx_budget` is.
-    #[cfg(feature = "tx-lend-only")]
-    pub tx_refusals: TxRefusalCounts,
     /// How many times each action of the machine ran ([`SessionLinkActions::trace_snapshot`]);
     /// held only by a build that keeps the counters (`action-trace`).
     #[cfg(feature = "action-trace")]
@@ -2893,12 +2873,8 @@ macro_rules! fact_doors {
 }
 
 fact_doors! {
-    #[cfg(feature = "transport-stats")]
-    fact_metrics => metrics: crate::stats_registry::TransportMetrics,
     #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
     fact_fragment_tx_budget => fragment_tx_budget: usize,
-    #[cfg(feature = "tx-lend-only")]
-    fact_tx_refusals => tx_refusals: TxRefusalCounts,
     #[cfg(feature = "action-trace")]
     fact_trace => trace: ActionTrace,
     fact_inbound_cookie => handshake.inbound_cookie: Option<SessionBytes<COOKIE_MAX>>,
@@ -5367,17 +5343,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // Read before `params` moves into the core: the queries a link remembers the key form of.
         #[cfg(feature = "shared-key-ids")]
         let noted_requests = params.limits.link_noted_requests();
+        // The registry's partition the first link was opened in is the transmit state's.
         #[cfg(feature = "transport-stats")]
-        let stats_metrics = seed.metrics;
+        let tx = crate::transport_tx::TransportTx::new(initial_frame_sn, seed.metrics);
         #[cfg(not(feature = "transport-stats"))]
-        let _ = seed;
+        let tx = {
+            let _ = seed;
+            crate::transport_tx::TransportTx::new(initial_frame_sn)
+        };
         write_fields!(
             at,
             SessionCore {
                 #[cfg(feature = "resource-snapshot")]
                 rx_intervals: crate::interval_meter::IntervalMeter::new(),
-                #[cfg(feature = "transport-stats")]
-                stats: crate::stats::TransportStats::default(),
                 // Nobody has asked this session anything from outside its loop.
                 out_of_band: OutOfBand::new(),
                 // Empty: a session owes its loop nothing until something
@@ -5408,14 +5386,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         local_remote_bound: None::<crate::extbound::Bound>,
                         expected_peer_zid: None,
                     },
-                    #[cfg(feature = "transport-stats")]
-                    metrics: stats_metrics,
                     // "Unbounded" until a host declares a budget — a profile that
                     // never configures one fragments exactly as it did before.
                     #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
                     fragment_tx_budget: usize::MAX,
-                    #[cfg(feature = "tx-lend-only")]
-                    tx_refusals: TxRefusalCounts::default(),
                     #[cfg(feature = "action-trace")]
                     trace: ActionTrace::default(),
                     // R311y813 — fail-closed until a host with an entropy source
@@ -5489,7 +5463,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 peer_declaration_progress_ms: AtomicU64::new(u64::MAX),
                 #[cfg(feature = "alloc")]
                 peer_sync_bits: AtomicU8::new(0),
-                tx: crate::transport_tx::TransportTx::new(initial_frame_sn),
+                tx: tx,
                 #[cfg(all(
                     feature = "reply-egress-gate",
                     any(
@@ -5808,7 +5782,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`crate::stats::TransportStatsReport`].
     #[cfg(feature = "transport-stats")]
     pub fn stats_report(&self) -> crate::stats::TransportStatsReport {
-        self.stats.report()
+        self.tx.stats.report()
     }
 
     /// R2825 — a copy of this session's stats-registry partition, what a host
@@ -5816,7 +5790,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`crate::stats_registry::StatsRegistry::set_transport_metrics`].
     #[cfg(feature = "transport-stats")]
     pub fn stats_metrics(&self) -> crate::stats_registry::TransportMetrics {
-        self.fact_metrics(|metrics| metrics.clone())
+        self.tx.metrics(|metrics| metrics.clone())
     }
 
     /// R2843 — the stats registry of a node that IS this session: this node's
@@ -5888,24 +5862,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// calls it before its last [`Self::stats_metrics`] of a closing session.
     #[cfg(feature = "transport-stats")]
     pub fn close_stats_links(&self) {
-        self.fact_metrics(|metrics| metrics.close_all_links());
-    }
-
-    /// R2825 — record on `link`'s cells in this session's partition. A link
-    /// without a slot records nothing (see [`LinkState::stats_slot`]).
-    #[cfg(feature = "transport-stats")]
-    pub(crate) fn record_on_link(
-        &self,
-        link: &LinkState<R>,
-        record: impl FnOnce(
-            &mut crate::stats_registry::TransportMetrics,
-            crate::stats_registry::LinkSlot,
-        ),
-    ) {
-        let Some(slot) = R::with_mutex_mut(&link.stats_slot, |slot| *slot) else {
-            return;
-        };
-        self.fact_metrics(|metrics| record(metrics, slot));
+        self.tx.metrics(|metrics| metrics.close_all_links());
     }
 
     /// R2825 — observe one data message's payload in this session's partition.
@@ -5928,7 +5885,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return;
         };
         let shm = class.medium == crate::stats::StatMedium::Shm;
-        self.fact_metrics(|metrics| {
+        self.tx.metrics(|metrics| {
             metrics.observe_payload_class(direction, priority, kind, shm, &payload)
         });
     }
@@ -5945,7 +5902,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Result<(), crate::stats_registry::StatsKeyFiltersError> {
         #[cfg(feature = "transport-stats")]
         {
-            self.fact_metrics(|metrics| metrics.set_key_filters(filters));
+            self.tx.metrics(|metrics| metrics.set_key_filters(filters));
             Ok(())
         }
         #[cfg(not(feature = "transport-stats"))]
@@ -5967,14 +5924,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         class: crate::stats::NetworkStatsClass,
         keyexpr: impl FnOnce() -> Option<K>,
     ) -> crate::stats::NetworkStatsClass {
-        if class.payload.is_none() || self.fact_metrics(|metrics| metrics.key_filters().is_empty())
-        {
+        if class.payload.is_none() || self.tx.metrics(|metrics| metrics.key_filters().is_empty()) {
             return class;
         }
         let Some(keyexpr) = keyexpr() else {
             return class;
         };
-        let keys = self.fact_metrics(|metrics| metrics.key_filters().matching(keyexpr.as_ref()));
+        let keys = self
+            .tx
+            .metrics(|metrics| metrics.key_filters().matching(keyexpr.as_ref()));
         class.with_keys(keys)
     }
 
@@ -5992,7 +5950,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return;
         };
         let shm = class.medium == crate::stats::StatMedium::Shm;
-        self.record_on_link(link, |metrics, slot| {
+        self.tx.record_on_link(link, |metrics, slot| {
             metrics.inc_network_message(direction, slot, priority, kind, shm)
         });
     }
@@ -6022,7 +5980,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return;
         };
         let size = class.payload.map_or(0, |p| p.pl_bytes as u64);
-        self.fact_metrics(|metrics| {
+        self.tx.metrics(|metrics| {
             metrics.observe_network_message_dropped_payload(
                 crate::stats_registry::StatsDirection::Tx,
                 priority,
@@ -6064,7 +6022,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return;
         };
         let size = class.payload.map_or(0, |p| p.pl_bytes as u64);
-        self.record_on_link(link, |metrics, slot| {
+        self.tx.record_on_link(link, |metrics, slot| {
             metrics.observe_network_message_dropped_payload(
                 crate::stats_registry::StatsDirection::Tx,
                 priority,
@@ -6411,7 +6369,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             slot.give_back();
             lend.lost = lend.lost.wrapping_add(1);
-            let _ = self.refuse_tx(crate::link::LinkDropCause::NoTxSlot);
+            let _ = self.tx.refuse(crate::link::LinkDropCause::NoTxSlot);
             let _ = (channel, priority);
         }
         #[cfg(not(feature = "tx-lend-only"))]
@@ -6518,7 +6476,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     drop(slot);
                     batch.stage.count = 0;
                     batch.lend.lost = batch.lend.lost.wrapping_add(1);
-                    let _ = self.refuse_tx(crate::link::LinkDropCause::NoTxSlot);
+                    let _ = self.tx.refuse(crate::link::LinkDropCause::NoTxSlot);
                 }
             });
         }
@@ -6601,7 +6559,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         message_priority: Priority,
         class: &crate::stats::NetworkStatsClass,
     ) {
-        self.stats
+        self.tx
+            .stats
             .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
         self.with_conduit_link(reliability, route, |link| {
             self.drop_for_congestion(link, message_priority, class)
@@ -7174,15 +7133,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "transport-stats")]
             match _outcome {
                 crate::link::LinkSendOutcome::Sent => {
-                    self.stats.inc_tx(_wire_bytes);
-                    self.record_on_link(link, |metrics, slot| {
+                    self.tx.stats.inc_tx(_wire_bytes);
+                    self.tx.record_on_link(link, |metrics, slot| {
                         let tx = crate::stats_registry::StatsDirection::Tx;
                         metrics.inc_bytes(tx, slot, _wire_bytes as u64);
                         metrics.inc_transport_message(tx, slot, 1);
                     });
                 }
                 crate::link::LinkSendOutcome::Dropped(_) => {
-                    self.stats
+                    self.tx
+                        .stats
                         .inc_tx_drop(crate::stats::StatDrop::Transport, 1, _wire_bytes)
                 }
             }
@@ -7273,7 +7233,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // has both honest about it.
         #[cfg(all(feature = "transport-compression", feature = "tx-lend-only"))]
         if link.compresses_batches() {
-            let _ = self.refuse_tx(crate::link::LinkDropCause::NoTxSlot);
+            let _ = self.tx.refuse(crate::link::LinkDropCause::NoTxSlot);
             return;
         }
         #[cfg(all(feature = "transport-compression", not(feature = "tx-lend-only")))]
@@ -7394,7 +7354,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         match self.send_lent_on(&self.link, Reliability::Reliable, priority, want, &write) {
             Lend::Sent => Ok(()),
             Lend::NoSlot | Lend::Refused(_) => {
-                Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot))
+                Err(self.tx.refuse(crate::link::LinkDropCause::NoTxSlot))
             }
         }
     }
@@ -7545,63 +7505,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         Ok(())
     }
 
-    /// Fixed-memory step S4 — the answer of a lend-only send the link took no
-    /// slot for: the cause, counted on the session ([`Self::tx_refusals`]) and,
-    /// under `transport-stats`, as the dropped transport message it is, so a dry
-    /// pool is visible and never silent. Returns `cause` so a sender hands it on
-    /// in one expression.
-    ///
-    /// `WriterGone` is not a refusal the SESSION raises (a driver's writer is
-    /// gone: `emit_on_link`'s disposition closes the gate on it) and is not
-    /// counted here.
-    #[cfg(all(
-        feature = "tx-lend-only",
-        any(
-            all(
-                any(feature = "codec-init-body", feature = "codec-open-body"),
-                any(feature = "session-unicast-open", feature = "session-unicast-accept")
-            ),
-            feature = "codec-close",
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "declare-interest",
-            feature = "liveliness-token",
-            feature = "transport-batching",
-            // The compression arm of `emit_on_link`, which is compiled where
-            // that seam is (its union, which `transport-keepalive` joins).
-            all(
-                feature = "transport-compression",
-                feature = "transport-keepalive"
-            ),
-        )
-    ))]
-    // Out of line for the same reason as `emit_on_link`: every lend-only refusal reaches it.
-    #[inline(never)]
-    fn refuse_tx(&self, cause: crate::link::LinkDropCause) -> crate::link::LinkDropCause {
-        self.fact_tx_refusals(|counts| match cause {
-            crate::link::LinkDropCause::NoTxSlot => counts.no_slot = counts.no_slot.wrapping_add(1),
-            crate::link::LinkDropCause::Oversize => {
-                counts.oversize = counts.oversize.wrapping_add(1)
-            }
-            crate::link::LinkDropCause::WriterGone => {}
-        });
-        #[cfg(feature = "transport-stats")]
-        self.stats
-            .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
-        cause
-    }
-
     /// Fixed-memory step S4 — the sends this lend-only session refused for want
     /// of a slot, by cause: see [`TxRefusalCounts`].
     #[cfg(feature = "tx-lend-only")]
     pub fn tx_refusals(&self) -> TxRefusalCounts {
-        self.fact_tx_refusals(|counts| *counts)
+        self.tx.refusals()
     }
 
     /// Fixed-memory step S4 — the lend-only InitSyn / InitAck: the Init message
@@ -9419,7 +9327,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let ends = crate::link::LinkEndsText::link_endpoints(link.link_driver());
             let slot = ends.map(|ends| {
-                self.fact_metrics(|metrics| {
+                self.tx.metrics(|metrics| {
                     metrics.open_link(crate::stats_registry::LinkLabels::new(&ends.src, &ends.dst))
                 })
             });
@@ -9459,7 +9367,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // upstream's `remove_link` folds them.
         #[cfg(feature = "transport-stats")]
         if let Some(slot) = R::with_mutex_mut(&link.stats_slot, |own| own.take()) {
-            self.fact_metrics(|metrics| metrics.close_link(slot));
+            self.tx.metrics(|metrics| metrics.close_link(slot));
         }
         // ARCHITECTURE section 9.1 -- the batch frames open in this link's
         // slots move to the heap stage before the link leaves the set.
@@ -12645,7 +12553,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 self.core.out_of_band.take(|s| s.expiry_run.pushed());
             }
             #[cfg(feature = "transport-stats")]
-            self.stats.inc_tx_network(&_stats_class);
+            self.tx.stats.inc_tx_network(&_stats_class);
             #[cfg(feature = "transport-stats")]
             self.with_conduit_link(wire_reliability, priority, |link| {
                 self.count_network_message(
@@ -12695,7 +12603,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // encode to answer it with.
                 #[cfg(feature = "tx-lend-only")]
                 return Err(SendWireError::LinkRefused(
-                    self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
+                    self.tx.refuse(crate::link::LinkDropCause::NoTxSlot),
                 ));
             }
             #[cfg(not(feature = "tx-lend-only"))]
@@ -13078,7 +12986,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Ok(UnicastPush::Chain) => Ok(Dispatched::Chain),
             // Fixed-memory step S4 — a send the link lent no slot for was never
             // pushed: it is not an `n_msgs` message, as a congestion drop is not,
-            // and the refusal was counted where it was raised (`refuse_tx`).
+            // and the refusal was counted where it was raised (`TransportTx::refuse`).
             #[cfg(feature = "tx-lend-only")]
             Err(refused @ SendWireError::LinkRefused(_)) => Err(refused),
             // A typed refusal past the room check (the reassembly cap) keeps
@@ -13362,7 +13270,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // gap in a reliable channel that no frame fills.
                     self.tx.frame_sn.unmint(priority, emit.reliable);
                     Err(SendWireError::LinkRefused(
-                        self.refuse_tx(crate::link::LinkDropCause::Oversize),
+                        self.tx.refuse(crate::link::LinkDropCause::Oversize),
                     ))
                 }
                 // No slot, or one short of the frame. A slot that was lent and then found short
@@ -13374,7 +13282,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         self.tx.frame_sn.unmint(priority, emit.reliable);
                     }
                     Err(SendWireError::LinkRefused(
-                        self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
+                        self.tx.refuse(crate::link::LinkDropCause::NoTxSlot),
                     ))
                 }
                 // Refused before a byte left: the SN minted for it is given back.
@@ -13912,7 +13820,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     Ok(())
                 }
                 Lend::NoSlot | Lend::Refused(_) => Err(SendWireError::LinkRefused(
-                    self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
+                    self.tx.refuse(crate::link::LinkDropCause::NoTxSlot),
                 )),
             }
         }
@@ -20180,7 +20088,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 );
                 #[cfg(feature = "transport-stats")]
                 if encoded.is_err() {
-                    a.stats.inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+                    a.tx.stats
+                        .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = encoded {
                     a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
@@ -20235,7 +20144,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 );
                 #[cfg(feature = "transport-stats")]
                 if encoded.is_err() {
-                    a.stats.inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+                    a.tx.stats
+                        .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = encoded {
                     a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
@@ -20435,7 +20345,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 );
                 #[cfg(feature = "transport-stats")]
                 if encoded.is_err() {
-                    a.stats.inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+                    a.tx.stats
+                        .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = &encoded {
                     a.send_wire(bytes, Reliability::Reliable, HANDSHAKE_LANE);
@@ -20507,7 +20418,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                         a.encode_init_with_role(/*is_ack=*/ true, None, ExtChainRole::InitAck);
                     #[cfg(feature = "transport-stats")]
                     if encoded.is_err() {
-                        a.stats.inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+                        a.tx.stats
+                            .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                     }
                     if let Ok(bytes) = &encoded {
                         a.send_wire(bytes, Reliability::Reliable, HANDSHAKE_LANE);
@@ -20571,7 +20483,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 );
                 #[cfg(feature = "transport-stats")]
                 if encoded.is_err() {
-                    a.stats.inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+                    a.tx.stats
+                        .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = encoded {
                     a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
