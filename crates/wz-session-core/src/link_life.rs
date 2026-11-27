@@ -56,8 +56,6 @@ use core::ptr::addr_of_mut;
 use sce_rust_runtime::helpers::session_id::SessionId;
 use sce_rust_runtime::Engine;
 
-#[cfg(feature = "storage-profile")]
-use crate::driver_loop::DriverOutcome;
 use crate::duty_outbox::{Duties, DutyOutbox};
 use crate::unicast_link::{
     UnicastLinkActions, UnicastLinkEvent, UnicastLinkPolicy, UnicastLinkState,
@@ -607,19 +605,6 @@ impl UnicastLink {
         match event {
             Some(event) => self.drive(event, from, gave_up_dial, now_us),
             None => self.waits(now_us),
-        }
-    }
-
-    /// [`Self::input`] for what a pump of the established link came to: one that terminated
-    /// ended the link, and one stopped at its iteration cap goes on. A pump refused before it ran
-    /// dropped the link it was given, so the link has ended as one that terminated has.
-    #[cfg(feature = "storage-profile")]
-    pub fn pumped(&mut self, outcome: DriverOutcome, now_us: u64) -> Effects {
-        match outcome {
-            DriverOutcome::Terminated | DriverOutcome::Refused => {
-                self.input(LinkInput::Ended, now_us)
-            }
-            DriverOutcome::IterationLimit => self.waits(now_us),
         }
     }
 
@@ -1272,35 +1257,6 @@ mod tests {
         assert!(matches!(waiting.phase(), LinkPhase::Backoff { .. }));
         assert!(waiting.input(LinkInput::Close, 3).is_empty());
         assert_eq!(waiting.phase(), LinkPhase::Closed);
-    }
-
-    /// The pump of an established link that terminated ended the link; one stopped at its
-    /// iteration cap goes on.
-    #[cfg(feature = "storage-profile")]
-    #[test]
-    fn a_terminated_pump_ends_the_link_and_a_capped_one_goes_on() {
-        let mut slot = MaybeUninit::uninit();
-        let link = made(&mut slot, TIMES, 1);
-        bring_up(link, 0);
-        assert!(link.pumped(DriverOutcome::IterationLimit, 1).is_empty());
-        assert_eq!(link.phase(), LinkPhase::Up);
-        let lost = link.pumped(DriverOutcome::Terminated, 2);
-        assert!(lost.lose());
-        assert_eq!(lost.dial(), Some(0));
-    }
-
-    /// A pump refused before it ran dropped its link: the established link is lost and the first
-    /// endpoint dialled again, as for one that terminated.
-    #[cfg(feature = "storage-profile")]
-    #[test]
-    fn a_refused_pump_ends_the_link() {
-        let mut slot = MaybeUninit::uninit();
-        let link = made(&mut slot, TIMES, 1);
-        bring_up(link, 0);
-        let lost = link.pumped(DriverOutcome::Refused, 1);
-        assert!(lost.lose());
-        assert_eq!(lost.dial(), Some(0));
-        assert_eq!(link.phase(), LinkPhase::Dialing { row: 0 });
     }
 
     /// A face taken beside the dial role's, from a link accepted on a port.
