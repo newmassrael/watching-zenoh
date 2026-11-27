@@ -14444,7 +14444,7 @@ layer_c1m_session_lwip() {
     # (`dial::parse_tests::the_ipv6_reader_reads_what_core_reads`, which `dial` compiles).
     # 62 -> 58, printed on 20ee0c0a1: the five dial reader tests moved to the runtime (322866c0f), one more lib test since.
     # 58 -> 60 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu adminspace-write" 62 \
+    _runci_guarded_test "C1m mcu adminspace-write" 63 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     # 27 -> 29, printed: hosted run 44895098050 on `c72460b30` printed 29 (the +2 above was counted
     # from the source and missed two).
@@ -14481,7 +14481,7 @@ layer_c1m_session_lwip() {
     # 73 -> 74, counted from the source: the same IPv6 reader test as the adminspace-write leg.
     # 74 -> 70, counted on 20ee0c0a1: 67 passed beside the same three admin_status tests.
     # 70 -> 73 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu adminspace read+write" 75 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 76 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -25779,14 +25779,16 @@ layer_e6_peer_mesh() {
     wz_test_args wz-integration-tests wz_peer_adminspace_config_write
     (cd crates && cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
-    # The session lifecycle QUERIES, over the wire between real nodes: a GET closes
-    # the session with a named peer and is answered with a verdict (and that peer's
-    # face really goes DOWN), a second GET lists the node's verbs, and a node that
-    # hosts the queries with no `--session-commander` grant answers `refused` with a
-    # reason. Rides the SAME E6 binary (built above with `session-close-ingress`).
-    # Two tests, so the count guard reddens on a dropped `#[ignore]` (0 selected).
+    # The session lifecycle QUERIES, over the wire between real nodes (decision D16): a
+    # commander the node's declaration grants (`--node-declaration`), proved by the key of
+    # its mutual TLS link, closes the session with a named peer and is answered with a
+    # verdict (and that peer's face really goes DOWN), and a key the declaration does not
+    # list is refused; over plain TCP no commander is proved and the same GET is refused;
+    # a node that grants nothing answers `refused` with a reason. Rides the SAME E6 binary
+    # (built above with `session-close-ingress`). Three tests, so the count guard reddens
+    # on a dropped `#[ignore]` (0 selected).
     wz_test_args wz-integration-tests wz_peer_session_lifecycle_query
-    _runci_guarded_test "E6 session lifecycle query" 2 \
+    _runci_guarded_test "E6 session lifecycle query" 3 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 --quiet || return 1
     # R311y272 — the CROSS-IMPL half of the config write, on the SAME binary, and the
