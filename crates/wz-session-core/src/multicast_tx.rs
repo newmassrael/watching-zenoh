@@ -5237,7 +5237,7 @@ mod group_declarations_written_from_parts {
     /// backing that queues owned items builds, counted as long as it is, and framed and tallied as
     /// that one is; a keyexpr past the protocol's bound is refused with `f` not called, as its owned
     /// form is never built. Turned red by a writer of a kind that answers with another header, id,
-    /// key or info than its owned builder (`DeclarationReply::write_wire`), a size that is not its
+    /// key or info than its owned builder (`GroupDeclare::write_wire`), a size that is not its
     /// length, or a framing or a tally that reads another QoS than the owned reply's.
     #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
     #[test]
