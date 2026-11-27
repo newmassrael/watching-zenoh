@@ -142,7 +142,7 @@ EXEMPT: dict[tuple[str, str], Exemption] = {
         "cooperative engine forwards its `connectivity` to; the engine's legs with it "
         "run the tests that read the rows",
         (
-            ("crates/wz-capi-coop/Cargo.toml", 'connectivity = ["wz-runtime-coop/connectivity"]'),
+            ("crates/wz-capi-coop/Cargo.toml", '"wz-runtime-coop/connectivity"'),
             (
                 "scripts/lib/nondefault-tests-gate.sh",
                 '"wz-capi-coop|hook|app-transport,group,connectivity|tests::group::"',
