@@ -275,6 +275,11 @@ pub trait FinalStaging {
     /// refuse the request ([`Self::refuse_request`]) before running anything.
     fn has_room(&self) -> bool;
 
+    /// [`Self::has_room`], the room made now where the table takes its memory at its first row,
+    /// so a `true` is a promise that the next [`Self::owe`] is taken: what a dispatch asks before
+    /// it runs anything for a request that will owe a `Final`.
+    fn make_room(&mut self) -> bool;
+
     /// Owe a `Final` for `rid`, carrying the query's `qos`.
     fn owe(&mut self, rid: crate::wire_id::RequestId, qos: QosLevel);
 
@@ -1201,6 +1206,16 @@ impl<P: Storage> FinalStaging for FinalStage<P> {
         self.rows.free_slots() > 0 && self.quota.admits(self.rows.len().saturating_add(1))
     }
 
+    fn make_room(&mut self) -> bool {
+        // Only a policy that takes a table's memory at its first value has a room to make; on every
+        // other the rows counted by `has_room` are there already.
+        if matches!(P::TAKEN, crate::bounded::Taken::AtFirstUse) {
+            self.has_room() && self.rows.make_room()
+        } else {
+            self.has_room()
+        }
+    }
+
     fn owe(&mut self, rid: crate::wire_id::RequestId, qos: QosLevel) {
         // Room was asked for before the request ran; a table that has none by
         // now is the caller's contract broken, and counted rather than dropped
@@ -1957,6 +1972,27 @@ mod tests {
         assert!(!finals.has_room(), "one row of Finals");
         finals.owe(2, QosLevel::DEFAULT);
         assert_eq!((finals.owed(), finals.refusals()), (1, 1));
+    }
+
+    /// Making room for a `Final` on the on-use policy takes the table's rows before anything is
+    /// owed, so the dispatch that asks it before a query runs learns then whether the `Final` can
+    /// be owed; past the count there is no room to make, and a table whose rows are lent answers as
+    /// `has_room` does. Turned red by a `make_room` that answers `has_room` without taking the
+    /// rows.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn making_room_for_a_final_takes_the_on_use_rows_before_anything_is_owed() {
+        use crate::bounded::OnUse;
+        let mut finals = FinalStage::<OnUse>::counted(1);
+        assert!(!finals.rows.holds_rows());
+        assert!(finals.make_room());
+        assert!(finals.rows.holds_rows(), "the room is made, not counted");
+        assert_eq!(finals.owed(), 0, "nothing is owed by making room");
+        finals.owe(1, QosLevel::DEFAULT);
+        assert!(!finals.make_room(), "no room past the count");
+        assert_eq!(finals.refusals(), 0, "making room refuses nothing");
+        let mut fixed: FinalStage<Static> = FinalStage::default();
+        assert_eq!(fixed.make_room(), fixed.has_room());
     }
 
     /// The default `FinalStage` is the build's profile and can sit in a `static`.

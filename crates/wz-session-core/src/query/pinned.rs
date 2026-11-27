@@ -211,7 +211,7 @@ impl QueryPeer {
         let RequestOwnedVariant::CodecZenohQuery(query) = &request.body else {
             return None;
         };
-        if !pending_final_rids.has_room() {
+        if !pending_final_rids.make_room() {
             pending_final_rids.refuse_request();
             return None;
         }
