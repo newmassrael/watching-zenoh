@@ -171,6 +171,7 @@ PROGRAMS: tuple[tuple[str, str], ...] = (
     ("crates/wz-capi-pico/examples/c/periodic_step.c", "a session stepped on the program's cycle and time"),
     ("crates/wz-capi-pico/examples/c/keyed.c", "a keyed topic with a last value per instance"),
     ("crates/wz-capi-pico/examples/c/history.c", "history for a late subscriber"),
+    ("crates/wz-capi-pico/examples/c/redial.c", "a client that dials its lost link again"),
 )
 
 

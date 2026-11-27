@@ -234,7 +234,7 @@ hands it four refused documents and checks that each leaves the config as it was
 
 ## Examples
 
-Each example is one C file that exchanges between two sessions of one process, over the loopback
+Each example is one C file that exchanges between sessions of one process, over the loopback
 or, in `own_transport.c` and `pico_app_transport.c`, over a stack the program implements, and
 exits 0 when every check held. An example whose comment states `expect-line:` lines prints each as
 a line of its output, and the package's test holds its run to them. Every example but
@@ -255,6 +255,7 @@ a line of its output, and the package's test holds its run to them. Every exampl
 | `periodic_step.c` | a session opened without its read task and stepped by the program each cycle (`zext_session_step`), its timers on a time the program moves one period per cycle (`zext_time_base_*`) |
 | `keyed.c` | a keyed topic: two instances of one message on one key expression, told apart by a field of the payload, with the last value of each |
 | `history.c` | history for a late subscriber: the last frames a publisher sent, replayed oldest first, then the live ones, each judged by an end-to-end receiver |
+| `redial.c` | a client whose link is lost: the node it dialled closes, a new node listens on the same port, and the client dials it by itself, its put and its subscription going on over the new link |
 
 ## Checking the package
 
