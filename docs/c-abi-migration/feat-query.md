@@ -204,6 +204,31 @@ A build with a switch off states nothing it would read: a test of each switch ho
 without it to the zenoh-pico behaviour (the get that ends at its last Final, the reply that leaves
 before its Final), as the send's switches are held (`scripts/lib/nondefault-tests-gate.sh`).
 
+### 4.1 What the lane that landed Q5 found of O1 and O3
+
+Neither is landed; each is read here far enough to say what its step is.
+
+- **O1** is a restructure of the get plane, not a switch over the code that is there. A leg's
+  entry is kept in the tables of the face it was asked of (`RegistryOf::gets_mut` in
+  `wz-capi-coop/src/engine/registry.rs`), its deadline is read from those tables
+  (`RegistryOf::dues`, `SessionFaces::next_get_deadline_ms`), and the leg ends when its entry
+  is dropped, by the guard its sink owns (`get_plane.rs`). `SessionState::lose_face` drops the
+  lost face's legs (`pending_gets.drop_face`), but leaving them would not make a get wait for its
+  timeout as zenoh-pico's does: the entry, its deadline and the routing of the face's replies are
+  all the face's. The form without the switch needs a pending get of the session's own (its
+  request id, the Finals it is owed and its deadline, as zenoh-pico's `_z_pending_query_t` holds
+  `_remaining_finals`), the faces' tables routing replies to it, and both engines' gets
+  (`wz-capi-coop/src/engine.rs`'s legs, `wz-capi-pico/src/get.rs`'s `leg_callback`) reading
+  it: the step of the row's last column, a lane of its own, which builds and measures each half.
+- **O3** lands with Q6, as the row says: until Q6 leaves the Query half of the Request's reader
+  out of a build without `queryable`, the switch removes nothing, and this lane does not take Q6.
+  What decides the Final today is `DispatchOutcome::owes_final` (`wz-session-core/src/query.rs`)
+  under the `query-unanswerable-final` policy (`QueryPeer::answers_unresolved_queries`); a build
+  without `queryable` reaches it through `Registry::dispatch` with no queryables' table
+  (`QueryablePresence = Absent`, `wz-capi-coop/src/engine.rs`). Q5's reader of a Request
+  (`network_message/request_read.rs`) reads the Query by the codec's `QueryView` in one arm of
+  its own, which is the arm Q6 gates.
+
 ## 5. Verification (the main session's)
 
 - Build and clippy of `wz-capi-coop` with `queryable`, with `queryable,group,app-transport,threads`
