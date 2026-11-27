@@ -3542,6 +3542,52 @@ fn the_wire_form_of_a_zid_ends_at_its_last_non_zero_byte() {
     assert_eq!(wire_form(SessionZid::from([0x44; 16])), [0x44; 16]);
 }
 
+/// A drawn zid is the source's sixteen bytes up to the last non-zero one, and sixteen zero bytes
+/// are the refusal of a source that gave none; bytes past sixteen are refused by their length as
+/// given, trailing zeros and all. Turned red by a wire form taken before the length is judged, or
+/// by a draw of zero bytes refused as anything but the entropy refusal.
+#[test]
+fn a_drawn_zid_is_trimmed_and_a_draw_of_zero_bytes_is_the_entropy_refusal() {
+    use crate::engine::{fresh_zid, wire_zid};
+    use crate::OpenError;
+    use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+    use wz_session_core::session_init_params::ZidError;
+
+    struct Gives([u8; 16]);
+    impl EntropySource for Gives {
+        fn try_fill_bytes(&mut self, buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+            for (byte, given) in buf.iter_mut().zip(self.0) {
+                *byte = given;
+            }
+            Ok(())
+        }
+    }
+
+    let mut inner_zero = [0u8; 16];
+    inner_zero[0] = 0x11;
+    inner_zero[2] = 0x22;
+    assert_eq!(
+        fresh_zid(&mut Gives(inner_zero)).map(|zid| zid.to_vec()),
+        Ok(std::vec![0x11, 0, 0x22])
+    );
+    assert_eq!(
+        fresh_zid(&mut Gives([0x33; 16])).map(|zid| zid.to_vec()),
+        Ok(std::vec![0x33; 16])
+    );
+    assert_eq!(
+        fresh_zid(&mut Gives([0; 16])),
+        Err(OpenError::EntropyUnavailable)
+    );
+    let mut long = [0u8; 17];
+    long[0] = 0x44;
+    assert_eq!(
+        wire_zid(&long),
+        Err(OpenError::InvalidZid(ZidError::LengthOutOfRange {
+            len: 17
+        }))
+    );
+}
+
 /// A build without the shared key ids names a key as upstream does and no other way: a session
 /// opened under any other key-wire form is refused before it dials, and `declared` opens on as
 /// before (and fails here for the endpoint the config does not name).

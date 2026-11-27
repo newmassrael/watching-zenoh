@@ -186,7 +186,7 @@ use wz_session_core::session_actions::Probed;
 use wz_session_core::session_actions::{LinkState, SessionCore, SessionLinkActions};
 use wz_session_core::session_init_params::{
     CookieKey, HeldDrop, KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf,
-    ZidError,
+    ZidError, ZID_MAX,
 };
 use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
@@ -1197,34 +1197,41 @@ fn session_zid(
     }
 }
 
-/// The wire form of the zid `zid` spells ([`wire_form`]), refused when the bytes are not one to
-/// sixteen or are all zero, so the session the open makes from them holds a zid.
+/// The zid `zid` spells, up to its last non-zero byte as zenoh writes an id, refused as
+/// [`SessionZid::new`] refuses the bytes as given: when they are not one to sixteen or are all
+/// zero. Out of line: the configured zid ([`wire_form`]), a drawn one and a derived one are each
+/// put in their wire form by this one body, so the walk and the copy are not repeated in each
+/// arm of the open's zid.
+#[inline(never)]
 pub(crate) fn wire_zid(zid: &[u8]) -> Result<SessionZid, OpenError> {
-    SessionZid::new(zid)
-        .map(wire_form)
-        .map_err(OpenError::InvalidZid)
-}
-
-/// `zid` up to its last non-zero byte, as zenoh writes an id. A zid has a non-zero byte, so what
-/// is kept is a zid as well and the fallback to `zid` itself is never taken.
-pub(crate) fn wire_form(zid: SessionZid) -> SessionZid {
-    zid.iter()
+    let len = zid.len();
+    if len > ZID_MAX {
+        return Err(OpenError::InvalidZid(ZidError::LengthOutOfRange { len }));
+    }
+    // Bytes with no non-zero one are kept whole, so they are refused with their own length.
+    let kept = zid
+        .iter()
         .rposition(|byte| *byte != 0)
         .and_then(|last| zid.get(..=last))
-        .and_then(|kept| SessionZid::new(kept).ok())
-        .unwrap_or(zid)
+        .unwrap_or(zid);
+    SessionZid::new(kept).map_err(OpenError::InvalidZid)
 }
 
-/// Sixteen random bytes, not all zero (an id of zero bytes names nothing).
-fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<SessionZid, OpenError> {
-    let mut zid = [0u8; 16];
+/// `zid` up to its last non-zero byte, as zenoh writes an id ([`wire_zid`]). A zid is one to
+/// sixteen bytes with a non-zero byte, so what is kept is a zid as well and the fallback to `zid`
+/// itself is never taken.
+pub(crate) fn wire_form(zid: SessionZid) -> SessionZid {
+    wire_zid(&zid).unwrap_or(zid)
+}
+
+/// Sixteen random bytes in their wire form; sixteen zero bytes, an id that names nothing, are
+/// the refusal of a source that gave none.
+pub(crate) fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<SessionZid, OpenError> {
+    let mut zid = [0u8; ZID_MAX];
     entropy
         .try_fill_bytes(&mut zid)
         .map_err(|_| OpenError::EntropyUnavailable)?;
-    if zid.iter().all(|b| *b == 0) {
-        return Err(OpenError::EntropyUnavailable);
-    }
-    wire_zid(&zid)
+    wire_zid(&zid).map_err(|_| OpenError::EntropyUnavailable)
 }
 
 /// The zid `zid-derivation = address-ports` derives from `owned`, the node's own address the
