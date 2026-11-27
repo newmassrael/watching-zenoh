@@ -4517,6 +4517,7 @@ dependencies = [
  "wz-codecs",
  "wz-codecs-test-support",
  "wz-codegen-build",
+ "wz-command-seal",
  "wz-ext-pubsub",
  "wz-host-net",
  "wz-node-time",

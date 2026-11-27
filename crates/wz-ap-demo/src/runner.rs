@@ -368,7 +368,7 @@ fn apply_tls_ca(
 
 /// The `tls`-less build: a `tls/...` dial surfaces the runtime's typed
 /// `Unsupported` at [`dial_endpoint`], so `--tls-ca` and the client certificate are
-/// inert (the fields are feature-uniform on [`Role`], only their USE is gated).
+/// inert (the client's key is not even read: `args::TlsConnectIdentity`).
 #[cfg(not(feature = "tls"))]
 fn apply_tls_ca(
     cfg: DialConfig,
@@ -4215,7 +4215,7 @@ fn log_lifecycle_verbs(whatami: &str, grants: &wz::runtime_tokio::lifecycle_quer
         ),
         n => log::info!(
             "wz-ap-demo {whatami}: session lifecycle verbs granted by {n} commander row(s) of \
-             the --node-declaration, to the zid a secure link proves"
+             the --node-declaration, to the zid a secure link or a sealed command proves"
         ),
     }
 }
@@ -4269,12 +4269,28 @@ fn host_session_lifecycle<D, I, M, P, E>(
             return;
         }
     };
+    // A verb may come as a command sealed by its commander's key (decision D17), judged for that
+    // commander whatever link carried it. The verifier holds a counter for every commander the
+    // declaration grants and an echo drawn now, so a command sealed before this start is not taken;
+    // a host that cannot hold it serves no lifecycle query rather than judge a sealed command as
+    // the link's.
+    let seal =
+        match wz::runtime_tokio::lifecycle_seal::lifecycle_seal_from_os_entropy(zid_hex, &grants) {
+            Ok(seal) => seal,
+            Err(e) => {
+                log::warn!(
+                    "wz-ap-demo {whatami}: {e}; the session lifecycle queries are not hosted"
+                );
+                return;
+            }
+        };
     log_lifecycle_verbs(whatami, &grants);
     let queries = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
         LifecycleQueries::new(zid_hex, whatami, grants, directory, reset_seed)
             .with_intent(loop_side.intent)
             .with_machines(loop_side.machines)
-            .with_opener(loop_side.opener),
+            .with_opener(loop_side.opener)
+            .with_seal(seal),
     ));
     let patterns = queries.guard().patterns();
     for pattern in patterns {

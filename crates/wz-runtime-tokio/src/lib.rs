@@ -716,6 +716,11 @@ pub use wz_session_core::lifecycle_query;
 #[cfg(feature = "session-close-ingress")]
 pub mod node_declaration;
 
+/// The verifier of the sealed lifecycle commands a node is sent (decision D17): its zid, ES256 by
+/// `ring` and the echo of this start, for every commander its declaration grants a verb to.
+#[cfg(feature = "session-close-ingress")]
+pub mod lifecycle_seal;
+
 /// The seed of a lifecycle node's table of reset generations
 /// ([`lifecycle_query::LifecycleQueries::new`]), drawn from OS-backed entropy: sixteen bytes from
 /// `getrandom`, the source this runtime draws its handshake nonces and signing keys from, so a

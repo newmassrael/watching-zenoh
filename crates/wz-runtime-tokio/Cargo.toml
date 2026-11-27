@@ -1752,8 +1752,15 @@ session-unicast-accept = ["wz-session-core/session-unicast-accept"]
 # names the channel it takes them over.
 #
 # The heap node reads who may command it from its declaration file (`node_declaration`), the
-# same rows the fixed profile compiles, so the verbs bring the TOML reader with them.
-session-close-ingress = ["wz-session-core/session-close-ingress", "dep:toml"]
+# same rows the fixed profile compiles, so the verbs bring the TOML reader with them. A verb may
+# arrive as a command sealed by its commander's key (decision D17), which the node verifies with
+# `ring` (`lifecycle_seal`), so the verbs bring the verifier with them too.
+session-close-ingress = [
+    "wz-session-core/session-close-ingress",
+    "wz-session-core/sealed-commands",
+    "dep:toml",
+    "dep:wz-command-seal",
+]
 # R1 extauth — forward the §5.4 Z_EXT_AUTH establishment ext codec into the
 # AP runtime (the codec lives in wz-session-core; only the AP profile carries
 # auth — the MCU/lwip path never forwards it). The dispatch + methods are
@@ -2274,6 +2281,11 @@ socket2 = { version = "0.6", features = ["all"], optional = true }
 # `session-close-ingress`: the grants of the lifecycle verbs are its commander rows.
 # The version `wz-zenoh-config` reads its TOML with, so the lock holds one.
 toml = { version = "0.9.6", optional = true }
+
+# The verifier of the sealed lifecycle commands a node is sent (decision D17), pulled by
+# `session-close-ingress`: ES256 and its signer by `ring` (the crate's default), which the TLS
+# links the verbs are taken over already link, so the graph gains no crate.
+wz-command-seal = { path = "../wz-command-seal", optional = true }
 
 # R2801 — the filesystem storage backend's dependencies, pulled ONLY by
 # `storage-backend-filesystem`, each at the version zenoh-backend-filesystem
