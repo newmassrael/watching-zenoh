@@ -1426,7 +1426,7 @@ mod face_ledger_tests {
 }
 
 /// What the first half of `SharedSession::face_up` leaves for the second: the faces the gossip
-/// told of the new link.
+/// told of the new link, and the watches the face's coming up is told to.
 struct LinkAnnounced {
     /// Each with the wake that gets its drive loop to send what was staged on it. Empty for a
     /// node that does not gossip, and for the first link of a node.
@@ -1435,6 +1435,156 @@ struct LinkAnnounced {
         allow(dead_code)
     )]
     told: Vec<(TokioSession, Arc<Notify>)>,
+    /// The watches made when the registry took the face in.
+    watched: WatchesUpTo,
+}
+
+/// The face watches a face's coming up or going is told to: those made up to the step of the
+/// registry that took the face in or let it go, the step a reader of the registry sees it in.
+/// [`SharedSession::watch_faces`] numbers the watches in order under the same lock, so a watch
+/// made after that step found the registry already changed: it was made with the face listed
+/// (and a history it asks for names the face), or after the face was gone. Told of the step all
+/// the same, a listener without the history would be told a face came up that was open before
+/// it was declared, and one with it a face went that it was never shown.
+#[derive(Debug, Clone, Copy)]
+struct WatchesUpTo(u64);
+
+impl WatchesUpTo {
+    /// Whether the watch numbered `id` was made by then.
+    fn includes(self, id: u64) -> bool {
+        id <= self.0
+    }
+}
+
+/// Which watches a face's coming up and going is told to: those made by the step of the registry
+/// that took the face in or let it go, and still made when it is told.
+#[cfg(test)]
+mod face_watch_tests {
+    use super::*;
+    use wz_runtime_tokio_test_support::establish_capability_pair_between;
+
+    /// The kinds a watch was told, in order.
+    type Told = Arc<StdMutex<Vec<FaceEventKind>>>;
+
+    /// A watch that records the kind of each transition it is told.
+    fn recording() -> (FaceEventSink, Told) {
+        let told = Told::default();
+        let kept = Arc::clone(&told);
+        let sink = FaceEventSink::of_arc(Arc::new(
+            move |kind: FaceEventKind, _face: &FaceSnapshot| {
+                kept.lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(kind);
+            },
+        ));
+        (sink, told)
+    }
+
+    fn told(watch: &Told) -> Vec<FaceEventKind> {
+        watch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn registry() -> SharedSession {
+        SharedSession::new(
+            TokioTime::new(),
+            [0x11; 16].into(),
+            SessionPolicy::defaults(),
+        )
+        .expect("test host entropy")
+    }
+
+    /// A watch made once the registry lists a face, before the face's coming up is told, is not
+    /// told it came up: it was made with the face open, as a listener declared then is, whose
+    /// history is what names the face. It is told the face went. A link's arrival runs the two
+    /// halves of the coming up on its own thread while a program declares its listener; here the
+    /// test runs them, and declares between them. This test fails (the late watch is told `Up`)
+    /// when the coming up is told to every watch made by the time it is told.
+    #[tokio::test]
+    async fn a_watch_made_once_a_face_is_listed_is_not_told_it_came_up() {
+        let link = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let shared = registry();
+        let (early, told_early) = recording();
+        shared.watch_faces(early);
+        let announced = shared
+            .face_up_announced(1, &link.resp_actions, false)
+            .expect("the face is admitted");
+        assert_eq!(
+            shared.face_snapshots().len(),
+            1,
+            "the registry lists the face before its coming up is told"
+        );
+        let (late, told_late) = recording();
+        shared.watch_faces(late);
+        assert!(shared.face_up_replayed(1, announced.watched));
+        assert_eq!(
+            told(&told_early),
+            [FaceEventKind::Up],
+            "CONTROL: a watch made before the face was listed is told it came up"
+        );
+        assert!(
+            told(&told_late).is_empty(),
+            "a watch made with the face listed was told it came up: {:?}",
+            told(&told_late)
+        );
+        shared.face_down(1);
+        assert_eq!(told(&told_early), [FaceEventKind::Up, FaceEventKind::Down]);
+        assert_eq!(
+            told(&told_late),
+            [FaceEventKind::Down],
+            "a watch made with the face listed is told it went"
+        );
+    }
+
+    /// A watch let go of between the two halves of a face's coming up is told nothing: the
+    /// coming up is told to the watches made when the face was listed that are still made. This
+    /// test fails when it is told to the watches as they were when the face was listed.
+    #[tokio::test]
+    async fn a_watch_let_go_of_before_a_face_is_told_is_told_nothing() {
+        let link = establish_capability_pair_between(0x01, 0x02, false, false, |_| {}).await;
+        let shared = registry();
+        let (gone, told_gone) = recording();
+        let id = shared.watch_faces(gone);
+        let (kept, told_kept) = recording();
+        shared.watch_faces(kept);
+        let announced = shared
+            .face_up_announced(1, &link.resp_actions, false)
+            .expect("the face is admitted");
+        assert!(shared.unwatch_faces(id));
+        assert!(shared.face_up_replayed(1, announced.watched));
+        assert!(told(&told_gone).is_empty(), "{:?}", told(&told_gone));
+        assert_eq!(
+            told(&told_kept),
+            [FaceEventKind::Up],
+            "CONTROL: the watch that is still made is told"
+        );
+    }
+
+    /// A transition is told to the watches made by its step and to no later one: a watch made
+    /// after a face was let go of never saw it, and is not told it went. This test fails when
+    /// the transition is told to every watch made by the time it is told.
+    #[test]
+    fn a_transition_is_told_to_the_watches_made_by_its_step_only() {
+        let shared = registry();
+        let (before, told_before) = recording();
+        shared.watch_faces(before);
+        let step = shared.lock().watches_made();
+        let (after, told_after) = recording();
+        shared.watch_faces(after);
+        let face = FaceSnapshot {
+            zid: [0x01; 16],
+            whatami: 1,
+            is_qos: false,
+            is_multicast: false,
+            is_shm: false,
+            links: Vec::new(),
+        };
+        shared.fire_face_event(FaceEventKind::Down, &face, step);
+        assert_eq!(told(&told_before), [FaceEventKind::Down]);
+        assert!(told(&told_after).is_empty(), "{:?}", told(&told_after));
+    }
 }
 
 /// The decision for a link `dialled` (or not) that has completed its handshake to the node
@@ -2380,6 +2530,11 @@ struct Inner {
 }
 
 impl Inner {
+    /// The face watches made up to now: those a face this step takes in or lets go is told to.
+    fn watches_made(&self) -> WatchesUpTo {
+        WatchesUpTo(self.next_face_watcher_id)
+    }
+
     /// The next session-scope entity id ([`Inner::tables`]), or `None` once every `u32` one has
     /// been handed out: a declaration is retracted by its id, and an id handed out twice would
     /// retract a live one.
@@ -3624,7 +3779,7 @@ impl SharedSession {
     /// back until the faces told of the new link have processed the announcement.
     pub fn face_up(&self, id: u64, actions: &Arc<SessionLinkActions>, dialled: bool) -> bool {
         match self.face_up_announced(id, actions, dialled) {
-            Some(_) => self.face_up_replayed(id),
+            Some(announced) => self.face_up_replayed(id, announced.watched),
             None => false,
         }
     }
@@ -3658,12 +3813,10 @@ impl SharedSession {
         let Some(announced) = self.face_up_announced(id, actions, dialled) else {
             return false;
         };
+        let watched = announced.watched;
         #[cfg(all(feature = "gossip", feature = "liveliness-get"))]
         Self::await_links_told(announced.told).await;
-        // Read only by the wait above, which a build with no gossip or no liveliness get lacks.
-        #[cfg(not(all(feature = "gossip", feature = "liveliness-get")))]
-        let _ = announced;
-        self.face_up_replayed(id)
+        self.face_up_replayed(id, watched)
     }
 
     /// The first half of [`Self::face_up`]: the admission, and the gossip that tells the other
@@ -3811,6 +3964,8 @@ impl SharedSession {
             },
         );
         guard.refresh_face_set();
+        // In the step that makes the face seen: a watch made from here on finds it listed.
+        let watched = guard.watches_made();
         drop(guard);
         // Outside the lock: the teardown of a replaced entry drops its subscribers and
         // queryables and may release the last `Arc<CClosure>`, running the C `drop(context)`
@@ -3822,7 +3977,7 @@ impl SharedSession {
             old.retire_watches();
             old.retire_groups();
         }
-        Some(LinkAnnounced { told })
+        Some(LinkAnnounced { told, watched })
     }
 
     /// The second half of [`Self::face_up`]: the declarations the face is owed are replayed
@@ -3832,7 +3987,10 @@ impl SharedSession {
     ///
     /// What a declaration made in the meantime put on the face is not declared again: the
     /// registry declares to every face it holds, this one included.
-    fn face_up_replayed(&self, id: u64) -> bool {
+    ///
+    /// The face's coming up is told last, to the watches of `watched` that are still made: a
+    /// watch made since the first half found the face listed already.
+    fn face_up_replayed(&self, id: u64, watched: WatchesUpTo) -> bool {
         let mut guard = self.lock();
         let Some(held) = guard.faces.get(&id) else {
             return false;
@@ -4052,7 +4210,7 @@ impl SharedSession {
         // Outside the lock, for the reason `fire_face_event` states: a C
         // listener may re-enter this registry.
         if let Some(snapshot) = snapshot {
-            self.fire_face_event(FaceEventKind::Up, &snapshot);
+            self.fire_face_event(FaceEventKind::Up, &snapshot, watched);
         }
         true
     }
@@ -4154,7 +4312,7 @@ impl SharedSession {
         // Drop OUTSIDE the lock: dropping the entry drops its subscribers,
         // and the last one may release the final `Arc<CClosure>` and run the
         // C `drop(context)`.
-        let removed = {
+        let (removed, watched) = {
             let mut guard = self.lock();
             let removed = guard.faces.remove(&id);
             // In the same step as the removal, so a reader (which holds this lock) sees the
@@ -4166,13 +4324,14 @@ impl SharedSession {
                     .retire(&entry.session.actions().message_reading());
             }
             guard.refresh_face_set();
-            removed
+            // In the step that removes the face: a watch made from here on never saw it.
+            (removed, guard.watches_made())
         };
         // R2259 (item 593) — the DEPARTED face's identity, taken while the
         // entry is still alive. There is no other moment: `face_down` is handed
         // an id, and once the entry drops nothing can say which peer it was.
         if let Some(snapshot) = removed.as_ref().and_then(|e| snapshot_of(&e.session)) {
-            self.fire_face_event(FaceEventKind::Down, &snapshot);
+            self.fire_face_event(FaceEventKind::Down, &snapshot, watched);
         }
         // The link's place in the node's admission is free the moment its face is: the node that
         // comes back is not refused for the link that left, however long the session's last holder
@@ -6090,11 +6249,15 @@ impl SharedSession {
     /// the lock across the call would deadlock on exactly the paths a C program
     /// is most likely to take. That is the same discipline `face_down` states
     /// for dropping a `FaceEntry` outside the lock.
-    fn fire_face_event(&self, kind: FaceEventKind, snapshot: &FaceSnapshot) {
+    ///
+    /// Told only to the watches of `watched`, those made when the registry took the face in or
+    /// let it go ([`WatchesUpTo`]), that are still made: one let go of since is told nothing.
+    fn fire_face_event(&self, kind: FaceEventKind, snapshot: &FaceSnapshot, watched: WatchesUpTo) {
         let sinks: Vec<FaceEventSink> = self
             .lock()
             .face_watchers
             .iter()
+            .filter(|(id, _)| watched.includes(*id))
             .map(|(_, sink)| sink.clone())
             .collect();
         for sink in sinks {

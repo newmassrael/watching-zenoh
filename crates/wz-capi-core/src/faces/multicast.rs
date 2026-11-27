@@ -616,10 +616,14 @@ impl SharedSession {
     /// A member is the same member while its zid, role and address are: a JOIN that moves
     /// any of them is a departure and an arrival. Departures are announced first, so a
     /// member that re-joined changed is never reported twice at once. The events run
-    /// outside the registry lock ([`Self::fire_face_event`]).
+    /// outside the registry lock ([`Self::fire_face_event`]), to the watches made when the
+    /// members were listed or unlisted.
     pub(crate) fn group_members_moved(&self, id: u64, members: &[MulticastMember]) {
-        let (departed, arrived) = {
+        let (departed, arrived, watched) = {
             let mut guard = self.lock();
+            // In the step that lists and unlists the members: a watch made from here on finds
+            // the group as it is after it.
+            let watched = guard.watches_made();
             let Some(face) = guard.mcast_faces.get_mut(&id) else {
                 return;
             };
@@ -644,13 +648,13 @@ impl SharedSession {
                 face.announced.push((*member, snapshot.clone()));
                 arrived.push(snapshot);
             }
-            (departed, arrived)
+            (departed, arrived, watched)
         };
         for (_, snapshot) in &departed {
-            self.fire_face_event(FaceEventKind::Down, snapshot);
+            self.fire_face_event(FaceEventKind::Down, snapshot, watched);
         }
         for snapshot in &arrived {
-            self.fire_face_event(FaceEventKind::Up, snapshot);
+            self.fire_face_event(FaceEventKind::Up, snapshot, watched);
         }
     }
 
