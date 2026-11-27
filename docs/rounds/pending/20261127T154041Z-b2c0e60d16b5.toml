@@ -1,0 +1,19 @@
+impact = ["watching-zenoh/build-and-verify", "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"]
+decision = '''
+Hold every move of logic into SCE to the cost it had (owner, 2026-11-27): measure the end-to-end receiver, restore it after its move into SCE maps measured slower, and land the TLA+ models written with the moves, checked by TLC.
+'''
+changes = '''
+- wz-app-frame bench e2e_receiver_cost: ns of a receive under sender keying and of slot_sender, 1 to 16 senders.
+- The receiver's own scan of its senders is restored (S11 2's move reverted); the two tests added before the move stay and pass on it; the five C11 budget rows of its documents go.
+- docs/formal: ResetOnceService and ResetGenerations (the reset's duplicate suppression, S5 M5 and S2 30), SecondLinkService and SecondLinks (S1 55), FaceCollisionService and FaceCollisions (S4 26), with a configuration per part.
+'''
+verification = '''
+- Bench on one machine, before, after, before, after, reverted: a receive 93-118 ns before, 126-180 ns after, 93-103 ns reverted; slot_sender 0.6-0.9 ns before and reverted, up to 8.4 ns after with 16 senders.
+- wz-app-frame tests with replay 99 passed; Layer Bc 132 units, no row unmeasured.
+- TLC 1.7.4 per configuration: the three whole models hold (91, 17, 61 distinct states); each part taken out breaks the invariant its row names.
+'''
+carry = '''
+- Every census row tried this round lost size or time through SCE's map: hashed lookup for a few slots, Linear's key comparison through a dyn feed, repeated scans in a generated step, a second table for host values. The moves wait for SCE: Lent storage and map slots (ADR 0154, accepted), and the requests sent with this round.
+- S5 M5, S4 26 and S1 55's rule are written on branches sce-s5 and sce-link and do not land until measured at no loss.
+- S10 22's bound sentence in the census is wrong: a heap session with no limit stated admits past the build's three limits.
+'''
