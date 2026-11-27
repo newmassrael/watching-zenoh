@@ -1546,7 +1546,65 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   `tests::on_use::an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table` reads the
   table's count (the plan's chains) beside the length and each Router's share.
 
+### 7.31 3d, the last step: no arena on use
+
+- `f90e925543`: the on-use form reserves no arena. With every tenant housed (7.27 to 7.30), the
+  arena held nothing but the count the engine kept it by (`ArenaKeep`); that count, the arena
+  (`SessionArena`), its lender (`TableLender`), the lend bodies of the state's plain tables
+  (`SessionRows::lent_from`, `StateTables`) and the runtime's span (`ArenaPlan::holding_runtime`,
+  `lay_runtime`, `runtime_bytes`, `RUNTIME_ROWS` none) are not compiled on use, and `lay_keep`
+  is gone. The engine's claim is made with no count of any memory (`SharedClaim::made` in
+  `wz-runtime-coop` `kept.rs`, replacing `made_with` and `last_kept_boxed`, which had no other
+  user): nothing it holds lies in memory another owner gives back. The open's memory
+  (`OpenStorage::memory`) stays meaningful in every form: on use it reserves the one block the
+  open takes, the session's state (`OwnBlock::take(memory)`, given back to that memory), as it
+  reserves the arena in D12, so a host ABI's fresh pages (`HostPages`, `reserves_zeroed`) give
+  the state as they give the arena, written by none of the take. `CoopEngine::arena_bytes` reads
+  none on use. The plan keeps its counts, the on-use constructors' one input (`ArenaPlan::count`,
+  `tables`, `peers`, `gets`, `session`, `reassembly`).
+- Tests. wz-capi-coop `engine::state_places::tests::an_on_use_state_block_is_reserved_from_the_opens_memory_and_given_back_to_it`
+  (new, on use; red if the block is taken of the allocator and not the memory, a zeroed memory's
+  block is written, or another's is left as it lay);
+  `tests::on_use::an_on_use_open_asks_its_memory_for_its_state_alone` (one block, the state's,
+  where it asked for the arena alone; red if an arena is reserved on use or the state taken of the
+  allocator); `tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime`
+  now asserts no row and no byte at all, CONTROL the plan's count of chains (red if any table is
+  laid out on use). Two on-use tests that read the arena are gone with it
+  (`an_on_use_engine_and_its_rooms_lie_apart_from_its_arena`,
+  `an_on_use_sessions_link_admission_lies_apart_from_its_arena`: with no arena the property is
+  the type's). The lent forms' alone: `tests::arena`
+  `the_reservation_is_the_plan_and_lending_every_row_fills_it` and
+  `an_open_holding_the_handle_reserves_the_plan_with_its_place` (which on use had read the
+  handle's place as a row since `898e504334`), `tests::admission_heap`'s arena test,
+  `arena::tests` two of the arena's own block; `tests::an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena`
+  reads the arena in D12 alone. The round's tests lend from a leaked `Arena`
+  (`arena::leaked_arena`, test and `wz_round`) in every form. wz-runtime-coop `kept::tests`:
+  `a_claimed_value_is_made_where_its_claim_lies_and_dropped_by_its_last_holder` replaces the
+  memory-count test; `a_claim_let_go_of_before_its_value_is_made_drops_no_value` over `made`.
+- What 3d leaves: the plan's `holding_cells`, `holding_rooms` and `holding_engine` are still
+  compiled on use (a test lays every row, `a_plan_with_every_row_holds_exactly_arena_rows`), though
+  the on-use open lays none of them; they are the D12 forms' API and go with the next pass over the
+  plan's public surface.
+
 ## 8. What the main session runs
+
+- 3d, the last step: no arena on use (`f90e925543`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --features tables-on-use --lib` (one more in
+  `engine::state_places`; `tests::on_use` two fewer; `tests::arena` two fewer, `arena::tests`
+  two fewer), `--features listen,tables-on-use --lib`, `--features udp-listen,tables-on-use
+  --lib tests::arena`, `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --features
+  tables-on-use --test engine_rows` and `--test no_engine_rows` (one block per open, the state's),
+  the default set's `--lib` (unchanged) and `cargo test --manifest-path crates/Cargo.toml -p
+  wz-runtime-coop --features alloc,session-unicast --lib kept` (count unchanged). With
+  `WZ_COOP_VALUE_LOCKS=off` and `threads,tables-on-use` the round's tests (`leaked_arena`).
+  Clippy of wz-runtime-coop (`--features alloc,session-unicast`) and wz-capi-coop in its default
+  set, `--features tables-on-use`, `--features listen,tables-on-use`, `--features
+  udp-listen,tables-on-use`, `--features group-host`, and `--features runtime-plan`. Size: D12
+  unchanged (`SessionArena`'s code as it was; `SharedClaim` is on use alone); on use smaller by
+  the arena's reservation, lender, `ArenaKept`, its last-holder body and the claim's count (one
+  retain and one give-back fewer), larger by nothing (the state's block was taken already; the
+  zeroing is a `write_bytes` where `alloc_zeroed` was). Receive Ir: unchanged (nothing of the
+  arena is read on the receive).
 
 - The reds of hn19 and the kept message's bound on use (`5db4e1ab42`, `425e22cf54`), not built or
   run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --features
@@ -2188,7 +2246,7 @@ The order that builds at each step:
    (7.27): the endpoints' texts by the state's policy, counted on use; step 2 (7.28): the
    reassembly chains by the policy's `ChainStore`, each chain's own buffer on use; steps 3 and 4
    (7.29): the cache's ring and the ABI's places of the allocator, through the same
-   `PlaceLender`; the arena and its count are next.
+   `PlaceLender`; the last (7.31): no arena on use, the open's memory reserving the state alone.
 6. The zenoh-pico preset's own library on use (11.1, R1 to R4), and N5 once R1 builds (11.2).
 
 The pushes of the tables step 2's second half counts, and of the tables beside them in the same
