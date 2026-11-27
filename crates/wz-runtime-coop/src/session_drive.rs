@@ -1157,10 +1157,12 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
         Self::LINK_CELL_BYTES
     }
 
-    /// The cells every link the stack opens from now on is placed in, for the session the links
-    /// serve: a link that finds none free is [`LinkOpenError::Exhausted`], and none is placed on
-    /// the heap. The default ignores them, as a stack whose `link_cell_bytes` is `0` does.
-    fn lend_cells(&mut self, cells: wz_session_core::byte_cells::LentByteCells<N::Flag>) {
+    /// Where every link the stack opens from now on is placed, for the session the links serve
+    /// ([`CountKind::Cells`](crate::link_cells::CountKind::Cells)): in a cell of a table the
+    /// session lent, where a link that finds none free is [`LinkOpenError::Exhausted`] and none is
+    /// placed on the heap; on the heap where it lent none, or where the kind's cells are the
+    /// heap's alone. The default ignores it, as a stack whose `link_cell_bytes` is `0` does.
+    fn lend_cells(&mut self, cells: N::Cells) {
         let _ = cells;
     }
 

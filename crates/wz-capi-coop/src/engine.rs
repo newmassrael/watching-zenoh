@@ -4775,11 +4775,8 @@ type HeldGate<C> = CellRc<LinkGate<C>, LinkCount>;
 #[cfg(not(wz_round))]
 type HeldGate<C> = LinkGate<C>;
 
-/// The table of cells a link's gates are placed in where they hold the link back
-/// (`TransportState::gate_cells`).
-type GateCells = wz_session_core::byte_cells::LentByteCells<
-    <LinkCount as wz_runtime_coop::link_cells::CountKind>::Flag,
->;
+/// Where a link's gates are placed where they hold the link back (`TransportState::gate_cells`).
+type GateCells = <LinkCount as wz_runtime_coop::link_cells::CountKind>::Cells;
 
 /// The two halves the actions of a link of a session on the clock `C` hold, which the session
 /// places together in the link's cell of its table (`TransportState::halves_cells`): the link's
@@ -5233,7 +5230,7 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         &self,
         pump: CellRc<dyn SessionDatagramLink, LinkCount>,
         _actions: &LinkHandle<C>,
-        _cells: Option<&GateCells>,
+        _cells: &GateCells,
     ) -> Option<HeldGate<C>> {
         Some(pump)
     }
@@ -5248,7 +5245,7 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         &self,
         pump: CellRc<dyn SessionDatagramLink, LinkCount>,
         actions: &LinkHandle<C>,
-        cells: Option<&GateCells>,
+        cells: &GateCells,
     ) -> Option<HeldGate<C>> {
         // The session is handed a record of a link only while its round of deliveries has the room
         // one record can take (decision Q4), and with `listen` only once the engine admitted it:
@@ -7293,9 +7290,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         links
             .lend_port_rows(lent.transport.port_rows)
             .map_err(heap_refused)?;
-        if let Some(driver_cells) = lent.transport.cells.driver {
-            links.lend_cells(driver_cells);
-        }
+        links.lend_cells(lent.transport.cells.driver);
         let (waits, room_places) = (links.waits(), lent.room_places);
         // SAFETY: the place reserved above, the arena's or the allocation of its own, was lent for
         // the rooms alone, aligned for them and valid for writes of them, where they stay.

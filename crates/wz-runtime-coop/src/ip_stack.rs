@@ -26,8 +26,6 @@ use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use wz_session_core::byte_cells::LentByteCells;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkEnds, LinkSendOutcome, LostCause, RoomAnswer, RoomWait, TxSlot,
@@ -43,7 +41,7 @@ use wz_session_core::session_slot::SlotDriver;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::group_transport::{GroupJoiner, GroupTransport, NoGroups};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::link_cells::{CellClaim, CellRc, CountKind, OneTask};
+use crate::link_cells::{CellClaim, CellRc, CellSource, CountKind, OneTask};
 use crate::link_storage::TxStore;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
@@ -136,7 +134,7 @@ pub type HeapLink<N = OneTask> = crate::link_cells::CellRc<dyn SessionDatagramLi
 /// buffers) is let go of where it lies.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub(crate) fn heap_link<K, N: CountKind>(
-    cells: Option<&LentByteCells<N::Flag>>,
+    cells: &N::Cells,
     fits: bool,
 ) -> Result<LinkCell<K, N>, LinkOpenError> {
     if !fits {
@@ -436,7 +434,7 @@ impl<N: CountKind> LinkShape<N> {
     /// ([`SessionLinks::lend_cells`]), so the shape is changed before that and has none.
     fn counted_by<M: CountKind>(self) -> LinkShape<M> {
         debug_assert!(
-            self.place.cells.is_none() && self.lent.is_none(),
+            self.place.cells.table().is_none() && self.lent.is_none(),
             "cells and buffers are lent after the links are made"
         );
         LinkShape {
@@ -446,7 +444,7 @@ impl<N: CountKind> LinkShape<N> {
             lent: None,
             place: LinkPlace {
                 owner_waits: self.place.owner_waits,
-                cells: None,
+                cells: Default::default(),
             },
         }
     }
@@ -458,9 +456,9 @@ impl<N: CountKind> LinkShape<N> {
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 struct LinkPlace<N: CountKind> {
     owner_waits: bool,
-    /// The cells of the session the links serve, when it lent the stack some
-    /// ([`SessionLinks::lend_cells`]): every link is placed in one, and none on the heap.
-    cells: Option<LentByteCells<N::Flag>>,
+    /// Where every link is placed ([`SessionLinks::lend_cells`]): in a cell of the session's
+    /// table when it lent the stack one, and none on the heap; on the heap otherwise.
+    cells: N::Cells,
 }
 
 // Not derived, as `LinkShape`'s are not.
@@ -479,7 +477,7 @@ impl<N: CountKind> Default for LinkPlace<N> {
     fn default() -> Self {
         Self {
             owner_waits: false,
-            cells: None,
+            cells: Default::default(),
         }
     }
 }
@@ -498,7 +496,7 @@ impl<N: CountKind> LinkPlace<N> {
         rx: RxBuffer<N::Flag>,
         tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
-        heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&socket))?.open(|place| {
+        heap_link::<_, N>(&self.cells, stream_ends_fit(&socket))?.open(|place| {
             let link = place.write(link_over(socket, rx, tx));
             if self.owner_waits {
                 link.wait_by_owner();
@@ -521,7 +519,7 @@ impl<N: CountKind> LinkPlace<N> {
         rx: RxBuffer<N::Flag>,
         tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
-        heap_link::<_, N>(self.cells.as_ref(), datagram_ends_fit(&socket, peer))?.open(|place| {
+        heap_link::<_, N>(&self.cells, datagram_ends_fit(&socket, peer))?.open(|place| {
             let link = UdpDriver::<U, _, _, W>::with_peer_in(place, socket, peer, rx, tx);
             if self.owner_waits {
                 link.wait_by_owner();
@@ -799,9 +797,9 @@ where
     };
 
     /// Every link these links open from now on, dialled or taken off a port that is listened on
-    /// after this, is placed in a cell of `cells`.
-    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
-        self.shape.place.cells = Some(cells);
+    /// after this, is placed through `cells`.
+    fn lend_cells(&mut self, cells: N::Cells) {
+        self.shape.place.cells = cells;
     }
 
     /// Every udp port these links listen on from now on keeps its peers and their datagrams in
@@ -2780,7 +2778,7 @@ mod tests {
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
         let cells = arena.lend_byte_cells(size, 1).expect("one cell");
-        links.lend_cells(cells);
+        links.lend_cells(Some(cells));
 
         let stream = links
             .open_initiator(Locator::tcp(ROUTER))
@@ -2808,6 +2806,34 @@ mod tests {
             first.is_ok() && second.is_ok(),
             "CONTROL: links lent no cells open each link on the heap"
         );
+    }
+
+    /// Links counted by a kind whose cells are the heap's hold a source that names no table and
+    /// open each link in a block of the heap of its own, none refused for want of a cell. Turned
+    /// red by a stack whose links' cells are made otherwise than its kind's source says.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn links_whose_cells_are_the_heaps_open_each_link_on_the_heap() {
+        use crate::link_cells::{HeapCells, OnHeap};
+
+        let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial).counted_by::<OnHeap<OneTask>>();
+        links.lend_cells(HeapCells);
+        assert!(
+            links.shape.place.cells.table().is_none(),
+            "the heap's source names no table"
+        );
+        let stream = links
+            .open_initiator(Locator::tcp(ROUTER))
+            .expect("a stream link on the heap");
+        let datagram = links
+            .open_initiator(Locator::udp(ROUTER))
+            .expect("a datagram link on the heap beside it");
+        assert_eq!(
+            CellRc::handles(&datagram.pump),
+            2,
+            "a link's sink and pump are two handles on its one cell"
+        );
+        drop((stream, datagram));
     }
 
     /// Links counted as several threads count a link's handles place each link in a cell of a
@@ -2841,7 +2867,7 @@ mod tests {
         let cells = arena
             .lend_byte_cells_of::<AtomicBool>(size, 1)
             .expect("one cell");
-        links.lend_cells(cells);
+        links.lend_cells(Some(cells));
 
         let link = links
             .open_initiator(Locator::udp(ROUTER))
@@ -2894,7 +2920,7 @@ mod tests {
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
         let cells = arena.lend_byte_cells(size, 1).expect("one cell");
-        links.lend_cells(cells);
+        links.lend_cells(Some(cells));
 
         let mut first = links
             .begin_initiator(Locator::tcp(ROUTER))
@@ -2978,7 +3004,7 @@ mod tests {
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
         let cells = arena.lend_byte_cells(size, 1).expect("one cell");
-        links.lend_cells(cells);
+        links.lend_cells(Some(cells));
 
         let mut made = links
             .begin_initiator(Locator::tcp(ROUTER))
@@ -3062,7 +3088,7 @@ mod tests {
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
         let cells = arena.lend_byte_cells(size, 1).expect("one cell");
-        links.lend_cells(cells);
+        links.lend_cells(Some(cells));
 
         let accepting = links
             .open_acceptor(7447)

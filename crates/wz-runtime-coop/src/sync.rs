@@ -450,6 +450,88 @@ impl HoldKind for ManyThreads {
     }
 }
 
+/// `K`, each part of its links made in a cell of the heap ([`OnHeap`](crate::link_cells::OnHeap)):
+/// the kind of a session that takes its links' memory as each link opens and lends its links no
+/// table of cells, so neither its stacks nor its transport name one. Every other item is `K`'s.
+#[cfg(all(
+    feature = "runtime",
+    feature = "session-unicast",
+    not(feature = "session-slot")
+))]
+pub struct LinksOnHeap<K: LockKind>(PhantomData<fn() -> K>);
+
+#[cfg(all(
+    feature = "runtime",
+    feature = "session-unicast",
+    not(feature = "session-slot")
+))]
+impl<K: LockKind> LockKind for LinksOnHeap<K> {
+    type Mutex<T>
+        = K::Mutex<T>
+    where
+        T: Send + 'static;
+
+    #[inline]
+    fn wrap<T: Send + 'static>(value: T) -> Self::Mutex<T> {
+        K::wrap(value)
+    }
+
+    #[inline]
+    fn with<T: Send + 'static, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
+        K::with(mutex, f)
+    }
+
+    #[inline]
+    fn try_with<T: Send + 'static, U>(
+        mutex: &Self::Mutex<T>,
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Option<U> {
+        K::try_with(mutex, f)
+    }
+
+    const WAITS: bool = K::WAITS;
+
+    type LinkCount = crate::link_cells::OnHeap<K::LinkCount>;
+    type SharedCount = K::SharedCount;
+    type Flag = K::Flag;
+    type Word = K::Word;
+    type Local<T>
+        = K::Local<T>
+    where
+        T: Send + 'static;
+
+    #[inline]
+    fn new_local<T: Send + 'static>(value: T) -> Self::Local<T> {
+        K::new_local(value)
+    }
+
+    #[inline]
+    fn with_local<T: Send + 'static, U>(
+        local: &Self::Local<T>,
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Result<U, wz_session_core::link::LocalHeld> {
+        K::with_local(local, f)
+    }
+}
+
+/// A hold through a kind whose links' cells are the heap's is a hold of `K`'s.
+#[cfg(all(
+    feature = "runtime",
+    feature = "session-unicast",
+    not(feature = "session-slot")
+))]
+impl<K: HoldKind> HoldKind for LinksOnHeap<K> {
+    type Hold<'a, T>
+        = K::Hold<'a, T>
+    where
+        T: Send + 'static;
+
+    #[inline]
+    fn hold<T: Send + 'static>(mutex: &Self::Mutex<T>) -> Self::Hold<'_, T> {
+        K::hold(mutex)
+    }
+}
+
 /// A value of a session reached only under the lock of the engine `O` that owns the session, and
 /// so taking no lock of its own: [`Self::with`] is the closure called on the value.
 ///
@@ -922,6 +1004,36 @@ pub(crate) mod tests {
     unsafe impl ConfinedOwner for TestOwner {}
 
     type Held = Confined<TestOwner>;
+
+    /// A kind whose links' cells are the heap's is the kind it wraps in all else: a value is
+    /// wrapped and held as the wrapped kind holds it, it waits as that kind does, and its links'
+    /// handles are counted as that kind counts them, each cell of the heap. Turned red by an item
+    /// of `LinksOnHeap` that is not the wrapped kind's.
+    #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+    #[test]
+    fn a_kind_whose_links_cells_are_the_heaps_is_its_kind_in_all_else() {
+        use crate::link_cells::CellRc;
+        type OnHeap = super::LinksOnHeap<Held>;
+        let value = OnHeap::wrap(1u32);
+        assert_eq!(
+            OnHeap::with(&value, |held| {
+                *held += 1;
+                *held
+            }),
+            2
+        );
+        assert_eq!(OnHeap::try_with(&value, |held| *held), Some(2));
+        assert_eq!(
+            <OnHeap as LockKind>::WAITS,
+            <Held as LockKind>::WAITS,
+            "it waits as the kind it wraps"
+        );
+        let link = CellRc::<u32, <OnHeap as LockKind>::LinkCount>::try_on_heap(7)
+            .expect("the heap has room");
+        let again = link.clone();
+        assert_eq!(CellRc::handles(&again), 2, "counted as one task's");
+        assert_eq!(*again, 7);
+    }
 
     /// Each closure runs on the value and sees what the one before it left, and two values nest,
     /// one inside the other's hold.

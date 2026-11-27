@@ -13,7 +13,6 @@
 
 use alloc::boxed::Box;
 
-use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::link::{LostCause, RxFrame};
 
@@ -283,7 +282,7 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
         on_side!(EitherLinks, self, links => links.link_cell_bytes())
     }
 
-    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
+    fn lend_cells(&mut self, cells: N::Cells) {
         on_side!(EitherLinks, self, links => links.lend_cells(cells))
     }
 

@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::ffi::c_int;
 
-use wz_session_core::byte_cells::{CellFlag, LentByteCells};
+use wz_session_core::byte_cells::CellFlag;
 use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::ws_link::{MaskKeys, KEY_LEN, MAX_HEAD_LEN};
 
@@ -31,7 +31,7 @@ use super::handshake::{answer_request, client_keys, read_answer, send_request, O
 use super::{WsFraming, WsSource, WS_MTU};
 use crate::group_transport::GroupTransport;
 use crate::ip_stack::HeapLink;
-use crate::link_cells::{CellRc, CountKind, OneTask};
+use crate::link_cells::{CellRc, CellSource, CountKind, OneTask};
 use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
     LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionDatagramLink,
@@ -60,7 +60,7 @@ type Stream<O> = <<O as WsOpen>::Dial as StreamDial>::Stream;
 /// Where a WebSocket link of a [`WsLinks`] is placed once its handshake is done: in a cell of the
 /// session's when it lent them, and waited on by its owner when the stack says so.
 struct WsPlace<N: CountKind> {
-    cells: Option<LentByteCells<N::Flag>>,
+    cells: N::Cells,
     owner_waits: bool,
 }
 
@@ -76,7 +76,7 @@ impl<N: CountKind> Copy for WsPlace<N> {}
 impl<N: CountKind> Default for WsPlace<N> {
     fn default() -> Self {
         Self {
-            cells: None,
+            cells: Default::default(),
             owner_waits: false,
         }
     }
@@ -140,7 +140,7 @@ impl<N: CountKind> WsPlace<N> {
             return Err(LinkOpenError::Unsupported);
         }
         let owner_waits = self.owner_waits;
-        let link = CellRc::<_, N>::claim_of(self.cells.as_ref())
+        let link = CellRc::<_, N>::claim_of(&self.cells)
             .ok_or(LinkOpenError::Exhausted)?
             .made(|place| {
                 let link = place.write(StreamDriver::framed(stream, rx, held, tx, framing));
@@ -447,7 +447,7 @@ impl<S, O: WsOpen, N: CountKind> WsLinks<S, O, N> {
     /// lends them its cells.
     pub fn counted_by<M: CountKind, T>(self, links: T) -> WsLinks<T, O, M> {
         debug_assert!(
-            self.shape.place.cells.is_none() && self.shape.lent.is_none(),
+            self.shape.place.cells.table().is_none() && self.shape.lent.is_none(),
             "cells and buffers are lent after the links are made"
         );
         WsLinks {
@@ -456,7 +456,7 @@ impl<S, O: WsOpen, N: CountKind> WsLinks<S, O, N> {
             shape: WsShape {
                 lent: None,
                 place: WsPlace {
-                    cells: None,
+                    cells: Default::default(),
                     owner_waits: self.shape.place.owner_waits,
                 },
                 tx_slots: self.shape.tx_slots,
@@ -494,7 +494,7 @@ impl<S, O: WsOpen, N: CountKind> WsLinks<S, O, N> {
         {
             return Err(LinkOpenError::Unsupported);
         }
-        let cell = CellRc::<DialCell<O, N>, N>::claim_of(self.shape.place.cells.as_ref())
+        let cell = CellRc::<DialCell<O, N>, N>::claim_of(&self.shape.place.cells)
             .ok_or(LinkOpenError::Exhausted)?;
         let (key, keys) = client_keys(&self.opener)?;
         let (rx, tx) = self.shape.buffers()?;
@@ -584,8 +584,8 @@ where
             ),
         };
 
-    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
-        self.shape.place.cells = Some(cells);
+    fn lend_cells(&mut self, cells: N::Cells) {
+        self.shape.place.cells = cells;
         self.links.lend_cells(cells);
     }
 

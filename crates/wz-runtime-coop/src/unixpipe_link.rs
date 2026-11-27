@@ -31,12 +31,11 @@ use core::cell::RefCell;
 use core::ffi::c_int;
 use core::fmt::Debug;
 
-use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::group_locator::GroupLocator;
 
 use crate::group_transport::GroupTransport;
 use crate::ip_stack::{heap_link, HeapLink};
-use crate::link_cells::{CellRc, CountKind, OneTask};
+use crate::link_cells::{CellRc, CellSource, CountKind, OneTask};
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, RxStore, TxBuffer, TxStore};
 use crate::session_drive::{
     LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionDatagramLink,
@@ -289,7 +288,7 @@ type PipeDriver<F, B> = StreamDriver<PipeStream<F>, RxBuffer<B>, TxBuffer<B>>;
 /// owner waits.
 struct PipeShape<N: CountKind> {
     lent: Option<LinkTables<N::Flag>>,
-    cells: Option<LentByteCells<N::Flag>>,
+    cells: N::Cells,
     owner_waits: bool,
     tx_slots: usize,
     tx_capacity: usize,
@@ -308,7 +307,7 @@ impl<N: CountKind> Default for PipeShape<N> {
     fn default() -> Self {
         Self {
             lent: None,
-            cells: None,
+            cells: Default::default(),
             owner_waits: false,
             tx_slots: 0,
             tx_capacity: 0,
@@ -330,7 +329,7 @@ impl<N: CountKind> PipeShape<N> {
             self.tx_slots,
             self.tx_capacity,
         )?;
-        heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&pipe))?.open(|place| {
+        heap_link::<_, N>(&self.cells, stream_ends_fit(&pipe))?.open(|place| {
             let link = place.write(link_over(pipe, rx, tx));
             if self.owner_waits {
                 link.wait_by_owner();
@@ -675,7 +674,7 @@ impl<S, O: FifoOpen, N: CountKind> UnixpipeLinks<S, O, N> {
     /// lends them its cells.
     pub fn counted_by<M: CountKind, T>(self, links: T) -> UnixpipeLinks<T, O, M> {
         debug_assert!(
-            self.shape.cells.is_none() && self.shape.lent.is_none(),
+            self.shape.cells.table().is_none() && self.shape.lent.is_none(),
             "cells and buffers are lent after the links are made"
         );
         UnixpipeLinks {
@@ -683,7 +682,7 @@ impl<S, O: FifoOpen, N: CountKind> UnixpipeLinks<S, O, N> {
             opener: self.opener,
             shape: PipeShape {
                 lent: None,
-                cells: None,
+                cells: Default::default(),
                 owner_waits: self.shape.owner_waits,
                 tx_slots: self.shape.tx_slots,
                 tx_capacity: self.shape.tx_capacity,
@@ -764,8 +763,8 @@ where
         ),
     };
 
-    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
-        self.shape.cells = Some(cells);
+    fn lend_cells(&mut self, cells: N::Cells) {
+        self.shape.cells = cells;
         self.links.lend_cells(cells);
     }
 

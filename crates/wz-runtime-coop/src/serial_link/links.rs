@@ -30,7 +30,6 @@ use core::ffi::c_int;
 use core::mem::ManuallyDrop;
 use core::ops::Deref;
 
-use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkEnds, LinkKind, LinkRoom, LinkSendOutcome, LinkSubject,
@@ -47,7 +46,7 @@ use wz_session_core::serial_link::{
 use super::{SerialDevice, SerialOpen};
 use crate::group_transport::GroupTransport;
 use crate::ip_stack::HeapLink;
-use crate::link_cells::{CellRc, CountKind, OneTask};
+use crate::link_cells::{CellRc, CellSource, CountKind, OneTask};
 use crate::link_storage::{
     heap_link_buffers, LinkTables, RxBuffer, RxStore, TxBuffer, TxLender, TxStore,
 };
@@ -706,7 +705,7 @@ fn opened<D: SerialDevice + 'static, N: CountKind>(
 /// waits.
 struct SerialShape<N: CountKind> {
     lent: Option<LinkTables<N::Flag>>,
-    cells: Option<LentByteCells<N::Flag>>,
+    cells: N::Cells,
     owner_waits: bool,
     tx_slots: usize,
     tx_capacity: usize,
@@ -725,7 +724,7 @@ impl<N: CountKind> Default for SerialShape<N> {
     fn default() -> Self {
         Self {
             lent: None,
-            cells: None,
+            cells: Default::default(),
             owner_waits: false,
             tx_slots: 0,
             tx_capacity: 0,
@@ -749,7 +748,7 @@ impl<N: CountKind> SerialShape<N> {
             self.tx_capacity,
         )?;
         let owner_waits = self.owner_waits;
-        CellRc::<_, N>::claim_of(self.cells.as_ref())
+        CellRc::<_, N>::claim_of(&self.cells)
             .ok_or(LinkOpenError::Exhausted)?
             .made(|place| {
                 let link = place.write(SerialDriver::over(line, at, rx, tx));
@@ -948,7 +947,7 @@ impl<S, O: SerialOpen, N: CountKind> SerialLinks<S, O, N> {
     /// lends them its cells.
     pub fn counted_by<M: CountKind, T>(self, links: T) -> SerialLinks<T, O, M> {
         debug_assert!(
-            self.shape.cells.is_none() && self.shape.lent.is_none(),
+            self.shape.cells.table().is_none() && self.shape.lent.is_none(),
             "cells and buffers are lent after the links are made"
         );
         SerialLinks {
@@ -956,7 +955,7 @@ impl<S, O: SerialOpen, N: CountKind> SerialLinks<S, O, N> {
             opener: self.opener,
             shape: SerialShape {
                 lent: None,
-                cells: None,
+                cells: Default::default(),
                 owner_waits: self.shape.owner_waits,
                 tx_slots: self.shape.tx_slots,
                 tx_capacity: self.shape.tx_capacity,
@@ -1058,8 +1057,8 @@ where
         ),
     };
 
-    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
-        self.shape.cells = Some(cells);
+    fn lend_cells(&mut self, cells: N::Cells) {
+        self.shape.cells = cells;
         self.links.lend_cells(cells);
     }
 

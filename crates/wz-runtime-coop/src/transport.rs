@@ -11,7 +11,6 @@
 use alloc::vec::Vec;
 
 use wz_session_core::bounded::push_text;
-use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
@@ -203,15 +202,15 @@ pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>
     );
 
     /// The gates over `pump`, the link's one shared handle, whose session sends through
-    /// `actions`, placed in a cell of `cells` where they hold the link back: `None` when `cells`
-    /// has no cell left. Where nothing holds the link back its gate is `pump` itself, which takes no
-    /// cell, so every call on the link goes through the link's own table and not first through a
+    /// `actions`, placed in a cell made through `cells` where they hold the link back: `None` when
+    /// no cell takes them. Where nothing holds the link back its gate is `pump` itself, which takes
+    /// no cell, so every call on the link goes through the link's own table and not first through a
     /// table of the gates over it.
     fn gate(
         &self,
         pump: CellRc<dyn SessionDatagramLink, K::LinkCount>,
         actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
-        cells: Option<&LentByteCells<<K::LinkCount as CountKind>::Flag>>,
+        cells: &<K::LinkCount as CountKind>::Cells,
     ) -> Option<Self::Gate>;
 
     /// The link as it is read behind `gate`: what the pump of its session steps and what its face

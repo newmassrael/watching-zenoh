@@ -11,7 +11,9 @@
 //! A cell is a claim of a [`LentByteCells`] table, its value laid out after a head that counts the
 //! handles and knows where the cell's memory goes back. A program whose links were lent no table
 //! (a host's links outside a session's arena) holds the same handle over a cell of its own on the
-//! heap, so a link is one type whichever memory it lives in.
+//! heap, so a link is one type whichever memory it lives in. Where a cell is made is the handle's
+//! kind's to say ([`CountKind::Cells`], a [`CellSource`]): a kind whose sessions lend their links
+//! no table makes each cell on the heap and names no table at all ([`OnHeap`]).
 //!
 //! Making a cell, letting go of a handle and giving the cell back are one body each for each form
 //! of a table's flag a build uses ([`CountKind::Flag`]), and generic over nothing else: what is
@@ -72,6 +74,11 @@ pub trait CountKind: Sized + 'static {
     /// holder, so its handles are counted for every thread a link's handles may be on.
     type Shared: CountKind<Flag = Self::Flag>;
 
+    /// Where a cell for a handle of this kind is made, which what makes a link's parts holds (a
+    /// stack, a session's transport): a table the session lent, or the heap while it lent none,
+    /// for a kind whose sessions may lend their links tables; the heap alone for [`OnHeap`]'s.
+    type Cells: CellSource<Self::Flag>;
+
     /// The word as it stands.
     fn read(word: &CountWord) -> usize;
 
@@ -103,6 +110,7 @@ pub enum OneTask {}
 impl CountKind for OneTask {
     type Flag = Cell<bool>;
     type Shared = OneTask;
+    type Cells = Option<LentByteCells<Cell<bool>>>;
 
     #[inline]
     fn read(word: &CountWord) -> usize {
@@ -148,6 +156,7 @@ pub enum Atomic {}
 impl CountKind for Atomic {
     type Flag = AtomicBool;
     type Shared = Atomic;
+    type Cells = Option<LentByteCells<AtomicBool>>;
 
     #[inline]
     fn read(word: &CountWord) -> usize {
@@ -220,6 +229,7 @@ pub enum OneFace {}
 impl CountKind for OneFace {
     type Flag = AtomicBool;
     type Shared = Atomic;
+    type Cells = Option<LentByteCells<AtomicBool>>;
 
     #[inline]
     fn read(word: &CountWord) -> usize {
@@ -246,6 +256,84 @@ impl CountKind for OneFace {
     #[inline]
     fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
         OneTask::try_with_local(local, f)
+    }
+}
+
+/// Counted as `N` counts, every cell made on the heap ([`HeapCells`]): the kind of a session that
+/// takes its links' memory as each link opens and lends its links no table of cells, so no maker of
+/// a link's part names a table or a claim of one. What its links share is counted as `N`'s is.
+pub struct OnHeap<N: CountKind>(PhantomData<fn() -> N>);
+
+impl<N: CountKind> CountKind for OnHeap<N> {
+    type Flag = N::Flag;
+    type Shared = N::Shared;
+    type Cells = HeapCells;
+
+    #[inline]
+    fn read(word: &CountWord) -> usize {
+        N::read(word)
+    }
+
+    #[inline]
+    fn update(word: &CountWord, f: impl FnMut(usize) -> Option<usize>) -> usize {
+        N::update(word, f)
+    }
+
+    type Local<T> = N::Local<T>;
+
+    #[inline]
+    fn new_local<T>(value: T) -> Self::Local<T> {
+        N::new_local(value)
+    }
+
+    #[inline]
+    fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U {
+        N::with_local(local, f)
+    }
+
+    #[inline]
+    fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
+        N::try_with_local(local, f)
+    }
+}
+
+/// Where the cells of a kind of handle are made ([`CountKind::Cells`]), as what makes a link's
+/// parts holds it: a table a session lent, claimed a cell at a time, or the heap. A type, not only
+/// a value, so a kind whose sessions never lend a table makes its cells through a source that
+/// names none ([`HeapCells`]), and its makers hold no claim of a table.
+pub trait CellSource<F: CellFlag>: Copy + Default {
+    /// Whether a cell may be claimed of a table: `false` for a source whose every cell is the
+    /// heap's, whose makers then call the heap's maker alone.
+    const LENDS: bool;
+
+    /// The table a cell is claimed of now: `None` for a cell of the heap.
+    fn table(&self) -> Option<&LentByteCells<F>>;
+}
+
+/// A table a session lent, while it lent one: a cell is claimed of it, and a link past its cells is
+/// refused, none made on the heap; each cell is a block of the heap while none is lent (a host's
+/// links outside a session's arena). What a stack holds before its session lends it cells, and
+/// after.
+impl<F: CellFlag> CellSource<F> for Option<LentByteCells<F>> {
+    const LENDS: bool = true;
+
+    #[inline(always)]
+    fn table(&self) -> Option<&LentByteCells<F>> {
+        self.as_ref()
+    }
+}
+
+/// Every cell a block of the heap of its own, given back to the heap: the source of a kind whose
+/// sessions take their links' memory as each link opens ([`OnHeap`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeapCells;
+
+impl<F: CellFlag> CellSource<F> for HeapCells {
+    const LENDS: bool = false;
+
+    #[inline(always)]
+    fn table(&self) -> Option<&LentByteCells<F>> {
+        None
     }
 }
 
@@ -351,6 +439,23 @@ fn head_in<F: CellFlag>(
     match cells {
         Some(cells) => table_head(cells, layout, whole, place),
         None => heap_head(layout, whole, place),
+    }
+}
+
+/// A cell made through `cells` for a slot of `layout`, its head written with `whole` and
+/// `place`: [`head_in`] for a source that may lend a table, and a block of the heap with no table
+/// named for one whose every cell is the heap's. Inlined: what is left is a call of one body.
+#[inline(always)]
+fn head_of<F: CellFlag, S: CellSource<F>>(
+    cells: &S,
+    layout: Layout,
+    whole: DropWhole,
+    place: usize,
+) -> Option<NonNull<CellHead<F>>> {
+    if S::LENDS {
+        head_in(cells.table(), layout, whole, place)
+    } else {
+        heap_head(layout, whole, place)
     }
 }
 
@@ -484,7 +589,7 @@ impl<K, N: CountKind> CellRc<K, N> {
     /// `value` in a cell of its own on the heap, its handles counted by `N`. `None`, with
     /// `value` let go of, when the heap refuses the cell: the program goes on.
     pub fn try_on_heap(value: K) -> Option<Self> {
-        Self::in_cells_of(None, value).ok()
+        Self::in_cells_of(&HeapCells, value).ok()
     }
 
     /// The handle of the cell `head` heads, its value written from `value`.
@@ -508,10 +613,11 @@ impl<K, N: CountKind> CellRc<K, N> {
         }
     }
 
-    /// [`CellRc::in_cells`] for handles counted by `N`, of a table whose flags are the form
-    /// `N` gives a cell back by.
-    pub fn in_cells_of(cells: Option<&LentByteCells<N::Flag>>, value: K) -> Result<Self, K> {
-        match head_in(
+    /// `value` in a cell made through `cells` ([`CellSource`]), its handles counted by `N`: a
+    /// cell of a lent table, of whose flags `N` gives a cell back by, or one of the heap; `value`
+    /// back when no cell takes it or the heap refuses one.
+    pub fn in_cells_of<S: CellSource<N::Flag>>(cells: &S, value: K) -> Result<Self, K> {
+        match head_of(
             cells,
             Layout::new::<Slot<K, N::Flag>>(),
             Slot::<K, N::Flag>::WHOLE,
@@ -533,10 +639,10 @@ impl<K, N: CountKind> CellRc<K, N> {
         }
     }
 
-    /// [`CellRc::claim`] for handles counted by `N`, of a table whose flags are the form `N`
-    /// gives a cell back by.
-    pub fn claim_of(cells: Option<&LentByteCells<N::Flag>>) -> Option<CellClaim<K, N>> {
-        let head = head_in(
+    /// [`CellRc::claim`] for handles counted by `N`, its cell made through `cells`
+    /// ([`Self::in_cells_of`]).
+    pub fn claim_of<S: CellSource<N::Flag>>(cells: &S) -> Option<CellClaim<K, N>> {
+        let head = head_of(
             cells,
             Layout::new::<Slot<K, N::Flag>>(),
             Slot::<K, N::Flag>::WHOLE,
@@ -553,7 +659,7 @@ impl<K> CellRc<K> {
     /// `value` in a cell of `cells`, or `value` back when every cell is taken or a cell is too
     /// small for it, or not aligned for it.
     pub fn place(cells: &LentByteCells, value: K) -> Result<Self, K> {
-        Self::in_cells_of(Some(cells), value)
+        Self::in_cells_of(&Some(*cells), value)
     }
 
     /// `value` in a cell of `cells` when a table is lent, or `value` back when none of its cells
@@ -562,7 +668,7 @@ impl<K> CellRc<K> {
     /// lends. The cell is made by `head_in`, out of line; what is left here, for each kind of
     /// value, is moving the value into it.
     pub fn in_cells(cells: Option<&LentByteCells>, value: K) -> Result<Self, K> {
-        Self::in_cells_of(cells, value)
+        Self::in_cells_of(&cells.copied(), value)
     }
 
     /// A cell for a value of `K`, claimed and not yet written: one of `cells` when a table is
@@ -571,7 +677,7 @@ impl<K> CellRc<K> {
     /// it stays ([`CellClaim::made`]); one let go of unwritten goes back. `None` too when the
     /// heap refuses the cell.
     pub fn claim(cells: Option<&LentByteCells>) -> Option<CellClaim<K>> {
-        Self::claim_of(cells)
+        Self::claim_of(&cells.copied())
     }
 
     /// `value` in a cell of its own on the heap: the handle of a link lent no table. `None`, with
@@ -677,21 +783,21 @@ impl<A, B> CellRc<(A, B)> {
         write: impl FnOnce(*mut A, *mut B),
     ) -> Option<(CellRc<A>, CellRc<B>)> {
         // SAFETY: the caller's contract, which is this call's.
-        unsafe { Self::halves_in_of(cells, write) }
+        unsafe { Self::halves_in_of(&cells.copied(), write) }
     }
 }
 
 impl<A, B, N: CountKind> CellRc<(A, B), N> {
-    /// [`CellRc::halves_in`] for handles counted by `N`, of a table whose flags are the form
-    /// `N` gives a cell back by.
+    /// [`CellRc::halves_in`] for handles counted by `N`, their cell made through `cells`
+    /// ([`Self::in_cells_of`]).
     ///
     /// # Safety
     /// As [`CellRc::halves_in`].
-    pub unsafe fn halves_in_of(
-        cells: Option<&LentByteCells<N::Flag>>,
+    pub unsafe fn halves_in_of<S: CellSource<N::Flag>>(
+        cells: &S,
         write: impl FnOnce(*mut A, *mut B),
     ) -> Option<(CellRc<A, N>, CellRc<B, N>)> {
-        let head = head_in(
+        let head = head_of(
             cells,
             Layout::new::<Slot<(A, B), N::Flag>>(),
             Slot::<(A, B), N::Flag>::WHOLE,
@@ -1069,6 +1175,68 @@ mod tests {
         assert_eq!((drops.get(), cells.in_use()), (4, 0));
     }
 
+    /// Each source makes a cell where it says: a lent table claims of the table and refuses past
+    /// it, the heap asked for none; no table lent, the heap; the heap's own source, the heap. Turned
+    /// red by a source whose cells go elsewhere than it says, as a lent table passed over for the
+    /// heap (`head_of` calling the heap's maker for a source that lends).
+    #[test]
+    fn each_source_makes_its_cells_where_it_says() {
+        let cells = table(CellRc::<Counted>::cell_bytes());
+        let drops = Rc::new(Cell::new(0));
+        let lent = Some(cells);
+        let first = CellRc::<Counted>::in_cells_of(&lent, Counted(drops.clone()))
+            .ok()
+            .expect("a cell");
+        let second = CellRc::<Counted>::in_cells_of(&lent, Counted(drops.clone()))
+            .ok()
+            .expect("a cell");
+        assert_eq!(cells.in_use(), 2, "both in the lent table");
+        assert!(
+            CellRc::<Counted>::in_cells_of(&lent, Counted(drops.clone())).is_err(),
+            "a full table refuses, and the heap is not asked"
+        );
+        let none = CellRc::<Counted>::in_cells_of(&None::<LentByteCells>, Counted(drops.clone()))
+            .ok()
+            .expect("the heap when no table is lent");
+        let heap = CellRc::<Counted>::in_cells_of(&HeapCells, Counted(drops.clone()))
+            .ok()
+            .expect("the heap's source");
+        assert_eq!(cells.in_use(), 2, "the heap's cells take none of the table");
+        drop((first, second, none, heap));
+        assert_eq!((drops.get(), cells.in_use()), (5, 0));
+    }
+
+    /// A handle of a kind whose cells are the heap's is counted as the kind it wraps counts: a
+    /// clone names the same value, the last handle drops it once, and a claim through the kind's
+    /// source is a cell of the heap its value is made in. Turned red by `OnHeap` counting apart
+    /// from the kind it wraps, or by its source making no cell.
+    #[test]
+    fn a_handle_whose_cells_are_the_heaps_counts_as_its_kind_does() {
+        let drops = Rc::new(Cell::new(0));
+        let source: <OnHeap<OneTask> as CountKind>::Cells = Default::default();
+        let handle =
+            CellRc::<Counted, OnHeap<OneTask>>::in_cells_of(&source, Counted(drops.clone()))
+                .ok()
+                .expect("the heap has room");
+        let again = handle.clone();
+        assert_eq!(
+            CellRc::handles(&handle),
+            2,
+            "a clone counted as one task's is"
+        );
+        drop(handle);
+        assert_eq!(drops.get(), 0, "a clone keeps the value");
+        drop(again);
+        assert_eq!(drops.get(), 1, "the last handle drops it once");
+        let made = CellRc::<Counted, OnHeap<OneTask>>::claim_of(&source)
+            .expect("a cell of the heap")
+            .made(|place| place.write(Counted(drops.clone())))
+            .expect("made in its cell");
+        assert_eq!(made.name(), 7);
+        drop(made);
+        assert_eq!(drops.get(), 2);
+    }
+
     /// A value made in a cell is made only once a cell is had for it: past the table's cells it is
     /// not made and what its maker holds is let go of, and with no table it is made on the heap.
     /// Turned red by a claim that calls a maker before its cell is had, or one kept past a refusal.
@@ -1442,7 +1610,7 @@ mod tests {
         let cells = table_of::<AtomicBool>(CellRc::<DropsOnce>::cell_bytes());
         let drops = alloc::sync::Arc::new(AtomicUsize::new(0));
         let Ok(handle) =
-            CellRc::<DropsOnce, Atomic>::in_cells_of(Some(&cells), DropsOnce(drops.clone()))
+            CellRc::<DropsOnce, Atomic>::in_cells_of(&Some(cells), DropsOnce(drops.clone()))
         else {
             panic!("a free cell of the table");
         };
@@ -1667,7 +1835,7 @@ mod tests {
         let drops = alloc::sync::Arc::new(AtomicUsize::new(0));
         let mut held = FaceHeld::gather(|| {
             let Ok(first) =
-                CellRc::<DropsOnce, OneFace>::in_cells_of(Some(&cells), DropsOnce(drops.clone()))
+                CellRc::<DropsOnce, OneFace>::in_cells_of(&Some(cells), DropsOnce(drops.clone()))
             else {
                 panic!("a free cell of the table");
             };

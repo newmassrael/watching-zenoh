@@ -1283,8 +1283,11 @@ pub(crate) type SharedBook<N> =
 pub(crate) fn shared_book<N: CountKind>(
     rows: Option<PortRows<Lent, N::Flag>>,
 ) -> Result<SharedBook<N>, usize> {
-    <SharedBook<N>>::in_cells_of(None, N::new_local(PortBook::of(rows)))
-        .map_err(|_| <SharedBook<N>>::cell_bytes_of())
+    <SharedBook<N>>::in_cells_of(
+        &crate::link_cells::HeapCells,
+        N::new_local(PortBook::of(rows)),
+    )
+    .map_err(|_| <SharedBook<N>>::cell_bytes_of())
 }
 
 /// Where a [`UdpPort`] reads its datagrams and holds those it sorted for a peer: memory of its

@@ -18,7 +18,6 @@ use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use core::ops::Deref;
 
-use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 #[cfg(feature = "group")]
 use wz_session_core::group_locator::parse_group_locator;
@@ -223,16 +222,15 @@ pub struct TransportState<T: TransportFaces> {
     /// engine owns, which it drops after every link's actions and task.
     #[cfg(feature = "link-admission")]
     pub admission: PlacedRef<dyn LinkAdmission>,
-    /// The cells each link's gates are placed in when the session makes the link, where they hold
-    /// the link back (`LinkCalls::gate`), lent from the arena; none for a plan that laid out none.
-    pub gate_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
-    /// The cells each link's actions are placed in when the session makes the link, lent from the
-    /// arena; none for a plan that laid out none.
-    pub actions_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
-    /// The cells the two halves of each link's actions are placed in together when the session
-    /// makes the link (its own state and the session's kernel, `place_halves`), lent from the
-    /// arena; none for a plan that laid out none, whose halves lie on the heap.
-    pub halves_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
+    /// Where each link's gates are placed when the session makes the link, where they hold the
+    /// link back (`LinkCalls::gate`): the cells the arena lent, the heap for a plan that laid out
+    /// none, or the heap alone where the links' kind lends no table ([`CountKind::Cells`]).
+    pub gate_cells: <CountOf<T> as CountKind>::Cells,
+    /// Where each link's actions are placed when the session makes the link, as its gates are.
+    pub actions_cells: <CountOf<T> as CountKind>::Cells,
+    /// Where the two halves of each link's actions are placed together when the session makes the
+    /// link (its own state and the session's kernel, `place_halves`), as its gates are.
+    pub halves_cells: <CountOf<T> as CountKind>::Cells,
     /// The key-wire form of each link the session opens: the session's, and the one stated for an
     /// endpoint apart from it (`shared-key-ids`).
     #[cfg(feature = "shared-key-ids")]
@@ -439,7 +437,7 @@ impl<T: TransportFaces> TransportState<T> {
         endpoint: Option<&DialEndpoint>,
     ) -> Result<LinkHandle<T>, TransportRefusal> {
         let actions: LinkHandle<T> =
-            CellRc::<_, CountOf<T>>::in_cells_of(self.actions_cells.as_ref(), actions)
+            CellRc::<_, CountOf<T>>::in_cells_of(&self.actions_cells, actions)
                 .map_err(|_| self.cells_exhausted(endpoint))?;
         #[cfg(feature = "link-admission")]
         actions
@@ -467,7 +465,7 @@ impl<T: TransportFaces> TransportState<T> {
             unsafe { halves.write(link, kernel) }
         };
         // SAFETY: `HalvesMaking::write` leaves a whole value at each place when it returns.
-        unsafe { CellRc::<_, CountOf<T>>::halves_in_of(self.halves_cells.as_ref(), write) }
+        unsafe { CellRc::<_, CountOf<T>>::halves_in_of(&self.halves_cells, write) }
             .ok_or_else(|| self.cells_exhausted(endpoint))
     }
 
@@ -792,7 +790,7 @@ impl<T: TransportFaces> TransportState<T> {
         // The gates take a cell of the session's table where they hold the link back, and a link
         // past the cells is refused as one past the buffers is.
         let gate = calls
-            .gate(pump, &actions, self.gate_cells.as_ref())
+            .gate(pump, &actions, &self.gate_cells)
             .ok_or_else(|| self.cells_exhausted(endpoint))?;
         let link = K::gated_link(&gate);
         let (dispatch, session) = calls.wire_parts(face, actions.clone(), &gate);

@@ -305,8 +305,11 @@ impl EntropyCount for crate::link_cells::Atomic {
         source: S,
     ) -> Result<CellRc<dyn DrawsEntropy + Send + Sync, Self>, usize> {
         type SourceCell<S> = CellRc<crate::cs::HostMutex<S>, crate::link_cells::Atomic>;
-        let held = SourceCell::<S>::in_cells_of(None, crate::cs::HostMutex::new(source))
-            .map_err(|_| SourceCell::<S>::cell_bytes_of())?;
+        let held = SourceCell::<S>::in_cells_of(
+            &crate::link_cells::HeapCells,
+            crate::cs::HostMutex::new(source),
+        )
+        .map_err(|_| SourceCell::<S>::cell_bytes_of())?;
         // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
         Ok(unsafe {
             held.unsize(|value| -> core::ptr::NonNull<dyn DrawsEntropy + Send + Sync> { value })
@@ -321,8 +324,11 @@ fn try_held_by_one_task<S: EntropySource + 'static>(
     source: S,
 ) -> Result<CellRc<dyn DrawsEntropy>, usize> {
     type SourceCell<S> = CellRc<core::cell::RefCell<S>>;
-    let held = SourceCell::<S>::in_cells(None, core::cell::RefCell::new(source))
-        .map_err(|_| SourceCell::<S>::cell_bytes())?;
+    let held = SourceCell::<S>::in_cells_of(
+        &crate::link_cells::HeapCells,
+        core::cell::RefCell::new(source),
+    )
+    .map_err(|_| SourceCell::<S>::cell_bytes())?;
     // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
     Ok(unsafe { held.unsize(|value| -> core::ptr::NonNull<dyn DrawsEntropy> { value }) })
 }
