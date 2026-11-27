@@ -242,14 +242,20 @@ What is left, largest first:
   into every door that takes a typed lock, once for each path out of the body a guard is dropped
   on (`wz_capi_pico::handlers::push` holds 234 of them, `matching::declare_on_filter` 200,
   `WriteFilter`'s drop 134). pico's lock is a call (`vendor/zenoh-pico/src/system/unix/system.c`
-  @ `z_result_t _z_mutex_lock(_z_mutex_t *m)`). The design, landed with this section: the typed
-  guard takes and lets go of its word through one out-of-line body each, and a notification is one
-  body; the runtime's section and the locks of what it lends the session, which the receive takes,
-  keep the inline exchange inside the out-of-line bodies they already are
-  (`wz-runtime-coop/src/cs.rs` @ `fn enter(lock: &'a RawLock) -> Self {`). Expected -1,000 to
-  -1,600 in driver, nothing in the receive's instructions. The count of a kept value's holders
-  (`kept::Kept::retain` and `release`, inlined into every clone and drop of a `Shared`) is
-  the same shape and is out of line too: expected -300 to -500.
+  @ `z_result_t _z_mutex_lock(_z_mutex_t *m)`). The design, landed with this section, follows
+  the receive: the read task's turn takes the engine's typed locks several times a message
+  (`wz_host_sync::run_body`'s loop, `face_turn`, `Deliveries::within`, `live`), and with the
+  guard's take and release and the count below out of line a message cost 3,020.3 instructions
+  against 2,759.5 with both in line (main 3,078.1). So a free take and a release nobody waits for are the word's one
+  exchange in line, and only the wait, the wake and a notification that finds a waiter are out of
+  line (`RawLock::lock_contended`, `wake_waiter`, `RawCondvar::notify_marked`). The count of a
+  kept value's holders is the other shape: in the receive's build no function a message runs
+  takes or gives back a count (every `Shared` clone and drop lies in an open, a declaration, a
+  reply or a drop), so `kept::Kept::retain` and `release` are one out-of-line body each; with
+  them in line beside the lock's the driver read 30,317 against main's 29,998, `kept` 2,251
+  against 2,005 and `faces` 3,076 against 2,836, the last from a link's drop copied into
+  `drive_link` and `place_link_session`, which is one body again
+  (`DirectSlot::drop_link`, never inlined). Expected below main's 29,998 in driver.
 - **The send of a stream link.** `tx_slot_send` 574, `write_owed` 477, `tx_slot_acquire` 275,
   `wait_for_room` 177 and `drop_owed` 115 hold the slot a frame is written in, the frames the
   stream has not taken whole, and the wait for room: 1,600 bytes against pico's one write of a
@@ -297,7 +303,7 @@ lines in language. A step whose area does not move by its expectation is reverte
 The driver's steps of section 3.4 are read on the driver row, the `wz_host_sync` and
 `wz_runtime_coop::kept` owner lines, and the bodies `wz_capi_pico::handlers::push` and
 `matching::declare_on_filter`; their check of the receive is `ir-receive.md`'s count of
-instructions a message, which neither step should move.
+instructions a message, which the count's step should not move and the lock's moved down.
 
 
 ## 6. Transport read again: the send writer as it landed, and the session machine's bytes
@@ -405,3 +411,5 @@ Together with 6.3 the transport area moves by about -1,800 to -2,700. The gap to
 is the receive's (`drive` 4,657, `reassembly_dispatch` 2,111, `transport_timers` 786: `text.md`
 X2, X4, X5) and the send's admission jobs of section 6.1.
 ||||||| parent of cb1055d1f4 (docs(size): Design the driver's steps against zenoh-pico's links)
+||||||| parent of 66494a4adb (docs(size): Read the driver's lock and count steps on the receive)
+instructions a message, which neither step should move.
