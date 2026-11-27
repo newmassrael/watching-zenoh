@@ -8360,6 +8360,23 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4682": {
+      "decision_summary": "Move the SCE pin to cfe5e88d74d, where SceReader::within takes a wire\nlength; the regeneration at the new pin writes no file of out/, and the\nmachines' feature-gated match arms build with their feature on and off.",
+      "changes_bullets": [
+        "vendor/sce: the pin moves to cfe5e88d74d."
+      ],
+      "verification_bullets": [
+        "bx --action regen-codegen at the pin: 0 files changed.",
+        "wz-session-core: check default, session-unicast-accept and clock-source pass.",
+        "wz-session-core lib tests 1781 pass; nondefault-features clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
