@@ -161,3 +161,10 @@ The lane states the tables' policy once, in the build script (`wz_lent`,
   to `tests/on_use_listen.rs`, a system-layer module with its row in
   `docs/deterministic-tests/system-layer.tsv`, so `tests::on_use` stays in
   the unit layer and the `on_use` filter of the on-use legs still runs it.
+- `crates/wz-capi-coop/src/engine.rs`: heap-native's `HeldGate` had a
+  form off the round (`LinkGate` itself) that read `LinkGates` in every
+  build; base-td's pump reads the link with no cell of gates between, so the
+  merge kept only the round's `HeldGate`. `LinkGates` and `LinkGate` are
+  then read by the round's gate cell (`wz_round`) and by the laid-out link
+  cells (`not(wz_on_use)`) alone, and carry that cfg; an on-use session that
+  steps its links itself names neither.

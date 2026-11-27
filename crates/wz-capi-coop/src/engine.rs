@@ -4772,12 +4772,16 @@ impl<C: ClockSource + 'static, D: ?Sized + DynSink> EventSink for FaceDispatch<C
 /// The gates a link's pump runs behind on this engine, for a session on the clock `C`, which the
 /// session places in the link's cell of its table (`TransportState::gate_cells`): the round's, and with
 /// `listen` the admission's under it, which carries the clock; where the read hands each record
-/// out as it is read, the link alone, which takes no cell (`HeldGate`).
+/// out as it is read, the link alone, which takes no cell (`HeldGate`). Read by the round's cell
+/// of gates and by the cells a session lays out; a session on use that steps its links itself has
+/// neither.
+#[cfg(any(wz_round, not(wz_on_use)))]
 trait LinkGates<D: ?Sized> {
     /// The gates.
     type Gate;
 }
 
+#[cfg(any(wz_round, not(wz_on_use)))]
 impl<C: ClockSource + 'static, D: ?Sized + DynSink> LinkGates<D> for C {
     #[cfg(all(feature = "listen", wz_round))]
     type Gate =
@@ -4793,6 +4797,7 @@ impl<C: ClockSource + 'static, D: ?Sized + DynSink> LinkGates<D> for C {
 
 /// The gates of a link of a session on the clock `C` whose actions send through it as `D`
 /// ([`LinkGates`]).
+#[cfg(any(wz_round, not(wz_on_use)))]
 type LinkGate<C, D> = <C as LinkGates<D>>::Gate;
 
 /// The gates of a link as its session and its pump hold them (`LinkCalls::Gate`): a handle on
