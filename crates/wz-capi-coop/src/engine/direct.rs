@@ -67,6 +67,7 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::session_drive::LinkWait;
 #[cfg(not(feature = "threads"))]
 use wz_runtime_coop::sync::ConfinedOwner;
+use wz_runtime_coop::transport::WalkRefusal;
 use wz_runtime_coop::transport::{LinkPump, OpenedAs, PlacedWire, PumpPlace};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::link_life::{carry, LinkInput, LinkIo, LinkPhase, Refused, SessionEnded};
@@ -951,9 +952,9 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// endpoint it reached beside its life's row: nothing in a build without `listen`, whose
     /// endpoint is the life's row alone.
     opened: Option<(OpenedLink<L::Pump, LinkCount>, DialNamed)>,
-    /// Why the last endpoint tried came to no link: what the session ends with when the life
-    /// ends it.
-    last: Option<OpenError>,
+    /// Why the last endpoint tried came to no link, with no text: what the session ends with
+    /// when the life ends it, its text read once then (`TransportState::walk_refused`).
+    refusal: Option<WalkRefusal>,
     /// When the life is next to be looked at, on the session's clock in microseconds.
     life_due_us: u64,
     /// When the pump's own deadlines fall next: 0 for a pump not stepped yet, `u64::MAX` while no
@@ -1131,7 +1132,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
     fn clear(&mut self, site: &DirectSite<L, C>) {
         self.let_go();
         self.empty_site(site);
-        self.last = None;
+        self.refusal = None;
         self.brought_up = false;
         self.life_due_us = u64::MAX;
     }
@@ -1260,7 +1261,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
         let begun = match transport.begin_dial(transport.endpoints.dial_text(row)) {
             Ok(begun) => begun,
             Err(refused) => {
-                self.last = Some(OpenError::from(refused));
+                self.refusal = Some(WalkRefusal::of(Some(DialEndpoint::Listed(row)), refused));
                 return LinkInput::DialRefused;
             }
         };
@@ -1279,33 +1280,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
     #[inline(never)]
     fn take_dial_answer(&mut self, core: &mut Core<L, C>) -> Option<LinkInput> {
         let (answer, endpoint) = core.transport.links.answer_face_dial(self.at())?;
-        Some(self.answered(core, endpoint, answer))
+        Some(self.answered(endpoint, answer))
     }
 
-    /// Keep why the endpoint `text` came to no link, `why`: what the session ends with when its
-    /// life ends it. Out of line and cold: each way the life gives up on an endpoint keeps its
-    /// refusal here.
+    /// Keep why `endpoint` (none for a refusal no endpoint names) came to no link, `why`: what
+    /// the session ends with when its life ends it. Out of line and cold: each way the life gives
+    /// up on an endpoint keeps its refusal here.
     #[cold]
     #[inline(never)]
-    fn keep_refusal(&mut self, text: &str, why: Refusal) {
-        self.last = Some(OpenError::Unreachable(EndpointRefusal::new(text, why)));
+    fn keep_refusal(&mut self, endpoint: Option<DialEndpoint>, why: Refusal) {
+        self.refusal = Some(WalkRefusal::endpoint(endpoint, why));
     }
 
     /// The answer of a dial of `endpoint`: the link kept until its handshake is begun, or why
     /// the network refused it.
     fn answered(
         &mut self,
-        core: &Core<L, C>,
         endpoint: DialEndpoint,
         answer: Result<OpenedLink<L::Pump, LinkCount>, LinkOpenError>,
     ) -> LinkInput {
-        match core.transport.dialled(Some(&endpoint), answer) {
+        match answer {
             Ok(opened) => {
                 self.opened = Some((opened, endpoint.into_named()));
                 LinkInput::DialMade
             }
             Err(refused) => {
-                self.last = Some(OpenError::from(refused));
+                self.keep_refusal(Some(endpoint), Refusal::Link(refused));
                 LinkInput::DialRefused
             }
         }
@@ -1400,7 +1400,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
                         router,
                         lend,
                         opened: None,
-                        last: None,
+                        refusal: None,
                         life_due_us: u64::MAX,
                         pump_due_us: u64::MAX,
                         brought_up: false,
@@ -1697,18 +1697,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> LinkIo for Direct
     /// want of an answer in time, as a build whose links are tasks names it.
     fn give_up_dial(&mut self, row: usize) {
         if let Some(endpoint) = self.core.transport.links.end_dial(self.slot.at(), row) {
-            self.slot.keep_refusal(
-                self.core.transport.endpoint_text(Some(&endpoint)),
-                Refusal::NoAnswerInTime,
-            );
+            self.slot
+                .keep_refusal(Some(endpoint), Refusal::NoAnswerInTime);
         }
     }
 
     fn end_handshake(&mut self, row: usize) {
         let at = self.slot.at();
         let why = self.core.transport.end_handshake(at);
-        self.slot
-            .keep_refusal(self.core.transport.endpoints.dial_text(row), why);
+        self.slot.keep_refusal(Some(DialEndpoint::Listed(row)), why);
         // The record lets go of the link while the place still holds its parts, so what the
         // link's session counted is read through the place as it goes.
         self.core.transport.links.put_link(at, Link::Idle);
@@ -1734,7 +1731,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> LinkIo for Direct
         }
         self.slot.drop_link(&self.face.site);
         if ends_session {
-            self.slot.keep_refusal("", Refusal::LinkLost);
+            self.slot.keep_refusal(None, Refusal::LinkLost);
         }
     }
 
@@ -2937,7 +2934,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             Err(SessionEnded) => {
                 io.slot.life_due_us = u64::MAX;
-                Err(io.slot.last.take().unwrap_or(OpenError::NoEndpoint))
+                let refused = io
+                    .slot
+                    .refusal
+                    .take()
+                    .map(|refusal| OpenError::from(io.core.transport.walk_refused(&refusal)));
+                Err(refused.unwrap_or(OpenError::NoEndpoint))
             }
         }
     }
@@ -3005,11 +3007,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             Ok(()) => LinkInput::HandshakeBegun,
             Err(refused) => {
                 let why = match refused {
-                    OpenError::EntropyUnavailable => Refused::Fatal,
-                    OpenError::NoTask(_) => Refused::Task,
+                    TransportRefusal::EntropyUnavailable => Refused::Fatal,
+                    TransportRefusal::NoTask(_) => Refused::Task,
                     _ => Refused::Endpoint,
                 };
-                slot.last = Some(refused);
+                slot.refusal = Some(WalkRefusal::of(Some(endpoint), refused));
                 LinkInput::HandshakeRefused(why)
             }
         }
@@ -3027,12 +3029,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         opened: OpenedLink<L::Pump, LinkCount>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-    ) -> Result<(), OpenError> {
+    ) -> Result<(), TransportRefusal> {
         slot.drop_link(&face.site);
         face.end.ready();
         let params = core.link_params()?;
         // The face's record at the slot's row names the face its link's session dispatches to.
-        let face_id = slot.face_id(core).ok_or(OpenError::NoEndpoint)?;
+        let face_id = slot.face_id(core).ok_or(TransportRefusal::NoEndpoint)?;
         let end = face.end_handle();
         // The link's session is made under the session's lock, its pump in the slot's place, which
         // the read that makes it holds.
@@ -3041,30 +3043,27 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             #[cfg(feature = "shared-key-ids")]
             limits: resolve_limits(&core.config),
         };
-        let placed = core
-            .transport
-            .place_wire(
-                &mut calls,
-                opened,
-                OpenedAs {
-                    face: face_id,
-                    role,
-                    endpoint,
-                },
-                WireMaking {
-                    params,
-                    local: &core.local,
-                    entropy: &mut core.entropy,
-                    clock: &core.session_time,
-                    timeouts: core.config.timeouts,
-                },
-                PumpPlace {
-                    place: &mut slot.pump,
-                    end,
-                    lend: slot.lend.clone(),
-                },
-            )
-            .map_err(OpenError::from)?;
+        let placed = core.transport.place_wire(
+            &mut calls,
+            opened,
+            OpenedAs {
+                face: face_id,
+                role,
+                endpoint,
+            },
+            WireMaking {
+                params,
+                local: &core.local,
+                entropy: &mut core.entropy,
+                clock: &core.session_time,
+                timeouts: core.config.timeouts,
+            },
+            PumpPlace {
+                place: &mut slot.pump,
+                end,
+                lend: slot.lend.clone(),
+            },
+        )?;
         let PlacedWire {
             wire,
             dispatch,

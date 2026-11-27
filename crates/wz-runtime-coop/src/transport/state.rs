@@ -40,7 +40,7 @@ use wz_session_core::unicast_rx::RouterLend;
 
 #[cfg(feature = "group")]
 use super::GroupRecord;
-use super::{EndpointRefusal, LinkCalls, Refusal, TransportRefusal, TransportSession};
+use super::{EndpointRefusal, LinkCalls, Refusal, TransportRefusal, TransportSession, WalkRefusal};
 use crate::dial::Begun;
 use crate::executor::SpawnRefusal;
 #[cfg(feature = "listen")]
@@ -411,6 +411,12 @@ impl<T: TransportFaces> TransportState<T> {
     /// named; empty for none.
     pub fn endpoint_text<'a>(&'a self, endpoint: Option<&'a DialEndpoint>) -> &'a str {
         endpoint.map_or("", |endpoint| endpoint.text(&self.endpoints))
+    }
+
+    /// The refusal the walk over the endpoints ends the session with: `refusal`, the text of
+    /// the endpoint it passed read in the session's texts now, once.
+    pub fn walk_refused(&self, refusal: &WalkRefusal) -> TransportRefusal {
+        refusal.with_text(self.endpoint_text(refusal.passed()))
     }
 
     /// A link to `endpoint` refused for want of a cell of the session's tables, as one past the
