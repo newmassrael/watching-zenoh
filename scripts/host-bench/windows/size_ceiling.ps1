@@ -259,6 +259,11 @@ $quoted = ($arguments | ForEach-Object { $Q + $_ + $Q }) -join ' '
 $configure = $Q + $cmakeExe + $Q + ' -S ' + $Q + $picoTree + $Q + ' -B ' + $Q + $build + $Q + ' -G ' + $Q + $generatorName + $Q +
              ' -A ' + $platform + ' ' + $quoted
 $compile = $Q + $cmakeExe + $Q + ' --build ' + $Q + $build + $Q + ' --config ' + $config + ' --parallel'
+# zenoh-pico's sources are UTF-8 and its MSVC build treats a warning as an error: MSVC reads a source in
+# the host's code page unless told, and on a host whose page is not UTF-8 (CP949) a comment's character
+# is C4819. CMake adds CFLAGS to the flags of a directory's first configure; no string literal of the
+# tree holds a character past ASCII, so the reference's code is the same either way.
+$env:CFLAGS = (@($env:CFLAGS, '/utf-8') | Where-Object { $_ }) -join ' '
 $log = Join-Path $script:WorkDir 'build-reference.log'
 if (Test-Path -LiteralPath $log) { Remove-Item -Force -LiteralPath $log }
 if ((Invoke-InVs 'build-reference' $compilerArch @($configure, $compile) $log) -ne 0) {
@@ -270,8 +275,10 @@ $header = Join-Path $build 'include\zenoh-pico\config.h'
 if (-not (Test-Path -LiteralPath $header)) { Fail "the reference build left no $header" }
 
 # The toolchain, in the words the reading gives it: CMake's, the linker's, and cl's banner, last since it
-# exits non-zero with no input.
+# exits non-zero with no input. The banner is read in English (`VSLANG` 1033): Visual Studio prints it in
+# the language of its installation otherwise, and a Korean one names no `Microsoft (R) C/C++`.
 $versionLog = Join-Path $script:WorkDir 'toolchain.log'
+$env:VSLANG = '1033'
 if (Test-Path -LiteralPath $versionLog) { Remove-Item -Force -LiteralPath $versionLog }
 [void](Invoke-InVs 'toolchain' $compilerArch @(($Q + $cmakeExe + $Q + ' --version'), ($Q + $linkerPath + $Q + ' --version'), 'cl') $versionLog)
 $said = @((Read-Text $versionLog) -split "\r?\n")

@@ -99,14 +99,22 @@ fn main() {
     // additional source trees and link options unrelated to wire-
     // codec interop. The static-lib + minimal-features build keeps
     // the surface lean.
-    let dst = cmake::Config::new(&pico_src)
+    let mut config = cmake::Config::new(&pico_src);
+    config
         .define("BUILD_SHARED_LIBS", "OFF")
         .define("BUILD_EXAMPLES", "OFF")
         .define("BUILD_TESTING", "OFF")
         .define("BUILD_TOOLS", "OFF")
         .define("BUILD_INTEGRATION", "OFF")
-        .define("PACKAGING", "OFF")
-        .build();
+        .define("PACKAGING", "OFF");
+    // zenoh-pico's sources are UTF-8 and its MSVC build treats a warning as an error: MSVC reads a
+    // source in the host's code page unless told, and on a host whose page is not UTF-8 (CP949) a
+    // comment's character is C4819 and the build fails. No string literal of the tree holds a
+    // character past ASCII, so the code is the same either way.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        config.cflag("/utf-8");
+    }
+    let dst = config.build();
 
     println!("cargo:rustc-link-search=native={}/lib", dst.display());
     println!("cargo:rustc-link-lib=static=zenohpico");
