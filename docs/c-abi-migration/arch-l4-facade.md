@@ -421,8 +421,8 @@ a minus is a fall.
 | step | holds once | change | files | lands | turns red if it is wrong | client | peer | api | receive Ir |
 |---|---|---|---|---|---|---:|---:|---:|---|
 | F1 (landed, `89d7916c9b`) | A3, the subscriber's | the subscriber's state holds no count of the engine and reaches it through its place's lender (`object_slot::lent_engine`, `pubsub::subscriber_engine`); the tokio engine's state keeps its own, its places being its pools' | `wz-capi-pico/src/object_slot.rs`, `pubsub.rs`, `session.rs` | landed | `pubsub::tests::a_subscriber_reaches_its_engine_through_its_places_one_count` | in section 1's readings | in them | in them | 0 |
-| F2 | A3, the rest | the write filter (a publisher's, a querier's), the matching listener, the token, the queryable and the liveliness subscriber reach the engine through their place's lender. The filter names no engine: its owner hands it the engine its place reaches on each call and gives the filter back with it in its own release, as an object that keeps a `KeyHold` gives it back (`KeyHold::release(session)`), so the plain publishers an advanced publisher keeps in its place need no reach of their own. The tokio engine's states keep their count, as F1's does | `write_filter.rs`, `pubsub.rs`, `querier.rs`, `matching.rs`, `liveliness.rs`, `query.rs`, `advanced_plane.rs` of `wz-capi-pico` | alone: the doors' crate, both engine legs | an F1-shaped test per kind (the take adds one count, the fill none, the release gives the one back); `pubsub::tests::a_publishers_lent_key_is_the_records_and_a_copy_holds_its_declaration`, `matching::tests::a_listeners_place_stands_while_its_filter_holds_it`, `query::tests::a_queryables_place_goes_back_when_its_row_lets_go_of_the_closure` unchanged | -60 to -150 (a publisher and a listener: a retain at the declaration, a release and its last-holder test, `WriteFilter`'s drop 410) | -60 to -150 | -200 to -450 (six kinds and the advanced publisher's filters) | 0; a put reads the engine through the lender at a fixed offset from the publisher's state, one load, as `WriteFilter::shared` is one now |
-| F3 | A1, A2 | `PicoSession` is lent from the handle (the drive's engine and `&PicoSessionExt`) and not stored in it; the advanced plane, which keeps one on a task, keeps an owned copy where it keeps it | `write_filter.rs`, `session.rs`, `session_ext.rs`, the declaring doors, `advanced_plane.rs` | alone | `write_filter::tests::a_door_borrows_the_view_its_session_was_opened_with` (rewritten: the view is the handle's own fields), `session::session_place_tests::the_engine_held_for_a_call_is_the_one_its_entities_keep` | -40 to -100 (the second count's clone at the open and its drop at the close) | -40 to -100 | -150 to -350 (`PicoSessionHandle::new` 994 and `PicoSession`'s drop glue 162, with the clock's and the time's clones) | 0 |
+| F2 | A3, the rest | the write filter (a publisher's, a querier's), the matching listener, the token, the queryable and the liveliness subscriber reach the engine through their place's lender. The filter names no engine: its owner hands it the engine its place reaches on each call and gives the filter back with it in its own release, as an object that keeps a `KeyHold` gives it back (`KeyHold::release(session)`), so the plain publishers an advanced publisher keeps in its place need no reach of their own. The tokio engine's states keep their count, as F1's does | `write_filter.rs`, `pubsub.rs`, `querier.rs`, `matching.rs`, `liveliness.rs`, `query.rs`, `advanced_plane.rs` of `wz-capi-pico` | landed (section 4.2) | an F1-shaped test per kind (the take adds one count, the fill none, the release gives the one back); `pubsub::tests::a_publishers_lent_key_is_the_records_and_a_copy_holds_its_declaration`, `matching::tests::a_listeners_place_stands_while_its_filter_holds_it`, `query::tests::a_queryables_place_goes_back_when_its_row_lets_go_of_the_closure` unchanged | -60 to -150 (a publisher and a listener: a retain at the declaration, a release and its last-holder test, `WriteFilter`'s drop 410) | -60 to -150 | -200 to -450 (six kinds and the advanced publisher's filters) | 0; a put reads the engine through the lender at a fixed offset from the publisher's state, one load, as `WriteFilter::shared` is one now |
+| F3 | A1, A2 | `PicoSession` is lent from the handle (the drive's engine and `&PicoSessionExt`) and not stored in it; the advanced plane, which keeps one on a task, keeps an owned copy where it keeps it | `write_filter.rs`, `session.rs`, `session_ext.rs`, the declaring doors, `advanced_plane.rs` | landed (section 4.3) | `write_filter::tests::a_door_borrows_the_view_its_session_was_opened_with` (rewritten: the view is the handle's own fields), `session::session_place_tests::the_engine_held_for_a_call_is_the_one_its_entities_keep` | -40 to -100 (the second count's clone at the open and its drop at the close) | -40 to -100 | -150 to -350 (`PicoSessionHandle::new` 994 and `PicoSession`'s drop glue 162, with the clock's and the time's clones) | 0 |
 | F4 | the holds of a declaring call (2.2) | the record adopts the door's hold: the door's `KeyHold` is handed on (`WireKey::with_own` names the declaration by its `KeyexprRef`, row and all), and the engine's record takes it by value, with no search by id, no second hold and no release on the way that succeeds; a refusal hands the hold back with the sink | `wz-capi-pico` (`keyexpr.rs`, `pubsub.rs`, `write_filter.rs`, `query.rs`, `liveliness.rs`), `wz-capi-port/src/lib.rs`, `wz-capi-coop/src/engine.rs` (the declaring methods), `wz-session-core/src/session_tables.rs` (`KeyForm`), `wz-capi-core/src/engine_port.rs` | after `arch-l3-rows.md` D3 and T-DECL's change of `Declaring`, which write `session_tables.rs` | `keyexpr::arena_key_tests::an_entity_key_keeps_no_text_and_holds_only_while_the_door_does` (rewritten: the hold is handed on, not given back), `keyexpr::tests::a_declaration_lives_as_long_as_its_last_holder`, `pubsub::tests::a_subscribers_lent_key_is_the_sessions_record_and_a_copy_holds_its_declaration`; a new test: a declaration takes the session twice, not three times (`Takes::core`), and leaves its key's count at one | -150 to -300 (`EntityKey`'s drop 88 and its release; the search in `declare_subscriber_on_wire` and `declare_write_filter`; `release_keyexpr` 115) | -150 to -300 | -400 to -800 (seven declaring kinds) | 0; a declaration two takes of the lock, not three |
 | F5 | A4 | an entity is named across the boundary by its row's handle (principle P10): the port's `Declared` answers L3's handle, an associated type of the port's trait that the tokio engine sets to its id until phase P5; the door's object keeps it, and an undeclaration names the row (`SessionTables::undeclare_subscriber(handle)` is there already); the entity id is read off the row where the wire or `z_subscriber_id` names it | `wz-capi-port` (`lib.rs`, `engine.rs`), `wz-capi-pico` (`pubsub.rs`, `write_filter.rs`, `query.rs`, `liveliness.rs`, `matching.rs`), `wz-capi-coop/src/engine.rs` (the undeclarations), `wz-capi-core/src/engine_port.rs` | one step with `arch-l3-rows.md` D4: that lane's tests, this lane's files | D4's tests (an undeclaration by a handle of an earlier generation removes nothing; one of a liveliness subscriber reaches its own table); `pubsub::tests::both_subscriber_doors_take_the_closure_and_refuse_alike` | -150 to -300 (the walk of two tables by id in `undeclare_subscriber`, 1,721; D4's estimate) | -150 to -300 | -400 to -900 (subscribers, liveliness subscribers, queryables, tokens, write filters) | 0 |
 | F6 | the declaration's composition (`docs/win-budget/size.md` 3.2.1) | one declaring request: each declaring door reads its C arguments into one `DeclareRequest` (the kind, the key the gate admitted, the caller's declaration, the options' fold, the closure's parts, the place, the door its refusal is answered at) and makes one call, in which L3 declares the key, mints the id, writes the row with its callback and announces it under one take | the declaring doors, `refusal.rs`, the engine's declaring methods | on T-DECL's engine body (S1), after F4 and F5 | one take a declaration (`Takes::core`); `entity_tables`'s order of refusal (room, key, id); the doors' refusal tests (the subscriber's above, the queryable's and the token's twins); the Layer C1co legs at their exact counts | net -900 to -1,200 (doors -1,600, sessions +700; size.md 3.2.1) | as client | net -1,500 to -3,000 (twelve declaring bodies of 9,087 B in the doors against zenoh-pico's of about 220 each) | 0; a declaration one take of the lock |
@@ -451,6 +451,79 @@ count, the fill none, the engine reached is the session's, the release gives the
 `pubsub::tests::a_subscribers_place_goes_back_with_its_owner_while_its_row_holds_the_closure` and
 `pubsub::tests::a_subscribers_lent_key_is_the_sessions_record_and_a_copy_holds_its_declaration`
 hold the release and the record's key, which names the lender's engine.
+
+### 4.2 F2, landed
+
+One reading of an entity's engine for every kind: `object_slot::entity_engine` over the trait
+`object_slot::SessionEntity`, which reads the place's lender at `LENDER_AT` past the object on the
+cooperative engine (the object, or the `Answering` it begins, names the layout through
+`SessionEntity::Placed`) and the object's own count on the tokio engine (`kept_engine`). F1's
+`subscriber_engine` and `subscriber_at` fold into it and into `abi::handle_at`, the raw form of
+`handle_ref` a door uses where it reads past the object into its place. `PublisherState`,
+`QuerierState`, `MatchingListenerState`, `TokenState` and `QueryableState` hold the engine only
+with `engine-tokio`.
+
+The write filter names no engine. Each of its calls takes the engine its owner reaches
+(`declare_matching_listener`, `active`, `holds_back`, `keep_plain`, `publish`), and
+`WriteFilter::retract(engine)` replaces its drop: the listeners, then the filter. Its owners call
+it on every path that lets go of it: `free_publisher` (which `z_undeclare_publisher` now calls
+too), `free_querier` before the querier's state is retired, `FilteredKey::declare_at`'s refusal
+of a key the record keeps none of, and the drop of the advanced plane's `KeptPublisher`.
+`write_filter::FilterOn` is a filter and the engine its owner reached: the one value the matching
+doors of a publisher, a querier and an advanced publisher read the status of (`FilterOn::matches`)
+and declare a listener on (`matching::declare_on_filter`). A token's declaration answers its id
+(`liveliness::declare_token`); its state has no drop, and `z_liveliness_undeclare_token`, which
+`z_liveliness_token_drop` calls, retracts it on the engine its place reaches.
+
+What the row did not foresee: the advanced plane's publisher, its beacon and its token are kept
+by value by the composite of `wz-ext-pubsub` (`AdvancedPublisherOn`), on no place of the session,
+and the composite lets go of them by dropping them. They keep a count each, in
+`advanced_plane::KeptPublisher` and `KeptToken`, as many as before; so does `query::PlainQueryable`
+(the cache's queryable, the admin space). Taking those counts needs the plane to retract what it
+declared (a method of `AdvancedPublisherPlane` the composite calls), a change of a contract the
+Rust ABIs share; it is not made here, and the api case's figure of the row is smaller by them.
+
+Held by `pubsub::tests::each_entity_reaches_its_engine_through_its_places_one_count` (through the C
+doors: a publisher's declaration adds its place's one count and its matching listener one more,
+each undeclaration gives its count back, and the querier, the token and the queryable each hold
+one while declared and none after); turned red by a state or a write filter that holds the engine
+again, or an undeclaration that leaves its place standing. F1's test, `write_filter::tests` and
+`matching::tests::a_listeners_place_stands_while_its_filter_holds_it` are kept.
+
+Expected, unmeasured: client and peer -60 to -150 (the publisher's retain at the declaration, the
+release and its last-holder test at the undeclaration; the filter's retraction is the same work
+moved into `free_publisher`); api -150 to -350 (five kinds less the advanced plane's, which keeps
+its counts). Receive Ir 0: no receive path is touched, and a put reads the engine through the
+lender in one load where it read `WriteFilter::shared` in one.
+
+### 4.3 F3, landed
+
+`write_filter::PicoSession` is a view, `PicoSession<'a> { engine: &'a EngineHold, mode }`, made by
+`PicoSession::of(handle)` of the count the session's drive holds (`engine_held`) and of
+`PicoSessionExt::mode`; `PicoSessionHandle` keeps no `pico` field, so the open makes no second
+count of the engine, and, with `advanced`, no second clone of the clock and the time. Every
+declaring function takes the view by value (two words). The advanced plane, which declares from a
+task of its own, keeps what it declares with where it keeps it: `PicoPlane` holds the engine, the
+role, the clock and the time, each once (it held the clock twice: in the session it kept and
+beside it), and lends the same view (`PicoPlane::session`).
+
+Held by `write_filter::tests::a_door_borrows_the_view_its_session_was_opened_with`, rewritten: the
+view's engine lies where the drive holds it, and making a view takes no count; turned red by a
+view kept beside the drive.
+`session::session_place_tests::the_engine_held_for_a_call_is_the_one_its_entities_keep` is kept.
+
+Expected, unmeasured: client and peer -40 to -100 (the second count's clone at the open and its
+drop at the close, inlined into `z_open` and the handle's drop); api -150 to -350 (with the clock's
+and the time's clones and `PicoSession`'s drop glue). Receive Ir 0.
+
+### 4.4 What waits, on this base
+
+F4 to F10 each wait on a step of another lane that has not landed on `99c88e8372`:
+`arch-l3-rows.md` section 1 records D1 and D3 (the subscriber's) alone. F4 waits on T-DECL's
+change of `Declaring` (`docs/win-budget/size.md` S1, designed); F5 is one step with D4; F6 waits
+on F4, F5 and T-DECL's engine body; F7 on D5 and D6; F8 on F7 and `feat-query.md` Q7; F9 on D5,
+whose seam it shares; F10 on all of them and on D7 with step 6d; F11 on phase P5. The lane stops
+after F3 until one of those lands.
 
 ## 5. A feature's cost after steps 4 and 5
 
