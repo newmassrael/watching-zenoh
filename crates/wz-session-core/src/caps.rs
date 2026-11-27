@@ -62,7 +62,10 @@
 //! and the bindings below are current), for another front end from whatever
 //! sets the environment of the cargo build (the deploy file's `limits` keys
 //! are the next such front end). A value that is not a decimal number is a
-//! compile error, not a default.
+//! compile error, not a default. A limit only one capability's machines read
+//! (its `read_by`) has no Kconfig symbol to set in a configuration without
+//! that capability, and in a build without its feature a value off the
+//! default is a compile error as well.
 //!
 //! Distinct from protocol constants fixed by the zenoh wire spec (e.g. the
 //! 16-byte ZID ceiling) — those are not tunable and land in a sibling

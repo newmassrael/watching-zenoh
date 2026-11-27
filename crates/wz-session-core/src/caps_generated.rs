@@ -150,6 +150,12 @@ pub(super) const TX_NO_PROGRESS_WINDOW_US: usize =
     limit(option_env!("WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US"), 1000000);
 pub(super) const TX_EXPIRY_CLOSE_AFTER: usize =
     limit(option_env!("WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER"), 0);
+// Read by tx-expiry-run alone: a build without it states no value but the default.
+#[cfg(not(feature = "tx-expiry-run"))]
+const _: () = assert!(
+    TX_EXPIRY_CLOSE_AFTER == 0,
+    "TX_EXPIRY_CLOSE_AFTER is stated for a build without tx-expiry-run, which reads it nowhere"
+);
 pub(super) const DATAGRAM_FRAGMENT_BURST: usize =
     limit(option_env!("WZ_LIMIT_DATAGRAM_FRAGMENT_BURST"), 8);
 pub(super) const DATAGRAM_FRAGMENT_GAP_US: usize =

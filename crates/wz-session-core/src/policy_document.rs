@@ -2967,8 +2967,9 @@ mod tests {
 
     /// A build that counts no run of expiries refuses a statement of `TX_EXPIRY_CLOSE_AFTER` by
     /// name, whatever its value: its sessions keep themselves through every expiry, as
-    /// zenoh-pico's do, and a stated count would be taken and never read. Turned red by
-    /// `limit_binding::built_reads` answering `true` for the limit in this build.
+    /// zenoh-pico's do, and a stated count would be taken and never read. Turned red by the
+    /// limit's `READ_FROM_SNAPSHOT` reading `true` in this build: the declaration's `read_by` of
+    /// the limit dropped, or naming another capability than `tx-expiry-run`.
     #[cfg(not(feature = "tx-expiry-run"))]
     #[test]
     fn a_build_without_the_expiry_run_refuses_its_count() {
@@ -2987,6 +2988,22 @@ mod tests {
                 "{value:?}"
             );
         }
+    }
+
+    /// A build that counts the run of expiries reads `TX_EXPIRY_CLOSE_AFTER` from the snapshot:
+    /// the build's own count, stated, is selected and recorded as the open's. Turned red by the
+    /// limit's `READ_FROM_SNAPSHOT` reading `false` in this build: the declaration's `read_by`
+    /// of the limit naming a feature the session core is not built with.
+    #[cfg(feature = "tx-expiry-run")]
+    #[test]
+    fn a_build_with_the_expiry_run_selects_its_count() {
+        let limit = <crate::limits::TxExpiryCloseAfter as LimitSpec>::LIMIT;
+        let own = SessionLimits::defaults().tx_expiry_close_after();
+        let stated = [LimitStatement::new(limit, own.as_value())];
+        let resolved = resolve_under(SessionPolicy::defaults(), limits_alone(&stated))
+            .expect("the build's own count of a limit its machines read");
+        assert_eq!(resolved.limits.provenance.origin(limit), Some(Origin::Api));
+        assert_eq!(resolved.limits.session.tx_expiry_close_after(), own);
     }
 
     /// Each refusal of a limit statement names the limit, and the domain's reason where the

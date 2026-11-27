@@ -180,6 +180,9 @@ limit and binds the name the code uses to the generated value.
   9. The enums of crates/wz-session-core/src/policy_binding.rs that the generated policy and
      limit rows name (`Scope`, `Binding`, `Mutability`, `Wire`, `Storage`) have one variant per
      word of the declaration's vocabulary, in its order.
+ 10. Each capability a limit is read by (`read_by`) is a feature of the crate the limit
+     snapshots are generated into (wz-session-core): the limit's generated `READ_FROM_SNAPSHOT`
+     reads that feature there, and a crate without it would read the limit in no build.
 
 ## Domains
 
@@ -256,6 +259,9 @@ RUST_POLICIES = ROOT / "crates" / "wz-session-core" / "src" / "policy_generated.
 RUST_LIMIT_BINDINGS = ROOT / "crates" / "wz-session-core" / "src" / "caps_binding_generated.rs"
 # The limits a stage after the build may decide, as types and snapshots (`crate::limits`).
 RUST_LIMIT_SNAPSHOTS = ROOT / "crates" / "wz-session-core" / "src" / "limits_generated.rs"
+# The manifest of the crate the limit snapshots are generated into, where the generated
+# `READ_FROM_SNAPSHOT` of a limit read by a capability (`read_by`) reads that capability's feature.
+LIMIT_SNAPSHOTS_MANIFEST = RUST_LIMIT_SNAPSHOTS.parents[1] / "Cargo.toml"
 # The hand-written types the generated policy and limit rows name (`Domain`, `Bound`, the words
 # of where a value is bound); `--check` holds the variants of its enums to the declaration's words.
 POLICY_BINDING_RS = ROOT / "crates" / "wz-session-core" / "src" / "policy_binding.rs"
@@ -494,6 +500,7 @@ def validate_decl(data: dict) -> list[str]:
     out += validate_switches(data)
     out += validate_limit_presets(data)
     out += validate_limit_opens(data)
+    out += validate_limit_readers(data)
     symbols = [c["kconfig"] for c in data["capability"]] + [l["kconfig"] for l in data["limit"]]
     for pol in data.get("policy", []):
         symbols += policy_symbols(pol)
@@ -1480,7 +1487,7 @@ LIMIT_ON_HEAP = ("advisory", "capacity", "quota")
 # with the narrowest word wz builds for.
 LIMIT_RANGE_MOST = 4294967295
 LIMIT_KEYS = {"id", "kconfig", "default", "help",
-              "storage", "scope", "binding_heap", "binding_fixed", "read", "wire",
+              "storage", "scope", "binding_heap", "binding_fixed", "read", "read_by", "wire",
               "kind", "driven", "range", "most", "on_heap", "zero_unbounded", "upstream",
               "pico_preset", "pico_open", "open_count", "process_open_count"}
 # Where the machines of a limit's scope read it (deploy/wz-config.toml, "Limits"): from the
@@ -1489,6 +1496,13 @@ LIMIT_KEYS = {"id", "kconfig", "default", "help",
 LIMIT_READS = ("snapshot", "build")
 LIMIT_READ_SNAPSHOT = "snapshot"
 LIMIT_READ_BUILD = "build"
+# A limit read from the snapshot may name the capability whose machines alone read it (`read_by`):
+# a build without that capability reads it nowhere, so a reader of a document refuses its statement
+# by name there, as for a limit read from the build. The capability's cargo feature, named as the
+# capability is, decides it in the crate the snapshots are generated into (`limit_read_rust`). The
+# build refuses it there as well: the limit's Kconfig symbol depends on the capability's
+# (`limit_reader_symbol`), and the generated module does not compile a value the environment
+# states off the limit's default (`rust_unread_assert`).
 # A limit's counterpart in upstream zenoh (`[limit.upstream]`): `zenoh`, the key of zenoh's
 # configuration that states the same number, or `none`; `cite`, the upstream code that reads the
 # key; `reason`, why no key does. The zenoh-pico counterpart is the value switch whose
@@ -1655,6 +1669,26 @@ def validate_limit_opens(data: dict) -> list[str]:
         elif widest != "runtime":
             out.append(f"{where}: a process pool belongs to no session, so its count is a "
                        f"runtime's (`process_open_count`)")
+    return out
+
+
+def validate_limit_readers(data: dict) -> list[str]:
+    """A limit's `read_by` names a declared capability, and only a limit read from the snapshot
+    states one: a limit read from the build, or a capacity alone, is read from no snapshot in any
+    build, so no capability decides whether it is."""
+    caps = {c.get("id") for c in data["capability"]}
+    out: list[str] = []
+    for lim in data["limit"]:
+        if "read_by" not in lim:
+            continue
+        where = f"limit `{lim.get('id', '?')}`"
+        cid = lim["read_by"]
+        if not isinstance(cid, str) or cid not in caps:
+            out.append(f"{where}: `read_by` is {cid!r}, which names no declared capability")
+        if lim.get("read") != LIMIT_READ_SNAPSHOT:
+            out.append(f"{where}: only a limit read from the snapshot names the capability whose "
+                       "machines read it (`read_by`); one read from the build is read from no "
+                       "snapshot in any build")
     return out
 
 
@@ -2957,6 +2991,14 @@ def emit_kconfig_capabilities(decl: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def limit_reader_symbol(decl: dict, lim: dict) -> str | None:
+    """The Kconfig symbol of the capability whose machines alone read `lim` (`read_by`), which the
+    limit's own symbol depends on; None for a limit every build that has it reads."""
+    if "read_by" not in lim:
+        return None
+    return decl["caps"][lim["read_by"]]["kconfig"]
+
+
 def emit_kconfig_limits(decl: dict) -> str:
     out = generated_header("#", "kconfig-limits") + [
         "",
@@ -2982,6 +3024,11 @@ def emit_kconfig_limits(decl: dict) -> str:
     for lim in decl["limits"]:
         out.append(f"config {lim['kconfig']}")
         out.append(f'\tint "{lim["id"]}"')
+        reader = limit_reader_symbol(decl, lim)
+        if reader is not None:
+            # A configuration without the capability reads the limit nowhere, so there the symbol
+            # has no value: an assignment is refused, and the build's environment states none.
+            out.append(f"\tdepends on {reader}")
         if lim["kind"] == "parameter":
             # The range the code runs with, so menuconfig refuses what the build would.
             out.append(f"\trange {lim['range'][0]} {lim['range'][1]}")
@@ -3023,6 +3070,24 @@ def rust_limit_const(name: str, kconfig: str, default: object) -> list[str]:
     return rust_const(name, value)
 
 
+def rust_unread_assert(lim: dict) -> list[str]:
+    """For a limit only one capability's machines read (`read_by`), the refusal its Kconfig symbol's
+    `depends on` gives, made by the compiler for a build whose environment no Kconfig wrote: in a
+    build of the limits' crate without the capability's feature, a value off the declared default
+    does not compile. The default passes: Zephyr's CMake hands the cargo build every limit symbol
+    its Kconfig has a value for, a default among them, and a limit stated at its default is
+    nothing stated (`statement_vectors`), the value such a build reads."""
+    lid, feature = lim["id"], lim["read_by"]
+    return [
+        f"// Read by {feature} alone: a build without it states no value but the default.",
+        f'#[cfg(not(feature = "{feature}"))]',
+        "const _: () = assert!(",
+        f"    {lid} == {lim['default']},",
+        f'    "{lid} is stated for a build without {feature}, which reads it nowhere"',
+        ");",
+    ]
+
+
 def emit_rust_limits(decl: dict) -> str:
     out = generated_header("//", "rust-limits") + [
         "",
@@ -3035,6 +3100,8 @@ def emit_rust_limits(decl: dict) -> str:
     ]
     for lim in decl["limits"]:
         out += rust_limit_const(lim["id"], lim["kconfig"], lim["default"])
+        if "read_by" in lim:
+            out += rust_unread_assert(lim)
     return "\n".join(out) + "\n"
 
 
@@ -3145,6 +3212,20 @@ def limit_default_rust(lim: dict) -> str:
     return "Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED)"
 
 
+def limit_read_rust(lim: dict) -> str:
+    """`READ_FROM_SNAPSHOT` of a limit's `LimitSpec`: whether the machines of its scope read it
+    from the snapshot in this build. A limit read from the build is read from none. One read from
+    the snapshot by the machines of a capability alone (`read_by`) is read where the limits' crate
+    is built with that capability's feature, a crate's features being named after the
+    capabilities, and in no other build, which refuses its statement by name."""
+    if lim["read"] != LIMIT_READ_SNAPSHOT:
+        return "false"
+    if "read_by" in lim:
+        feature = lim["read_by"]
+        return f'cfg!(feature = "{feature}")'
+    return "true"
+
+
 def rust_assoc_const(name: str, ty: str, value: str) -> list[str]:
     """`const <name>: <ty> = <value>;` in an impl, broken after the `=` when it does not fit."""
     one = f"    const {name}: {ty} = {value};"
@@ -3159,13 +3240,12 @@ def limit_spec_rust(lim: dict) -> list[str]:
     bound = lim["kind"] == "bound"
     ty = "Quota" if bound else "usize"
     driven = f"Some(Driven::{camel(lim['driven'])})" if bound else "None"
-    read = "true" if lim["read"] == LIMIT_READ_SNAPSHOT else "false"
     out = rust_doc(f"`{lid}`: {first_sentence(lim['help'])}", "")
     out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]", f"pub struct {name};", "",
             f"impl LimitSpec for {name} {{", f"    type Value = {ty};",
             f"    const LIMIT: &'static str = {rust_word(lid)};",
-            f"    const DRIVEN: Option<Driven> = {driven};",
-            f"    const READ_FROM_SNAPSHOT: bool = {read};"]
+            f"    const DRIVEN: Option<Driven> = {driven};"]
+    out += rust_assoc_const("READ_FROM_SNAPSHOT", "bool", limit_read_rust(lim))
     out += rust_assoc_const("CAPACITY", "Option<usize>", limit_capacity_rust(lim))
     if bound and lim.get("open_count") is True and "most" in lim:
         domain = f"LimitDomain::of_count_within(Self::CAPACITY, {lim['most']}, Self::DEFAULT)"
@@ -3376,8 +3456,9 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
     build, its domain and the build's value), and the two snapshots that hold one value of each:
     `RuntimeLimits` for a limit whose widest scope is the runtime, `SessionLimits` for the rest.
     Each type states whether the machines of its scope read it from the snapshot
-    (`READ_FROM_SNAPSHOT`, the limit's `read`); the build defaults are what the build runs
-    with, so nothing a build does changes."""
+    (`READ_FROM_SNAPSHOT`, the limit's `read`, and the feature of the capability its `read_by`
+    names where it names one); the build defaults are what the build runs with, so nothing a
+    build does changes."""
     lims = open_limits(decl)
     runtime = [lim for lim in lims if is_runtime_limit(lim)]
     session = [lim for lim in lims if not is_runtime_limit(lim)]
@@ -4868,6 +4949,17 @@ def check_manifest(decl: dict, abi: str, feats: dict) -> list[str]:
     return out
 
 
+def check_limit_reader_features(decl: dict, feats: dict) -> list[str]:
+    """Each capability a limit is read by (`read_by`) against `feats`, the `[features]` of the crate
+    the limit snapshots are generated into: the generated `READ_FROM_SNAPSHOT` reads the
+    capability's feature there, and a crate without that feature would read the limit in no build
+    and refuse every statement of it."""
+    crate = LIMIT_SNAPSHOTS_MANIFEST.relative_to(ROOT)
+    return [f"limit `{lim['id']}`: it is read by `{lim['read_by']}`, which is no feature of "
+            f"{crate}, so no build would read the limit"
+            for lim in decl["limits"] if "read_by" in lim and lim["read_by"] not in feats]
+
+
 # ---------------------------------------------------------------------------------------------
 # presets: resolved by the pinned Kconfig interpreter
 # ---------------------------------------------------------------------------------------------
@@ -5008,11 +5100,20 @@ def resolved_caps(decl: dict, kconf) -> set[str]:
     return {cid for cid, cap in decl["caps"].items() if kconf.syms[cap["kconfig"]].tri_value == 2}
 
 
+def resolved_limit(kconf, lim: dict) -> int:
+    """The value a resolved configuration gives `lim`. The symbol of a limit read by a capability
+    the configuration turns off (`read_by`) has no value, its `depends on` not holding, and the
+    limit is the declared default, what its build reads with nothing stated."""
+    text = kconf.syms[lim["kconfig"]].str_value
+    return int(text) if text else lim["default"]
+
+
 def resolved_limit_env(decl: dict, kconf) -> list[str]:
-    """`WZ_LIMIT_<NAME>=<value>` for every limit the configuration sets off its default."""
+    """`WZ_LIMIT_<NAME>=<value>` for every limit the configuration sets off its default; a limit
+    whose symbol the configuration gives no value states nothing."""
     out: list[str] = []
     for lim in decl["limits"]:
-        value = int(kconf.syms[lim["kconfig"]].str_value)
+        value = resolved_limit(kconf, lim)
         if value != lim["default"]:
             out.append(f"{lim['kconfig']}={value}")
     return out
@@ -5267,7 +5368,7 @@ def resolved_statement(decl: dict, abi: str, kconf, derived_from: dict) -> dict:
     """The conformance statement of the `abi` build a resolved configuration gives."""
     return conformance_statement(
         decl, abi, resolved_features(decl, abi, kconf),
-        {lim["id"]: int(kconf.syms[lim["kconfig"]].str_value) for lim in decl["limits"]},
+        {lim["id"]: resolved_limit(kconf, lim) for lim in decl["limits"]},
         {pol["id"]: resolved_policy(kconf, pol) for pol in decl["policies"]},
         derived_from)
 
@@ -5501,6 +5602,10 @@ def cmd_check() -> int:
             print(f"  wz-config FAIL: {abi}: {exc}", file=sys.stderr)
             return 1
         findings += check_manifest(decl, abi, feats)
+    try:
+        findings += check_limit_reader_features(decl, manifest_features(LIMIT_SNAPSHOTS_MANIFEST))
+    except (KeyError, OSError) as exc:
+        findings.append(f"{LIMIT_SNAPSHOTS_MANIFEST.relative_to(ROOT)}: {exc}")
     # The platform rows against the compiler that builds for them. A compiler that is absent is a
     # finding and not a skip: a gate that cannot reach its input must not report green.
     for assessed in decl["assessed_packages"]:
@@ -7361,6 +7466,78 @@ def cmd_selftest() -> int:
            "}\n\nconst _: LimitDomain = MaxA::DOMAIN;\n" in psnap
            and "}\n\nconst _: LimitDomain = MaxA::DOMAIN;\n" in bsnap)
 
+    # A limit only the machines of one capability read (`read_by`).
+    read_by = SAMPLE.replace('read = "snapshot"\n', 'read = "snapshot"\nread_by = "a"\n')
+    expect("a limit read from the snapshot by a declared capability's machines validates",
+           validate_decl(read_decl_toml(read_by)) == [])
+    expect("a limit read by a capability the declaration does not have is refused",
+           limit_refused(read_by.replace('read_by = "a"', 'read_by = "zz"'),
+                         "limit `MAX_A`: `read_by` is 'zz', which names no declared capability"))
+    expect("a limit read from the build that names a capability reading it is refused",
+           limit_refused(read_by.replace('read = "snapshot"', 'read = "build"'),
+                         "limit `MAX_A`: only a limit read from the snapshot names the capability"))
+    expect("a capacity alone that names a capability reading it is refused",
+           limit_refused(limit_text(storage='"capacity"').replace('wire = "none"\n',
+                                                                  'wire = "none"\nread_by = "a"\n'),
+                         "limit `MAX_A`: only a limit read from the snapshot names the capability"))
+    by_decl = decl_of(read_decl_toml(read_by))
+    by_snap = emit_rust_limit_snapshots(by_decl)
+    expect("a limit read by a capability's machines is read from the snapshot in a build of the "
+           "limits' crate with that capability's feature, and in no other",
+           '    const READ_FROM_SNAPSHOT: bool = cfg!(feature = "a");\n' in by_snap
+           and "    const READ_FROM_SNAPSHOT: bool = true;\n" not in by_snap)
+    expect("a capability a limit is read by is a feature of the limits' crate, and one the crate "
+           "lacks is a finding naming the limit, the capability and the crate",
+           check_limit_reader_features(by_decl, {"a": [], "default": ["a"]}) == []
+           and check_limit_reader_features(by_decl, {"b": []})
+           == [f"limit `MAX_A`: it is read by `a`, which is no feature of "
+               f"{LIMIT_SNAPSHOTS_MANIFEST.relative_to(ROOT)}, so no build would read the limit"]
+           and check_limit_reader_features(bdecl, {}) == [])
+    expect("the count of a run of expiries is read where the session core counts the run",
+           '    const READ_FROM_SNAPSHOT: bool = cfg!(feature = "tx-expiry-run");\n'
+           in emit_rust_limit_snapshots(shipped))
+    expect("a limit read by a capability's machines depends on that capability's symbol in the "
+           "Kconfig, so a configuration without it has no value of the limit to state, and a limit "
+           "every build reads depends on nothing",
+           'config WZ_LIMIT_MAX_A\n\tint "MAX_A"\n\tdepends on WZ_CAP_A\n\tdefault 4\n'
+           in emit_kconfig_limits(by_decl)
+           and "depends on" not in emit_kconfig_limits(bdecl))
+    expect("a build of the limits' crate without the capability a limit is read by does not compile "
+           "a value of the limit off its default, and a limit every build reads asserts nothing",
+           'pub(super) const MAX_A: usize = limit(option_env!("WZ_LIMIT_MAX_A"), 4);\n'
+           "// Read by a alone: a build without it states no value but the default.\n"
+           '#[cfg(not(feature = "a"))]\n'
+           "const _: () = assert!(\n"
+           "    MAX_A == 4,\n"
+           '    "MAX_A is stated for a build without a, which reads it nowhere"\n'
+           ");\n" in emit_rust_limits(by_decl)
+           and "assert!" not in emit_rust_limits(bdecl))
+    expect("the count of a run of expiries has a value to state only where the run is counted",
+           'config WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER\n\tint "TX_EXPIRY_CLOSE_AFTER"\n'
+           "\tdepends on WZ_CAP_TX_EXPIRY_RUN\n" in emit_kconfig_limits(shipped)
+           and '#[cfg(not(feature = "tx-expiry-run"))]\nconst _: () = assert!(\n'
+           "    TX_EXPIRY_CLOSE_AFTER == 0,\n" in emit_rust_limits(shipped))
+
+    class Symbol:
+        """The one attribute of a kconfiglib symbol a limit's resolution reads."""
+
+        def __init__(self, text: str) -> None:
+            self.str_value = text
+
+    class Resolved:
+        """A resolved tree of the one symbol of `MAX_A`."""
+
+        def __init__(self, text: str) -> None:
+            self.syms = {"WZ_LIMIT_MAX_A": Symbol(text)}
+
+    by_limit = by_decl["limits"][0]
+    expect("a limit whose symbol a configuration gives no value is its default and states nothing "
+           "to the build's environment, and one the configuration sets states its value",
+           resolved_limit(Resolved(""), by_limit) == 4
+           and resolved_limit_env(by_decl, Resolved("")) == []
+           and resolved_limit(Resolved("6"), by_limit) == 6
+           and resolved_limit_env(by_decl, Resolved("6")) == ["WZ_LIMIT_MAX_A=6"])
+
     def caps_refused(old: str, new: str, words: str) -> bool:
         return any(words in p for p in validate_decl(read_decl_toml(SAMPLE.replace(old, new))))
 
@@ -8035,6 +8212,20 @@ requires = "WZ_MODE_P && !WZ_SIDE_R"
                            "one original"))
             expect("each original's defconfig resolves to that original",
                    all(original_differences(decl, o, resolve([], original=o)) == [] for o in BASE_ABI))
+            pico_head = head.replace("base: zenoh-c", "base: zenoh-pico")
+            expect("a count of a run of expiries stated over zenoh-pico's own build, which counts no "
+                   "run, is refused",
+                   refused([preset(d, "count.conf", "CONFIG_WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER=3\n",
+                                   pico_head)],
+                           "WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER was assigned the value '3' but got the "
+                           "value ''"))
+            pico_own = resolve([], original="zenoh-pico")
+            expect("zenoh-pico's own build states no count of a run of expiries to the environment, "
+                   "and its statement holds the count's default",
+                   not any(e.startswith("WZ_LIMIT_TX_EXPIRY_CLOSE_AFTER=")
+                           for e in resolved_limit_env(decl, pico_own))
+                   and {x["id"]: x["value"] for x in resolved_statement(
+                       decl, "pico", pico_own, {})["limits"]}["TX_EXPIRY_CLOSE_AFTER"] == 0)
             # The emitted tree of the global sample, read by the interpreter: the default option
             # leaves the off capability off, and the option that implies it turns it on.
             tree = d / "tree"
