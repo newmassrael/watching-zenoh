@@ -8,7 +8,8 @@ that feature answers. Two steps cost wz the most over zenoh-pico after the trans
 zenoh-pico compiles for each of the two with what wz compiles for it, says for each pair whether
 the bytes differ because the work differs (a contract or preset decision) or because of its form
 (layers that overlap, generic copies, inline copies, gates and structures wider than the role),
-and states the steps that take the form's share out. The first step lands with this note.
+and states the steps that take the form's share out. The first step landed with this note; the
+owner's ruling of 2026-11-27 makes each item of section 4 a switch.
 
 ## 1. Where the readings come from
 
@@ -108,7 +109,7 @@ bytes): Q3 and Q4 together take 10,474, not their sum.
 
 | step | change | bytes, expected | client case | receive Ir (about 3,066 a message) | held by |
 |---|---|---|---|---|---|
-| **Q1 (lands with this note)** | `hand_query`'s callback loop moves out of the face-kind generic into `CoopEngine::call_queryables`, generic over the engine's links and clock alone: one loop for a link's face and a group's | `pico-api-coop-nostd` -1,150 to -1,300 (one loop of 1,266 or 1,282 bytes, less the call's arguments); `pico-peer-coop` 0 (no `queryable`) | 0: `engine/queries.rs` is compiled under `queryable` | none: the client has no queryable; on a queryable's path the loop was an out-of-line closure and stays one, called once a query | `tests::direct_receive::a_query_is_handed_to_its_queryables_by_the_read_with_the_session_free` (a link's face: two queryables in order, the session free, the Final after both replies, two calls counted); `tests::group::asked::a_get_of_the_group_is_answered_by_a_members_queryable_and_ends_with_its_final` (a group's face) |
+| **Q1 (landed)** | `hand_query`'s callback loop moves out of the face-kind generic into `CoopEngine::call_queryables`, generic over the engine's links and clock alone: one loop for a link's face and a group's | `pico-api-coop-nostd` -1,150 to -1,300 (one loop of 1,266 or 1,282 bytes, less the call's arguments); `pico-peer-coop` 0 (no `queryable`) | 0: `engine/queries.rs` is compiled under `queryable` | none: the client has no queryable; on a queryable's path the loop was an out-of-line closure and stays one, called once a query | `tests::direct_receive::a_query_is_handed_to_its_queryables_by_the_read_with_the_session_free` (a link's face: two queryables in order, the session free, the Final after both replies, two calls counted); `tests::group::asked::a_get_of_the_group_is_answered_by_a_members_queryable_and_ends_with_its_final` (a group's face) |
 | Q2 | the rest of the walk out of the face kind: the lent query's pin, its owned projection and the first queryable's pin in engine methods, the face kind keeping the three calls that read it (`hold_replies`, `owe_final`, `release_replies`) and `owe_finals`' loop over the registry's Finals | -1,500 to -2,500 | 0 | none: the read's dispatch of a record that is not a Request is not touched | the two tests of Q1; `tests::queryable`'s Final tests |
 | Q3 | arch-mono M5 for these messages: a reply's length from the direct layout for every reply (the window writer writes a timestamp, an attachment and a source info too, and `GENERIC_REACHABLE` is `transport-fragmentation` alone), a Request counted by `RequestWriter::measured` alone | -4,000 to -8,300 | 0 | none: nothing of the receive changes, and a reply's count is arithmetic where it was a pass of the encoder | `lent_response`'s direct-against-generic tests, which keep `encode_generic` as their reference |
 | Q4 | one form of each sent message: the group's reply stage writes through the lent `ResponseWriter`, as a link's does, and no path of a cooperative build sends an owned `Request`; the owned encoders over `Heap` stay the tests' reference | -4,000 to -5,800 (the 5,791 of owned forms, less what the stage's window writer adds) | 0: the client's own `MsgPutWire::write_source::<MsgPutIn<Heap>, TxSink>` is its put's and stays | none: a put does not take the stage's path | `tests::group::asked` (both tests); `lent_response`'s owned-against-lent tests |
@@ -117,13 +118,26 @@ bytes): Q3 and Q4 together take 10,474, not their sum.
 | Q7 | one reply method: `ReplyOut` takes one record of the reply's parts (key, payload, encoding, timestamp, attachment, source info, Put or Del) where it has a method for each combination, the C doors filling the record as zenoh-pico's fill `_z_send_reply`'s arguments | -3,000 to -4,500 | 0 | none: a reply is built once a call either way | `query_sink::reply_out_contract_covers_del_err_and_responder_roundtrip` and the doors' reply tests, each combination one case |
 | Q8 | read the unread rows (Q-a, Q-i, R-b's doors, R-c) body by body from the line tables, as arch-mono read `run`, on the API twin's explain report once `--explain pico-api-coop-nostd` reads one | none | | | |
 
-## 4. Owner decisions: where the work itself differs
+## 4. Owner decisions: each behaviour zenoh-pico does not have is a switch
 
-| item | what wz does | what zenoh-pico does | bytes (`query` / `queryable` steps) | what turning it off loses |
-|---|---|---|---|---|
-| O1 | a get is one leg per face it went out on, each with its own Final, and the legs of a face that goes end with it (`SessionState::lose_face`, `pending_gets.drop_face`), so a get ends when its last face does | one pending query with a count of the Finals it waits for (`_remaining_finals`, set in `src/net/primitives.c`, decremented only by a Final in `src/session/query.c`): a get whose peer goes waits for its timeout | about 6,200 of Q-a and Q-c (`hold_leg`, `end_leg_now`, `leg_callback`, `LegSink`, `lose_link`'s growth, the get plane) | a get on a lost face ends at its timeout instead of at once; the per-leg accounting goes |
-| O2 | the replies a queryable's callbacks make wait in the face's open frame and leave with the Final in one send (`ResponseSink::hold_replies`, `release_replies`, `engine/queries.rs`) | each reply is sent as the callback makes it (`_z_send_reply`), the Final after the callbacks | not separated (inside R-e and the reply sinks) | one send a reply, the Final possibly in a later frame, as zenoh-pico's; the guarantee that no reply has left without its Final goes |
-| O3 | a build that only asks reads a peer's Query in full (Q-f); what it answers is the build's `QueryUnanswerableFinal` policy (`QueryPeer::answers_unresolved_queries`: an empty Final, or nothing). Which of the two such a build runs was not read for this note | a Query is dropped at `Z_FEATURE_QUERYABLE` 0 (`src/session/rx.c`), no Final | 5,632 of Q-f in a build without `queryable` | if the requester-only preset drops a Query as zenoh-pico does, Q6 leaves its reader out; if it answers an empty Final, the asker's get ends at once instead of at its timeout, and the reader stays |
+The owner's ruling of 2026-11-27: a behaviour of wz's that zenoh-pico does not have is a switch of
+its own, a capability of `deploy/wz-config.toml` with `upstream_off = ["zenoh-pico"]`: on in a
+build that names nothing and in the host profiles, off in the zenoh-pico preset, whose library then
+links none of it. The send's four behaviours are the first such switches (`tx-probe`,
+`tx-expiry-run`, `tx-fragment-credit`, `tx-held-wait`); the three items of the query planes follow
+them, one switch each. A switch is a behaviour of every session and no door, so `host-peer` and
+`host-peer-ext` keep each on, as they keep the send's: `pico-api-coop-nostd` is read with them
+on, and moves by the steps of section 3 alone; the zenoh-pico preset is read with them off.
+
+| item | switch | on: what wz does | off: what the build does, as zenoh-pico does | bytes (`query` / `queryable` steps) | lands |
+|---|---|---|---|---|---|
+| O1 | `query-face-legs` (`WZ_CAP_QUERY_FACE_LEGS`) | a get is one leg per face it went out on, each with its own Final, and the legs of a face that goes end with it (`SessionState::lose_face`, `pending_gets.drop_face`), so a get ends when its last face does | one pending get with a count of the Finals it waits for, as zenoh-pico's `_remaining_finals` (set in `src/net/primitives.c`, decremented only by a Final in `src/session/query.c`): a face that goes ends none of its gets, and each ends at its last Final or at its timeout | about 6,200 of Q-a and Q-c (`hold_leg`, `end_leg_now`, `leg_callback`, `LegSink`, `lose_link`'s growth, the get plane) | a step of its own: the get plane keeps a count of Finals beside its legs, and the legs' bodies are gated |
+| O2 | `query-replies-with-final` (`WZ_CAP_QUERY_REPLIES_WITH_FINAL`) | the replies a queryable's callbacks make wait in the face's open frame and leave with the Final in one send (`ResponseSink::hold_replies`, `release_replies`, `engine/queries.rs`) | each reply is sent as the callback makes it, as `_z_send_reply` sends it, and the Final after the callbacks, possibly in a later frame: no reply is held and the face's hold is not compiled | not separated (inside R-e and the reply sinks): read on the zenoh-pico preset's library by the switch | with this lane |
+| O3 | `query-final-unanswered` (`WZ_CAP_QUERY_FINAL_UNANSWERED`) | a build that only asks reads a peer's Query in full (Q-f) and owes it what a query no queryable answers is owed (`QueryPeer::answers_unresolved_queries`, the `query-unanswerable-final` policy) | a build without `queryable` drops a peer's Query unread, as zenoh-pico does at `Z_FEATURE_QUERYABLE` 0 (`src/session/rx.c`), and sends no Final: the asker's get ends at its timeout | 5,632 of Q-f, in a build without `queryable` only | with Q6: the switch is what Q6 reads to leave the Query half of the Request's reader out of a build without `queryable`; until Q6 it removes nothing |
+
+A build with a switch off states nothing it would read: a test of each switch holds the build
+without it to the zenoh-pico behaviour (the get that ends at its last Final, the reply that leaves
+before its Final), as the send's switches are held (`scripts/lib/nondefault-tests-gate.sh`).
 
 ## 5. Verification (the main session's)
 
