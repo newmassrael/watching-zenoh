@@ -1176,7 +1176,7 @@ pub fn fragment_body(
 /// has that moment because it pulls a batch per fragment from a finite pool
 /// (`common/pipeline.rs`, `zgetbatch_rets!`) and can fail to get one; this
 /// iterator is the shape that gives wz the same seam, and
-/// `SessionFacts::fragment_tx_budget`
+/// the transport's fragment credit (`TransportTx`)
 /// is the finite resource it draws against.
 ///
 /// ⚠ The budget is deliberately NOT consulted here. This type stays a pure

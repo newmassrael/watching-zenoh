@@ -49,6 +49,67 @@ pub struct TransportTx<R: SessionRuntime> {
     refused_no_slot: R::Word,
     #[cfg(feature = "tx-lend-only")]
     refused_oversize: R::Word,
+    /// R2238 (open-debt item 580) — how many more `T_MID_FRAGMENT` messages
+    /// this transport may put on the wire. Each fragment of a chain draws ONE
+    /// credit through `Self::take_fragment_credit` as it is emitted;
+    /// when the draw fails the chain is abandoned and the send reports
+    /// [`crate::send_wire_error::SendWireError::FragmentTxBudgetExhausted`].
+    ///
+    /// This is wz's answer to the finite batch pool upstream fragments
+    /// against (`common/pipeline.rs`, `zgetbatch_rets!`), and the reason wz
+    /// needed one at all: with an unbounded writer channel
+    /// (`wz-runtime-tokio/src/serial_pipeline.rs`, `link_pipeline.rs` and
+    /// their siblings all take `mpsc::unbounded_channel`) and a
+    /// build-the-whole-chain-first encoder, there was no state in which some
+    /// fragments had been sent and the rest could not be — so there was no
+    /// place to report a chain abandon from, whatever the encoder could
+    /// spell. The budget is what makes that state REACHABLE, and reaching it
+    /// deterministically is what a gate can assert on.
+    ///
+    /// ⚠ It is a SESSION-wide resource, not a per-chain allowance, and the
+    /// distinction is load-bearing rather than stylistic. A per-chain
+    /// allowance would be knowable before the walk began, and the honest
+    /// implementation of it would be a pre-check that refuses the whole
+    /// message and emits nothing — which never reaches the mid-chain state
+    /// at all. Shared, the credit another sender takes between two of this
+    /// chain's fragments is not predictable from inside the chain, so the
+    /// walk must stream and find out, exactly as upstream's does.
+    ///
+    /// The stop fragment itself does NOT draw a credit: it is the abandon
+    /// NOTICE, not chain payload, and a budget that could not afford to say
+    /// it had run out would leave the peer holding the buffer this whole
+    /// mechanism exists to release. Upstream draws its stop batch outside
+    /// the pool for the same reason (`WBatch::new_ephemeral`).
+    ///
+    /// `usize::MAX` (the default) means "unbounded" and is never decremented,
+    /// so a host that never calls
+    /// [`set_fragment_tx_budget`](crate::session_actions::SessionLinkActions::set_fragment_tx_budget)
+    /// keeps the pre-existing behavior byte for byte.
+    ///
+    /// Under a lock and not an atomic: ARMv6-M has no `target_has_atomic = "ptr"`.
+    #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
+    fragment_credit: R::Mutex<usize>,
+    /// The shape the transport's links' queues took when it was established
+    /// (`SessionInitParams::tx_queue`'s `shape`), which a sender that may not wait asks before it
+    /// begins a fragment chain: a chain longer than its lane holds is not begun. `None` until the
+    /// transport's send limits are settled, when no data frame is sent.
+    #[cfg(all(
+        feature = "tx-probe",
+        feature = "transport-fragmentation",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    lanes: R::Mutex<Option<crate::link::TxQueueShape>>,
 }
 
 impl<R: SessionRuntime> TransportTx<R> {
@@ -70,6 +131,26 @@ impl<R: SessionRuntime> TransportTx<R> {
             refused_no_slot: <R::Word as crate::runtime_cell::WordCell>::new(0),
             #[cfg(feature = "tx-lend-only")]
             refused_oversize: <R::Word as crate::runtime_cell::WordCell>::new(0),
+            // Unbounded until a host declares a budget.
+            #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
+            fragment_credit: R::new_mutex(usize::MAX),
+            #[cfg(all(
+                feature = "tx-probe",
+                feature = "transport-fragmentation",
+                any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "declare-keyexpr",
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token",
+                    feature = "declare-interest",
+                    feature = "liveliness-token",
+                )
+            ))]
+            lanes: R::new_mutex(None),
         }
     }
 
@@ -81,6 +162,98 @@ impl<R: SessionRuntime> TransportTx<R> {
     pub(crate) fn reset(&self, initial_sn: u64) {
         self.conduits.reset();
         self.frame_sn.reset(initial_sn);
+    }
+
+    /// Declare how many more fragments this transport may send, or `usize::MAX` for no bound;
+    /// it both sets and refills the credit.
+    #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
+    pub(crate) fn set_fragment_credit(&self, fragments: usize) {
+        R::with_mutex_mut(&self.fragment_credit, |slot| *slot = fragments);
+    }
+
+    /// The fragments this transport may still send, `usize::MAX` when no bound was declared.
+    #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
+    pub(crate) fn fragment_credit(&self) -> usize {
+        R::with_mutex_mut(&self.fragment_credit, |slot| *slot)
+    }
+
+    /// Draw ONE fragment credit, reporting whether it was available. The unbounded default
+    /// (`usize::MAX`) always succeeds and is never decremented, so an unconfigured transport can
+    /// neither run out nor count itself down into a false exhaustion. Gated as its one caller,
+    /// the fragment walk, is: fragmentation with no sender compiles no walk.
+    #[cfg(all(
+        feature = "transport-fragmentation",
+        feature = "tx-fragment-credit",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    pub(crate) fn take_fragment_credit(&self) -> bool {
+        R::with_mutex_mut(&self.fragment_credit, |slot| {
+            if *slot == usize::MAX {
+                return true;
+            }
+            if *slot == 0 {
+                return false;
+            }
+            // Not zero, checked above.
+            *slot = slot.wrapping_sub(1);
+            true
+        })
+    }
+
+    /// Record the shape the transport's links' queues take, once its send limits are settled.
+    #[cfg(all(
+        feature = "tx-probe",
+        feature = "transport-fragmentation",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    pub(crate) fn shape_lanes(&self, shape: crate::link::TxQueueShape) {
+        R::with_mutex_mut(&self.lanes, |lanes| *lanes = Some(shape));
+    }
+
+    /// The bytes the queue a frame of `priority` goes to holds before it refuses one
+    /// ([`crate::link::TxQueueShape::lane_bytes`]); no bound before the shape is recorded.
+    #[cfg(all(
+        feature = "tx-probe",
+        feature = "transport-fragmentation",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    pub(crate) fn lane_bytes(&self, priority: crate::qos::Priority) -> usize {
+        R::with_mutex_mut(&self.lanes, |lanes| {
+            lanes.map_or(usize::MAX, |shape| shape.lane_bytes(priority))
+        })
     }
 
     /// The transport's registry partition, lent to `f` under its lock. `f` takes no other lock.

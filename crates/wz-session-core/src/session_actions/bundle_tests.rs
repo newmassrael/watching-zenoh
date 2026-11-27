@@ -346,6 +346,33 @@ fn a_datagram_dropped_before_the_session_read_it_is_a_receive_drop() {
     assert_eq!(report.tx.n_dropped, 0, "nothing sent was dropped");
 }
 
+/// A sender that may not wait reads the lane bound the established transport's queue took, and
+/// none before it is established. Turned red by a lane bounded before the send limits are
+/// settled, or by a settle that records another shape than the one the session's parameters
+/// give its link's queue.
+#[cfg(all(
+    feature = "tx-probe",
+    feature = "transport-fragmentation",
+    feature = "codec-push"
+))]
+#[test]
+fn a_probe_reads_the_lane_the_established_queue_took() {
+    let (actions, _link) = bundle();
+    let priority = crate::qos::Priority::DEFAULT;
+    assert_eq!(
+        actions.tx.lane_bytes(priority),
+        usize::MAX,
+        "no lane is bounded before the transport is established"
+    );
+    actions.enter_established();
+    let shape = actions.params.tx_queue.shape(
+        actions.negotiated_qos(),
+        actions.negotiated_batch_mtu(),
+        actions.params.effective_batch_size() as usize,
+    );
+    assert_eq!(actions.tx.lane_bytes(priority), shape.lane_bytes(priority));
+}
+
 /// A link compresses its batches from its establishment, and only when the session negotiated
 /// compression: its handshake leaves bare, a link established over a session whose peer offered
 /// none compresses nothing, and a reopen writes the next handshake bare again. Turned red by

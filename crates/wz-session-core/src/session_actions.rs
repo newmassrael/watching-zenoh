@@ -2603,48 +2603,6 @@ pub(crate) enum OpenAckAdmission {
 pub struct SessionFacts {
     /// The handshake's row.
     pub handshake: HandshakeFacts,
-    /// R2238 (open-debt item 580) — how many more `T_MID_FRAGMENT` messages
-    /// this session may put on the wire. Each fragment of a chain draws ONE
-    /// credit through `SessionLinkActions::take_fragment_tx_credit` (private,
-    /// so a code span rather than an intra-doc link — on a public item's docs
-    /// that link is BROKEN and spends the Layer C1bz budget) as it is emitted;
-    /// when the draw fails the chain is abandoned and the send reports
-    /// [`SendWireError::FragmentTxBudgetExhausted`].
-    ///
-    /// This is wz's answer to the finite batch pool upstream fragments
-    /// against (`common/pipeline.rs`, `zgetbatch_rets!`), and the reason wz
-    /// needed one at all: with an unbounded writer channel
-    /// (`wz-runtime-tokio/src/serial_pipeline.rs`, `link_pipeline.rs` and
-    /// their siblings all take `mpsc::unbounded_channel`) and a
-    /// build-the-whole-chain-first encoder, there was no state in which some
-    /// fragments had been sent and the rest could not be — so there was no
-    /// place to report a chain abandon from, whatever the encoder could
-    /// spell. The budget is what makes that state REACHABLE, and reaching it
-    /// deterministically is what a gate can assert on.
-    ///
-    /// ⚠ It is a SESSION-wide resource, not a per-chain allowance, and the
-    /// distinction is load-bearing rather than stylistic. A per-chain
-    /// allowance would be knowable before the walk began, and the honest
-    /// implementation of it would be a pre-check that refuses the whole
-    /// message and emits nothing — which never reaches the mid-chain state
-    /// at all. Shared, the credit another sender takes between two of this
-    /// chain's fragments is not predictable from inside the chain, so the
-    /// walk must stream and find out, exactly as upstream's does.
-    ///
-    /// The stop fragment itself does NOT draw a credit: it is the abandon
-    /// NOTICE, not chain payload, and a budget that could not afford to say
-    /// it had run out would leave the peer holding the buffer this whole
-    /// mechanism exists to release. Upstream draws its stop batch outside
-    /// the pool for the same reason (`WBatch::new_ephemeral`).
-    ///
-    /// `usize::MAX` (the default) means "unbounded" and is never decremented,
-    /// so a host that never calls
-    /// [`set_fragment_tx_budget`](SessionLinkActions::set_fragment_tx_budget)
-    /// keeps the pre-existing behavior byte for byte.
-    ///
-    /// A fact and not an atomic: ARMv6-M has no `target_has_atomic = "ptr"`.
-    #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
-    pub fragment_tx_budget: usize,
     /// How many times each action of the machine ran ([`SessionLinkActions::trace_snapshot`]);
     /// held only by a build that keeps the counters (`action-trace`).
     #[cfg(feature = "action-trace")]
@@ -2873,8 +2831,6 @@ macro_rules! fact_doors {
 }
 
 fact_doors! {
-    #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
-    fact_fragment_tx_budget => fragment_tx_budget: usize,
     #[cfg(feature = "action-trace")]
     fact_trace => trace: ActionTrace,
     fact_inbound_cookie => handshake.inbound_cookie: Option<SessionBytes<COOKIE_MAX>>,
@@ -5386,10 +5342,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         local_remote_bound: None::<crate::extbound::Bound>,
                         expected_peer_zid: None,
                     },
-                    // "Unbounded" until a host declares a budget — a profile that
-                    // never configures one fragments exactly as it did before.
-                    #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
-                    fragment_tx_budget: usize::MAX,
                     #[cfg(feature = "action-trace")]
                     trace: ActionTrace::default(),
                     // R311y813 — fail-closed until a host with an entropy source
@@ -7163,6 +7115,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 .saturating_sub(self.batch_envelope_bytes_for(class));
             self.link.tx_limits.settle(class, budget, ring);
         }
+        // The queue shape a sender that may not wait reads before it begins a fragment chain,
+        // the one the established link's queue takes.
+        #[cfg(all(feature = "tx-probe", feature = "transport-fragmentation"))]
+        self.tx.shape_lanes(self.params.tx_queue.shape(
+            self.negotiated_qos(),
+            self.negotiated_batch_mtu(),
+            self.params.effective_batch_size() as usize,
+        ));
     }
 
     /// Enter the established state on this bundle's link: what the session machine's
@@ -7472,7 +7432,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R2238 (open-debt item 580) — declare how many more `T_MID_FRAGMENT`
     /// messages this session may emit; see
-    /// [`SessionFacts::fragment_tx_budget`]. `usize::MAX` restores the default
+    /// the transport's fragment credit (`TransportTx`). `usize::MAX` restores the default
     /// "unbounded".
     ///
     /// This both SETS and REFILLS: a session whose budget ran out resumes
@@ -7481,68 +7441,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// which is what its stop fragment told the peer.
     #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
     pub fn set_fragment_tx_budget(&self, fragments: usize) {
-        self.fact_fragment_tx_budget(|slot| *slot = fragments);
+        self.tx.set_fragment_credit(fragments);
     }
 
     /// Fragments this session may still emit, or `usize::MAX` when the host
     /// declared no budget.
     ///
     /// ⚠ Reading this to decide whether a chain will fit is exactly the
-    /// pre-check [`SessionFacts::fragment_tx_budget`] explains must not
+    /// pre-check the transport's fragment credit (`TransportTx`) explains must not
     /// happen — the value can change between this read and the next
     /// fragment. It is here for hosts and tests to OBSERVE the resource, not
     /// for the emit path to plan against.
     #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
     pub fn fragment_tx_budget(&self) -> usize {
-        self.fact_fragment_tx_budget(|slot| *slot)
-    }
-
-    /// Draw ONE fragment credit, reporting whether it was available.
-    ///
-    /// The unbounded default (`usize::MAX`) always succeeds and never
-    /// decrements, so an unconfigured session cannot exhaust and cannot
-    /// saturate its own counter downward into a false exhaustion.
-    ///
-    /// ⚠ The cfg is [`Self::emit_frame_or_fragments`]' OWN, repeated —
-    /// `transport-fragmentation` alone is not the condition. That method is
-    /// this draw's only caller and is itself gated on a codec/declare arm
-    /// existing to frame anything, so a build with fragmentation ON and every
-    /// emitter OFF compiles the fragmenter and nothing that reaches it; the
-    /// draw is then dead code and `-D warnings` refuses the crate. MEASURED,
-    /// R2238: `--features transport-qos,transport-fragmentation,
-    /// transport-batching,reassembly,session-multicast` is exactly that
-    /// combination, and pre-push gate 4b is what found it — no lane this
-    /// round ran by hand composes it. The repetition is deliberate rather
-    /// than a helper: if the two lists ever disagree, THIS error is what says
-    /// so, which a shared `allow(dead_code)` would have silenced instead.
-    #[cfg(all(
-        feature = "transport-fragmentation",
-        feature = "tx-fragment-credit",
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "declare-interest",
-            feature = "liveliness-token",
-        )
-    ))]
-    fn take_fragment_tx_credit(&self) -> bool {
-        self.fact_fragment_tx_budget(|slot| {
-            if *slot == usize::MAX {
-                return true;
-            }
-            if *slot == 0 {
-                return false;
-            }
-            // Not zero, checked above.
-            *slot = slot.wrapping_sub(1);
-            true
-        })
+        self.tx.fragment_credit()
     }
 
     /// Replace the ext chain for the given role. Production callers
@@ -9386,36 +9298,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return false;
         }
         true
-    }
-
-    /// The bytes the link's queue for `priority` holds before it refuses a frame: the shape the
-    /// session gave the link when it was established ([`Self::record_established_at`]), asked
-    /// of the same parameters.
-    #[cfg(all(
-        feature = "alloc",
-        feature = "transport-fragmentation",
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "declare-interest",
-            feature = "liveliness-token",
-        )
-    ))]
-    fn tx_lane_bytes(&self, priority: Priority) -> usize {
-        self.params
-            .tx_queue
-            .shape(
-                self.negotiated_qos(),
-                self.negotiated_batch_mtu(),
-                self.params.effective_batch_size() as usize,
-            )
-            .lane_bytes(priority)
     }
 
     /// R2924 — [`Self::is_qos`] in every build: a build without
@@ -12865,14 +12747,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the way the cap above is: before a byte leaves and before a follow-on SN is reserved,
         // with the SN of this message given back; the sender sends it waiting. The chain that
         // fits may still find the lane full and is abandoned and put down for later, which is
-        // what a probe does with a frame. A probe exists with `alloc`.
-        #[cfg(feature = "alloc")]
+        // what a probe does with a frame. A probe exists with `tx-probe`.
+        #[cfg(feature = "tx-probe")]
         if deadline.is_probe() {
             let before_last = plan
                 .remaining_fragments()
                 .saturating_sub(1)
                 .saturating_mul(mtu);
-            if before_last >= self.tx_lane_bytes(priority) {
+            if before_last >= self.tx.lane_bytes(priority) {
                 self.tx.frame_sn.unmint(priority, reliable);
                 return Ok(UnicastPush::Chain);
             }
@@ -12919,7 +12801,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 }
             }
             #[cfg(feature = "tx-fragment-credit")]
-            if !self.take_fragment_tx_credit() {
+            if !self.tx.take_fragment_credit() {
                 if emitted == 0 {
                     // Nothing left this session, and nothing has left
                     // for THIS message: there is no chain for a peer to
