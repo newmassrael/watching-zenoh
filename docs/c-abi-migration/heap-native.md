@@ -8,11 +8,13 @@ counted on `OnUse`), then N3b (every other table a face and the application hold
 `OnUse`, and the two places where a table of that policy is asked for room before the push that
 takes its memory), then the first step of N3c (section 11, 1): the cooperative engine on `OnUse`
 under its feature `tables-on-use`, its registry made by value and its keys counted against a
-`KeyBudget` its region holds, guarded by the session's lock as the key arena is. The owner's
-ruling of 2026-11-27 chose the form of section 6 (c), per preset: the rest of the cooperative
-engine's on-use form (N3c's steps 2 and 3, N3d, N3e), the doors' (N4) and the switch with its
-guards (section 9) are designed here and not written yet, because a switch that cannot be built is
-not declared; section 11 reads what N3c has to give a home to, and why it is the next step and not
+`KeyBudget`, guarded by the session's lock as the key arena is; then its second step (section
+11, 2): the places of the state's own values and the key budget in a state of the session's own,
+one allocation the open takes from the allocator apart from its arena, `region.rs` no longer in
+the form. The owner's ruling of 2026-11-27 chose the form of section 6 (c), per preset: the rest
+of the cooperative engine's on-use form (the plain tables and the round's rows counted, N3c's step
+3, N3d, N3e), the doors' (N4) and the switch with its guards (section 9) are designed here and not
+written yet, because a switch that cannot be built is not declared; section 11 reads what N3c has to give a home to, and why it is the next step and not
 a part of N3b. Nothing here was built or
 measured by this lane: a byte figure is either **read** from the size ledger's explain document or
 from `nm -S` of the case's library named below, or an **estimate** read off the code; a count of
@@ -456,7 +458,7 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
 - With `tables-on-use`, every test whose path names `on_use`:
   `region::tests::an_on_use_region_holds_the_sessions_key_budget` (red if `StateRegion::place`
   writes a budget of other bytes than the limits' `KEY_ARENA_BYTES`, or hands back a handle of no
-  budget); `engine::registry::counted::tests::an_on_use_registry_holds_the_plans_rows_and_has_taken_none`
+  budget; step 2 moves it with the budget, 7.6); `engine::registry::counted::tests::an_on_use_registry_holds_the_plans_rows_and_has_taken_none`
   (red if an application's table is made of the build's bound, `SlotMap::new` for `counted`, or
   takes its rows when made, if the registry holds no set, or, without `queryable`, if the set's
   peer tables are not counted); `tests::on_use::`, three: a declaration's key counted against the
@@ -474,13 +476,48 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   for item. `form_precedence_tests::a_build_of_both_forms_lays_its_tables_out_at_the_open`, in that
   build alone, holds it (red if a build of both names `OnUse`, or any policy but `Lent`, as its
   `RowPolicy`, the `runtime-plan` arm of `lib.rs` read only without `tables-on-use`).
-  `region.rs` asserts the key budget has no drop, which the region's drop would leave undone.
+  What holds the key budget asserts it has no drop, which that holder's drop would leave undone
+  (`region.rs` at this step, `engine/state_places.rs` from step 2).
 - Not tested: the open refused when the allocator has no room for the dial face's set
   (`ArenaRefused::NoMemory`); only a refusing allocator reaches it.
 
+### 7.6 N3c, step 2
+
+- With `tables-on-use`, the tests whose path names `on_use` are six, one of step 1's replaced and
+  one added: `engine::state_places::tests::an_on_use_state_holds_the_sessions_key_budget_and_its_places`,
+  in place of the region's (red if `OwnState::place` writes a budget of other bytes than the
+  limits' `KEY_ARENA_BYTES` or hands back a handle of no budget, or if `OwnState::places_at`
+  projects anywhere but the state); and
+  `tests::on_use::an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart`
+  (red if `lend_session` lays the state at the head of the arena's block again,
+  `SessionArena::reserve_after`, which asks the session's memory for the state's span too, or, in
+  a build with `query`, `queryable` or `connectivity`, if a plane is written anywhere but the
+  state).
+- `tests::arena::a_sessions_planes_lie_in_its_own_arena` reads `CoopEngine::state_holds`
+  (`region_holds` before) in both forms without `runtime-plan`: the region's in the crate's
+  default suite, the state's in an on-use build.
+- At the build: `region.rs`, `tests/region.rs`, `SessionArena::reserve_after` and its test
+  compile only without both features; `SessionArena::reserve` is the on-use form's too. The
+  engine names the state by `StateLayout` and its holder by `StateHold` (`StateRegion` in a
+  `RegionBlock`, or `OwnState` in an `OwnBlock`), so the region's form calls the bodies it
+  called before.
+- Not tested: the open refused when the allocator has no room for the state
+  (`OwnBlock::take`, `ArenaRefused::NoMemory`); only a refusing allocator reaches it.
+
 ## 8. What the main session runs
 
-Nothing of N1, N2, N3a, N3b or N3c's first step was built or run by this lane.
+Nothing of N1, N2, N3a, N3b or N3c's first two steps was built or run by this lane.
+
+- N3c, step 2, the D12 form, whose behaviour and bytes it does not change (the region's form
+  calls the same bodies through `StateLayout` and `StateHold`): the crate's suites of
+  `wz-capi-coop` and `wz-capi-pico` as before, `tests::arena::a_sessions_planes_lie_in_its_own_arena`
+  reading `state_holds`. The on-use form: `cargo test -p wz-capi-coop --features tables-on-use
+  --lib on_use` 6, the same with `--features
+  liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use` 6 (7.6); `cargo clippy
+  -p wz-capi-coop --features tables-on-use --all-targets -- -D warnings` and the same with the
+  second leg's features; the client library in that form, `cargo build -p wz-capi-pico
+  --no-default-features --features os-host,link-udp,wz-capi-coop/tables-on-use`, whose `nm` should
+  name no `wz_capi_coop::region` body. The precedence leg and `--all-features` as for step 1 below.
 
 - N3c, step 1, the D12 form, whose behaviour and bytes it does not change:
   `cargo test -p wz-session-core --lib on_use::tests` 14 in a debug build (10 before, four added;
@@ -700,7 +737,22 @@ The order that builds at each step:
    the C ABI's held keys (`SessionKeys`, `KeysLocked`): on the on-use form each is a copy of its
    own the engine makes, refused past the session's `MAX_KEYEXPR_BYTES` as the arena refuses it,
    and not counted against the budget until N3e makes it a holder of the row's `HeapKey`.
-2. The region's other places into the boxed state; `region.rs` leaves the form.
+2. The region's other places into the boxed state; `region.rs` leaves the form. Written (7.6):
+   the state is `OwnState` (`engine/state_places.rs`), the places of the state's own values
+   (`StatePlaces`) and the key budget, taken zeroed from the allocator by `OwnBlock` at the open,
+   apart from the arena, which is reserved alone (`SessionArena::reserve`); the engine names the
+   state by `StateLayout` and its holder by `StateHold`. Its places keep the rows of the plain
+   tables and of the round at the build's bound, taken with the state at the open. Counting them on
+   `OnUse` is the second half of this step, a commit of its own, because those tables are the
+   session core's lent ones and each push into them was written for rows the open lent:
+   `EndedLegs` and `LegRows` (`crates/wz-session-core/src/get_plane.rs:213`, `:143`), the get
+   plane's `HeldReplies<u64, Lent>` (`:288`), `HeldFinals` and `RefusedFinals`
+   (`query_plane.rs:118`, `:121`) and the round's `RoundRows` (`round.rs:775`). Each needs the
+   policy as a parameter, and each push a first row the allocator may refuse:
+   `EndedLegs::note` asserts its push is kept (`get_plane.rs:224`), `FinalHolds::admit` lets a
+   refused request's push go (`query_plane.rs:223`), and the round pushes on the receive. Each is
+   given its room before the push, as `FinalStaging::make_room` is (below), or a refusal its
+   caller answers.
 3. N3d, then the runtime, the engine and the rooms boxed; `arena.rs` leaves the form and the
    size case reads group A's figure.
 4. N4, then N5: the switch is declared once the form it selects builds.
