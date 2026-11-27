@@ -958,6 +958,11 @@ static struct {
     const z_loaned_publisher_t *pub;
     int batching;
     _Atomic uint64_t answered;
+    // Whether the first ping's CPU was read, apart from what it read: on Windows the CPU of a process
+    // moves on at the host's clock tick only, so a process that used less than one tick before its first
+    // ping reads 0, a reading and not an absence.
+    _Atomic int first_claimed;
+    _Atomic int first_taken;
     _Atomic uint64_t first_cpu_ns;
     _Atomic uint64_t stop_cpu_ns;
     _Atomic int stopped;
@@ -965,9 +970,10 @@ static struct {
 
 static void on_ping(z_loaned_sample_t *sample, void *context) {
     (void)context;
-    if (atomic_load_explicit(&pong_state.answered, memory_order_relaxed) == 0) {
-        uint64_t expected = 0;
-        atomic_compare_exchange_strong(&pong_state.first_cpu_ns, &expected, cpu_ns());
+    // One callback claims the reading; the flag the main thread reads is set after the value it guards.
+    if (!atomic_exchange(&pong_state.first_claimed, 1)) {
+        atomic_store(&pong_state.first_cpu_ns, cpu_ns());
+        atomic_store(&pong_state.first_taken, 1);
     }
     z_owned_bytes_t payload;
     z_bytes_clone(&payload, z_sample_payload(sample));
@@ -1003,10 +1009,11 @@ static int run_pong(const z_loaned_session_t *session, const struct options *o) 
     while (!terminated && !atomic_load(&pong_state.stopped)) sleep_ms(5);
     int by_stop = atomic_load(&pong_state.stopped);
     uint64_t end = by_stop ? atomic_load(&pong_state.stop_cpu_ns) : cpu_ns();
+    int taken = atomic_load(&pong_state.first_taken);
     uint64_t start = atomic_load(&pong_state.first_cpu_ns);
     printf("perf_probe pong answered=%llu cpu_ns=%llu stopped_by=%s\n",
            (unsigned long long)atomic_load(&pong_state.answered),
-           (unsigned long long)(start > 0 && end > start ? end - start : 0), by_stop ? "stop" : "signal");
+           (unsigned long long)(taken && end > start ? end - start : 0), by_stop ? "stop" : "signal");
     fflush(stdout);
     return 0;
 }
