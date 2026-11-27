@@ -56,6 +56,37 @@ fn parse_heartbeat_source_round_trips_and_rejects_malformed() {
     assert_eq!(parse_heartbeat_source("demo/@adv/pub/ff/xx/_"), None);
 }
 
+/// The key is read from its first `@adv` chunk on, and a key that ends before a chunk the
+/// parse needs is no token: the walk stops where the key does. Turned red by a parse that reads
+/// from a later `@adv` than the first, or past the key's end.
+#[cfg(feature = "advanced-recovery")]
+#[test]
+fn a_heartbeat_key_is_read_from_its_first_adv_chunk_and_ends_with_the_key() {
+    let first = zid_to_zenoh_hex(&[0x09, 0xAB]);
+    let second = zid_to_zenoh_hex(&[0xFF]);
+    assert_eq!(
+        parse_heartbeat_source(&format!("a/@adv/pub/{first}/7/_/@adv/pub/{second}/9/_")),
+        Some(AdvPublisherSource::Sequenced {
+            zid: vec![0x09, 0xAB],
+            eid: 7
+        })
+    );
+    assert_eq!(
+        parse_heartbeat_source(&format!("a/@adv/sub/@adv/pub/{second}/9/_")),
+        None
+    );
+    assert_eq!(parse_heartbeat_source("a/@adv"), None);
+    assert_eq!(parse_heartbeat_source("a/@adv/pub"), None);
+    assert_eq!(
+        parse_heartbeat_source(&format!("a/@adv/pub/{second}")),
+        None
+    );
+    assert_eq!(
+        parse_heartbeat_source(&format!("a/@adv/pub/{second}/uhlc")),
+        Some(AdvPublisherSource::Timestamped { zid: vec![0xFF] })
+    );
+}
+
 /// R311y92 (review S1) — the `@adv` namespace SSOT round-trip: a KE built by the
 /// publisher's `publisher_adv_ke` parses back through the subscriber's
 /// `parse_heartbeat_source` to the same `(zid, eid)`. This couples the two sides through

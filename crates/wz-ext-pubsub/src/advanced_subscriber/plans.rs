@@ -542,20 +542,19 @@ pub enum AdvPublisherSource {
 /// responses from a caller.
 #[cfg(feature = "advanced-recovery")]
 pub fn parse_heartbeat_source(keyexpr: &str) -> Option<AdvPublisherSource> {
-    let chunks: Vec<&str> = keyexpr.split('/').collect();
-    let adv = chunks
-        .iter()
-        .position(|c| *c == crate::advanced_ke::KE_ADV_PREFIX)?;
-    if chunks.get(adv + 1) != Some(&crate::advanced_ke::KE_ADV_PUB) {
+    // The chunks are walked, not collected: the four after the first `@adv` are all it reads.
+    let mut chunks = keyexpr.split('/');
+    chunks.find(|chunk| *chunk == crate::advanced_ke::KE_ADV_PREFIX)?;
+    if chunks.next() != Some(crate::advanced_ke::KE_ADV_PUB) {
         return None;
     }
     // R2555 — a zid chunk that does not decode is the UNIDENTIFIED shape, not a
     // refusal. Upstream reaches its third arm by exactly this test failing
     // (`ZenohId::from_str`), and still queries the publisher's cache.
-    let Some(zid) = zenoh_hex_to_zid(chunks.get(adv + 2)?) else {
+    let Some(zid) = zenoh_hex_to_zid(chunks.next()?) else {
         return Some(AdvPublisherSource::Unidentified);
     };
-    let discriminator = *chunks.get(adv + 3)?;
+    let discriminator = chunks.next()?;
     if discriminator == crate::advanced_ke::KE_ADV_UHLC {
         return Some(AdvPublisherSource::Timestamped { zid });
     }
