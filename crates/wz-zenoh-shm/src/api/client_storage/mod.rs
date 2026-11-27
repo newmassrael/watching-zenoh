@@ -15,10 +15,7 @@
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-shm 1.10.2, file
 // src/api/client_storage/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, RwLock},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use static_init::dynamic;
 use zenoh_result::{bail, ZResult};
@@ -30,6 +27,7 @@ use crate::{
         protocol_implementations::posix::posix_shm_client::PosixShmClient,
     },
     reader::{ClientStorage, GlobalDataSegmentId},
+    segment_cache::{SegmentCache, RETAINED_SEGMENTS},
 };
 
 #[dynamic(lazy, drop)]
@@ -122,6 +120,14 @@ impl ShmClientStorageBuilder {
     pub fn build(self) -> ShmClientStorage {
         ShmClientStorage::new(self.clients)
     }
+
+    /// [`Self::build`], keeping at most `retained` data segments mapped that no buffer points
+    /// into (16 by default; 0 maps a segment exactly while a buffer of it is held). Hidden: upstream
+    /// has no such knob, and the tests of the bound are what name it.
+    #[doc(hidden)]
+    pub fn build_retaining(self, retained: usize) -> ShmClientStorage {
+        ShmClientStorage::with_retained(self.clients, retained)
+    }
 }
 
 /// A storage for SHM clients.
@@ -132,7 +138,10 @@ impl ShmClientStorageBuilder {
 #[derive(Debug)]
 pub struct ShmClientStorage {
     pub(crate) clients: ClientStorage<Arc<dyn ShmClient>>,
-    pub(crate) segments: RwLock<BTreeMap<GlobalDataSegmentId, Arc<dyn ShmSegment>>>,
+    /// The data segments this storage's readers mapped: each held by the buffers that point into
+    /// it, and the last ones used by the table itself (`SegmentCache`). Upstream's map holds every
+    /// segment it mapped for the life of the storage.
+    pub(crate) segments: SegmentCache<GlobalDataSegmentId, dyn ShmSegment>,
 }
 
 impl Eq for ShmClientStorage {}
@@ -165,10 +174,21 @@ impl ShmClientStorage {
         self.clients.get_clients().get(&protocol)
     }
 
+    /// How many data segments the storage holds mapped now: those a buffer of a reader points
+    /// into, and the last ones used. A diagnostic, hidden for the reason [`Self::client`] is.
+    #[doc(hidden)]
+    pub fn mapped_segments(&self) -> usize {
+        self.segments.mapped()
+    }
+
     fn new(clients: BTreeMap<ProtocolID, Arc<dyn ShmClient>>) -> Self {
+        Self::with_retained(clients, RETAINED_SEGMENTS)
+    }
+
+    fn with_retained(clients: BTreeMap<ProtocolID, Arc<dyn ShmClient>>, retained: usize) -> Self {
         Self {
             clients: ClientStorage::new(clients),
-            segments: RwLock::default(),
+            segments: SegmentCache::new(retained),
         }
     }
 }

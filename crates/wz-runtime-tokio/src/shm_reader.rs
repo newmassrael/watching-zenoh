@@ -282,6 +282,91 @@ mod tests {
         );
     }
 
+    /// A buffer of its own pool holding `bytes`, sent: its descriptor, with the sender's
+    /// reference taken for the receiver.
+    fn sent(bytes: &[u8]) -> (crate::shm_buffer::IssuedBuffer, ShmDescriptor) {
+        let mut buffer =
+            crate::shm_buffer::IssuedBuffer::alloc(bytes.len()).expect("a buffer of its own pool");
+        buffer.write(bytes);
+        let wire = buffer.wire_reference();
+        let descriptor = wire.descriptor();
+        wire.commit();
+        (buffer, descriptor)
+    }
+
+    /// A storage of the default client set that keeps at most `retained` segments no buffer
+    /// holds.
+    fn storage_retaining(retained: usize) -> Arc<ShmClientStorage> {
+        Arc::new(
+            ShmClientStorage::builder()
+                .with_default_client_set()
+                .build_retaining(retained),
+        )
+    }
+
+    /// A reader maps a provider's segment while a buffer of it is held, and the provider gone
+    /// changes nothing for that buffer: it reads what was sent. Once no buffer holds the segment, a
+    /// storage that keeps none has unmapped it. The CONTROL is the default storage, which keeps
+    /// the segment it used last, so a subscriber that drops each sample before the next does not
+    /// map its provider again for every message.
+    ///
+    /// Turned red by a storage that keeps every segment it ever mapped (upstream's table, the
+    /// debt this closes), or by one that unmaps a segment a buffer still points into.
+    #[test]
+    fn a_reader_maps_a_segment_while_a_buffer_of_it_is_held() {
+        let storage = storage_retaining(0);
+        let reader = ShmReaderResolver::new(Arc::clone(&storage));
+        let (owner, descriptor) = sent(b"held");
+        let read = reader
+            .read(&descriptor)
+            .expect("the receiver reads what was sent");
+        assert_eq!(storage.mapped_segments(), 1);
+        drop(owner);
+        assert_eq!(
+            AsRef::<[u8]>::as_ref(&*read),
+            b"held",
+            "the provider gone, the buffer reads"
+        );
+        assert_eq!(
+            storage.mapped_segments(),
+            1,
+            "the held buffer keeps its segment"
+        );
+        drop(read);
+        assert_eq!(storage.mapped_segments(), 0, "no buffer holds it: unmapped");
+
+        let kept = storage_retaining(DEFAULT_RETAINED);
+        let reader = ShmReaderResolver::new(Arc::clone(&kept));
+        let (owner, descriptor) = sent(b"kept");
+        drop(reader.read(&descriptor).expect("read"));
+        drop(owner);
+        assert_eq!(
+            kept.mapped_segments(),
+            1,
+            "CONTROL: the last one used is kept"
+        );
+    }
+
+    /// The segments kept with no buffer of theirs held are bounded: a reader of more providers
+    /// than the bound, each read dropped, holds the bound's worth mapped and no more.
+    ///
+    /// Turned red by a kept set that grows with every provider read.
+    #[test]
+    fn the_segments_kept_past_their_buffers_are_bounded() {
+        let storage = storage_retaining(2);
+        let reader = ShmReaderResolver::new(Arc::clone(&storage));
+        let mut owners = Vec::new();
+        for n in 0..5u8 {
+            let (owner, descriptor) = sent(&[n; 8]);
+            drop(reader.read(&descriptor).expect("read"));
+            owners.push(owner);
+        }
+        assert_eq!(storage.mapped_segments(), 2);
+    }
+
+    /// The bound a storage built with no word of its own keeps.
+    const DEFAULT_RETAINED: usize = 16;
+
     /// A descriptor of no bytes is no buffer: it is refused before anything is read.
     #[test]
     fn a_descriptor_of_no_bytes_is_refused() {

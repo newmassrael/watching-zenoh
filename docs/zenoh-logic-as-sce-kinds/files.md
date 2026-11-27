@@ -1313,6 +1313,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-zenoh-shm/src/posix_shm/segment.rs` | S6 | |
 | `crates/wz-zenoh-shm/src/posix_shm/struct_in_shm.rs` | S6 | |
 | `crates/wz-zenoh-shm/src/reader.rs` | S6 | |
+| `crates/wz-zenoh-shm/src/segment_cache.rs` | S6 | |
 | `crates/wz-zenoh-shm/src/shm/mod.rs` | S6 | |
 | `crates/wz-zenoh-shm/src/shm/unix.rs` | S6 | |
 | `crates/wz-zenoh-shm/src/shm/windows.rs` | S6 | |

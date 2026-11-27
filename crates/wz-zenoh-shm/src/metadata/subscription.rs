@@ -15,74 +15,46 @@
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-shm 1.10.2, file
 // src/metadata/subscription.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, RwLock},
-};
+use std::sync::Arc;
 
 use static_init::dynamic;
-use zenoh_core::{zread, zwrite};
 use zenoh_result::{bail, ZResult};
 
 use super::{
     descriptor::{MetadataDescriptor, MetadataSegmentID, OwnedMetadataDescriptor},
     segment::MetadataSegment,
 };
+use crate::segment_cache::{SegmentCache, RETAINED_SEGMENTS};
 
 #[dynamic(lazy, drop)]
 pub static mut GLOBAL_METADATA_SUBSCRIPTION: Subscription = Subscription::new();
 
 pub struct Subscription {
-    linked_table: RwLock<BTreeMap<MetadataSegmentID, Arc<MetadataSegment>>>,
+    /// The metadata segments linked: each held by the descriptors that point into it, and the last
+    /// ones used by the table itself (`SegmentCache`). Upstream's table keeps every segment it
+    /// linked for the life of the process.
+    linked_table: SegmentCache<MetadataSegmentID, MetadataSegment>,
 }
 
 impl std::fmt::Debug for Subscription {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut debug = f.debug_struct("Subscription");
-        match self.linked_table.try_read() {
-            Ok(linked_table) => {
-                debug.field("linked_table_len", &linked_table.len());
-            }
-            Err(_) => {
-                debug.field("linked_table_len", &"<locked>");
-            }
-        }
-        debug.finish()
+        f.debug_struct("Subscription")
+            .field("linked_table", &self.linked_table)
+            .finish()
     }
 }
 
 impl Subscription {
     fn new() -> Self {
         Self {
-            linked_table: RwLock::default(),
+            linked_table: SegmentCache::new(RETAINED_SEGMENTS),
         }
     }
 
     fn ensure_segment(&self, id: MetadataSegmentID) -> ZResult<Arc<MetadataSegment>> {
-        // fastest path: try to utilize already existing segment
-        {
-            let guard = zread!(self.linked_table);
-            if let Some(segment) = guard.get(&id) {
-                return Ok(segment.clone());
-            }
-        }
-
-        // try to create segment
-        let mut guard = zwrite!(self.linked_table);
-        // ensure segment
-        Ok(match guard.entry(id) {
-            std::collections::btree_map::Entry::Vacant(vacant) => {
-                let segment = Arc::new(MetadataSegment::open(id)?);
-                vacant.insert(segment.clone());
-                segment
-            }
-            std::collections::btree_map::Entry::Occupied(occupied) => {
-                // this is intentional
-                occupied.get().clone()
-            }
-        })
+        self.linked_table
+            .get_or_map(id, || Ok(Arc::new(MetadataSegment::open(id)?)))
     }
-
     pub fn link(&self, descriptor: &MetadataDescriptor) -> ZResult<OwnedMetadataDescriptor> {
         let segment = self.ensure_segment(descriptor.id)?;
 

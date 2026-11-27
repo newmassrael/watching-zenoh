@@ -21,7 +21,7 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 
-use zenoh_core::{bail, zerror, zread, zwrite};
+use zenoh_core::{bail, zerror};
 use zenoh_result::ZResult;
 
 use crate::{
@@ -128,39 +128,17 @@ impl ShmReader {
         descriptor: &ChunkDescriptor,
     ) -> ZResult<Arc<dyn ShmSegment>> {
         let id = get_global_id(protocol_id, descriptor.segment);
-
-        // fastest path: try to get access to already mounted SHM segment
-        // read lock allows concurrent execution of multiple requests
-        let r_guard = zread!(self.segments);
-        if let Some(val) = r_guard.get(&id) {
-            return Ok(val.clone());
-        }
-        // fastest path failed: need to mount a new segment
-
-        // drop read lock because we're gonna obtain write lock further
-        drop(r_guard);
-
-        // find appropriate client
-        let client = self
-            .clients
-            .get_clients()
-            .get(&protocol_id)
-            .ok_or_else(|| zerror!("Unsupported SHM protocol: {}", protocol_id))?;
-
-        // obtain write lock...
-        let mut w_guard = zwrite!(self.segments);
-
-        // many concurrent threads may be racing for mounting this particular segment, so we must check again if the segment exists
-        match w_guard.entry(id) {
-            // (rare case) segment already mounted
-            std::collections::btree_map::Entry::Occupied(occupied) => Ok(occupied.get().clone()),
-
-            // (common case) mount a new segment and add it to the map
-            std::collections::btree_map::Entry::Vacant(vacant) => {
-                let new_segment = client.attach(descriptor.segment)?;
-                Ok(vacant.insert(new_segment).clone())
-            }
-        }
+        // A segment mapped now is found; one that is not is attached through the client of its
+        // protocol, and the table holds it only as long as a buffer of it or its recent use does
+        // (`SegmentCache`), where upstream's map keeps it for the life of the storage.
+        self.segments.get_or_map(id, || {
+            let client = self
+                .clients
+                .get_clients()
+                .get(&protocol_id)
+                .ok_or_else(|| zerror!("Unsupported SHM protocol: {}", protocol_id))?;
+            client.attach(descriptor.segment)
+        })
     }
 }
 
