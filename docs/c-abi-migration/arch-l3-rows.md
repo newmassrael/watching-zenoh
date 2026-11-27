@@ -1025,10 +1025,32 @@ is about level in text and lower in Ir. The
 receive is unchanged (no change is on a Push's path). A `liveliness-get` build counts the rows of
 a kind on each get's begin (at most `PENDING_GET_ROWS`).
 
-Read and not yet attributed: `tests::get::a_get_ends_with_its_link` (region and runtime-plan
-forms) and `tests::listen::a_listener_hears_and_asks_every_client_it_has_taken` were red with no
-panic line kept; the loss path ends each leg on its row (`end_legs_of`) and notes the end for the
-read's delivery, and none of the four commits moves it. Their panic lines decide the next step.
+**The two reds read by their panic lines** (two commits). Both were a get's end never seen,
+each for a cause of its own:
+
+- `fix(capi-coop): Hand out a get its link's loss ended with the session`. The test session
+  dials nothing again, so the loss of its one link ends the session in the same step: the step
+  ends the face's legs on their rows (`end_legs_of`), notes the end, and marks the session
+  closed. The delivery after the step reached the tables through `live`, which refuses a closed
+  session, so the end waited for the program's close, which the test never makes. The loss of a
+  link that also ended the session is still that link's loss, as the retractions of its tokens
+  are (handed past the end, `hand_lost_tokens`): the hand-out now reaches the session through
+  `unreleased`, the session's lock until the program's close has let go of what it holds
+  (`Core::released`), after which the close has cancelled every get itself and nothing is handed
+  out. Both forms take this one path: the direct read delivers after the turn that ended the
+  session, the round's read after the step that did. Tests:
+  `tests::get::a_get_ends_with_its_link` (red if the hand-out goes back to `live`; its CONTROL
+  now states that the loss ended the session) and
+  `tests::get::a_get_ends_with_its_link_where_the_session_dials_again` (the loss of a session
+  that goes on, the session open after it).
+- `test(capi-coop): Count one callback for the listener's get of two legs`. The test counted two
+  callbacks dropped for a get of two legs, as each leg minted one before the switch; the switch
+  mints one for the get, so the count never reached two in any form. The test waits for the one
+  drop, after which both answers are asserted as before.
+
+Expected size and Ir: the hand-out takes the lock it took (`live`'s check of the closed word goes,
+`released` is read under the lock instead), so a get's end costs about the same; no Push path
+changes, and the pico-compare cases do not move.
 
 ## 7. The receive
 
