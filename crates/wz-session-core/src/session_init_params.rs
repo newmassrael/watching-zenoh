@@ -51,7 +51,11 @@ const _: () = assert!(
     COOKIE_MAX >= 1 && COOKIE_MAX <= COOKIE_FIELD_MAX,
     "HANDSHAKE_COOKIE_BYTES is in 1..=65535, the INIT cookie field's capacity"
 );
-#[cfg(all(feature = "session-fixed-storage", feature = "session-unicast-accept"))]
+#[cfg(all(
+    feature = "session-fixed-storage",
+    feature = "session-unicast-accept",
+    feature = "accept-cookie"
+))]
 const _: () = assert!(
     COOKIE_MAX >= crate::accept_cookie::ACCEPT_COOKIE_MAX_BYTES,
     "HANDSHAKE_COOKIE_BYTES is at least the widest cookie an accepting node issues"
@@ -759,32 +763,34 @@ impl TxQueueConf {
 /// The key an accepting session signs its cookies with
 /// ([`SessionInitParams::cookie_signing_key`]).
 ///
-/// Held only where the session machine has its accepting role (`session-unicast-accept`): an
-/// initiator neither signs nor checks a cookie of its own, so a build without that role holds no
-/// key, draws none and wipes none. There is no key that stands in for a missing one: without the
-/// role the value is empty, and no cookie verifies under it ([`Self::decode`]). It is made from a
-/// [`SigningKey`] or drawn ([`Self::draw`]) the same way in either build, so a caller that makes
-/// parameters names no feature.
+/// Held only where the session machine has its accepting role (`session-unicast-accept`) in its
+/// stateless form (`accept-cookie`): an initiator neither signs nor checks a cookie of its own, and
+/// an acceptor that holds each accept itself mints none, so a build without either holds no key,
+/// draws none and wipes none. There is no key that stands in for a missing one: without them the
+/// value is empty, and no cookie verifies under it (`Self::decode`, which a build without
+/// `accept-cookie` does not have). It is made from a [`SigningKey`] or drawn ([`Self::draw`])
+/// the same way in every build, so a caller that makes parameters names no feature.
 #[derive(Debug, Clone)]
 pub struct CookieKey {
-    #[cfg(feature = "session-unicast-accept")]
+    #[cfg(all(feature = "session-unicast-accept", feature = "accept-cookie"))]
     key: SigningKey,
 }
 
 impl CookieKey {
-    /// A key drawn from `source`, as [`SigningKey::from_entropy`] draws one. A build without the
-    /// accepting role draws nothing, and its draw is never refused.
+    /// A key drawn from `source`, as [`SigningKey::from_entropy`] draws one. A build that mints
+    /// no cookie (no accepting role, or one without `accept-cookie`) draws nothing, and its draw is
+    /// never refused.
     #[inline]
     pub fn draw<E: crate::entropy::EntropySource + ?Sized>(
         source: &mut E,
     ) -> Result<Self, crate::entropy::EntropyUnavailable> {
-        #[cfg(feature = "session-unicast-accept")]
+        #[cfg(all(feature = "session-unicast-accept", feature = "accept-cookie"))]
         {
             Ok(Self {
                 key: SigningKey::from_entropy(source)?,
             })
         }
-        #[cfg(not(feature = "session-unicast-accept"))]
+        #[cfg(not(all(feature = "session-unicast-accept", feature = "accept-cookie")))]
         {
             let _ = source;
             Ok(Self {})
@@ -794,6 +800,7 @@ impl CookieKey {
     /// The state `cookie` carries when this node minted it under this key
     /// ([`crate::accept_cookie::decode_accept_cookie`]): `None` when it does not verify, and
     /// always in a build without the accepting role, which holds no key and so minted no cookie.
+    #[cfg(feature = "accept-cookie")]
     pub fn decode(&self, cookie: &[u8]) -> Option<crate::accept_cookie::AcceptCookieState> {
         #[cfg(feature = "session-unicast-accept")]
         {
@@ -807,21 +814,21 @@ impl CookieKey {
     }
 
     /// The key the accepting role mints and checks its cookies with.
-    #[cfg(feature = "session-unicast-accept")]
+    #[cfg(all(feature = "session-unicast-accept", feature = "accept-cookie"))]
     pub fn signing_key(&self) -> &SigningKey {
         &self.key
     }
 }
 
-#[cfg(feature = "session-unicast-accept")]
+#[cfg(all(feature = "session-unicast-accept", feature = "accept-cookie"))]
 impl From<SigningKey> for CookieKey {
     fn from(key: SigningKey) -> Self {
         Self { key }
     }
 }
 
-/// A build without the accepting role keeps no key: the one handed in is wiped as it goes.
-#[cfg(not(feature = "session-unicast-accept"))]
+/// A build that mints no cookie keeps no key: the one handed in is wiped as it goes.
+#[cfg(not(all(feature = "session-unicast-accept", feature = "accept-cookie")))]
 impl From<SigningKey> for CookieKey {
     fn from(_key: SigningKey) -> Self {
         Self {}
@@ -1333,7 +1340,7 @@ mod cookie_key_tests {
     /// A session machine with the accepting role draws its key, so a dry source refuses it, and
     /// a cookie minted under the key is one it reads back while bytes it never signed are not.
     /// Turned red by a draw that holds no key where an acceptor signs with it.
-    #[cfg(feature = "session-unicast-accept")]
+    #[cfg(all(feature = "session-unicast-accept", feature = "accept-cookie"))]
     #[test]
     fn an_accepting_build_draws_its_key_and_reads_only_what_it_minted() {
         use crate::accept_cookie::{encode_accept_cookie_into, AcceptCookieView};
@@ -1378,12 +1385,39 @@ mod cookie_key_tests {
             0,
             "no byte of a key is kept"
         );
-        assert!(key.decode(&[0u8; 40]).is_none());
         let handed =
             CookieKey::from(SigningKey::from_slice(&[7u8; 32]).expect("a key of 32 bytes"));
-        assert!(
-            handed.decode(&[7u8; 40]).is_none(),
-            "a key handed in is not kept"
+        // A build that reads cookies at all (`accept-cookie`) verifies none under either key.
+        #[cfg(feature = "accept-cookie")]
+        {
+            assert!(key.decode(&[0u8; 40]).is_none());
+            assert!(
+                handed.decode(&[7u8; 40]).is_none(),
+                "a key handed in is not kept"
+            );
+        }
+        #[cfg(not(feature = "accept-cookie"))]
+        let _ = (key, handed);
+    }
+
+    /// An acceptor without its stateless form (`accept-cookie`, off in the zenoh-pico preset)
+    /// holds each accept itself and mints no cookie, so it holds no key either: it draws nothing,
+    /// a dry source does not refuse it, and it keeps no byte of a key it is handed. Turned red by a
+    /// key drawn or kept by an acceptor that signs nothing with it.
+    #[cfg(all(feature = "session-unicast-accept", not(feature = "accept-cookie")))]
+    #[test]
+    fn an_acceptor_that_mints_no_cookie_holds_and_draws_no_key() {
+        use crate::signing_key::SigningKey;
+
+        let mut dry = Dry(0);
+        let _key = CookieKey::draw(&mut dry).expect("nothing is drawn, so nothing refuses");
+        assert_eq!(dry.0, 0, "the source was not asked");
+        assert_eq!(
+            core::mem::size_of::<CookieKey>(),
+            0,
+            "no byte of a key is kept"
         );
+        let _handed =
+            CookieKey::from(SigningKey::from_slice(&[7u8; 32]).expect("a key of 32 bytes"));
     }
 }

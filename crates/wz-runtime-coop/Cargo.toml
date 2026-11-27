@@ -307,6 +307,13 @@ session-unicast-accept = ["dep:wz-session-core", "wz-session-core/session-unicas
 # answers its peers' Interests (the facade's accepting role), and left out by the zenoh-pico
 # preset's peer, which answers none on a unicast face.
 interest-answer = ["dep:wz-session-core", "wz-session-core/interest-answer"]
+# The stateless form of the accepting role (`wz-session-core`'s `accept-cookie`), which the session
+# core's accepting role does not bring: an acceptor that mints its InitAck's cookie from a nonce
+# drawn for the handshake, so a link is not accepted while the session's source is dry. Named
+# beside `session-unicast-accept` by a node whose acceptor mints its cookies (the facade's accepting
+# role, the cooperative engine's own build), and left out by the zenoh-pico preset's peer, whose
+# acceptor holds each accept and draws nothing for it.
+accept-cookie = ["dep:wz-session-core", "wz-session-core/accept-cookie"]
 # No `session-close-ingress` here: the lifecycle verbs compile only beside a
 # secure channel (decision D2 of docs/session-lifecycle-intent.md), and this
 # runtime cannot promise one, so a feature naming the verbs here would name a

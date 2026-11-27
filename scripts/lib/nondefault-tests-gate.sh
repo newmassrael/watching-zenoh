@@ -824,10 +824,11 @@ files::decl_watch_doors::"
     # session steps are `threads`' and leave this build; the rest must pass in it as they do above.
     # `tls-mbedtls` is the row above's cost and is not repeated. Matching listeners on a key stay
     # in (`key-matching-listener`, a default the row above has), so the suite's tests of them run
-    # in this form too. It listens without `udp-listen`, `interest-answer` and `link-admission`,
-    # as the zenoh-pico preset's peer does, so a `udp/` endpoint to listen on is refused here, a
-    # peer's Interest is not answered, and a second link to a node is a face of its own
-    # (`tests::one_thread::listen::`).
+    # in this form too. It listens without `udp-listen`, `interest-answer`, `link-admission` and
+    # `accept-cookie`, as the zenoh-pico preset's peer does, so a `udp/` endpoint to listen on is
+    # refused here, a peer's Interest is not answered, a second link to a node is a face of its own
+    # (`tests::one_thread::listen::`), and each accept is held with an empty cookie, no key drawn
+    # for a dial (`tests::an_open_whose_source_gives_nothing_opens_where_no_cookie_key_is_drawn`).
     "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
     # The declaration watch in the same form: a round of one thread tells a catch-up a declaration a
     # round with the links held, which the watch's tests prove only where they run in it.
@@ -1139,7 +1140,13 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
     # (`reassembly_rx::tests`); the reading a let-go link keeps is `resource-snapshot`'s. The
     # row already names what `listen` implies (`session-unicast-accept`, `udp-listen`); the two
     # add the faces' listening half and the links' counters, which those tests read.
+    #
+    # `accept-cookie` joins: the session core's accepting role mints its InitAck's cookie only with
+    # it, which the session core's defaults hold and this crate takes the core without, so the
+    # crate's tests over an acceptor run its stateless form as they did before it was a switch,
+    # and the draw an acceptor asks of the session's source before its handshake is compiled.
     "wz-runtime-coop|hook|\
+        accept-cookie,\
         alloc,\
         codec-close,\
         codec-frame,\
@@ -1177,6 +1184,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
     # crate's defaults, on its own module. NOT YET MEASURED.
     "wz-runtime-coop|hook|\
         -default,\
+        accept-cookie,\
         alloc,\
         codec-close,\
         codec-frame,\
@@ -1527,7 +1535,8 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
     # `tx-fragment-credit`, `tx-held-wait`, each a default of the crate), as the zenoh-pico preset
     # builds the session core: the crate's defaults without the four, spelled out, over the first
     # lend-only row's features above with fragmentation, the send of the C library's cooperative
-    # engine.
+    # engine. The stateless acceptor (`accept-cookie`, a default) is left out with them, as that
+    # preset's peer leaves it, so the rows' acceptor holds each accept with an empty cookie.
     # Four filters, one build, each the test of what a behaviour's absence does: a chain its link
     # cuts ends where it was cut, a kept expiry never closes the session, a stated count of
     # expiries is refused by name, and every sender's deadline waits. NOT YET MEASURED.
@@ -1635,6 +1644,62 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         transport-keepalive,\
         tx-lend-only\
         |tx_deadline::tests::without_the_probe_stage_every_deadline_waits"
+    # The same build's acceptor without the stateless cookie (`accept-cookie` left out): an
+    # InitAck that mints nothing and draws nothing, the accept marked pending and the OpenSyn
+    # that echoes the configured cookie admitted, and a cookie key that is never drawn. Two
+    # filters, the same build. NOT YET MEASURED.
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_actions::bundle_tests::an_acceptor_without_the_stateless_cookie_holds_its_accept"
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_init_params::cookie_key_tests::an_acceptor_that_mints_no_cookie_holds_and_draws_no_key"
     # The same build has no `link-wire-reports` (a default left out with the four: no driver of
     # the cooperative engine queues its writes or carries a class apart), so the line mark and the
     # keepalive's deadline are the inline driver's alone, which this filter holds. NOT YET

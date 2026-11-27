@@ -368,7 +368,7 @@ pub fn generate_cookie_hmac_sha256(
 /// ⚠ AN OPERATION AND NOT AN ACCESSOR, which is the whole reason it is here
 /// rather than a `pub(crate) as_slice`. [`SigningKey`]'s own doc states the
 /// boundary — "only this module's `generate_cookie_hmac_sha256` can read
-/// them" — so the state-carrying cookie in [`crate::accept_cookie`] is given
+/// them" — so the state-carrying cookie in `crate::accept_cookie` is given
 /// the MAC it needs instead of the key. Widening `as_slice` to the crate
 /// would have been the smaller edit and the weaker type.
 ///

@@ -205,6 +205,7 @@ use crate::session_init_params::{SessionBytes, SessionInitParams, SessionZid, CO
 #[cfg(all(
     feature = "codec-init-body",
     feature = "session-unicast-accept",
+    feature = "accept-cookie",
     not(feature = "tx-lend-only")
 ))]
 use crate::accept_cookie::encode_accept_cookie;
@@ -8906,7 +8907,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// R2783 — this handshake's multilink accept state for the cookie, or
     /// `None` when no dispatch is installed or multilink is off for it.
-    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "session-unicast-accept",
+        feature = "accept-cookie"
+    ))]
     fn multilink_accept_state(&self) -> crate::accept_cookie::MultilinkAcceptState {
         #[cfg(feature = "transport-multilink")]
         {
@@ -8961,6 +8966,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(
         feature = "codec-init-body",
         feature = "session-unicast-accept",
+        feature = "accept-cookie",
         not(feature = "tx-lend-only")
     ))]
     pub(crate) fn accept_cookie_state(
@@ -8986,7 +8992,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// one place both forms of the cookie read them from: the owned state, and
     /// the borrowed view [`Self::mint_accept_cookie_into`] writes without a
     /// copy. `(peer_whatami, sn_res, batch_size, negotiated, multilink)`.
-    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "session-unicast-accept",
+        feature = "accept-cookie"
+    ))]
     fn accept_cookie_members(
         &self,
     ) -> (
@@ -9018,7 +9028,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(
         feature = "tx-lend-only",
         feature = "codec-init-body",
-        feature = "session-unicast-accept"
+        feature = "session-unicast-accept",
+        feature = "accept-cookie"
     ))]
     fn mint_accept_cookie_into<'o>(
         &self,
@@ -9058,7 +9069,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// rather than through `negotiated_patch()`, which folds an absent
     /// negotiation into `NO_PATCH` — the difference a flag bit could not
     /// carry, and the reason the state type keeps an `Option<u8>`.
-    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "session-unicast-accept",
+        feature = "accept-cookie"
+    ))]
     fn negotiated_extensions(&self) -> crate::accept_state::NegotiatedExtensions {
         #[cfg(not(feature = "session-extauth"))]
         use crate::accept_state::AuthAcceptState;
@@ -9118,7 +9133,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// none — the state a fresh session is constructed in.
     #[cfg(any(
         feature = "session-reconnect",
-        all(feature = "codec-init-body", feature = "session-unicast-accept")
+        all(
+            feature = "codec-init-body",
+            feature = "session-unicast-accept",
+            feature = "accept-cookie"
+        )
     ))]
     fn offered_extensions(&self) -> crate::accept_state::NegotiatedExtensions {
         use crate::accept_state::{
@@ -9183,6 +9202,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "session-reconnect",
         all(
             feature = "session-unicast-accept",
+            feature = "accept-cookie",
             any(feature = "codec-init-body", feature = "codec-open-body")
         )
     ))]
@@ -9260,7 +9280,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`crate::session_actions::SessionLinkActions::cookie_valid`] has already
     /// accepted these bytes and a failure here would be this code disagreeing
     /// with itself.
-    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
+    #[cfg(all(
+        feature = "codec-open-body",
+        feature = "session-unicast-accept",
+        feature = "accept-cookie"
+    ))]
     pub(crate) fn restore_accept_state_from_cookie(&self) -> bool {
         let echoed = match self.fact_inbound_opensyn_cookie(|s| s.clone()) {
             Some(c) => c,
@@ -9307,6 +9331,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// it is gated as that boundary is.
     #[cfg(all(
         feature = "session-unicast-accept",
+        feature = "accept-cookie",
         any(feature = "codec-init-body", feature = "codec-open-body")
     ))]
     fn install_accept_head(&self, head: Option<&crate::accept_cookie::AcceptCookieState>) {
@@ -9478,7 +9503,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(
         feature = "transport-multilink",
         feature = "codec-init-body",
-        feature = "session-unicast-accept"
+        feature = "session-unicast-accept",
+        feature = "accept-cookie"
     ))]
     fn release_multilink_accept_state(&self) {
         self.fact_multilink(|slot| {
@@ -9496,7 +9522,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(
         feature = "transport-multilink",
         feature = "codec-open-body",
-        feature = "session-unicast-accept"
+        feature = "session-unicast-accept",
+        feature = "accept-cookie"
     ))]
     fn restore_multilink_accept_state(&self, carried: &crate::accept_cookie::MultilinkAcceptState) {
         self.fact_multilink(|slot| {
@@ -11593,7 +11620,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
     pub(crate) fn admit_open_syn(&self, lease: u64, initial_sn: u64) {
         // Under `handshake-cookie = fixed` the acceptor held what it negotiated and the
-        // cookie carries nothing to restore.
+        // cookie carries nothing to restore, as in a build without the stateless acceptor
+        // (`accept-cookie`), which holds every accept.
+        #[cfg(feature = "accept-cookie")]
         if !self.fixed_cookie() {
             self.restore_accept_state_from_cookie();
         }
@@ -20199,8 +20228,18 @@ pub struct SessionActionsBinding<R: SessionRuntime, T: TimeSource> {
     /// session's links ([`SessionRuntime::EntropyDraw`]): what every InitAck this
     /// binding sends draws its cookie nonce and its challenges from. The link's
     /// bundle keeps none. Only an acceptor draws, so a build without the accept path
-    /// holds none.
-    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+    /// holds none, nor does one whose acceptor draws nothing: it holds each accept
+    /// itself (no `accept-cookie`) and issues no challenge (no `session-extauth`, no
+    /// `transport-multilink`).
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "session-unicast-accept",
+        any(
+            feature = "accept-cookie",
+            feature = "session-extauth",
+            feature = "transport-multilink"
+        )
+    ))]
     entropy: R::EntropyDraw,
 }
 
@@ -20213,11 +20252,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
     /// test can drive an individual action method directly (the
     /// engine-free successor of the retired `dispatch_script` shim).
     pub fn new(actions: R::ActionsHandle<T>, entropy: R::EntropyDraw) -> Self {
-        #[cfg(not(all(feature = "codec-init-body", feature = "session-unicast-accept")))]
+        #[cfg(not(all(
+            feature = "codec-init-body",
+            feature = "session-unicast-accept",
+            any(
+                feature = "accept-cookie",
+                feature = "session-extauth",
+                feature = "transport-multilink"
+            )
+        )))]
         let _ = entropy;
         Self {
             inner: actions,
-            #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
+            #[cfg(all(
+                feature = "codec-init-body",
+                feature = "session-unicast-accept",
+                any(
+                    feature = "accept-cookie",
+                    feature = "session-extauth",
+                    feature = "transport-multilink"
+                )
+            ))]
             entropy,
         }
     }
@@ -20632,18 +20687,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // configured cookie (the `None` below falls back to it), nothing carried is released
             // after the send, and the nonce slot marks the accept as pending until an OpenSyn
             // is admitted, so the same value cannot admit a second OpenSyn after it.
+            //
+            // The minting half is the stateless acceptor's (`accept-cookie`); a build without it
+            // holds every accept, below, as `fixed` does.
+            #[cfg(feature = "accept-cookie")]
             let fixed_cookie = a.fixed_cookie();
+            #[cfg(feature = "accept-cookie")]
             if fixed_cookie {
                 a.fact_cookie_nonce(|slot| *slot = Some(FIXED_COOKIE_PENDING));
             } else {
                 a.draw_cookie_nonce(&mut self.entropy);
             }
+            #[cfg(feature = "accept-cookie")]
             let nonce: Option<u64> = if fixed_cookie {
                 None
             } else {
                 a.fact_cookie_nonce(|slot| *slot)
             };
-            #[cfg(not(feature = "tx-lend-only"))]
+            #[cfg(all(feature = "accept-cookie", not(feature = "tx-lend-only")))]
             let cookie_carried = {
                 let peer_zid: Option<SessionZid> = a.fact_inbound_peer_zid(|slot| *slot);
                 let cookie_bytes: Option<Vec<u8>> = match (peer_zid, nonce) {
@@ -20678,7 +20739,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // and counted. A cookie that cannot be minted (no zid, no nonce)
             // leaves as an InitAck with the parameters' own, as the heap form
             // does, and the state below is then not released.
-            #[cfg(feature = "tx-lend-only")]
+            #[cfg(all(feature = "accept-cookie", feature = "tx-lend-only"))]
             let cookie_carried = {
                 let zid: Option<SessionZid> = a.fact_inbound_peer_zid(|slot| *slot);
                 let peer_zid: Option<&[u8]> = zid.as_deref();
@@ -20706,6 +20767,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             // but the release is justified by the carriage and by nothing
             // else. Last, after the send: every read of these slots for this
             // InitAck — the reflections staged above and the mint — is done.
+            #[cfg(feature = "accept-cookie")]
             if cookie_carried {
                 a.install_negotiated(a.offered_extensions());
                 // R2782 — and the HEAD: the peer's zid, role and sizing caps
@@ -20715,6 +20777,33 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                 // captured key, and the key already latched for the join.
                 #[cfg(feature = "transport-multilink")]
                 a.release_multilink_accept_state();
+            }
+            // Without the stateless acceptor (`accept-cookie`, off in the zenoh-pico preset)
+            // every accept is held as under `handshake-cookie = fixed`, whatever the policy states
+            // (`SessionLinkActions::fixed_cookie`): nothing is drawn and nothing minted, the
+            // InitAck carries the session's configured cookie, empty unless the configuration
+            // states one, as zenoh-pico's acceptor answers with an empty cookie
+            // (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+            // `_z_t_msg_make_init_ack(mode, *local_zid, cookie)`), the negotiated state stays in
+            // this session until its OpenSyn, and the nonce slot marks the accept as pending.
+            #[cfg(not(feature = "accept-cookie"))]
+            {
+                a.fact_cookie_nonce(|slot| *slot = Some(FIXED_COOKIE_PENDING));
+                #[cfg(not(feature = "tx-lend-only"))]
+                {
+                    let encoded =
+                        a.encode_init_with_role(/*is_ack=*/ true, None, ExtChainRole::InitAck);
+                    #[cfg(feature = "transport-stats")]
+                    if encoded.is_err() {
+                        a.stats.inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
+                    }
+                    if let Ok(bytes) = &encoded {
+                        a.send_wire(bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                        a.hold_handshake_answer(bytes);
+                    }
+                }
+                #[cfg(feature = "tx-lend-only")]
+                let _ = a.send_init_lent(/*is_ack=*/ true, None, ExtChainRole::InitAck);
             }
         }
     }
@@ -20927,12 +21016,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Whether this session answers an InitSyn with its configured cookie and holds what it
-    /// negotiated itself (`handshake-cookie = fixed`), from the snapshot it was handed.
+    /// negotiated itself (`handshake-cookie = fixed`), from the snapshot it was handed. Always,
+    /// whatever the snapshot states, in a build without the stateless acceptor (`accept-cookie`,
+    /// off in the zenoh-pico preset), which mints and reads no cookie.
     pub fn fixed_cookie(&self) -> bool {
-        matches!(
-            self.params.policy.handshake_cookie(),
-            crate::policy::HandshakeCookie::Fixed
-        )
+        !cfg!(feature = "accept-cookie")
+            || matches!(
+                self.params.policy.handshake_cookie(),
+                crate::policy::HandshakeCookie::Fixed
+            )
     }
 
     /// `cookie_valid` under `handshake-cookie = fixed`: an accept is pending (its InitAck went
@@ -20981,7 +21073,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if self.fixed_cookie() {
             return self.fixed_cookie_echoed();
         }
+        self.minted_cookie_echoed()
+    }
 
+    /// `cookie_valid` under `handshake-cookie = stateless`: the OpenSyn echoes the cookie this
+    /// node minted for this handshake (`accept-cookie`).
+    #[cfg(feature = "accept-cookie")]
+    fn minted_cookie_echoed(&self) -> bool {
         // Defensive: any missing material rejects. A well-formed handshake
         // populates every slot before this guard runs. Each slot is read in
         // its own with_mutex_mut (sequential, no nesting).
@@ -21023,6 +21121,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // is this one. The carrier's faithfulness is now witnessed where it
         // is used -- the rebuilt head IS what the session runs on.
         carried.nonce == nonce
+    }
+
+    /// A build without the stateless acceptor (`accept-cookie`) minted no cookie, so no echo is
+    /// one it minted; its accepts are all held (`Self::fixed_cookie`) and never ask this.
+    #[cfg(not(feature = "accept-cookie"))]
+    fn minted_cookie_echoed(&self) -> bool {
+        false
     }
 }
 

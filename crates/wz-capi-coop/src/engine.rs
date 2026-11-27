@@ -5181,7 +5181,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The cookie key of the attempt is drawn before the parameters are read off the config:
         // drawn among them, its refusal would leave every field read before it in a temporary
         // of its own, moved again into the parameters once the key is there. A build whose
-        // session machine has no accepting role holds no key, and its draw takes nothing.
+        // session machine has no accepting role, or whose acceptor mints no cookie (no
+        // `accept-cookie`), holds no key, and its draw takes nothing.
         let cookie_signing_key =
             CookieKey::draw(&mut self.entropy).map_err(|_| OpenError::EntropyUnavailable)?;
         // The parameters the tokio engine gives a session (`wz-capi-core`'s `init_params`), with a

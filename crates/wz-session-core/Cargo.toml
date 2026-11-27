@@ -93,6 +93,7 @@ default = [
     "log",
     "south-subregions",
     "interest-answer",
+    "accept-cookie",
     "policy-selection",
     "tx-probe",
     "tx-expiry-run",
@@ -756,6 +757,22 @@ session-unicast-open = []
 # crate names beside this one where its node answers them, and the zenoh-pico preset's peer leaves
 # out, as zenoh-pico's unicast session answers none.
 session-unicast-accept = ["rx-push", "rx-response", "rx-control"]
+# `accept-cookie`: the accepting role's stateless form, upstream's: the InitAck carries what the
+# acceptor negotiated, sealed (HMAC-SHA256) and bound to the handshake by a nonce drawn for it
+# (`accept_cookie`), the acceptor holds nothing of the accept until the OpenSyn, and only an
+# OpenSyn that echoes that cookie is admitted, the state rebuilt from it. The `handshake-cookie`
+# policy chooses between it and the held form at the open. A behaviour zenoh-pico's acceptor does
+# not have: it answers an InitSyn with an empty cookie
+# (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+# `_z_t_msg_make_init_ack(mode, *local_zid, cookie)`) and keeps what it negotiated in the
+# handshake's own frame. Without this feature every accept is held as under
+# `handshake-cookie = fixed`, whatever the policy states: the InitAck carries the session's
+# configured cookie, nothing is drawn or minted for it, the negotiated state stays in the
+# accepting link's session until its OpenSyn, and the build links no cookie codec. It means
+# nothing without `session-unicast-accept` and does not bring it: on by default, and a crate that
+# takes this one without its defaults and accepts names it beside that role, as the pico ABI's
+# capability of the same name does, which the zenoh-pico preset leaves off.
+accept-cookie = []
 
 # clock-quality (the observation plane's clock with a quality) — the clock-quality statechart
 # (`sources/session/clock_quality.scxml`): how far a node may trust the time it stamps with

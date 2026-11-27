@@ -734,12 +734,14 @@ pub mod signing_key;
 ///
 /// Gated with [`signing_key`] and for its reason: the cookie is a `Vec<u8>`
 /// authenticated by that module's `SigningKey`, so the two share a footing.
-#[cfg(feature = "storage-profile")]
+/// And with `accept-cookie`, the stateless acceptor that alone mints and reads
+/// one: a build without it holds every accept itself and links no cookie codec.
+#[cfg(all(feature = "storage-profile", feature = "accept-cookie"))]
 pub mod accept_cookie;
 
 /// R2762 — the per-extension ACCEPT STATE seam the cookie is meant to carry.
 ///
-/// Deliberately NOT gated with [`accept_cookie`] above, and the difference is
+/// Deliberately NOT gated with `accept_cookie` above, and the difference is
 /// the point: that module authenticates a `Vec<u8>` and needs an allocator,
 /// while this one writes through `SceSink` and reads through `SceCursor`, so
 /// it is expressible on the no-alloc Inline profile — the profile where the

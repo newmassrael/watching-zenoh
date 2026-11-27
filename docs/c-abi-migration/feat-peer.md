@@ -174,11 +174,34 @@ only a peer's own admission refuses, and keeps the dial role from dialling that 
 `a_second_dial_to_a_node_of_one_thread_is_refused` and `tests::one_face::` as before; the arena's
 row by `tests::arena::a_listening_session_lays_out_its_link_admission_only_where_the_build_has_one`.
 
-**W1.** `accept-cookie` gates `accept_cookie`, the cookie half of `signing_key` and
-`CookieKey`'s key; the session machine is unchanged, since its two accept guards are events the
-host classifies (`cookie_valid`): without the feature the host answers an `OpenSyn` as valid when it
-comes on the link whose session holds the state its `InitAck` negotiated. `sha256-compact` and the
-`hmac` and `sha2` dependencies become optional under it.
+**W1 (this branch).** `accept-cookie` is the session core's (a default), forwarded by
+`wz-runtime-coop`'s and `wz-capi-coop`'s (a default of that crate's own build), and named beside
+the accepting role by each crate that takes the session core without its defaults and accepts
+(`wz-session-mcu`'s `listen` and `adminspace-write` and its tests' acceptor, `wz-session-lwip`'s
+`session-unicast-accept` and `adminspace-write`, the facade's accepting role through the runtime;
+the tokio runtime holds it through the session core's defaults), so nothing but the pico peer
+changes. It gates the `accept_cookie` module, `CookieKey`'s key and its decode, and the stateless
+half of the acceptor: the mint at the InitAck, the release of what the cookie carries, the rebuild
+at the OpenSyn, and the runtime's draw before an accepted link's handshake. The session machine
+is unchanged: its accept guard is an event the host classifies (`cookie_valid`), and without the
+feature `SessionLinkActions::fixed_cookie` is always true, so every accept is held as the
+`handshake-cookie` policy's `fixed` value holds it, whatever that policy states: the InitAck
+carries the session's configured cookie, empty, as zenoh-pico's does
+(`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+`_z_t_msg_make_init_ack(mode, *local_zid, cookie)`), the nonce slot marks the accept pending, the
+negotiated state stays in the link's session, `cookie_valid` admits the OpenSyn that echoes the
+configured cookie once, and nothing is drawn for a cookie or for its key. The binding keeps the
+session's source only where its acceptor draws (the cookie, or a challenge of `session-extauth` or
+`transport-multilink`). `signing_key`'s MAC and the `hmac` dependency stay: nothing calls them
+in the off form, the release profiles' LTO keeps nothing no export reaches, and `sha2` is the
+credential identity's as well. Held by
+`session_actions::bundle_tests::an_acceptor_without_the_stateless_cookie_holds_its_accept` (both
+builds: held and admitted without the feature, minted under a dry source and refused with it),
+`session_init_params::cookie_key_tests::an_acceptor_that_mints_no_cookie_holds_and_draws_no_key`,
+and `wz-capi-coop`'s `tests::an_open_whose_source_gives_nothing_opens_where_no_cookie_key_is_drawn`
+beside its twin `an_open_whose_source_gives_no_cookie_key_is_refused_with_the_entropy_refusal`;
+end to end, by `tests::one_thread::listen::` in the zenoh-pico preset's form (the engine against
+itself, both ends holding their accepts).
 
 **W5.** The capability is `wz-capi-coop`'s `runtime-plan`, which `config-policy` and `group` keep
 implying; `peer` stops implying it once S3 lands. Until then `peer` keeps it, and the capability is
@@ -252,3 +275,25 @@ to: with `udp/` listening out of the pico preset the step still holds every buil
   three of `tests::one_face::`.
 - W2, Layer C1cs: `pico-peer-coop` lower by 1,500 to 2,300 (`rival_says`, `LinkRegistry::reserve`,
   `LinkBook::try_with_order`); `pico-client-coop-nostd` and `pico-api-coop-nostd` unchanged.
+- W1: `wz_config.py --write` and `--check`, and `sce_feature_model.py`'s check (the session
+  core's model names `accept-cookie`); build and clippy of `wz-session-core` with its defaults,
+  with `session-unicast,session-unicast-accept,codec-init-body,codec-open-body` and no defaults,
+  and the same with `tx-lend-only` and with `session-fixed-storage`; of `wz-runtime-coop` with
+  `alloc,session-unicast,listen` and with `accept-cookie` beside them; of `wz-capi-coop` with
+  its defaults and with `--no-default-features --features std,key-matching-listener,listen,query,queryable`;
+  of `wz-session-mcu` with `listen`, `wz-session-lwip` with `session-unicast-accept`, the
+  facade with `runtime-coop,session-unicast-accept`, and `wz-capi-pico` with
+  `os-host,link-udp,peer` and with its defaults.
+- W1, off: the two filters of the session core's new rows (`nondefault-tests-gate.sh`, the
+  lend-only rows' build), 1 test each, and
+  `cargo test -p wz-capi-coop --lib --no-default-features --features std,key-matching-listener,listen,query,queryable no_cookie_key`,
+  1 test (the twin without the key), then the same build's `one_thread::listen`, which holds
+  every accept at both ends.
+- W1, on: `cargo test -p wz-session-core --lib --features session-unicast,session-unicast-accept,codec-init-body,codec-open-body cookie`
+  (the bundle test's minted side and the key tests), `cargo test -p wz-capi-coop --lib no_cookie_key`
+  (1, the entropy refusal), and the tokio runtime's `handshake_cookie_fixed` and
+  `session_fsm_accepting_path` files as before.
+- W1, Layer C1cs: `pico-peer-coop` lower by 7,000 to 9,000 (`decode_accept_cookie`,
+  `send_init_ack_with_cookie`'s mint, `RegionAcceptState::encode`, `compute_hmac_sha256_full`,
+  `sha256::compress256`), `nm -C` of it holding none of them; `pico-client-coop-nostd` and
+  `pico-api-coop-nostd` unchanged.

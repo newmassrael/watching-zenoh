@@ -123,6 +123,7 @@ default = [
     "udp-listen",
     "interest-answer",
     "link-admission",
+    "accept-cookie",
 ]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
@@ -749,6 +750,15 @@ interest-answer = ["peer", "wz-capi-core?/interest-answer", "wz-capi-coop?/inter
 # and its arena lays out none. The tokio engine's runtime admits its links whatever is named, so
 # it selects neither engine.
 link-admission = ["peer", "wz-capi-core?/link-admission", "wz-capi-coop?/link-admission"]
+# `accept-cookie`: the stateless acceptor, upstream zenoh's: the InitAck carries what the handshake
+# negotiated, sealed under a key drawn for each attempt (HMAC-SHA256), the acceptor holds nothing
+# of the accept until the OpenSyn, and only an OpenSyn that echoes that cookie is admitted
+# (`wz-capi-coop`'s `accept-cookie`). Off, each accept is held by its link's session until the
+# OpenSyn, as zenoh-pico's acceptor keeps it in its handshake, and the InitAck carries the
+# session's configured cookie, empty, as zenoh-pico's does; nothing is drawn for a cookie or its
+# key, and the library links no cookie codec and no MAC. The tokio engine's runtime mints whatever
+# is named, so it selects neither engine.
+accept-cookie = ["peer", "wz-capi-core?/accept-cookie", "wz-capi-coop?/accept-cookie"]
 # `config-document`: `zext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a

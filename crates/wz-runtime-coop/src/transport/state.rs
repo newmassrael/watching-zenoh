@@ -757,8 +757,9 @@ impl<T: TransportFaces> TransportState<T> {
         let actions = self.place_actions(actions, role, endpoint)?;
         // An acceptor mints a cookie at each InitAck from a nonce its binding draws from the
         // session's source, and one whose source is dry refuses every handshake (fail closed): a
-        // source that is dry now is not a link to accept.
-        #[cfg(feature = "listen")]
+        // source that is dry now is not a link to accept. One that holds each accept itself
+        // (without `accept-cookie`) draws nothing for it.
+        #[cfg(all(feature = "listen", feature = "accept-cookie"))]
         if matches!(role, SessionRole::Acceptor)
             && wz_session_core::entropy::EntropySource::try_next_u64(&mut *entropy).is_err()
         {

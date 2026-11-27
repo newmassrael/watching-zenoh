@@ -823,9 +823,10 @@ pub const TX_EXPIRY_CLOSE_AFTER: usize = generated::TX_EXPIRY_CLOSE_AFTER;
 
 /// How many bytes of a peer's cookie a session keeps on the `session-slot` profile
 /// ([`crate::session_init_params::COOKIE_MAX`]): each buffer that holds one is this long. The default
-/// is 128. At most the generated INIT cookie field's 65535 and, for a node that accepts, at least
-/// [`crate::accept_cookie::ACCEPT_COOKIE_MAX_BYTES`]; `session_init_params` refuses a value outside
-/// that at compile time. The growable profile does not read it.
+/// is 128. At most the generated INIT cookie field's 65535 and, for a node that accepts and mints
+/// its cookies (`accept-cookie`), at least `crate::accept_cookie::ACCEPT_COOKIE_MAX_BYTES`;
+/// `session_init_params` refuses a value outside that at compile time. The growable profile does
+/// not read it.
 pub const HANDSHAKE_COOKIE_BYTES: usize = generated::HANDSHAKE_COOKIE_BYTES;
 
 /// How many batches each priority's outbound queue holds for the pico C ABI

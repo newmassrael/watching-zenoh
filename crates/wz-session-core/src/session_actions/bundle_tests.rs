@@ -814,6 +814,74 @@ fn the_heap_paths_opening_handshake_reaches_the_link() {
     assert_eq!(link.written.load(Ordering::SeqCst), 2, "and the OpenSyn");
 }
 
+/// What an acceptor holds between its InitAck and the OpenSyn, by its build. With the stateless
+/// acceptor (`accept-cookie`) under the policy's `stateless`, the InitAck mints a cookie under a
+/// nonce drawn for the handshake: the test's source is dry, so none is drawn and no OpenSyn is
+/// admitted. Without it, as the zenoh-pico preset builds the session core, every accept is held as
+/// under `handshake-cookie = fixed` whatever the policy states: nothing is drawn, the accept is
+/// marked pending, and the OpenSyn that echoes the session's configured cookie (empty here) is
+/// admitted, as zenoh-pico's acceptor answers with an empty cookie. Turned red by a
+/// `fixed_cookie` that reads the policy alone in a build without the stateless acceptor, or by a
+/// held InitAck that leaves the accept unmarked.
+#[cfg(all(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "session-unicast-accept"
+))]
+#[test]
+fn an_acceptor_without_the_stateless_cookie_holds_its_accept() {
+    use crate::session_fsm_unicast::SessionFsmUnicastActions;
+    use wz_codecs::wire_const::{FLAG_T_INIT_S, PROTOCOL_VERSION, T_MID_INIT, T_MID_OPEN};
+
+    let held = !cfg!(feature = "accept-cookie")
+        || matches!(
+            params().policy.handshake_cookie(),
+            crate::policy::HandshakeCookie::Fixed
+        );
+    let (actions, _link) = bundle();
+    let mut binding = super::SessionActionsBinding::<PlainRuntime, StillClock>::new(
+        Arc::clone(&actions),
+        NoEntropy,
+    );
+    // A peer's InitSyn: role peer (wire 1) and a 4-byte zid, then the size block.
+    let init_syn = vec![
+        FLAG_T_INIT_S | T_MID_INIT,
+        PROTOCOL_VERSION,
+        0x31,
+        0xB0,
+        0xB1,
+        0xB2,
+        0xB3,
+        0x00,
+        0x00,
+        0x00,
+    ];
+    actions
+        .handle_inbound(&init_syn)
+        .expect("the InitSyn decodes");
+    binding.send_init_ack_with_cookie();
+    assert_eq!(
+        actions.fixed_cookie(),
+        held,
+        "the accept is held where the build mints no cookie"
+    );
+    assert_eq!(
+        actions.cookie_nonce(),
+        held.then_some(super::FIXED_COOKIE_PENDING),
+        "a held accept is marked pending; a minted one under a dry source has no nonce"
+    );
+    // The peer's OpenSyn: a lease of 5 ms, initial SN 0, and the empty cookie it was handed.
+    let open_syn = vec![T_MID_OPEN, 0x05, 0x00, 0x00];
+    actions
+        .handle_inbound(&open_syn)
+        .expect("the OpenSyn decodes");
+    assert_eq!(
+        actions.cookie_valid(),
+        held,
+        "the echo of the configured cookie opens a held accept, and no minted one"
+    );
+}
+
 /// The lend-only handshake senders write each message once, into a slot asked for by the bound
 /// every handshake message fits and not by the message's own length, which nothing measures
 /// before the write; the link is handed the bytes written. A slot shorter than the message

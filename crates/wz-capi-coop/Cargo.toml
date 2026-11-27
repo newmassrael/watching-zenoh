@@ -140,6 +140,7 @@ default = [
     "tx-stream-owed",
     "multicast-locator-keys",
     "query-replies-with-final",
+    "accept-cookie",
 ]
 std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
 # A read task beside the program's calls (pico's multi-threaded arm): the session is stepped by a
@@ -308,6 +309,18 @@ multicast-locator-keys = ["wz-session-core/multicast-locator-keys"]
 # not have, named as the send's are. Without it each reply leaves as it is made, and the Final
 # after them, as zenoh-pico's `_z_send_reply` sends each.
 query-replies-with-final = ["wz-session-core/query-replies-with-final"]
+# `accept-cookie`: the stateless acceptor, the session core's feature of the same name and the
+# runtime's draw it asks of the session's source for each accepted link: the InitAck carries what
+# the handshake negotiated, sealed under a key drawn for each attempt, and only an OpenSyn that
+# echoes it is admitted, as zenoh's acceptor does. A behaviour zenoh-pico's acceptor does not
+# have: it answers with an empty cookie
+# (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+# `_z_t_msg_make_init_ack(mode, *local_zid, cookie)`). On in this crate's own build and named by
+# the pico ABI's capability of the same name, which the zenoh-pico preset leaves off: without it
+# each accept is held by its link's session until the OpenSyn, the InitAck carries the session's
+# configured cookie (empty), nothing is drawn for a cookie or its key, and the library links no
+# cookie codec. It changes nothing in a build that does not listen.
+accept-cookie = ["wz-session-core/accept-cookie", "wz-runtime-coop/accept-cookie"]
 # A transport the program supplies: the session shell's links over the program's own network
 # stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
 app-transport = ["wz-runtime-coop/app-link"]

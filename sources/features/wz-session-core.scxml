@@ -14,6 +14,7 @@
 -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml" xmlns:sce="http://sce.dev/ext"
        version="1.0" sce:kind="feature-model" name="wz-session-core">
+  <sce:feature name="accept-cookie"/>
   <sce:feature name="action-trace"/>
   <sce:feature name="alloc" requires="storage-profile"/>
   <sce:feature name="app-link" requires="alloc"/>

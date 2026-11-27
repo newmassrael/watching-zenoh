@@ -41,10 +41,14 @@ use wz_codecs::init_body::{InitBody, InitBodyS};
 use wz_codecs::open_body::OpenBody;
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
+// The accept cookie is the stateless acceptor's (`accept-cookie`), which mints it into the array
+// below; a build without it mints none and holds no cookie codec.
+#[cfg(feature = "accept-cookie")]
 use wz_session_core::accept_cookie::{
     decode_accept_cookie, encode_accept_cookie, encode_accept_cookie_into, AcceptCookieState,
     AcceptCookieView, MultilinkAcceptState, ACCEPT_COOKIE_MAX_BYTES,
 };
+#[cfg(feature = "accept-cookie")]
 use wz_session_core::accept_state::NegotiatedExtensions;
 use wz_session_core::handshake_encode::{
     encode_close, encode_close_into, encode_init, encode_init_into, encode_open, encode_open_into,
@@ -53,6 +57,7 @@ use wz_session_core::handshake_encode::{
 use wz_session_core::session_init_params::{
     session_bytes, LinkRxConf, SessionInitParams, TxQueueConf, COOKIE_MAX, ZID_MAX,
 };
+#[cfg(feature = "accept-cookie")]
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::tx_buf::{SliceTxBuf, TxBuf};
@@ -390,10 +395,12 @@ fn a_close_written_into_a_buffer_is_the_close_the_heap_encoder_builds() {
     }
 }
 
+#[cfg(feature = "accept-cookie")]
 fn key() -> SigningKey {
     SigningKey::new(vec![9u8; 32]).expect("key")
 }
 
+#[cfg(feature = "accept-cookie")]
 fn cookie_state(zid_len: usize, multilink: Option<(u64, Vec<u8>)>) -> AcceptCookieState {
     AcceptCookieState {
         peer_zid: SessionZid::new(&(1..=zid_len as u8).collect::<Vec<u8>>())
@@ -407,6 +414,7 @@ fn cookie_state(zid_len: usize, multilink: Option<(u64, Vec<u8>)>) -> AcceptCook
     }
 }
 
+#[cfg(feature = "accept-cookie")]
 fn view_of(state: &AcceptCookieState) -> AcceptCookieView<'_> {
     AcceptCookieView {
         peer_zid: &state.peer_zid,
@@ -422,6 +430,7 @@ fn view_of(state: &AcceptCookieState) -> AcceptCookieView<'_> {
 /// The cookie minted into a stack array is the cookie the owned form mints, for
 /// every zid width the wire admits, and it verifies and decodes back to the state
 /// that made it.
+#[cfg(feature = "accept-cookie")]
 #[test]
 fn a_cookie_minted_into_an_array_is_the_cookie_the_owned_form_mints() {
     let k = key();
@@ -442,6 +451,7 @@ fn a_cookie_minted_into_an_array_is_the_cookie_the_owned_form_mints() {
 
 /// The array is the width of the widest cookie without a multilink key, and the
 /// generated `cookie` field caps at 128: the array must fit the field.
+#[cfg(feature = "accept-cookie")]
 #[test]
 fn the_cookie_array_fits_the_generated_field() {
     const {
@@ -462,6 +472,7 @@ fn the_cookie_array_fits_the_generated_field() {
 /// A multilink key makes the cookie wider than the array on the widest zid: it is
 /// refused (`None`, which the acceptor reads as "no cookie" and fails closed),
 /// not truncated; a short one that does fit is the owned form's bytes.
+#[cfg(feature = "accept-cookie")]
 #[test]
 fn a_cookie_that_does_not_fit_the_array_is_refused_not_truncated() {
     let k = key();
@@ -487,6 +498,7 @@ fn a_cookie_that_does_not_fit_the_array_is_refused_not_truncated() {
 /// Nothing is minted for a zid the wire cannot carry, in either form. The owned
 /// state cannot hold one at all: its zid is a `SessionZid`, refused where it is
 /// made. The view the array form reads is bytes, and the encoder refuses them.
+#[cfg(feature = "accept-cookie")]
 #[test]
 fn no_cookie_is_minted_for_a_zid_outside_one_to_sixteen() {
     let k = key();
