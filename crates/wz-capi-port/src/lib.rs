@@ -2307,7 +2307,8 @@ mod tests {
         assert_eq!(core::mem::size_of::<KeyAnchor>(), 0);
         let named = WireKey::aliased(7, Some(String::from("/rest")));
         assert_eq!(named.names_in("demo/rest"), (7, Some("/rest")));
-        drop(named.into_anchor());
+        let anchor = named.into_anchor();
+        assert_eq!(core::mem::size_of_val(&anchor), 0);
     }
 
     /// A session's count of a declaration's holders as a test keeps it: each hold taken and each
