@@ -1694,7 +1694,7 @@ fn a_pool_past_what_a_u16_names_refuses_the_open_by_its_limit() {
 /// faces: `HANDED_LEG_BYTES` cut into places of its links' batch, with their flags, under the
 /// build's `held-faces` value of `held-publish-drop`, and none under `every-face`. Turned red
 /// by places sized by anything but the links' batch, or reserved when the policy keeps none.
-#[cfg(all(feature = "listen", wz_round))]
+#[cfg(all(feature = "listen", wz_round, not(wz_on_use)))]
 #[test]
 fn a_listening_session_reserves_places_for_the_publishes_it_keeps() {
     use wz_session_core::policy::HeldPublishDrop;
@@ -1713,6 +1713,55 @@ fn a_listening_session_reserves_places_for_the_publishes_it_keeps() {
     };
     assert_eq!(places.count, expected);
     assert_eq!(row(&plan, "handed leg flags").count, expected);
+}
+
+/// Where the tables take their memory on use, a listening session lays out no row of the publishes
+/// it keeps, and its table keeps as many as the lent form reserves places for, each a links' batch
+/// long, and none past them. Turned red by a plan that still lays the handed rows out on use, or a
+/// table counted or sized to anything but the lent form's places.
+#[cfg(all(feature = "listen", wz_round, wz_on_use))]
+#[test]
+fn an_on_use_session_counts_the_publishes_it_keeps_and_lays_out_none() {
+    use crate::arena::DroppedOn;
+    use wz_session_core::policy::HeldPublishDrop;
+
+    let config = CoopConfig {
+        max_faces: 2,
+        ..client_config()
+    };
+    let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
+    for part in ["handed leg places", "handed leg flags", "handed legs"] {
+        assert!(
+            plan.rows().all(|row| row.part() != part),
+            "an on-use plan lays out no row of {part}"
+        );
+    }
+    let batch = plan.link_bytes();
+    let expected = match SessionPolicy::defaults().held_publish_drop() {
+        HeldPublishDrop::HeldFaces => caps::HANDED_LEG_BYTES / batch,
+        HeldPublishDrop::EveryFace => 0,
+    };
+    let mut session =
+        SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
+    let mut lend = session.lender();
+    let mut handed = plan.transport().lent_from(&mut lend).handed;
+    // A publish whose key and payload fill a batch fits a place; one a byte longer does not.
+    let whole = vec![0u8; batch - 1];
+    let longer = vec![0u8; batch];
+    assert!(
+        !handed.keep("k", &longer, &PublishOptions::put(), DroppedOn::none(0)),
+        "a publish longer than a place is not kept"
+    );
+    for kept in 0..expected {
+        assert!(
+            handed.keep("k", &whole, &PublishOptions::put(), DroppedOn::none(0)),
+            "publish {kept} of {expected} is kept"
+        );
+    }
+    assert!(
+        !handed.keep("k", b"x", &PublishOptions::put(), DroppedOn::none(0)),
+        "none past the places the lent form reserves"
+    );
 }
 
 /// A session that listens and sends each face its own leg (`direct`) reserves no place for a

@@ -74,7 +74,10 @@
 //! - with `listen` or `group`, the places of the droppable publishes the session keeps for the
 //!   faces they were not dropped on while a send holds it (`HANDED_LEG_BYTES`, under the build's),
 //!   each a link's batch long, with their flags and a row beside each for the rest of the
-//!   publish (`wz_runtime_coop::handed`), lent with the links' tables;
+//!   publish (`wz_runtime_coop::handed`), lent with the links' tables. Where the tables take their
+//!   memory on use none of them is laid out: the rows are the table's own, counted to the same
+//!   and taken at its first publish, and each place a link's batch of its own, taken as it is
+//!   first needed (`wz_runtime_coop::handed::OwnPlaces`);
 //! - the session's one table set, each declaration it announces and announces again over a new
 //!   link a row of it ([`EntityRows`]): the key expressions it declares
 //!   (`MAX_DECLARED_KEYEXPRS`), the write filters of its publishers (`MAX_PUBLISHERS`) and
@@ -542,9 +545,13 @@ const GROUP_RX_ROWS: usize = 2 * cfg!(all(feature = "group", not(wz_on_use))) as
 const PORT_RX_ROWS: usize = 4 * cfg!(all(feature = "udp-listen", not(wz_on_use))) as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
 /// beside them (`listen` or `group`, in the work form, `wz_round`): a build of the dial face
-/// alone owes no other face, nor does one that sends each face its own leg (`direct`).
-const HANDED_ROWS: usize =
-    3 * cfg!(all(wz_round, any(feature = "listen", feature = "group"))) as usize;
+/// alone owes no other face, nor does one that sends each face its own leg (`direct`). None where
+/// the tables take their memory on use, whose table takes its own as publishes are kept.
+const HANDED_ROWS: usize = 3 * cfg!(all(
+    wz_round,
+    any(feature = "listen", feature = "group"),
+    not(wz_on_use)
+)) as usize;
 /// The application's tables apart from the session's one table set: the declaration watchers,
 /// where the arena lends them (`runtime-plan`).
 const OBSERVER_ROWS: usize = cfg!(wz_lent) as usize;
@@ -1431,7 +1438,8 @@ pub(crate) struct TransportTables {
     pub(crate) face_chains: usize,
     /// The rows of the endpoints' texts, none written.
     pub(crate) endpoints: EndpointTexts,
-    /// The places of the publishes the session keeps for its other faces.
+    /// The places of the publishes the session keeps for its other faces: lent, or, where the
+    /// tables take their memory on use, its own, counted to the plan's.
     #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub(crate) handed: HandedTable,
 }
@@ -1488,11 +1496,15 @@ impl TransportRows {
             reassembly: lend.byte_cells(self.reassembly_bytes, self.reassembly_chains),
             face_chains: self.face_chains,
             endpoints: EndpointTexts::over(lend.table(dials), lend.table(listens)),
-            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group"), not(wz_on_use)))]
             handed: HandedTable::over(
                 lend.byte_cells(self.link_bytes, self.handed_legs),
                 lend.table(self.handed_legs),
             ),
+            // Laid out in no row: the rows are taken at the first publish kept, each place a
+            // link's batch as it is first needed.
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group"), wz_on_use))]
+            handed: HandedTable::counted(self.link_bytes, self.handed_legs),
         }
     }
 
@@ -2214,13 +2226,17 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
                 _ => 0,
             };
             self.transport.handed_legs = legs;
-            self.put_table(
-                [ArenaPart::HandedLegFlags, ArenaPart::HandedLegPlaces],
-                legs,
-                link_bytes,
-            );
-            let rows = self.sized(Arena::table_bytes::<Handed>(legs));
-            self.put(ArenaPart::HandedLegs, 1, rows);
+            // Counted in both forms; laid out only where the arena lends them.
+            #[cfg(not(wz_on_use))]
+            {
+                self.put_table(
+                    [ArenaPart::HandedLegFlags, ArenaPart::HandedLegPlaces],
+                    legs,
+                    link_bytes,
+                );
+                let rows = self.sized(Arena::table_bytes::<Handed>(legs));
+                self.put(ArenaPart::HandedLegs, 1, rows);
+            }
         }
         // The rows of the session's own declarations, read once: the registries' rows below and
         // the declaration tables after them count the same limits.
@@ -3512,12 +3528,14 @@ pub(crate) const FACE_SLOT_WORDS: usize = MAX_FACE_SETS.div_ceil(u64::BITS as us
 /// The faces a droppable publish that found the session held was dropped on.
 pub(crate) type DroppedOn = wz_runtime_coop::handed::FaceSlots<FACE_SLOT_WORDS>;
 
-/// The publishes a session keeps for the faces they were not dropped on.
+/// The publishes a session keeps for the faces they were not dropped on, of the storage of the
+/// session's state (`crate::StatePolicy`): lent from its arena, or taken on use.
 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
-pub(crate) type HandedTable = wz_runtime_coop::handed::HandedLegs<FACE_SLOT_WORDS>;
+pub(crate) type HandedTable =
+    wz_runtime_coop::handed::HandedLegs<FACE_SLOT_WORDS, crate::StatePolicy>;
 
-/// One publish a session keeps for its other faces.
-#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
+/// One publish a session keeps for its other faces, in a row its arena lends.
+#[cfg(all(wz_round, any(feature = "listen", feature = "group"), not(wz_on_use)))]
 pub(crate) type Handed = wz_runtime_coop::handed::HandedLeg<FACE_SLOT_WORDS>;
 
 /// The groups a session's plan counts at most: as many as its task cells hold in a build that

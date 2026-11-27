@@ -196,10 +196,10 @@ mod form_precedence_tests {
 }
 /// The storage policy of the tables the session core's planes and round keep for the engine (the
 /// ends of its gets' legs and their callbacks, the replies its gets hold, the Finals its queryables
-/// hold and the requests they refused, the round's records, callbacks and keys) and of its note of
-/// each leg pending: lent, where the open lends them from its arena or the region places them,
-/// whichever policy the registry's tables are of; and taken at each table's first row where the
-/// tables take their memory on use.
+/// hold and the requests they refused, the round's records, callbacks and keys, the publishes it
+/// keeps for its other faces) and of its note of each leg pending: lent, where the open lends them
+/// from its arena or the region places them, whichever policy the registry's tables are of; and
+/// taken at each table's first row where the tables take their memory on use.
 #[cfg(all(
     any(wz_round, feature = "query", feature = "queryable"),
     not(wz_on_use)

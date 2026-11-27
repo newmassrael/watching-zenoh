@@ -13366,8 +13366,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngi
         // drop the handle it held. A session never closed is closed now; a closed one has no
         // link left to end.
         self.core.dropping().end_links();
-        // The kept publishes' places lie in the session's arena, which the state's drop gives
-        // back: they are given back first.
+        // The kept publishes' places lie in the session's arena where it lends them, which the
+        // state's drop gives back: they are given back first.
         #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         lock(&self.handed).clear();
         // The round's tables lie in the session's arena, which the state's drop gives back: they
