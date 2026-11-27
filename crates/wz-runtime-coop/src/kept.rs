@@ -54,22 +54,15 @@ impl Kept {
         }
     }
 
-    /// Take a count for another holder: the count's one exchange, in line at every clone of
-    /// every held type; a count taken past its bound is given back out of line.
-    #[inline]
+    /// Take a count for another holder. Out of line, as [`Self::release`] is: a holder is taken
+    /// at many places of many held types, none of them on the path a received message takes, so
+    /// each place calls the one body rather than carry the exchange and its bound.
+    #[inline(never)]
     pub fn retain(&self) {
         let before = self.count.fetch_add(1, Ordering::Relaxed);
         if before > MOST_HOLDERS {
-            self.past_bound();
+            self.count.fetch_sub(1, Ordering::Relaxed);
         }
-    }
-
-    /// Give back the count just taken past `MOST_HOLDERS`, which no program reaches but one
-    /// that forgot holders.
-    #[cold]
-    #[inline(never)]
-    fn past_bound(&self) {
-        self.count.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Take a count for another holder while one is left, and say whether it was taken: a count
@@ -84,35 +77,21 @@ impl Kept {
             .is_ok()
     }
 
-    /// Give back a count; the last one runs what the count was made with. The count's one
-    /// exchange is in line at every holder's drop; what the last holder runs is out of line.
+    /// Give back a count; the last one runs what the count was made with. Out of line: every
+    /// holder's drop, of every held type, gives its count back through this one body.
     ///
     /// # Safety
     /// `this` is a live count the caller holds one of, given back here once; the caller reads
     /// nothing through it after.
-    #[inline]
+    #[inline(never)]
     pub unsafe fn release(this: NonNull<Self>) {
         // SAFETY: the caller holds a count, so the place is live.
         let kept = unsafe { this.as_ref() };
         // Acquire on the last release orders every holder's use before what `last` drops.
         if kept.count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // SAFETY: the count just given back was the last.
-            unsafe { Self::last_released(this) }
-        }
-    }
-
-    /// Run what the count was made with, its last holder gone.
-    ///
-    /// # Safety
-    /// `this` is a count no holder is left of, read nowhere else after.
-    #[cold]
-    #[inline(never)]
-    unsafe fn last_released(this: NonNull<Self>) {
-        // SAFETY: the caller's: the place is live until `last` runs, and no holder is left, so
-        // `last` is the one user of it.
-        unsafe {
-            let last = this.as_ref().last;
-            last(this)
+            let last = kept.last;
+            // SAFETY: no holder is left, so `last` is the one user of the place.
+            unsafe { last(this) }
         }
     }
 }
