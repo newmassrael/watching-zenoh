@@ -9343,6 +9343,25 @@
         "xtask regen drops the Rust <stem>_test.rs, so the same document vectors run on no Rust lane yet.",
         "lane_input_closure --lane Bc --run names two reads the lane does not own: run-ci.sh read by its own per-function awk at start (every lane), and vendor/sce/.cargo/config.toml read by git -C, resolved against the root."
       ]
+    },
+    "Round 4737": {
+      "decision_summary": "Close debt-windows-x86-pico-ratchet-loss on two readings, hosted and measured directly on pc3-win, and repair what a Korean-locale Windows host broke on the way.",
+      "changes_bullets": [
+        "wz_config reads cargo metadata as UTF-8; zenoh-pico-sys and the size reference pass /utf-8 to MSVC.",
+        "size_ceiling.ps1 reads cl's banner in English (VSLANG 1033).",
+        "debt-windows-x86-pico-ratchet-loss closed with both readings."
+      ],
+      "verification_bullets": [
+        "pc3-win at 3b2aa88bd: package built, every x86 row PASS, pico-api-windows-x86 ratio 2.9144.",
+        "Hosted Platform 45972593479: every x86 row PASS, pico-api-windows-x86 ratio 3.0844.",
+        "wz_config selftest 583/583; zenoh-pico-sys builds on Linux."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Rows are the hosted toolchain's; several read under ratchet by more than tolerance."
+      ]
     }
   },
   "inventory_entries": {
