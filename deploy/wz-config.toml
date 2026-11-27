@@ -1793,6 +1793,20 @@ implies = []
 help = "A stream link's send that never waits for its stream: the part of a frame the stream did not take is owed in the frame's slot and written by a later step, and the link answers a question of room from its stream within the message's own wait, as zenoh's queue does. Off, each frame is written whole by a send that waits for its stream, as zenoh-pico's link write does, and the link has room whenever it has a slot."
 
 [[capability]]
+id = "dial-in-flight"
+kconfig = "WZ_CAP_DIAL_IN_FLIGHT"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's open connects and
+# waits in one call, walking the resolver's addresses there, so a connect the other end is slow to
+# answer holds its caller and none is refused later. A behaviour of the cooperative engine's dial
+# (wz-runtime-coop's feature of the same name), not a door; the tokio engine's dials connect on its
+# own tasks whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "A dial that does not hold the session: a stream link's connect is begun without waiting and asked at each later step, and a connect refused once under way passes to the next address its host resolved to. Off, a dial connects and waits in the call that begins it, walking the host's addresses there, as zenoh-pico's open does, so a connect the other end does not answer holds the open or the redial for as long."
+
+[[capability]]
 id = "config-limits"
 kconfig = "WZ_CAP_CONFIG_LIMITS"
 # On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's config is a map

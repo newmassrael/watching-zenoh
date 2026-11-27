@@ -90,7 +90,7 @@ it up is not landed.
 |---:|---|---|---|---:|---:|---|---|
 | - | L0 | shape: overlapping layers | the face's life, link and rows each kept once (`docs/c-abi-migration/arch-l0-driver.md` steps 6b-2 to 6b-6) | 7,531 | -1,300 to -2,750 | 6b-6 is on it; its own lane reads it | arch-l0-driver |
 | 1 | **W1** (landed with this file) | work: switch `tx-stream-owed` | off: a stream link writes each frame whole, the send waiting for its stream (`StreamSocket::write_all`), as `_z_link_send_wbuf` waits in `send`; no owed ring, no question of room asked of the stream | 2,429 + 179 | -1,100 to -1,500 | 0: the datagram receive reaches none of it; a stream link's `service` per turn drops a `RefCell` borrow | base-driver |
-| 2 | W2 | work: switch (a connect that does not hold the session) | off: a dial connects and waits in one call, walking the host's addresses there, as `_z_tcp_open` does; `Dial::answer_on`'s later answer and `HostWalk::pass_on` go | 2,215 (+ part of the dial row) | -800 to -1,200 | 0 (an open, never a message) | base-driver, with arch-l0-driver 6b-1 to 6b-3 (the life's `DialStage::Pending`) |
+| 2 | **W2** (landed, section 7) | work: switch `dial-in-flight` | off: a dial connects and waits in one call, walking the host's addresses there, as `_z_tcp_open` does; `Dial::answer_on`'s later answer and `HostWalk::pass_on` go | 2,215 (+ part of the dial row) | -800 to -1,200 | 0 (an open, never a message) | base-driver, with arch-l0-driver 6b-1 to 6b-3 (the life's `DialStage::Pending`) |
 | 3 | S2 | shape: over-generalization | whether the owner waits for every link becomes the stack's type, so a driver of such a stack has no wait of its own (`size.md` 3.4, first item) | 798 + about 120 of the stream's `service` | -800 to -1,000 | 0 or less (the `owner_waits` load goes) | base-driver; touches every heap link family |
 | 4 | S4 | shape: overlapping layers | on a stack that `RESOLVES`, a literal address goes to the host's resolver (one `getaddrinfo` asked for a numeric host) and wz's literal parser is not linked; a stack without a resolver keeps it | 994 | -600 to -850 | 0 | base-driver |
 | 5 | S6 | shape: over-generalization | one table a link (the session's sends and the loop's pump through one `dyn` entry set), and `try_recv` out of the table of a build whose receive lends | 1,285 | -400 to -800 | must not rise: `recv_with` is reached through the table | base-driver |
@@ -179,3 +179,45 @@ type (`StreamSocket::Link`), the same seam as S2's stream share.
 
 Measured on the case's explain report: `begin_initiator` and the `wz_runtime_coop::ip_stack`
 owner line; expected -150 to -270, the receive untouched (an open).
+
+## 7. Step W2: a dial that does not hold the session, as a capability
+
+`dial-in-flight` is `wz-runtime-coop`'s second default, forwarded by `wz-capi-coop`'s and named
+by the pico and core ABI manifests and `deploy/wz-config.toml` (`WZ_CAP_DIAL_IN_FLIGHT`, off in the
+zenoh-pico preset, on in the host profiles; the core ABI's tokio engine connects on its own tasks
+whatever is named). No crate but the pico library's build decides it: the other stacks over the
+runtime (lwIP, Zephyr, the MCU memory links) answer their dials as they always have, which the
+face asks at each step in either form.
+
+| case | with `dial-in-flight` (as before) | without it (the zenoh-pico preset) |
+|---|---|---|
+| a `tcp/` or `tls/` dial of the IP stack | its connect begun without waiting (`StreamDial::dial_started`), the link placed once a later ask finds it made (`PendingStream`) | connected and waited for in `begin_initiator` (`StreamDial::dial`, `IpLinks::dial`), the link placed there; the stack's dial is `Dialled`, its made link |
+| a `udp/` dial | made where it begins | the same |
+| a connect the other end refuses at once | the next address of the host begun in the same call (`dial::begin`) | the same |
+| a connect refused once under way | the face's dial passes to the host's next address (`HostWalk::pass_on`), under way again | none is under way: every refusal is met in the call, as `_z_tcp_posix_open` walks `ai_next` |
+| a connect the other end does not answer | the face asks at each step; the life gives the dial up at its deadline | the call waits for the host's own connect timeout, as zenoh-pico's open does |
+| a dial another stack answers later (a program's links, a test's) | asked at each step; a refusal passes to the host's next address | asked at each step; its refusal is the dial's |
+| a face's row of the dials | the stack's dial and its host's addresses left (`HostWalk`, `HOST_ADDRESSES` places) | the stack's dial alone |
+
+Bodies that go in the case: `HostWalk::pass_on` (221) and the refusal arm of `Dial::answer_on`
+(1,094 in all, the `PendingStream` poll, the connect's `SO_ERROR` read and the socket's blocking
+switch inlined into it), `IpDial` and `PendingStream`; `answer_on` is the made link's take.
+`dial::begin` keeps its walk, which now meets every refusal of the case's stack, and
+`IpLinks::begin_initiator` is the one body `open_initiator` already reached (`IpLinks::dial`).
+The engine's dial rows (`DirectSlot::take_dial_answer`, the life's `DialStage::Pending`) are
+arch-l0-driver's 6b-1 to 6b-3 and do not change: a dial answered at once is read at the next look,
+as a datagram dial always was.
+
+Tests: `faces::tests::a_dial_refused_later_passes_to_the_hosts_next_address`,
+`a_dial_whose_every_address_is_refused_answers_one_refusal`,
+`ip_stack::tests::a_heap_tls_dial_is_begun_and_asked_never_waited_for` and
+`a_begun_stream_dial_is_placed_where_the_links_own_are` are gated on the feature; two run without
+it (`nondefault-tests-gate.sh`, the `-default` rows of `wz-runtime-coop` beside W1's):
+`faces::tests::a_dial_without_dials_in_flight_is_refused_by_the_address_it_was_under_way_to` (red
+if `answer_on` passes a later refusal on) and
+`ip_stack::tests::a_stream_dial_without_dials_in_flight_is_made_where_it_is_begun` (red if
+`begin_initiator` begins the stream without waiting).
+
+Measured by the main session on the case's explain report: the driver row and the
+`wz_runtime_coop::faces`, `wz_runtime_coop::dial`, `wz_runtime_coop::ip_stack` and
+`wz_runtime_posix::stream` owner lines; expected -1,000 to -1,300, the receive untouched (an open).

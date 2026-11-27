@@ -47,6 +47,12 @@ use crate::link_cells::{CellClaim, CellRc, CountKind, OneTask};
 use crate::link_storage::TxStore;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "dial-in-flight"
+))]
+use crate::session_drive::PendingDial;
 use crate::session_drive::SessionDatagramLink;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::WaitOn;
@@ -54,8 +60,7 @@ use crate::session_drive::WaitOn;
 use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::{
-    Dialled, InputWaiter, LinkListener, OpenedLink, PendingDial, SessionLinks, WaitedByOwner,
-    WaitsInLoop,
+    Dialled, InputWaiter, LinkListener, OpenedLink, SessionLinks, WaitedByOwner, WaitsInLoop,
 };
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::session_drive::{LinkOpenError, LinkProto, Locator};
@@ -729,7 +734,13 @@ where
 {
     type Pump = HeapLink<N>;
 
+    #[cfg(feature = "dial-in-flight")]
     type Dial = IpDial<D::Stream, L::Stream, N>;
+
+    // Every link of these is made in the call that begins its dial, a stream's connect waited for
+    // there as zenoh-pico's open waits for it, so a dial is its made link.
+    #[cfg(not(feature = "dial-in-flight"))]
+    type Dial = Dialled<HeapLink<N>, N>;
 
     const IPV6: bool = opens_ipv6::<U, D, L>();
 
@@ -812,6 +823,7 @@ where
     /// before its socket is opened, and held by a stream's dial until its link is made: a refused
     /// or abandoned dial gives them back. Out of line: every address a dial begins at, the one an
     /// endpoint's text names and each of a host's (`crate::dial`), is begun by this one body.
+    #[cfg(feature = "dial-in-flight")]
     #[inline(never)]
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
         let Some(ip) = to.as_ip() else {
@@ -845,6 +857,17 @@ where
                 place: self.shape.place,
             }))),
         }
+    }
+
+    /// The link of a dial to `to`, made before this returns (`Self::dial`): a `tcp/` or `tls/`
+    /// stream connects and waits for its connection (`StreamDial::dial`), as zenoh-pico's open
+    /// does, so a connection the other end refuses is refused here, and the walk over a host's
+    /// addresses (`crate::dial`) passes to the next one at once. Out of line: every address a dial
+    /// begins at, the one an endpoint's text names and each of a host's, is begun by this one body.
+    #[cfg(not(feature = "dial-in-flight"))]
+    #[inline(never)]
+    fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
+        self.dial(to).map(Dialled::new)
     }
 
     /// A `tcp/` listener over the stack's stream dial, a `tls/` one over its secure channel's
@@ -935,7 +958,11 @@ where
 
 /// A dial of [`IpLinks`] ([`SessionLinks::begin_initiator`]): a link made when it was begun, or a
 /// `tcp/` (`S`) or `tls/` (`T`) stream still being made.
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "dial-in-flight"
+))]
 pub struct IpDial<S, T, N: CountKind = OneTask>(IpDialing<S, T, N>)
 where
     S: StreamSocket + 'static,
@@ -946,7 +973,11 @@ where
 // stream being made is not boxed to bring the made link's variant to its size: that would be an
 // allocation for each dial.
 #[allow(clippy::large_enum_variant)]
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "dial-in-flight"
+))]
 enum IpDialing<S, T, N: CountKind>
 where
     S: StreamSocket + 'static,
@@ -957,7 +988,11 @@ where
     Tls(PendingStream<T, N>),
 }
 
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "dial-in-flight"
+))]
 impl<S, T, N: CountKind> PendingDial<HeapLink<N>, N> for IpDial<S, T, N>
 where
     S: StreamSocket + 'static,
@@ -972,7 +1007,11 @@ where
     }
 }
 
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "dial-in-flight"
+))]
 impl<S, T, N: CountKind> From<OpenedLink<HeapLink<N>, N>> for IpDial<S, T, N>
 where
     S: StreamSocket + 'static,
@@ -986,14 +1025,22 @@ where
 /// A stream dial whose stream `P` is being made (a `tcp/` connection, or a `tls/` channel's
 /// connection and handshake): the link is made over the stream and the buffers claimed for it once
 /// the stream says it is, placed as the stack's links are.
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "dial-in-flight"
+))]
 struct PendingStream<P: StreamSocket + 'static, N: CountKind> {
     socket: Option<P>,
     buffers: Option<LinkBuffers<N::Flag>>,
     place: LinkPlace<N>,
 }
 
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "dial-in-flight"
+))]
 impl<P: StreamSocket + 'static, N: CountKind> PendingDial<HeapLink<N>, N> for PendingStream<P, N> {
     fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         match self.socket.as_mut()?.connected() {
@@ -2378,7 +2425,11 @@ mod tests {
     /// begun dial answers nothing however often it is asked, and holds the link's buffers; once
     /// the channel is made it answers the secure stream link, once; a channel whose opening fails
     /// is refused and gives its buffers back. The channel's waiting dial is never called.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        feature = "dial-in-flight"
+    ))]
     #[test]
     fn a_heap_tls_dial_is_begun_and_asked_never_waited_for() {
         use alloc::rc::Rc;
@@ -2820,7 +2871,11 @@ mod tests {
     /// are: in the cells the links were lent, and refused as exhausted once another link holds
     /// the last of them. A dial being made holds no cell. The CONTROL is the same dial on links
     /// lent none, made on the heap whatever the count.
-    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        feature = "dial-in-flight"
+    ))]
     #[test]
     fn a_begun_stream_dial_is_placed_where_the_links_own_are() {
         use wz_session_core::bounded::{Arena, ARENA_ALIGN};
@@ -2870,6 +2925,107 @@ mod tests {
         assert!(
             matches!(one.poll(), Some(Ok(_))) && matches!(two.poll(), Some(Ok(_))),
             "CONTROL: links lent no cells make each dialled link on the heap"
+        );
+    }
+
+    /// Without `dial-in-flight` a stream dial is made in the call that begins it: a `tcp/` dial
+    /// takes its link's cell as it begins, a dial past the cells is refused as it begins, and the
+    /// made dial answers its link at once, once; a `tls/` dial connects by the channel's waiting
+    /// dial and never by the one begun without waiting, and a connection the other end refuses is
+    /// refused as the dial begins. Turned red by a `begin_initiator` that begins the stream without
+    /// waiting for it (`StreamDial::dial_started`), which places the link at its first ask.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        not(feature = "dial-in-flight")
+    ))]
+    #[test]
+    fn a_stream_dial_without_dials_in_flight_is_made_where_it_is_begun() {
+        use crate::session_drive::PendingDial;
+        use alloc::rc::Rc;
+        use core::cell::Cell;
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        /// The dial of [`Channel`]s, counting each dial that waited and each begun without.
+        struct Counted {
+            waited: Rc<Cell<usize>>,
+            started: Rc<Cell<usize>>,
+        }
+
+        impl StreamDial for Counted {
+            type Stream = Channel;
+            fn dial(&self, to: SocketAddr) -> Result<Channel, LinkOpenError> {
+                self.waited.set(self.waited.get() + 1);
+                ChannelDial.dial(to)
+            }
+            fn dial_started(&self, to: SocketAddr) -> Result<Channel, LinkOpenError> {
+                self.started.set(self.started.get() + 1);
+                ChannelDial.dial(to)
+            }
+        }
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
+        let size = links.link_cell_bytes();
+        let bytes = Arena::byte_cells_bytes(size, 1).expect("within the address space");
+        let region: &'static mut [Block] =
+            alloc::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+        // leaked, so nothing else uses it and it outlives every link placed in it.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        let cells = arena.lend_byte_cells(size, 1).expect("one cell");
+        links.lend_cells(cells);
+
+        let mut made = links
+            .begin_initiator(Locator::tcp(ROUTER))
+            .expect("the dial is made");
+        assert_eq!(
+            cells.in_use(),
+            1,
+            "the link took its cell as its dial began"
+        );
+        assert!(
+            matches!(
+                links.begin_initiator(Locator::tcp(ROUTER)),
+                Err(LinkOpenError::Exhausted)
+            ),
+            "a link past the cells is refused as its dial begins"
+        );
+        let link = made
+            .poll()
+            .expect("the dial answered at once")
+            .expect("the stream link");
+        assert!(made.poll().is_none(), "a dial answers once");
+        drop(link);
+        assert_eq!(cells.in_use(), 0, "the link that went gave its cell back");
+
+        let (waited, started) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+        let secure = IpLinks::<Datagrams, Dial>::new(NODE, Dial).with_tls(Counted {
+            waited: waited.clone(),
+            started: started.clone(),
+        });
+        let mut channel = secure
+            .begin_initiator(Locator::tls(ROUTER))
+            .expect("the channel is made");
+        assert!(
+            matches!(channel.poll(), Some(Ok(_))),
+            "made in the call that began it"
+        );
+        assert!(
+            matches!(
+                secure.begin_initiator(Locator::tls(refusing())),
+                Err(LinkOpenError::Refused)
+            ),
+            "a connection the other end refuses is refused as the dial begins"
+        );
+        assert_eq!(
+            (waited.get(), started.get()),
+            (2, 0),
+            "every channel was waited for"
         );
     }
 

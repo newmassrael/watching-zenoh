@@ -97,10 +97,10 @@ feature-sets = [
 # wz-runtime-core dep is feature-gated so the no-alloc build stays
 # trait-skeleton-free.
 #
-# The one default is a behaviour of the stream links (`tx-stream-owed`, below), which pulls no
-# dependency, so a build with default features still pulls only the sync primitives.
+# The defaults are two behaviours of the links (`tx-stream-owed` and `dial-in-flight`, below),
+# which pull no dependency, so a build with default features still pulls only the sync primitives.
 [features]
-default = ["tx-stream-owed"]
+default = ["tx-stream-owed", "dial-in-flight"]
 # R311bb — alloc lane now pulls portable-atomic{,-util} so Arc /
 # AtomicBool / AtomicU64 stay available on thumbv6m (Cortex-M0+),
 # closing the M0+ alloc gap that R311av documented. Native-atomic
@@ -223,6 +223,19 @@ udp-port-lent-only = []
 # frames' code. A crate that takes this one without its defaults and has stream links names it
 # unless its own build is the switch's (`wz-capi-coop` forwards it).
 tx-stream-owed = []
+
+# `dial-in-flight`: a dial that does not hold whoever holds the session (`dial`, `faces`,
+# `ip_stack`). The heap profile's IP stack begins a `tcp/` or `tls/` connect without waiting
+# (`StreamDial::dial_started`) and the face asks it at each later step, and a connect the network
+# refuses once under way passes to the next address of the host the endpoint names. A behaviour
+# zenoh-pico's link does not have: its open connects and waits in one call, walking the resolver's
+# addresses there (`vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @
+# `static z_result_t _z_tcp_posix_open(`). On in a build that names nothing; the pico ABI turns it
+# on through its capability of the same name (deploy/wz-config.toml), which the zenoh-pico preset
+# leaves off, so that preset's IP stack connects in the call that begins the dial and its faces
+# keep no addresses to pass to later. A stack whose own dial is answered later still is: the face
+# asks it at each step, and its refusal is the dial's.
+dial-in-flight = []
 
 # Links over a serial line (`serial/` locators): the locator of one, read and written with the
 # session core's grammar, and the session core's serial framing the link reads and writes with.

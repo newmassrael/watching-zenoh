@@ -138,6 +138,7 @@ default = [
     "tx-fragment-credit",
     "tx-held-wait",
     "tx-stream-owed",
+    "dial-in-flight",
     "multicast-locator-keys",
     "query-replies-with-final",
     "accept-cookie",
@@ -301,6 +302,12 @@ tx-held-wait = ["wz-session-core/tx-held-wait"]
 # within the message's wait. The runtime's feature of the same name. Without it each frame is
 # written whole by a send that waits for its stream, as zenoh-pico's link write does.
 tx-stream-owed = ["wz-runtime-coop/tx-stream-owed"]
+# `dial-in-flight`: a dial that does not hold the session. The IP stack begins a stream's connect
+# without waiting and the face asks it at each step, and a connect refused once under way passes to
+# the next address of its host. The runtime's feature of the same name. Without it a dial connects
+# and waits in the call that begins it, walking the host's addresses there, as zenoh-pico's open
+# does, so a connect the other end does not answer holds the open or the redial for as long.
+dial-in-flight = ["wz-runtime-coop/dial-in-flight"]
 # `multicast-locator-keys`: a host group's `#ttl=`, `#bind=` and `#dscp=`, read by the session
 # core's feature of the same name and given to the group's sockets (`host_group`). Without it the
 # three are refused when the group's endpoint is read, and no send socket is marked.

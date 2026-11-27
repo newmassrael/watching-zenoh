@@ -33,7 +33,9 @@ use wz_session_core::resource_snapshot::{BuildMessageReading, BuildReceiveLedger
 use wz_session_core::session_zid::{SessionZid, ZID_MAX};
 use wz_session_core::zid_hex::same_zid;
 
-use crate::dial::{Begun, HostWalk};
+use crate::dial::Begun;
+#[cfg(feature = "dial-in-flight")]
+use crate::dial::HostWalk;
 use crate::link_cells::{CellRc, CountKind, FaceHeld, FaceParts, OneTask};
 #[cfg(feature = "listen")]
 use crate::session_drive::Locator;
@@ -1520,11 +1522,12 @@ impl DialEndpoint {
 }
 
 /// A face's dial under way: the endpoint it dials, the network's answer still to come, the
-/// stack's own dial `D` held by value, and the addresses of a named host it passes to when that
-/// one is refused ([`HostWalk`]).
+/// stack's own dial `D` held by value, and, with `dial-in-flight`, the addresses of a named host
+/// it passes to when that one is refused once under way ([`HostWalk`](crate::dial::HostWalk)).
 pub struct Dial<D> {
     endpoint: DialEndpoint,
     pending: D,
+    #[cfg(feature = "dial-in-flight")]
     walk: HostWalk,
 }
 
@@ -1539,6 +1542,7 @@ impl<D> Dial<D> {
         Self {
             endpoint,
             pending: begun.pending,
+            #[cfg(feature = "dial-in-flight")]
             walk: begun.walk,
         }
     }
@@ -1583,20 +1587,24 @@ impl<D> Dial<D> {
         self.pending.poll()
     }
 
-    /// [`Self::answer`], where a refusal passes the dial to the next address of its host on
-    /// `links` while one is left: the dial is then under way again, `None` is answered, and the
-    /// next address is asked at the next step, as a dial just begun is. The refusal of the last
-    /// address tried is the dial's. A link made is answered as it comes. Out of line: a face's
-    /// read, a dial asked once as it begins and a face's dial asked by its own slot
-    /// ([`LinkSupervisor::answer_face_dial`]) share it.
+    /// [`Self::answer`], where, with `dial-in-flight`, a refusal passes the dial to the next
+    /// address of its host on `links` while one is left: the dial is then under way again, `None`
+    /// is answered, and the next address is asked at the next step, as a dial just begun is. The
+    /// refusal of the last address tried is the dial's. Without it the dial keeps no address to
+    /// pass to, and its refusal is the dial's: the IP stack's dial is answered in the call that
+    /// begins it, whose walk met every refusal already. A link made is answered as it comes. Out
+    /// of line: a face's read, a dial asked once as it begins and a face's dial asked by its own
+    /// slot ([`LinkSupervisor::answer_face_dial`]) share it.
     #[inline(never)]
     pub fn answer_on<N: CountKind, L>(&mut self, links: &L) -> DialAnswer<L::Pump, N>
     where
         L: SessionLinks<N, Dial = D>,
         D: PendingDial<L::Pump, N>,
     {
-        match self.pending.poll() {
-            Some(Err(refused)) => match self.walk.pass_on::<N, L>(links, refused) {
+        let answer = self.pending.poll();
+        #[cfg(feature = "dial-in-flight")]
+        if let Some(Err(refused)) = answer {
+            return match self.walk.pass_on::<N, L>(links, refused) {
                 // The refused dial has handed out all it held, so it is let go of as the next is
                 // put in its place.
                 Ok(next) => {
@@ -1604,9 +1612,11 @@ impl<D> Dial<D> {
                     None
                 }
                 Err(last) => Some(Err(last)),
-            },
-            answer => answer,
+            };
         }
+        #[cfg(not(feature = "dial-in-flight"))]
+        let _ = links;
+        answer
     }
 }
 
@@ -2393,7 +2403,7 @@ impl<
 
     /// Begin a dial of `endpoint` over these links, which the network answers later: of the
     /// address it names, or of the first address of the host it names that the network begins,
-    /// the rest kept for the dial to pass to ([`crate::dial`]). [`TransportRefusal::Unreachable`]
+    /// the rest kept for the dial to pass to with `dial-in-flight` ([`crate::dial`]). [`TransportRefusal::Unreachable`]
     /// when the endpoint does not read, names a host no dial of a name reaches over these links,
     /// or the network refuses every address at once.
     // Always inlined: the dial's one body is `crate::dial::begin`, out of line and cold.
@@ -2549,7 +2559,7 @@ impl<
     }
 
     /// Ask the dial under way in the face at `at` once over these links ([`Dial::answer_on`]),
-    /// where it lies: a refused address passes it to its host's next. Once the network answered,
+    /// where it lies: with `dial-in-flight`, a refused address passes it to its host's next. Once the network answered,
     /// the dial is let go of, the face holds no link, and the answer is handed back with the
     /// endpoint it dialled. `None` while the network has not answered, and for a face that holds
     /// no dial or lies past the table.
@@ -3485,6 +3495,7 @@ mod tests {
     /// is passed over the same way. Turned red by a refused address ending the dial while another
     /// is left (`Dial::answer_on`), or by an address dialled out of its order or twice
     /// (`HostWalk::pass_on`).
+    #[cfg(feature = "dial-in-flight")]
     #[test]
     fn a_dial_refused_later_passes_to_the_hosts_next_address() {
         let (v6, v4) = loopbacks();
@@ -3511,6 +3522,7 @@ mod tests {
     /// that asks the last address it dialled, each address dialled in turn; a host no address of
     /// which begins is no dial, refused as its last address was. Turned red by a refusal for each
     /// address, or one answered before the last address was tried.
+    #[cfg(feature = "dial-in-flight")]
     #[test]
     fn a_dial_whose_every_address_is_refused_answers_one_refusal() {
         use crate::transport::Refusal;
@@ -3565,6 +3577,8 @@ mod tests {
         let Ok(begun) = crate::dial::begin::<OneTask, Hosts>("tcp/127.0.0.1:7447", &hosts) else {
             panic!("an address is dialled");
         };
+        assert!(begun.pending.0.is_none(), "under way at the address");
+        #[cfg(feature = "dial-in-flight")]
         assert_eq!(begun.walk.left(), 0, "an address has none to pass to");
         assert_eq!(*hosts.dialled.borrow(), vec![v4]);
 
@@ -3592,6 +3606,55 @@ mod tests {
             refused(faces.begin_dial("tcp/router.example:7447")),
             Some(Refusal::Locator(DialRefused::NoResolver))
         );
+    }
+
+    /// Without `dial-in-flight` a dial keeps no address to pass to: a host's address refused once
+    /// under way is the dial's refusal, answered once, and the host's next address is never
+    /// dialled; an address refused at once is passed over within the call that begins the dial, as
+    /// with it, and a host every address of which is refused at once is no dial. Turned red by an
+    /// `answer_on` that passes a later refusal on (`HostWalk::pass_on`), or by a `begin` that
+    /// stops at the first address refused at once.
+    #[cfg(not(feature = "dial-in-flight"))]
+    #[test]
+    fn a_dial_without_dials_in_flight_is_refused_by_the_address_it_was_under_way_to() {
+        use crate::transport::Refusal;
+
+        let (v6, v4) = loopbacks();
+        let hosts = Hosts::new(&[(v6, Says::Refused), (v4, Says::UnderWay)]);
+        let Ok(mut dial) = named_dial(&hosts) else {
+            panic!("the first address is begun");
+        };
+        assert!(matches!(
+            dial.answer_on::<OneTask, Hosts>(&hosts),
+            Some(Err(LinkOpenError::Refused))
+        ));
+        assert_eq!(
+            *hosts.dialled.borrow(),
+            vec![v6],
+            "the next address is never dialled"
+        );
+        assert!(
+            dial.answer_on::<OneTask, Hosts>(&hosts).is_none(),
+            "answered once"
+        );
+
+        let hosts = Hosts::new(&[(v6, Says::RefusedAtOnce), (v4, Says::UnderWay)]);
+        let Ok(mut dial) = named_dial(&hosts) else {
+            panic!("the second address is begun");
+        };
+        assert!(
+            dial.answer_on::<OneTask, Hosts>(&hosts).is_none(),
+            "under way at the second"
+        );
+        assert_eq!(*hosts.dialled.borrow(), vec![v6, v4], "each address once");
+
+        let hosts = Hosts::new(&[(v6, Says::RefusedAtOnce), (v4, Says::RefusedAtOnce)]);
+        assert_eq!(
+            refused(named_dial(&hosts)),
+            Some(Refusal::Link(LinkOpenError::Unsupported)),
+            "no address begins"
+        );
+        assert_eq!(*hosts.dialled.borrow(), vec![v6, v4]);
     }
 
     /// A dial of `endpoint` that answers `answer`, for a face to be given

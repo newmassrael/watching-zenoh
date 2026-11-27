@@ -3,7 +3,8 @@
 
 //! The one dial of an endpoint: its text read once, a host name resolved by the network's
 //! resolver, and the walk over the host's addresses that passes from a refused address to the
-//! next, at once or when the refusal comes later, answering one refusal once none is left.
+//! next, at once or, with `dial-in-flight`, when the refusal comes later, answering one refusal
+//! once none is left.
 //!
 //! Dialing is cold: it runs once per link, never per message. Its plane is one body generic over
 //! nothing, [`dial_step`], which reads a [`LinkPlan`] (the endpoint's text, as the open wrote it
@@ -13,8 +14,12 @@
 //! does what it is asked (`begin`, `HostWalk::pass_on`): the stack begins a link at one
 //! address (`SessionLinks::begin_initiator`) and resolves a name (`SessionLinks::resolve`), and
 //! no trait object is made for the plane. The faces begin a dial here
-//! (`LinkSupervisor::begin_dial`), hold the [`Begun`] dial and pass it on with
-//! `HostWalk::pass_on` when the network refuses the address it is under way to.
+//! (`LinkSupervisor::begin_dial`), hold the [`Begun`] dial and, with `dial-in-flight`, pass it on
+//! with `HostWalk::pass_on` when the network refuses the address it is under way to. Without it
+//! a begun dial keeps no address to pass to: the IP stack's dial is answered in the call that
+//! begins it, so the walk of `begin` meets each refusal of it, as zenoh-pico's open walks the
+//! resolver's answer inside its one call, and a dial another stack answers later is refused by
+//! the refusal it answers.
 
 use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
@@ -61,8 +66,8 @@ impl<'a> LinkPlan<'a> {
 
 /// The addresses of a named host a dial has not tried yet, each at the port the name is dialled
 /// at, and the link the dial opens at each: it begins the first, and passes to the next in turn
-/// when the network refuses the one it dials, at once or later (a connection refused once under
-/// way), as zenoh-pico's open walks the resolver's answer
+/// when the network refuses the one it dials, at once or, with `dial-in-flight`, later (a
+/// connection refused once under way), as zenoh-pico's open walks the resolver's answer
 /// (`vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @ `it = it->ai_next`). None for a
 /// dial of an address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +106,7 @@ impl HostWalk {
     /// it refuses at once: the stack's dial, or the refusal of the last address tried, which is
     /// `refused` when none is left to try. Out of line: every dial a face passes on is begun by
     /// this one shell, and the walk itself is `next_locator`'s, generic over nothing.
+    #[cfg(feature = "dial-in-flight")]
     #[inline(never)]
     pub(crate) fn pass_on<N: CountKind, L: SessionLinks<N>>(
         &mut self,
@@ -198,12 +204,13 @@ pub fn dial_step<'a>(
     }
 }
 
-/// A dial begun: the stack's dial, and the addresses of its host it passes to when that one is
-/// refused.
+/// A dial begun: the stack's dial, and, with `dial-in-flight`, the addresses of its host it
+/// passes to when that one is refused once under way.
 pub struct Begun<D> {
     /// The stack's dial of the address it is under way to.
     pub pending: D,
     /// The addresses left after it.
+    #[cfg(feature = "dial-in-flight")]
     pub walk: HostWalk,
 }
 
@@ -212,6 +219,7 @@ impl<D> Begun<D> {
     pub fn alone(pending: D) -> Self {
         Self {
             pending,
+            #[cfg(feature = "dial-in-flight")]
             walk: HostWalk::NONE,
         }
     }
@@ -219,8 +227,8 @@ impl<D> Begun<D> {
 
 /// Begin a dial of `endpoint` over `links`, which the network answers later: of the address it
 /// names, or of the first address of the host it names that the network begins, the rest kept
-/// for the dial to pass to. Refused as [`TransportRefusal::Unreachable`], with the endpoint and
-/// why ([`DialAsk::Refused`]). The shell of [`dial_step`] over the stack: it does what the
+/// for the dial to pass to with `dial-in-flight`. Refused as [`TransportRefusal::Unreachable`],
+/// with the endpoint and why ([`DialAsk::Refused`]). The shell of [`dial_step`] over the stack: it does what the
 /// dial asks and nothing else, so its body is the stack's two calls and the loop.
 #[cold]
 #[inline(never)]
@@ -237,6 +245,7 @@ pub(crate) fn begin<N: CountKind, L: SessionLinks<N>>(
                 Ok(pending) => {
                     return Ok(Begun {
                         pending,
+                        #[cfg(feature = "dial-in-flight")]
                         walk: at.walk(),
                     })
                 }

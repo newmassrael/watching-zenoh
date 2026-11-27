@@ -1251,6 +1251,72 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         unixpipe,\
         ws\
         |stream_link::"
+    # A dial made in the call that begins it (`dial-in-flight`, the crate's other default, left out
+    # with `tx-stream-owed`, as the zenoh-pico preset builds the cooperative engine): the IP stack's
+    # stream dial connects and waits where it begins and places its link there, a dial past the
+    # cells is refused as it begins, and a face's dial keeps no address of its host to pass to once
+    # under way (the two tests gated `not(feature = "dial-in-flight")`). The row above, on each of
+    # those tests. NOT YET MEASURED.
+    "wz-runtime-coop|hook|\
+        -default,\
+        alloc,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        host-lock,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        keyexpr-wildcard-double,\
+        keyexpr-wildcard-single,\
+        listen,\
+        reassembly,\
+        resource-snapshot,\
+        rx-in-place,\
+        scouting-static,\
+        serial,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        switchboard,\
+        transport-batching,\
+        transport-keepalive,\
+        transport-qos,\
+        udp-listen,\
+        unixpipe,\
+        ws\
+        |faces::tests::a_dial_without_dials_in_flight_is_refused_by_the_address_it_was_under_way_to"
+    "wz-runtime-coop|hook|\
+        -default,\
+        alloc,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        host-lock,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        keyexpr-wildcard-double,\
+        keyexpr-wildcard-single,\
+        listen,\
+        reassembly,\
+        resource-snapshot,\
+        rx-in-place,\
+        scouting-static,\
+        serial,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        switchboard,\
+        transport-batching,\
+        transport-keepalive,\
+        transport-qos,\
+        udp-listen,\
+        unixpipe,\
+        ws\
+        |ip_stack::tests::a_stream_dial_without_dials_in_flight_is_made_where_it_is_begun"
     # Fixed-memory step S6 -- the same crate under the SESSION-SLOT profile, a row of
     # its own because the selector swaps the task pool, the join handles, the local
     # set and the timer queue for their static forms (and drops the tests that build

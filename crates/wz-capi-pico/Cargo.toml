@@ -115,6 +115,7 @@ default = [
     "tx-fragment-credit",
     "tx-held-wait",
     "tx-stream-owed",
+    "dial-in-flight",
     "config-limits",
     "multicast-locator-keys",
     "query-replies-with-final",
@@ -682,6 +683,11 @@ tx-held-wait = ["wz-capi-core?/tx-held-wait", "wz-capi-coop?/tx-held-wait"]
 # stream within the message's wait. Off, each frame is written whole by a send that waits for the
 # stream, as zenoh-pico's link write does, and the link has room whenever it has a slot.
 tx-stream-owed = ["wz-capi-core?/tx-stream-owed", "wz-capi-coop?/tx-stream-owed"]
+# `dial-in-flight`: a dial that does not hold the session; a stream's connect is begun without
+# waiting and asked at each step, and one refused once under way passes to its host's next address.
+# Off, a dial connects and waits in the call that begins it, walking the host's addresses there, as
+# zenoh-pico's open does, and the faces keep no address to pass to later.
+dial-in-flight = ["wz-capi-core?/dial-in-flight", "wz-capi-coop?/dial-in-flight"]
 # `config-limits`: the numbered key `ZEXT_CONFIG_LIMITS_KEY` (`zext.h`) by which a config states
 # its session's limits and, with process pools, the values a program holds apart from any
 # session, judged at the insert and read by the open (`src/config_limits.rs`). A parity contract
