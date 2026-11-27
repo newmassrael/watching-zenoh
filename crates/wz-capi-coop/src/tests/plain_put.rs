@@ -102,8 +102,11 @@ fn a_plain_put_through_a_write_filter_takes_the_session_once() {
 
 /// A put with options of a publisher asks its write filter under the take its own leg makes: held
 /// back, it takes the session once and sends nothing; let through, each takes it once and is sent.
-/// Turned red by a put with options that asks its filter by a take of its own before it publishes,
-/// or by one held back whose leg still sends.
+/// A build that delivers to the session's own subscribers takes it once more for a sent put whose
+/// destination admits them, to find them (`CoopEngine::publish_to_subscribers`), whatever the
+/// filter answered, and so does the general publish without a filter. Turned red by a put with
+/// options that asks its filter by a take of its own before it publishes, or by one held back
+/// whose leg still sends.
 #[test]
 fn a_put_with_options_asks_its_filter_under_its_own_take() {
     let router = Router::start(CatchAll::None);
@@ -130,6 +133,7 @@ fn a_put_with_options_asks_its_filter_under_its_own_take() {
     until(&engine, "the filter to open", || {
         !engine.write_filter_active(filter)
     });
+    let local = usize::from(cfg!(feature = "local-subscriber"));
     let before = takes(&engine);
     for _ in 0..3 {
         assert!(matches!(
@@ -139,8 +143,8 @@ fn a_put_with_options_asks_its_filter_under_its_own_take() {
     }
     assert_eq!(
         takes(&engine) - before,
-        3,
-        "one take a put with options that is sent"
+        3 * (1 + local),
+        "one take a put with options that is sent, and one for the session's own subscribers"
     );
     until(&engine, "the router to receive the puts", || {
         router.seen(|s| s.pushes) == 3
