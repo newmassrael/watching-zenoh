@@ -9090,6 +9090,25 @@
         "Windows shm pool test unmeasured off hosted: pc3-win has no checkout.",
         "19 static gates and one citation fail on main itself, not this item."
       ]
+    },
+    "Round 4723": {
+      "decision_summary": "Pay the reds the switch landing left in builds without tx-expiry-run by\nnaming in a limit's declaration the capability that reads it, so the\ngenerator refuses the limit where its reader is not built.",
+      "changes_bullets": [
+        "wz-config: read_by on TX_EXPIRY_CLOSE_AFTER; READ_FROM_SNAPSHOT by cfg!.",
+        "Kconfig depends on the reader; caps_generated refuses a stated value.",
+        "limit_binding same_text and the hand assertion in tx_deadline removed."
+      ],
+      "verification_bullets": [
+        "wz_config --check, --selftest 580/580, limit_read_gate --check, selftest.",
+        "clippy runtime-coop, session-core, capi-pico; session-core tests 1797.",
+        "reason pins re-read for session-close-ingress on two moved files."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
