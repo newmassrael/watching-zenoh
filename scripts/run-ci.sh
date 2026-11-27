@@ -13148,15 +13148,16 @@ layer_c1cf_reduced_features() {
 # above holds inside it. Unset, every case is built here, as before.
 #
 # The second leg is the size ledger (docs/c-abi-architecture.md P9): `size_ledger_gate.py` reads
-# the release case the cost gate just built, and its zenoh-pico reference, by AREA, and holds each
-# area's ratio under its row of `deploy/size_ledger.json`, so a change that grows one area is
-# refused there and not only in the total. Each byte goes to the source file the line table names
-# for it, inlined code included, read from the first leg's own builds: every case and reference is
-# built once with its line tables and measured with its debug information taken off, the file that
-# ships, whose executable sections the first leg holds to the build's. It builds nothing the first
-# leg did not (the same commands, target directory and reference directory), reads its case only on
-# the shard the first leg deals that case to, and checks the ledger itself on every shard. The two
-# legs are independent: a red case of the first does not hide the ledger's verdict.
+# each case of its ledger the cost gate just built, one feature bundle each, and its zenoh-pico
+# reference, by AREA, and holds each area's ratio under the case's row of
+# `deploy/size_ledger.json`, so a change that grows one area is refused there and not only in the
+# total. Each byte goes to the source file the line table names for it, inlined code included, read
+# from the first leg's own builds: every case and reference is built once with its line tables and
+# measured with its debug information taken off, the file that ships, whose executable sections the
+# first leg holds to the build's. It builds nothing the first leg did not (the same commands, target
+# directory and reference directory), reads each case only on the shard the first leg deals that
+# case to, and checks the ledger itself on every shard. The two legs are independent: a red case of
+# the first does not hide the ledger's verdict.
 layer_c1cs_capability_cost() {
     local c1cs_shard_args=()
     if [[ -n "${WZ_C1CS_SHARDS:-}" ]]; then

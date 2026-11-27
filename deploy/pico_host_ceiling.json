@@ -156,6 +156,17 @@
         "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
+    "pico-api-coop-nostd": {
+      "ratio_at_most": 2.0523,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-27",
+        "wz_text": 1035460,
+        "pico_text": 504559,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"
+      }
+    },
     "pico-release-windows-x64": {
       "ratio_at_most": 4.797,
       "debt": "debt-pico-host-size-ceiling",

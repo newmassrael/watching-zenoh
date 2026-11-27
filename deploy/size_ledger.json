@@ -1,7 +1,7 @@
 {
-  "about": "The size ledger of the pico C ABI's release library (docs/c-abi-architecture.md principle P9; the gate is scripts/lib/size_ledger_gate.py, Layer C1cs). The function bytes of one case of scripts/lib/capability_cost_gate.py (`case`) and of zenoh-pico built as the same build, each body counted once however many names its address carries, each byte of it given to the source file the line table of that build names (the build carries its line tables, and what is measured and shipped is it with its debug information taken off; for inlined code, the inlined function's file, except inlined language runtime code (Rust's standard library, a C toolchain's headers), which goes to the file of its innermost caller outside the runtime, on both sides; and for bytes of no source line, the file the function of the innermost frame holding them is declared in), divided into the AREAS of the architecture by the RULES below, and each area's ratio held by its row in `rows`. A row follows the rule of a row of deploy/pico_host_ceiling.json (scripts/lib/pico_host_ceiling.py, the one implementation): locked at WIN, or a ratchet, `ratio_at_most`, the ratio of the reading it was set from rounded up to four places, under the open-debt item the area is registered under; `wz_text` and `pico_text` of a reading are the area's function bytes. A ratchet only moves down: a reading over it by more than the tolerance fails, a reading under it by more prints the tighter row to commit. A row whose ratio_at_most is null is unfilled and fails with the row this run reads; --measure prints every row. RULES, per side: `owners` are prefixes of the owner of a byte's source file (for wz the crate::module the file is, by its path in its crate or, for code a crate includes, by the module its functions are named in; for zenoh-pico the file's path in the export, and `toolchain/...` for the C toolchain's headers), the longest match at a segment boundary placing it; `names` are regular expressions over a symbol's name (its compiler clone suffix removed), the first match in this file's order giving the area of the bytes of the body's own file. Bytes no rule places are unclassified, and either side's over `unclassified_bytes_at_most` fail the gate: what a change brings is given an area in the commit that brings it. Bytes no line and no frame give a source go to the area the body's symbols are placed in by these rules, else are unclassified under the owner their symbols carry; only those of a body whose names carry no owner and match no name rule are unattributed, in no area, and either side's over `unattributed_bytes_at_most` fail; null is unfilled and fails with what the run reads.",
-  "schema": 2,
-  "case": "pico-client-coop-nostd",
+  "about": "The size ledger of the pico C ABI's libraries (docs/c-abi-architecture.md principle P9; the gate is scripts/lib/size_ledger_gate.py, Layer C1cs). For each case of scripts/lib/capability_cost_gate.py `cases` names, one feature bundle each (the release client, the cooperative peer, and the Linux twin of the Windows release's like-for-like library), the function bytes of its library and of zenoh-pico built as the same build, each body counted once however many names its address carries, each byte of it given to the source file the line table of that build names (the build carries its line tables, and what is measured and shipped is it with its debug information taken off; for inlined code, the inlined function's file, except inlined language runtime code (Rust's standard library, a C toolchain's headers), which goes to the file of its innermost caller outside the runtime, on both sides; and for bytes of no source line, the file the function of the innermost frame holding them is declared in), divided into the AREAS of the architecture by the RULES below, which every case shares, and each area's ratio held by the case's row for it in `cases`. `base_case` is the case `--per-feature` steps from to each other case, one feature at a time, printing what each feature adds to each area on each side. A row follows the rule of a row of deploy/pico_host_ceiling.json (scripts/lib/pico_host_ceiling.py, the one implementation): locked at WIN, or a ratchet, `ratio_at_most`, the ratio of the reading it was set from rounded up to four places, under the open-debt item the area is registered under; `wz_text` and `pico_text` of a reading are the area's function bytes. A ratchet only moves down: a reading over it by more than the tolerance fails, a reading under it by more prints the tighter row to commit. A row whose ratio_at_most is null is unfilled and fails with the row this run reads; --measure prints every row. RULES, per side: `owners` are prefixes of the owner of a byte's source file (for wz the crate::module the file is, by its path in its crate or, for code a crate includes, by the module its functions are named in; for zenoh-pico the file's path in the export, and `toolchain/...` for the C toolchain's headers), the longest match at a segment boundary placing it; `names` are regular expressions over a symbol's name (its compiler clone suffix removed), the first match in this file's order giving the area of the bytes of the body's own file. Bytes no rule places are unclassified, and either side's over `unclassified_bytes_at_most` fail the gate: what a change brings is given an area in the commit that brings it. Bytes no line and no frame give a source go to the area the body's symbols are placed in by these rules, else are unclassified under the owner their symbols carry; only those of a body whose names carry no owner and match no name rule are unattributed, in no area, and either side's over `unattributed_bytes_at_most` fail; null is unfilled and fails with what the run reads.",
+  "schema": 3,
+  "base_case": "pico-client-coop-nostd",
   "unclassified_bytes_at_most": 1024,
   "unattributed_bytes_at_most": 0,
   "areas": [
@@ -13,14 +13,34 @@
     {"id": "codec", "title": "wire codec (message encoders and decoders)"},
     {"id": "language", "title": "language support (Rust core, alloc and drop glue, and the out-of-line bodies of the standard library; heapless; zenoh-pico's collections, buffers and utilities)"}
   ],
-  "rows": {
-    "sessions": {"ratio_at_most": 2.5675, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 70626, "pico_text": 27508, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
-    "doors": {"ratio_at_most": 2.2219, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 42291, "pico_text": 19034, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
-    "transport": {"ratio_at_most": 2.3557, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 32863, "pico_text": 13951, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
-    "driver": {"ratio_at_most": 1.8347, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 29444, "pico_text": 16049, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
-    "keyexpr": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 10088, "pico_text": 13490, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
-    "codec": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 31798, "pico_text": 35440, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
-    "language": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 17953, "pico_text": 45028, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}}
+  "cases": {
+    "pico-client-coop-nostd": {
+      "sessions": {"ratio_at_most": 2.5675, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 70626, "pico_text": 27508, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "doors": {"ratio_at_most": 2.2219, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 42291, "pico_text": 19034, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "transport": {"ratio_at_most": 2.3557, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 32863, "pico_text": 13951, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "driver": {"ratio_at_most": 1.8347, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 29444, "pico_text": 16049, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "keyexpr": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 10088, "pico_text": 13490, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "codec": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 31798, "pico_text": 35440, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "language": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-26", "wz_text": 17953, "pico_text": 45028, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}}
+    },
+    "pico-peer-coop": {
+      "sessions": {"ratio_at_most": 3.9831, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 121053, "pico_text": 30392, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "doors": {"ratio_at_most": 2.5923, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 50849, "pico_text": 19616, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "transport": {"ratio_at_most": 2.3894, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 40291, "pico_text": 16863, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "driver": {"ratio_at_most": 4.3377, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 71832, "pico_text": 16560, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "keyexpr": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 8147, "pico_text": 13490, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "codec": {"ratio_at_most": 1.0044, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 35702, "pico_text": 35547, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "language": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 36126, "pico_text": 46674, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}}
+    },
+    "pico-api-coop-nostd": {
+      "sessions": {"ratio_at_most": 5.5651, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 306791, "pico_text": 55128, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "doors": {"ratio_at_most": 3.1183, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 190824, "pico_text": 61195, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "transport": {"ratio_at_most": 2.6041, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 70949, "pico_text": 27246, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "driver": {"ratio_at_most": 5.7329, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 149554, "pico_text": 26087, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "keyexpr": {"verdict": "win", "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 9253, "pico_text": 14439, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "codec": {"ratio_at_most": 2.9956, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 109957, "pico_text": 36707, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}},
+      "language": {"ratio_at_most": 1.5735, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-27", "wz_text": 93595, "pico_text": 59485, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"}}
+    }
   },
   "rules": {
     "wz": {
@@ -31,6 +51,7 @@
       "owners": {
         "wz_capi_pico": "doors",
         "wz_capi_port": "doors",
+        "wz_ext_pubsub": "doors",
         "wz_capi_coop": "sessions",
         "wz_session_core": "sessions",
         "wz_session_core::keyexpr_canon": "keyexpr",
@@ -43,11 +64,18 @@
         "wz_session_core::lent_push": "codec",
         "wz_session_core::lent_control": "codec",
         "wz_session_core::declare_ext_keyexpr": "codec",
+        "wz_session_core::join_decode": "codec",
+        "wz_session_core::lent_request": "codec",
+        "wz_session_core::lent_response": "codec",
         "wz_session_core::session_actions": "transport",
         "wz_session_core::drive": "transport",
         "wz_session_core::reassembly_dispatch": "transport",
         "wz_session_core::transport_timers": "transport",
         "wz_session_core::unicast_rx": "transport",
+        "wz_session_core::multicast_rx": "transport",
+        "wz_session_core::multicast_tx": "transport",
+        "wz_session_core::multicast_join": "transport",
+        "wz_session_core::multicast_stats": "transport",
         "wz_session_core::ext_view": "codec",
         "wz_session_core::tx_buf": "transport",
         "wz_session_core::tx_lease": "transport",
@@ -66,6 +94,7 @@
         "wz_session_core::bounded": "language",
         "wz_session_core::text_out": "language",
         "wz_session_mcu": "driver",
+        "wz_node_time": "driver",
         "wz_runtime_coop": "driver",
         "wz_runtime_coop::reassembly_rx": "transport",
         "wz_runtime_posix": "driver",
