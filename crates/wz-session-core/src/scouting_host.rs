@@ -37,11 +37,14 @@
 //! The generated policy takes the action implementation BY VALUE and keeps it private, so the
 //! pump cannot read the staging slots back out of the engine. The state therefore lives in a
 //! [`ScoutingActions`] the caller holds, and the policy is parameterised over a thin
-//! [`ScoutActionsBinding`] that reaches it (the orphan rule forbids implementing the foreign trait
-//! on the state's holder itself). A host with a heap holds the state behind an `Arc`, a clone of
-//! which the binding keeps; a host with none holds it in the window's own place, which does not
-//! move while the window lives ([`ScoutWindowPlace::build_over`]), and the binding points at it,
-//! so a window is made with no allocation.
+//! [`ScoutActionsBinding`] that reaches it. How it reaches the state is a type ([`ActionsReach`]):
+//! a host with a heap holds the state behind an `Arc`, a clone of which the binding keeps; a host
+//! with none holds it in the window's own place, which does not move while the window lives
+//! ([`ScoutWindowPlace::build_over`]), and the binding points at it ([`PlacedActions`]). Where
+//! the window records its Hellos is a type too ([`HelloRecord`]): the heap collection
+//! ([`HelloList`]) or a table its host lends ([`LentTable`]). A host names both, so a window links
+//! the one form of each it uses: a window over a lent table, held in its place, makes no
+//! allocation and links neither the collection nor the `Arc`.
 //!
 //! ## Timeout ownership: the host owns the clock
 //!
@@ -87,13 +90,15 @@ use crate::scouting::{
 ///
 /// Distinct from the session handshake's bundle: scouting is a pre-session, untrusted-link
 /// subsystem, so its parameters, trace and staging slots are not folded into the session's.
-/// Generic over the runtime `R` for its locks, as the rest of the session model is.
+/// Generic over the runtime `R` for its locks, as the rest of the session model is, and over the
+/// record `K` the window keeps its Hellos in ([`HelloRecord`]): the heap collection unless one is
+/// named ([`HelloList`]), or a table its host lends ([`LentTable`]).
 ///
 /// The caller holds this behind an `Arc`, and [`new_scouting_engine`] wraps a clone of that `Arc`
 /// in a [`ScoutActionsBinding`] for the policy to own, so the caller can still read
-/// [`Self::discovered_locator`] and [`Self::scouted_hellos`] after the policy takes the binding;
-/// or a window holds it in its own place ([`ScoutWindowPlace::build_over`]).
-pub struct ScoutingActions<R: Runtime> {
+/// [`Self::discovered_locator`] and the record after the policy takes the binding; or a window
+/// holds it in its own place ([`ScoutWindowPlace::build_over`]).
+pub struct ScoutingActions<R: Runtime, K = HelloList<R>> {
     /// Inputs for the outbound Scout frame and the scouting deadline (what, zid, timeout).
     pub params: ScoutParams,
     /// Script-action dispatch counters, read in tests through [`Self::trace_snapshot`].
@@ -102,15 +107,47 @@ pub struct ScoutingActions<R: Runtime> {
     /// awaiting transmission, in bytes of its own. The host takes it, sends it on the multicast
     /// link and clears the slot.
     pub pending_scout: R::Mutex<Option<ScoutFrame>>,
-    /// Set by the pump before it feeds `HelloReceived`: the DECODED inbound Hello.
-    /// `record_hello_and_emit` takes it and records it.
+    /// Where the window records the Hellos it takes, and what it keeps of the datagrams it does
+    /// not; a host reads it through `record`.
+    record: K,
+    /// How many datagrams the window observed and did not take as a Hello, by verdict: the count
+    /// every window keeps, whatever its record.
     ///
-    /// The decode sits in the pump, not in the action, because that is where zenoh-pico puts it
-    /// (see the module doc): a datagram that does not decode never reaches the machine, so it
-    /// can neither be recorded nor end an `exit_on_first` window. Staging raw bytes here and
-    /// decoding inside the action would put that verdict AFTER the transition had been taken,
-    /// which on the exit-on-first arm let one malformed datagram from anywhere on the untrusted
-    /// group close the window with nothing discovered.
+    /// Together with the Hellos the record holds (or counts as refused), it makes the handling of
+    /// inbound datagrams CONSERVATIVE: every datagram the window receives lands in exactly one of
+    /// them, so a future silent drop is a broken count and not a missing log line.
+    ignored_counts: R::Mutex<IgnoredCounts>,
+}
+
+/// Where a window records the Hellos it takes, and what it keeps of the datagrams it does not
+/// beyond the count every window keeps ([`ScoutingActions::ignored_counts`]). A host names its
+/// record as a type, so a window links the one it records in.
+pub trait HelloRecord<R: Runtime>: Sized + 'static {
+    /// `bytes`, a datagram of the Hello MID, decoded and staged for the machine's next
+    /// `hello.received`: whether it is a Hello the window advances on ([`hello_advances_window`]).
+    /// A datagram that does not decode stages nothing.
+    ///
+    /// The decode sits before the machine, not in its action, because that is where zenoh-pico
+    /// puts it (see the module doc): a datagram that does not decode never reaches the machine, so
+    /// it can neither be recorded nor end an `exit_on_first` window. Decoding inside the action
+    /// would put that verdict AFTER the transition had been taken, which on the exit-on-first arm
+    /// let one malformed datagram from anywhere on the untrusted group close the window with
+    /// nothing discovered.
+    fn stage(&self, bytes: &[u8], exit_on_first: bool) -> bool;
+    /// The staged Hello recorded after the others: the machine took it.
+    fn record_staged(&self);
+    /// One datagram the window observed and did not take as a Hello, already counted.
+    fn record_ignored(&self, why: ScoutRxIgnored);
+    /// The first locator a recorded Hello advertised, the dial target: `None` until a Hello with
+    /// a locator is recorded.
+    fn discovered_locator(&self) -> Option<String>;
+}
+
+/// The record a host with a heap keeps, zenoh's: every Hello decoded onto the heap, with no bound,
+/// and every datagram not taken listed with its verdict.
+pub struct HelloList<R: Runtime> {
+    /// Set by [`HelloRecord::stage`] before the pump feeds `HelloReceived`: the DECODED inbound
+    /// Hello, which `record_hello_and_emit` takes and records.
     pub pending_hello: R::Mutex<Option<ScoutedHello>>,
     /// The discovered peer locator (for example `"udp/127.0.0.1:7447"`), taken from the first
     /// Hello locator. `None` until a Hello with a locator arrives.
@@ -119,9 +156,7 @@ pub struct ScoutingActions<R: Runtime> {
     /// re-point it. With [`ScoutParams::exit_on_first`] there is one Hello per window so the rule
     /// is invisible; under the survey arm it stops the LAST peer to answer from silently
     /// replacing a dial target the caller may already have acted on. A locator-less Hello never
-    /// sets it: that peer is in [`Self::hellos`], but there is nothing to dial. A window over a
-    /// lent table leaves it unset: its first locator is the table's first row that kept one
-    /// ([`Self::discovered_locator`]).
+    /// sets it: that peer is in [`Self::hellos`], but there is nothing to dial.
     pub discovered: R::Mutex<Option<String>>,
     /// Every Hello decoded in the window, in ARRIVAL order.
     ///
@@ -133,26 +168,69 @@ pub struct ScoutingActions<R: Runtime> {
     /// Holds ONE entry per window with [`ScoutParams::exit_on_first`] (the session-open implicit
     /// scout leaves `AwaitingHello` on the first Hello), and every responder in the window
     /// without it: pico's `exit_on_first == false` survey arm, which the statechart's
-    /// self-transition carries. Zenoh's collection, with no bound: a window built over a table
-    /// ([`Self::over_table`]) records into the table instead and leaves this empty.
+    /// self-transition carries. Zenoh's collection, with no bound.
     pub hellos: R::Mutex<Vec<ScoutedHello>>,
-    /// The table a host with no heap lends the window to record its Hellos in, `None` for the
-    /// collection above.
-    lent: Option<LentTable>,
     /// Every datagram the window OBSERVED and did not take as a Hello, with the reason, in
     /// arrival order.
     ///
     /// A log line alone is the wrong instrument for "a datagram was dropped": a log needle dies
     /// two ways (the level is filtered, or the wording drifts) and a test that greps for one
     /// asserts on prose. So the verdict is recorded here as a value, and logged beside it.
-    /// Together with [`Self::hellos`] (or the lent table, which counts what it could not record)
-    /// it makes the handling of inbound datagrams CONSERVATIVE: every datagram the window receives
-    /// lands in exactly one of them, so a future silent drop is a broken count and not a missing
-    /// log line. A window over a lent table keeps no list: it counts each verdict
-    /// ([`Self::ignored_counts`]), which every window does.
     pub ignored: R::Mutex<Vec<ScoutRxIgnored>>,
-    /// How many datagrams the window observed and did not take as a Hello, by verdict.
-    ignored_counts: R::Mutex<IgnoredCounts>,
+}
+
+impl<R: Runtime> HelloList<R> {
+    /// A record of no Hello and no datagram.
+    pub fn new() -> Self {
+        Self {
+            pending_hello: R::new_mutex(None),
+            discovered: R::new_mutex(None),
+            hellos: R::new_mutex(Vec::new()),
+            ignored: R::new_mutex(Vec::new()),
+        }
+    }
+}
+
+impl<R: Runtime> Default for HelloList<R> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R: Runtime> HelloRecord<R> for HelloList<R> {
+    fn stage(&self, bytes: &[u8], exit_on_first: bool) -> bool {
+        match decode_scouted_hello(bytes) {
+            Some(hello) if hello_advances_window(exit_on_first, hello.locators.len()) => {
+                R::with_mutex_mut(&self.pending_hello, |slot| *slot = Some(hello));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn record_staged(&self) {
+        let Some(scouted) = R::with_mutex_mut(&self.pending_hello, |slot| slot.take()) else {
+            return;
+        };
+        // FIRST-WINS, which the survey arm turned from a tautology into a decision: `discovered`
+        // is the DIAL TARGET read, and a plain assignment would let the LAST peer to answer
+        // silently re-point a target the caller may already have acted on, while a locator-less
+        // late answer would not even clear it.
+        R::with_mutex_mut(&self.discovered, |discovered| {
+            if discovered.is_none() {
+                *discovered = scouted.locators.first().cloned();
+            }
+        });
+        R::with_mutex_mut(&self.hellos, |hellos| hellos.push(scouted));
+    }
+
+    fn record_ignored(&self, why: ScoutRxIgnored) {
+        R::with_mutex_mut(&self.ignored, |ignored| ignored.push(why));
+    }
+
+    fn discovered_locator(&self) -> Option<String> {
+        R::with_mutex_mut(&self.discovered, |locator| locator.clone())
+    }
 }
 
 /// The most bytes a Scout datagram holds: its header and the longest body the codec writes. The
@@ -521,7 +599,7 @@ const PLACEHOLDER_ZID: SessionZid = SessionZid::from_array([1]);
 
 /// The Hellos a window records, in arrival order, in a table of `MAX_SCOUT_HELLOS` rows and one
 /// more the next Hello is decoded into: what a host with no heap lends its window
-/// ([`ScoutingActions::over_table`]). It is made where the host keeps the scout's state, never on
+/// ([`ScoutWindowPlace::build_over`]). It is made where the host keeps the scout's state, never on
 /// a stack, which its size is not for. A Hello past the rows is counted and not recorded.
 #[derive(Debug)]
 pub struct HelloTable {
@@ -649,12 +727,14 @@ impl HelloTable {
     }
 }
 
-/// The table a window was lent ([`ScoutingActions::over_table`]).
-#[derive(Clone, Copy)]
-struct LentTable(NonNull<HelloTable>);
+/// The record a host with no heap lends its window: a [`HelloTable`] where the host keeps the
+/// scout's state, which the window records its Hellos in and its holder reads once the window has
+/// resolved. It keeps no list of the datagrams the window drops: their counts are every window's.
+/// Made only by [`ScoutWindowPlace::build_over`], whose contract it holds.
+pub struct LentTable(NonNull<HelloTable>);
 
 // SAFETY: the table is reached through this only while the window that was lent it is pumped, by
-// the one thread that pumps it (`ScoutingActions::over_table`'s contract).
+// the one thread that pumps it (`ScoutWindowPlace::build_over`'s contract).
 unsafe impl Send for LentTable {}
 // SAFETY: as for `Send`.
 unsafe impl Sync for LentTable {}
@@ -663,71 +743,42 @@ impl LentTable {
     /// The table.
     ///
     /// # Safety
-    /// As [`ScoutingActions::over_table`] states: the table outlives the window and nothing else
+    /// As [`ScoutWindowPlace::build_over`] states: the table outlives the window and nothing else
     /// reaches it while the window is pumped.
-    unsafe fn get<'t>(self) -> &'t mut HelloTable {
+    unsafe fn get<'t>(&self) -> &'t mut HelloTable {
         &mut *self.0.as_ptr()
     }
 }
 
+impl<R: Runtime> HelloRecord<R> for LentTable {
+    fn stage(&self, bytes: &[u8], exit_on_first: bool) -> bool {
+        // SAFETY: `build_over`'s contract: the window that is pumped owns the table.
+        unsafe { self.get() }.stage(bytes, exit_on_first)
+    }
+
+    fn record_staged(&self) {
+        // SAFETY: as for `stage`.
+        unsafe { self.get() }.record_staged();
+    }
+
+    fn record_ignored(&self, _why: ScoutRxIgnored) {}
+
+    /// The first locator of the first row that kept one: the table's rows are what the window
+    /// discovered, and no locator is copied out of them until it is asked for.
+    fn discovered_locator(&self) -> Option<String> {
+        // SAFETY: as for `stage`: the table outlives the state that holds this.
+        unsafe { self.get() }
+            .iter()
+            .find_map(|row| row.locator(0))
+            .map(String::from)
+    }
+}
+
 impl<R: Runtime> ScoutingActions<R> {
-    /// The state bundle for one discovery window. `params` are captured by value; the staging
-    /// slots start empty.
+    /// The state bundle for one discovery window over the heap collection. `params` are captured
+    /// by value; the staging slots start empty.
     pub fn new(params: ScoutParams) -> Arc<Self> {
-        Arc::new(Self::with(params, None))
-    }
-
-    /// The state bundle for one window that records its Hellos in `table`, which it clears: the
-    /// form of a host with no heap, whose table lies where it keeps the scout's state. The bundle
-    /// holds a pointer to the table and none of it.
-    ///
-    /// # Safety
-    /// `table` outlives every use of the bundle, and nothing else reads or writes it until the
-    /// window is over: its holder reads it once the window has resolved.
-    pub unsafe fn over_table(params: ScoutParams, table: &mut HelloTable) -> Arc<Self> {
-        Arc::new(Self::held_over_table(params, table))
-    }
-
-    /// [`Self::over_table`] by value, for a window that holds its state in its own place
-    /// ([`ScoutWindowPlace::build_over`]) and shares it with no one.
-    ///
-    /// # Safety
-    /// As [`Self::over_table`].
-    unsafe fn held_over_table(params: ScoutParams, table: &mut HelloTable) -> Self {
-        table.clear();
-        Self::with(params, Some(LentTable(NonNull::from(table))))
-    }
-
-    fn with(params: ScoutParams, lent: Option<LentTable>) -> Self {
-        Self {
-            params,
-            trace: R::new_mutex(ScoutTrace::default()),
-            pending_scout: R::new_mutex(None),
-            pending_hello: R::new_mutex(None),
-            discovered: R::new_mutex(None),
-            hellos: R::new_mutex(Vec::new()),
-            lent,
-            ignored: R::new_mutex(Vec::new()),
-            ignored_counts: R::new_mutex(IgnoredCounts::default()),
-        }
-    }
-
-    /// Field-by-field `Copy` snapshot of the dispatch counters, lifted out from under the lock.
-    pub fn trace_snapshot(&self) -> ScoutTrace {
-        R::with_mutex_mut(&self.trace, |trace| trace.clone_via_copy())
-    }
-
-    /// The discovered locator, if a Hello locator was captured: for a window over a lent table,
-    /// the first locator of the first row that kept one.
-    pub fn discovered_locator(&self) -> Option<String> {
-        match self.lent {
-            // SAFETY: `over_table`'s contract: the table outlives the bundle.
-            Some(table) => unsafe { table.get() }
-                .iter()
-                .find_map(|row| row.locator(0))
-                .map(String::from),
-            None => R::with_mutex_mut(&self.discovered, |locator| locator.clone()),
-        }
+        Arc::new(Self::with(params, HelloList::new()))
     }
 
     /// Every Hello decoded in this window, in arrival order, complete with role, zid and all
@@ -737,28 +788,61 @@ impl<R: Runtime> ScoutingActions<R> {
     /// A non-empty result with an EMPTY `locators` is meaningful: a peer answered and advertised
     /// no address, which must not read as silence.
     pub fn scouted_hellos(&self) -> Vec<ScoutedHello> {
-        match self.lent {
-            // SAFETY: `over_table`'s contract: the table outlives the bundle.
-            Some(table) => unsafe { table.get() }
-                .iter()
-                .map(HelloRow::to_hello)
-                .collect(),
-            None => R::with_mutex_mut(&self.hellos, |hellos| hellos.clone()),
-        }
-    }
-
-    /// How many Hellos the window took and did not record: those past a lent table's rows, and
-    /// none for the collection, which has no bound.
-    pub fn hellos_refused(&self) -> usize {
-        // SAFETY: `over_table`'s contract: the table outlives the bundle.
-        self.lent
-            .map_or(0, |table| unsafe { table.get() }.refused())
+        R::with_mutex_mut(&self.record.hellos, |hellos| hellos.clone())
     }
 
     /// Every datagram this window observed and did not take as a Hello, with the reason, in
-    /// arrival order. See [`Self::ignored`] for why the record is a value.
+    /// arrival order. See [`HelloList::ignored`] for why the record is a value.
     pub fn ignored_datagrams(&self) -> Vec<ScoutRxIgnored> {
-        R::with_mutex_mut(&self.ignored, |ignored| ignored.clone())
+        R::with_mutex_mut(&self.record.ignored, |ignored| ignored.clone())
+    }
+}
+
+impl<R: Runtime> ScoutingActions<R, LentTable> {
+    /// The state bundle for one window that records its Hellos in `table`, which it clears: the
+    /// form of a host with no heap, whose table lies where it keeps the scout's state. The bundle
+    /// holds a pointer to the table and none of it.
+    ///
+    /// # Safety
+    /// `table` outlives every use of the bundle, and nothing else reads or writes it until the
+    /// window is over: its holder reads it once the window has resolved.
+    unsafe fn over_table(params: ScoutParams, table: &mut HelloTable) -> Self {
+        table.clear();
+        Self::with(params, LentTable(NonNull::from(table)))
+    }
+
+    /// How many Hellos the window took and did not record, past the lent table's rows.
+    pub fn hellos_refused(&self) -> usize {
+        // SAFETY: `over_table`'s contract: the table outlives the bundle.
+        unsafe { self.record.get() }.refused()
+    }
+}
+
+impl<R: Runtime, K: HelloRecord<R>> ScoutingActions<R, K> {
+    fn with(params: ScoutParams, record: K) -> Self {
+        Self {
+            params,
+            trace: R::new_mutex(ScoutTrace::default()),
+            pending_scout: R::new_mutex(None),
+            record,
+            ignored_counts: R::new_mutex(IgnoredCounts::default()),
+        }
+    }
+
+    /// Where the window records its Hellos.
+    pub fn record(&self) -> &K {
+        &self.record
+    }
+
+    /// Field-by-field `Copy` snapshot of the dispatch counters, lifted out from under the lock.
+    pub fn trace_snapshot(&self) -> ScoutTrace {
+        R::with_mutex_mut(&self.trace, |trace| trace.clone_via_copy())
+    }
+
+    /// The discovered locator, if a Hello locator was captured
+    /// ([`HelloRecord::discovered_locator`]).
+    pub fn discovered_locator(&self) -> Option<String> {
+        self.record.discovered_locator()
     }
 
     /// How many datagrams this window observed and did not take as a Hello, by verdict: the record
@@ -798,50 +882,14 @@ impl<R: Runtime> ScoutingActions<R> {
             }
         }
         R::with_mutex_mut(&self.ignored_counts, |counts| counts.count(&why));
-        if self.lent.is_none() {
-            R::with_mutex_mut(&self.ignored, |ignored| ignored.push(why));
-        }
+        self.record.record_ignored(why);
     }
-}
-
-/// The generated policy's owner of the state: a reach of the caller's [`ScoutingActions`], so the
-/// four native actions mutate the slots the caller reads back. Over a shared state it keeps a
-/// clone of the caller's `Arc`; over a state a window holds in its place it keeps only the
-/// reach, which the window outlives ([`ScoutWindowPlace::build_over`]).
-pub struct ScoutActionsBinding<R: Runtime> {
-    actions: NonNull<ScoutingActions<R>>,
-    /// The shared state `actions` points into, kept alive by the binding; `None` for a held one.
-    _shared: Option<Arc<ScoutingActions<R>>>,
-}
-
-// SAFETY: the binding reaches the state as a shared reference only, and may hold an `Arc` of it,
-// so it may go to another thread exactly when an `Arc` of the state may.
-unsafe impl<R: Runtime> Send for ScoutActionsBinding<R> where ScoutingActions<R>: Send + Sync {}
-// SAFETY: as for `Send`.
-unsafe impl<R: Runtime> Sync for ScoutActionsBinding<R> where ScoutingActions<R>: Send + Sync {}
-
-impl<R: Runtime> ScoutActionsBinding<R> {
-    /// The state the actions write.
-    fn actions(&self) -> &ScoutingActions<R> {
-        // SAFETY: `actions` points into the `Arc` `_shared` keeps, or at a state its holder keeps
-        // in place for longer than the engine that owns this binding (`placed_scouting_engine`).
-        unsafe { self.actions.as_ref() }
-    }
-}
-
-impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
-    // This host performs the machine's duties. `scout_emit` stages the datagram the host sends
-    // and `record_hello_and_emit` writes the slots the caller reads back. `emit_scout_timeout`
-    // and `diag_scout_tx_failed` are notices that only count: a window that ends with no Hello
-    // leaves `discovered` unset whether or not they run.
-    const REALIZATION: ::sce_rust_runtime::ActionRealization =
-        ::sce_rust_runtime::ActionRealization::Performs;
 
     /// Idle -> Sending entering transition: encode one Scout frame and stage the datagram for the
     /// host to transmit. Pure: no socket access. Mirrors zenoh-pico's `_z_link_send_wbuf` in
     /// `scout.c`, except the send itself is the host's job.
-    fn scout_emit(&mut self) {
-        let a = self.actions();
+    fn scout_emit(&self) {
+        let a = self;
         R::with_mutex_mut(&a.trace, |trace| {
             trace.scout_emit = trace.scout_emit.saturating_add(1)
         });
@@ -887,81 +935,120 @@ impl<R: Runtime> ScoutingActionsTrait for ScoutActionsBinding<R> {
     /// Runs on BOTH `hello.received` arms, because pico pushes before it consults
     /// `exit_on_first`: the mode decides whether the window keeps running, never whether the peer
     /// is recorded.
-    fn record_hello_and_emit(&mut self) {
-        let a = self.actions();
-        R::with_mutex_mut(&a.trace, |trace| {
+    fn record_hello(&self) {
+        R::with_mutex_mut(&self.trace, |trace| {
             trace.record_hello = trace.record_hello.saturating_add(1)
         });
-        // FIRST-WINS, which the survey arm turned from a tautology into a decision: `discovered`
-        // is the DIAL TARGET read, and a plain assignment would let the LAST peer to answer
-        // silently re-point a target the caller may already have acted on, while a locator-less
-        // late answer would not even clear it.
-        let discover = |hello: &dyn HelloFacts| {
-            R::with_mutex_mut(&a.discovered, |discovered| {
-                if discovered.is_none() {
-                    *discovered = hello.locator(0).map(String::from);
-                }
-            });
-        };
-        // A window over a lent table keeps what it discovered in the table's rows
-        // (`ScoutingActions::discovered_locator`), and copies no locator out of them.
-        if let Some(table) = a.lent {
-            // SAFETY: `over_table`'s contract: the window that is pumped owns the table.
-            unsafe { table.get() }.record_staged();
-            return;
-        }
-        let Some(scouted) = R::with_mutex_mut(&a.pending_hello, |slot| slot.take()) else {
-            return;
-        };
-        discover(&scouted);
-        R::with_mutex_mut(&a.hellos, |hellos| hellos.push(scouted));
+        self.record.record_staged();
     }
 
     /// AwaitingHello -> Idle on scout.timer.elapsed: the window expired with no Hello.
-    /// Observability only; `discovered` stays `None`.
-    fn emit_scout_timeout(&mut self) {
-        R::with_mutex_mut(&self.actions().trace, |trace| {
+    /// Observability only; nothing is discovered.
+    fn count_timeout(&self) {
+        R::with_mutex_mut(&self.trace, |trace| {
             trace.scout_timeout = trace.scout_timeout.saturating_add(1)
         });
     }
 
     /// Sending -> Idle on link.tx_failed: the multicast Scout transmit errored.
-    fn diag_scout_tx_failed(&mut self) {
-        R::with_mutex_mut(&self.actions().trace, |trace| {
+    fn count_tx_failed(&self) {
+        R::with_mutex_mut(&self.trace, |trace| {
             trace.tx_failed = trace.tx_failed.saturating_add(1)
         });
     }
 }
 
-/// The scouting machine a host pumps.
-pub type ScoutEngine<R> = Engine<ScoutingPolicy<ScoutActionsBinding<R>>>;
+/// How the scouting machine's actions reach the state they write: an `Arc` of it the machine
+/// shares with its holder, or a pointer to a state its holder keeps in place ([`PlacedActions`]).
+pub trait ActionsReach: 'static {
+    /// The runtime of the state's locks.
+    type Runtime: Runtime;
+    /// The record the state keeps its Hellos in.
+    type Record: HelloRecord<Self::Runtime>;
+    /// The state.
+    fn reached(&self) -> &ScoutingActions<Self::Runtime, Self::Record>;
+}
+
+impl<R: Runtime, K: HelloRecord<R>> ActionsReach for Arc<ScoutingActions<R, K>> {
+    type Runtime = R;
+    type Record = K;
+
+    fn reached(&self) -> &ScoutingActions<R, K> {
+        self
+    }
+}
+
+/// A reach of a state its holder keeps in place and shares with no one: a pointer, which no `Arc`
+/// backs. Made only by a window that holds its state ([`WindowHolding::reach`]), which outlives
+/// the machine that owns this and does not move while it lives.
+pub struct PlacedActions<R: Runtime, K>(NonNull<ScoutingActions<R, K>>);
+
+// SAFETY: the reach lends the state as a shared reference only, so it may go to another thread, or
+// be shared between threads, exactly when a shared reference to the state may.
+unsafe impl<R: Runtime, K> Send for PlacedActions<R, K> where ScoutingActions<R, K>: Sync {}
+// SAFETY: as for `Send`.
+unsafe impl<R: Runtime, K> Sync for PlacedActions<R, K> where ScoutingActions<R, K>: Sync {}
+
+impl<R: Runtime, K: HelloRecord<R>> ActionsReach for PlacedActions<R, K> {
+    type Runtime = R;
+    type Record = K;
+
+    fn reached(&self) -> &ScoutingActions<R, K> {
+        // SAFETY: the state's holder keeps it in place for longer than the machine that owns this
+        // reach (`WindowHolding::reach`).
+        unsafe { self.0.as_ref() }
+    }
+}
+
+/// The generated policy's owner of the state: a reach of the caller's [`ScoutingActions`], so the
+/// four native actions mutate the slots the caller reads back. Over a shared state the reach is a
+/// clone of the caller's `Arc`; over a state a window holds in its place it is a pointer, which
+/// the window outlives ([`ScoutWindowPlace::build_over`]).
+pub struct ScoutActionsBinding<A> {
+    reach: A,
+}
+
+impl<A: ActionsReach> ScoutingActionsTrait for ScoutActionsBinding<A> {
+    // This host performs the machine's duties. `scout_emit` stages the datagram the host sends
+    // and `record_hello_and_emit` writes the record the caller reads back. `emit_scout_timeout`
+    // and `diag_scout_tx_failed` are notices that only count: a window that ends with no Hello
+    // discovers nothing whether or not they run.
+    const REALIZATION: ::sce_rust_runtime::ActionRealization =
+        ::sce_rust_runtime::ActionRealization::Performs;
+
+    fn scout_emit(&mut self) {
+        self.reach.reached().scout_emit();
+    }
+
+    fn record_hello_and_emit(&mut self) {
+        self.reach.reached().record_hello();
+    }
+
+    fn emit_scout_timeout(&mut self) {
+        self.reach.reached().count_timeout();
+    }
+
+    fn diag_scout_tx_failed(&mut self) {
+        self.reach.reached().count_tx_failed();
+    }
+}
+
+/// The scouting machine a host pumps, its actions reaching their state through `A`.
+pub type ScoutEngine<A> = Engine<ScoutingPolicy<ScoutActionsBinding<A>>>;
 
 /// Build a scouting engine over the generated policy, parameterised over a
 /// [`ScoutActionsBinding`] wrapping a clone of `actions`. The caller retains `actions` and pumps
 /// the engine ([`open_window`] and the functions after it).
-pub fn new_scouting_engine<R: Runtime>(actions: &Arc<ScoutingActions<R>>) -> ScoutEngine<R> {
-    engine_over(ScoutActionsBinding {
-        actions: NonNull::from(&**actions),
-        _shared: Some(actions.clone()),
-    })
+pub fn new_scouting_engine<R: Runtime, K: HelloRecord<R>>(
+    actions: &Arc<ScoutingActions<R, K>>,
+) -> ScoutEngine<Arc<ScoutingActions<R, K>>> {
+    engine_over(Arc::clone(actions))
 }
 
-/// [`new_scouting_engine`] over a state its holder keeps in place and shares with no one, which
-/// the engine reaches by pointer: no `Arc` is made.
-///
-/// # Safety
-/// `actions` outlives the engine, and does not move while the engine lives.
-unsafe fn placed_scouting_engine<R: Runtime>(actions: &ScoutingActions<R>) -> ScoutEngine<R> {
-    engine_over(ScoutActionsBinding {
-        actions: NonNull::from(actions),
-        _shared: None,
-    })
-}
-
-fn engine_over<R: Runtime>(binding: ScoutActionsBinding<R>) -> ScoutEngine<R> {
+fn engine_over<A: ActionsReach>(reach: A) -> ScoutEngine<A> {
     Engine::new(ScoutingPolicy::new_with_checked_session_id(
         SCOUTING_SESSION_ID,
-        binding,
+        ScoutActionsBinding { reach },
     ))
 }
 
@@ -1049,9 +1136,9 @@ pub enum ScoutOutcome {
 /// Open the window: start the machine and take the Scout datagram it staged, which the host sends
 /// on the group. `None` when nothing was staged (which does not happen); the host then reports
 /// the send as failed ([`window_sent`]), so the machine returns to `Idle` deterministically.
-pub fn open_window<R: Runtime>(
-    actions: &ScoutingActions<R>,
-    engine: &mut ScoutEngine<R>,
+pub fn open_window<R: Runtime, K: HelloRecord<R>, A: ActionsReach>(
+    actions: &ScoutingActions<R, K>,
+    engine: &mut ScoutEngine<A>,
 ) -> Option<ScoutFrame> {
     engine.initialize().unwrap_or_else(|never| match never {});
     // Idle -> Sending: `scout_emit` fires on the entering transition and stages the datagram.
@@ -1061,7 +1148,7 @@ pub fn open_window<R: Runtime>(
 
 /// Tell the machine whether the Scout went out: `Sending -> AwaitingHello` when it did,
 /// `Sending -> Idle` when the send failed.
-pub fn window_sent<R: Runtime>(engine: &mut ScoutEngine<R>, sent: bool) {
+pub fn window_sent<A: ActionsReach>(engine: &mut ScoutEngine<A>, sent: bool) {
     engine.process_event(if sent {
         ScoutingEvent::ScoutTxDone
     } else {
@@ -1081,28 +1168,18 @@ pub fn window_sent<R: Runtime>(engine: &mut ScoutEngine<R>, sent: bool) {
 ///
 /// The verdict is computed at ONE place on purpose: an `advanced` flag, and not a record call per
 /// drop site, so a future arm cannot forget to account for its datagram. Every datagram the
-/// window observes lands in exactly one of `hellos` (or the lent table, recorded or counted) and
-/// `ignored`.
-pub fn window_datagram<R: Runtime>(
-    actions: &ScoutingActions<R>,
-    engine: &mut ScoutEngine<R>,
+/// window observes lands in exactly one of the record's Hellos (recorded, or counted as refused)
+/// and the ignored counts.
+pub fn window_datagram<R: Runtime, K: HelloRecord<R>, A: ActionsReach>(
+    actions: &ScoutingActions<R, K>,
+    engine: &mut ScoutEngine<A>,
     bytes: &[u8],
 ) {
     let exit_on_first = actions.params.exit_on_first;
     let advanced = if bytes.first().map(|h| h & 0x1f) == Some(wire_const::S_MID_HELLO) {
-        let staged = match actions.lent {
-            // SAFETY: `over_table`'s contract: the window that is pumped owns the table.
-            Some(table) => unsafe { table.get() }.stage(bytes, exit_on_first),
-            None => match decode_scouted_hello(bytes) {
-                Some(hello) if hello_advances_window(exit_on_first, hello.locators.len()) => {
-                    R::with_mutex_mut(&actions.pending_hello, |slot| *slot = Some(hello));
-                    true
-                }
-                _ => false,
-            },
-        };
-        // Undecodable, or decodable and declined by the rule above: both land in `ignored`, each
-        // under its own verdict.
+        let staged = actions.record.stage(bytes, exit_on_first);
+        // Undecodable, or decodable and declined by the window's rule: both are counted as
+        // ignored, each under its own verdict.
         if staged {
             // The window's mode rides the event: the generated machine has no datamodel, so its
             // two `hello.received` arms guard on this typed field. Lent for the one call that
@@ -1126,9 +1203,9 @@ pub fn window_datagram<R: Runtime>(
 /// Tell the window that `elapsed_ms` have passed since the Scout went out: once the budget
 /// ([`ScoutParams::timeout_ms`]) has elapsed with no Hello, raise the timeout (`AwaitingHello ->
 /// Idle`). Only `AwaitingHello` handles the event, so calling it in any other state is a no-op.
-pub fn window_tick<R: Runtime>(
-    actions: &ScoutingActions<R>,
-    engine: &mut ScoutEngine<R>,
+pub fn window_tick<R: Runtime, K: HelloRecord<R>, A: ActionsReach>(
+    actions: &ScoutingActions<R, K>,
+    engine: &mut ScoutEngine<A>,
     elapsed_ms: u64,
 ) {
     if elapsed_ms >= actions.params.timeout_ms
@@ -1140,12 +1217,14 @@ pub fn window_tick<R: Runtime>(
 
 /// Whether the window is over: the machine is back in `Idle`, because a Hello ended it, its budget
 /// elapsed, or the Scout could not be sent.
-pub fn window_resolved<R: Runtime>(engine: &ScoutEngine<R>) -> bool {
+pub fn window_resolved<A: ActionsReach>(engine: &ScoutEngine<A>) -> bool {
     engine.get_current_state() == ScoutingState::Idle
 }
 
 /// How a resolved window ended: the first locator it captured, or that it timed out.
-pub fn window_outcome<R: Runtime>(actions: &ScoutingActions<R>) -> ScoutOutcome {
+pub fn window_outcome<R: Runtime, K: HelloRecord<R>>(
+    actions: &ScoutingActions<R, K>,
+) -> ScoutOutcome {
     match actions.discovered_locator() {
         Some(locator) => ScoutOutcome::Discovered(locator),
         None => ScoutOutcome::TimedOut,
@@ -1153,10 +1232,13 @@ pub fn window_outcome<R: Runtime>(actions: &ScoutingActions<R>) -> ScoutOutcome 
 }
 
 /// One scouting window as a single value, for a host that pumps it from a loop of its own: the
-/// actions the answers land on, the machine, and the time the Scout went out.
+/// actions the answers land on, the machine, and the time the Scout went out. How the window holds
+/// its state is its type `S` ([`WindowHolding`]): shared behind an `Arc`
+/// ([`SharedWindowState`]), or held in the window over a table its host lends
+/// ([`LentWindowState`]).
 ///
 /// ```text
-/// let mut window = ScoutWindow::<R>::new(params);
+/// let mut window = ScoutWindow::<SharedWindowState<R>>::new(params);
 /// let scout = window.open();                    // the datagram to send on the group
 /// window.sent(now_ms, send(scout).is_ok());     // the budget runs from here
 /// while !window.resolved() {
@@ -1165,86 +1247,117 @@ pub fn window_outcome<R: Runtime>(actions: &ScoutingActions<R>) -> ScoutOutcome 
 /// }
 /// let hellos = window.actions().scouted_hellos();
 /// ```
-pub struct ScoutWindow<R: Runtime> {
+pub struct ScoutWindow<S: WindowHolding> {
     // Before `actions`, so the machine that reaches them goes first.
-    engine: ScoutEngine<R>,
-    actions: WindowActions<R>,
+    engine: ScoutEngine<S::Reach>,
+    actions: S,
     started_ms: u64,
 }
 
-/// Where a window's state is: shared behind an `Arc`, or held in the window, which then lies in
-/// its place and does not move while it lives ([`ScoutWindowPlace::build_over`]).
-enum WindowActions<R: Runtime> {
-    Shared(Arc<ScoutingActions<R>>),
-    Held(ScoutingActions<R>),
+/// How a window holds the state its machine's actions write, and how the machine reaches it.
+pub trait WindowHolding: Sized + 'static {
+    /// The runtime of the state's locks.
+    type Runtime: Runtime;
+    /// The record the state keeps its Hellos in.
+    type Record: HelloRecord<Self::Runtime>;
+    /// How the machine reaches the state.
+    type Reach: ActionsReach<Runtime = Self::Runtime, Record = Self::Record>;
+    /// The state.
+    fn state(&self) -> &ScoutingActions<Self::Runtime, Self::Record>;
+    /// The reach the window's machine keeps.
+    ///
+    /// # Safety
+    /// A state held by value ([`PlacedActions`]) is not moved while the reach lives: the reach
+    /// points where it lies.
+    unsafe fn reach(&self) -> Self::Reach;
 }
 
-impl<R: Runtime> WindowActions<R> {
-    fn get(&self) -> &ScoutingActions<R> {
-        match self {
-            Self::Shared(shared) => shared,
-            Self::Held(held) => held,
-        }
+/// The state of a window that shares it behind an `Arc` and records into the heap collection:
+/// what a host with a heap pumps, and reads once the window is gone.
+pub type SharedWindowState<R> = Arc<ScoutingActions<R>>;
+
+/// The state of a window that holds it in its place and records into a table its host lends:
+/// what a host with no heap pumps ([`ScoutWindowPlace::build_over`]).
+pub type LentWindowState<R> = ScoutingActions<R, LentTable>;
+
+impl<R: Runtime, K: HelloRecord<R>> WindowHolding for Arc<ScoutingActions<R, K>> {
+    type Runtime = R;
+    type Record = K;
+    type Reach = Self;
+
+    fn state(&self) -> &ScoutingActions<R, K> {
+        self
+    }
+
+    unsafe fn reach(&self) -> Self {
+        Arc::clone(self)
     }
 }
 
-impl<R: Runtime> ScoutWindow<R> {
-    /// A window over `params`, not yet open.
+impl<R: Runtime, K: HelloRecord<R>> WindowHolding for ScoutingActions<R, K> {
+    type Runtime = R;
+    type Record = K;
+    type Reach = PlacedActions<R, K>;
+
+    fn state(&self) -> &ScoutingActions<R, K> {
+        self
+    }
+
+    unsafe fn reach(&self) -> PlacedActions<R, K> {
+        PlacedActions(NonNull::from(self))
+    }
+}
+
+impl<R: Runtime> ScoutWindow<SharedWindowState<R>> {
+    /// A window over `params`, not yet open, recording into the heap collection.
     pub fn new(params: ScoutParams) -> Self {
         let mut place = MaybeUninit::uninit();
         // SAFETY: a window over a shared state may move: its machine reaches the state in the
         // `Arc`, not in the window.
-        unsafe {
-            Self::write_in(
-                &mut place,
-                WindowActions::Shared(ScoutingActions::<R>::new(params)),
-            );
-        }
+        unsafe { Self::write_in(&mut place, ScoutingActions::<R>::new(params)) };
         // SAFETY: `write_in` wrote every field of the window into `place`.
         unsafe { place.assume_init() }
     }
+}
 
+impl<R: Runtime, K: HelloRecord<R>> ScoutWindow<Arc<ScoutingActions<R, K>>> {
+    /// The state the answers land on as the window shares it, for a holder that reads it once the
+    /// window is gone.
+    pub fn shared_actions(&self) -> &Arc<ScoutingActions<R, K>> {
+        &self.actions
+    }
+}
+
+impl<S: WindowHolding> ScoutWindow<S> {
     /// The window over `actions` written field by field into `place`, which is overwritten without
     /// dropping what it held. Never inlined, for the stack: the machine is made in this frame and
     /// written into its field, and the frame has returned before the window is pumped.
     ///
     /// # Safety
-    /// A window whose state it holds (`WindowActions::Held`) is not moved out of `place` while it
-    /// lives: its machine reaches the state where it was written.
+    /// A window whose state it holds by value is not moved out of `place` while it lives: its
+    /// machine reaches the state where it was written.
     #[inline(never)]
-    unsafe fn write_in(place: &mut MaybeUninit<Self>, actions: WindowActions<R>) {
+    unsafe fn write_in(place: &mut MaybeUninit<Self>, actions: S) {
         let at = place.as_mut_ptr();
         // SAFETY: `at` is valid for writes of a `Self`, and each field is written once; the state
         // is written before the machine that reaches it, and the caller keeps a held state where
         // it was written for as long as the window, whose machine is dropped first.
         unsafe {
             core::ptr::addr_of_mut!((*at).actions).write(actions);
-            let engine = match &*core::ptr::addr_of!((*at).actions) {
-                WindowActions::Shared(shared) => new_scouting_engine(shared),
-                WindowActions::Held(held) => placed_scouting_engine(held),
-            };
-            core::ptr::addr_of_mut!((*at).engine).write(engine);
+            let reach = (*core::ptr::addr_of!((*at).actions)).reach();
+            core::ptr::addr_of_mut!((*at).engine).write(engine_over(reach));
             core::ptr::addr_of_mut!((*at).started_ms).write(0);
         }
     }
 
     /// The state the answers land on.
-    pub fn actions(&self) -> &ScoutingActions<R> {
-        self.actions.get()
-    }
-
-    /// The state the answers land on as the window shares it, for a holder that reads it once the
-    /// window is gone; `None` for a window that holds its state in its place.
-    pub fn shared_actions(&self) -> Option<&Arc<ScoutingActions<R>>> {
-        match &self.actions {
-            WindowActions::Shared(shared) => Some(shared),
-            WindowActions::Held(_) => None,
-        }
+    pub fn actions(&self) -> &ScoutingActions<S::Runtime, S::Record> {
+        self.actions.state()
     }
 
     /// Open the window ([`open_window`]): the Scout datagram to send.
     pub fn open(&mut self) -> Option<ScoutFrame> {
-        open_window(self.actions.get(), &mut self.engine)
+        open_window(self.actions.state(), &mut self.engine)
     }
 
     /// The Scout was sent, or was not ([`window_sent`]); `now_ms` is the host's clock, from which
@@ -1256,13 +1369,13 @@ impl<R: Runtime> ScoutWindow<R> {
 
     /// One datagram arrived ([`window_datagram`]).
     pub fn datagram(&mut self, bytes: &[u8]) {
-        window_datagram(self.actions.get(), &mut self.engine, bytes);
+        window_datagram(self.actions.state(), &mut self.engine, bytes);
     }
 
     /// The host's clock reads `now_ms` ([`window_tick`]).
     pub fn tick(&mut self, now_ms: u64) {
         window_tick(
-            self.actions.get(),
+            self.actions.state(),
             &mut self.engine,
             now_ms.saturating_sub(self.started_ms),
         );
@@ -1275,7 +1388,7 @@ impl<R: Runtime> ScoutWindow<R> {
 
     /// How it ended ([`window_outcome`]).
     pub fn outcome(&self) -> ScoutOutcome {
-        window_outcome(self.actions.get())
+        window_outcome(self.actions.state())
     }
 }
 
@@ -1283,12 +1396,12 @@ impl<R: Runtime> ScoutWindow<R> {
 /// whose stack is to stay shallow pumps its window from. The window (the scouting machine and its
 /// actions) is written once in the holder's frame, never returned into it, and the frame that
 /// builds the machine has returned before the window is pumped.
-pub struct ScoutWindowPlace<R: Runtime> {
-    window: MaybeUninit<ScoutWindow<R>>,
+pub struct ScoutWindowPlace<S: WindowHolding> {
+    window: MaybeUninit<ScoutWindow<S>>,
     built: bool,
 }
 
-impl<R: Runtime> ScoutWindowPlace<R> {
+impl<S: WindowHolding> ScoutWindowPlace<S> {
     /// A place with no window in it.
     pub const fn empty() -> Self {
         Self {
@@ -1297,37 +1410,9 @@ impl<R: Runtime> ScoutWindowPlace<R> {
         }
     }
 
-    /// A window over `params` built in this place and lent for as long as the place is. A place
-    /// holds one window: building a second in it is refused with a panic, and the first is kept.
-    pub fn build(&mut self, params: ScoutParams) -> &mut ScoutWindow<R> {
-        // SAFETY: a window over a shared state may move.
-        unsafe { self.build_with(WindowActions::Shared(ScoutingActions::new(params))) }
-    }
-
-    /// A window over `params` that records its Hellos in `table` ([`ScoutingActions::over_table`]),
-    /// built in this place as [`Self::build`] builds one, its state held in the place beside its
-    /// machine: the window makes no allocation.
-    ///
-    /// # Safety
-    /// `table` outlives this place, and nothing else reads or writes it until the window has
-    /// resolved. The window lent is not moved out of the place (by `core::mem::swap` or
-    /// `core::mem::replace`): its machine reaches its state where the place holds it.
-    pub unsafe fn build_over(
-        &mut self,
-        params: ScoutParams,
-        table: &mut HelloTable,
-    ) -> &mut ScoutWindow<R> {
-        // SAFETY: the caller's.
-        unsafe {
-            self.build_with(WindowActions::Held(ScoutingActions::held_over_table(
-                params, table,
-            )))
-        }
-    }
-
     /// # Safety
     /// As [`ScoutWindow::write_in`]: a held state is not moved out of the place.
-    unsafe fn build_with(&mut self, actions: WindowActions<R>) -> &mut ScoutWindow<R> {
+    unsafe fn build_with(&mut self, actions: S) -> &mut ScoutWindow<S> {
         assert!(!self.built, "a place holds one window");
         // SAFETY: the caller's; the place lends the window only through `&mut`, and gives no
         // other way to it.
@@ -1338,7 +1423,35 @@ impl<R: Runtime> ScoutWindowPlace<R> {
     }
 }
 
-impl<R: Runtime> Drop for ScoutWindowPlace<R> {
+impl<R: Runtime> ScoutWindowPlace<SharedWindowState<R>> {
+    /// A window over `params` built in this place and lent for as long as the place is. A place
+    /// holds one window: building a second in it is refused with a panic, and the first is kept.
+    pub fn build(&mut self, params: ScoutParams) -> &mut ScoutWindow<SharedWindowState<R>> {
+        // SAFETY: a window over a shared state may move.
+        unsafe { self.build_with(ScoutingActions::<R>::new(params)) }
+    }
+}
+
+impl<R: Runtime> ScoutWindowPlace<LentWindowState<R>> {
+    /// A window over `params` that records its Hellos in `table`, which it clears, built in this
+    /// place as [`ScoutWindowPlace::build`] builds one, its state held in the place beside its
+    /// machine: the window makes no allocation.
+    ///
+    /// # Safety
+    /// `table` outlives this place, and nothing else reads or writes it until the window has
+    /// resolved. The window lent is not moved out of the place (by `core::mem::swap` or
+    /// `core::mem::replace`): its machine reaches its state where the place holds it.
+    pub unsafe fn build_over(
+        &mut self,
+        params: ScoutParams,
+        table: &mut HelloTable,
+    ) -> &mut ScoutWindow<LentWindowState<R>> {
+        // SAFETY: the caller's.
+        unsafe { self.build_with(ScoutingActions::over_table(params, table)) }
+    }
+}
+
+impl<S: WindowHolding> Drop for ScoutWindowPlace<S> {
     fn drop(&mut self) {
         if self.built {
             // SAFETY: `built` is set only once `build` wrote the window here, and it is dropped

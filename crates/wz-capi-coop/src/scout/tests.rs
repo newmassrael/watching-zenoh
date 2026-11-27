@@ -15,7 +15,8 @@ use wz_runtime_posix::PosixClock;
 use wz_session_core::caps;
 use wz_session_core::scout_initiator::ScoutRxIgnored;
 use wz_session_core::scouting_host::{
-    decode_scouted_hello, HelloRow, HelloTable, ScoutWindow, ScoutWindowPlace,
+    decode_scouted_hello, HelloRow, HelloTable, LentTable, LentWindowState, ScoutWindow,
+    ScoutWindowPlace, SharedWindowState, WindowHolding,
 };
 
 use super::*;
@@ -296,10 +297,11 @@ fn a_window_nobody_answers_ends_empty_at_its_deadline() {
 #[test]
 fn a_datagram_that_is_not_an_answer_is_named_and_the_window_goes_on() {
     // The Scout the window itself sends, as a host that loops its multicast back hears it.
-    let own_scout = ScoutWindow::<CoopRuntime<PosixClock>>::new(params(3_000, true))
-        .open()
-        .expect("a window opens with a Scout")
-        .to_vec();
+    let own_scout =
+        ScoutWindow::<SharedWindowState<CoopRuntime<PosixClock>>>::new(params(3_000, true))
+            .open()
+            .expect("a window opens with a Scout")
+            .to_vec();
     let truncated = vec![0x22, 0x09];
     let locatorless = hello_datagram(0, &[0x33; 4], &[]);
     let answer = hello_datagram(0, &[0x44; 4], &["tcp/10.0.0.4:7447"]);
@@ -429,28 +431,28 @@ fn the_collection_has_no_bound_and_a_lent_table_counts_past_its_rows() {
         timeout_ms: 1_000,
         exit_on_first: false,
     };
-    let pump = |window: &mut ScoutWindow<CoopRuntime<PosixClock>>| {
+    fn pump<H: WindowHolding>(window: &mut ScoutWindow<H>, hellos: &[Vec<u8>]) {
         assert!(window.open().is_some());
         window.sent(0, true);
-        for datagram in &hellos {
+        for datagram in hellos {
             window.datagram(datagram);
         }
-    };
+    }
 
-    let mut collected = ScoutWindow::<CoopRuntime<PosixClock>>::new(params.clone());
-    pump(&mut collected);
+    let mut collected =
+        ScoutWindow::<SharedWindowState<CoopRuntime<PosixClock>>>::new(params.clone());
+    pump(&mut collected, &hellos);
     let all = collected.actions().scouted_hellos();
     assert_eq!(all.len(), past, "the collection records every Hello");
     assert_eq!(all[past - 1].locators, ["tcp/10.0.0.1:7447"]);
-    assert_eq!(collected.actions().hellos_refused(), 0);
 
     let mut lent = table();
     {
-        let mut place = ScoutWindowPlace::<CoopRuntime<PosixClock>>::empty();
+        let mut place = ScoutWindowPlace::<LentWindowState<CoopRuntime<PosixClock>>>::empty();
         // SAFETY: `lent` outlives the place, dropped at the end of this block, and nothing else
         // reaches it meanwhile.
         let window = unsafe { place.build_over(params, &mut lent) };
-        pump(window);
+        pump(window, &hellos);
         assert_eq!(window.actions().hellos_refused(), 2);
     }
     assert_eq!(lent.len(), caps::MAX_SCOUT_HELLOS);
@@ -463,7 +465,7 @@ fn the_collection_has_no_bound_and_a_lent_table_counts_past_its_rows() {
 /// table, or one of its rows, moved into the window's state.
 #[test]
 fn a_windows_state_holds_no_table() {
-    let actions = core::mem::size_of::<ScoutingActions<CoopRuntime<PosixClock>>>();
+    let actions = core::mem::size_of::<LentWindowState<CoopRuntime<PosixClock>>>();
     let row = core::mem::size_of::<HelloRow>();
     assert!(
         actions < row,
@@ -475,26 +477,34 @@ fn a_windows_state_holds_no_table() {
     );
 }
 
-/// A window built over a lent table in its place holds its state there: it shares no `Arc`, opens
-/// to the Scout a window by value opens, keeps no list of the datagrams it drops but counts each
-/// verdict, and reads what it discovered from the table's rows. Turned red by a window over a lent
-/// table whose state is shared on the heap, or that keeps a list of what it drops.
+/// A window built over a lent table in its place holds its state there: its record is the
+/// table's pointer and owns nothing it would drop, it opens to the Scout a window by value opens,
+/// counts each verdict of the datagrams it drops, records its answer in the table and reads what it
+/// discovered from the table's rows. Turned red by a lent record that grows a collection, a
+/// counter of its own or a shared state, or by a window over a lent table that records elsewhere.
 #[test]
 fn a_window_over_a_lent_table_holds_its_state_in_its_place() {
-    let mut by_value = ScoutWindow::<CoopRuntime<PosixClock>>::new(params(1_000, false));
     assert!(
-        by_value.shared_actions().is_some(),
-        "CONTROL: a window by value shares its state"
+        !core::mem::needs_drop::<LentTable>(),
+        "the lent record owns nothing it would drop: no list, no string, no `Arc`"
+    );
+    assert_eq!(
+        core::mem::size_of::<LentTable>(),
+        core::mem::size_of::<usize>(),
+        "the lent record is the table's pointer"
+    );
+    let mut by_value =
+        ScoutWindow::<SharedWindowState<CoopRuntime<PosixClock>>>::new(params(1_000, false));
+    assert_eq!(
+        Arc::strong_count(by_value.shared_actions()),
+        2,
+        "CONTROL: a window by value shares its state with its machine"
     );
     let mut lent = table();
-    let mut place = ScoutWindowPlace::<CoopRuntime<PosixClock>>::empty();
+    let mut place = ScoutWindowPlace::<LentWindowState<CoopRuntime<PosixClock>>>::empty();
     // SAFETY: `lent` outlives the place, nothing else reaches it meanwhile, and the window is
     // pumped where the place holds it.
     let window = unsafe { place.build_over(params(1_000, false), &mut lent) };
-    assert!(
-        window.shared_actions().is_none(),
-        "a window over a lent table shares no state"
-    );
     let scout = window.open().expect("a window opens with a Scout");
     assert_eq!(Some(scout), by_value.open(), "the same Scout either way");
     window.sent(0, true);
@@ -510,16 +520,19 @@ fn a_window_over_a_lent_table_holds_its_state_in_its_place() {
         2,
         "every datagram not taken is counted once"
     );
-    assert!(
-        actions.ignored_datagrams().is_empty(),
-        "a window over a lent table keeps no list of what it drops"
-    );
     assert_eq!(
         actions.discovered_locator().as_deref(),
         Some("tcp/10.0.0.4:7447"),
         "what it discovered is the table's first row with a locator"
     );
     assert_eq!(actions.hellos_refused(), 0);
+    drop(place);
+    assert_eq!(
+        lent.len(),
+        1,
+        "the answer is recorded in the table it was lent"
+    );
+    assert_eq!(lent.first().map(|row| row.zid[0]), Some(0x44));
 }
 
 /// The window reads each datagram into the buffer its caller lends and no further: a Hello longer

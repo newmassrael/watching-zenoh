@@ -23,11 +23,12 @@ use wz_capi_port::ScoutAsk;
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_runtime_posix::group::MulticastSocket;
 use wz_runtime_posix::scouting::ScoutMembers;
-#[cfg(all(test, feature = "std", unix))]
-use wz_session_core::scouting_host::ScoutingActions;
 use wz_session_core::scouting_host::{
-    deliver_rows_in_upstream_order, HelloRow, HelloTable, ScoutWindow, ScoutWindowPlace,
+    deliver_rows_in_upstream_order, HelloRow, HelloTable, LentWindowState, ScoutWindow,
+    ScoutWindowPlace, WindowHolding,
 };
+#[cfg(all(test, feature = "std", unix))]
+use wz_session_core::scouting_host::{ScoutingActions, SharedWindowState};
 
 use crate::prelude::*;
 
@@ -62,13 +63,9 @@ fn run_window<S: MulticastSocket, C: ClockSource + Clone + 'static>(
 ) -> Arc<ScoutingActions<CoopRuntime<C>>> {
     // Built in this frame's place and pumped from it: the machine is made in a frame that has
     // returned before the first datagram is read.
-    let mut place = ScoutWindowPlace::<CoopRuntime<C>>::empty();
+    let mut place = ScoutWindowPlace::<SharedWindowState<CoopRuntime<C>>>::empty();
     let window = place.build(params);
-    let actions = Arc::clone(
-        window
-            .shared_actions()
-            .expect("a window built over its params shares its state"),
-    );
+    let actions = Arc::clone(window.shared_actions());
     // The most a single datagram can carry over UDP.
     let mut buffer = vec![0u8; 65_507];
     pump(clock, members, window, &mut buffer);
@@ -85,7 +82,7 @@ fn run_window_over<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     table: &mut HelloTable,
     buffer: &mut [u8],
 ) {
-    let mut place = ScoutWindowPlace::<CoopRuntime<C>>::empty();
+    let mut place = ScoutWindowPlace::<LentWindowState<CoopRuntime<C>>>::empty();
     // SAFETY: `table` outlives the place, which this frame drops before it returns, nothing else
     // reaches it while the window is pumped, and the window is pumped where the place holds it.
     let window = unsafe { place.build_over(params, table) };
@@ -93,11 +90,12 @@ fn run_window_over<S: MulticastSocket, C: ClockSource + Clone + 'static>(
 }
 
 /// Pump `window` over `members` until it resolves, reading each datagram into `buffer`: a
-/// datagram longer than it is read cut short, and is no Hello the window takes.
-fn pump<S: MulticastSocket, C: ClockSource + Clone + 'static>(
+/// datagram longer than it is read cut short, and is no Hello the window takes. The window holds
+/// its state as its caller made it: the pump reads neither.
+fn pump<S: MulticastSocket, C: ClockSource, H: WindowHolding>(
     clock: &C,
     mut members: ScoutMembers<S>,
-    window: &mut ScoutWindow<CoopRuntime<C>>,
+    window: &mut ScoutWindow<H>,
     buffer: &mut [u8],
 ) {
     if members.is_empty() {
