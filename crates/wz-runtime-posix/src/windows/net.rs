@@ -8,16 +8,18 @@
 //! that module's `UdpDriver`. Nothing here allocates: the socket is a handle, the address it is
 //! bound to and the wait its blocking reads are bounded by.
 //!
-//! Winsock has no `MSG_DONTWAIT`, so a read that must not block asks `WSAPoll` first and reads
-//! only what it reports, and the bounded read of the drive loop is the same poll with the wait
-//! the link armed. Two answers of Winsock differ from a POSIX stack's and are made the same here:
-//! a datagram longer than the buffer is the buffer's length and not an error, and the report of
-//! an unreachable port a send brings back is turned off, where Windows would hand it to the next
-//! receive as a reset connection and fail a read that has a datagram behind it.
+//! Winsock has no `MSG_DONTWAIT`, so a read of a socket that blocks, which must not wait, asks
+//! `WSAPoll` first and reads only what it reports; a socket made non-blocking (the sockets of a
+//! group are) is read at once, `WSAEWOULDBLOCK` being nothing queued, as the stream seam reads.
+//! The bounded read of the drive loop is the same poll with the wait the link armed. Two answers
+//! of Winsock differ from a POSIX stack's and are made the same here: a datagram longer than the
+//! buffer is the buffer's length and not an error, and the report of an unreachable port a send
+//! brings back is turned off, where Windows would hand it to the next receive as a reset
+//! connection and fail a read that has a datagram behind it.
 
 use core::ffi::c_int;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use windows_sys::Win32::Networking::WinSock as ws;
 use wz_runtime_coop::group_transport::GroupInterface;
@@ -34,6 +36,9 @@ pub struct WindowsUdpSocket {
     socket: ws::SOCKET,
     local: SocketAddr,
     wait_ms: AtomicI32,
+    /// Whether the socket was made non-blocking (`make_nonblocking`): set before the socket is
+    /// handed to another thread, and never cleared.
+    nonblocking: AtomicBool,
 }
 
 /// Turn off the report of an unreachable port on a datagram socket (`SIO_UDP_CONNRESET`): the
@@ -75,6 +80,7 @@ impl WindowsUdpSocket {
             socket,
             local: at,
             wait_ms: AtomicI32::new(SERVICE_WAIT_MS),
+            nonblocking: AtomicBool::new(false),
         };
         ignore_unreachable_reports(socket).map_err(WindowsNetError::ResetReport)?;
         if shared {
@@ -194,10 +200,13 @@ impl WindowsUdpSocket {
     }
 
     /// Make every call of this socket return at once (`ioctlsocket(FIONBIO)`): a send that finds
-    /// no room fails with `WSAEWOULDBLOCK` rather than wait for it.
+    /// no room fails with `WSAEWOULDBLOCK` rather than wait for it, and a read that finds nothing
+    /// queued says so with no poll before it.
     #[cfg(feature = "host-multicast")]
     pub(crate) fn make_nonblocking(&self) -> Result<(), WindowsNetError> {
-        super::set_nonblocking(self.socket, true).map_err(WindowsNetError::NonBlocking)
+        super::set_nonblocking(self.socket, true).map_err(WindowsNetError::NonBlocking)?;
+        self.nonblocking.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Whether this host's other members of a group observe what this socket sends:
@@ -271,12 +280,12 @@ impl WindowsUdpSocket {
         }
     }
 
-    /// One `recvfrom` into `buf`, made only once the socket has reported input: the length and
-    /// source, `Ok(None)` when the read answered "nothing yet", any other failure as an error. A
-    /// datagram longer than `buf` is the buffer's length, as a POSIX stack truncates it (the
-    /// session reads it as a bad frame); Winsock fills the buffer and says `WSAEMSGSIZE`. A
-    /// datagram whose source is named in a family other than the two is an error: there is no
-    /// end to judge it by.
+    /// One `recvfrom` into `buf`, made once the socket has reported input or on a socket that
+    /// does not block: the length and source, `Ok(None)` when the read answered "nothing yet",
+    /// any other failure as an error. A datagram longer than `buf` is the buffer's length, as a
+    /// POSIX stack truncates it (the session reads it as a bad frame); Winsock fills the buffer
+    /// and says `WSAEMSGSIZE`. A datagram whose source is named in a family other than the two is
+    /// an error: there is no end to judge it by.
     fn receive(&self, buf: &mut [u8]) -> Result<Option<Received>, WindowsNetError> {
         let mut src = RawAddr::empty();
         let room = i32::try_from(buf.len()).unwrap_or(i32::MAX);
@@ -378,8 +387,11 @@ impl DatagramSocket for WindowsUdpSocket {
         self.receive(buf)
     }
 
+    // A socket that does not block is read at once and answers `WSAEWOULDBLOCK` when nothing is
+    // queued: one call for each datagram, where a poll before the read made two. One that blocks
+    // is asked first, so the read does not wait.
     fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, WindowsNetError> {
-        if !poll_readable(self.socket, 0) {
+        if !self.nonblocking.load(Ordering::Relaxed) && !poll_readable(self.socket, 0) {
             return Ok(None);
         }
         self.receive(buf)
@@ -573,6 +585,66 @@ mod tests {
             .expect("a queued datagram");
         assert_eq!(&buf[..len], b"now");
         assert_eq!(b.try_recv(&mut buf), Ok(None), "and then nothing");
+    }
+
+    /// A socket that blocks is asked before its read, so a read that must not wait does not.
+    /// Turned red by a `try_recv` that reads a socket that blocks with no poll first.
+    #[test]
+    fn a_blocking_socket_is_asked_before_a_read_that_must_not_wait() {
+        let socket = WindowsUdpSocket::bind(LOOPBACK).expect("a socket");
+        let mut buf = [0u8; 16];
+        let polls = super::super::readable_polls();
+        assert_eq!(
+            socket.try_recv(&mut buf),
+            Ok(None),
+            "nothing queued, and no wait"
+        );
+        assert_eq!(
+            super::super::readable_polls(),
+            polls + 1,
+            "the read of a socket that blocks polls first"
+        );
+    }
+
+    /// A socket made non-blocking is read at once: nothing queued and a queued datagram are each
+    /// one `recvfrom`, with no poll before it. Turned red by a `try_recv` that polls a socket that
+    /// does not block.
+    #[cfg(feature = "host-multicast")]
+    #[test]
+    fn a_socket_made_non_blocking_is_read_with_no_poll_before_it() {
+        let (a, b) = pair();
+        b.make_nonblocking().expect("non-blocking");
+        let mut buf = [0u8; 16];
+        let polls = super::super::readable_polls();
+        assert_eq!(b.try_recv(&mut buf), Ok(None), "nothing queued yet");
+        assert_eq!(
+            super::super::readable_polls(),
+            polls,
+            "a read of nothing polls nothing"
+        );
+        a.send_to(b.local(), b"now").expect("a send");
+        b.wait_readable(500);
+        assert_eq!(
+            super::super::readable_polls(),
+            polls + 1,
+            "CONTROL: the wait polls"
+        );
+        let (len, src) = b
+            .try_recv(&mut buf)
+            .expect("no error")
+            .expect("the queued datagram");
+        assert_eq!(&buf[..len], b"now");
+        assert_eq!(
+            src,
+            a.local(),
+            "the source is the sender's address and port"
+        );
+        assert_eq!(b.try_recv(&mut buf), Ok(None), "and then nothing");
+        assert_eq!(
+            super::super::readable_polls(),
+            polls + 1,
+            "the reads of what is queued poll nothing"
+        );
     }
 
     #[test]
