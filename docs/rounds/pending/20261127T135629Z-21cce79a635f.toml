@@ -1,0 +1,18 @@
+impact = ["watching-zenoh/local-ci-gates", "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"]
+decision = '''
+Run the vectors the codec documents state on the Rust emission too, so one row set holds both the Rust and the C11 generation, and regenerate two machines B2 read stale.
+'''
+changes = '''
+- xtask regen keeps the test-vector sidecars SCE emits beside a codec (crc32, fragment, frame, locator) and removes one whose document dropped its vectors.
+- wz-codecs compiles each sidecar into its codec's module under test with alloc: 13 rows, the rows Layer Bc runs against the C11 emission.
+- A wz-codecs test holds every sidecar in out/wz-codecs to an include in lib.rs and its row count to its document's test-vector elements.
+- out/wz-session-core clock_quality_sm.rs and session_fsm_unicast_sm.rs regenerated: their source hash still named the feature model before its two regenerations of 11-27.
+'''
+verification = '''
+- cargo test -p wz-codecs --lib: 32 passed, the 13 document vectors and the coverage test among them.
+- Control: with locator's include removed the coverage test fails naming locator_test.rs; restored.
+- clippy of wz-codecs (lib, tests) and of xtask with -D warnings; rustfmt check; bx --action regen-codegen leaves out/ as committed.
+'''
+carry = '''
+- The vectors of three algorithm documents (crc16_ccitt, vle_byte_length, vle_u64_decode, 7 rows) run on C11 only: wz generates no Rust from them.
+'''
