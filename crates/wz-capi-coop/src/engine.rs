@@ -2353,8 +2353,10 @@ impl Asked {
 enum PutGoes<'r> {
     /// Written from its publisher's plan at the session's send epoch, nothing asked again.
     Planned(wz_session_core::session_tables::PlannedPut<'r>),
-    /// A plain Put sent from these facts, and the head its filter's plain way wrote, if any.
-    Plain(PlainPutParams, Option<lent_push::PutHead>),
+    /// A plain Put sent from these facts, and the head its filter's plain way wrote, if any; and
+    /// for the first leg of a bare put of that way not planned, the send epoch its plan was looked
+    /// for at, which the put plans the way at once it is sent (`CoopEngine::keep_plan`).
+    Plain(PlainPutParams, Option<lent_push::PutHead>, Option<u64>),
     /// A publish sent from its options, and the head its filter's plain way wrote, if any, which a
     /// link writes it from where the options leave it a plain Put (`PushParts::takes_head`).
     Options(Option<lent_push::PutHead>),
@@ -2961,6 +2963,9 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// tests count.
     #[cfg(test)]
     filter_rows: core::cell::Cell<usize>,
+    /// How often the session's send epoch was read (`Core::send_epoch`), which the tests count.
+    #[cfg(test)]
+    epoch_reads: core::cell::Cell<usize>,
     /// How many steps in a row read a group's datagram and moved nothing, up to
     /// the deploy `GROUP_READS_PER_MOVE` limit (`CoopEngine::step`).
     #[cfg(all(feature = "group", wz_round))]
@@ -6464,6 +6469,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// other. Each count it adds up moves by one at a time and never back, so the sum moves
     /// whenever any of them does.
     fn send_epoch(&self) -> u64 {
+        #[cfg(test)]
+        self.epoch_reads.set(self.epoch_reads.get() + 1);
         let registry = &self.session.registry;
         self.transport
             .links
@@ -7175,6 +7182,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             links_let_go: core::cell::Cell::new(0),
             #[cfg(test)]
             filter_rows: core::cell::Cell::new(0),
+            #[cfg(test)]
+            epoch_reads: core::cell::Cell::new(0),
             #[cfg(all(feature = "group", wz_round))]
             group_reads: 0,
             #[cfg(all(feature = "group", not(wz_round)))]
@@ -7801,6 +7810,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn filter_rows(&self) -> usize {
         self.core.lock().0.filter_rows.get()
+    }
+
+    /// How often the session's send epoch was read since the open (`Core::send_epoch`): what a
+    /// test of the cost of a put through a filter's plan counts. Read under the lock, uncounted as
+    /// a take.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn epoch_reads(&self) -> usize {
+        self.core.lock().0.epoch_reads.get()
     }
 
     /// How often the session moved its links on since the open (`Core::link_polls`): what a
@@ -8664,17 +8681,30 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // The registry itself, not its holder: the filter reads it as what the peers declare.
         let registry: &Registry = &core.session.registry;
         let row = Self::filter_row(core, put.filter);
-        if let PutBy::Plain(None) = put.by {
-            #[cfg(feature = "group")]
-            let groups_left = core.transport.groups.is_empty();
-            #[cfg(not(feature = "group"))]
-            let groups_left = true;
-            if groups_left {
-                if let Some(planned) = row.and_then(|row| row.planned_put(core.send_epoch())) {
-                    return PutGoes::Planned(planned);
+        // The send epoch is read once, for a bare put of the row's way where no group the session
+        // joined is sent it the general way: the plan stands at it or not, and the first leg plans
+        // the way at this same reading once the put is sent. A `wz_round` build that sends what
+        // was handed to the session before the put may move the epoch in between; a plan kept at
+        // the earlier reading is then never taken, which costs one more put that is named, and
+        // sends none as planned at an epoch that moved.
+        let plan_at = match (put.by, row) {
+            (PutBy::Plain(None), Some(row)) => {
+                #[cfg(feature = "group")]
+                let groups_left = core.transport.groups.is_empty();
+                #[cfg(not(feature = "group"))]
+                let groups_left = true;
+                if groups_left {
+                    let epoch = core.send_epoch();
+                    if let Some(planned) = row.planned_put(epoch) {
+                        return PutGoes::Planned(planned);
+                    }
+                    first.then_some(epoch)
+                } else {
+                    None
                 }
             }
-        }
+            _ => None,
+        };
         if first
             && !Self::filters_left_unasked(core)
             && row.is_some_and(|row| !tables(registry).write_filter_row_open(row, registry))
@@ -8714,7 +8744,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if first && !core.transport.groups.is_empty() {
             return PutGoes::Unsent(Answer::NotPlain);
         }
-        PutGoes::Plain(params, head)
+        PutGoes::Plain(params, head, plan_at)
     }
 
     /// The row of write filter `filter`: `None` for a put no publisher made, or a filter the
@@ -8813,7 +8843,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             return Ok(0);
         };
         let params = match Self::decide_put(&core.0, put, asked.first()) {
-            PutGoes::Plain(params, _) => params,
+            PutGoes::Plain(params, ..) => params,
             PutGoes::Unsent(answer) => {
                 asked.answer_first(answer);
                 return Ok(0);
@@ -8923,7 +8953,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         let first = asked.first();
         let plain_meta;
-        let (kind, meta, send, head) = match Self::decide_put(&core.0, put, first) {
+        let (kind, meta, send, head, plan_at) = match Self::decide_put(&core.0, put, first) {
             PutGoes::Planned(planned) => {
                 asked.answer_first(Answer::Through);
                 #[cfg(test)]
@@ -8957,7 +8987,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 asked.answer_first(answer);
                 return Ok(0);
             }
-            PutGoes::Plain(params, head) => {
+            PutGoes::Plain(params, head, plan_at) => {
                 #[cfg(test)]
                 self.takes.namings.fetch_add(1, Ordering::Relaxed);
                 // A plain put carries its QoS and nothing else of a publication's.
@@ -8970,7 +9000,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     express: params.express,
                     priority: params.priority,
                 };
-                (SampleKind::Put, &plain_meta, send, head)
+                (SampleKind::Put, &plain_meta, send, head, plan_at)
             }
             PutGoes::Options(head) => {
                 // A put by options read them before the take.
@@ -8982,7 +9012,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     express: meta.is_express(),
                     priority: opts.priority_band(),
                 };
-                (opts.kind, meta, send, head)
+                (opts.kind, meta, send, head, None)
             }
         };
         asked.answer_first(Answer::Through);
@@ -9043,8 +9073,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if begin.hand_before {
             self.send_handed(&mut core.0);
         }
-        // The first plain put of the row's way after its plan stood plans it at this epoch.
-        let plan_at = (first && matches!(put.by, PutBy::Plain(None))).then(|| core.0.send_epoch());
         // The put's leg is made once: the fan-out sends it, and the plan is made with the key it
         // named. An empty key names nothing a link carries.
         let leg = Self::leg_of(&core.0, &publication);

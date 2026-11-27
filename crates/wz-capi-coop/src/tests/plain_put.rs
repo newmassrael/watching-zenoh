@@ -755,6 +755,71 @@ fn a_put_plans_its_way_by_the_key_its_leg_named() {
     drop(hold);
 }
 
+/// How often the session's send epoch was read since the open.
+fn epoch_reads(engine: &Engine) -> usize {
+    engine.epoch_reads()
+}
+
+/// A bare put of a publisher's way reads the session's send epoch once: the first at an epoch to
+/// look for its plan, which it then plans the way at once it is sent, and each after it to find
+/// the plan standing there. CONTROL: a put with options and a put of a way its caller gives look
+/// for no plan and read none. Turned red by a leg that reads the epoch a second time to plan the
+/// way.
+#[test]
+fn a_bare_put_reads_the_send_epoch_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let (_hold, filter, wire) = way_on(&engine, &router, "demo/x");
+
+    let (before, plans_before) = (epoch_reads(&engine), plans(&engine));
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &wire, b"v", None),
+        FilteredPut::Sent(Ok(0))
+    );
+    assert_eq!(
+        epoch_reads(&engine) - before,
+        1,
+        "the first put reads it to look for its plan, and plans at that reading"
+    );
+    let before = epoch_reads(&engine);
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &wire, b"v", None),
+        FilteredPut::Sent(Ok(0))
+    );
+    assert_eq!(
+        epoch_reads(&engine) - before,
+        1,
+        "a planned put reads it once"
+    );
+    assert_eq!(
+        plans(&engine) - plans_before,
+        1,
+        "CONTROL: the second put is written from the plan made at the first one's reading"
+    );
+
+    let options = PublishOptions::put();
+    let params = PublishOptions::put()
+        .plain_put_params()
+        .expect("a plain put");
+    let before = epoch_reads(&engine);
+    assert!(matches!(
+        engine.publish_filtered(filter, "demo/x", &wire, b"v", Some(&options)),
+        FilteredPut::Sent(Ok(_))
+    ));
+    assert_eq!(
+        engine.put_plain_filtered(filter, "demo/x", wire.declared(), b"v", &params),
+        FilteredPut::Sent(Ok(0))
+    );
+    assert_eq!(
+        epoch_reads(&engine),
+        before,
+        "CONTROL: a put with options and a given way read no epoch"
+    );
+    until(&engine, "the router to receive every put", || {
+        router.seen(|s| s.pushes) == 4
+    });
+}
+
 /// A plan stands at its send epoch alone: once the router retracts the subscriber that opened the
 /// filter, the epoch has moved and the publisher's bare put is held back, not written from the
 /// plan. CONTROL: the put before the retraction is written from it. Turned red by an epoch that
