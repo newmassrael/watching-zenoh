@@ -8377,6 +8377,24 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4683": {
+      "decision_summary": "Shrink the sessions area of the no_std pico preset: a session filters a\nmessage once through one body for every row kind instead of one per kind,\nwith the receive cost held at main's 3,078 Ir per message.",
+      "changes_bullets": [
+        "session-core and capi-coop: S-FILTER, one filter body over the row kinds.",
+        "docs/win-budget/size.md and c-abi-l3-tables.md record the step."
+      ],
+      "verification_bullets": [
+        "size ledger pico-client-coop-nostd: total 216,719 B vs main 218,756 (-2,037).",
+        "receive Ir W 3,077.6 vs main 3,078.1 (subprofile, callgrind).",
+        "session-core 1786 and capi-coop 279 lib tests pass; clippy, nondefault clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
