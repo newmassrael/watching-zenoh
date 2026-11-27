@@ -379,7 +379,7 @@ nothing; on, it holds the refused datagram as above. Either way it is the driver
 
 | step | change | bytes, expected (`pico-api-coop-nostd`) | receive Ir | held by |
 |---|---|---|---|---|
-| T3a | `TransportTx<R>` out of `SessionLinkActions` (section 9.6): T3a-1 the conduits and the frame numbers as one owned field of the core; T3a-2 onwards the walk, as methods of a borrow of it with the link it routes to and the emit's facts; the session's prelude calls it | 0 to +500 (a field read through one more reference); client the same | none: the read is not the walk; the send's Ir held by arm W | every link test of the walk unchanged (`batch_tests`, the fragment, lend and window tests of `session_actions`) |
+| T3a | `TransportTx<R>` out of `SessionLinkActions` (section 9.6): T3a-1 the conduits and the frame numbers as one owned field of the core; T3a-2 onwards the walk, as methods of a borrow of it with the link it routes to and the emit's facts; the session's prelude calls it | 0 to +500 (a field read through one more reference); client the same | none: the read is not the walk; the send's Ir held by arm W | every link test of the walk unchanged (`session_actions`' `conduit_tx_sn_tests`, `window_word_tests`, `window_join_tests`, `sender_inside_tests`; the frame, fragment and reopen tests of `wz-runtime-tokio`'s `session_glue`) |
 | T3b | the group holds a `TransportTx` over its datagram driver; the stage keeps D2, the quota's admission and the JOIN's numbers (T4 with it); `push_frame`, `MulticastBatch`, `StageQueue`, the lanes and the staged storage leave the pico builds | -20,000 to -30,000: section 2's framer 6,559 and stage 19,458, less the driver, 2,000 to 4,000 | none: the group's read is not touched; a group's put the link's one walk | the group's wire held to the link's for the same messages (one test feeding both a link and a group the same sends and comparing the frames); the stage's tests of a held datagram, the beacon's order and the quota moved onto the driver |
 | D2 | the capability of section 9.3, off in the zenoh-pico preset | 500 to 1,500 off | none | a group send on a full socket held (on) and waited (off) |
 | T3c | the tokio engine's group onto the component; `push_frame` and the owned items leave every build | host builds only | none | `wz-runtime-tokio`'s group pipeline tests |
@@ -456,3 +456,27 @@ the writer writes another id or QoS), `the_one_writer_of_a_declaration_writes_it
 if an arm writes another kind or the QoS is not the envelope's), and the group's tests that already
 held every group declaration and final to the owned builders
 (`group_declarations_written_from_parts`, `push_tests`), now through the one writer.
+
+## 11. Step T3a-1, as landed
+
+- `transport_tx::TransportTx<R>` holds the conduits (`TxConduits<R>`) and the frame numbers
+  (`FrameTxConduits<R::Word>`). `SessionCore` holds it as one field, `tx`, where it held
+  `tx_conduits` and `outbound_frame_sn`; every read of the walk is the read it was, through that
+  field. `TransportTx::reset` puts both back for a reopen, after the caller has given the frames
+  open in lent slots back to their links (`abort_lent_batches`), which this state does not hold.
+  `TxConduits::new` and its reopen `reset` are the crate's, for the new module.
+- No method moved and no `#[inline]` changed: the step names the state the walk's methods move
+  onto (T3a-2 onwards, section 9.6).
+- The module's gate is `session_actions`' (`storage-profile` and `session-unicast`), the types it
+  holds being defined there. A group holds one with T3b without a unicast session; the types and
+  the gate move to this module in that step.
+
+Expected: 0 bytes on every case, a field's path; receive Ir none; arm W's send Ir unchanged.
+
+Held by every test that reads the conduits or the numbers, unchanged: `session_actions`'
+`conduit_tx_sn_tests`, `window_word_tests`, `window_join_tests`, `sender_inside_tests`;
+`wz-runtime-tokio`'s `next_outbound_frame_sn_seeds_at_initial_sn_then_increments`,
+`next_outbound_frame_sn_wraps_at_ring_seam`,
+`outbound_frame_sn_splits_reliable_and_best_effort_channels` and, with `transport-multilink` and
+`session-reconnect`, `reset_for_reopen_preserves_shared_sn_while_a_link_is_live` (red if the
+reset reaches the numbers while a link is live, or misses them once none is).
