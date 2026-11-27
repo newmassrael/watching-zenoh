@@ -578,7 +578,7 @@ impl<T, K> Answering<T, K> {
     /// # Safety
     /// `at` is valid for writes of a `Self`, aligned for it and holds none; `write` leaves a valid
     /// `T` and `write_kept` a valid `K` in the place each is handed.
-    #[cfg(any(feature = "query", feature = "connectivity"))]
+    #[cfg(any(feature = "query", feature = "connectivity", feature = "advanced"))]
     pub(crate) unsafe fn write_at(
         at: *mut Self,
         write: impl FnOnce(NonNull<T>),

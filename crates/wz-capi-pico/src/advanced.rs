@@ -1203,18 +1203,40 @@ pub(crate) struct AdvSubKept {
 }
 
 impl AdvSubKept {
-    /// `sample` kept, with nothing lodged and no hold for it.
-    fn new(sample: SampleKept) -> Self {
-        Self {
-            sample,
-            core: SubscriberCore::vacant(),
-            core_hold: core::mem::MaybeUninit::uninit(),
-            miss: Lodging::vacant(),
-            miss_keep: core::mem::MaybeUninit::uninit(),
-            forms: Lodging::vacant(),
-            forms_keep: core::mem::MaybeUninit::uninit(),
-            anchors: AnchorRooms::new(),
+    /// `sample` kept, with nothing lodged and no hold for it, written in `at`, where it stays: the
+    /// anchors' rooms are written there row by row ([`AnchorRooms::write_vacant`]).
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self`, aligned for it, and holds none.
+    unsafe fn write_in(at: NonNull<Self>, sample: SampleKept) {
+        let at = at.as_ptr();
+        // SAFETY: the caller's: each field is written once through a pointer to it, not null as
+        // it is inside the place.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).sample).write(sample);
+            core::ptr::addr_of_mut!((*at).core).write(SubscriberCore::vacant());
+            core::ptr::addr_of_mut!((*at).core_hold).write(core::mem::MaybeUninit::uninit());
+            core::ptr::addr_of_mut!((*at).miss).write(Lodging::vacant());
+            core::ptr::addr_of_mut!((*at).miss_keep).write(core::mem::MaybeUninit::uninit());
+            core::ptr::addr_of_mut!((*at).forms).write(Lodging::vacant());
+            core::ptr::addr_of_mut!((*at).forms_keep).write(core::mem::MaybeUninit::uninit());
+            AnchorRooms::write_vacant(NonNull::new_unchecked(core::ptr::addr_of_mut!(
+                (*at).anchors
+            )));
         }
+        // Every field is named here, so a field added and not written above fails to compile.
+        let _every_field_written = |kept: &Self| {
+            let Self {
+                sample: _,
+                core: _,
+                core_hold: _,
+                miss: _,
+                miss_keep: _,
+                forms: _,
+                forms_keep: _,
+                anchors: _,
+            } = kept;
+        };
     }
 }
 
@@ -1513,18 +1535,34 @@ unsafe fn declare_subscriber_state(
         None => DeclaredKeyexpr::literal_of_session(engine, ke)?,
     };
     let session = crate::session::session_count(zs);
-    let state = slot
-        .fill_answering(
-            AdvSubState {
+    let write_state = |at: NonNull<AdvSubState>| {
+        // SAFETY: the place `write_at` hands is valid for writes of the state and holds none.
+        unsafe {
+            at.as_ptr().write(AdvSubState {
                 engine: crate::session::EngineHold::clone(engine),
                 subscriber: core::mem::MaybeUninit::uninit(),
                 loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                 miss: None,
                 session: Some(session),
-            },
-            AdvSubKept::new(SampleKept::new(closure, background.then(|| session.hold()))),
-        )
-        .cast::<AdvSubState>();
+            })
+        }
+    };
+    let write_kept = |at: NonNull<AdvSubKept>| {
+        // SAFETY: as above, for what the place keeps past the state.
+        unsafe {
+            AdvSubKept::write_in(
+                at,
+                SampleKept::new(closure, background.then(|| session.hold())),
+            )
+        }
+    };
+    let write = |at: *mut AdvSubPlace| {
+        // SAFETY: the slot hands a place valid for writes of an `AdvSubPlace`, holding none; the
+        // two writers write its state and what it keeps whole.
+        unsafe { crate::object_slot::Answering::write_at(at, write_state, write_kept) }
+    };
+    // SAFETY: `write` leaves a whole `AdvSubPlace` in the place it is handed.
+    let state = unsafe { slot.fill_in_place(write) }.cast::<AdvSubState>();
     // SAFETY: `state` was filled for an `AdvSubPlace` just above, and its owner holds it; the
     // closure is counted in the place before anything can call it or let it go, so the place
     // stands until the host lets go of the sample callback, and a C sample closure is called from
@@ -2502,21 +2540,36 @@ mod tests {
             crate::object_slot::Kind::AdvancedSubscriber,
         )
         .expect("a place for an advanced subscriber");
-        let state = slot.fill(crate::object_slot::Answering::keeping(
-            AdvSubState {
-                engine,
-                subscriber: core::mem::MaybeUninit::new(subscriber),
-                loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
-                miss: Some(set.clone()),
-                session: None,
-            },
-            // The C closure kept beside the state is counted in nothing and taken out by nothing:
-            // the subscriber's callback is the Rust closure above.
-            AdvSubKept::new(SampleKept::new(
-                CClosure::uncounted(std::ptr::null_mut(), None, None),
-                None,
-            )),
-        ));
+        let write_state = |at: NonNull<AdvSubState>| {
+            // SAFETY: the place `write_at` hands is valid for writes of the state and holds none.
+            unsafe {
+                at.as_ptr().write(AdvSubState {
+                    engine,
+                    subscriber: core::mem::MaybeUninit::new(subscriber),
+                    loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+                    miss: Some(set.clone()),
+                    session: None,
+                })
+            }
+        };
+        // The C closure kept beside the state is counted in nothing and taken out by nothing: the
+        // subscriber's callback is the Rust closure above.
+        let write_kept = |at: NonNull<AdvSubKept>| {
+            // SAFETY: as above, for what the place keeps past the state.
+            unsafe {
+                AdvSubKept::write_in(
+                    at,
+                    SampleKept::new(CClosure::uncounted(std::ptr::null_mut(), None, None), None),
+                )
+            }
+        };
+        // SAFETY: the slot hands a place valid for writes of an `AdvSubPlace`, holding none, and
+        // the two writers write it whole.
+        let state = unsafe {
+            slot.fill_in_place(|at| {
+                crate::object_slot::Answering::write_at(at, write_state, write_kept)
+            })
+        };
         let owned = ze_owned_advanced_subscriber_t {
             handle: state.cast::<c_void>(),
             _pad: [0u8; SUBSCRIBER_PAD],
