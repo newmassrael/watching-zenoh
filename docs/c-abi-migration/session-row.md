@@ -294,3 +294,22 @@ after the release; red if the release leaves the table held to one row).
 In `crates/wz-capi-port/src/cancellation.rs`:
 `a_kernels_token_lies_where_the_storage_policy_places_it` (`TOKEN_PLACES + 1` tokens of `Heap`;
 `TOKEN_PLACES` of `Static` and the next refused): red if either impl lodges in the other's source.
+
+In `crates/wz-capi-coop/tests/engine_rows.rs`, after the opens past the rows: the table held to one
+session, an open refused before its engine is made (a memory with no arena to give) and two refused
+once it is made each take the one row, and the count is let go of after. Red if the drop of an
+unfilled `RowClaim` leaves its row claimed (`let_go_unfilled`), or the engine's drop leaves it in
+its row (`self.reach.clear()` in `Drop for CoopEngine`). On the heap policy a table held to no
+count takes a row of the heap in place of a row kept, so only the count shows either.
+
+### 7.6 A row of the heap in a count of an open's allocations
+
+On the heap policy the open's claim takes a row of the heap only when no row the table kept is
+vacant, and the table keeps it for the next open. A test that counts the allocations of two opens
+in turn on its thread (`an_open_whose_source_writes_the_texts_allocates_nothing_for_each_endpoint`
+in `src/tests/redial_heap.rs`) counted the row in the first and not in the second: run alone, the
+open of one endpoint counted 8 and the open of three 7, and the claim given back by the first is
+what the second took. The row is the process's table's, taken at most once for an open and
+whatever its endpoints, and whether an open takes it is decided by the opens of every test of the
+process, so `open_counted` sets it apart: `RowClaim::rows_taken_here` counts the rows of the heap
+the calling thread's claims took, in the crate's test builds only.
