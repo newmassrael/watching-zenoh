@@ -801,9 +801,55 @@ the relations' index.
   `listen`, a lent table where an inline row was (a row of arena a place, a load of the table's
   base a read). Receive Ir: a group's datagram is read as now; the client case is untouched.
 
-R5a is not landed here: it crosses the session's lock order, the arena plan and every
-`listen` gate of the read slots' table, a step of R2's and R4's size, which is left to a context
-that starts with it.
+R5a landed: section 7.7.
+
+### 7.7 R5a, landed
+
+- **The read slots' table, lent where a group joins** (`crates/wz-capi-coop/src/arena.rs` @
+  `pub(crate) const fn lay_direct_faces(&mut self, bytes: usize) {`): the table is laid, a row for
+  each place of the face table, wherever the build takes a place past the dial role's
+  (`TAKES_FACES`, `listen` or `group`); the inline row of one stays the build of neither.
+  `DirectFaces::lent_in`, `init_at`, `turned`, `walked`, `held_rows` and `holds_face` follow
+  the same bound, and the open's `SessionLent`, `LentApart` and `engine_of` with them. A group's
+  row is never marked holding a face, so no read turns it. The chain buffers still count the
+  faces read where they lie (`read_faces`): a group's session stages its own chains.
+- **A group's session in its row** (`crates/wz-capi-coop/src/engine/direct.rs` @
+  `group: Option<super::group::GroupPump<C>>,`): the row's read slot holds the session, built
+  there and never moved. A join owes its seat to the row (`GroupFace::take_seat`, the face's
+  `seat`), and `CoopEngine::step_groups` pays it: the group's place read under the session's
+  lock and the lock let go of, the row's slot taken by a try, the lock taken again to build or
+  rebuild the session in the row (`DirectSlot::seat_group`, `GroupPump::new` or `rejoin`),
+  then the step made in place as before. `Core::group_pumps`, `Core::seat_group`, the
+  `(face, seat)` pair of a join and the take-out and put-back around each step are gone.
+- **Whether a read waits in a group's receive** (`crates/wz-capi-coop/src/engine/group.rs` @
+  `pub(super) fn awaits(&self, wait: &LinkWait) -> bool {`): the face answers it, from the
+  input its receive half waits in, read once as the join splits the half (`awaited_input`),
+  while its session has not ended, so the read's wait, made under the session's lock, needs no
+  row's slot.
+- **The close** (`DirectFaces::leave_groups`): under the session's lock, before the links end,
+  each group row's slot is tried and its session left; a row a read holds is left by that read,
+  which finds the session closed after its step or before it pays a seat. The engine's drop
+  leaves each row's group with the faces owned whole (`DirectFace::let_go_owned`).
+- **Held by:** `tests::one_thread`'s `a_groups_session_lies_in_the_row_of_its_place` (the rows
+  holding a group's session are the groups' places, before and after a join again: red if the
+  session lies apart from the table, in another row, or moves);
+  `a_member_of_one_thread_whose_group_link_is_lost_joins_again_in_the_same_place` (one place
+  made across the joins, counted where the row builds a session: red if a join again makes a
+  place of its own); `tests::arena`'s
+  `each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own` (a row for each
+  place wherever `TAKES_FACES`, the chain share still the listening build's alone);
+  `tests::direct_receive`'s `the_dial_roles_row_lies_where_the_faces_table_does` (inline exactly
+  where `TAKES_FACES` is false); `group`'s `a_read_waits_in_a_groups_receive_only_for_its_own_input`
+  over `awaited_input`; and `tests::group`, whose groups are now stepped from their rows.
+- **Bytes, expected:** out, the vector of pumps (its push, growth and drop glue) and the
+  take-out and put-back; in, for a group build without `listen`, a lent table where the inline
+  row was, and one row of arena a place. A group's datagram is read as before; the client case
+  compiles none of it.
+- **Found, not changed:** where the session listens and joins groups, a group's row below the
+  walk's bound keeps `rests` false, as the group's place's row did before this step, so
+  `CoopEngine::quiet_until` never finds every other face at rest and a session with groups never
+  reads one face quietly. A row no face holds rests; marking it so at its making, with a test of
+  the quiet read beside a group, is the next step of this kind.
 
 ## 8. Where the cases end
 
