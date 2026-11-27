@@ -1981,6 +1981,18 @@ impl<Key: KeyBacking, Cb: RowCallback> RetractedEntity for QueryableRow<Key, Cb>
     }
 }
 
+/// A token's row hands back no callback, none being called: only its key, to its retraction.
+impl<Key: KeyBacking> RetractedEntity for TokenRow<Key> {
+    type Key = Key;
+    type Callback = ();
+    fn entity_key(&self) -> &EntityKey<Key> {
+        &self.key
+    }
+    fn into_parts(self) -> ((), Key) {
+        ((), self.key.key)
+    }
+}
+
 impl<Key: KeyBacking, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
@@ -2784,16 +2796,16 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         .map_err(|refused| refused.why)
     }
 
-    /// Undeclare the liveliness token `handle` names.
-    pub fn undeclare_token(&mut self, handle: TokenHandle) -> Option<Undeclared<TokenRow<P::Key>>> {
+    /// Undeclare the liveliness token `handle` names, as a subscriber is
+    /// ([`Self::undeclare_subscriber`]): what its retraction names is read off the row it removes,
+    /// with the row's key. A token has no callback, so no call keeps its row, and nothing else of
+    /// the row is handed back.
+    pub fn undeclare_token(
+        &mut self,
+        handle: TokenHandle,
+    ) -> Option<RetractedUndeclared<(), P::Key>> {
         let tokens = <F::LivelinessPresence as Presence>::get_mut::<Tokens<P>>(&mut self.tokens)?;
-        undeclare_entity(
-            tokens,
-            &mut self.keyexprs,
-            handle,
-            |_, _, _| (),
-            core::convert::identity,
-        )
+        undeclare_retracted(tokens, &mut self.keyexprs, handle)
     }
 
     /// Declare a liveliness subscriber on `key`, asking for the tokens alive now with `history`.

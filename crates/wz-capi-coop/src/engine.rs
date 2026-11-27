@@ -12480,19 +12480,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     #[cfg(feature = "liveliness")]
     fn undeclare_liveliness_token(&self, id: TokenId) {
         let _ = self.live_on_link(|core, tx| {
-            let retracted =
-                {
-                    let tables = tables(&core.session.registry);
-                    let found = tables.tokens().iter().find(|(_, row)| row.id() == id).map(
-                        |(handle, row)| {
-                            // What its retraction names, read while the declaration stands.
-                            let names = tables.retraction_of(row.key());
-                            (handle, names, row.key().prefix())
-                        },
-                    );
-                    found
-                };
-            let Some((handle, names, prefix)) = retracted else {
+            let found = tables(&core.session.registry)
+                .tokens()
+                .iter()
+                .find(|(_, row)| row.id() == id)
+                .map(|(handle, row)| (handle, row.key().prefix()));
+            let Some((handle, prefix)) = found else {
                 return;
             };
             // The links are asked while the rows stand, which are their places in the replay's
@@ -12506,12 +12499,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
             // The rows went before the links are told: a send never finds the tables borrowed.
-            let key = undeclared.taken.as_ref().map(|row| row.key().as_str());
-            let retract = key.map(|key| Retract::Token {
-                id,
-                names: names.map(|names| names.names(key)),
-            });
-            core.retract_at(token_place, retract, tx);
+            // The retraction names the key as the row named it, holding the key past the row.
+            let names = undeclared
+                .retraction
+                .as_ref()
+                .map(|retraction| retraction.names());
+            core.retract_at(token_place, Some(Retract::Token { id, names }), tx);
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
         });
     }

@@ -2136,6 +2136,51 @@ fn a_queryable_undeclared_while_its_callback_runs_names_its_retraction_past_the_
     );
 }
 
+/// A token's undeclaration names its retraction off the row it removes, as a subscriber's does: a
+/// token retracted as it is announced names the declaration its key is named by and the rest of
+/// the key, though the row was the declaration's last holder and it went with the row. One
+/// retracted by its id alone names nothing.
+///
+/// # Control
+///
+/// Reading the retraction in `undeclare_entity` after the row's holds are let go of names the key
+/// whole, the declaration gone; handing the retraction no key of the row that left
+/// (`undeclare_retracted`) names nothing.
+#[test]
+fn a_tokens_undeclaration_names_its_retraction_off_the_row_it_removes() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/tk").unwrap();
+    let announced = KeyForm {
+        prefix: Some(declared.handle),
+        own: None,
+        retraction: Retraction::AsAnnounced,
+    };
+    let token = tables.declare_token("demo/tk/a", announced).unwrap();
+    assert_eq!(
+        tables.undeclare_keyexpr(declared.handle),
+        None,
+        "the token holds it"
+    );
+    let undeclared = tables.undeclare_token(token.handle).unwrap();
+    assert_eq!(
+        undeclared.keyexpr,
+        Some(declared.id),
+        "it went with the row"
+    );
+    assert_eq!(tables.keyexpr_by_id(declared.id), None);
+    assert_eq!(
+        undeclared.retraction.as_ref().map(Retracting::names),
+        Some((declared.id, "/a")),
+        "the retraction names it as the row's announcement did"
+    );
+    assert_eq!(undeclared.taken, Some(()), "a token's row always leaves");
+    let quiet = tables
+        .declare_token("demo/tk/a", KeyForm::default())
+        .unwrap();
+    let undeclared = tables.undeclare_token(quiet.handle).unwrap();
+    assert!(undeclared.retraction.is_none(), "retracted by its id alone");
+}
+
 /// A declaration an entity's key is named by and its retraction names alike is held once, and
 /// retracted once with it.
 ///
