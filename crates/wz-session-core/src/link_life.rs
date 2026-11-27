@@ -216,15 +216,21 @@ pub enum LinkPhase {
 }
 
 /// What the owner does after an input, in this order: let go of what a close leaves
-/// ([`Self::let_go`]), end the handshake ([`Self::end_handshake`]), lose the established link
-/// ([`Self::lose`]), bring the link up ([`Self::bring_up`]), begin the handshake
-/// ([`Self::begin_handshake`]), dial ([`Self::dial`]); and it ends the session
-/// ([`Self::ends_session`]) or waits ([`Self::backs_off`]).
+/// ([`Self::let_go`]), let go of a dial given up ([`Self::gives_up_dial`]), end the handshake
+/// ([`Self::end_handshake`]), lose the established link ([`Self::lose`]), bring the link up
+/// ([`Self::bring_up`]), begin the handshake ([`Self::begin_handshake`]), dial
+/// ([`Self::dial`]); and it ends the session ([`Self::ends_session`]) or waits
+/// ([`Self::backs_off`]). Each names the endpoint it is about, so the owner keeps no copy of
+/// where the link stood to carry it out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Effects {
     duties: Duties,
+    /// The endpoint dialled next, read after the input moved the link.
     row: usize,
+    /// The endpoint the input found the link at: the one whose dial or handshake it ended.
+    from: usize,
     gone: bool,
+    gave_up_dial: bool,
 }
 
 impl Effects {
@@ -233,9 +239,20 @@ impl Effects {
         self.duties.has(LinkBinding::LET_GO)
     }
 
-    /// End the task of a handshake that is over.
-    pub fn end_handshake(self) -> bool {
-        self.duties.has(LinkBinding::END_HANDSHAKE)
+    /// End the task of a handshake that is over: the row of the endpoint its link was dialled
+    /// to (row 0 for a link taken on a port), which names the refusal its end leaves.
+    pub fn end_handshake(self) -> Option<usize> {
+        self.duties
+            .has(LinkBinding::END_HANDSHAKE)
+            .then_some(self.from)
+    }
+
+    /// The dial under way was not answered by its deadline: let go of it, its endpoint refused
+    /// for want of an answer in time. Only a dial the network has not answered is given up so;
+    /// one answered (made or refused) was taken with its answer, and a close lets go of
+    /// everything ([`Self::let_go`]).
+    pub fn gives_up_dial(self) -> bool {
+        self.gave_up_dial
     }
 
     /// The established link ended: what its peer declared goes with it.
@@ -276,7 +293,7 @@ impl Effects {
 
     /// Nothing to do.
     pub fn is_empty(self) -> bool {
-        self.duties.is_empty() && !self.gone
+        self.duties.is_empty() && !self.gone && !self.gave_up_dial
     }
 }
 
@@ -459,55 +476,61 @@ impl UnicastLink {
     /// What `input`, reported at `now_us`, comes to: the link moves on, and the owner is told
     /// what to do. An input the link has no use for where it stands moves nothing.
     pub fn input(&mut self, input: LinkInput, now_us: u64) -> Effects {
-        if input == LinkInput::Close {
-            return self.drive(UnicastLinkEvent::LinkClose);
-        }
-        let event = match self.engine.get_current_state() {
-            UnicastLinkState::Idle => match input {
-                LinkInput::Open => self.walk_from_idle(),
-                LinkInput::Taken => {
-                    self.data.row = 0;
-                    self.data.deadline_us = now_us
-                        .saturating_add(self.data.times.accept_timeout_ms.saturating_mul(1000));
-                    Some(UnicastLinkEvent::LinkTaken)
-                }
-                _ => None,
-            },
-            UnicastLinkState::Dialing => self.dialing(input, now_us),
-            UnicastLinkState::Handshaking => match input {
-                LinkInput::Established => {
-                    self.data.has_been_up = true;
-                    Some(UnicastLinkEvent::HandshakeDone)
-                }
-                LinkInput::Ended => Some(self.walk_on(now_us, &FROM_HANDSHAKING)),
-                LinkInput::HeldElsewhere => Some(match self.data.role {
-                    LinkRole::Dial => UnicastLinkEvent::HandshakeHeld,
-                    LinkRole::Taken => UnicastLinkEvent::HandshakeGone,
-                }),
-                _ if now_us >= self.data.deadline_us => {
-                    Some(self.walk_on(now_us, &FROM_HANDSHAKING))
-                }
-                _ => None,
-            },
-            UnicastLinkState::Up => match input {
-                LinkInput::Ended => Some(self.lost()),
-                _ => None,
-            },
-            UnicastLinkState::Backoff if now_us >= self.data.until_us => {
-                self.dial_row(0);
-                Some(UnicastLinkEvent::BackoffOver)
-            }
-            UnicastLinkState::Held => match input {
-                LinkInput::NodeFree => {
+        // Read before the input moves the link: the endpoint whose dial or handshake it ends.
+        let from = self.data.row;
+        let mut gave_up_dial = false;
+        // A close is raised as every other input is, so the machine's event is pushed and its turn
+        // run from the one call below.
+        let event = if input == LinkInput::Close {
+            Some(UnicastLinkEvent::LinkClose)
+        } else {
+            match self.engine.get_current_state() {
+                UnicastLinkState::Idle => match input {
+                    LinkInput::Open => self.walk_from_idle(),
+                    LinkInput::Taken => {
+                        let accept_us = self.data.times.accept_timeout_ms.saturating_mul(1000);
+                        self.data.row = 0;
+                        self.data.deadline_us = now_us.saturating_add(accept_us);
+                        Some(UnicastLinkEvent::LinkTaken)
+                    }
+                    _ => None,
+                },
+                UnicastLinkState::Dialing => self.dialing(input, now_us, &mut gave_up_dial),
+                UnicastLinkState::Handshaking => match input {
+                    LinkInput::Established => {
+                        self.data.has_been_up = true;
+                        Some(UnicastLinkEvent::HandshakeDone)
+                    }
+                    LinkInput::Ended => Some(self.walk_on(now_us, &FROM_HANDSHAKING)),
+                    LinkInput::HeldElsewhere => Some(match self.data.role {
+                        LinkRole::Dial => UnicastLinkEvent::HandshakeHeld,
+                        LinkRole::Taken => UnicastLinkEvent::HandshakeGone,
+                    }),
+                    _ if now_us >= self.data.deadline_us => {
+                        Some(self.walk_on(now_us, &FROM_HANDSHAKING))
+                    }
+                    _ => None,
+                },
+                UnicastLinkState::Up => match input {
+                    LinkInput::Ended => Some(self.lost()),
+                    _ => None,
+                },
+                UnicastLinkState::Backoff if now_us >= self.data.until_us => {
                     self.dial_row(0);
-                    Some(UnicastLinkEvent::HeldOver)
+                    Some(UnicastLinkEvent::BackoffOver)
                 }
-                _ => None,
-            },
-            UnicastLinkState::Backoff | UnicastLinkState::Closed => None,
+                UnicastLinkState::Held => match input {
+                    LinkInput::NodeFree => {
+                        self.dial_row(0);
+                        Some(UnicastLinkEvent::HeldOver)
+                    }
+                    _ => None,
+                },
+                UnicastLinkState::Backoff | UnicastLinkState::Closed => None,
+            }
         };
         match event {
-            Some(event) => self.drive(event),
+            Some(event) => self.drive(event, from, gave_up_dial),
             None => Effects::default(),
         }
     }
@@ -525,8 +548,14 @@ impl UnicastLink {
         }
     }
 
-    /// What `input` comes to while an endpoint is being dialled.
-    fn dialing(&mut self, input: LinkInput, now_us: u64) -> Option<UnicastLinkEvent> {
+    /// What `input` comes to while an endpoint is being dialled; `gave_up` is set when the dial
+    /// under way is given up at its deadline, unanswered.
+    fn dialing(
+        &mut self,
+        input: LinkInput,
+        now_us: u64,
+        gave_up: &mut bool,
+    ) -> Option<UnicastLinkEvent> {
         let stage = self.data.stage;
         match input {
             LinkInput::DialPending if stage == DialStage::Owed => {
@@ -555,6 +584,7 @@ impl UnicastLink {
                 Refused::Fatal => UnicastLinkEvent::DialEnded,
             }),
             _ if stage == DialStage::Pending && now_us >= self.data.deadline_us => {
+                *gave_up = true;
                 Some(self.walk_on(now_us, &FROM_DIALING))
             }
             _ => None,
@@ -618,12 +648,15 @@ impl UnicastLink {
         self.data.stage = DialStage::Owed;
     }
 
-    /// Raise `event` and take the duties it ran.
-    fn drive(&mut self, event: UnicastLinkEvent) -> Effects {
+    /// Raise `event`, the input's at endpoint `from`, and take the duties it ran. Called from one
+    /// place (`Self::input`): the machine's event push and turn are in this image once.
+    fn drive(&mut self, event: UnicastLinkEvent, from: usize, gave_up_dial: bool) -> Effects {
         self.engine.process_event(event);
         Effects {
             duties: self.engine.policy().actions().duties.take(),
             row: self.data.row,
+            from,
+            gave_up_dial,
             gone: matches!(
                 event,
                 UnicastLinkEvent::DialGone
@@ -748,12 +781,12 @@ mod tests {
             let deadline = 1000 * MS;
             if ended {
                 let over = link.input(LinkInput::Ended, 5);
-                assert!(over.end_handshake());
+                assert_eq!(over.end_handshake(), Some(0));
                 assert_eq!(over.dial(), Some(1));
             } else {
                 assert!(link.input(LinkInput::Tick, deadline - 1).is_empty());
                 let over = link.input(LinkInput::Tick, deadline);
-                assert!(over.end_handshake());
+                assert_eq!(over.end_handshake(), Some(0));
                 assert_eq!(over.dial(), Some(1));
                 assert!(!over.lose());
                 assert!(!over.ends_session());
@@ -877,7 +910,7 @@ mod tests {
             link.input(LinkInput::DialMade, 20);
             link.input(LinkInput::HandshakeBegun, 20);
             let over = link.input(LinkInput::Ended, 30);
-            assert!(over.end_handshake());
+            assert_eq!(over.end_handshake(), Some(0));
             assert!(over.backs_off());
             assert_eq!(
                 link.phase(),
@@ -899,8 +932,9 @@ mod tests {
         link.input(LinkInput::DialMade, 0);
         let next = link.input(LinkInput::HandshakeRefused(Refused::Endpoint), 1);
         assert_eq!(next.dial(), Some(1));
-        assert!(
-            !next.end_handshake(),
+        assert_eq!(
+            next.end_handshake(),
+            None,
             "no handshake began, so none is ended"
         );
         link.input(LinkInput::DialMade, 2);
@@ -1028,7 +1062,7 @@ mod tests {
         );
         assert!(link.input(LinkInput::Tick, deadline - 1).is_empty());
         let over = link.input(LinkInput::Tick, deadline);
-        assert!(over.end_handshake());
+        assert_eq!(over.end_handshake(), Some(0));
         assert!(over.removes());
         assert!(!over.ends_session());
         assert_eq!(over.dial(), None);
@@ -1079,7 +1113,7 @@ mod tests {
         link.input(LinkInput::DialMade, 0);
         link.input(LinkInput::HandshakeBegun, 0);
         let held = link.input(LinkInput::HeldElsewhere, 5);
-        assert!(held.end_handshake());
+        assert_eq!(held.end_handshake(), Some(0));
         assert_eq!(held.dial(), None);
         assert!(!held.removes());
         assert_eq!(link.phase(), LinkPhase::Held);
@@ -1092,7 +1126,89 @@ mod tests {
         let other = taken(&mut slot, 1);
         other.input(LinkInput::Taken, 0);
         let gone = other.input(LinkInput::HeldElsewhere, 1);
-        assert!(gone.end_handshake());
+        assert_eq!(gone.end_handshake(), Some(0));
         assert!(gone.removes());
+    }
+
+    /// The end of a handshake names the endpoint its link was dialled to, read before the walk
+    /// moved on, and not the endpoint dialled next: the owner names the refusal by it and keeps
+    /// no copy of where the link stood. Turned red by a row read after the walk
+    /// (`Effects::end_handshake` answering `self.row`, or `from` read after the input).
+    #[test]
+    fn the_end_of_a_handshake_names_the_endpoint_it_was_dialled_to_not_the_next() {
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 3);
+        link.input(LinkInput::Open, 0);
+        let refused = link.input(LinkInput::DialRefused, 1);
+        assert_eq!(refused.dial(), Some(1));
+        assert_eq!(
+            refused.end_handshake(),
+            None,
+            "a refused dial began no handshake"
+        );
+        assert!(link.input(LinkInput::DialMade, 2).begin_handshake());
+        link.input(LinkInput::HandshakeBegun, 2);
+        let over = link.input(LinkInput::Ended, 3);
+        assert_eq!(
+            over.end_handshake(),
+            Some(1),
+            "the endpoint the handshake ran over"
+        );
+        assert_eq!(over.dial(), Some(2), "the endpoint dialled next");
+        link.input(LinkInput::DialMade, 4);
+        link.input(LinkInput::HandshakeBegun, 4);
+        let last = link.input(LinkInput::Ended, 5);
+        assert_eq!(last.end_handshake(), Some(2));
+        assert_eq!(last.dial(), None);
+        assert!(last.ends_session(), "a link never up dials none again");
+    }
+
+    /// Only a dial the network has not answered by its deadline is given up: one made, one
+    /// refused, one still within its deadline and one let go of by a close are not, and the
+    /// last endpoint's dial given up is given up as the session ends. Turned red by a give-up
+    /// read off the effects that walk on (a dial, a wait or an end) rather than the deadline's
+    /// arm of `dialing`.
+    #[test]
+    fn only_an_unanswered_dial_at_its_deadline_is_given_up() {
+        let deadline = 1000 * MS;
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 3);
+        assert!(!link.input(LinkInput::Open, 0).gives_up_dial());
+        assert!(link.input(LinkInput::DialPending, 0).is_empty());
+        let early = link.input(LinkInput::Tick, deadline - 1);
+        assert!(early.is_empty());
+        assert!(!early.gives_up_dial());
+        let late = link.input(LinkInput::Tick, deadline);
+        assert!(late.gives_up_dial());
+        assert_eq!(late.dial(), Some(1));
+        assert!(!late.is_empty());
+        link.input(LinkInput::DialPending, deadline);
+        let refused = link.input(LinkInput::DialRefused, deadline + 10);
+        assert!(!refused.gives_up_dial(), "a refusal is the dial's answer");
+        assert_eq!(refused.dial(), Some(2));
+        link.input(LinkInput::DialPending, deadline + 10);
+        let made_link = link.input(LinkInput::DialMade, deadline + 20);
+        assert!(
+            !made_link.gives_up_dial(),
+            "a made link is the dial's answer"
+        );
+        assert!(made_link.begin_handshake());
+
+        let mut slot = MaybeUninit::uninit();
+        let lone = made(&mut slot, TIMES, 1);
+        lone.input(LinkInput::Open, 0);
+        lone.input(LinkInput::DialPending, 0);
+        let ended = lone.input(LinkInput::Tick, deadline);
+        assert!(ended.gives_up_dial());
+        assert!(ended.ends_session());
+        assert_eq!(ended.dial(), None);
+
+        let mut slot = MaybeUninit::uninit();
+        let closing = made(&mut slot, TIMES, 1);
+        closing.input(LinkInput::Open, 0);
+        closing.input(LinkInput::DialPending, 0);
+        let close = closing.input(LinkInput::Close, deadline);
+        assert!(close.let_go());
+        assert!(!close.gives_up_dial(), "a close lets go of the dial itself");
     }
 }

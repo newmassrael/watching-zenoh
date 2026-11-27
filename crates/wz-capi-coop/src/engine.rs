@@ -5236,7 +5236,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return Ok(());
         };
         let id = face.id;
-        let was = face.life.phase();
         // A link that is up goes on telling its peer what the session holds, when a turn is due.
         // A turn the replay is given up on (a refused send, at once without a pace or when the
         // pace says so) ends the link here, with no Close, as
@@ -5259,7 +5258,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if step.effects.is_empty() {
             return Ok(());
         }
-        self.carry_out(at, step.effects, was, &mut read, now_us, last)
+        self.carry_out(at, step.effects, &mut read, now_us, last)
     }
 
     /// Give the life of the face at `at` the input `input` at `now_us`, and carry out what it
@@ -5275,23 +5274,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let Some(face) = self.transport.links.face_mut(at) else {
             return Ok(());
         };
-        let was = face.life.phase();
         let effects = face.life.input(input, now_us);
-        self.carry_out(at, effects, was, &mut ReadDial::none(), now_us, last)
+        self.carry_out(at, effects, &mut ReadDial::none(), now_us, last)
     }
 
-    /// Carry out what the life of the face at `at`, which stood at `was`, asks for (`effects`),
-    /// in the order [`Effects`] names, reporting the dial or the handshake it asks for back to it
-    /// as its next input, read at the clock after the I/O, until it asks for no more. `read` holds
-    /// the face's dial as the step read it ([`ReadDial`]). `Err` when the session ends, the
-    /// reason the last endpoint tried gave left in `last`, which every arm writes rather than
-    /// hands back.
+    /// Carry out what the life of the face at `at` asks for (`effects`), each naming the endpoint
+    /// it is about, in the order [`Effects`] names, reporting the dial or the handshake it asks
+    /// for back to it as its next input, read at the clock after the I/O, until it asks for no
+    /// more. `read` holds the face's dial as the step read it ([`ReadDial`]). `Err` when the
+    /// session ends, the reason the last endpoint tried gave left in `last`, which every arm
+    /// writes rather than hands back.
     #[cfg(wz_round)]
     fn carry_out(
         &mut self,
         at: usize,
         mut effects: Effects,
-        was: LinkPhase,
         read: &mut ReadDial<L::Pump>,
         now_us: u64,
         last: &mut OpenError,
@@ -5315,13 +5312,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 self.transport.links.put_link(at, Link::Idle);
             }
             // The link's task, told to stop, ends in the pass of the tasks before its link goes.
-            if effects.end_handshake() {
+            if let Some(row) = effects.end_handshake() {
                 let why = self.transport.end_handshake(at);
                 self.run_tasks();
                 self.transport.links.put_link(at, Link::Idle);
-                if let LinkPhase::Handshaking { row, .. } = was {
-                    self.refuse(last, Some(&DialEndpoint::Listed(row)), why);
-                }
+                self.refuse(last, Some(&DialEndpoint::Listed(row)), why);
             }
             // zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read
             // that failed, a Close from the router

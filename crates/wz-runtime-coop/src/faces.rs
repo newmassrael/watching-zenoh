@@ -5285,7 +5285,7 @@ mod tests {
         let read = faces.read_face(0, 100, 0, &mut None, &mut None);
         assert_eq!(read.input, LinkInput::HeldElsewhere);
         let face = faces.face_mut(0).expect("the dial role's face");
-        assert!(face.life.input(read.input, 0).end_handshake());
+        assert!(face.life.input(read.input, 0).end_handshake().is_some());
         assert_eq!(face.life.phase(), LinkPhase::Held);
         faces.put_link(0, Link::Idle);
         assert_eq!(
