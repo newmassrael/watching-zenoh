@@ -120,6 +120,11 @@ EXEMPT: dict[tuple[str, str], Exemption] = {
         "this crate keeps; lane C1co runs its files (SKIPS of the tests gate say the same)",
         (("scripts/run-ci.sh", '_runci_guarded_test "C1co tls os-host"'),),
     ),
+    ("wz-capi-pico", "tables-on-use"): Exemption(
+        "forward",
+        "the cooperative engine's moment of its tables' memory, its feature of the same name, which "
+        "a leg of the engine's crate turns on; the ABI's sources name it nowhere",
+    ),
     ("wz-capi-pico", "gossip"): Exemption(
         "gap",
         "linked and never started: every pico session is opened with no gossip policy, so a build "

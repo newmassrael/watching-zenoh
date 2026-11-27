@@ -650,6 +650,13 @@ config-policy = [
     "wz-capi-coop?/runtime-plan",
     "wz-session-core/policy-selection",
 ]
+# `tables-on-use`: the cooperative engine's sessions take their tables' memory at each table's
+# first row and reserve no arena, the state the one block an open takes (`wz-capi-coop`'s
+# `tables-on-use`). A form, not a capability: the library's doors are the same, and the moment
+# the memory is taken is what changes. Off in every build that names nothing and in every preset
+# until the configuration's axis of the moment names it; the tokio engine's runtime takes its
+# memory as its tables grow whatever is named, so it selects neither engine.
+tables-on-use = ["wz-capi-coop?/tables-on-use"]
 # `conformance-digest`: `zext_conformance_digest`, the digest of the configuration the library
 # was built with (`src/conformance.rs`). wz's own: on in a build that names nothing and in a
 # package that ships a build statement (the host-peer-ext preset), off in the zenoh-pico preset.
