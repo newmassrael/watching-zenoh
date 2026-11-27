@@ -160,6 +160,12 @@ struct Shared<E: EngineHolder> {
     late: (Option<usize>, Option<core::time::Duration>),
 }
 
+/// The rows of the table at `table`: its type's length, so a walk over the rows reads the storage it
+/// walks and not the build's limit that sized it.
+const fn rows_in<T, const N: usize>(_table: *mut [T; N]) -> usize {
+    N
+}
+
 impl<E: EngineHolder> Shared<E> {
     /// A subscriber of `engine` on `base_keyexpr` with no get in flight, made in `place`, where
     /// it stays: its token holds a lock made in its place ([`CancellationToken::init_in`]).
@@ -183,8 +189,9 @@ impl<E: EngineHolder> Shared<E> {
             addr_of_mut!((*at).engine).write(engine);
             // Row by row through one out-of-line body, so the rows' stores are not copied into
             // the declaration once a row.
-            let gets = addr_of_mut!((*at).gets).cast::<GetSlot<E>>();
-            for row in 0..caps::MAX_PENDING_QUERIES {
+            let table = addr_of_mut!((*at).gets);
+            let gets = table.cast::<GetSlot<E>>();
+            for row in 0..rows_in(table) {
                 GetSlot::write_empty(gets.add(row));
             }
             addr_of_mut!((*at).state).write(Mutex::new(state));
