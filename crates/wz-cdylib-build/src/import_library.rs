@@ -188,11 +188,13 @@ pub fn import_library(machine: Machine, dll: &str, functions: &[Import]) -> Vec<
 /// Whether the linker cargo resolved (`RUSTC_LINKER`) is the toolchain's own: `rust-lld`, or LLVM's
 /// `lld-link`, by the file name of the path given.
 pub fn links_without_sdk(linker: &str) -> bool {
-    let file = linker.rsplit(['/', '\\']).next().unwrap_or(linker);
-    let stem = file
-        .strip_suffix(".exe")
-        .unwrap_or(file)
+    // A Windows file name is told apart from another without its case, its extension too.
+    let file = linker
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(linker)
         .to_ascii_lowercase();
+    let stem = file.strip_suffix(".exe").unwrap_or(&file);
     stem == "rust-lld" || stem == "lld-link"
 }
 
