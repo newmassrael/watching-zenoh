@@ -653,8 +653,9 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
 /// each carry their own mark ([`ArenaPlan::holding`]).
 const LODGING_ROWS: usize = 1;
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
-/// (`advanced-cache`).
-const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
+/// (`advanced-cache`): none where the tables take their memory on use, whose ring takes its own
+/// bytes at the caches' first use.
+const CACHE_RING_ROWS: usize = 2 * cfg!(all(feature = "advanced-cache", not(wz_on_use))) as usize;
 /// The Finals the queryables' plane holds and the requests a dispatch refused (`queryable`), where
 /// the arena lends them (`runtime-plan`); a region holds them otherwise.
 const FINAL_ROWS: usize = 2 * cfg!(all(feature = "queryable", wz_lent)) as usize;
@@ -1703,7 +1704,8 @@ impl SessionRows {
 
     /// The bytes of the ring the session's advanced publishers' caches keep their samples in
     /// (`ADVANCED_CACHE_BYTES`): one table of one buffer, claimed for the session's life
-    /// (`CacheSpan::claimed`).
+    /// (`CacheSpan::claimed`), or, where the tables take their memory on use, the bytes the ring
+    /// takes at the caches' first use.
     #[cfg(feature = "advanced-cache")]
     pub fn cache_bytes(&self) -> usize {
         self.cache_bytes
@@ -2490,6 +2492,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
                 Quota::at_most(caps::ADVANCED_CACHE_BYTES),
                 caps::ADVANCED_CACHE_BYTES,
             );
+            // Where the tables take their memory on use the ring takes its own bytes at the caches'
+            // first use, and none is laid out.
+            #[cfg(not(wz_on_use))]
             if self.session.cache_bytes != 0 {
                 self.put_table(
                     [ArenaPart::CacheRingFlag, ArenaPart::CacheRing],
@@ -3910,7 +3915,7 @@ fn claimed(cells: LentByteCells) -> Option<(NonNull<u8>, usize)> {
 /// ([`SessionRows::cache_bytes`]): claimed at the open for the session's life, zero as its table
 /// was lent, so it holds an empty ring, and lent under the engine's lock of its own
 /// (`wz_capi_port::CacheBytes`).
-#[cfg(feature = "advanced-cache")]
+#[cfg(all(feature = "advanced-cache", not(wz_on_use)))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct CacheSpan {
     base: NonNull<u8>,
@@ -3919,10 +3924,10 @@ pub(crate) struct CacheSpan {
 
 // SAFETY: a span is an address in a session's arena and its length; its bytes are reached only
 // through the engine's lock of the span, so handing the span to another thread shares nothing.
-#[cfg(feature = "advanced-cache")]
+#[cfg(all(feature = "advanced-cache", not(wz_on_use)))]
 unsafe impl Send for CacheSpan {}
 
-#[cfg(feature = "advanced-cache")]
+#[cfg(all(feature = "advanced-cache", not(wz_on_use)))]
 impl CacheSpan {
     /// The one buffer of `cells`, a table of one buffer of `bytes`, claimed and never given back.
     /// Its bytes are as the table was lent them, zero (`Arena::lend_byte_cells`), and the open
@@ -4314,7 +4319,7 @@ mod tests {
     /// The caches' span is claimed as its table lent it and written by nothing more: bytes put in
     /// the table's one buffer before the claim are still there after it (a buffer of a fresh table
     /// is lent zero, which the claim then keeps). Turned red by a claim that writes the span over.
-    #[cfg(feature = "advanced-cache")]
+    #[cfg(all(feature = "advanced-cache", not(wz_on_use)))]
     #[test]
     fn the_caches_span_is_claimed_as_its_table_lent_it() {
         let mut arena = SessionArena::of_bytes(4096, &AllocatorMemory).expect("the host has it");

@@ -44,7 +44,7 @@ use crate::prelude::*;
 
 #[cfg(any(feature = "runtime-plan", test))]
 use crate::arena::AllocatorMemory;
-#[cfg(feature = "advanced-cache")]
+#[cfg(all(feature = "advanced-cache", not(wz_on_use)))]
 use crate::arena::CacheSpan;
 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 use crate::arena::HandedTable;
@@ -161,7 +161,10 @@ use wz_runtime_coop::transport::{
 #[cfg(not(wz_on_use))]
 use wz_runtime_coop::RuntimePlace;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimeRows};
-#[cfg(any(all(test, feature = "std"), feature = "advanced-cache"))]
+#[cfg(any(
+    all(test, feature = "std"),
+    all(feature = "advanced-cache", not(wz_on_use))
+))]
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare_form::{InterestAsk, InterestForm, RetractionKey};
@@ -238,6 +241,12 @@ pub(crate) use query::QueryableCall;
 // forms a build lays out at the open. The on-use form counts them in its own tables.
 #[cfg(all(feature = "queryable", not(wz_on_use)))]
 pub(crate) use query::{FinalHold, RefusedFinal};
+
+// The ring the advanced publishers' caches keep their samples in, as the session's form holds it.
+#[cfg(feature = "advanced-cache")]
+mod cache_ring;
+#[cfg(feature = "advanced-cache")]
+use cache_ring::CacheRing;
 
 #[cfg(feature = "group")]
 mod group;
@@ -863,7 +872,7 @@ struct LentApart {
     #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     handed: HandedTable,
     #[cfg(feature = "advanced-cache")]
-    cache: Option<CacheSpan>,
+    cache: CacheRing,
 }
 
 /// What the arena of a session lends it at its open ([`lend_session`]). The arena is the last
@@ -899,9 +908,10 @@ struct SessionLent {
     /// Whether the outbound slots the links share are fewer than the links.
     #[cfg(feature = "listen")]
     tx_pool_short: bool,
-    /// The ring the advanced publishers' caches keep their samples in, none for a plan of none.
+    /// The ring the advanced publishers' caches keep their samples in: a span of the arena, none
+    /// for a plan of none, or the session's own where the tables take their memory on use.
     #[cfg(feature = "advanced-cache")]
-    cache: Option<CacheSpan>,
+    cache: CacheRing,
     /// The places of the faces' rooms, a row for each set of face tables (`LinkRooms::init_at`).
     room_places: RoomPlaces,
     /// The places the session lends its registry and its Router in for a step, in the arena.
@@ -950,7 +960,7 @@ struct StateTables {
     held_finals: query::HeldFinals<wz_session_core::bounded::Lent>,
     #[cfg(all(feature = "queryable", wz_lent))]
     refused_finals: query::RefusedFinals<wz_session_core::bounded::Lent>,
-    #[cfg(feature = "advanced-cache")]
+    #[cfg(all(feature = "advanced-cache", not(wz_on_use)))]
     cache: Option<LentByteCells>,
 }
 
@@ -962,7 +972,7 @@ impl SessionRows {
         // state no plain table: its lender is asked nothing.
         #[cfg(not(any(
             all(any(feature = "query", feature = "queryable"), wz_lent),
-            feature = "advanced-cache"
+            all(feature = "advanced-cache", not(wz_on_use))
         )))]
         let _ = lend;
         #[cfg(all(feature = "query", wz_lent))]
@@ -978,7 +988,7 @@ impl SessionRows {
             held_finals: lend.table(self.held_queries()),
             #[cfg(all(feature = "queryable", wz_lent))]
             refused_finals: lend.table(self.held_queries()),
-            #[cfg(feature = "advanced-cache")]
+            #[cfg(all(feature = "advanced-cache", not(wz_on_use)))]
             cache: (self.cache_bytes() != 0).then(|| lend.byte_cells(self.cache_bytes(), 1)),
         }
     }
@@ -1062,7 +1072,7 @@ fn lend_session(
         held_finals,
         #[cfg(all(feature = "queryable", wz_lent))]
         refused_finals,
-        #[cfg(feature = "advanced-cache")]
+        #[cfg(all(feature = "advanced-cache", not(wz_on_use)))]
         cache,
     } = plan.session().lent_from(&mut lend);
     let PlaceTables {
@@ -1125,10 +1135,16 @@ fn lend_session(
     #[cfg(wz_on_use)]
     let room_places = RoomPlaces::counted(plan.peers().sets())?;
     let claimed = plan.claim_handle(handle)?;
-    #[cfg(feature = "advanced-cache")]
-    let cache = cache
-        .map(|cells| CacheSpan::claimed(cells, plan.session().cache_bytes()))
-        .transpose()?;
+    #[cfg(all(feature = "advanced-cache", not(wz_on_use)))]
+    let cache = CacheRing::claimed(
+        cache
+            .map(|cells| CacheSpan::claimed(cells, plan.session().cache_bytes()))
+            .transpose()?,
+    );
+    // Where the tables take their memory on use the ring is laid out in no row: its bytes are
+    // taken at the caches' first use.
+    #[cfg(all(feature = "advanced-cache", wz_on_use))]
+    let cache = CacheRing::counted(plan.session().cache_bytes());
     let ClaimedPlaces {
         handle: handle_place,
     } = claimed;
@@ -1550,7 +1566,7 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     /// The ring the session's advanced publishers' caches keep their samples in, under a lock of
     /// its own, which nothing that holds the session's lock takes ([`wz_capi_port::CacheBytes`]).
     #[cfg(feature = "advanced-cache")]
-    cache: Mutex<Option<CacheSpan>>,
+    cache: Mutex<CacheRing>,
     /// The takes of the session's locks on a message's paths, which the tests count.
     #[cfg(test)]
     pub(crate) takes: Takes,
@@ -12825,8 +12841,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender for C
     }
 }
 
-/// The ring the session's arena laid out at its open for its advanced publishers' caches
-/// (`CacheSpan`), lent under a lock of its own: a cache's put and its queryable's answer take
+/// The ring the session keeps for its advanced publishers' caches (`CacheRing`): the span its
+/// arena laid out at its open, or its own bytes taken at the caches' first use where the tables
+/// take their memory on use, lent under a lock of its own: a cache's put and its queryable's answer take
 /// it, from whatever thread, and neither takes the session's lock with it.
 #[cfg(feature = "advanced-cache")]
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::CacheBytes
@@ -12836,13 +12853,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::Cac
     /// engine is let go, which the caches that hold the engine hold off. A plan of no ring lends
     /// an empty span.
     fn with_cache_bytes(&self, with: &mut dyn FnMut(&mut [u8])) {
-        let held = self.cache.lock();
-        match *held {
-            // SAFETY: the span is the arena's, lent to this lock alone, which is held for the call,
-            // and the arena stands while the engine does.
-            Some(span) => with(unsafe { span.bytes() }),
-            None => with(&mut []),
-        }
+        let mut held = self.cache.lock();
+        // SAFETY: the ring is lent to this lock alone, which is held for the call, and the arena
+        // it may lie in stands while the engine does.
+        unsafe { held.with_bytes(with) };
     }
 }
 
