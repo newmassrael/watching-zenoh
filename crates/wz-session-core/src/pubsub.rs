@@ -589,7 +589,8 @@ struct InterestSide<P: Storage = Profile> {
     /// At most `MAX_INBOUND_SUB_INTERESTS` rows, in the policy's sequence of a peer's rows
     /// (`Storage::Pooled`): on the lent policy each row lies in a pool every face of the session
     /// shares (`InterestRows`), so a face holds the interests its peer asked and not the most it
-    /// could.
+    /// could; on the on-use one the rows are taken at the first interest, each a row of the
+    /// session's `SESSION_MAX_INBOUND_SUB_INTERESTS` its key budget holds.
     #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     rows: InterestTable<P>,
     /// R311y530 — the staged interest-response chain, drained by

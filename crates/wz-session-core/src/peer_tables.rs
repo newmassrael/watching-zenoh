@@ -399,10 +399,10 @@ impl PeerTables<crate::bounded::OnUse> {
     /// under the build's bound, none taking memory until its first row; the keys of every row
     /// counted against `keys`, the session's key budget; held to `limits` as
     /// [`PeerTables::limit_to`] holds them. What the peer writes by its own choice (its aliases,
-    /// its declarations, its interests) is inline in the tables at its bounds, as on the region
-    /// policy, so there is no pool to hand them. Nothing is taken, so nothing is refused here: a
-    /// row past a table's count, or one the allocator or the budget has no room for, is refused
-    /// when the peer asks for it.
+    /// its declarations, their repeats, its interests) takes its rows at its first value too, each
+    /// a row of its kind of the session's bounds that `keys` holds, so there is no pool to hand
+    /// them. Nothing is taken, so nothing is refused here: a row past a table's count, or one the
+    /// allocator or the budget has no room for, is refused when the peer asks for it.
     pub fn counted(
         keys: crate::on_use::BudgetKeys,
         rows: PeerRows,
@@ -2346,6 +2346,103 @@ mod on_use_tests {
             budget.counts().used,
             0,
             "a forgotten peer gives every key's bytes back"
+        );
+    }
+
+    /// A peer's repeat of a subscriber keyexpr it declared is kept as an alias, whose rows are
+    /// taken at the first alias: where the allocator has none, the repeat is refused whole and
+    /// counted before its key is made, so no id stands that the application was not told of.
+    /// Turned red by a repeat bound before its alias's rows are taken (it would stand, its alias
+    /// lost), or by one whose key is made first (the budget would count a refused key).
+    #[cfg(all(feature = "codec-declare", feature = "declare-subscriber"))]
+    #[test]
+    fn an_on_use_subscriber_repeat_with_no_alias_row_is_refused_whole() {
+        use crate::transport_profile::owned::DeclareOwnedVariant;
+        use wz_session_core_test_support as fx;
+
+        let budget = budget(256);
+        let mut tables = counted(rows(1), budget);
+        let mut table = crate::declare::subscriber::RemoteSubscriberTable::<
+            crate::decl_sink::BoxedDeclSink,
+            crate::decl_sink::BoxedUndeclSink,
+        >::default();
+        let none: hashbrown::HashMap<u64, std::string::String> = hashbrown::HashMap::new();
+        let declare = |id| {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(fx::decl_subscriber(
+                id,
+                0,
+                Some("demo/sub/x"),
+            ))
+        };
+        let (first, repeat) = (declare(1), declare(2));
+        table.dispatch_declare(&mut tables.remote_subscribers, &first, &none);
+        assert_eq!(tables.remote_subscribers.declared_count(), 1);
+        crate::test_heap::refused(|| {
+            table.dispatch_declare(&mut tables.remote_subscribers, &repeat, &none);
+        });
+        assert_eq!(
+            tables.remote_subscribers.declared_count(),
+            1,
+            "the repeat is not bound"
+        );
+        assert_eq!(
+            tables.remote_subscribers.refusals(),
+            1,
+            "it is counted as refused"
+        );
+        assert_eq!(budget.counts().refused, 0, "its key was never made");
+        table.dispatch_declare(&mut tables.remote_subscribers, &repeat, &none);
+        assert_eq!(
+            tables.remote_subscribers.declared_count(),
+            2,
+            "CONTROL: with the allocator's rows the repeat is bound"
+        );
+    }
+
+    /// The queryable side of the repeat above: a repeat whose alias finds no row is refused whole
+    /// and counted before its key is made. Turned red as that test is.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn an_on_use_queryable_repeat_with_no_alias_row_is_refused_whole() {
+        use crate::transport_profile::owned::DeclareOwnedVariant;
+        use wz_session_core_test_support as fx;
+
+        let budget = budget(256);
+        let mut tables = counted(rows(1), budget);
+        let mut table = crate::declare::queryable::RemoteQueryableTable::<
+            crate::decl_sink::BoxedDeclSink,
+            crate::decl_sink::BoxedUndeclSink,
+        >::default();
+        let none: hashbrown::HashMap<u64, std::string::String> = hashbrown::HashMap::new();
+        let declare = |id| {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(fx::decl_queryable(
+                id,
+                0,
+                Some("demo/q/x"),
+            ))
+        };
+        let (first, repeat) = (declare(1), declare(2));
+        table.dispatch_declare(&mut tables.remote_queryables, &first, &none);
+        assert_eq!(tables.remote_queryables.declared_count(), 1);
+        crate::test_heap::refused(|| {
+            table.dispatch_declare(&mut tables.remote_queryables, &repeat, &none);
+        });
+        assert_eq!(
+            tables.remote_queryables.declared_count(),
+            1,
+            "the repeat is not bound"
+        );
+        assert_eq!(
+            tables.remote_queryables.refusals(),
+            1,
+            "it is counted as refused"
+        );
+        assert_eq!(budget.counts().refused, 0, "its key was never made");
+        table.dispatch_declare(&mut tables.remote_queryables, &repeat, &none);
+        assert_eq!(
+            tables.remote_queryables.declared_count(),
+            2,
+            "CONTROL: with the allocator's rows the repeat is bound"
         );
     }
 }

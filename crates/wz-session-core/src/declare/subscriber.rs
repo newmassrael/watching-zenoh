@@ -1369,6 +1369,18 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     ) {
         // Consumed only by the `session-matching` re-evaluation below.
         let _ = &local_matching;
+        #[cfg(feature = "alloc")]
+        let told_as = peer.told_as(resolved);
+        // A repeat is kept as an alias, whose rows may be taken at their first alias: one they
+        // find no memory for is refused before anything of it is kept, as a declaration the
+        // table has no room for, so no id stands that the application was not told of.
+        #[cfg(feature = "alloc")]
+        if told_as.is_some_and(|told| told != id)
+            && !RemoteSubscriberPeer::<Q>::aliases_mut(&mut peer.aliases, &peer.keys).take_rows()
+        {
+            RemoteSubscriberPeer::<Q>::declared_mut(&mut peer.declared, &peer.keys).count_refused();
+            return;
+        }
         // R290 — same membership-tracking pattern as the
         // Q-side registry: same-id-replaces semantic, no
         // explicit conflict surfacing.
@@ -1386,8 +1398,6 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
                 return;
             }
         };
-        #[cfg(feature = "alloc")]
-        let told_as = peer.told_as(resolved);
         // Past the room or the quota: refused and counted by the table, and announced to no
         // observer, so what they are told is what the table holds.
         let quota = peer.quota;

@@ -1217,8 +1217,9 @@ pub type DeclaredQueryables<P = Profile> =
 ///
 /// Every alias is an id the peer's table of declarations holds, so a policy that bounds that
 /// table at [`caps::MAX_REMOTE_DECLS`] bounds this one there too: the rows are the policy's
-/// sequence of a peer's rows (`Storage::Pooled`), inline on the static policy and in a pool the
-/// session's faces share on the lent one, as the peer's id tables are.
+/// sequence of a peer's rows (`Storage::Pooled`), inline on the static policy, in a pool the
+/// session's faces share on the lent one and taken at the first alias on the on-use one, as the
+/// peer's id tables are.
 #[cfg(feature = "alloc")]
 pub struct DeclaredAliases<P: Storage = Profile>(AliasRows<P>);
 
@@ -1345,6 +1346,13 @@ impl<P: Storage> LentAliases<'_, P> {
     /// Forget every alias, each row given back.
     pub fn clear(&mut self) {
         RowList::clear(&mut self.0);
+    }
+
+    /// Take the memory of the aliases' rows now, where they take it at their first alias:
+    /// `false` where the allocator refuses it. Asked before a repeat is bound, so a repeat whose
+    /// alias would find no row is refused before anything of it is kept.
+    pub fn take_rows(&mut self) -> bool {
+        RowList::take_rows(&mut self.0)
     }
 }
 
