@@ -728,8 +728,9 @@ impl StreamSocket for AppStreamSocket {
     type Link<
         B: crate::link_storage::RxStore + 'static,
         X: crate::link_storage::TxStore + 'static,
+        W: crate::session_drive::InputWaiter,
     >
-        = crate::stream_link::StreamDriver<Self, B, X>
+        = crate::stream_link::StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
     where
         Self: 'static;
 

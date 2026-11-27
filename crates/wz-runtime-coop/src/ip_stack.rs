@@ -109,9 +109,9 @@ pub enum IpDriver<
     /// A `udp/` link.
     Udp(UdpDriver<U, B, X>),
     /// A `tcp/` link.
-    Tcp(T::Link<B, X>),
+    Tcp(T::Link<B, X, crate::session_drive::WaitsInLoop>),
     /// A `tls/` link: the stream link over a secure channel.
-    Tls(L::Link<B, X>),
+    Tls(L::Link<B, X, crate::session_drive::WaitsInLoop>),
     /// A `ws/` link: the stream link over a plain stream, each batch one WebSocket message.
     #[cfg(feature = "ws")]
     Ws(crate::stream_link::StreamDriver<T, B, X, crate::ws_link::WsFraming>),
@@ -490,18 +490,18 @@ impl<N: CountKind> Default for LinkPlace<N> {
 impl<N: CountKind> LinkPlace<N> {
     /// The stream link over the connected `socket`, over the buffers `rx` and `tx`, as the stack
     /// opens it: refused when the build's rows do not name both its ends, written where it lies, in
-    /// a cell when the stack was lent some, and waited on by its owner when the stack says so.
-    /// Out of line: a dial, a dial made later and a port's accept each open one, and one body for
-    /// each stream serves them.
+    /// a cell when the stack was lent some, of the type that says who waits for its input (`W`, the
+    /// stack's), and waited on by its owner when the stack says so. Out of line: a dial, a dial
+    /// made later and a port's accept each open one, and one body for each stream serves them.
     #[inline(never)]
-    fn stream<S: StreamSocket + 'static>(
+    fn stream<S: StreamSocket + 'static, W: InputWaiter>(
         &self,
         socket: S,
         rx: RxBuffer<N::Flag>,
         tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&socket))?.open(|place| {
-            let link = link_over_in(place, socket, rx, tx);
+            let link = link_over_in::<S, _, _, W>(place, socket, rx, tx);
             if self.owner_waits {
                 link.wait_by_owner();
             }
@@ -704,13 +704,13 @@ where
             LinkProto::Tcp => {
                 let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
                 let socket = self.dial.dial(ip.at)?;
-                self.shape.place.stream(socket, rx, tx)
+                self.shape.place.stream::<_, W>(socket, rx, tx)
             }
             LinkProto::Tls if !L::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
                 let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
                 let channel = self.tls.dial(ip.at)?;
-                self.shape.place.stream(channel, rx, tx)
+                self.shape.place.stream::<_, W>(channel, rx, tx)
             }
         }
     }
@@ -737,7 +737,7 @@ where
     type Pump = HeapLink<N>;
 
     #[cfg(feature = "dial-in-flight")]
-    type Dial = IpDial<D::Stream, L::Stream, N>;
+    type Dial = IpDial<D::Stream, L::Stream, N, W>;
 
     // Every link of these is made in the call that begins its dial, a stream's connect waited for
     // there as zenoh-pico's open waits for it, so a dial is its made link.
@@ -794,8 +794,8 @@ where
             CellRc::<UdpDriver<PortPeer<U, N::Shared>, RxBuffer<N::Flag>, TxBuffer<N::Flag>, W>>::cell_bytes(),
         );
         let stream = crate::link_cells::larger_cell(
-            CellRc::<<D::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
-            CellRc::<<L::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
+            CellRc::<<D::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>, W>>::cell_bytes(),
+            CellRc::<<L::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>, W>>::cell_bytes(),
         );
         crate::link_cells::larger_cell(datagram, stream)
     };
@@ -852,11 +852,13 @@ where
                 socket: Some(self.dial.dial_started(ip.at)?),
                 buffers: Some(buffers),
                 place: self.shape.place,
+                waiter: core::marker::PhantomData,
             }))),
             LinkProto::Tls => Ok(IpDial(IpDialing::Tls(PendingStream {
                 socket: Some(self.tls.dial_started(ip.at)?),
                 buffers: Some(buffers),
                 place: self.shape.place,
+                waiter: core::marker::PhantomData,
             }))),
         }
     }
@@ -917,16 +919,18 @@ where
             }
             LinkProto::Tcp if D::CARRIED => {
                 let listener = self.dial.listen(ip.at)?;
-                Ok(Box::new(IpListener {
+                Ok(Box::new(IpListener::<_, N, W> {
                     listener,
                     shape: self.shape,
+                    waiter: core::marker::PhantomData,
                 }))
             }
             LinkProto::Tls if L::CARRIED => {
                 let listener = self.tls.listen(ip.at)?;
-                Ok(Box::new(IpTlsListener {
+                Ok(Box::new(IpTlsListener::<_, N, W> {
                     listener,
                     shape: self.shape,
+                    waiter: core::marker::PhantomData,
                 }))
             }
             _ => Err(LinkOpenError::Unsupported),
@@ -965,7 +969,7 @@ where
     not(feature = "session-slot"),
     feature = "dial-in-flight"
 ))]
-pub struct IpDial<S, T, N: CountKind = OneTask>(IpDialing<S, T, N>)
+pub struct IpDial<S, T, N: CountKind = OneTask, W = WaitsInLoop>(IpDialing<S, T, N, W>)
 where
     S: StreamSocket + 'static,
     T: StreamSocket + 'static;
@@ -980,14 +984,14 @@ where
     not(feature = "session-slot"),
     feature = "dial-in-flight"
 ))]
-enum IpDialing<S, T, N: CountKind>
+enum IpDialing<S, T, N: CountKind, W>
 where
     S: StreamSocket + 'static,
     T: StreamSocket + 'static,
 {
     Made(Dialled<HeapLink<N>, N>),
-    Tcp(PendingStream<S, N>),
-    Tls(PendingStream<T, N>),
+    Tcp(PendingStream<S, N, W>),
+    Tls(PendingStream<T, N, W>),
 }
 
 #[cfg(all(
@@ -995,7 +999,7 @@ where
     not(feature = "session-slot"),
     feature = "dial-in-flight"
 ))]
-impl<S, T, N: CountKind> PendingDial<HeapLink<N>, N> for IpDial<S, T, N>
+impl<S, T, N: CountKind, W: InputWaiter> PendingDial<HeapLink<N>, N> for IpDial<S, T, N, W>
 where
     S: StreamSocket + 'static,
     T: StreamSocket + 'static,
@@ -1014,7 +1018,7 @@ where
     not(feature = "session-slot"),
     feature = "dial-in-flight"
 ))]
-impl<S, T, N: CountKind> From<OpenedLink<HeapLink<N>, N>> for IpDial<S, T, N>
+impl<S, T, N: CountKind, W> From<OpenedLink<HeapLink<N>, N>> for IpDial<S, T, N, W>
 where
     S: StreamSocket + 'static,
     T: StreamSocket + 'static,
@@ -1032,10 +1036,12 @@ where
     not(feature = "session-slot"),
     feature = "dial-in-flight"
 ))]
-struct PendingStream<P: StreamSocket + 'static, N: CountKind> {
+struct PendingStream<P: StreamSocket + 'static, N: CountKind, W> {
     socket: Option<P>,
     buffers: Option<LinkBuffers<N::Flag>>,
     place: LinkPlace<N>,
+    /// Who waits for the input of the link made over the stream: the stack's.
+    waiter: core::marker::PhantomData<fn() -> W>,
 }
 
 #[cfg(all(
@@ -1043,7 +1049,9 @@ struct PendingStream<P: StreamSocket + 'static, N: CountKind> {
     not(feature = "session-slot"),
     feature = "dial-in-flight"
 ))]
-impl<P: StreamSocket + 'static, N: CountKind> PendingDial<HeapLink<N>, N> for PendingStream<P, N> {
+impl<P: StreamSocket + 'static, N: CountKind, W: InputWaiter> PendingDial<HeapLink<N>, N>
+    for PendingStream<P, N, W>
+{
     fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         match self.socket.as_mut()?.connected() {
             Ok(false) => None,
@@ -1057,7 +1065,7 @@ impl<P: StreamSocket + 'static, N: CountKind> PendingDial<HeapLink<N>, N> for Pe
             Ok(true) => {
                 let socket = self.socket.take()?;
                 let (rx, tx) = self.buffers.take()?;
-                Some(self.place.stream(socket, rx, tx))
+                Some(self.place.stream::<_, W>(socket, rx, tx))
             }
         }
     }
@@ -1117,13 +1125,17 @@ impl<U: DatagramSocket + 'static, N: CountKind, W: InputWaiter> LinkListener<Hea
 /// over the secure channel's streams `T`. A connection it yields has completed its handshake, so
 /// the link above runs the session's own handshake over a stream whose peer the channel accepted.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-struct IpTlsListener<T: StreamSocket, N: CountKind> {
+struct IpTlsListener<T: StreamSocket, N: CountKind, W> {
     listener: Box<dyn StreamListen<Stream = T>>,
     shape: LinkShape<N>,
+    /// Who waits for the input of the links it accepts: the stack's.
+    waiter: core::marker::PhantomData<fn() -> W>,
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<T: StreamSocket + 'static, N: CountKind> LinkListener<HeapLink<N>, N> for IpTlsListener<T, N> {
+impl<T: StreamSocket + 'static, N: CountKind, W: InputWaiter> LinkListener<HeapLink<N>, N>
+    for IpTlsListener<T, N, W>
+{
     fn local(&self) -> Locator {
         Locator::tls(self.listener.local())
     }
@@ -1135,7 +1147,7 @@ impl<T: StreamSocket + 'static, N: CountKind> LinkListener<HeapLink<N>, N> for I
         // As the `tcp/` listener's: the connection is off the port before the buffers are claimed,
         // so one the session's tables have none left for is closed, not left queued.
         let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
-        self.shape.place.stream(channel, rx, tx).map(Some)
+        self.shape.place.stream::<_, W>(channel, rx, tx).map(Some)
     }
 
     fn input_wait(&self) -> Option<WaitOn> {
@@ -1147,13 +1159,17 @@ impl<T: StreamSocket + 'static, N: CountKind> LinkListener<HeapLink<N>, N> for I
 /// yield the same link a dial does, shaped as the stack's links are, so a session opened over one
 /// is run as one over a dialled link, and the acceptor's role is the handshake's alone.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-struct IpListener<S: StreamSocket, N: CountKind> {
+struct IpListener<S: StreamSocket, N: CountKind, W> {
     listener: Box<dyn StreamListen<Stream = S>>,
     shape: LinkShape<N>,
+    /// Who waits for the input of the links it accepts: the stack's.
+    waiter: core::marker::PhantomData<fn() -> W>,
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<S: StreamSocket + 'static, N: CountKind> LinkListener<HeapLink<N>, N> for IpListener<S, N> {
+impl<S: StreamSocket + 'static, N: CountKind, W: InputWaiter> LinkListener<HeapLink<N>, N>
+    for IpListener<S, N, W>
+{
     fn local(&self) -> Locator {
         Locator::tcp(self.listener.local())
     }
@@ -1165,7 +1181,7 @@ impl<S: StreamSocket + 'static, N: CountKind> LinkListener<HeapLink<N>, N> for I
         // The connection is off the port before the buffers are claimed, so one the session's
         // tables have none left for is closed, not left queued, as `IpAcceptor` closes it.
         let (rx, tx) = self.shape.buffers(STREAM_RX_CAPACITY)?;
-        self.shape.place.stream(stream, rx, tx).map(Some)
+        self.shape.place.stream::<_, W>(stream, rx, tx).map(Some)
     }
 
     fn input_wait(&self) -> Option<WaitOn> {
@@ -1290,13 +1306,23 @@ where
             LinkProto::Tcp => {
                 let (rx, tx) = self.claim()?;
                 let socket = named(self.dial.dial(ip.at)?)?;
-                out.write(IpDriver::Tcp(link_over(socket, rx, tx)));
+                out.write(IpDriver::Tcp(link_over::<
+                    _,
+                    _,
+                    _,
+                    crate::session_drive::WaitsInLoop,
+                >(socket, rx, tx)));
             }
             LinkProto::Tls if !L::CARRIED => return Err(LinkOpenError::Unsupported),
             LinkProto::Tls => {
                 let (rx, tx) = self.claim()?;
                 let channel = named(self.tls.dial(ip.at)?)?;
-                out.write(IpDriver::Tls(link_over(channel, rx, tx)));
+                out.write(IpDriver::Tls(link_over::<
+                    _,
+                    _,
+                    _,
+                    crate::session_drive::WaitsInLoop,
+                >(channel, rx, tx)));
             }
         }
         Ok(())
@@ -1394,7 +1420,12 @@ where
             self.refused = self.refused.saturating_add(1);
             return Err(LinkOpenError::Exhausted);
         };
-        Ok(Some(IpDriver::Tcp(link_over(stream, rx, tx))))
+        Ok(Some(IpDriver::Tcp(link_over::<
+            _,
+            _,
+            _,
+            crate::session_drive::WaitsInLoop,
+        >(stream, rx, tx))))
     }
 }
 
@@ -1448,7 +1479,12 @@ where
             self.refused = self.refused.saturating_add(1);
             return Err(LinkOpenError::Exhausted);
         };
-        Ok(Some(IpDriver::Tls(link_over(stream, rx, tx))))
+        Ok(Some(IpDriver::Tls(link_over::<
+            _,
+            _,
+            _,
+            crate::session_drive::WaitsInLoop,
+        >(stream, rx, tx))))
     }
 }
 
@@ -1601,8 +1637,9 @@ mod tests {
         type Link<
             B: crate::link_storage::RxStore + 'static,
             X: crate::link_storage::TxStore + 'static,
+            W: crate::session_drive::InputWaiter,
         >
-            = crate::stream_link::StreamDriver<Self, B, X>
+            = crate::stream_link::StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
         where
             Self: 'static;
 
@@ -1649,8 +1686,9 @@ mod tests {
         type Link<
             B: crate::link_storage::RxStore + 'static,
             X: crate::link_storage::TxStore + 'static,
+            W: crate::session_drive::InputWaiter,
         >
-            = crate::stream_link::StreamDriver<Self, B, X>
+            = crate::stream_link::StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
         where
             Self: 'static;
 
@@ -2451,8 +2489,9 @@ mod tests {
             type Link<
                 B: crate::link_storage::RxStore + 'static,
                 X: crate::link_storage::TxStore + 'static,
+                W: crate::session_drive::InputWaiter,
             >
-                = crate::stream_link::StreamDriver<Self, B, X>
+                = crate::stream_link::StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
             where
                 Self: 'static;
 
@@ -3465,14 +3504,22 @@ mod tests {
     #[test]
     fn a_stream_names_its_link_and_the_stream_there_is_none_of_names_none() {
         // Each binding compiles only while the stream names that link.
-        let none: fn(<NoStream as StreamSocket>::Link<ByteBuf, ByteBuf>) -> NoStream =
-            core::convert::identity;
-        type StreamLinkOf = <Stream as StreamSocket>::Link<ByteBuf, ByteBuf>;
+        let none: fn(
+            <NoStream as StreamSocket>::Link<ByteBuf, ByteBuf, crate::session_drive::WaitsInLoop>,
+        ) -> NoStream = core::convert::identity;
+        type StreamLinkOf =
+            <Stream as StreamSocket>::Link<ByteBuf, ByteBuf, crate::session_drive::WaitsInLoop>;
         type StreamDriverOf = crate::stream_link::StreamDriver<Stream, ByteBuf, ByteBuf>;
         let some: fn(StreamLinkOf) -> StreamDriverOf = core::convert::identity;
         let _ = (none, some);
         assert_eq!(
-            core::mem::size_of::<<NoStream as StreamSocket>::Link<ByteBuf, ByteBuf>>(),
+            core::mem::size_of::<
+                <NoStream as StreamSocket>::Link<
+                    ByteBuf,
+                    ByteBuf,
+                    crate::session_drive::WaitsInLoop,
+                >,
+            >(),
             0
         );
         assert!(

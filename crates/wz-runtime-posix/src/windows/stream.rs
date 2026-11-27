@@ -305,8 +305,15 @@ impl StreamSocket for WindowsTcpSocket {
     type Link<
         B: wz_runtime_coop::link_storage::RxStore + 'static,
         X: wz_runtime_coop::link_storage::TxStore + 'static,
+        W: wz_runtime_coop::session_drive::InputWaiter,
     >
-        = wz_runtime_coop::stream_link::StreamDriver<Self, B, X>
+        = wz_runtime_coop::stream_link::StreamDriver<
+        Self,
+        B,
+        X,
+        wz_runtime_coop::stream_link::LengthPrefix,
+        W,
+    >
     where
         Self: 'static;
 

@@ -161,8 +161,8 @@ pub struct PipeStream<F: Fifo> {
 impl<F: Fifo> StreamSocket for PipeStream<F> {
     type Error = F::Error;
 
-    type Link<B: RxStore + 'static, X: TxStore + 'static>
-        = StreamDriver<Self, B, X>
+    type Link<B: RxStore + 'static, X: TxStore + 'static, W: crate::session_drive::InputWaiter>
+        = StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
     where
         Self: 'static;
 
@@ -331,7 +331,8 @@ impl<N: CountKind> PipeShape<N> {
             self.tx_capacity,
         )?;
         heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&pipe))?.open(|place| {
-            let link = link_over_in(place, pipe, rx, tx);
+            let link =
+                link_over_in::<_, _, _, crate::session_drive::WaitsInLoop>(place, pipe, rx, tx);
             if self.owner_waits {
                 link.wait_by_owner();
             }
