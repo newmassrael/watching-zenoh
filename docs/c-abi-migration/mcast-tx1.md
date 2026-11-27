@@ -909,3 +909,74 @@ The switch is one change across three crates, and these are its parts as the cod
 
 Next: the switch above, then the D2 capability rows (they claim the driver's behaviour, so they
 land after the driver is what sends), T3c with the gate widening of 17.1, F8b.
+
+## 20. The switch's first pieces, as landed, and the stage as it is to be written
+
+- **A send that may not wait.** `GroupTx::send_at_once` asks for room with a wait of zero and
+  drops a message at once behind a sender that holds its conduit, whatever its congestion
+  control; `send` and it are one body (`send_within`). A reply the group's own step answers
+  runs inside the wait a sender of the group waits with, so the stage sends replies with it.
+- **The counters' home is readable.** `GroupTx::stats` (`transport-stats`) answers the
+  `TransportStats` the walk's emit counts into; the stage counts its network messages there,
+  and the pump's receive and beacon counts are to move there through the stage's object, so the
+  face's `Rc<TransportStats>` goes with the switch.
+- **The JOIN's numbers are written from outside.** `MulticastTxConduits::set_next` sets the
+  next number of a conduit's channel on its ring, so the stage writes `GroupTx::next_sn` of each
+  conduit and channel, and the held frame's number on its lane, into the announcer the JOIN is
+  encoded from.
+- **The driver's answers past the walk.** `group_drive::HeldFrame` (`holds`, `offer_held`,
+  `lost`, `held_lane` with the hold) is implemented by `GroupDriver` and by a
+  `CellRc` of anything that implements it, the counted handle the engine keeps before
+  `into_sink`. The step's `offer_held` waits on nothing. A send the stack failed is counted
+  (`lost`), a full socket's refusal is not.
+- **A dead variant in a leg without `tx-probe`.** `UnicastPush::Chain` is made only by a probe,
+  which only `tx-probe` has; it and `Dispatched::Chain` are gated on `transport-fragmentation`
+  and `tx-probe`, and so are their two match arms.
+
+Held by `bundle_tests::group_tx_tests::a_message_sent_at_once_asks_for_room_with_no_wait` (red
+if the at-once send asks with the message's own wait, or is answered pushed on a full link),
+`sn::tests::mcast_tx_conduits_advertise_a_next_set_from_outside` (red if the set writes the
+other channel or leaves a number past the ring), and `group_drive::driver::tests`:
+`a_frame_a_send_failed_is_lost_and_counted` (red if a failure is not counted, counted twice, or
+held) and, with the hold, `a_held_frame_is_offered_again_by_the_step_without_a_wait` (red if the
+step's offer waits, lets a refused frame go, or the counted handle answers another driver).
+
+Expected: 0 bytes on every case (no build calls the new items); receive Ir none.
+
+### 20.1 The stage, as it is to be written
+
+`GroupTxStage<R: SessionRuntime, D: HeldFrame>` in place of today's, `Rc` of `GroupTx<R>` (made
+by the stage from the sink, numbered from 0, its limits read off `MulticastParams`:
+`frame_budget()`, `mask_from_res(seq_num_res)`, `is_qos`, `compression`, `tx_queue`, and no
+bound on a chain, as the group's walk set none), the driver handle `D`, the parameters, a drop
+count per conduit and the replies' drop count:
+
+- `push_encoded(message)` is `GroupTx::send` of `MulticastTxMeta::of_encoded(..).group_message`
+  with the message's body: pushed is counted as a network message; congested or held is a drop
+  of its conduit; refused is answered; an error of the link (a link the task has not opened) is
+  answered pushed, lost with the link, as today's stage answers a push on an ended group. The
+  pace parameter goes: the driver waits with its own.
+- A reply is admitted while `quota.admits(holds + 1)` (the held frame is the one datagram a
+  hold keeps out) and sent with `send_at_once`; one refused for want of a slot or of room is
+  counted in `dropped`. The `MulticastReplyEnqueue` forms stay as they are, over that body.
+- The pump's object (`GroupTxAnswers`): `offer_held`, `holds`, `lost`, `advertised`
+  (`set_next` of every conduit and channel, then the held lane's number), `has_reply_slot`,
+  `admit_reply`, the window's flush and the counters. The pump holds it as `Rc<dyn ..>`; its
+  `write` and `offer_held(transport)` calls go, since the driver sends at once.
+- The batch window is `GroupTx`'s (`transport-batching` of the core). `wz-session-mcu` gets a
+  `transport-batching` feature forwarding the core's, which `wz-capi-coop` names (it always
+  enables the core's), gating the stage's `batch_*` and the pump's flush at the beacon and the
+  Close; a new feature name runs the census, no-allocator and prose-name gates.
+- What goes with the switch: `Lanes`, `LaneRing`, `Record`, `next_out`, `StageQueue`,
+  `Staged`, `Writer`, `Through`, `SendNow`, `GroupLink::write_staged` and `push_encoded`,
+  the face's `write_staged` and its callers (`engine.rs` `group.write_staged()`), and the
+  stage's tests of lanes and staging; the tests of the JOIN's numbers, the quota and the counters
+  are written again over the driver.
+- Open: without the hold a reply sent at once on a full socket still waits inside the driver's
+  send (`tx_slot_send` waits on the pace); in the round form that pace runs the session's tasks
+  from inside the group's own. The round form builds the hold by default, so the combination is
+  a build that names the round form and leaves the hold out, and wants a ruling: refuse it, or
+  let a send that asks no room drop on a full socket.
+
+Next: the stage of 20.1 with the pump's object and the engine in one change, then the D2
+capability rows, T3c with the gate widening of 17.1, F8b.
