@@ -411,9 +411,16 @@ pub enum AdvancedPublisherError {
     /// non-expression on the wire and no caller could learn it.
     InvalidAdvKeyexpr(wz_session_core::keyexpr_canon::OutboundKeyexprError),
     /// The plane the publisher was declared on could not declare one of its
-    /// entities, for a reason of its own — a key table out of ids, say. The
-    /// plane names the reason; a runtime session never raises this.
-    Plane(String),
+    /// entities, for a reason of its own — a key table out of ids, say: which
+    /// entity, and the result code the plane's C ABI gave for it. A runtime
+    /// session never raises this.
+    Plane {
+        /// The entity the plane could not declare: `"publisher"`, `"cache queryable"`,
+        /// `"liveliness token"` or `"beacon publisher"`.
+        entity: &'static str,
+        /// The result code of the plane's C ABI for the refusal.
+        code: i8,
+    },
     /// The session has handed out every `u32` entity id a publisher's
     /// `SourceInfo` can carry (`commons/zenoh-protocol/src/core/mod.rs` @
     /// `pub type EntityId = u32;`). Upstream's counter wraps onto ids a live

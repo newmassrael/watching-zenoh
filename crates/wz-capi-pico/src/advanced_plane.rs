@@ -68,9 +68,10 @@ impl PicoPlane {
         }
     }
 
-    /// What the plane names a failed declaration.
-    fn refusal(what: &str, code: ZResult) -> AdvancedPublisherError {
-        AdvancedPublisherError::Plane(format!("{what}: pico result {code}"))
+    /// What the plane names a failed declaration: the entity, and the code the door that declares
+    /// it gave.
+    fn refusal(entity: &'static str, code: ZResult) -> AdvancedPublisherError {
+        AdvancedPublisherError::Plane { entity, code }
     }
 }
 
@@ -288,6 +289,19 @@ mod timer_tests {
     use core::any::TypeId;
 
     use super::*;
+
+    /// A refused declaration names its entity and the code its door gave, with no text made for
+    /// it. Turned red by a refusal that loses the door's code.
+    #[test]
+    fn a_refusal_names_the_entity_and_the_doors_code() {
+        assert!(matches!(
+            PicoPlane::refusal("cache queryable", crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY),
+            AdvancedPublisherError::Plane {
+                entity: "cache queryable",
+                code: crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
+            }
+        ));
+    }
 
     /// The heartbeat's job holds the session's engine as the session does, not as the port's
     /// object of periodic jobs, so no table of the engine's jobs is made for it.
