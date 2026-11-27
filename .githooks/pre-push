@@ -1268,6 +1268,10 @@ round_fed_gates=(
     # Every crate is read by a slice of the logic census or excluded with a reason.
     # Fed by the tracked crate manifests and the census table and slices; a text read.
     "logic_census_coverage_gate.py --check"
+    # A test module of the covered crates reaches no wall clock, host socket, thread of its own,
+    # host entropy or process unless its row of the system layer's table says why. Fed by the
+    # crates' test modules and docs/deterministic-tests/system-layer.tsv; a text read, no build.
+    "deterministic_test_layer_gate.py --check"
     "expired_blocker_lint.py"
     "reason_citation_gate.py"
     # Items 221 and 255 -- a `path:LINE` citation of this tree in a source or script

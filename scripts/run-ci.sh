@@ -2402,6 +2402,14 @@ layer_c0_test_discipline() {
     # deleting one row of the real table.
     _runci_leg logic_census_coverage_gate.selftest -- python3 scripts/lib/logic_census_coverage_gate.py --selftest
     _runci_leg logic_census_coverage_gate --after logic_census_coverage_gate.selftest -- python3 scripts/lib/logic_census_coverage_gate.py --check
+    # The deterministic test layer (docs/deterministic-tests.md section 5). A unit test is a
+    # function of its script and its seed: a test module of the covered crates reaches no wall
+    # clock, host socket, thread of its own, host entropy or process, directly or through the
+    # helpers it takes from another test module, unless its row of
+    # docs/deterministic-tests/system-layer.tsv declares it with a reason. A row whose module
+    # moved to the simulated world is stale.
+    _runci_leg deterministic_test_layer_gate.selftest -- python3 scripts/lib/deterministic_test_layer_gate.py --selftest
+    _runci_leg deterministic_test_layer_gate --after deterministic_test_layer_gate.selftest -- python3 scripts/lib/deterministic_test_layer_gate.py --check
     # The completeness scoreboard (docs/completeness-scoreboard.md): four criteria by which wz is
     # held to be more complete than zenoh-pico, each a figure read from the gate or the lane that
     # computes it and held to its row of deploy/completeness_ratchet.json. A figure worse than its
