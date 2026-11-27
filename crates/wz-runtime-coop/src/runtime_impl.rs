@@ -105,6 +105,8 @@ use wz_runtime_core::Runtime;
 #[cfg(not(feature = "session-slot"))]
 use wz_runtime_core::RuntimeError;
 
+#[cfg(not(feature = "session-slot"))]
+use crate::const_layout;
 #[cfg(feature = "session-slot")]
 use crate::executor::TaskTable;
 use crate::executor::{ExecutorState, TaskJoin};
@@ -377,19 +379,22 @@ impl PlacedParts {
             }
         };
         let layout = kept::Shared::<RuntimeInner<C>>::layout();
-        let Ok((layout, store)) = layout.extend(kept::Shared::<TaskStore>::layout()) else {
+        let Some((layout, store)) =
+            const_layout::extend(layout, kept::Shared::<TaskStore>::layout())
+        else {
             return None;
         };
-        let Ok((layout, block)) = layout.extend(laid.layout()) else {
+        let Some((layout, block)) = const_layout::extend(layout, laid.layout()) else {
             return None;
         };
-        let Ok(timer_entries) = Layout::array::<TimerSlot>(rows.timers) else {
+        let Some(timer_entries) = const_layout::array::<TimerSlot>(rows.timers) else {
             return None;
         };
-        let Ok((layout, timers)) = layout.extend(timer_entries) else {
+        let Some((layout, timers)) = const_layout::extend(layout, timer_entries) else {
             return None;
         };
-        let Ok((layout, set)) = layout.extend(crate::local::CoopLocalSet::<C>::owner_layout())
+        let Some((layout, set)) =
+            const_layout::extend(layout, crate::local::CoopLocalSet::<C>::owner_layout())
         else {
             return None;
         };
@@ -400,7 +405,7 @@ impl PlacedParts {
             timers,
             set,
             laid,
-            layout: layout.pad_to_align(),
+            layout: const_layout::pad_to_align(layout),
         })
     }
 }

@@ -76,6 +76,8 @@ use wz_runtime_core::RuntimeError;
 
 use crate::atomic::{AtomicBool, Ordering};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::const_layout;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::kept::{Kept, Shared};
 
 pub use crate::yield_now::{yield_now, YieldNow};
@@ -402,9 +404,9 @@ impl StoreLayout {
     /// (`crate::runtime_impl::CoopRuntime::placed_layout`).
     pub(crate) const fn of<const AT_MOST_ONE: bool>(count: usize, bytes: Option<usize>) -> Self {
         let count = if AT_MOST_ONE && count > 1 { 1 } else { count };
-        let (count, cells_layout) = match Layout::array::<TaskCell>(count) {
-            Ok(layout) => (count, layout),
-            Err(_) => (0, Layout::new::<[TaskCell; 0]>()),
+        let (count, cells_layout) = match const_layout::array::<TaskCell>(count) {
+            Some(layout) => (count, layout),
+            None => (0, Layout::new::<[TaskCell; 0]>()),
         };
         let reserved = match bytes {
             Some(bytes) => Self::bytes_after(cells_layout, count, bytes),
@@ -416,7 +418,7 @@ impl StoreLayout {
         };
         Self {
             count,
-            layout: layout.pad_to_align(),
+            layout: const_layout::pad_to_align(layout),
             reserved,
         }
     }
@@ -433,12 +435,12 @@ impl StoreLayout {
         let Some(tail_bytes) = stride.checked_mul(count) else {
             return None;
         };
-        let Ok(tail) = Layout::from_size_align(tail_bytes, CELL_ALIGN) else {
+        let Some(tail) = const_layout::layout(tail_bytes, CELL_ALIGN) else {
             return None;
         };
-        match cells.extend(tail) {
-            Ok((layout, offset)) => Some((layout, offset, stride, bytes)),
-            Err(_) => None,
+        match const_layout::extend(cells, tail) {
+            Some((layout, offset)) => Some((layout, offset, stride, bytes)),
+            None => None,
         }
     }
 
