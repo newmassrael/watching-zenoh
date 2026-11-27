@@ -13050,7 +13050,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // this first ask spends from it, and a fragment chain spends the rest.
         #[cfg(feature = "tx-probe")]
         let probing = stage == DispatchStage::Probe;
-        #[cfg(not(feature = "tx-probe"))]
+        #[cfg(all(feature = "alloc", not(feature = "tx-probe")))]
         let probing = false;
         let deadline = core::cell::Cell::new(if covered {
             PushDeadline::covered(droppable, &self.params.tx_queue)

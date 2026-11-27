@@ -7380,7 +7380,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// How many of the session's links owe their stack the rest of a frame it took only in part,
     /// each holding an outbound slot for it. Compiled where its readers are (`tests::tx_pool`).
-    #[cfg(all(test, feature = "std", feature = "listen"))]
+    #[cfg(all(test, feature = "std", feature = "listen", feature = "tx-probe"))]
     pub(crate) fn links_owing(&self) -> usize {
         self.live().map_or(0, |core| {
             core.0
