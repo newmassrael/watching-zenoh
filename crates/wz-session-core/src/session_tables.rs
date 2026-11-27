@@ -1896,6 +1896,9 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     /// zero bytes hold no deadline: kept as gets begin and stop standing, so a driver's wait reads
     /// it with no walk ([`Self::next_get_deadline`]).
     get_due: u64,
+    /// How many gets their answer or their deadline ended and that are not retired yet: what a
+    /// delivery that hands out their ends reads with no walk ([`Self::owes_ended_get`]).
+    ended_gets: u16,
     /// What the consolidating gets hold back (`admit_reply`).
     #[cfg(feature = "storage-profile")]
     held: crate::reply_hold::HeldReplies<PendingGetHandle, P>,
@@ -2444,6 +2447,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             matching: <F::FilterPresence as Presence>::empty::<MatchingListeners<F, P>>(),
             pending_gets: <F::GetPresence as Presence>::empty::<PendingGets<F, P>>(),
             get_due: 0,
+            ended_gets: 0,
             #[cfg(feature = "storage-profile")]
             held: crate::reply_hold::HeldReplies::default(),
         }
@@ -3670,6 +3674,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         }
         row.end = GetEnd::Answered;
         let deadline = row.deadline;
+        self.ended_gets = self.ended_gets.saturating_add(1);
         self.raise_get_due(deadline);
         Some(LegEnded::Over)
     }
@@ -3688,8 +3693,15 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         }
         row.end = GetEnd::TimedOut;
         let deadline = row.deadline;
+        self.ended_gets = self.ended_gets.saturating_add(1);
         self.raise_get_due(deadline);
         true
+    }
+
+    /// Whether a get ended by its answer or its deadline is still to be handed out and retired:
+    /// what a delivery reads before it walks the gets for it ([`Self::next_ended_get`]).
+    pub fn owes_ended_get(&self) -> bool {
+        self.ended_gets != 0
     }
 
     /// The next get at or after `cursor` that ended, and how: what the caller hands out (what it
@@ -3720,8 +3732,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             return None;
         }
         let removed = entry.remove();
-        if let Some(deadline) = stood {
-            self.raise_get_due(deadline);
+        match stood {
+            Some(deadline) => self.raise_get_due(deadline),
+            None => self.ended_gets = self.ended_gets.saturating_sub(1),
         }
         removed
     }
@@ -4336,6 +4349,7 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
                 rows.pending_gets,
             ),
             get_due: 0,
+            ended_gets: 0,
             #[cfg(feature = "storage-profile")]
             held: lend
                 .lend_with(|arena| crate::reply_hold::HeldReplies::lent(arena, rows.held_replies)),
@@ -4417,6 +4431,7 @@ impl<F: RowCallbacks> SessionTables<F, crate::bounded::OnUse> {
                 PendingGets<F, crate::bounded::OnUse>,
             >(rows.pending_gets),
             get_due: 0,
+            ended_gets: 0,
             held: crate::reply_hold::HeldReplies::counted(rows.held_replies),
         }
     }

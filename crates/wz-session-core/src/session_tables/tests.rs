@@ -5574,3 +5574,34 @@ fn an_on_use_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last
     assert!(tables.release_subscriber(sub.handle).is_some());
     assert!(!tables.subscribers().holds_slot(sub.handle));
 }
+
+/// The tables count the gets an answer or a deadline ended until each is retired, so a delivery
+/// reads whether an end is owed with no walk; a get retired while it stands (its asker cancelled
+/// it) is no end owed. Turned red by an end left uncounted in `end_leg` or `time_out_get`, by
+/// `retire_get` not taking an ended get off the count, or by it taking a standing get off it.
+#[test]
+fn the_tables_count_the_ended_gets_until_each_is_retired() {
+    let mut tables = Tables::new();
+    let answered = tables
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 100, 7)
+        .unwrap();
+    let timed = tables
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 50, 8)
+        .unwrap();
+    let cancelled = tables
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 70, 9)
+        .unwrap();
+    assert!(!tables.owes_ended_get(), "no get ended");
+    assert!(tables.retire_get(cancelled.handle).is_some());
+    assert!(
+        !tables.owes_ended_get(),
+        "a get retired standing is no end owed"
+    );
+    assert_eq!(tables.end_leg(answered.handle), Some(LegEnded::Over));
+    assert!(tables.time_out_get(timed.handle));
+    assert!(tables.owes_ended_get());
+    assert!(tables.retire_get(answered.handle).is_some());
+    assert!(tables.owes_ended_get(), "one end is still owed");
+    assert!(tables.retire_get(timed.handle).is_some());
+    assert!(!tables.owes_ended_get(), "every end was handed out");
+}
