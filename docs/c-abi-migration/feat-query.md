@@ -115,7 +115,7 @@ bytes): Q3 and Q4 together take 10,474, not their sum.
 | **Q4 (landed)** | one form of each sent message: the group's reply stage writes through the lent `ResponseWriter`, as a link's does, and no path of a cooperative build sends an owned `Request`; the owned encoders over `Heap` stay the tests' reference | -4,000 to -5,800 (the 5,791 of owned forms, less what the stage's window writer adds) | 0: the client's own `MsgPutWire::write_source::<MsgPutIn<Heap>, TxSink>` is its put's and stays | none: a put does not take the stage's path | `tests::group::asked` (both tests); `lent_response`'s owned-against-lent tests |
 | **Q5 (landed)** | one Put body reader: a Reply's Put and Del, and a Request's, read by the reader a Push's body is read with (`network_message/body_read.rs`), as zenoh-pico's `_z_reply_decode` and `_z_request_decode` call `_z_push_body_decode`; the Response and the Request read by readers of their own that judge each chain as they read it (section 3.1) | -1,500 to -3,000, to measure: `MsgPutView::read_with`, `ReplyView::read_with`, the generated envelopes and the admission's walks after the read, less the two readers and their instances of the chain and Put readers | 0 bytes and 0 Ir: no `codec-request` or `codec-response` there | none on a Push: its instances of the body readers keep their one caller each, and `read_key` is held in place | `network_message::response_read::tests` and `network_message::request_read::tests` (every shape, a reused binding, every cut and every damaged byte against the generated decode and its admission; a Reply's Put against a Push's of the same bytes), and `push_read`'s tests as before |
 | Q6 | gates by role: `query` alone does not turn on `declare-queryable`, the Query half of the Request's reader (pending O3) or the group's reply stage; `codec-request` and `codec-response` split into a read and a write half; the get's cancellation fan under `unstable-api` | `pico-api-coop-nostd` 0 (every role is on); a build that only asks (`query` without `queryable`, zenoh-pico's `Z_FEATURE_QUERY` 1 and `Z_FEATURE_QUERYABLE` 0) -12,000 to -16,000 | 0 | none | the C1h feature matrix compiling each half alone; a requester-only build's test that a peer's Query is answered as O3 decides |
-| Q7 | one reply method: `ReplyOut` takes one record of the reply's parts (key, payload, encoding, timestamp, attachment, source info, Put or Del) where it has a method for each combination, the C doors filling the record as zenoh-pico's fill `_z_send_reply`'s arguments | -3,000 to -4,500 | 0 | none: a reply is built once a call either way | `query_sink::reply_out_contract_covers_del_err_and_responder_roundtrip` and the doors' reply tests, each combination one case |
+| **Q7 (the responder's half landed)** | one reply method: `ReplyOut` takes one record of the reply's parts (key, payload, encoding, timestamp, attachment, source info, Put or Del) where it has a method for each combination, the C doors filling the record as zenoh-pico's fill `_z_send_reply`'s arguments. Landed: the responder's reply methods are one staging body (`QueryResponder::stage`), each method naming only its record (section 3.1); not landed: the contract itself | -3,000 to -4,500 for both halves; the responder's half -1,500 to -3,000, to measure (the admission, the clock's stamp and the staged reply's envelope once, where each of 14 methods held them) | 0 | none: a reply is built once a call either way; a queryable's reply takes one direct call more | `query::tests::a_keyed_reply_the_query_refuses_takes_no_time_of_the_clock` (the staging body admits before it stamps), the responder's stamp tests, `query_sink::reply_out_contract_covers_del_err_and_responder_roundtrip` and the doors' reply tests |
 | Q8 | read the unread rows (Q-a, Q-i, R-b's doors, R-c) body by body from the line tables, as arch-mono read `run`, on the API twin's explain report once `--explain pico-api-coop-nostd` reads one | none | | | |
 
 ### 3.1 What the lane after Q1 landed, and how it differs from the rows above
@@ -167,7 +167,21 @@ estimates, to be read by the cost gate.
   the one caller each has, and `read_key` is held in place in every reader: the walk of a Push
   is compiled as before. Expected: `pico-api-coop-nostd` -1,500 to -3,000, to measure;
   `pico-client-coop-nostd` byte for byte.
-- **Q7** is not landed: it changes the `ReplyOut` contract every runtime and test sink implements.
+- **Q7** landed its responder's half. Each of `QueryResponder`'s 14 staging methods held its own
+  copy of the key's admission, the clock's stamp and the staged reply's envelope; they are one
+  body now (`QueryResponder::stage`), handed what each reply names (`Asked`: the key, a QoS that
+  overrides the query's, whether the clock stamps it, the Put, Del or Err), and the admission
+  still comes before the stamp, so a refused reply takes no time of the clock. The `ReplyOut`
+  methods that forward to them are unchanged, so no runtime, door or test sink changes.
+  The contract half is not landed, and it is a lane of its own: `ReplyOut` has 19 implementors
+  in 8 crates (`QueryResponder`, the tokio runtime's sinks, the admin space's, the advanced
+  cache's, the C ABIs' taps, the slot client's, and the test sinks) and its methods close to
+  200 call sites; the methods do not differ only by the parts they carry (a bound reply needs
+  no admission, the plain forms are stamped by the clock and the stamped and metadata forms are
+  not, `reply`, `reply_del` and `reply_err` answer nothing and the keyed forms a refusal), so
+  the record has to say each of those, and every implementor that overrides a method today reads
+  it instead. What it adds over the responder's half is the 14 forwarding bodies and their
+  entries in the trait's table.
 
 ## 4. Owner decisions: each behaviour zenoh-pico does not have is a switch
 
@@ -220,5 +234,9 @@ before its Final), as the send's switches are held (`scripts/lib/nondefault-test
   `codec-push,rx-push,session-unicast` (each reader alone, and the Request without `request-put-del`),
   and `--no-default-features --features alloc,codec-response --all-targets`. In the library of
   `pico-api-coop-nostd`, no `MsgPutView::read_with` or `ReplyView::read_with` body.
+- Q7: `cargo test -p wz-session-core --lib --features query-queryable,query-attachment,query-selector-parameters,query-reply-err,pubsub-timestamp query::tests::`
+  (the responder's stamp, key and refusal tests, the new one among them), and
+  `cargo test -p wz-session-core --lib --features query-queryable query_sink::`; clippy of
+  `wz-session-core` with and without `query-reply-err` and `pubsub-timestamp`.
 - `pico-api-coop-nostd` lower by the steps' sums; `pico-client-coop-nostd` byte for byte and its
   receive Ir as before (no step reaches the client's put or its receive).

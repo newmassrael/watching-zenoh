@@ -1467,6 +1467,17 @@ fn literal_key(keyexpr: &str) -> LiteralKey<'_> {
     keyexpr
 }
 
+/// A reply a method of [`QueryResponder`] asks its one staging body for: the key it is staged
+/// under (`None`: the query's own, which needs no admission), the QoS that overrides the query's,
+/// whether the responder's clock stamps it when it states no timestamp, and what it is.
+#[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+struct Asked<'r> {
+    key: Option<&'r str>,
+    qos: Option<QosLevel>,
+    stamped: bool,
+    kind: PartsKind<'r>,
+}
+
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl<'a> QueryResponder<'a> {
     /// R311li — public constructor: the Session-tier deferred queryable
@@ -1586,6 +1597,54 @@ impl<'a> QueryResponder<'a> {
         Err(ReplyError::KeyExprNotMatch)
     }
 
+    /// Stage the reply `asked` describes: under the query's own key, or under one the query
+    /// admits; stamped by the responder's clock where it is asked to be and states no timestamp of
+    /// its own; at the QoS it overrides, or the query's. Every reply method of the responder is
+    /// this one body, each naming only what its reply carries.
+    #[inline(never)]
+    fn stage(&mut self, asked: Asked<'_>) -> Result<(), ReplyError> {
+        let keyexpr = match asked.key {
+            Some(keyexpr) => {
+                self.admit(keyexpr)?;
+                keyexpr
+            }
+            None => key_str(&self.keyexpr_literal),
+        };
+        // Minted after the admission, so a refused reply takes no time of the clock.
+        let stamp = if asked.stamped {
+            self.auto_stamp()
+        } else {
+            None
+        };
+        let kind = match asked.kind {
+            PartsKind::Reply {
+                body,
+                encoding,
+                timestamp,
+                attachment,
+                source_info,
+            } => PartsKind::Reply {
+                body,
+                encoding,
+                timestamp: timestamp
+                    .or_else(|| stamp.as_ref().map(crate::reply_stage::ReplyStamp::parts)),
+                attachment,
+                source_info,
+            },
+            #[cfg(feature = "query-reply-err")]
+            err @ PartsKind::Err { .. } => err,
+        };
+        self.replies.stage_reply(ReplyParts {
+            rid: self.rid,
+            keyexpr,
+            responder: responder_parts(&self.responder),
+            qos: asked.qos.unwrap_or(self.qos),
+            #[cfg(feature = "pubsub-ts-stack")]
+            ts_stack: self.ts_stack.as_ref(),
+            kind,
+        })
+    }
+
     /// Emit a Put-form data reply with the given payload bytes.
     /// Multiple calls accumulate; the registry passes the
     /// caller-owned `Vec<QueryReply>` back so each push is one
@@ -1597,18 +1656,14 @@ impl<'a> QueryResponder<'a> {
     /// ([`ReplyError::PayloadTooLarge`], [`ReplyError::StagingFull`]) and
     /// counted, and nothing is staged. The growable backing refuses nothing.
     pub fn send_reply(&mut self, payload: &[u8]) -> Result<(), ReplyError> {
-        let stamp = self.auto_stamp();
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr: key_str(&self.keyexpr_literal),
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: None,
+            qos: None,
+            stamped: true,
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: None,
-                timestamp: stamp.as_ref().map(crate::reply_stage::ReplyStamp::parts),
+                timestamp: None,
                 attachment: None,
                 source_info: None,
             },
@@ -1628,19 +1683,14 @@ impl<'a> QueryResponder<'a> {
     /// refused with [`ReplyError::KeyExprNotMatch`] unless the query carried
     /// `_anyke`, and nothing is staged — as for every keyed method here.
     pub fn send_reply_keyed(&mut self, keyexpr: &str, payload: &[u8]) -> Result<(), ReplyError> {
-        self.admit(keyexpr)?;
-        let stamp = self.auto_stamp();
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr,
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: Some(keyexpr),
+            qos: None,
+            stamped: true,
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: None,
-                timestamp: stamp.as_ref().map(crate::reply_stage::ReplyStamp::parts),
+                timestamp: None,
                 attachment: None,
                 source_info: None,
             },
@@ -1665,14 +1715,10 @@ impl<'a> QueryResponder<'a> {
         encoding: Option<&EncodingHint>,
         timestamp: &TimestampHint,
     ) -> Result<(), ReplyError> {
-        self.admit(keyexpr)?;
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr,
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: Some(keyexpr),
+            qos: None,
+            stamped: false,
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: encoding.map(EncodingParts::of),
@@ -1704,14 +1750,10 @@ impl<'a> QueryResponder<'a> {
         timestamp: &TimestampHint,
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
-        self.admit(keyexpr)?;
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr,
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: Some(keyexpr),
+            qos: None,
+            stamped: false,
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: encoding.map(EncodingParts::of),
@@ -1745,14 +1787,10 @@ impl<'a> QueryResponder<'a> {
         encoding: Option<&EncodingHint>,
         attachment: &[u8],
     ) -> Result<(), ReplyError> {
-        self.admit(keyexpr)?;
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr,
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: Some(keyexpr),
+            qos: None,
+            stamped: false,
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: encoding.map(EncodingParts::of),
@@ -1779,14 +1817,10 @@ impl<'a> QueryResponder<'a> {
         payload: &[u8],
         encoding: Option<&EncodingHint>,
     ) -> Result<(), ReplyError> {
-        self.admit(keyexpr)?;
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr,
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: Some(keyexpr),
+            qos: None,
+            stamped: false,
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: encoding.map(EncodingParts::of),
@@ -1806,14 +1840,10 @@ impl<'a> QueryResponder<'a> {
         payload: &[u8],
         encoding: EncodingParts<'_>,
     ) -> Result<(), ReplyError> {
-        self.admit(keyexpr)?;
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr,
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: Some(keyexpr),
+            qos: None,
+            stamped: false,
             kind: PartsKind::Reply {
                 body: PartsBody::Put(payload),
                 encoding: Some(encoding),
@@ -1829,18 +1859,14 @@ impl<'a> QueryResponder<'a> {
     /// (the inner `MsgDel` body carries only a header + optional
     /// timestamp). Fallible for the reason [`Self::send_reply`] is.
     pub fn send_reply_del(&mut self) -> Result<(), ReplyError> {
-        let stamp = self.auto_stamp();
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr: key_str(&self.keyexpr_literal),
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: None,
+            qos: None,
+            stamped: true,
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
-                timestamp: stamp.as_ref().map(crate::reply_stage::ReplyStamp::parts),
+                timestamp: None,
                 attachment: None,
                 source_info: None,
             },
@@ -1870,19 +1896,14 @@ impl<'a> QueryResponder<'a> {
     /// counterpart takes an arbitrary keyexpr
     /// (`~/zenoh-pico/include/zenoh-pico/api/primitives.h:2846`).
     pub fn send_reply_keyed_del(&mut self, keyexpr: &str) -> Result<(), ReplyError> {
-        self.admit(keyexpr)?;
-        let stamp = self.auto_stamp();
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr,
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: Some(keyexpr),
+            qos: None,
+            stamped: true,
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
-                timestamp: stamp.as_ref().map(crate::reply_stage::ReplyStamp::parts),
+                timestamp: None,
                 attachment: None,
                 source_info: None,
             },
@@ -1907,13 +1928,10 @@ impl<'a> QueryResponder<'a> {
         &mut self,
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr: key_str(&self.keyexpr_literal),
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: None,
+            qos: None,
+            stamped: false,
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
@@ -1948,14 +1966,10 @@ impl<'a> QueryResponder<'a> {
         timestamp: &TimestampHint,
         source_info: Option<&SourceInfo>,
     ) -> Result<(), ReplyError> {
-        self.admit(keyexpr)?;
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr,
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: Some(keyexpr),
+            qos: None,
+            stamped: false,
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
@@ -1986,7 +2000,6 @@ impl<'a> QueryResponder<'a> {
         payload: &[u8],
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
-        self.admit(keyexpr)?;
         // R3062 -- a payload that is a buffer of shared memory is staged AS the buffer, not as
         // a copy of its bytes: the copy is what the descriptor exists to avoid, and the
         // bytes stay one call away on the handle for a peer that cannot map the segment.
@@ -1997,15 +2010,12 @@ impl<'a> QueryResponder<'a> {
         };
         #[cfg(not(feature = "transport-shm"))]
         let body = PartsBody::Put(payload);
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr,
-            responder: responder_parts(&self.responder),
+        self.stage(Asked {
+            key: Some(keyexpr),
             // R2596 — a per-reply override BEATS the query's QoS; absent one,
             // the reply inherits, which is what R2594 built.
-            qos: meta.qos.unwrap_or(self.qos),
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+            qos: meta.qos,
+            stamped: false,
             kind: PartsKind::Reply {
                 body,
                 encoding: meta.encoding,
@@ -2046,16 +2056,12 @@ impl<'a> QueryResponder<'a> {
         keyexpr: &str,
         meta: ReplyMeta<'_>,
     ) -> Result<(), ReplyError> {
-        self.admit(keyexpr)?;
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr,
-            responder: responder_parts(&self.responder),
+        self.stage(Asked {
+            key: Some(keyexpr),
             // R2596 — the Del arm honours the override too: a cache replays a
             // cached DELETE on its own terms exactly as it replays a Put.
-            qos: meta.qos.unwrap_or(self.qos),
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+            qos: meta.qos,
+            stamped: false,
             kind: PartsKind::Reply {
                 body: PartsBody::Del,
                 encoding: None,
@@ -2084,13 +2090,10 @@ impl<'a> QueryResponder<'a> {
         schema: Option<&[u8]>,
         payload: &[u8],
     ) -> Result<(), ReplyError> {
-        self.replies.stage_reply(ReplyParts {
-            rid: self.rid,
-            keyexpr: key_str(&self.keyexpr_literal),
-            responder: responder_parts(&self.responder),
-            qos: self.qos,
-            #[cfg(feature = "pubsub-ts-stack")]
-            ts_stack: self.ts_stack.as_ref(),
+        self.stage(Asked {
+            key: None,
+            qos: None,
+            stamped: false,
             kind: PartsKind::Err {
                 encoding: encoding_id.map(|id| (id, schema)),
                 payload,
@@ -5210,6 +5213,39 @@ mod tests {
         }
         assert_eq!(staged_timestamps(&stage), [None]);
         assert_eq!(clock.next.get(), 100);
+    }
+
+    /// A keyed reply the query does not admit is refused before the clock is asked: it stages
+    /// nothing and takes no time of the clock, so the next plain reply takes its first stamp.
+    /// Turned red by a staging body (`QueryResponder::stage`) that mints the stamp before it
+    /// admits the key.
+    #[cfg(feature = "pubsub-timestamp")]
+    #[test]
+    fn a_keyed_reply_the_query_refuses_takes_no_time_of_the_clock() {
+        let clock = CountingClock {
+            next: core::cell::Cell::new(100),
+            stamps: true,
+        };
+        let mut stage = ReplyStage::new();
+        {
+            let mut responder = responder_over(&mut stage);
+            responder.with_reply_clock(&clock);
+            assert_eq!(
+                responder.send_reply_keyed("other/x", b"v"),
+                Err(crate::query_sink::ReplyError::KeyExprNotMatch)
+            );
+            assert_eq!(
+                responder.send_reply_keyed_del("other/x"),
+                Err(crate::query_sink::ReplyError::KeyExprNotMatch)
+            );
+            responder.send_reply(b"w").unwrap();
+        }
+        assert_eq!(staged_timestamps(&stage), [Some((100, vec![0x2a]))]);
+        assert_eq!(
+            clock.next.get(),
+            101,
+            "the clock was asked once, for the admitted reply"
+        );
     }
 
     #[test]
