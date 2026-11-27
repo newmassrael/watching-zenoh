@@ -1,0 +1,13 @@
+impact = ["wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"]
+decision = '''
+The round that added send_bursts to each TCP direction carried that no capture of a real restart after an idle had been read through it. That residue is registered as debt-tcp-send-bursts-real-capture, active, with what closes it: a capture whose connection idles past its RTO and sends again, its listed bursts checked against the segments and acknowledgements read by hand from the same packets, or a consumer's report from real captures.
+'''
+changes = '''
+docs/.atomic/workspace.atomic.json: inventory entry debt-tcp-send-bursts-real-capture (status active, source open-debt register), through mnemosyne-cli add-inventory-entry.
+'''
+verification = '''
+mnemosyne-cli validate-workspace before and after the entry in the item's worktree: exit 0 both times, T1 orphans 14 and 14 (new +0), T3 warn 4 and 4, ledger entries 4706 and 4706, inventory 360 then 361.
+'''
+carry = '''
+None beyond the debt itself.
+'''
