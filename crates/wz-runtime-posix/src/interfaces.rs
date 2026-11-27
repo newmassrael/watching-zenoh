@@ -74,6 +74,145 @@ pub struct InterfaceRow {
     pub address: Option<IpAddr>,
 }
 
+#[cfg(unix)]
+impl InterfaceRow {
+    /// The row as an entry of the system's list reads.
+    fn entry(&self) -> Entry<'_> {
+        Entry {
+            name: self.name.as_bytes(),
+            up: self.up,
+            running: self.running,
+            multicast: self.multicast,
+            address: self.address,
+        }
+    }
+}
+
+/// One entry of the system's list, read where the list holds it: a row with its name borrowed,
+/// which is what a question that keeps no row needs.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct Entry<'a> {
+    name: &'a [u8],
+    up: bool,
+    running: bool,
+    multicast: bool,
+    address: Option<IpAddr>,
+}
+
+#[cfg(unix)]
+impl Entry<'_> {
+    /// The address a scouting window asks by from this entry: its IPv4 address, when the
+    /// interface can carry multicast (up, running and `IFF_MULTICAST`) and the address is not a
+    /// group it joined.
+    fn scouting_ipv4(&self) -> Option<Ipv4Addr> {
+        match self.address {
+            Some(IpAddr::V4(address))
+                if self.up && self.running && self.multicast && !address.is_multicast() =>
+            {
+                Some(address)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The first IPv4 address of every interface that can carry multicast, one for each interface, in
+/// the order of `entries`: an entry is taken when no earlier one of its interface was, which is
+/// asked of the entries themselves (as zenoh-pico's walk asks whether an interface was visited,
+/// `vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @ `_z_udp_posix_iface_was_visited`), so
+/// the question keeps no list of names.
+#[cfg(unix)]
+fn first_ipv4_of_each<'a>(entries: impl Iterator<Item = Entry<'a>> + Clone) -> Vec<Ipv4Addr> {
+    let mut addresses = Vec::new();
+    for (k, entry) in entries.clone().enumerate() {
+        let Some(address) = entry.scouting_ipv4() else {
+            continue;
+        };
+        let taken_before = entries
+            .clone()
+            .take(k)
+            .any(|earlier| earlier.name == entry.name && earlier.scouting_ipv4().is_some());
+        if !taken_before {
+            addresses.push(address);
+        }
+    }
+    addresses
+}
+
+/// The system's list as `getifaddrs` gives it, held until it is dropped, which gives it back.
+#[cfg(unix)]
+struct HostList {
+    head: *mut libc::ifaddrs,
+}
+
+#[cfg(unix)]
+impl HostList {
+    /// The host's list now, or `None` when `getifaddrs` could not read it.
+    fn read() -> Option<Self> {
+        let mut head: *mut libc::ifaddrs = core::ptr::null_mut();
+        // SAFETY: `getifaddrs` writes the head of a list it allocates through the out-pointer and
+        // returns 0 on success; on failure `head` is not read.
+        if unsafe { libc::getifaddrs(&mut head) } != 0 {
+            return None;
+        }
+        Some(Self { head })
+    }
+
+    /// Every entry of the list that names its interface, in the list's order.
+    fn entries(&self) -> HostEntries<'_> {
+        HostEntries {
+            at: self.head,
+            _list: core::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for HostList {
+    fn drop(&mut self) {
+        // SAFETY: `head` is the list a successful `getifaddrs` returned, given back once; no
+        // entry borrowed from it outlives the borrow of `self` it was read under.
+        unsafe { libc::freeifaddrs(self.head) };
+    }
+}
+
+/// A walk of a [`HostList`]'s entries.
+#[cfg(unix)]
+#[derive(Clone)]
+struct HostEntries<'a> {
+    at: *mut libc::ifaddrs,
+    _list: core::marker::PhantomData<&'a HostList>,
+}
+
+#[cfg(unix)]
+impl<'a> Iterator for HostEntries<'a> {
+    type Item = Entry<'a>;
+
+    fn next(&mut self) -> Option<Entry<'a>> {
+        while !self.at.is_null() {
+            // SAFETY: `at` is a node of the list the walk borrows, live until the list is dropped,
+            // and the list is not changed while it is walked.
+            let ifa = unsafe { &*self.at };
+            self.at = ifa.ifa_next;
+            if ifa.ifa_name.is_null() {
+                continue;
+            }
+            let flags = ifa.ifa_flags as libc::c_int;
+            return Some(Entry {
+                // SAFETY: a non-null `ifa_name` is the interface's NUL-terminated name, owned by
+                // the list the walk borrows.
+                name: unsafe { core::ffi::CStr::from_ptr(ifa.ifa_name) }.to_bytes(),
+                up: flags & libc::IFF_UP != 0,
+                running: flags & libc::IFF_RUNNING != 0,
+                multicast: flags & libc::IFF_MULTICAST != 0,
+                address: sockaddr_ip(ifa.ifa_addr),
+            });
+        }
+        None
+    }
+}
+
 /// The host's interfaces as the table lists them, in the table's order.
 #[cfg(unix)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -90,46 +229,25 @@ impl InterfaceTable {
 
     /// The host's table now, or `None` when `getifaddrs` could not read it.
     pub fn read() -> Option<Self> {
-        let mut head: *mut libc::ifaddrs = core::ptr::null_mut();
-        // SAFETY: `getifaddrs` writes the head of a list it allocates through the out-pointer and
-        // returns 0 on success; on failure `head` is not read.
-        if unsafe { libc::getifaddrs(&mut head) } != 0 {
-            return None;
-        }
+        let list = HostList::read()?;
         let mut rows: Vec<InterfaceRow> = Vec::new();
-        let mut cur = head;
-        while !cur.is_null() {
-            // SAFETY: `cur` is a node of the list the successful call above returned, live until
-            // `freeifaddrs`, and the list is not changed while it is walked.
-            let ifa = unsafe { &*cur };
-            cur = ifa.ifa_next;
-            if ifa.ifa_name.is_null() {
-                continue;
-            }
-            // SAFETY: a non-null `ifa_name` is the interface's NUL-terminated name, owned by the
-            // list.
-            let name_bytes = unsafe { core::ffi::CStr::from_ptr(ifa.ifa_name) }.to_bytes();
-            let name = String::from_utf8_lossy(name_bytes).into_owned();
+        for entry in list.entries() {
+            let name = String::from_utf8_lossy(entry.name).into_owned();
             // The table lists an interface once for each address it holds: its index is asked of
             // the system once.
             let index = match rows.iter().find(|row| row.name == name) {
                 Some(row) => row.index,
-                // SAFETY: `ifa_name` is NUL-terminated and live for the call, which only reads it.
-                None => unsafe { libc::if_nametoindex(ifa.ifa_name) },
+                None => index_of_name_bytes(entry.name),
             };
-            let flags = ifa.ifa_flags as libc::c_int;
             rows.push(InterfaceRow {
                 name,
                 index,
-                up: flags & libc::IFF_UP != 0,
-                running: flags & libc::IFF_RUNNING != 0,
-                multicast: flags & libc::IFF_MULTICAST != 0,
-                address: sockaddr_ip(ifa.ifa_addr),
+                up: entry.up,
+                running: entry.running,
+                multicast: entry.multicast,
+                address: entry.address,
             });
         }
-        // SAFETY: `head` is the list the successful call above returned, freed once; every row
-        // holds copies of what it read.
-        unsafe { libc::freeifaddrs(head) };
         Some(Self { rows })
     }
 
@@ -143,20 +261,7 @@ impl InterfaceTable {
     /// interface would reach no node the first does not, and a loopback has no `IFF_MULTICAST` on
     /// the hosts this crate is built for, so the flag test leaves it out.
     pub fn multicast_interface_addresses(&self) -> Vec<Ipv4Addr> {
-        let mut taken: Vec<&str> = Vec::new();
-        let mut addresses = Vec::new();
-        for row in &self.rows {
-            if !Self::carries_multicast(row) || taken.contains(&row.name.as_str()) {
-                continue;
-            }
-            if let Some(IpAddr::V4(address)) = row.address {
-                if !address.is_multicast() {
-                    taken.push(&row.name);
-                    addresses.push(address);
-                }
-            }
-        }
-        addresses
+        first_ipv4_of_each(self.rows.iter().map(InterfaceRow::entry))
     }
 
     /// Every unicast address, of either family, of every interface that can carry multicast, once
@@ -262,9 +367,29 @@ fn c_int_of(family: libc::sa_family_t) -> libc::c_int {
 
 /// The first IPv4 address of every interface that can carry multicast, read from the host's table
 /// now; `None` when it could not be read. See [`InterfaceTable::multicast_interface_addresses`].
+///
+/// The host's list is walked where the system holds it, and no row of it is copied: a scouting
+/// window, whose one question this is, makes no table.
 #[cfg(unix)]
 pub fn multicast_interface_addresses() -> Option<Vec<Ipv4Addr>> {
-    Some(InterfaceTable::read()?.multicast_interface_addresses())
+    Some(first_ipv4_of_each(HostList::read()?.entries()))
+}
+
+/// The system's index of the interface whose name is `name`, 0 for none: `name` is a name the
+/// system's list gave, so it holds no NUL, and a longer one than an interface's name can be is
+/// none.
+#[cfg(unix)]
+fn index_of_name_bytes(name: &[u8]) -> u32 {
+    if name.len() >= libc::IF_NAMESIZE {
+        return 0;
+    }
+    let mut text = [0u8; libc::IF_NAMESIZE];
+    let Some(into) = text.get_mut(..name.len()) else {
+        return 0;
+    };
+    into.copy_from_slice(name);
+    // SAFETY: `text` holds `name` and a NUL after it, and lives for the call, which only reads it.
+    unsafe { libc::if_nametoindex(text.as_ptr().cast()) }
 }
 
 /// Every unicast address of every interface that can carry multicast, read now; `None` when the
@@ -628,6 +753,38 @@ mod tests {
                 Some(table.multicast_interface_addresses()),
                 "the free function reads the same table"
             );
+        }
+
+        /// The walk of the host's list and the table read from it list the same entries in the
+        /// same order, and each entry's index is the one its name finds. Turned red by a walk that
+        /// skips an entry or reads a field otherwise than the table, or an index asked by a name
+        /// cut short.
+        #[test]
+        fn the_walk_and_the_table_read_the_same_entries() {
+            type Seen = (Vec<u8>, bool, bool, bool, Option<IpAddr>);
+            let seen = |entry: Entry<'_>| -> Seen {
+                (
+                    entry.name.to_vec(),
+                    entry.up,
+                    entry.running,
+                    entry.multicast,
+                    entry.address,
+                )
+            };
+            let table = InterfaceTable::read().expect("getifaddrs reads the host's table");
+            let list = HostList::read().expect("getifaddrs reads the host's list");
+            let walked: Vec<Seen> = list.entries().map(seen).collect();
+            let read: Vec<Seen> = table.rows.iter().map(|row| seen(row.entry())).collect();
+            assert_eq!(walked, read);
+            for row in &table.rows {
+                assert_eq!(
+                    row.index,
+                    interface_index_of_name(&row.name).unwrap_or(0),
+                    "{}",
+                    row.name
+                );
+            }
+            assert_eq!(index_of_name_bytes(b"wz-no-such-interface-name"), 0);
         }
 
         /// A name no interface has, and one that cannot be a name, find no index.
