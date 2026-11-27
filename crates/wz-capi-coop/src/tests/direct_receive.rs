@@ -78,6 +78,47 @@ fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
     );
 }
 
+/// A get its Final ends is handed out by the delivery of the read that read the Final: what it
+/// held back, then its end, with no read after it. The get keeps the latest reply of each key, so
+/// its reply is held to its end and reaches the callback only as the end is handed out. The
+/// CONTROL is each read before the Final: the leg is open and handed nothing. Turned red by a
+/// Final whose dispatch leaves the engine's word of ended gets unset (`note_ended_gets` after
+/// `dispatch_reply` in `direct`), which leaves the end to a later read's sweep.
+#[cfg(all(feature = "query", not(wz_round)))]
+#[test]
+fn a_get_its_final_ends_is_handed_out_by_the_read_that_read_the_final() {
+    use wz_session_core::query_mode::ConsolidationMode;
+    use wz_session_core::reply_sink::ReplyKind;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    super::get::settle(&router, &engine, Command::Answer("demo/g/**", b"r"));
+    let opts = super::get::remote_get().with_consolidation(ConsolidationMode::Latest);
+    let (issued, leg) = super::get::ask(&engine, "demo/g/a", &opts, None, None, None);
+    assert!(matches!(issued, Ok(1)), "one leg: the link's peer");
+    let before = engine.reply_dispatches();
+    // The Response and its Final, each counted as the read hands it to the gets.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while engine.reply_dispatches() - before < 2 {
+        {
+            let leg = leg.lock().unwrap();
+            assert!(
+                leg.replies.is_empty() && !leg.ended,
+                "CONTROL: nothing is handed before the Final"
+            );
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for the Final");
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    let leg = leg.lock().unwrap();
+    assert_eq!(
+        leg.replies,
+        vec![(ReplyKind::Put, "demo/g/a".to_owned(), b"r".to_vec())],
+        "what the get held, handed out by the read that read its Final"
+    );
+    assert!(leg.ended, "the get's end, handed out by the same read");
+}
+
 /// A peer's query is handed to each queryable it reaches by the read itself, one call at a time in
 /// the table's order with the session free, nothing of it held in the round, and its Final follows
 /// the replies. Turned red by a query offered to the round (the read counts none), handed while the
