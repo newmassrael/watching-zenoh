@@ -98,6 +98,7 @@ default = [
     "tx-expiry-run",
     "tx-fragment-credit",
     "tx-held-wait",
+    "multicast-locator-keys",
     "link-wire-reports",
 ]
 
@@ -1332,6 +1333,14 @@ tx-fragment-credit = []
 # message is dropped at once and the sender told (`HeldDrop::DropAtOnce`), whatever the queue
 # profile, as zenoh-pico's dropping send fails on a transmit lock another send holds.
 tx-held-wait = []
+
+# `multicast-locator-keys`: a group endpoint's `#ttl=`, `#bind=` and `#dscp=`, read into the group a
+# session joins (`group_locator::UdpGroup`) for its sockets. Without it each of the three is refused
+# by name when the endpoint is read (`GroupLocatorError::KeyNotCarried`), as a build refuses a key it
+# does not carry: zenoh-pico's multicast link reads `iface` and `join` alone. On by default; the
+# pico ABI names it through its capability of the same name (deploy/wz-config.toml), which the
+# zenoh-pico preset leaves off.
+multicast-locator-keys = []
 
 # `link-wire-reports`: a link driver that reports its own wire writes, by the four methods of
 # `link::BoxedLinkDriver` it adds (whether it reports them, how long ago it last wrote, whether it

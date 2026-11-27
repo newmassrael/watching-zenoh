@@ -116,6 +116,7 @@ default = [
     "tx-held-wait",
     "tx-stream-owed",
     "config-limits",
+    "multicast-locator-keys",
 ]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
@@ -681,6 +682,13 @@ tx-stream-owed = ["wz-capi-core?/tx-stream-owed", "wz-capi-coop?/tx-stream-owed"
 # opens each table at the preset's bound (`session::opening_limits`). This crate reads the key on
 # either engine, so the core's feature only carries the name.
 config-limits = ["wz-capi-core?/config-limits"]
+# `multicast-locator-keys`: a group endpoint's `#ttl=`, `#bind=` and `#dscp=`, which zenoh-pico's
+# multicast link does not read. Off, each is refused by name when the group's endpoint is read, and
+# a group's sockets keep the host's hop limit and carry no traffic class.
+multicast-locator-keys = [
+    "wz-capi-core?/multicast-locator-keys",
+    "wz-capi-coop?/multicast-locator-keys",
+]
 # `config-document`: `zext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a

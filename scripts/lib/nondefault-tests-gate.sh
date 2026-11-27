@@ -1466,6 +1466,29 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         tx-lend-only\
         |session_actions::bundle_tests::lent_handshake::"
+    # A group endpoint's keys zenoh-pico's multicast link does not read left out
+    # (`multicast-locator-keys`, a default of the crate), as the zenoh-pico preset builds the session
+    # core: the crate's defaults without it, spelled out. The filter is the endpoint reader's own
+    # tests, which hold `#ttl=`, `#bind=` and `#dscp=` refused by name and `iface` and `join` read
+    # (`a_build_without_the_locator_keys_refuses_them_by_name`). NOT YET MEASURED.
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        tx-probe,\
+        tx-expiry-run,\
+        tx-fragment-credit,\
+        tx-held-wait,\
+        link-wire-reports\
+        |group_locator::"
     # The send's behaviours beyond zenoh-pico's transport left out (`tx-probe`, `tx-expiry-run`,
     # `tx-fragment-credit`, `tx-held-wait`, each a default of the crate), as the zenoh-pico preset
     # builds the session core: the crate's defaults without the four, spelled out, over the first

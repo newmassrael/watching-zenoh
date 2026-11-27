@@ -64,6 +64,7 @@ tx-fragment-credit = ["wz-capi-pico/tx-fragment-credit"]
 tx-held-wait = ["wz-capi-pico/tx-held-wait"]
 tx-stream-owed = ["wz-capi-pico/tx-stream-owed"]
 config-limits = ["wz-capi-pico/config-limits"]
+multicast-locator-keys = ["wz-capi-pico/multicast-locator-keys"]
 
 [dependencies]
 libfuzzer-sys = "0.4.10"

@@ -1805,6 +1805,20 @@ abis = ["core", "c"]
 implies = []
 help = "The traffic policy a node's config states: access_control, low_pass_filter, downsampling and the qos/network overwrite, enforced on every face; a build without it refuses a config that states one, by its key."
 
+[[capability]]
+id = "multicast-locator-keys"
+kconfig = "WZ_CAP_MULTICAST_LOCATOR_KEYS"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's multicast link
+# reads iface and join and no other key of a group's endpoint, so it sets no hop limit, binds its
+# send socket to no address it is given and marks no traffic class. A behaviour of a group's
+# sockets (wz-session-core's feature of the same name, read where a group's endpoint is read), not
+# a door; the tokio engine reads the keys whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "A group endpoint's #ttl=, #bind= and #dscp=: the hop limit, the local address of the send socket and the traffic class of what a member sends (wz-own). Off, each is refused by name when the group's endpoint is read, as zenoh-pico's multicast link reads iface and join alone."
+
 # ## The upstream switches (a complete map: every upstream switch is classified)
 #
 # Every build switch of zenoh-pico (each `Z_FEATURE_*` its CMakeLists defines) and of zenoh-c

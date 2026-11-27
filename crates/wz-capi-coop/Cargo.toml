@@ -138,6 +138,7 @@ default = [
     "tx-fragment-credit",
     "tx-held-wait",
     "tx-stream-owed",
+    "multicast-locator-keys",
 ]
 std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
 # A read task beside the program's calls (pico's multi-threaded arm): the session is stepped by a
@@ -269,6 +270,10 @@ tx-held-wait = ["wz-session-core/tx-held-wait"]
 # within the message's wait. The runtime's feature of the same name. Without it each frame is
 # written whole by a send that waits for its stream, as zenoh-pico's link write does.
 tx-stream-owed = ["wz-runtime-coop/tx-stream-owed"]
+# `multicast-locator-keys`: a host group's `#ttl=`, `#bind=` and `#dscp=`, read by the session
+# core's feature of the same name and given to the group's sockets (`host_group`). Without it the
+# three are refused when the group's endpoint is read, and no send socket is marked.
+multicast-locator-keys = ["wz-session-core/multicast-locator-keys"]
 # A transport the program supplies: the session shell's links over the program's own network
 # stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
 app-transport = ["wz-runtime-coop/app-link"]

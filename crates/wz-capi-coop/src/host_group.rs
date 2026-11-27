@@ -25,9 +25,10 @@ use core::marker::PhantomData;
 use wz_runtime_coop::group_transport::{GroupJoiner, GroupTransport};
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_posix::group::MulticastSocket;
+#[cfg(feature = "multicast-locator-keys")]
+use wz_runtime_posix::multicast::mark_traffic_class;
 use wz_runtime_posix::multicast::{
-    bind_joined, bind_sender, mark_traffic_class, HostGroupTransport, Loopback, MulticastError,
-    RxBind, SocketConfig,
+    bind_joined, bind_sender, HostGroupTransport, Loopback, MulticastError, RxBind, SocketConfig,
 };
 use wz_session_core::byte_cells::ByteBuf;
 use wz_session_core::group_locator::{GroupLocator, UdpGroup};
@@ -127,6 +128,8 @@ fn join<S: MulticastSocket>(
     };
     let write = bind_sender::<S>(address, port, &config, true)?;
     // `#dscp=` marks what this member sends, on the send half, which is the half upstream marks.
+    // A build without the key refuses it when the locator is read, so it has none to mark.
+    #[cfg(feature = "multicast-locator-keys")]
     if let Some(dscp) = group.dscp() {
         mark_traffic_class(&write.socket, dscp).map_err(MulticastError::Socket)?;
     }

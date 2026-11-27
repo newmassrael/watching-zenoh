@@ -85,7 +85,8 @@ default = [
     "conformance-digest",
     "device-requires",
     # The send's behaviours zenoh-pico's transport does not have (deploy/wz-config.toml,
-    # `tx-probe`, `tx-expiry-run`, `tx-fragment-credit`, `tx-held-wait`, `tx-stream-owed`).
+    # `tx-probe`, `tx-expiry-run`, `tx-fragment-credit`, `tx-held-wait`, `tx-stream-owed`), and the
+    # group endpoint's keys its multicast link does not read (`multicast-locator-keys`).
     "tx-probe",
     "tx-expiry-run",
     "tx-fragment-credit",
@@ -93,6 +94,7 @@ default = [
     "tx-stream-owed",
     # The numbered key that states a session's limits (`config-limits`), read by the pico ABI.
     "config-limits",
+    "multicast-locator-keys",
     "config-verdict",
     "transport_compression",
     "auth_usrpwd",
@@ -331,6 +333,10 @@ tx-stream-owed = []
 # The numbered key a pico config states its session's limits by (`wz-capi-pico/config-limits`):
 # the pico ABI's own crate reads it on either engine, so the feature only carries the name.
 config-limits = []
+# A group endpoint's `#ttl=`, `#bind=` and `#dscp=` (`wz-capi-pico/multicast-locator-keys`): this
+# engine's runtime takes the session core with its defaults, which read them, so the feature only
+# carries the capability's name.
+multicast-locator-keys = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

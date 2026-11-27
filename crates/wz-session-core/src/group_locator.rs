@@ -18,13 +18,21 @@
 //! group's own family, and a `bind` that is no literal address of that family. Upstream refuses
 //! both when its link opens; refusing them before any socket exists answers the same set of
 //! endpoints, earlier.
+//!
+//! `ttl`, `bind` and `dscp` are read in a build with `multicast-locator-keys` alone: zenoh-pico's
+//! multicast link reads `iface` and `join` and no other key
+//! (`vendor/zenoh-pico/src/link/multicast/udp.c` @ `UDP_CONFIG_JOIN_KEY`), so a build of its
+//! preset carries none of the three, and refuses each by name (`GroupLocatorError::KeyNotCarried`)
+//! rather than open a group without what it asked for.
 
 use core::fmt;
 use core::net::{IpAddr, SocketAddr};
 use core::str::FromStr;
 
 use crate::caps::MAX_GROUP_ENDPOINT_LEN;
-use crate::locator_grammar::{config_value, config_values, parse_dscp_value, split_locator_parts};
+#[cfg(feature = "multicast-locator-keys")]
+use crate::locator_grammar::parse_dscp_value;
+use crate::locator_grammar::{config_value, config_values, split_locator_parts};
 
 /// The scheme of a UDP multicast group's endpoint.
 const UDP_GROUP_PREFIX: &str = "udp/";
@@ -103,8 +111,11 @@ pub struct UdpGroup {
     /// Empty when the endpoint names no interface, as an empty `iface=` names none.
     iface: heapless::String<GROUP_IFACE_CAPACITY>,
     joins: heapless::Vec<IpAddr, GROUP_JOIN_CAPACITY>,
+    #[cfg(feature = "multicast-locator-keys")]
     ttl: Option<u32>,
+    #[cfg(feature = "multicast-locator-keys")]
     bind: Option<SocketAddr>,
+    #[cfg(feature = "multicast-locator-keys")]
     dscp: Option<u32>,
 }
 
@@ -127,19 +138,43 @@ impl UdpGroup {
     }
 
     /// `ttl=`: the hop limit of what is sent, as written; `None` leaves the host's, which is 1.
-    /// Whether a datagram's header can carry it is the socket's question.
+    /// Whether a datagram's header can carry it is the socket's question. Always `None` in a
+    /// build without `multicast-locator-keys`, which refuses the key.
     pub fn ttl(&self) -> Option<u32> {
-        self.ttl
+        #[cfg(feature = "multicast-locator-keys")]
+        {
+            self.ttl
+        }
+        #[cfg(not(feature = "multicast-locator-keys"))]
+        {
+            None
+        }
     }
 
-    /// `bind=`: the local address the sending socket binds, of the group's family.
+    /// `bind=`: the local address the sending socket binds, of the group's family. Always `None`
+    /// in a build without `multicast-locator-keys`, which refuses the key.
     pub fn bind(&self) -> Option<SocketAddr> {
-        self.bind
+        #[cfg(feature = "multicast-locator-keys")]
+        {
+            self.bind
+        }
+        #[cfg(not(feature = "multicast-locator-keys"))]
+        {
+            None
+        }
     }
 
-    /// `dscp=`: the traffic class what is sent is marked with, in upstream's accepted set.
+    /// `dscp=`: the traffic class what is sent is marked with, in upstream's accepted set. Always
+    /// `None` in a build without `multicast-locator-keys`, which refuses the key.
     pub fn dscp(&self) -> Option<u32> {
-        self.dscp
+        #[cfg(feature = "multicast-locator-keys")]
+        {
+            self.dscp
+        }
+        #[cfg(not(feature = "multicast-locator-keys"))]
+        {
+            None
+        }
     }
 
     /// The keys of `config` for the group `group` names.
@@ -161,6 +196,14 @@ impl UdpGroup {
                 .push(join)
                 .map_err(|_| GroupLocatorError::BadValue(JOIN_KEY))?;
         }
+        #[cfg(not(feature = "multicast-locator-keys"))]
+        if let Some(key) = [TTL_KEY, BIND_KEY, DSCP_KEY]
+            .into_iter()
+            .find(|&key| first(key).is_some())
+        {
+            return Err(GroupLocatorError::KeyNotCarried(key));
+        }
+        #[cfg(feature = "multicast-locator-keys")]
         let ttl = match first(TTL_KEY).filter(|text| !text.is_empty()) {
             None => None,
             Some(text) => Some(
@@ -168,6 +211,7 @@ impl UdpGroup {
                     .map_err(|_| GroupLocatorError::BadValue(TTL_KEY))?,
             ),
         };
+        #[cfg(feature = "multicast-locator-keys")]
         let bind = match first(BIND_KEY) {
             None => None,
             Some(text) => Some(
@@ -177,6 +221,7 @@ impl UdpGroup {
                     .ok_or(GroupLocatorError::BadValue(BIND_KEY))?,
             ),
         };
+        #[cfg(feature = "multicast-locator-keys")]
         let dscp = match first(DSCP_KEY) {
             None => None,
             Some(text) => {
@@ -187,8 +232,11 @@ impl UdpGroup {
             group,
             iface,
             joins,
+            #[cfg(feature = "multicast-locator-keys")]
             ttl,
+            #[cfg(feature = "multicast-locator-keys")]
             bind,
+            #[cfg(feature = "multicast-locator-keys")]
             dscp,
         })
     }
@@ -207,6 +255,10 @@ pub enum GroupLocatorError {
     /// The metadata span states what a group's link does not keep: a reliability other than best
     /// effort, or a key a group does not read.
     MetadataNotKept,
+    /// The config span names a key this build does not carry: `ttl`, `bind` or `dscp` in a
+    /// build without `multicast-locator-keys`.
+    #[cfg(not(feature = "multicast-locator-keys"))]
+    KeyNotCarried(&'static str),
 }
 
 impl fmt::Display for GroupLocatorError {
@@ -217,6 +269,13 @@ impl fmt::Display for GroupLocatorError {
             Self::BadValue(key) => write!(f, "the group endpoint's #{key}= holds no usable value"),
             Self::MetadataNotKept => {
                 f.write_str("the group endpoint's metadata states what a group does not keep")
+            }
+            #[cfg(not(feature = "multicast-locator-keys"))]
+            Self::KeyNotCarried(key) => {
+                write!(
+                    f,
+                    "the group endpoint's #{key}= is no key this build carries"
+                )
             }
         }
     }
@@ -335,6 +394,7 @@ mod tests {
     /// Every key is read into its field, a repeated `join` as often as it is written and any
     /// other key from its first value. The keys are spread over two endpoints, each within
     /// `MAX_GROUP_ENDPOINT_LEN`.
+    #[cfg(feature = "multicast-locator-keys")]
     #[test]
     fn every_key_is_read_into_its_field() {
         let group = udp(
@@ -437,11 +497,6 @@ mod tests {
             ("udp/[ff02::1]:7447#join=239.1.2.4", JOIN_KEY),
             ("udp/239.1.2.3:7447#join=10.0.0.1", JOIN_KEY),
             ("udp/239.1.2.3:7447#join=nope", JOIN_KEY),
-            ("udp/239.1.2.3:7447#bind=[::1]:0", BIND_KEY),
-            ("udp/239.1.2.3:7447#bind=localhost:0", BIND_KEY),
-            ("udp/239.1.2.3:7447#bind=", BIND_KEY),
-            ("udp/239.1.2.3:7447#ttl=-1", TTL_KEY),
-            ("udp/239.1.2.3:7447#dscp=0x04|nope", DSCP_KEY),
         ] {
             assert_eq!(
                 parse_group_locator(endpoint),
@@ -449,7 +504,51 @@ mod tests {
                 "{endpoint}"
             );
         }
-        assert_eq!(udp("udp/239.1.2.3:7447#ttl=").ttl(), None);
+        #[cfg(feature = "multicast-locator-keys")]
+        {
+            for (endpoint, key) in [
+                ("udp/239.1.2.3:7447#bind=[::1]:0", BIND_KEY),
+                ("udp/239.1.2.3:7447#bind=localhost:0", BIND_KEY),
+                ("udp/239.1.2.3:7447#bind=", BIND_KEY),
+                ("udp/239.1.2.3:7447#ttl=-1", TTL_KEY),
+                ("udp/239.1.2.3:7447#dscp=0x04|nope", DSCP_KEY),
+            ] {
+                assert_eq!(
+                    parse_group_locator(endpoint),
+                    Err(GroupLocatorError::BadValue(key)),
+                    "{endpoint}"
+                );
+            }
+            assert_eq!(udp("udp/239.1.2.3:7447#ttl=").ttl(), None);
+        }
+    }
+
+    /// A build without `multicast-locator-keys` refuses `ttl`, `bind` and `dscp` by name,
+    /// whatever their value, and reads `iface` and `join` as every build does. The CONTROL is
+    /// the same group with the two keys zenoh-pico reads. Turned red by a reader that skips a key
+    /// it does not carry, or that refuses one by another name.
+    #[cfg(not(feature = "multicast-locator-keys"))]
+    #[test]
+    fn a_build_without_the_locator_keys_refuses_them_by_name() {
+        let group = udp("udp/239.1.2.3:7447#iface=eth0;join=239.1.2.4");
+        assert_eq!(group.iface(), Some("eth0"), "CONTROL: iface is read");
+        assert_eq!(group.joins().len(), 1, "CONTROL: join is read");
+        assert_eq!(
+            (group.ttl(), group.bind(), group.dscp()),
+            (None, None, None)
+        );
+        for (endpoint, key) in [
+            ("udp/239.1.2.3:7447#iface=eth0;ttl=8", TTL_KEY),
+            ("udp/239.1.2.3:7447#ttl=", TTL_KEY),
+            ("udp/239.1.2.3:7447#bind=10.0.0.1:0", BIND_KEY),
+            ("udp/239.1.2.3:7447#join=239.1.2.4;dscp=0x10", DSCP_KEY),
+        ] {
+            assert_eq!(
+                parse_group_locator(endpoint),
+                Err(GroupLocatorError::KeyNotCarried(key)),
+                "{endpoint}"
+            );
+        }
     }
 
     /// Metadata that asks for what a group's link does not do is refused, as is a key a group
@@ -471,7 +570,7 @@ mod tests {
                 "{endpoint}"
             );
         }
-        assert!(parse_group_locator("udp/239.1.2.3:7447?#ttl=2").is_ok());
+        assert!(parse_group_locator("udp/239.1.2.3:7447?#join=239.1.2.4").is_ok());
         assert!(parse_group_locator("udp/239.1.2.3:7447?rel=0").is_ok());
     }
 
