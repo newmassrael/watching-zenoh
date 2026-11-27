@@ -7734,6 +7734,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         test,
         feature = "std",
         feature = "queryable",
+        feature = "query-replies-with-final",
         any(feature = "threads", feature = "listen", feature = "group")
     ))]
     pub(crate) fn answers_held(&self) -> usize {
