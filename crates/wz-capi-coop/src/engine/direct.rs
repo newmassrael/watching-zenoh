@@ -2581,6 +2581,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 Err(last) => {
                     // A handle reads the session closed from its row from here on, as after a
                     // close.
+                    #[cfg(any(feature = "engine-rows", test))]
                     self.reach.end();
                     self.closed.store(true, Ordering::Release);
                     ended = Some(last);

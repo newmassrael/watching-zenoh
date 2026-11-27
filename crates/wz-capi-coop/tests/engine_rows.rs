@@ -6,7 +6,9 @@
 //! with a row let go of an open goes on past the rows; on the heap policy the count bounds nothing,
 //! and opens go on past it, each on a row of the heap. Then the table held to one session: each
 //! open refused gives its row back, on either policy. The table is the process's, so it is filled
-//! and held in a binary of its own, by this one test.
+//! and held in a binary of its own, by this one test. A build that keeps no table (`engine-rows`
+//! off, which the default build has on) has none of this: `no_engine_rows.rs` reads it.
+#![cfg(feature = "engine-rows")]
 
 use std::alloc::Layout;
 use std::ptr::NonNull;

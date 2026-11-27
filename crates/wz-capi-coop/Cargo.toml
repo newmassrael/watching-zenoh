@@ -145,6 +145,7 @@ default = [
     "query-replies-with-final",
     "accept-cookie",
     "face-send-places",
+    "engine-rows",
 ]
 std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
 # A read task beside the program's calls (pico's multi-threaded arm): the session is stepped by a
@@ -197,6 +198,7 @@ scout-datagram = [
 # a reply and the final of a query's replies from their parts where they wait only under
 # `wz-session-mcu`'s own names for the codecs, so the feature names them there too.
 queryable = [
+    "engine-rows",
     "wz-runtime-coop/queryable",
     "wz-session-core/declare-queryable",
     "wz-session-core/query-queryable",
@@ -418,7 +420,17 @@ local-queryable = ["query", "queryable"]
 # transport and its links, and the events a watcher is told when one comes up or goes down. What
 # `wz-capi-core`'s `connectivity` names on its runtime. It needs nothing of session-core that the
 # engine does not already have.
-connectivity = ["wz-runtime-coop/connectivity"]
+connectivity = ["engine-rows", "wz-runtime-coop/connectivity"]
+# The process's table of engines (`RowClaim`, `EngineHandle`): a row for each session open at once,
+# which a holder that must not keep its session open reaches the engine through, and which an ABI's
+# pools hold to a count of sessions (`RowClaim::hold_to`). In a build with a reader of it: the
+# requesting end (a get fan's canceller), the answering end (a query its callback keeps), the
+# connectivity plane, and an ABI whose pools count the sessions. Without it the open claims no row,
+# a session's end marks none and its close clears none, the text links none of the table, and the
+# sessions open at once are bounded by the memory alone, as zenoh-pico bounds them. On in the host's
+# default build, as in the zenoh-pico preset, whose requesting end turns it on; the crate's own unit
+# tests keep it whatever this says, and `tests/no_engine_rows.rs` reads a build without it.
+engine-rows = []
 # The liveliness token and subscriber: the token's declaration and its retraction, the tokens the
 # session holds to answer a peer that asks for them, and the subscriber that hears the peer's.
 # What `wz-capi-core`'s `liveliness` names on its runtime, named on session-core.
@@ -439,6 +451,7 @@ liveliness-get = ["liveliness", "query", "wz-session-core/liveliness-get"]
 # consolidation, attachment, parameters, source info, value) and everything a reply carries back
 # to it. What `wz-capi-core`'s `query` names on its runtime, named on session-core.
 query = [
+    "engine-rows",
     "wz-runtime-coop/query",
     "wz-session-core/declare-queryable",
     "wz-session-core/query-get",

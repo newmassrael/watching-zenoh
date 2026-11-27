@@ -580,8 +580,9 @@ time-base = [
 # fallback to the heap (`src/process_pool.rs`, set by `build.rs`), so a build without the unstable
 # surface makes no allocation for them either. On the tokio engine, which otherwise keeps those
 # objects on the heap, the doors bring the pools with them. They serve either engine, so it selects
-# neither.
-object-pool = ["unstable-api", "wz-capi-core?/object-pool"]
+# neither; on the cooperative engine the sessions they count are rows of its table of engines,
+# which the doors keep (`wz-capi-coop`'s `engine-rows`).
+object-pool = ["unstable-api", "wz-capi-core?/object-pool", "wz-capi-coop?/engine-rows"]
 # `object-pool-region`: the same pools over memory the program hands over
 # (`zext_object_pool_place`), for a program that states where its memory lies.
 object-pool-region = ["object-pool", "wz-capi-core?/object-pool-region"]

@@ -254,9 +254,16 @@ mod deliveries;
 use deliveries::Deliveries;
 
 mod hold;
-pub use hold::{EngineHandle, EngineHold};
+#[cfg(any(feature = "engine-rows", test))]
+pub use hold::EngineHandle;
+pub use hold::EngineHold;
+// The process's table of engines, in a build with a reader of it (`engine-rows`) and in the tests,
+// which read it: without it the open claims no row and the engine keeps no reach of one.
+#[cfg(any(feature = "engine-rows", test))]
 mod reach;
+#[cfg(any(feature = "engine-rows", test))]
 use reach::ReachEngine;
+#[cfg(any(feature = "engine-rows", test))]
 pub use reach::{RowClaim, RowsRefused};
 
 mod ledger;
@@ -698,11 +705,12 @@ pub enum OpenError {
     /// build's `sn-resolution` domain leaves out: the build holds no word for its ring. Nothing
     /// was reserved, bound, joined or dialled.
     SnResolution(OutsideDomain<SnResolution>),
-    /// No row of the process's table of engines was left for the session's engine ([`RowClaim`]):
-    /// on the fixed storage policy every row (the build's `ENGINE_ROWS`) holds the engine of a
-    /// session open now, on the heap policy the heap had no room for one more row, and on either
-    /// the table is held to a count of sessions every one of which is open
-    /// ([`RowClaim::hold_to`]). Nothing was reserved, bound, joined or dialled.
+    /// No row of the process's table of engines was left for the session's engine (`RowClaim`, in
+    /// a build that keeps the table, `engine-rows`): on the fixed storage policy every row (the
+    /// build's `ENGINE_ROWS`) holds the engine of a session open now, on the heap policy the heap had
+    /// no room for one more row, and on either the table is held to a count of sessions every one of
+    /// which is open (`RowClaim::hold_to`). Nothing was reserved, bound, joined or dialled. A build
+    /// without the table never answers it.
     NoEngineRow,
     /// The heap had no room for a link's shared handle. Nothing of the link stays.
     HeapRefused,
@@ -1555,6 +1563,7 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     pub(crate) takes: Takes,
     /// The row of the process's table the engine is reached through without being held
     /// ([`EngineHandle`]), taken out at the session's close.
+    #[cfg(any(feature = "engine-rows", test))]
     reach: ReachEngine<Self>,
 }
 
@@ -6952,9 +6961,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         key_ids.admit(&policy)?;
         // The row the engine is reached through, taken before anything is reserved: an open that
         // finds no row, the fixed table full or the heap out of room, reserves nothing.
+        #[cfg(any(feature = "engine-rows", test))]
         let row = RowClaim::take().ok_or(OpenError::NoEngineRow)?;
         // Where the tables take their memory on use, the engine lies in an allocation of its own,
-        // claimed here beside its row: an open the allocator has no room for reserves nothing.
+        // claimed here, after its row where the build keeps the table of engines: an open the
+        // allocator has no room for reserves nothing.
         #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
         let claim = SharedClaim::<Self>::try_new()
             .ok_or_else(|| heap_refused(Shared::<Self>::layout().size()))?;
@@ -7266,6 +7277,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             apart,
             #[cfg(all(not(wz_round), feature = "listen"))]
             taken,
+            #[cfg(any(feature = "engine-rows", test))]
             row,
             #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
             claim,
@@ -7275,15 +7287,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// The engine over `core`, written at the place the open lent it in the session's arena, or in
     /// the allocation of its own the open claimed for it (`claim`) where the tables take their
     /// memory on use, and counted by its holders there, put in the row `row` the open claimed for
-    /// it, which reaches it without holding it ([`EngineHandle`]), with what the open lent apart
-    /// from the state (`apart`) and the read slots of the faces past the dial role's (`taken`).
-    /// Out of line, so the open's measure shows it apart.
+    /// it, which reaches it without holding it (`EngineHandle`, in a build that keeps the table),
+    /// with what the open lent apart from the state (`apart`) and the read slots of the faces past
+    /// the dial role's (`taken`). Out of line, so the open's measure shows it apart.
     #[inline(never)]
     fn engine_of(
         core: Core<L, C>,
         apart: LentApart,
         #[cfg(all(not(wz_round), feature = "listen"))] taken: direct::TakenFaces<L, C>,
-        row: RowClaim,
+        #[cfg(any(feature = "engine-rows", test))] row: RowClaim,
         #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))] claim: SharedClaim<
             Self,
         >,
@@ -7336,6 +7348,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // SAFETY: `this` is where the `Shared` the open places lays the engine, which is
             // taken out of its row at its close and first in its drop, before its place is given
             // back.
+            #[cfg(any(feature = "engine-rows", test))]
             let reach = unsafe { row.fill(this) };
             // The round hands the queries it holds to their queryables through the engine,
             // which sends what they answer. A read that steps its one link itself holds no query
@@ -7420,6 +7433,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 });
                 #[cfg(test)]
                 addr_of_mut!((*at).takes).write(Takes::default());
+                #[cfg(any(feature = "engine-rows", test))]
                 addr_of_mut!((*at).reach).write(reach);
             }
         };
@@ -7480,7 +7494,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     cache: _,
                 #[cfg(test)]
                     takes: _,
-                reach: _,
+                #[cfg(any(feature = "engine-rows", test))]
+                    reach: _,
             } = engine;
         };
         // SAFETY: the place was lent to the engine alone, aligned as asserted above and as large as
@@ -10441,6 +10456,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let mut last = OpenError::NoEndpoint;
         if core.move_links(redial_ms, now_us, &mut last).is_err() {
             // A handle reads the session closed from its row from here on, as after a close.
+            #[cfg(any(feature = "engine-rows", test))]
             self.reach.end();
             self.closed.store(true, Ordering::Release);
             return Stepped::Closed;
@@ -12725,6 +12741,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         }
         // No handle reaches the session from here on: a key, a query or a token kept past the
         // close finds it closed whatever still holds the engine.
+        #[cfg(any(feature = "engine-rows", test))]
         self.reach.clear();
         let core = &mut guard.0;
         // A key the program keeps past the close copies and gives back its hold at its row, with
@@ -13139,6 +13156,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngi
     fn drop(&mut self) {
         // No handle reaches the engine once its last holder let go: its row is vacated before its
         // place is given back, which a session never closed has not done yet.
+        #[cfg(any(feature = "engine-rows", test))]
         self.reach.clear();
         // The one link's session holds handles of the state's cells: it goes first (`direct`).
         #[cfg(not(wz_round))]

@@ -1,7 +1,7 @@
 # Structural lane sz-open: the session's open, line by line
 
 Status: the reading and the design of the lane, with its steps carried in beside it as section 5
-onwards records them (O1, O2, O4; O3 held, section 7).
+onwards records them (O1, O2, O4, O5; O3 held, section 7).
 Nothing here was built or measured by this lane: every byte figure is either **read** (from the
 size ledger's explain document of the case, from the case's shipped library, or from a line table
 named below) or an **estimate** from the code, to be read on the explain document after the merge.
@@ -217,3 +217,30 @@ The values keep their sizes: the Rust surface and the tests read them (`OpenErro
 so the class alone, which is all `coop_open_refusal` reads, is not what the open answers. The test
 `the_opens_refusals_of_memory_are_the_values_its_steps_answered` (`tests.rs`) holds each body's
 value. What the main session reads: `assemble` and the case's total; the three bodies appear apart.
+
+## 9. O5 as carried, with a reader the reading missed
+
+The reading named the table's readers as the requesting end, the answering end and the pico ABI's
+`connectivity`, `advanced` and `admin-space`. The code has one more: the pico ABI's `object-pool`,
+whose doors hold the table to the count of sessions the program states (`process_pool::install`,
+`RowClaim::hold_to`) and give it up with the pools (`RowClaim::let_go_of_count`). The step is
+carried with it.
+
+- `crates/wz-capi-coop/Cargo.toml`: the feature `engine-rows` keeps the process's table of engines;
+  `query`, `queryable` and `connectivity` turn it on (the pico ABI's `advanced` and `admin-space`
+  reach it through those), and so does the pico ABI's `object-pool` (`wz-capi-coop?/engine-rows`).
+  It is in the crate's default build, as in the zenoh-pico preset.
+- Without it (`any(feature = "engine-rows", test)` false): `engine::reach`, `RowClaim`,
+  `RowsRefused` and `EngineHandle` are not built, the engine has no `reach` field, `assemble` claims
+  no row, `engine_of` fills none, a step that ends the session (`engine.rs` and `engine/direct.rs`)
+  marks none, and the close and the drop clear none. `OpenError::NoEngineRow` stays and is never
+  answered. The unit tests keep the table whatever the feature says, as they read it.
+- Work: a build without a reader bounds the sessions open at once by nothing but its memory, as
+  zenoh-pico does; the fixed policy's `ENGINE_ROWS` bounds a build with one.
+
+The test `engines_past_the_builds_rows_are_held_at_once_where_no_table_keeps_them`
+(`tests/no_engine_rows.rs`, built only without `engine-rows`) makes and holds one engine past
+`ENGINE_ROWS` and reads every arena given back after; on the fixed policy a build that claims a row
+refuses the last one. `tests/engine_rows.rs` is built only with the feature. What the main session
+reads: the case's total (the case builds none of the readers), `assemble`, `engine_of` and `close`
+in the explain document, and the receive at arm W.

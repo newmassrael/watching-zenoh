@@ -15,6 +15,11 @@
 //! Whether the session is still open is read from the row's mark alone, with no lock and no count
 //! ([`ReachEngine::is_current`]): a reply asks it of every answer.
 //!
+//! The table is in a build with a reader of it (`engine-rows`, which the requesting end, the
+//! answering end and the connectivity plane turn on, and an ABI whose pools count the sessions)
+//! and in the crate's tests. A build with none claims no row at an open and bounds the sessions
+//! open at once by nothing but its memory.
+//!
 //! Where the rows come from is the build's storage policy, one decision for the whole table
 //! ([`RowSource`] of `wz_session_core::bounded::Profile`). On the fixed policy the rows lie in
 //! static memory, the build's `ENGINE_ROWS` of them, and that count is the one bound of the sessions

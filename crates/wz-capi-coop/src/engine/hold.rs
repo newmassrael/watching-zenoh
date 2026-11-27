@@ -4,19 +4,22 @@
 //! The holders of a session's engine. The engine lies in its session's own arena, counted by its
 //! holders there ([`EngineHold`]), so the open takes no memory of the heap for it; where the
 //! session's tables take their memory on use, in an allocation of its own the open claims first,
-//! which keeps the arena's memory while the engine is held. It is reached
-//! without being held ([`EngineHandle`]) through the row of the process's table it was put in at
-//! its open (`super::reach`), which its close takes it out of, so a handle kept past the
-//! close reaches nothing, whatever still holds the engine.
+//! which keeps the arena's memory while the engine is held. In a build that keeps the process's
+//! table of engines (`engine-rows`) it is reached without being held (`EngineHandle`) through the
+//! row of the table it was put in at its open (`super::reach`), which its close takes it out of,
+//! so a handle kept past the close reaches nothing, whatever still holds the engine.
 
 use core::ops::Deref;
 #[cfg(feature = "threads")]
 use core::ptr::NonNull;
 
+#[cfg(any(feature = "engine-rows", test))]
 use wz_capi_port::EngineHolder;
 use wz_runtime_coop::kept::Shared;
 
-use super::{ClockSource, CoopEngine, CoopLinks, ReachEngine};
+#[cfg(any(feature = "engine-rows", test))]
+use super::ReachEngine;
+use super::{ClockSource, CoopEngine, CoopLinks};
 
 /// A holder of a session's engine: cloning takes a count of the engine, dropping gives it back,
 /// and the last holder drops the engine where it lies and gives the session's arena back.
@@ -64,6 +67,7 @@ impl<E> AsRef<E> for EngineHold<E> {
     }
 }
 
+#[cfg(any(feature = "engine-rows", test))]
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHold<CoopEngine<L, C>> {
     /// A reach of the engine that keeps nothing of it standing.
     pub fn downgrade(this: &Self) -> EngineHandle<CoopEngine<L, C>> {
@@ -74,18 +78,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHold<CoopEn
 /// A reach of a session's engine that keeps nothing of it standing: a row of the process's table
 /// and the generation the row was at when the engine was put in it, two words copied freely.
 /// It reaches the engine while the session is open and one of the engine's holders is left.
+#[cfg(any(feature = "engine-rows", test))]
 pub struct EngineHandle<E> {
     reach: ReachEngine<E>,
 }
 
+#[cfg(any(feature = "engine-rows", test))]
 impl<E> Clone for EngineHandle<E> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
+#[cfg(any(feature = "engine-rows", test))]
 impl<E> Copy for EngineHandle<E> {}
 
+#[cfg(any(feature = "engine-rows", test))]
 impl<E> EngineHandle<E> {
     /// A handle of no engine, which reaches nothing: what a holder made with no session holds.
     pub const fn vacant() -> Self {
@@ -98,6 +106,7 @@ impl<E> EngineHandle<E> {
     }
 }
 
+#[cfg(any(feature = "engine-rows", test))]
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHandle<CoopEngine<L, C>> {
     /// A holder of the engine, while its session is open and one of its holders is left.
     pub fn upgrade(&self) -> Option<EngineHold<CoopEngine<L, C>>> {
@@ -117,6 +126,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHandle<Coop
     }
 }
 
+#[cfg(any(feature = "engine-rows", test))]
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHolder
     for EngineHold<CoopEngine<L, C>>
 {

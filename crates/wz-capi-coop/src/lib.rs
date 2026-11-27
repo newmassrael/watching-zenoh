@@ -254,9 +254,13 @@ mod tests;
 pub use engine::ClockMoves;
 pub use engine::{
     ClockMovesWord, ComposedLinks, CoopConfig, CoopDrive, CoopEngine, CoopLinks, EndpointRefusal,
-    EngineHandle, EngineHold, KeyWireFormRefused, OpenError, OpenKeyIds, Refusal, RowClaim,
-    RowsRefused,
+    EngineHold, KeyWireFormRefused, OpenError, OpenKeyIds, Refusal,
 };
+/// The process's table of engines and the reach of an engine through it, in a build with a reader
+/// of it (`engine-rows`, which the requesting end, the answering end and the connectivity plane
+/// turn on).
+#[cfg(any(feature = "engine-rows", test))]
+pub use engine::{EngineHandle, RowClaim, RowsRefused};
 /// Why the session's runtime had no task for a link or a group ([`OpenError::NoTask`]).
 pub use wz_runtime_coop::executor::SpawnRefusal;
 /// The grammar this engine reads an endpoint's text with when it dials or listens on it, and the
