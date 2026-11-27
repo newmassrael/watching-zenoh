@@ -1,0 +1,16 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Walk a query's queryables once for every face, so the loop is one body
+and not a copy per face kind (query lane, Q1).
+'''
+changes = '''
+- capi-coop queries: call_queryables, not generic over the face.
+- docs/c-abi-migration/feat-query.md: the pairing with zenoh-pico, Q1-Q8.
+'''
+verification = '''
+- size ledger pico-api-coop-nostd 930,535 -> 928,628 B (-1,907); client same.
+- capi-coop query,queryable tests 326 and group asked 2; clippy.
+'''
+carry = '''
+- none for this lane.
+'''
