@@ -406,10 +406,10 @@ impl OwnState {
         // not written again.
         let budget = unsafe {
             let field = addr_of_mut!((*state.as_ptr()).keys).cast::<KeyBudget>();
-            field.write(KeyBudget::new(
-                limits.key_arena_bytes(),
-                limits.max_keyexpr_bytes_held(),
-            ));
+            field.write(
+                KeyBudget::new(limits.key_arena_bytes(), limits.max_keyexpr_bytes_held())
+                    .holding_peer_rows_to(limits),
+            );
             &*field
         };
         // SAFETY: the caller's contract: the state, and the budget in it, neither moves nor is
@@ -756,14 +756,18 @@ mod tests {
     /// allocation of its own: it holds the session's key budget, which the open writes at the
     /// session's `KEY_ARENA_BYTES`, a key made through the handle it hands back counted there as
     /// its arena block and given back, and the places of the state's own values lie inside it.
-    /// Turned red by a budget of other bytes than the limits state, by a handle of no budget
-    /// (`BudgetKeys::default` in place of `budget.keys()`), which keeps no key, or by places
-    /// projected anywhere but the state.
+    /// The budget holds the rows the session's peers write to the limits' session bounds, the
+    /// tokens to `SESSION_MAX_REMOTE_DECLS` among them. Turned red by a budget of other bytes than
+    /// the limits state, by a handle of no budget (`BudgetKeys::default` in place of
+    /// `budget.keys()`), which keeps no key, by a budget held to no peer bound
+    /// (`holding_peer_rows_to` left out of `OwnState::place`), or by places projected anywhere
+    /// but the state.
     #[cfg(wz_on_use)]
     #[test]
     fn an_on_use_state_holds_the_sessions_key_budget_and_its_places() {
         use wz_session_core::bounded::KeyMaker;
         use wz_session_core::key_arena::block_bytes;
+        use wz_session_core::row_pool::PeerSlot;
         let state = OwnBlock::<OwnState>::take().expect("the test allocator answers");
         let limits = SessionLimits::BUILD;
         // SAFETY: the state is zeroed, aligned and this test's alone, and is given back after the
@@ -778,6 +782,19 @@ mod tests {
         );
         drop(key);
         assert_eq!(keys.counts().used, 0, "the key's bytes went back");
+        let budget = keys
+            .budget()
+            .expect("the handle names the session's budget");
+        if let Some(most) = limits.session_max_remote_decls().most() {
+            for _ in 0..most {
+                assert!(budget.take_peer_row(PeerSlot::Tokens));
+            }
+            assert!(
+                !budget.take_peer_row(PeerSlot::Tokens),
+                "the session's SESSION_MAX_REMOTE_DECLS binds its peers' tokens together"
+            );
+            budget.give_peer_rows(PeerSlot::Tokens, most);
+        }
         let start = state.as_ptr().as_ptr() as usize;
         // SAFETY: the state is the one taken above.
         let places = unsafe { OwnState::places_at(state.as_ptr()) }.as_ptr() as usize;

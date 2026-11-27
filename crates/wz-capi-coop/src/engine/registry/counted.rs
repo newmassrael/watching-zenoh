@@ -384,6 +384,46 @@ mod tests {
         drop(registry);
     }
 
+    /// A group's face on an on-use registry holds every member's aliases: its alias table, which
+    /// holds none yet, is counted to `GROUP_FACE_ALIASES` (`hold_member_aliases`), and once the
+    /// face goes it is counted back to a peer's, its rows given back, for the place's next face.
+    /// Turned red by a `limit_aliases_to` that recounts nothing on use, whose table then keeps a
+    /// peer's `MAX_PEER_KEYEXPR_ALIASES` rows, or by a set given back whose aliases keep the
+    /// group's count.
+    #[cfg(feature = "multicast-declarations")]
+    #[test]
+    fn an_on_use_groups_face_counts_its_aliases_to_every_members() {
+        use crate::arena::GROUP_FACE_ALIASES;
+        use wz_session_core::limit_binding::Quota;
+        use wz_session_core::limits::MaxPeerKeyexprAliasesHeld;
+
+        let limits = SessionLimits::defaults();
+        let budget = KeyBudget::new(4096, limits.max_keyexpr_bytes_held());
+        // SAFETY: the budget outlives the registry, which is dropped first, and every key of it.
+        let keys = unsafe { budget.keys() };
+        let mut registry = many(&limits, keys, 2, true);
+        let face = registry.add_face(5).expect("a place is free");
+        let peer_rows = registry.sets[1].peer.subscribers.alias_rows();
+        registry.hold_member_aliases(face);
+        let held = registry.sets[1].peer.subscribers.alias_rows();
+        if MaxPeerKeyexprAliasesHeld::select(Quota::at_most(GROUP_FACE_ALIASES)).is_err() {
+            // A domain that states no such quota leaves the face at a peer's rows.
+            assert_eq!(held, peer_rows);
+            return;
+        }
+        assert!(
+            held >= GROUP_FACE_ALIASES,
+            "the group's face has a row for every member's aliases"
+        );
+        registry.remove_face(face);
+        assert_eq!(
+            registry.sets[1].peer.subscribers.alias_rows(),
+            peer_rows,
+            "the place's next face is counted as a peer's"
+        );
+        drop(registry);
+    }
+
     /// An on-use session that dials nothing holds a set of no rows for its dial face, first, and
     /// builds the first face that comes its set in the next place, counted. Turned red by a dial
     /// face's set counted rows in a session that dials nothing, or by a registry that builds that
