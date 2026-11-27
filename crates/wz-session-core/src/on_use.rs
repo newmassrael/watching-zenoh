@@ -1156,6 +1156,30 @@ mod tests {
         assert_eq!(column.as_slice(), &[7, 8]);
     }
 
+    /// A column whose first value the heap has no room for hands the value back and takes nothing,
+    /// and its next value, the heap having room again, takes the rows; a key the heap has no room
+    /// for is no room, counted, with none of its bytes kept against the budget. Turned red by a
+    /// column that answers a refused `take_memory` as rows taken, or by a key whose refused
+    /// allocation leaves its bytes counted (`HeapKey::make` without its `refund`).
+    #[test]
+    fn what_the_heap_has_no_room_for_is_handed_back_and_takes_nothing() {
+        let mut column = FirstUse::<u64, 4>::counted(2);
+        let back = crate::test_heap::refused(|| column.push(7));
+        assert!(matches!(back, Err(CapacityFull(7))));
+        assert!(!column.holds_rows(), "a refused first value takes nothing");
+        assert!(column.as_slice().is_empty());
+        assert!(column.push(8).is_ok(), "the heap has room again");
+        assert_eq!(column.as_slice(), &[8]);
+
+        let budget = budget_of(256);
+        // SAFETY: as in the tests above.
+        let keys = unsafe { budget.keys() };
+        let unkept = crate::test_heap::refused(|| keys.key("demo/full").err());
+        assert_eq!(unkept, Some(KeyUnkept::NoRoom));
+        assert_eq!(budget.counts().used, 0, "nothing kept against the budget");
+        assert_eq!(budget.counts().refused, 1);
+    }
+
     /// An owner whose answer is that every thread holds its lock, which leaves its mark to say
     /// whether the lock is held.
     fn held_by_every_thread(_: *const ()) -> bool {

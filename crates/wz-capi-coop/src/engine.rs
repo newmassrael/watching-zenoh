@@ -885,9 +885,9 @@ struct StateTables {
     /// The Finals the queryables' plane holds and the requests a dispatch refused, a row of each
     /// for each query held at once (`query::FinalHolds`).
     #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
-    held_finals: query::HeldFinals,
+    held_finals: query::HeldFinals<wz_session_core::bounded::Lent>,
     #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
-    refused_finals: query::RefusedFinals,
+    refused_finals: query::RefusedFinals<wz_session_core::bounded::Lent>,
     #[cfg(feature = "advanced-cache")]
     cache: Option<LentByteCells>,
 }

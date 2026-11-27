@@ -188,6 +188,12 @@ pub mod key_arena;
 #[cfg(feature = "alloc")]
 pub mod on_use;
 
+// The unit tests' allocator, which refuses every allocation of a thread that asks it to: how a
+// test reaches the arm a table of the on-use policy takes when the allocator refuses its rows.
+// Built where that policy is.
+#[cfg(all(test, feature = "alloc"))]
+mod test_heap;
+
 /// The pools of rows the faces of a session share: a slab of rows of one kind lent from the
 /// session's arena once, each table that keeps its rows there a list of the rows it holds
 /// ([`row_pool::PooledRows`]). Unconditional, like [`bounded`], whose lent policy keeps a peer's

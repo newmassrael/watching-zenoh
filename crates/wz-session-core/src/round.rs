@@ -179,6 +179,11 @@ pub trait RoundCalls: 'static {
     /// session's tables, and so the latch the rows count them on and where the round keeps its
     /// records ([`RecordForm`]).
     type Form: RecordForm;
+    /// The policy of storage the round's tables and the planes' plain tables are of: the lent
+    /// policy where the session's open lends or places their rows, and the on-use policy where each
+    /// takes its rows at its first value
+    /// ([`Taken::AtFirstUse`](crate::bounded::Taken::AtFirstUse)).
+    type TablePolicy: Storage;
 }
 
 /// The records a round of one thread holds at once: the most one message makes, a token's

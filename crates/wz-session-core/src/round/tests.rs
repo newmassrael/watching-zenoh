@@ -116,6 +116,7 @@ impl RoundCalls for Kept {
     type Locks = StdLocks;
     type Tally = Counted;
     type Form = crate::row_callback::Threads;
+    type TablePolicy = Lent;
 }
 
 /// A round that keeps samples alone, offered calls of every other kind all the same.
@@ -137,6 +138,7 @@ impl RoundCalls for Lean {
     type Locks = StdLocks;
     type Tally = ();
     type Form = crate::row_callback::Threads;
+    type TablePolicy = Lent;
 }
 
 /// [`Lean`] in a build whose calls all run on the thread that steps the session.
@@ -158,6 +160,7 @@ impl RoundCalls for Single {
     type Locks = StdLocks;
     type Tally = ();
     type Form = crate::row_callback::OneThread;
+    type TablePolicy = Lent;
 }
 
 /// [`Kept`] in a build whose calls all run on the thread that steps the session.
@@ -179,6 +182,7 @@ impl RoundCalls for KeptSingle {
     type Locks = StdLocks;
     type Tally = Counted;
     type Form = crate::row_callback::OneThread;
+    type TablePolicy = Lent;
 }
 
 /// One block of an arena's memory, aligned as an arena's spans start.
@@ -1461,6 +1465,7 @@ impl RoundCalls for Grouped {
     type Locks = StdLocks;
     type Tally = ();
     type Form = crate::row_callback::Threads;
+    type TablePolicy = Lent;
 }
 
 /// A group's receive buffer given back while a record of the round reads a datagram in it is

@@ -187,6 +187,13 @@ mod form_precedence_tests {
         assert_eq!(<RowPolicy as Storage>::TAKEN, Taken::AtOpen);
     }
 }
+/// The storage policy of the tables the session core's planes and round keep for the engine (the
+/// ends of its gets' legs and their callbacks, the replies its gets hold, the Finals its queryables
+/// hold and the requests they refused, the round's records, callbacks and keys): lent, where the
+/// open lends them from its arena or the region places them, whichever policy the registry's tables
+/// are of.
+#[cfg(any(wz_round, feature = "query", feature = "queryable"))]
+pub(crate) type StatePolicy = wz_session_core::bounded::Lent;
 // How the engine's calls stand to its threads, and the locks that choice decides.
 mod form;
 

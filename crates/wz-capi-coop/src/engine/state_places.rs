@@ -51,8 +51,8 @@ use crate::arena::SessionRows;
 use crate::calls::CoopCalls;
 #[cfg(wz_round)]
 use crate::round::{Round, RoundRowCounts, RoundRows};
-#[cfg(feature = "query")]
-use wz_session_core::bounded::Lent;
+#[cfg(any(feature = "query", feature = "queryable"))]
+use crate::StatePolicy;
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 use wz_session_core::limits::SessionLimits;
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
@@ -84,11 +84,11 @@ pub(super) struct PlacedTables {
     #[cfg(feature = "query")]
     pub(super) pending_gets: Rows<PendingGet, { usize::MAX }>,
     #[cfg(feature = "query")]
-    pub(super) held_replies: HeldReplies<u64, wz_session_core::bounded::Lent>,
+    pub(super) held_replies: HeldReplies<u64, StatePolicy>,
     #[cfg(feature = "queryable")]
-    pub(super) held_finals: query::HeldFinals,
+    pub(super) held_finals: query::HeldFinals<StatePolicy>,
     #[cfg(feature = "queryable")]
-    pub(super) refused_finals: query::RefusedFinals,
+    pub(super) refused_finals: query::RefusedFinals<StatePolicy>,
 }
 
 /// The places of a session's region its state's own values are written in: see the module
@@ -267,8 +267,8 @@ impl StatePlaces {
     #[cfg(feature = "query")]
     pub(super) unsafe fn gets(
         at: NonNull<Self>,
-        ended: EndedLegs,
-        replies: HeldReplies<u64, Lent>,
+        ended: EndedLegs<StatePolicy>,
+        replies: HeldReplies<u64, StatePolicy>,
         legs: LegRows,
     ) -> Placed<GetPlane> {
         // SAFETY: the caller's contract; the field is aligned for the plane, the owner's alone,
@@ -288,7 +288,7 @@ impl StatePlaces {
     #[cfg(feature = "queryable")]
     pub(super) unsafe fn queries(
         at: NonNull<Self>,
-        holds: query::FinalHolds,
+        holds: query::FinalHolds<StatePolicy>,
     ) -> Placed<QueryPlane> {
         // SAFETY: as for the gets' plane.
         unsafe {
