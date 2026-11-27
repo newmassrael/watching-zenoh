@@ -160,6 +160,9 @@ its plane.
 | CN3 (the delivery) | `refactor(capi-pico): Deliver both planes' listener events as one type` | an event names its plane (`ConnEvent`: a transport's or a link's, each as that plane's callback reads it), so one `Delivery` and one `Pending` serve both planes where each was instantiated for the transport event and again for the link event. The delivery holds the closure with its event's type left out (`EventCall`, erased at the door by `erase_transport_call` and `erase_link_call`, as `pubsub`'s `erase_sample_call` is) and its plane, and hands the closure an event of that plane alone | the replay tests over the one delivery, unchanged in what they assert; `a_delivery_hands_its_closure_the_events_of_its_plane_alone` (red if `Delivery::call` hands the closure an event of the other plane: the transport callback reads a link event and logs a line) |
 | CN3 (the place) | `refactor(capi-pico): Lay both planes' listeners out in one place type` | one handle state (`ListenerState`) and one kept part (`Listener`: the delivery and the link filter, `None` for a transport listener) make one place type, `ListenerPlace`, which the pools of both kinds lay out (`object_slot`'s layouts, `process_pool`'s plan); one `place_listener` writes it, the pool kind read off the plane. `Listened`, `LetGo` and the second instantiation of the place's code (`hold_entity`, `kept_at`, `retire_entity`, `Slot::take_entity` and `fill_in_place` over the second pair) are gone | the place tests of the cooperative engine (`place_tests`: a listener of each plane holds a place of its session's own kind and gives it back), unchanged |
 | CN3 (the table) | `refactor(capi-pico): Keep a hub's listeners of both planes in one table` | one `Table` under one lock: a row (`ListenerRow`: the entry and the replay's mark) for each listener each plane's limit admits, read as the plane's slice, so a row's place is its listener's place in the plane's told notes; ids come from the hub, so one `undeclare` takes a listener of either plane. One `declare`, `release_listener`, `fan` and `converge` over the plane, with `key_of_row` and `event_of_row` the one place a plane's key and event are made, and `Listener::hears` what a replay and a convergence tell | `a_row_a_replay_keeps_is_given_to_no_other_listener_until_it_ended` now over the plane's slice and the hub's `end_replay` (red if a free row ignores the replay's mark, or a replay's end frees the other plane's row); `undeclaring_a_listener_takes_no_listener_of_the_other_plane` (red if each plane numbers its listeners apart: the link listener's undeclare takes the transport listener); the rows tests of each plane, unchanged |
+| CN1 (the row) | `refactor(session-core): Hold a face row's link ends as facts, not text` | `FaceLinkRow`'s `src` and `dst` texts became `ends: RowEnds`: the ends a driver lent (`Lent`: the kind, and each end an IP address or a name, `LentEnd`), a group member's (`Member`: the group's locator and the address the member's datagrams come from), or two locators a snapshot holds written (`Written`, the tokio engine's rows, read off `FaceSnapshot`). `FaceLinkRow::write_src` and `write_dst` write a locator with `link::write_locator` (now public, still the one writer) where the row is read; `member_end` is the one writer of a member's end, for its row and its snapshot (`GroupMemberLink`). The engine writes no locator into a row: `end_row`, `ends_row`, `udp_row`, `member_row` and `udp_text` are gone. The pico door writes each end once into the string it hands out (`ConnText::written`: on the stack, one allocation of the text's length) | `a_row_holds_the_ends_its_driver_lent_and_reads_as_their_locators` (red if a row writes another scheme, suffix or address than the driver's ends, or keeps an end's text rather than its address), `a_group_members_row_is_the_row_of_its_snapshot_held_in_place` now reads the member's address in the row, `a_member_end_is_written_whole` (the widest IPv6 end, and a UDP group's member written as no group's), `a_links_ends_are_written_where_they_are_handed_out` in the pico door (red if the door writes another scheme, none, or cuts a name past the row's bound); the snapshot, told-row and queue tests unchanged in what they assert |
+| CN2 | `refactor(capi-pico): Write a session's group text once, at its open` | as planned: `GroupText`, pico's text of the endpoint the session joins its group by (`pico_group_endpoint_text`), is written by each open where it plans the join (the tokio engine's and the cooperative engine's, before the config it is read from goes), handed to `PicoSessionExt::new` and kept by the hub (`Connectivity::group`), which every door that hands out a member's link reads (`z_info_links`, a listener's events, its replay and its convergence). No row is read as pico's endpoint text again. The engine's row still carries the endpoint the group was joined by, which other ABIs' snapshots read (`GroupLink`) | `a_members_link_starts_at_the_text_the_open_wrote` (red if the door reads the group's text for a unicast link, or ignores it for a member, which then starts at the group's locator); `a_group_members_link_starts_at_the_joined_endpoint` and its raweth twin unchanged in what they assert, reading through `GroupText` as the open writes it |
+| CN1 (the queue) | `refactor(capi-pico): Hold a replay's arrivals as keys, told from rows` | takes back CN3's queue growth by holding no event at all: a queue row is a change (`Held`: the row's key and whether it came), the same for either plane, and its event is written when it is told, from the row the engine keeps as it notes the listener told. `SessionEngine::tell_came` and `tell_went` answer that row (`Option<FaceLinkRow>`) where they answered whether to tell: the row as it stands, or as it was told it came, read from its tomb (the cooperative engine's face tomb, a group's member tomb, the port's `ToldLedger`). A held change owns nothing, so `Pending::release` and the events' release on a fold are gone | the replay tests of the delivery over held changes, unchanged in what they assert (a PUT and DEL that cancel, a reconnect told in order, a queue past its rows that converges once, holding allocates nothing); the engine's told tests now read the row a departure is told by (`a_told_face_that_goes_keeps_its_tomb_until_its_departure_is_told`, the second departure kept apart, `a_member_told_stays_as_its_tomb_until_its_departure_is_told`, `a_tombstone_stays_until_every_listener_told_it_came_was_told_it_left`: red if a departure is told of another row than the one it was told came as); a compile-time bound holds a queue row below two transport events |
 
 ## 8. What waits, and why
 
@@ -183,24 +186,30 @@ its plane.
   that reader in place of `rest.parse::<SocketAddr>()`, its tests unchanged
   (`the_multicast_locator_grammar_is_exact`), and a scout links no `core::net` reader.
 - **CN3** landed (section 7) in three steps, the delivery, the place and the table, each built
-  on the last. What it is expected to read, for the cells of section 6 to confirm: text falls by the
-  second copy of the delivery, its queue, the table's functions, the place's code and the declare,
-  converge and fan pairs (the estimate of section 4 stands). One residue to measure, not hidden: a
-  queued row of a replay is the larger of the two events, so a transport listener's place grows by
-  about 64 bytes a row of `MAX_CONNECTIVITY_REPLAY_EVENTS` (an estimate from the two events' sizes,
-  28 and 96 bytes, beside a 32-byte key), about 2 KB a session at the default limits, in a build
-  with `connectivity` (not the zenoh-pico preset, which has none). A queued row holds the event
-  because the face row it is of may be gone when it is told; CN1 makes that row the face's facts,
-  addresses with their kind, so the queue can hold the facts of either plane and the event be
-  written at the call, which takes this back. The receive path is not touched: no step of CN3 is on
-  the way a message takes.
-- **CN1, CN2 and CN4** are not begun. CN2's door-only form is not one: the text
-  pico writes of a group endpoint (`pico_group_endpoint_text`) is the pico ABI's reading, and the
-  engine's row carries the endpoint the group was joined by, which other ABIs read as it is. Written
-  once, it is the pico ABI's open plan that writes it, when it plans the join, kept with the
-  session's pico state and read by the door; that is the open plan's file and the face row's, so
-  CN2 goes with CN1, which changes the face row. CN4 (no queue between the face watch and the hub)
-  keeps its plan and its order: CN1 with CN2, then CN4.
+  on the last. Its one residue, a queue row sized by the link event (about 64 bytes a row more for
+  a transport listener's place), is taken back by CN1's queue step, and more: a queue row is now a
+  key and a direction, 40 bytes on a 64-bit target where a row held 136 (an estimate from the
+  types' sizes: `ToldKey` 32, the link event 96 and its tag, the key), so each listener's place,
+  of either plane, holds about 768 bytes less at the default `MAX_CONNECTIVITY_REPLAY_EVENTS` of
+  8, in a build with `connectivity`. The receive path is not touched: no step of CN3 or CN1 is
+  on the way a message takes.
+- **CN1 and CN2** landed (section 7). What each is expected to read, for the cells of section 6
+  to confirm: text falls by the engine's locator writing into a row (`end_row`'s two writes and
+  its `FixedText`, `push_socket_addr` for a member's `udp_row`, the raweth member's text at
+  every member row) and by `PicoEndpoint::read` and its `String` at every member's link handed
+  out; the door's `ConnText::written` and `write_locator` are the write that stays, once. Two
+  residues, stated rather than hidden: a row's ends are a little larger than its two texts were
+  (`RowEnds`'s `Lent` holds a kind beside two ends of a name's size, about 8 bytes a row on a
+  64-bit target, an estimate), which the face watch's queue, each face's kept row and the hub's
+  told rows each hold; and the hub keeps the group's text (one `GroupRowText` a session with
+  `connectivity`). Not done here, and owed: `wz_runtime_coop::udp_link::ends_fit` refuses an IP
+  link whose locator would not fit `MAX_LOCATOR_LEN`, a rule written so that no face row spills
+  to the heap; a row now holds an IP end as its address, so whether the rule still has a reader
+  that needs it (the bounded `LinkEndpoints` of `session-slot`) is to be read before it is
+  kept or narrowed.
+- **CN4** is not begun. It keeps its plan and its order: the hub told as the face changes, from
+  the engine's face watch, with no queue between, which removes `Told`, `catch_up` and
+  `MAX_CONNECTIVITY_TOLD_ROWS`'s rows.
 - **K1 and K2** landed (section 7). **K3 waits on CN4: its off form's premise is false while the
   hub is handed queued rows.** Section 5 says the off form holds the face table's read across the
   replay, so that an arrival waits for it rather than queueing. It does not wait: the rows reach the
