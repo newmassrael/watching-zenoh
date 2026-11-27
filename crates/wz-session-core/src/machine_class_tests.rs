@@ -93,6 +93,17 @@ fn the_acceptors_open_syn_takes_it_to_established_sending_the_open_ack() {
     assert!(tables.transition(taken).has_content());
 }
 
+/// The scouting machine a peer build links beside the session's is of the class too, so every
+/// machine of such a build hands the runtime's one turn the same answer and the general turn's
+/// macrostep completion has no caller there. Turned red by an eventless or raising step in the
+/// scouting source.
+#[cfg(feature = "scouting-active")]
+#[test]
+fn the_scouting_machine_is_of_the_reactive_class() {
+    assert_eq!(outside_the_class(&crate::scouting::SCOUTING_TABLES), None);
+    assert!(crate::scouting::SCOUTING_TABLES.reactive_class());
+}
+
 #[test]
 fn each_form_outside_the_class_is_named() {
     let eventless = [CandidateCell::new(UNICAST_LINK_TABLES.null_event, 0)];
