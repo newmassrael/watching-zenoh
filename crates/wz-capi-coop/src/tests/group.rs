@@ -526,7 +526,7 @@ fn a_members_put_tries_no_send_place_of_a_face_at_rest() {
 }
 
 /// Every row of a member's face table past the dial role's rests from its making, the group's
-/// among them: a group's session is stepped by the group's read, which no look of a face makes,
+/// among them: a group's session is stepped by a read's walk, which no look of a face makes,
 /// so its row stays at rest through the group's steps, and a walk of the faces that reaches past
 /// it, as a listener's does once a face takes a row after the group's, tries no leg on it and
 /// finds it no face awake beside another's. CONTROL: the table keeps a row past the dial role's,
@@ -553,13 +553,13 @@ fn every_row_past_the_dial_roles_rests_from_its_making_the_groups_among_them() {
     SessionDrive::close(&*first);
 }
 
-/// Each group's row is marked the group's at the open's join, and the group's read walks the rows
-/// so marked: a member's marked rows are its groups' places, the dial role's row none of them, and
-/// two members learn each other through their groups' reads, the marks standing after them. Turned
-/// red by an open that marks no row (`DirectFaces::hold_group` not called after the join) or
-/// another row than the group's place, or by a mark past the bound of the rows a walk reaches
-/// (`DirectFaces::walked`), where the group's read would find no row to step and the members
-/// would never meet.
+/// Each group's row is marked the group's at the open's join, and a read steps the rows so marked
+/// where its walk reaches them: a member's marked rows are its groups' places, the dial role's row
+/// none of them, and two members learn each other through their reads, the marks standing after
+/// them. Turned red by an open that marks no row (`DirectFaces::hold_group` not called after the
+/// join) or another row than the group's place, or by a mark past the bound of the rows a walk
+/// reaches (`DirectFaces::walked`), where a read would find no row to step and the members would
+/// never meet.
 #[test]
 fn each_groups_row_is_marked_at_its_join_and_walked_by_the_groups_read() {
     let network = Arc::new(Network::default());
@@ -2113,6 +2113,139 @@ mod in_place {
         assert!(
             session.link_polls() - polls <= 1,
             "one move of the links at most for the burst"
+        );
+        SessionDrive::close(&*session);
+    }
+
+    /// A read of a member that dials nothing steps the group's row where its walk reaches it,
+    /// after the look the read makes of the dial role's face for the session's bookkeeping (the
+    /// face rests, the one face the read turns, in the row before the group's), and at that look's
+    /// reading of the clock: each read turns the one face once and steps the group with no reading
+    /// of its own, and each frame handed in is delivered by the read after it. CONTROL: the
+    /// member's first put. Turned red by a walk that steps the group's row before the look in the
+    /// row before it, which reads the clock again for the group (`CoopEngine::step_group_row`
+    /// handed no reading), or by a read that makes no look while every face rests.
+    #[cfg(not(wz_round))]
+    #[test]
+    fn a_read_steps_the_groups_row_in_its_walk_at_the_reading_of_the_look_before_it() {
+        use std::sync::atomic::Ordering::SeqCst;
+        const FRAMES: u64 = 4;
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        let heard = subscribe(&session, "demo/walked/**");
+        let mut first = beacon(7);
+        first.extend_from_slice(&frame_of_puts(0, &["demo/walked/0"]));
+        hand_in(&network, 1, 7, &first);
+        for _ in 0..200 {
+            if !heard.lock().unwrap().is_empty() {
+                break;
+            }
+            SessionDrive::read(&*session, false).expect("the session reads");
+        }
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            1,
+            "CONTROL: the member's first put"
+        );
+        let (turns, own_clock) = (
+            session.takes.face_turns.load(SeqCst),
+            session.takes.group_steps_own_clock.load(SeqCst),
+        );
+        for sn in 1..=FRAMES {
+            hand_in(
+                &network,
+                1,
+                7,
+                &frame_of_puts(sn, &[&format!("demo/walked/{sn}")]),
+            );
+            SessionDrive::read(&*session, false).expect("the session reads");
+            assert_eq!(
+                heard.lock().unwrap().len(),
+                1 + sn as usize,
+                "frame {sn} delivered by the read after it"
+            );
+        }
+        assert_eq!(
+            session.takes.face_turns.load(SeqCst) - turns,
+            FRAMES as usize,
+            "one look a read, the dial role's, for the session's bookkeeping"
+        );
+        assert_eq!(
+            session.takes.group_steps_own_clock.load(SeqCst) - own_clock,
+            0,
+            "the group stepped at the reading of the look before it"
+        );
+        SessionDrive::close(&*session);
+    }
+
+    /// A read a callback of a group's record makes reads nothing, though the read under way holds
+    /// no face's slot while it steps the group: it holds the slot of the group's row across the
+    /// row's records, and a read tries every row it reaches before it waits, the groups' among
+    /// them. So no face is turned inside a call, no call runs inside another, the session answers
+    /// open, and each record is handed out once, in order. Turned red by a read whose entry tries
+    /// the faces' rows alone (`DirectFaces::read_rows` without the groups'): the callback's read
+    /// then turns the dial role's face inside the call.
+    #[cfg(not(wz_round))]
+    #[test]
+    fn a_read_from_a_callback_of_a_groups_record_turns_no_face() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::sync::Mutex;
+
+        use wz_capi_port::SubscriberSink;
+        use wz_session_core::locality::Locality;
+        use wz_session_core::sink::SampleView;
+
+        const KEYS: [&str; 3] = ["demo/inner/a", "demo/inner/b", "demo/inner/c"];
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        let got: Arc<Mutex<Vec<String>>> = Arc::default();
+        let inner: Arc<Mutex<Vec<(bool, usize)>>> = Arc::default();
+        let depth = Arc::new(AtomicUsize::new(0));
+        let deepest = Arc::new(AtomicUsize::new(0));
+        let hold = crate::EngineHold::downgrade(&session);
+        session
+            .declare_subscriber_on_wire("demo/inner/**", WireKey::literal(), Locality::Any, None, {
+                let got = Arc::clone(&got);
+                let inner = Arc::clone(&inner);
+                let depth = Arc::clone(&depth);
+                let deepest = Arc::clone(&deepest);
+                SubscriberSink::shared(move |sample: &dyn SampleView| {
+                    let now = depth.fetch_add(1, SeqCst) + 1;
+                    deepest.fetch_max(now, SeqCst);
+                    got.lock().unwrap().push(sample.keyexpr().to_owned());
+                    if let Some(engine) = hold.upgrade() {
+                        let turns = engine.takes.face_turns.load(SeqCst);
+                        let open = SessionDrive::read(&*engine, false).is_ok();
+                        let turned = engine.takes.face_turns.load(SeqCst) - turns;
+                        inner.lock().unwrap().push((open, turned));
+                    }
+                    depth.fetch_sub(1, SeqCst);
+                })
+            })
+            .expect("a session with ids left declares");
+        let mut datagram = beacon(7);
+        datagram.extend_from_slice(&frame_of_puts(0, &KEYS));
+        hand_in(&network, 1, 7, &datagram);
+        for _ in 0..200 {
+            if got.lock().unwrap().len() >= KEYS.len() {
+                break;
+            }
+            SessionDrive::read(&*session, false).expect("the session reads");
+        }
+        for _ in 0..4 {
+            SessionDrive::read(&*session, false).expect("the session reads");
+        }
+        assert_eq!(deepest.load(SeqCst), 1, "a call ran inside another's read");
+        assert_eq!(
+            *inner.lock().unwrap(),
+            [(true, 0); KEYS.len()],
+            "each callback's read answered open and turned no face"
+        );
+        assert_eq!(
+            *got.lock().unwrap(),
+            KEYS.map(str::to_owned),
+            "each record handed out once, in order"
         );
         SessionDrive::close(&*session);
     }

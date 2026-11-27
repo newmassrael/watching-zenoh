@@ -1595,8 +1595,8 @@ fn an_operation_lets_the_session_go_for_the_next_one_on_another_thread() {
 /// one with groups among them, the session having joined none: the sweep of the gets, each face
 /// and the look for a due job share the step's reading and its take. Turned red by a step that
 /// reads the clock again for its link, a wait that reads it with nothing to bound, or a read that
-/// takes the session to step and poll the groups of a session that joined none
-/// (`CoopEngine::read_groups`).
+/// takes the session to poll the groups of a session that joined none (`CoopEngine::poll_groups`
+/// after the walk of `CoopEngine::read_faces`).
 #[test]
 fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_step() {
     let router = Router::start(CatchAll::None);

@@ -1644,6 +1644,10 @@ pub(crate) struct Takes {
     /// its pump (`direct`).
     #[cfg(not(wz_round))]
     pub(crate) face_turns: core::sync::atomic::AtomicUsize,
+    /// The steps of a group's session made at a reading of the clock of their own, no read's
+    /// reading handed to them (`direct`).
+    #[cfg(all(not(wz_round), feature = "group"))]
+    pub(crate) group_steps_own_clock: core::sync::atomic::AtomicUsize,
     /// The tries of a face's read slot a read made (`direct`): before its wait, and to turn the
     /// face, or once for both where the read holds the slot across its wait.
     #[cfg(not(wz_round))]
@@ -11073,7 +11077,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // the session let go of as a read makes it; one asked from a callback's call leaves the
         // JOIN to the next read.
         #[cfg(not(wz_round))]
-        self.read_groups(None, None);
+        self.read_groups();
         // What the step took from a group is handed out outside the lock, as a read's is.
         self.deliver();
         Ok(asked)
