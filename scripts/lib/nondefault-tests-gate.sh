@@ -1026,10 +1026,15 @@ tests::direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg"
     # The same on-use tests in a session that takes faces beside its dial role's (`listen`, which
     # turns `runtime-plan` on), with the liveliness that owes a departed face's tokens: the
     # registry's faces added, removed and given back with their sets counted as each first comes,
-    # the tokens of the faces that went owed as a relation that bounds the faces admitted, and the
-    # plan that lays out no row of the faces' sets, their index or the tokens owed. Not measured on
-    # a build host yet.
+    # the tokens of the faces that went owed as a relation that bounds the faces admitted, the
+    # plan that lays out no row of the faces' sets, their index or the tokens owed, and each face's
+    # read slot made at its place's first face (`once_rows`). Not measured on a build host yet.
     "wz-capi-coop|hook|liveliness,listen,tables-on-use|on_use"
+    # The same where the session's links ask its admission (`link-admission`, which turns
+    # `listen` on): the admission held in an allocation of its own, apart from the arena, which the
+    # crate's all-features build compiles and no other on-use leg does. Not measured on a build
+    # host yet.
+    "wz-capi-coop|hook|link-admission,tables-on-use|on_use"
     # The crate's whole suite in the build form the C library ships: a domain of
     # `declaration-sync-pacing` without `on`, where a link is told the session's declarations in
     # one lap when it comes up and the engine holds no code of paced turns

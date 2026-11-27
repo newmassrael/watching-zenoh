@@ -144,6 +144,48 @@ fn an_on_use_engine_and_its_rooms_lie_apart_from_its_arena() {
     );
 }
 
+/// A session whose tables take their memory on use makes the read slot of a face past its dial
+/// role's at the place's first face: none at the open, one once a face is attached, which then
+/// comes up. Turned red by an open that makes every place's slot (`DirectFaces::taken` making its
+/// rows' faces), or by an attach that makes none (`DirectFaces::made_at` left out of
+/// `CoopEngine::attach_face`): the attached face then has no slot a read turns and never comes
+/// up.
+#[cfg(all(feature = "listen", not(wz_round)))]
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_on_use_face_takes_its_read_slot_at_its_places_first_face() {
+    let first = Router::start(CatchAll::None);
+    let second = Router::start_as(0xc5, CatchAll::None);
+    let engine = open(&first);
+    assert_eq!(
+        engine.faces_made(),
+        0,
+        "no face past the dial role's holds a read slot at the open"
+    );
+    engine
+        .attach_face(&second.endpoint())
+        .expect("the second router is dialled");
+    assert_eq!(engine.faces_made(), 1, "the attached face's slot is made");
+    until(&engine, "both faces to be up", || engine.faces_up() == 2);
+}
+
+/// A session whose tables take their memory on use holds the admission its links ask while their
+/// handshakes run in an allocation of its own, apart from its arena. Turned red by an open that
+/// places the admission in the arena (`Arena::place` in `CoopEngine::assemble`).
+#[cfg(feature = "link-admission")]
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_on_use_sessions_link_admission_lies_apart_from_its_arena() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let admission = engine.link_admission();
+    let at: *const dyn wz_session_core::link_admission::LinkAdmission = &*admission;
+    assert!(
+        !engine.arena_holds(at.cast()),
+        "the admission lies apart from the arena"
+    );
+}
+
 /// The plan of a session whose tables take their memory on use lays out no place for its engine or
 /// its faces' rooms, which lie in allocations of their own, while the CONTROL rows, the runtime's
 /// span and the count the arena is kept by, are laid out as the D12 plan lays them. Turned red by
@@ -170,10 +212,6 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
             runtime: 64,
             engine: 64,
             planes: crate::engine::SessionPlanes::OF_BUILD,
-            #[cfg(feature = "link-admission")]
-            admission: 64,
-            #[cfg(not(wz_round))]
-            direct_face: Engine::DIRECT_FACE_BYTES,
         },
     )
     .expect("the holds lay out");

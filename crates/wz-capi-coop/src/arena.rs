@@ -511,8 +511,10 @@ const REASSEMBLY_ROWS: usize = 2;
 /// The read slots and send places of the faces past the dial role's, where each face is read where
 /// it lies (`crate::engine::direct`): a build whose links run as tasks (`wz_round`) has none, nor
 /// does one that listens on no port (`listen`), the one role that reads a face past the dial
-/// role's where it lies (`read_faces`).
-const DIRECT_FACE_ROWS: usize = (!cfg!(wz_round) && cfg!(feature = "listen")) as usize;
+/// role's where it lies (`read_faces`). A session whose tables take their memory on use makes each
+/// such face at its place's first face, in an allocation of its own.
+const DIRECT_FACE_ROWS: usize =
+    (!cfg!(wz_round) && cfg!(feature = "listen") && !cfg!(wz_on_use)) as usize;
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the
@@ -630,8 +632,9 @@ const PLANE_ROWS: usize = cfg!(wz_lent) as usize
         + cfg!(feature = "query") as usize
         + cfg!(feature = "connectivity") as usize);
 /// The admission the links of a session that listens ask while their handshakes run
-/// (`ArenaPlan::lay_admission`, `link-admission`): a build without it lays none out.
-const ADMISSION_ROWS: usize = cfg!(feature = "link-admission") as usize;
+/// (`ArenaPlan::lay_admission`, `link-admission`): a build without it lays none out, nor does a
+/// session whose tables take their memory on use, whose admission lies in an allocation of its own.
+const ADMISSION_ROWS: usize = cfg!(all(feature = "link-admission", not(wz_on_use))) as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -2785,7 +2788,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// Lay out the read slots and send places of the faces past the dial role's, a row of `bytes`
     /// for each face read where it lies after the first (`read_faces`): the dial role's lies in
     /// the engine's place. Laid out once, at the open, the plan not settled.
-    #[cfg(not(wz_round))]
+    #[cfg(all(not(wz_round), not(wz_on_use)))]
     pub(crate) const fn lay_direct_faces(&mut self, bytes: usize) {
         let rows = read_faces(self.session.peers.sets()).saturating_sub(1);
         if rows != 0 {
@@ -2796,7 +2799,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// Lay out the place of `bytes` the admission of a session that listens lies in, which the
     /// session's state owns and its links' leases reach by handles that count nothing. Laid out
     /// once, at the open, the plan not settled: a refusal is kept for `Self::settled`.
-    #[cfg(feature = "link-admission")]
+    #[cfg(all(feature = "link-admission", not(wz_on_use)))]
     pub(crate) const fn lay_admission(&mut self, bytes: usize) {
         self.put(ArenaPart::LinkAdmissionState, 1, bytes);
     }
@@ -3994,15 +3997,8 @@ impl SessionArena {
 
     /// The arena, to lend from: by the open, where it lends the arena more than its lender's
     /// tables, and by the tests that lend its rows. A session whose tables take their memory on use
-    /// lends it none of those but the places of a session that listens: the read slots of the
-    /// faces past the dial role's, where each is read where it lies, and the admission of its
-    /// links (`link-admission`).
-    #[cfg(any(
-        not(wz_on_use),
-        test,
-        feature = "link-admission",
-        all(feature = "listen", not(wz_round))
-    ))]
+    /// lends it none of those.
+    #[cfg(any(not(wz_on_use), test))]
     pub(crate) fn arena_mut(&mut self) -> &mut Arena {
         &mut self.arena
     }

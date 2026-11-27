@@ -11,15 +11,19 @@ use super::{client_config, config_zid, open_with, Engine};
 use crate::{CoopConfig, EngineHold};
 
 /// A session that listens on a loopback port the kernel picks and dials nothing, not stepped: its
-/// face table holds the dial role's row and one row for each face it may take beside it.
+/// face table holds the dial role's row and one row for each face it may take beside it, each
+/// row's read slot made, as where the tables take their memory on use each is at its first face.
 fn listening() -> EngineHold<Engine> {
-    open_with(CoopConfig {
+    let engine = open_with(CoopConfig {
         whatami: WhatAmI::Peer,
         zid: config_zid(0xa6),
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         max_faces: 2,
         ..client_config()
-    })
+    });
+    #[cfg(wz_on_use)]
+    engine.make_every_face();
+    engine
 }
 
 /// While a face lends its Router for a step, no other face's pump finds a Router lent where it

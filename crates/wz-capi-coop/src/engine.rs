@@ -3065,8 +3065,19 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// and the transport reach by handles that count nothing: after the transport, the state and
     /// the tasks, which hold every lease, and before the arena it lies in. Held for its owner's
     /// drop alone.
-    #[cfg(feature = "link-admission")]
+    #[cfg(all(feature = "link-admission", not(wz_on_use)))]
     _admission: Placed<Admission<C>>,
+    /// See the form of a build without `tables-on-use`: where the tables take their memory on use,
+    /// the admission lies in an allocation of its own, which its owner gives back after it drops
+    /// the admission where it lies.
+    #[cfg(all(feature = "link-admission", wz_on_use))]
+    _admission: OwnPlaced<Admission<C>>,
+    /// The chain buffers the faces past the dial role's stage into, and the most chains each
+    /// face's Router holds open at once: where the tables take their memory on use, a face's read
+    /// slot is made at its place's first face (`direct::DirectFaces::made_at`), its Router over
+    /// these, as the open made every face's Router over them in a build that lends the slots.
+    #[cfg(all(wz_on_use, feature = "listen", not(wz_round)))]
+    face_chains: (wz_session_core::byte_cells::LentByteCells, usize),
     /// The state the places of the session's own values and its keys lie in (`StateHold`): the
     /// region, which holds its registry too (`crate::region`), or the session's own state where
     /// its tables take their memory on use. After the session's state, whose handle of the registry
@@ -4712,11 +4723,15 @@ pub(crate) struct OpenHolds<'h> {
     pub(crate) engine: usize,
     /// The places of the planes the session's state owns.
     pub(crate) planes: SessionPlanes,
-    /// The place of the admission the links of a session that listens ask ([`Admission`]).
-    #[cfg(feature = "link-admission")]
+    /// The place of the admission the links of a session that listens ask ([`Admission`]),
+    /// where the arena holds it: a session whose tables take their memory on use holds it in an
+    /// allocation of its own.
+    #[cfg(all(feature = "link-admission", not(wz_on_use)))]
     pub(crate) admission: usize,
-    /// The read slot and send place of one face past the dial role's (`direct`).
-    #[cfg(not(wz_round))]
+    /// The read slot and send place of one face past the dial role's (`direct`), where the arena
+    /// holds them: a session whose tables take their memory on use makes each face's at its
+    /// place's first face.
+    #[cfg(all(not(wz_round), not(wz_on_use)))]
     pub(crate) direct_face: usize,
 }
 
@@ -4811,9 +4826,11 @@ pub(crate) const fn lay_out_open<const ROWS: usize>(
     #[cfg(not(wz_on_use))]
     plan.lay_engine(holds.engine);
     plan.lay_planes(holds.planes);
-    #[cfg(feature = "link-admission")]
+    // The admission and the faces' read slots of a session whose tables take their memory on use
+    // lie in allocations of their own and take no place of the arena.
+    #[cfg(all(feature = "link-admission", not(wz_on_use)))]
     plan.lay_admission(holds.admission);
-    #[cfg(not(wz_round))]
+    #[cfg(all(not(wz_round), not(wz_on_use)))]
     plan.lay_direct_faces(holds.direct_face);
     // Each hold keeps its refusal in the plan, the first one kept, so the plan is asked once,
     // after them all, and answers what the first refused hold would have.
@@ -6869,9 +6886,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             runtime,
             engine: Shared::<Self>::layout().size(),
             planes: SessionPlanes::OF_BUILD,
-            #[cfg(feature = "link-admission")]
+            #[cfg(all(feature = "link-admission", not(wz_on_use)))]
             admission: core::mem::size_of::<Admission<C>>(),
-            #[cfg(not(wz_round))]
+            #[cfg(all(not(wz_round), not(wz_on_use)))]
             direct_face: Self::DIRECT_FACE_BYTES,
         }
     }
@@ -7030,7 +7047,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         })?;
         // The read slots and send places of the faces past the dial role's, each with a Router of
         // its own over the session's chain buffers, lent to its pump in a cell of its own.
-        #[cfg(all(not(wz_round), feature = "listen"))]
+        #[cfg(all(not(wz_round), feature = "listen", not(wz_on_use)))]
         let taken = direct::DirectFaces::<L, C>::taken_in(
             lent.arena.arena_mut(),
             lent.taken_faces,
@@ -7039,6 +7056,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             lent.transport.face_chains,
         )
         .map_err(lend_refused)?;
+        // Where the tables take their memory on use, a row for each of those faces and none made:
+        // each face is made at its place's first face, its Router over the same chain buffers.
+        #[cfg(all(not(wz_round), feature = "listen", wz_on_use))]
+        let taken =
+            direct::DirectFaces::<L, C>::taken(lent.taken_faces).map_err(OpenError::Arena)?;
         let wait_room = read_wait_room(&config);
         #[cfg(feature = "time-base")]
         let clock_wake = config.clock_moves.as_ref().and_then(|moves| {
@@ -7073,12 +7095,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             wz_session_core::limit_binding::Quota::at_most(lent.links),
         )
         .ok_or_else(|| heap_refused(lent.links.saturating_mul(LinkBook::row_bytes())))?;
-        #[cfg(feature = "link-admission")]
+        #[cfg(all(feature = "link-admission", not(wz_on_use)))]
         let admission = lent
             .arena
             .arena_mut()
             .place(admission)
             .map_err(lend_refused)?;
+        // Where the tables take their memory on use, the admission lies in an allocation of its
+        // own, owned where the arena's place would be.
+        #[cfg(all(feature = "link-admission", wz_on_use))]
+        let admission = {
+            let vacant = OwnPlaced::<Admission<C>>::vacant().map_err(OpenError::Arena)?;
+            // SAFETY: the write leaves the whole admission in the allocation reserved for it.
+            unsafe { vacant.fill(|at| at.write(admission)) }
+        };
         // SAFETY: the handle is held by the transport and by each link's lease, in the link's
         // actions, which the faces, the tasks and the transport hold: the engine's drop drops the
         // session's tasks before `Core` (`CoopLocalSet::drop_tasks`), and `Core` drops its
@@ -7261,6 +7291,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             _steps: lent.steps,
             #[cfg(feature = "link-admission")]
             _admission: admission,
+            #[cfg(all(wz_on_use, feature = "listen", not(wz_round)))]
+            face_chains: (lent.transport.reassembly, lent.transport.face_chains),
             #[cfg(not(wz_lent))]
             _state: lent.state,
             arena: lent.arena,

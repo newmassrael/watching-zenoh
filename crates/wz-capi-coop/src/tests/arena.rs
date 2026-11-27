@@ -257,9 +257,9 @@ fn held_plan(
             runtime,
             engine: wz_runtime_coop::kept::Shared::<Engine>::layout().size(),
             planes: crate::engine::SessionPlanes::OF_BUILD,
-            #[cfg(feature = "link-admission")]
+            #[cfg(all(feature = "link-admission", not(wz_on_use)))]
             admission: core::mem::size_of::<crate::engine::Admission<PosixClock>>(),
-            #[cfg(not(wz_round))]
+            #[cfg(all(not(wz_round), not(wz_on_use)))]
             direct_face: Engine::DIRECT_FACE_BYTES,
         },
     )?;
@@ -3349,9 +3349,9 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
     plan.holding_engine(64)
         .expect("the build's limits lay the engine's place out");
     plan.lay_planes(crate::engine::SessionPlanes::OF_BUILD);
-    #[cfg(feature = "link-admission")]
+    #[cfg(all(feature = "link-admission", not(wz_on_use)))]
     plan.lay_admission(64);
-    #[cfg(not(wz_round))]
+    #[cfg(all(not(wz_round), not(wz_on_use)))]
     plan.lay_direct_faces(64);
     plan.settled()
         .expect("the build's limits lay the planes' and the admission's places out");
@@ -3890,7 +3890,9 @@ fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
 /// group's place being read through the group's own session. Turned red by a table of one share
 /// whatever the faces of a build that listens (`ArenaPlan::lay_out`), by a row or a share for
 /// each place of a build that does not (`read_faces`), or by a row for the dial role's face,
-/// which lies in the engine's place (`ArenaPlan::lay_direct_faces`).
+/// which lies in the engine's place (`ArenaPlan::lay_direct_faces`). A session whose tables take
+/// their memory on use lays out no such row, each face being made at its place's first face, but
+/// keeps the shares: turned red there by a row laid out for them (`DIRECT_FACE_ROWS`).
 #[cfg(not(wz_round))]
 #[test]
 fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
@@ -3912,16 +3914,19 @@ fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
         caps::REASSEMBLY_CHAINS * read
     );
     let direct = plan.rows().find(|row| row.part() == "direct faces");
+    #[cfg(not(wz_on_use))]
     if read > 1 {
         let direct = direct.expect("a row of the faces past the dial role's");
         assert_eq!(direct.count, read - 1);
         assert_eq!(direct.entry_bytes, Engine::DIRECT_FACE_BYTES);
-    } else {
-        assert!(
-            direct.is_none(),
-            "the dial role's face lies in the engine's place"
-        );
+        return;
     }
+    // The dial role's face lies in the engine's place, and on use each face past it is made at
+    // its place's first face.
+    assert!(
+        direct.is_none(),
+        "no row is laid out for a face's read slot"
+    );
 }
 
 /// An open's plan lays out what a listed plan of the same session lays out, every sum and every
