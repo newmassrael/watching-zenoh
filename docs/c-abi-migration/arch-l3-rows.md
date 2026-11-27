@@ -797,6 +797,29 @@ every case (the engine's `GetPresence` is still `Absent`). Receive: 0. Tests:
 `a_walk_finds_each_get_its_pick_names_standing_or_ended` (red if the walk skips an ended get,
 finds one of another fan, or finds a retired get again).
 
+**Two rulings on the switch.** A get's row keeps no anchor: a get holds no key of the ABI's, so
+`LatchedRow` takes what its row keeps of the key as a parameter (`LatchedRow<S, A, K = KeyAnchor>`)
+and a get's row is `LatchedRow<ReplyCallback, GetShown, ()>`: one row type, and no anchor paid
+per get where the ABI keeps keys. And a cancellation ends delivery: once a get's cancel returns its
+callback is handed nothing more, held, owed by a round or begun and not yet made, and only its drop
+runs, as zenoh and zenoh-pico end a get its asker undeclares; an end by answer or by deadline still
+hands what the get held back and its timeout. The two ends differ where a call is made, with no
+lock held and after the tables' row was retired: the call reads only the get's record (a call is
+where the record lies), so the record says how the get ended (`GetShown::cancelled`, set under the
+lock before the cancellation retires the row and read as each call is made), and the tables' row
+keeps the ends that leave it in place to be handed out (`GetEnd::Answered`, `TimedOut`). The
+cancellation then waits, as an undeclaration does, until no call of the get runs
+(`wait_for_get_release`); the session's close ends each get as a cancellation.
+
+**The tables' count of ended gets, landed ahead of the switch.** The tables count the gets their
+answer or their deadline ended and that are not retired yet (`SessionTables::owes_ended_get`), so
+the engine marks under the hold that ended one that a delivery owes it, and a delivery that reads
+the mark clear takes no lock. Size: 0 in every case (`GetPresence` is still `Absent` on the
+engine). Receive: 0. Test:
+`session_tables::tests::the_tables_count_the_ended_gets_until_each_is_retired` (red if
+`end_leg` or `time_out_get` leaves an end uncounted, or `retire_get` takes a standing get off
+the count or leaves an ended one on it).
+
 ## 7. The receive
 
 None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message
