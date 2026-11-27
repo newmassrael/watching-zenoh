@@ -214,6 +214,61 @@ filter's plain form and record (`write_filter` 807), the places a session lends 
 the open's composition. What removes it is less work per declaration and per open (S1's pipeline,
 T-OPEN's plan), measured on this row, not a second split of the doors.
 
+#### 3.2.1 Doors: the declaration as one request, and the place that carries its lender
+
+The reading above leaves the declaring doors one body each; what they still hold is the composition
+pico's doors leave to its session layer. On the explain report of 2026-11-26 the four declaring
+bodies of this build are `z_declare_publisher` 1,901 (`write_filter` 695 of it, which is
+`FilteredKey::declare_at`: the key's declaration, the entity id, the filter's Interest and the
+record; `pubsub` 632; `object_slot` 137), `declare_subscriber_with` 1,359 (`pubsub` 625,
+`keyexpr` 333 for the subscription's own key, `wz_capi_port` 139, `object_slot` 105),
+`z_declare_keyexpr` 903 (`keyexpr` 661, `object_slot` 114) and `declare_on_filter` 615
+(`matching` 288, `ffi` 111, `object_slot` 93). pico's `z_declare_publisher` is 223 bytes
+because `_z_declare_publisher` and `_z_write_filter_create` do that work below it, in bodies the
+ledger counts in sessions. The structure has three parts; each keeps every check it has today in
+one place, and none touches the put or the receive.
+
+- **A lent place carries its lender from the take (landed with this note, section 7).** The take
+  of an entity's place is one body already (`Lender::lend`), but it handed the lender back to the
+  door, which moved it through a four-word slot and wrote it into the place at the fill
+  (`Lender::attach`, inlined per object type), and a refused fill or a release read it back out of
+  the place by the object's type. The lender is now written into the place by the one body that
+  lends it, at an offset handed to it as a value (`InSession::<T>::LENDER_AT`), the slot is the
+  place and a flag, the fill writes the object alone, and a refused fill and every release give
+  the place back through one body that reads the lender at that offset
+  (`give_back_lent_place`). Basis: `object_slot` bytes in the lent declaring bodies (137, 105,
+  93, 29) and `release_entity::<PublisherState>` 125. Expected doors -120 to -250. Textbook
+  because it is the allocator's own shape: the header an allocation keeps is written by the
+  allocation, and the free reads it from the address, so no caller carries it.
+- **One request to the engine for the declaration's work.** Each declaring door reads its
+  arguments into one `DeclareRequest` (the entity kind, the key the outbound gate admitted, the
+  caller's declaration when its key has one, the QoS and locality the options fold to, the C
+  closure's parts, the place the slot took, the door its refusal is answered at) and makes one
+  port call, `SessionEngine::declare_entity`, which does in one engine body what the door now
+  composes: the key's declaration, whole or up to its non-wild prefix, the entity's row with the
+  record taking its hold of that declaration directly, and for a publisher the filter's Interest
+  and its plain form. Two steps a declaration takes twice become one: the door's key step
+  (`EntityKey::up_to`) beside the engine's own (`declare_keyexpr_where`, `Declaring::keyed`),
+  and the door's hold that is taken, handed to the record and let go (`EntityKey`'s `taken` and
+  its drop). The checks stay
+  where they are, one body each: the session's reading (`open_session_handle`), the key's gate
+  (`outbound_keyexpr`, which reads the constructor's proof mark and judges again only an
+  unchecked view) and the refusal's code (`refusal_code`, the request naming its door). Expected
+  doors -1,600 (`declare_at` 695, `EntityKey::up_to` 355, the subscription's key steps about
+  330, the port's glue about 220), sessions about +700, net -900 to -1,200. It is the doors' half
+  of S1's `declare` (lane T-DECL), and lands on the engine method that lane makes, not beside it.
+- **What stays out, and why.** The put and delete doors (`session_write`, `publisher_write`,
+  `PutCarried::fold`) are the hot path: each is one body, its options fold once, and a put's key
+  is judged by the proof mark its constructor set, so a request there would add a call per put.
+  The open is S-OPEN's and T-OPEN's. Bytes and serialization (D3), the object families (D2), the
+  encodings (D4), the configuration (D5) and the platform exports (D6) are `text.md` section 10.3's
+  rows; the doors row reaches pico only with those, and the two parts above remove the declaring
+  work's share, about 1.8 KB of the 23.6 KB.
+
+Ir: the first part changes the declare and undeclare paths only; a pool's slot (a sample's clone)
+tests a flag where it tested the lender's niche, the same instruction. The second adds no call on a
+put or a receive. The receive's 3,078 instructions a message are not touched by either.
+
 ### 3.3 Transport: one batch writer, and the handshake's machine on tables
 
 The send side is 10,700 bytes against pico's 3,500 because a message is written through
@@ -428,3 +483,24 @@ callgrind of one handshake and one fragmented message (cell M9 of `text.md`).
 Together with 6.3 the transport area moves by about -1,800 to -2,700. The gap to pico that remains
 is the receive's (`drive` 4,657, `reassembly_dispatch` 2,111, `transport_timers` 786: `text.md`
 X2, X4, X5) and the send's admission jobs of section 6.1.
+
+## 7. The step landed with the doors' design: a lent place carries its lender from the take
+
+`wz-capi-pico`'s `object_slot`: `Lender::lend` becomes `Lender::lend_into`, which writes the
+lender into the place it claims, `InSession::<T>::LENDER_AT` bytes in (`core::mem::offset_of!`), and
+hands back the place alone. `Slot<T>` holds the place and, on the cooperative engine, whether it is
+lent (a `bool` where it held an `Option<Lender>`); `fill` and `fill_in_place` write the object
+only (`Lender::attach` is gone); the drop of an unfilled lent slot and `release_entity` give the
+place back through `give_back_lent_place(place, lender_at)`, one non-generic body. The tokio
+engine's empty `Lender` is gone with the field: its places are the pools'. The counted places
+(`Answering`) read the lender where they did, which the take now writes.
+
+Expected on the case: the `object_slot` owner lines in `z_declare_publisher`,
+`declare_subscriber_with`, `declare_on_filter` and `z_declare_background_subscriber` down by
+about 30 to 60 each, `release_entity::<PublisherState>` 125 to about 40, `Lender::lend` 81 to
+about 100 as `lend_into`: doors -120 to -250. Tests:
+`object_slot::tests::a_lent_places_lender_lies_past_its_object_within_the_place` holds the offset
+for five object types, and
+`object_slot::tests::a_refused_fill_gives_the_lent_place_back_to_its_session` holds the refused
+fill's and the release's give-back; the existing
+`a_session_lends_its_entities_places_and_spends_none_of_anothers` holds the unfilled drop.
