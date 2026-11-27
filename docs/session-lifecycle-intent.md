@@ -1599,6 +1599,59 @@ verbs to its commanders, which is D12's step (4).
 Order: D16 first (the port every later piece feeds), D17 beside it (its codec
 and verification stand alone until D16's subject takes it), D18 beside both.
 
+**D16 built.** One function decides every lifecycle request on both profiles:
+`decide` over a `Request` of subject (the `Commander`), verb, object (the
+peer, a reset's generation and the key the request arrived on) and context (the
+`Channel`), answering a `Decision` that names its reason, permit or refusal
+(`crates/wz-session-core/src/lifecycle_monitor.rs` @ `pub fn decide<P: Policy + ?Sized>`).
+It refuses a verb the node does not bind, then reads the policy: the node's own
+statement about its pipe, the grants of the verb (a grant names a zid a key
+proved, and may be narrowed to a key expression the arriving key must lie in),
+and last the write permission of the configuration, which names no subject and
+stands only for the admin images that hold no secure channel (D12, step 4). The
+policy is data behind `Policy`: the fixed profile's compiled `Commanders`
+lists (`crates/wz-session-mcu/src/connect_manager.rs` @ `impl Policy for Commanders`),
+`PipeOr` for a node commanded over a pipe as well, and the heap profile's
+`HeapGrants`, read at run time in the declaration's shape `<zid>=<verb>[,<verb>...]`
+with an optional `=<key expression>` (`lifecycle_monitor.rs` @ `pub fn parse(text: &str) -> Result<Self, GrantError>`;
+the demo's `--session-commander`). `Monitor` is the one type both profiles judge
+through: the policy and a `DecisionRecord` that every decision is written to
+before it is answered (`lifecycle_monitor.rs` @ `let decision = decide(self.policy, bound, request);`).
+The record is bounded on the fixed profile, the latest decisions and the count
+of all (`crates/wz-session-mcu/src/decision_log.rs` @ `pub struct DecisionLog<const N: usize>`,
+held by `StoreNode` and `ControlledOpener`), and the process's log on the heap
+profile (`LogRecord`). `Commander::Sealed` names the commander a sealed command
+proved (D17); nothing constructs it yet, and the lists judge it as they judge a
+verified zid.
+
+Every entry point reaches a verb through it. `LifecycleNode` no longer judges:
+its `permits` became `monitor`, and `lifecycle_verdict` asks the monitor
+first for every verb (`crates/wz-session-core/src/lifecycle_node.rs` @ `node.monitor().decide(node.binds(verb), &request).permits()`),
+so the pipe (`control_port`), the in-band queries of both profiles
+(`admin_fixed`, `lifecycle_query`) and the connect manager's store
+(`StoreNode`) share it. `NodeOpening::permitted` became `monitor` too. The heap
+profile's Push ingress decides with the zid the session proved
+(`crates/wz-session-core/src/drive.rs` @ `subject: Commander::of_requester(proven.as_ref()),`),
+and `SessionLifecycleAuthority`, which judged the key alone, is gone. The heap
+profile's dispatch now says who asks: a hosted queryable is handed the query as
+a `ProvenQuery` that answers the zid the asking face's link proved
+(`crates/wz-runtime-tokio/src/router_forward.rs` @ `.and_then(|face| face.runtime.actions.verified_peer_zid());`),
+which step (1) of D12 left open. An unproven or unlisted commander is refused
+on the heap profile, a listed zid commands only its verbs, and both records
+carry every decision (the tests beside each piece).
+
+What remains. The admin write of the fixed profile (`ConnectControl::apply`,
+the configuration's `connect/endpoints`) is still gated by the write permission
+inside the parse and does not yet ask the monitor; it is the one entry point
+left, and it waits on a ruling, because its object is a list of locators and not
+a peer, so it is none of the four verbs as they stand. No test drives a lifecycle query over the wire through the heap dispatch
+with a proven commander: the demo's end-to-end test reaches the node over plain
+TCP and now witnesses the refusal, and a permitted close over the wire needs a
+client whose TLS key names its zid. The heap profile reads its grants from the
+command line in the declaration's shape, not from a node declaration file. The
+Zephyr loopback image names a `Commander` where `lifecycle_verdict` now takes an
+`Asker` (lane D18's file).
+
 ## 6. The contract for every verb (step 8; A, B and D built, C in part)
 
 Step 7e held the transports to one table for `open`. The other verbs of D6
