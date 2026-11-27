@@ -4171,8 +4171,9 @@ fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
 
 /// An open's plan lays out what a listed plan of the same session lays out, every sum and every
 /// layer's rows, and lists no row, so the open's frame holds no table of them; a listed plan taken
-/// on by an open's plan, as a region's is, is the same plan. Turned red by a walk whose sums depend
-/// on the list it keeps, or a `take_on` that leaves a sum or a layer's rows behind.
+/// on by an open's plan, as a region's is, is the same plan, in the lent form and on use. Turned
+/// red by a walk whose sums depend on the list it keeps, or a `take_on` that leaves a sum or a
+/// layer's rows behind.
 #[cfg(feature = "runtime-plan")]
 #[test]
 fn an_open_s_plan_lays_out_a_listed_plan_s_sums_and_lists_no_row() {
@@ -4181,6 +4182,13 @@ fn an_open_s_plan_lays_out_a_listed_plan_s_sums_and_lists_no_row() {
     let mut open = crate::arena::OpenPlan::blank();
     open.count(&config, &config.limits)
         .expect("lays an arena out");
+    assert!(
+        listed.reassembly().1 > 0,
+        "CONTROL: the listed plan counts the chains"
+    );
+    // On use no plan lists a row, each table taking its own memory, so the sums are all the two
+    // plans have to share.
+    #[cfg(not(wz_on_use))]
     assert!(
         listed.rows().count() > 0,
         "CONTROL: the listed plan lists its rows"
