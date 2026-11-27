@@ -161,7 +161,16 @@ engine's tests do (`PosixLinks` in `crates/wz-capi-coop/src/tests.rs`). Test:
 
 Left for a step of its own: the stream link's share (about 120 bytes of `StreamDriver::service`).
 A stream link's type is its stream's (`StreamSocket::Link`), so carrying `W` there touches each
-stream family and the secure channel's.
+stream family and the secure channel's. Its change, read in the code and not built: the GAT takes
+the waiter, `type Link<B: RxStore + 'static, X: TxStore + 'static, W: InputWaiter>`;
+`StreamDriver` takes `W = WaitsInLoop` as `UdpDriver` does (a `PhantomData` field, written by
+`framed_in`), and its `service` reads `(W::OWNER && S::NAMES_INPUT_WAIT) || self.owner_waits`,
+with `StreamSocket::NAMES_INPUT_WAIT` beside the datagram socket's; `StreamLink`, `link_over`
+and `link_over_in` carry `W`, and `LinkPlace::stream` names the stack's. The impls that state the
+GAT are eight outside the tests (`NoStream`, the app's, the pipe's, and those of
+`wz-runtime-posix` for POSIX and Windows, `wz-runtime-zephyr`, `wz-session-lwip` and
+`wz-tls-mbedtls`) and six in tests: each a one-line change, but four of the crates are compiled
+only by a build of their own target, so the step waits for a build loop that compiles them.
 
 Measured on the case's explain report: the driver row and the `wz_runtime_coop::udp_link` owner
 line; expected -700 to -790, the receive's instructions a message unchanged or fewer.
@@ -174,8 +183,16 @@ stack makes each datagram link with it in its cell (`LinkPlace::datagram`), so
 `MaybeUninit::write`); `with_peer` is the same body over a place in its own frame. Test:
 `udp_link::tests::a_link_written_where_it_lies_is_the_link_a_value_is`.
 
-Left: the stream link's placement (217 bytes, `LinkPlace::stream`), whose link is the stream's
-type (`StreamSocket::Link`), the same seam as S2's stream share.
+The stream link's placement (217 bytes, `LinkPlace::stream`) is built too (commit "Write a
+stream link where it lies"): `StreamDriver::framed_in` writes the driver field by field in the
+place it is handed (`framed` and `over` are it over a place in their own frame, `over_in` the
+length-prefixed form), `StreamLink::over_in` is that for a stream's link (a default that moves a
+value in, which `NoStream` keeps), and `link_over_in` is what the stack's `LinkPlace::stream`,
+the pipe's `PipeShape::link`, the app's `place_stream` and the WebSocket's link open with. Test:
+`stream_link::tests::a_stream_link_written_where_it_lies_is_the_link_a_value_is` (red if
+`framed_in` leaves a field unwritten or writes one other than `framed` did). Expected: the
+`ip_stack` owner line -150 to -217, the receive untouched (an open). Not built or measured by this
+lane.
 
 Measured on the case's explain report: `begin_initiator` and the `wz_runtime_coop::ip_stack`
 owner line; expected -150 to -270, the receive untouched (an open).

@@ -19,7 +19,7 @@ here (five lanes work beside each other). The size case is `pico-client-coop-nos
 | 6b-5 | built (commit "Hand a face life's wake back with its answer") | section 6.2; its two readings and the tests in 6.5 |
 | 6b-3 | built (commit "Name a dial's endpoint by its face life's row") | section 6.3 |
 | 6b-4 | built in the direct read and the round (commits "Keep the walk's refusal with no text until it ends", "Carry the round's walk refusal with no text"), the refusal kept by L0, not the life | section 6.4 |
-| 6b-6 | designed (section 6.6): the life stays in the face's record; its reading of the link moves to L2 | section 6.6 |
+| 6b-6 | built as designed in section 6.6 (commit "Read a face's link for its life in one place"): the life stays in the face's record; its reading of the link is L2's `UnicastLink::read_link` | section 6.6 |
 | 6c sending, 6d session state | not this lane's first steps | 6d goes with phase 4 (lane arch-l3-rows) |
 
 ## 2. The layers that overlap in a face's lifecycle now
@@ -258,9 +258,10 @@ readings move is when a dial under way is next asked, which only a timing shows;
 `tests::dial_in_flight` and `tests::direct_receive` is the check, and a test whose count moved
 is named here once the run is read.
 
-### 6.6 6b-6, designed: the life reads its link, and stays out of the transport value
+### 6.6 6b-6, the life reads its link, and stays out of the transport value
 
-Section 4's premise for 6b-6 (the face's link sessions over one `UnicastTransport<_, UnicastLink>`
+Built as designed here (commit "Read a face's link for its life in one place"); not built, run
+or measured by this lane. Section 4's premise for 6b-6 (the face's link sessions over one `UnicastTransport<_, UnicastLink>`
 kept a face, which tells its life `Established` and `Ended` itself) is withdrawn, read in the
 code. What the step is for, the translation of section 2's row, is built another way.
 
