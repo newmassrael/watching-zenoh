@@ -1298,7 +1298,39 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   `an_on_use_session_sizes_its_groups_buffers_and_lays_out_none` (new, `group` with
   `tables-on-use`; red if the plan lays a group buffer out on use or sizes another length).
 
+### 7.24 The reds of hn14
+
+- `78aef50565`: `PortSource::book` names what it gives by a type, `BookParts<S, R, Reads>`
+  (`crates/wz-runtime-coop/src/udp_link.rs`), the book's rows and what makes each port's reads,
+  which clippy's `type_complexity` refused spelled inline.
+- `3d6b72f7c5`: `ip_stack::tests::udp_listener::a_stack_listens_on_udp_where_it_carries_datagrams`
+  lends its links a port's row and slot (`udp_link::leaked_ports(1, 1, 64)`) before it opens the
+  listener: since `5c5f545604` links given no port memory open no `udp/` port, so the test bound
+  nothing. What it asserts is unchanged.
+- `6015e9551a`: `LINK_ROWS`, `GROUP_RX_ROWS` and `PORT_RX_ROWS` (`crates/wz-capi-coop/src/arena.rs`)
+  count no row on use, where the plan lays none of them out, so `ARENA_ROWS` is the rows an on-use
+  plan holds (`tests::arena::a_plan_with_every_row_holds_exactly_arena_rows`).
+- `1d7bac1532`: the `tests::arena` tests that read a link's rows read the count every form keeps
+  (`ArenaPlan::links`) through `link_places`, which asserts the row of places in D12 alone, and
+  `link_receive_buffers` (the pool's row in D12, one for each link on use);
+  `a_listener_lays_out_the_gets_of_each_face_it_admits` reads the tables' rows under `wz_lent` and
+  their counts in every form;
+  `the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials` compares the arenas'
+  bytes only where the arena lays a face's tables out; the CONTROL of
+  `a_session_that_sends_each_face_its_own_leg_reserves_no_handed_places` and the plan of
+  `a_face_past_max_faces_is_not_attached` read `link_receive_buffers`.
+
 ## 8. What the main session runs
+
+- The reds of hn14 (`78aef50565`, `3d6b72f7c5`, `6015e9551a`, `1d7bac1532`), not built or run by
+  this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-coop --features
+  alloc,session-unicast,udp-listen --lib ip_stack` and `cargo test --manifest-path crates/Cargo.toml
+  -p wz-capi-coop --features udp-listen,tables-on-use --lib tests::arena` green, the counts
+  unchanged; clippy of wz-runtime-coop with `--features alloc,session-unicast,udp-listen` and of
+  wz-capi-coop with `--features udp-listen`, `--features udp-listen,tables-on-use` and `--features
+  threads,udp-listen,tables-on-use`, and the non-default features gate of the two crates. Size:
+  none in D12; an on-use plan's table of rows shorter by the rows it no longer counts. Receive Ir:
+  unchanged.
 
 - R3, 3c (c), the groups (`339c959c64`), not built or run by this lane. `cargo test
   --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast --lib
