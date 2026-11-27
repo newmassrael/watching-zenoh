@@ -951,8 +951,10 @@ fn a_redeclare_inside_the_reads_step_is_told() {
 /// with the read. Turned red by a hold that names another face's flags (`HeldSend::face`), a
 /// `FaceTx::held_of` that compares anything but those flags, a walk that holds no place
 /// (`CoopEngine::hold_faces_from`), or, where the dial role's face is the only face, a hold
-/// that hands the operation no wire (`DialHeld::parts`).
-#[cfg(not(wz_round))]
+/// that hands the operation no wire (`DialHeld::parts`). A build whose faces share the session's
+/// lock as their one send place holds none (its twin is
+/// `an_operation_holds_no_face_place_where_the_faces_share_the_sessions_lock`).
+#[cfg(not(any(wz_round, wz_one_send_place)))]
 #[test]
 fn an_operation_reaches_each_face_through_the_wire_it_holds() {
     let router = Router::start(CatchAll::None);
@@ -969,8 +971,10 @@ fn an_operation_reaches_each_face_through_the_wire_it_holds() {
 /// holder has. Turned red by a walk that takes the session's lock before the faces' places, or
 /// that skips a face whose place holds a link (`CoopEngine::hold_faces_from`), or by a hold of
 /// the dial role's face alone that takes no place (`CoopEngine::hold_dial`) or keeps it past
-/// the operation (`DialHeld`'s drop).
-#[cfg(not(wz_round))]
+/// the operation (`DialHeld`'s drop). A build whose faces share the session's lock as their one
+/// send place holds none (its twin is
+/// `an_operation_holds_no_face_place_where_the_faces_share_the_sessions_lock`).
+#[cfg(not(any(wz_round, wz_one_send_place)))]
 #[test]
 fn an_operation_holds_the_place_of_every_face_with_a_link() {
     let router = Router::start(CatchAll::None);
@@ -986,8 +990,39 @@ fn an_operation_holds_the_place_of_every_face_with_a_link() {
     );
 }
 
+/// Where the faces share the session's lock as their one send place (`wz_one_send_place`: a
+/// build of one thread without `face-send-places`, as the zenoh-pico preset's peer), an operation
+/// holds no face's place: the dial role's face, which holds the session's one link, is reached by
+/// a try of its place, which is free inside the operation and after it. Twin of
+/// `an_operation_reaches_each_face_through_the_wire_it_holds` and
+/// `an_operation_holds_the_place_of_every_face_with_a_link`. Turned red by an operation of that
+/// form that holds a face's place before the session's lock (`CoopEngine::live_on_link` taking
+/// the dial role's or every face's), which a send then reaches through its held wire and a try
+/// finds held, or by a `FaceTx::held_wire` of that form that answers a held wire.
+#[cfg(wz_one_send_place)]
+#[test]
+fn an_operation_holds_no_face_place_where_the_faces_share_the_sessions_lock() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.faces_reached_by_an_operation(),
+        (0, 1),
+        "the one face that is up is reached by a try of its place, through no held wire"
+    );
+    assert_eq!(
+        engine.places_held_by_an_operation(),
+        (0, 1),
+        "the dial role's place, which holds the link, is free inside the operation"
+    );
+    assert!(
+        engine.send_place_is_free(),
+        "and free after it, as no operation took it"
+    );
+}
+
 /// An operation on a closed session runs nothing, and leaves the dial role's send place free:
-/// the hold of the place taken before the session is found closed is let go of with it. Turned
+/// the hold of the place taken before the session is found closed is let go of with it, and
+/// where the faces share the session's lock as their one send place no place is taken. Turned
 /// red by a hold that runs the operation on a closed session (`CoopEngine::hold_dial` without
 /// `CoopEngine::live`), or that keeps the place it took.
 #[cfg(not(wz_round))]
@@ -1009,15 +1044,17 @@ fn an_operation_on_a_closed_session_runs_nothing_and_holds_nothing() {
 
 /// A publish's walk of the faces hands one leg to each face whose place holds a link, each leg
 /// reaching its own face alone: the session open on the dial role's face, and joined to no group,
-/// is handed one leg, which reaches that face, in every build. Turned red by a walk that skips the
-/// dial role's row (`DirectFaces::iter`), a leg that reaches no face (`FaceTx::reaches`), or a
-/// groups' leg handed to a session that joined none (`CoopEngine::on_groups_leg`).
+/// is handed one leg, which reaches that face, in every build; where the faces share the
+/// session's lock as their one send place, that one leg is every face's. Turned red by a walk that
+/// skips the dial role's row (`DirectFaces::iter`), a leg that reaches no face
+/// (`FaceTx::reaches`), or a groups' leg handed to a session that joined none
+/// (`CoopEngine::on_groups_leg`).
 #[cfg(not(wz_round))]
 #[test]
 fn a_publish_hands_each_face_a_leg_of_its_own() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     let tried = engine.takes.place_tries.load(Ordering::Relaxed);
     assert_eq!(
         engine.legs_of_a_publish(),
@@ -1025,7 +1062,7 @@ fn a_publish_hands_each_face_a_leg_of_its_own() {
         "one leg, for the dial role's face, which reaches that face"
     );
     // The face that is up is not at rest, and its place is tried for its leg.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     assert_eq!(engine.takes.place_tries.load(Ordering::Relaxed), tried + 1);
 }
 
@@ -1034,8 +1071,10 @@ fn a_publish_hands_each_face_a_leg_of_its_own() {
 /// one is handed one leg for it
 /// (`one_thread::group::a_publish_of_a_member_of_one_thread_reaches_the_group_by_one_leg`).
 /// Turned red by a groups' leg handed whatever the session joined (`CoopEngine::on_groups_leg`),
-/// or a face's leg that reaches the groups (`FaceTx::reaches_groups`).
-#[cfg(all(feature = "group", not(wz_round)))]
+/// or a face's leg that reaches the groups (`FaceTx::reaches_groups`). Where the faces share the
+/// session's lock as their one send place, a publish's one leg reaches the faces and the groups
+/// alike, and there is no groups' leg to withhold.
+#[cfg(all(feature = "group", wz_face_places))]
 #[test]
 fn a_session_that_joined_no_group_hands_the_groups_no_leg() {
     let router = Router::start(CatchAll::None);

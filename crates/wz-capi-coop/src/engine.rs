@@ -166,7 +166,7 @@ use wz_session_core::entropy::EntropySource;
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::lent_push;
 use wz_session_core::limits::SessionLimits;
-#[cfg(feature = "listen")]
+#[cfg(feature = "link-admission")]
 use wz_session_core::link_admission::{LinkAdmission, LinkBook, LinkRegistry};
 #[cfg(wz_round)]
 use wz_session_core::link_life::{Effects, LinkInput, LinkPhase, Refused as HandshakeRefusal};
@@ -847,7 +847,7 @@ struct SessionLent {
     /// The places for values lodged by counts, each of which keeps the arena's memory while lent.
     lodgings: LodgingPlaces,
     /// The links the plan holds buffers for: the rows of the session's link admission.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "link-admission")]
     links: usize,
     /// Whether the outbound slots the links share are fewer than the links.
     #[cfg(feature = "listen")]
@@ -1249,7 +1249,7 @@ fn lend_session(
         handle_place,
         places,
         lodgings,
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "link-admission")]
         links: plan.links(),
         #[cfg(feature = "listen")]
         tx_pool_short: plan.tx_pool_short(),
@@ -1535,7 +1535,7 @@ pub(crate) struct Takes {
     /// The sends on a face marked as the session's holder's while they were made (`SendingOn`).
     pub(crate) face_marks: core::sync::atomic::AtomicUsize,
     /// The faces' send places a publish's walk of the faces tried or held for a leg (`direct`).
-    #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
+    #[cfg(wz_face_places)]
     pub(crate) place_tries: core::sync::atomic::AtomicUsize,
     /// The sends on a face of a plain put written from the head its publisher's plain way made.
     pub(crate) planned: core::sync::atomic::AtomicUsize,
@@ -2103,8 +2103,10 @@ impl<W: LinkWaits> LinkRooms<W> {
     /// pico's try of that transport's transmit lock finds it taken; zenoh's asks that face alone
     /// for room within `wait_us`; and a build without the held-conduit wait (`tx-held-wait`)
     /// answers either profile as pico's, with no face asked. Asked by the read that steps each
-    /// face itself (`direct`), which a build that keeps the round has not.
-    #[cfg(not(wz_round))]
+    /// face itself (`direct`), which a build that keeps the round has not, where a face's send
+    /// place is held apart from the session's lock: a build whose faces share that lock as their
+    /// one place (`wz_one_send_place`) finds none held.
+    #[cfg(not(any(wz_round, wz_one_send_place)))]
     pub(crate) fn for_held_place(&self, held_drop: HeldDrop, at: usize, wait_us: u64) -> Room {
         self.for_held(
             held_drop,
@@ -2964,7 +2966,7 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// and the transport reach by handles that count nothing: after the transport, the state and
     /// the tasks, which hold every lease, and before the arena it lies in. Held for its owner's
     /// drop alone.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "link-admission")]
     _admission: Placed<Admission<C>>,
     /// The state the places of the session's own values and its keys lie in (`StateHold`): the
     /// region, which holds its registry too (`crate::region`), or the session's own state where
@@ -3385,8 +3387,10 @@ type FaceLink<C, L> = <L as HeldLink<C>>::Wire;
 /// A lend of a face's link that found it held. Never so where the read steps the faces itself: an
 /// operation holds the place of every face that holds a link before the session's lock
 /// (`CoopEngine::live_on_link`) and tries only a place that held none when it walked the faces,
-/// which nothing holds then, so a debug build of that form fails on it; a release build owes the
-/// send's debt, as any other form does.
+/// which nothing holds then; where the faces share the session's lock as their one place
+/// (`wz_one_send_place`), it tries every face's place on the one thread of the form, which holds
+/// none of them while it holds the session. A debug build of either fails on it; a release build
+/// owes the send's debt, as any other form does.
 #[inline(always)]
 fn found_held<U>(lent: &Lend<U>) {
     #[cfg(not(wz_round))]
@@ -4608,7 +4612,7 @@ pub(crate) struct OpenHolds<'h> {
     /// The places of the planes the session's state owns.
     pub(crate) planes: SessionPlanes,
     /// The place of the admission the links of a session that listens ask ([`Admission`]).
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "link-admission")]
     pub(crate) admission: usize,
     /// The read slot and send place of one face past the dial role's (`direct`).
     #[cfg(not(wz_round))]
@@ -4640,12 +4644,14 @@ impl OpenFrom<'_> {
 
 /// The admission the links of a session over the clock `C` ask while their handshakes run: owned
 /// by the session's state where its arena lent it, and reached by each link's lease through a
-/// handle that counts nothing.
-#[cfg(feature = "listen")]
+/// handle that counts nothing. A build without `link-admission` holds none: each link that ends
+/// its handshake is a face of its own, as each link is a peer of zenoh-pico's own
+/// (`vendor/zenoh-pico/src/transport/peer.c` @ `z_result_t _z_transport_peer_unicast_add(`).
+#[cfg(feature = "link-admission")]
 pub(crate) type Admission<C> = LinkRegistry<CoopRuntime<C>>;
 
 /// The admission as its links' leases ask it.
-#[cfg(feature = "listen")]
+#[cfg(feature = "link-admission")]
 fn as_link_admission<C: ClockSource + 'static>(
     admission: &Admission<C>,
 ) -> &(dyn LinkAdmission + 'static) {
@@ -4699,7 +4705,7 @@ pub(crate) const fn lay_out_open<const ROWS: usize>(
     plan.lay_runtime(holds.runtime);
     plan.lay_engine(holds.engine);
     plan.lay_planes(holds.planes);
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "link-admission")]
     plan.lay_admission(holds.admission);
     #[cfg(not(wz_round))]
     plan.lay_direct_faces(holds.direct_face);
@@ -5179,7 +5185,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The cookie key of the attempt is drawn before the parameters are read off the config:
         // drawn among them, its refusal would leave every field read before it in a temporary
         // of its own, moved again into the parameters once the key is there. A build whose
-        // session machine has no accepting role holds no key, and its draw takes nothing.
+        // session machine has no accepting role, or whose acceptor mints no cookie (no
+        // `accept-cookie`), holds no key, and its draw takes nothing.
         let cookie_signing_key =
             CookieKey::draw(&mut self.entropy).map_err(|_| OpenError::EntropyUnavailable)?;
         // The parameters the tokio engine gives a session (`wz-capi-core`'s `init_params`), with a
@@ -6753,7 +6760,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             runtime,
             engine: Shared::<Self>::layout().size(),
             planes: SessionPlanes::OF_BUILD,
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "link-admission")]
             admission: core::mem::size_of::<Admission<C>>(),
             #[cfg(not(wz_round))]
             direct_face: Self::DIRECT_FACE_BYTES,
@@ -6898,22 +6905,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             Ok((wire, entropy, rooms))
         })?;
         // The read slots and send places of the faces past the dial role's, each with a Router of
-        // its own over the session's chain buffers.
+        // its own over the session's chain buffers, lent to its pump in a cell of its own.
         #[cfg(all(not(wz_round), feature = "listen"))]
-        let taken = {
-            // SAFETY: the handle is held by the faces' rows, which the engine drops first, before
-            // the place's owner, `Core::steps`, which hands out no `&mut` of it.
-            let lend = RouterLend::over(unsafe { lent.steps.router.share() });
-            direct::DirectFaces::<L, C>::taken_in(
-                lent.arena.arena_mut(),
-                lent.taken_faces,
-                &policy,
-                &lent.transport.reassembly,
-                lent.transport.face_chains,
-                &lend,
-            )
-            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?
-        };
+        let taken = direct::DirectFaces::<L, C>::taken_in(
+            lent.arena.arena_mut(),
+            lent.taken_faces,
+            &policy,
+            &lent.transport.reassembly,
+            lent.transport.face_chains,
+        )
+        .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
         links.lend_buffers(lent.transport.links);
         #[cfg(feature = "udp-listen")]
         links
@@ -6966,7 +6967,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // after its open is admitted in place. The admission lies in the row the plan laid out for
         // it (`ArenaPlan::lay_admission`); its rows are the heap's, and a heap that refuses them
         // refuses the open.
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "link-admission")]
         let admission = Admission::<C>::try_with_order(
             &wire,
             policy.link_tie_order(),
@@ -6975,7 +6976,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         .ok_or(OpenError::Arena(ArenaRefused::NoMemory {
             bytes: lent.links.saturating_mul(LinkBook::row_bytes()),
         }))?;
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "link-admission")]
         let admission = lent
             .arena
             .arena_mut()
@@ -6986,7 +6987,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // session's tasks before `Core` (`CoopLocalSet::drop_tasks`), and `Core` drops its
         // transport and its state before the owner, a field after theirs. Nothing changes the
         // admission through its owner.
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "link-admission")]
         let link_admission = unsafe { admission.share() }.map(as_link_admission::<C>);
         // The faces' links keep the places the registry lends their tables at: one table of them.
         let places = lent.registry.places();
@@ -7031,7 +7032,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 endpoints: lent.transport.endpoints,
                 #[cfg(feature = "group")]
                 groups: Vec::new(),
-                #[cfg(feature = "listen")]
+                #[cfg(feature = "link-admission")]
                 admission: link_admission,
                 wire_zid: wire,
                 gate_cells: lent.transport.cells.gate,
@@ -7129,7 +7130,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             session_time,
             places: lent.places,
             _steps: lent.steps,
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "link-admission")]
             _admission: admission,
             #[cfg(not(feature = "runtime-plan"))]
             _state: lent.state,
@@ -7211,8 +7212,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         let handed_limits = HandedLimits::new(core.config.tx_queue.sizes);
         let arena_bytes = core.arena.bytes();
-        #[cfg(not(wz_round))]
-        let direct_lend = core.transport.lend.clone();
         let make = |this: NonNull<Self>| {
             // SAFETY: `this` is where the `Shared` the open places lays the engine, which is
             // taken out of its row at its close and first in its drop, before its place is given
@@ -7239,7 +7238,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 direct::DirectFaces::init_at(
                     NonNull::new_unchecked(addr_of_mut!((*at).direct)),
                     router,
-                    direct_lend,
                     #[cfg(feature = "listen")]
                     taken,
                 );
@@ -7493,7 +7491,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// The session's say on a second link to a node, the one its links' handshakes ask, for a
     /// test that asks it as they do.
-    #[cfg(all(test, feature = "std", feature = "listen"))]
+    #[cfg(all(test, feature = "std", feature = "link-admission"))]
     pub(crate) fn link_admission(&self) -> PlacedRef<dyn LinkAdmission> {
         self.core.lock().0.transport.admission
     }
@@ -7502,7 +7500,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// task of the session's: the runtime is confined to that lock (`confine_tasks`), so the set
     /// is used under it and a handle of it taken out is used only once the engine has gone. A
     /// session whose read steps each face where it lies runs no link as a task.
-    #[cfg(all(test, feature = "std", feature = "listen", wz_round))]
+    // Its one reader is `tests::admission_heap`, compiled with the link admission.
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "listen",
+        feature = "link-admission",
+        wz_round
+    ))]
     pub(crate) fn with_local_set<R>(&self, f: impl FnOnce(&CoopLocalSet<C>) -> R) -> R {
         f(&self.core.lock().0.local)
     }
@@ -8483,8 +8488,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let asked = Asked::new();
         let sent = if remote {
             // Where each face's leg is sent apart, the groups' leg is a body of its own, which
-            // reads none of what a face's leg reads to send on a face's link.
-            #[cfg(all(not(wz_round), feature = "group"))]
+            // reads none of what a face's leg reads to send on a face's link. Where the faces share
+            // one send place, the one leg reaches the groups too (`FaceTx::reaches_groups`).
+            #[cfg(all(wz_face_places, feature = "group"))]
             {
                 self.on_publish_legs(
                     droppable,
@@ -8495,7 +8501,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     },
                 )
             }
-            #[cfg(not(all(not(wz_round), feature = "group")))]
+            #[cfg(not(all(wz_face_places, feature = "group")))]
             {
                 self.on_faces(droppable, |tx| self.put_leg(put, &asked, tx))
             }
@@ -8650,7 +8656,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// plan of its publisher read, and no walk of the faces' links. A key a face's leg refuses
     /// (`Self::leg_of`, an empty key, which names nothing whatever declaration it is named by) is
     /// refused here too, as zenoh refuses a key that is not one on every transport alike.
-    #[cfg(all(not(wz_round), feature = "group"))]
+    #[cfg(all(wz_face_places, feature = "group"))]
     #[inline(never)]
     fn publish_to_groups_on(
         &self,
@@ -8710,7 +8716,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// its key named as `put.wire` names it. Nothing is named in the session's tables, which a
     /// group's key does not read, and no plan is kept. An empty key is left to the general publish
     /// (`NotPlain`), which refuses it on every leg alike.
-    #[cfg(all(not(wz_round), feature = "group"))]
+    #[cfg(all(wz_face_places, feature = "group"))]
     #[inline(never)]
     fn put_plain_groups_leg(&self, put: &PutOn<'_>, asked: &Asked) -> Result<usize, FanoutError> {
         if asked.stops() {

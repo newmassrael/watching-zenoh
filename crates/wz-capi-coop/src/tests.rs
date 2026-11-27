@@ -3542,7 +3542,9 @@ fn a_session_that_only_dials_opens_on_the_zid_its_stated_address_heads() {
 /// A session whose source gives nothing opens no link: its config states its zid, so the first
 /// draw is the cookie key of the dial's handshake, and the open is refused with the entropy
 /// refusal. Turned red by a start of a link that dials on without a key, or that names the
-/// refusal otherwise.
+/// refusal otherwise. The key is the stateless acceptor's (`accept-cookie`), whose twin without
+/// it is `an_open_whose_source_gives_nothing_opens_where_no_cookie_key_is_drawn`.
+#[cfg(feature = "accept-cookie")]
 #[test]
 fn an_open_whose_source_gives_no_cookie_key_is_refused_with_the_entropy_refusal() {
     use crate::OpenError;
@@ -3564,6 +3566,38 @@ fn an_open_whose_source_gives_no_cookie_key_is_refused_with_the_entropy_refusal(
     )
     .err();
     assert_eq!(refused, Some(OpenError::EntropyUnavailable));
+}
+
+/// A build without the stateless acceptor (`accept-cookie`, off in the zenoh-pico preset) holds
+/// each accept itself and mints no cookie, so it draws no cookie key for a dial: a session whose
+/// config states its zid and whose source gives nothing opens to the router, as zenoh-pico's
+/// acceptor draws nothing for its empty cookie. Twin of
+/// `an_open_whose_source_gives_no_cookie_key_is_refused_with_the_entropy_refusal`. Turned red by
+/// a key drawn for each attempt in a build that signs nothing with it (`CookieKey::draw`).
+#[cfg(not(feature = "accept-cookie"))]
+#[test]
+fn an_open_whose_source_gives_nothing_opens_where_no_cookie_key_is_drawn() {
+    use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+
+    struct Dry;
+    impl EntropySource for Dry {
+        fn try_fill_bytes(&mut self, _buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+            Err(EntropyUnavailable)
+        }
+    }
+
+    let router = Router::start(CatchAll::None);
+    let opened = Engine::open(
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        Dry,
+        config(&router),
+    );
+    assert!(
+        opened.is_ok(),
+        "a dial that draws no cookie key opens: {:?}",
+        opened.err()
+    );
 }
 
 /// Bytes the open makes a zid of (drawn or derived) are refused when they are no zid: all zero
@@ -4160,7 +4194,7 @@ fn an_open_whose_dial_is_refused_lets_go_of_the_port_it_bound() {
         .expect("the failed open let go of its port");
 }
 
-#[cfg(feature = "listen")]
+#[cfg(feature = "link-admission")]
 mod admission_heap;
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
@@ -4181,6 +4215,10 @@ mod entity_tables;
 // there not with the host's own locks (`host-sys`), which the module's tests read.
 #[cfg(all(feature = "std", debug_assertions))]
 mod face_order;
+// Each face's Router, where the read steps each face's pump itself and takes faces beside the dial
+// role's.
+#[cfg(all(not(wz_round), feature = "listen"))]
+mod face_routers;
 #[cfg(all(
     feature = "listen",
     feature = "query",
@@ -4225,8 +4263,9 @@ mod local_query;
 // A session whose tables take their memory at their first row.
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 mod on_use;
+// One face to a node is the link admission's (`link-admission`); without it each link is a face.
 #[cfg(all(
-    feature = "listen",
+    feature = "link-admission",
     feature = "query",
     feature = "queryable",
     feature = "threads"

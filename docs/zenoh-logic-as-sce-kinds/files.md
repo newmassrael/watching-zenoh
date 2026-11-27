@@ -217,6 +217,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/direct_receive.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/entity_tables.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/face_order.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/face_routers.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/face_table.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/faces.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/get.rs` | S7 | |

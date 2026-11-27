@@ -23,9 +23,9 @@ use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 #[cfg(feature = "group")]
 use wz_session_core::group_locator::parse_group_locator;
 use wz_session_core::link::BoxedLinkDriver;
-#[cfg(feature = "listen")]
+#[cfg(feature = "link-admission")]
 use wz_session_core::link_admission::LinkAdmission;
-#[cfg(feature = "listen")]
+#[cfg(feature = "link-admission")]
 use wz_session_core::placed::PlacedRef;
 #[cfg(all(feature = "queryable", feature = "group"))]
 use wz_session_core::response_sink::ResponseSink;
@@ -209,9 +209,9 @@ pub struct TransportState<T: TransportFaces> {
     /// The zid in its wire form, which every handshake of the session announces.
     pub wire_zid: SessionZid,
     /// The session's say on a link to a node it holds a link to, asked while the link's handshake
-    /// runs (`install_placed_link_admission`, `listen`): a handle of the admission the engine
-    /// owns, which it drops after every link's actions and task.
-    #[cfg(feature = "listen")]
+    /// runs (`install_placed_link_admission`, `link-admission`): a handle of the admission the
+    /// engine owns, which it drops after every link's actions and task.
+    #[cfg(feature = "link-admission")]
     pub admission: PlacedRef<dyn LinkAdmission>,
     /// The cells each link's gates are placed in when the session makes the link, where they hold
     /// the link back (`LinkCalls::gate`), lent from the arena; none for a plan that laid out none.
@@ -236,7 +236,9 @@ pub struct TransportState<T: TransportFaces> {
     /// ([`TransportFaces::Router`]).
     pub router: T::Router,
     /// Where the session lends its Router to its links' receives, each link's task holding the
-    /// place: lent for the length of a pass of the tasks and at no other time.
+    /// place: lent for the length of a pass of the tasks and at no other time. A link whose owner
+    /// steps it itself looks for its Router in a place of its own face's instead
+    /// ([`PumpPlace::lend`]).
     pub lend: RouterLend<SessionReassembly, T::RouterPlace>,
 }
 
@@ -285,6 +287,10 @@ pub struct PumpPlace<'p, T: TransportFaces, E> {
     pub place: &'p mut MaybeUninit<LinkPump<T, LinkOf<T>>>,
     /// How the owner tells the link's session ended, and ends it.
     pub end: E,
+    /// Where the pump's receive looks for the Router its owner lends it for each step: a place of
+    /// the face the link serves, which no other face's pump looks in, so a pump reaches its own
+    /// face's Router alone while another thread steps another face's.
+    pub lend: RouterLend<SessionReassembly, T::RouterPlace>,
 }
 
 /// A link whose session its owner steps itself, made ([`TransportState::place_wire`]): the
@@ -409,10 +415,11 @@ impl<T: TransportFaces> TransportState<T> {
     }
 
     /// The actions of a link the session makes, placed in their cell of the session's table: a
-    /// link past the cells is refused as one past the stack's buffers is. With `listen` the link
-    /// has its place in the session's admission before its handshake runs, which asks it once the
-    /// remote's zid is known: a second link to a node the session holds is refused there, with
-    /// nothing declared over it by either end, and not closed after it came up.
+    /// link past the cells is refused as one past the stack's buffers is. With `link-admission`
+    /// the link has its place in the session's admission before its handshake runs, which asks it
+    /// once the remote's zid is known: a second link to a node the session holds is refused there,
+    /// with nothing declared over it by either end, and not closed after it came up. Without it no
+    /// link is asked about, and each that ends its handshake is a face of its own.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn place_actions(
@@ -424,10 +431,10 @@ impl<T: TransportFaces> TransportState<T> {
         let actions: LinkHandle<T> =
             CellRc::<_, CountOf<T>>::in_cells_of(self.actions_cells.as_ref(), actions)
                 .map_err(|_| self.cells_exhausted(endpoint))?;
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "link-admission")]
         actions
             .install_placed_link_admission(self.admission, matches!(role, SessionRole::Initiator));
-        #[cfg(not(feature = "listen"))]
+        #[cfg(not(feature = "link-admission"))]
         let _ = role;
         Ok(actions)
     }
@@ -489,9 +496,9 @@ impl<T: TransportFaces> TransportState<T> {
 
     /// [`Self::spawn_link`] with no task: the link's session built in `place`, which its owner
     /// holds, steps itself and drops once no step of it is under way
-    /// ([`place_session_with_router`]). The session's Router is lent to it through the place the
-    /// link holds, as to a task's pump, for the steps its owner lends the Router around. `None`
-    /// when the Router could not be built in its place.
+    /// ([`place_session_with_router`]). Its receive looks for its Router in `lend`, the place of
+    /// its owner's face, for the steps its owner lends the Router around. `None` when the Router
+    /// could not be built in its place.
     // Always inlined: its one caller holds these values in its own frame.
     #[inline(always)]
     pub fn place_link<'p, P>(
@@ -499,11 +506,12 @@ impl<T: TransportFaces> TransportState<T> {
         place: &'p mut MaybeUninit<LinkPump<T, P>>,
         runtime: CoopRuntime<T::Clock, dyn BoxedLinkDriver, T::Lock>,
         fields: PumpFields<T::Clock, P, dyn BoxedLinkDriver, T::Lock>,
+        lend: RouterLend<SessionReassembly, T::RouterPlace>,
     ) -> Option<&'p mut LinkPump<T, P>>
     where
         P: SessionDatagramLink + 'static,
     {
-        place_session_with_router(place, runtime, fields, self.lend.clone())
+        place_session_with_router(place, runtime, fields, lend)
     }
 
     /// Open the link of the group `endpoint` names (`group`), read here once for every stack
@@ -700,9 +708,9 @@ impl<T: TransportFaces> TransportState<T> {
             endpoint,
         } = opened_as;
         let built = self.build_wire(calls, face, opened, role, endpoint, making)?;
-        let PumpPlace { place, end } = place;
+        let PumpPlace { place, end, lend } = place;
         let pump = self
-            .place_link(place, runtime, built.fields)
+            .place_link(place, runtime, built.fields, lend)
             .ok_or(TransportRefusal::NoTask(SpawnRefusal::NoTaskCell))?;
         Ok(PlacedWire {
             wire: Wire::new(
@@ -749,8 +757,9 @@ impl<T: TransportFaces> TransportState<T> {
         let actions = self.place_actions(actions, role, endpoint)?;
         // An acceptor mints a cookie at each InitAck from a nonce its binding draws from the
         // session's source, and one whose source is dry refuses every handshake (fail closed): a
-        // source that is dry now is not a link to accept.
-        #[cfg(feature = "listen")]
+        // source that is dry now is not a link to accept. One that holds each accept itself
+        // (without `accept-cookie`) draws nothing for it.
+        #[cfg(all(feature = "listen", feature = "accept-cookie"))]
         if matches!(role, SessionRole::Acceptor)
             && wz_session_core::entropy::EntropySource::try_next_u64(&mut *entropy).is_err()
         {

@@ -108,6 +108,11 @@ default = [
     # `interest-answer`).
     "udp-listen",
     "interest-answer",
+    # One link to a remote node when both dial (`link-admission`), the stateless acceptor
+    # (`accept-cookie`) and each face's own send place (`face-send-places`).
+    "link-admission",
+    "accept-cookie",
+    "face-send-places",
     "config-verdict",
     "transport_compression",
     "auth_usrpwd",
@@ -369,6 +374,18 @@ udp-listen = []
 # runtime takes the session core with the answer named, so the feature only carries the
 # capability's name.
 interest-answer = []
+# One link to a remote node when both dial (`wz-capi-pico/link-admission`): this engine's runtime
+# admits its links through its own registry whatever is named, so the feature only carries the
+# capability's name.
+link-admission = []
+# The stateless acceptor (`wz-capi-pico/accept-cookie`): this engine's runtime takes the session
+# core with its defaults, the stateless acceptor among them, so the feature only carries the
+# capability's name.
+accept-cookie = []
+# Each face's own send place (`wz-capi-pico/face-send-places`): this engine's runtime sends on
+# each link through a writer of its own whatever is named, so the feature only carries the
+# capability's name.
+face-send-places = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

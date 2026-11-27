@@ -101,6 +101,19 @@ impl<T: ?Sized> PlacedRef<T> {
         }
     }
 
+    /// A handle of the value at `at`, which its holder keeps there in place of a [`Placed`]
+    /// owner: a field of a value that lies where it was written for as long as it lives, reached
+    /// by another part of that value.
+    ///
+    /// # Safety
+    /// For this handle and every copy of it, on whichever thread: none is dereferenced before a
+    /// whole `T` lies at `at`, nor once the value there is moved or dropped; and none is
+    /// dereferenced while a `&mut` of the value is in use, nor such a reference taken while one
+    /// dereferenced is.
+    pub unsafe fn of_place(at: NonNull<T>) -> Self {
+        Self { at }
+    }
+
     /// A handle of what `part` borrows of the value: a field of it, or the value as a trait it
     /// implements. What `part` answers lies in the value or lives longer, as its signature binds
     /// it, so the handle is good for as long as this one is.
@@ -222,6 +235,24 @@ mod tests {
         let handle = PlacedRef::of_static(&VALUE);
         assert_eq!(*handle, 7);
         assert!(core::ptr::eq(&*handle, &VALUE));
+    }
+
+    /// A handle of a value its holder keeps in place reads it where it lies, every copy of the
+    /// handle alike, and a write through a cell of it is the holder's. Turned red by a handle that
+    /// reads a copy of the value it was made of.
+    #[test]
+    fn a_handle_of_a_value_held_in_place_reads_it_where_it_lies() {
+        let held = Cell::new(1_u32);
+        // SAFETY: `held` lies in this frame, unmoved, for every use of the handles below, and no
+        // `&mut` of it is taken.
+        let handle = unsafe { PlacedRef::of_place(NonNull::from(&held)) };
+        let copy = handle;
+        copy.set(2);
+        assert_eq!((held.get(), handle.get()), (2, 2));
+        assert!(
+            core::ptr::eq(&*handle, &held),
+            "the handle reads where the value lies"
+        );
     }
 
     /// A value written at a place its owner does not lend is read there, through the owner and a

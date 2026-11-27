@@ -510,7 +510,7 @@ fn a_put_on_an_empty_key_is_refused_on_the_groups_leg() {
 /// face's send place: the face holds no link that is up, and the put goes to the group by the
 /// groups' leg alone. Turned red by a walk of the faces that tries a face at rest
 /// (`CoopEngine::on_face_legs` without its look at `DirectFace::rests`).
-#[cfg(not(wz_round))]
+#[cfg(wz_face_places)]
 #[test]
 fn a_members_put_tries_no_send_place_of_a_face_at_rest() {
     let network = Arc::new(Network::default());

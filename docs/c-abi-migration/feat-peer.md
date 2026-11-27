@@ -129,11 +129,12 @@ behaviour is no door, so `host-peer` holds the same ones as `host-peer-ext`, and
 | W3 | `udp-listen` | `wz-capi-coop`'s `udp-listen` over the runtime's `udp-listen` and `udp-port-lent-only`; `listen` no longer brings it | refuses a `udp/` endpoint to listen on by name, as a scheme its links do not carry, and accepts over `tcp/` alone | none | 11,000 to 13,000 (the 16,000 of section 3 less S1's) |
 | W1 | `accept-cookie` | a session-core feature beside `session-unicast-accept` | answers an `InitSyn` with an empty cookie and keeps the negotiated state in the accepting link's own session until its `OpenSyn`, a half-open link bounded by `MAX_ACCEPT_PENDING`; no HMAC-SHA256 and no cookie codec is linked | the host's classification of an `OpenSyn` against the held state | 7,000 to 8,000 |
 | W4 | `interest-answer` | `wz-capi-coop`'s `interest-answer`, no longer implied by `listen` | answers no `Interest` a peer sends on a unicast face, and ends the replay a new face is told with the `DeclareFinal` of interest 0, as zenoh-pico's push to a new peer does | the session core's `session-unicast-accept` without `interest-answer` | 7,000 to 7,600 |
+| W6 | `face-send-places` | `wz-capi-coop`'s `face-send-places`, read by its build script | without `threads`, sends to every face under one send place, the session's lock, as zenoh-pico sends to every peer under one transmit lock: an operation runs in its caller and a put is one leg that reaches every face | none | 3,000 to 5,000 |
 | W2 | `link-admission` | the engine's admission (`link_admission`, `admission_gate`) under a feature of its own | takes each link as a face of its own, a remote node that dials and is dialled holding two | none | 2,000 to 2,300 |
 
 The order is by size, the largest first, each landed with `pico-peer-coop` lower and
 `pico-client-coop-nostd` (bytes, and receive Ir near its W/P of 0.757) unchanged: the client case
-compiles none of the five. W5 waits on S3, which is the form its off side takes, so W3 lands first.
+compiles none of the six. W5 waits on S3, which is the form its off side takes, so W3 lands first.
 
 **W3 (this branch).** `udp-listen` declared beside `peer`, which it implies; the runtime's `listen`
 brings the accepting role alone, and the session's plan lays the udp ports' rows out only with
@@ -158,17 +159,111 @@ interest, which zenoh-pico sends a new peer after the declarations it pushes
 `any(interest-answer, listen)` in `engine/replay.rs`, so a peer without the answer still ends its
 push as zenoh-pico's does.
 
-**W2.** The admission (`LinkAdmission`, `LinkBook`, `LinkRegistry`, the arena's
-`LinkAdmissionState` and, in the work form, `admission_gate`) is gated by `link-admission` in
-place of `listen`; without it every link that ends its handshake is a face, as each accepted or
-dialled link is a peer of zenoh-pico's own (`vendor/zenoh-pico/src/transport/peer.c` @
-`z_result_t _z_transport_peer_unicast_add(`).
+**W2 (this branch).** The admission (`LinkAdmission`, `LinkBook`, `LinkRegistry` as the engine's
+`Admission`, the arena's `LinkAdmissionState` row and `SessionLent::links`) and its place in each
+link's handshake (`TransportState::admission` and `place_actions`' install, `wz-runtime-coop`'s
+own `link-admission`) are gated by `link-admission` in place of `listen`; without it no link is
+asked about, so every link that ends its handshake is a face, as each accepted or dialled link is
+a peer of zenoh-pico's own (`vendor/zenoh-pico/src/transport/peer.c` @
+`z_result_t _z_transport_peer_unicast_add(`). The work form's `admission_gate` stays with
+`listen`: what it holds back is a taken link's input until its face is brought up, which a link
+that was not asked about needs as much. The dial role's standing by for a node another face holds
+(`LinkSupervisor::read_node`) stays too: it reads a handshake that ended at a held node, which
+only a peer's own admission refuses, and keeps the dial role from dialling that node again. Held by
+`tests::one_thread::listen::a_second_dial_to_a_node_of_one_thread_is_a_face_of_its_own_without_the_admission`
+(two faces at each end, the first link the CONTROL) and, with it, by
+`a_second_dial_to_a_node_of_one_thread_is_refused` and `tests::one_face::` as before; the arena's
+row by `tests::arena::a_listening_session_lays_out_its_link_admission_only_where_the_build_has_one`.
 
-**W1.** `accept-cookie` gates `accept_cookie`, the cookie half of `signing_key` and
-`CookieKey`'s key; the session machine is unchanged, since its two accept guards are events the
-host classifies (`cookie_valid`): without the feature the host answers an `OpenSyn` as valid when it
-comes on the link whose session holds the state its `InitAck` negotiated. `sha256-compact` and the
-`hmac` and `sha2` dependencies become optional under it.
+**W1 (this branch).** `accept-cookie` is the session core's (a default), forwarded by
+`wz-runtime-coop`'s and `wz-capi-coop`'s (a default of that crate's own build), and named beside
+the accepting role by each crate that takes the session core without its defaults and accepts
+(`wz-session-mcu`'s `listen` and `adminspace-write` and its tests' acceptor, `wz-session-lwip`'s
+`session-unicast-accept` and `adminspace-write`, the facade's accepting role through the runtime;
+the tokio runtime holds it through the session core's defaults), so nothing but the pico peer
+changes. It gates the `accept_cookie` module, `CookieKey`'s key and its decode, and the stateless
+half of the acceptor: the mint at the InitAck, the release of what the cookie carries, the rebuild
+at the OpenSyn, and the runtime's draw before an accepted link's handshake. The session machine
+is unchanged: its accept guard is an event the host classifies (`cookie_valid`), and without the
+feature `SessionLinkActions::fixed_cookie` is always true, so every accept is held as the
+`handshake-cookie` policy's `fixed` value holds it, whatever that policy states: the InitAck
+carries the session's configured cookie, empty, as zenoh-pico's does
+(`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+`_z_t_msg_make_init_ack(mode, *local_zid, cookie)`), the nonce slot marks the accept pending, the
+negotiated state stays in the link's session, `cookie_valid` admits the OpenSyn that echoes the
+configured cookie once, and nothing is drawn for a cookie or for its key. The binding keeps the
+session's source only where its acceptor draws (the cookie, or a challenge of `session-extauth` or
+`transport-multilink`). `signing_key`'s MAC and the `hmac` dependency stay: nothing calls them
+in the off form, the release profiles' LTO keeps nothing no export reaches, and `sha2` is the
+credential identity's as well. Held by
+`session_actions::bundle_tests::an_acceptor_without_the_stateless_cookie_holds_its_accept` (both
+builds: held and admitted without the feature, minted under a dry source and refused with it),
+`session_init_params::cookie_key_tests::an_acceptor_that_mints_no_cookie_holds_and_draws_no_key`,
+and `wz-capi-coop`'s `tests::an_open_whose_source_gives_nothing_opens_where_no_cookie_key_is_drawn`
+beside its twin `an_open_whose_source_gives_no_cookie_key_is_refused_with_the_entropy_refusal`;
+end to end, by `tests::one_thread::listen::` in the zenoh-pico preset's form (the engine against
+itself, both ends holding their accepts).
+
+**W6 (this branch).** `face-send-places` is `wz-capi-coop`'s (a default of that crate's own
+build) and the pico ABI's capability of the same name, which `wz-capi-core` carries by name alone
+(the tokio engine sends on each link through a writer of its own). It chooses how the
+direct read's sends hold the faces they send on in a build whose read takes faces past the dial
+role's (`listen`, `group`), as the crate's build script states it: each face's send place apart
+(`wz_face_places`) where the feature is named or the build has `threads`, else one send place for
+every face, the session's lock (`wz_one_send_place`). A build whose only face is the dial role's
+keeps its own form either way, so the client case is unchanged. That form is not the off form: it
+holds the dial role's place alone (`hold_dial`), so in a peer that only listens, whose dial role
+holds no link, an operation would send to no face and a put would answer `Ok(0)` having reached
+none. The off form is zenoh-pico's one transmit lock for all its peers
+(`vendor/zenoh-pico/src/transport/common/tx.c` @ `_z_transport_tx_mutex_lock(`), in two arms.
+
+- Without `threads`, the like-for-like case `pico-peer-coop`: no lock beside the session's. An
+  operation runs in its caller under the session's lock alone (`CoopEngine::live_on_link`), each
+  of its sends lends its face's link by a try of the face's place (`send_through`, `send_on`),
+  and a put is one leg (`CoopEngine::on_faces`) that reaches every face that is up and every
+  group the session joined (`FaceTx::reaches`, `FaceTx::reaches_groups`), each face's link lent
+  by a try. On the one thread of the form no try finds a place held: the read steps a face's pump
+  with that face's read slot held and not its place, hands its records out with the session free,
+  and changes a face's place only between operations, so `found_held`'s debug assertion holds in
+  this form too, and no put is held behind another send. Not compiled in it: `HeldSend`,
+  `UnderHeldFaces`, `HeldOperation`, `hold_faces_from`, `on_face_legs`, `wait_leg`, `try_leg`,
+  `on_publish_legs` and `on_groups_leg` with the groups' own legs (`publish_to_groups_on`,
+  `put_plain_groups_leg`), `FaceTx`'s chain of holds and `DirectEnd::is_of`, and the answer to a
+  held face's place (`behind_held_place`, `dropped_on_face`, `LinkRooms::for_held_place`).
+- With `threads`, argued here and not compiled in this step, which keeps each face's place in
+  every `threads` build whatever is named, so the multi-threaded library is unchanged: one send
+  lock of the session, `S`, in place of each face's place as what a send waits on. The read of
+  each face where it lies (`docs/c-abi-architecture.md` section 8) keeps its order: a face's read
+  slot first, then the session's lock, under which a face's place is changed only by a try, the
+  change it finds held owed to the read (`DirectSlot::pay_site`). The form adds one rule: whatever
+  waits on a face's place takes `S` first. An operation and a put hold `S`, then the session's
+  lock; the read carries out an owed change holding the face's slot, then `S`, then the place,
+  with the session's lock let go of. Every wait is then in the order slot, `S`, session's lock: no
+  holder of `S` waits on a read slot, since a send never waits on a read's step; no holder of the
+  session's lock waits on `S` or on a face's place, each being a try under it; and a face's place
+  is waited on only under `S`. With no wait against that order there is no cycle, and so no
+  deadlock. A send's try of a face's place under `S` finds no other holder, as `found_held`
+  asserts, and each face's read still steps its pump holding its own slot alone, never `S`: a put
+  waits behind another send, as zenoh-pico's put waits for its transmit lock, and never behind a
+  read. The form moves the read's own waits on a face's place under `S`, which is a step of its
+  own with the threaded read's tests.
+
+Receive Ir: unchanged. No message's receive reaches a send place in any form: the read's dispatch
+and its hand-out of records hold none, the one operation the read runs is the replay turn of a face
+that came up (`turn_replay`), once for each link, and the client case `pico-client-coop-nostd`
+(neither `listen` nor `group`) compiles the dial role's form, which this step does not touch.
+Held by `tests::one_thread::listen::a_put_of_a_listener_of_one_thread_reaches_every_face_it_took`
+(both forms: a listener that dials nothing puts once and both clients it took hear it, one leg
+reaching the two faces without the feature and one leg for each with it; red on an off form whose
+put holds the dial role's place alone), and
+`tests::direct_receive::an_operation_holds_no_face_place_where_the_faces_share_the_sessions_lock`
+(off: the face is reached by a try and its place is free inside the operation) beside its twins
+`an_operation_reaches_each_face_through_the_wire_it_holds` and
+`an_operation_holds_the_place_of_every_face_with_a_link`; with each face's place, by
+`engine::direct::held_operation_tests`, the place tries of
+`tests::direct_receive::a_publish_hands_each_face_a_leg_of_its_own`,
+`tests::congestion::a_held_face_place_answers_as_a_send_on_that_face` and
+`tests::direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg` as before.
 
 **W5.** The capability is `wz-capi-coop`'s `runtime-plan`, which `config-policy` and `group` keep
 implying; `peer` stops implying it once S3 lands. Until then `peer` keeps it, and the capability is
@@ -226,3 +321,64 @@ to: with `udp/` listening out of the pico preset the step still holds every buil
 - W3, Layer C1cs: `pico-peer-coop` lower by 11,000 to 13,000, most in the driver area;
   `pico-client-coop-nostd` and `pico-api-coop-nostd` unchanged (`host-peer` keeps
   `udp-listen`); `nm -C` of the peer library holds no `IpUdpListener` and no `UdpPort` body.
+- W2: `wz_config.py --write` and `--check` as for W3; build and clippy of `wz-runtime-coop` with
+  `alloc,session-unicast,listen` and with `alloc,session-unicast,link-admission`, of
+  `wz-capi-coop` with `listen` and with `link-admission`, the latter also under
+  `WZ_COOP_VALUE_LOCKS=off` (the work form), and of `wz-capi-pico` with `os-host,link-udp,peer`
+  and with its defaults.
+- W2, off, 2 tests:
+  `cargo test -p wz-capi-coop --lib --no-default-features --features std,key-matching-listener,listen,query,queryable admission`
+  runs `a_second_dial_to_a_node_of_one_thread_is_a_face_of_its_own_without_the_admission` and
+  `a_listening_session_lays_out_its_link_admission_only_where_the_build_has_one`.
+- W2, on: the same filter with `link-admission` beside them runs the arena's test and
+  `tests::admission_heap::`, the filter `a_second_dial_to_a_node_of_one_thread` the refused twin
+  alone, and
+  `cargo test -p wz-capi-coop --lib --features link-admission,query,queryable one_face` runs the
+  three of `tests::one_face::`.
+- W2, Layer C1cs: `pico-peer-coop` lower by 1,500 to 2,300 (`rival_says`, `LinkRegistry::reserve`,
+  `LinkBook::try_with_order`); `pico-client-coop-nostd` and `pico-api-coop-nostd` unchanged.
+- W1: `wz_config.py --write` and `--check`, and `sce_feature_model.py`'s check (the session
+  core's model names `accept-cookie`); build and clippy of `wz-session-core` with its defaults,
+  with `session-unicast,session-unicast-accept,codec-init-body,codec-open-body` and no defaults,
+  and the same with `tx-lend-only` and with `session-fixed-storage`; of `wz-runtime-coop` with
+  `alloc,session-unicast,listen` and with `accept-cookie` beside them; of `wz-capi-coop` with
+  its defaults and with `--no-default-features --features std,key-matching-listener,listen,query,queryable`;
+  of `wz-session-mcu` with `listen`, `wz-session-lwip` with `session-unicast-accept`, the
+  facade with `runtime-coop,session-unicast-accept`, and `wz-capi-pico` with
+  `os-host,link-udp,peer` and with its defaults.
+- W1, off: the two filters of the session core's new rows (`nondefault-tests-gate.sh`, the
+  lend-only rows' build), 1 test each, and
+  `cargo test -p wz-capi-coop --lib --no-default-features --features std,key-matching-listener,listen,query,queryable no_cookie_key`,
+  1 test (the twin without the key), then the same build's `one_thread::listen`, which holds
+  every accept at both ends.
+- W1, on: `cargo test -p wz-session-core --lib --features session-unicast,session-unicast-accept,codec-init-body,codec-open-body cookie`
+  (the bundle test's minted side and the key tests), `cargo test -p wz-capi-coop --lib no_cookie_key`
+  (1, the entropy refusal), and the tokio runtime's `handshake_cookie_fixed` and
+  `session_fsm_accepting_path` files as before.
+- W1, Layer C1cs: `pico-peer-coop` lower by 7,000 to 9,000 (`decode_accept_cookie`,
+  `send_init_ack_with_cookie`'s mint, `RegionAcceptState::encode`, `compute_hmac_sha256_full`,
+  `sha256::compress256`), `nm -C` of it holding none of them; `pico-client-coop-nostd` and
+  `pico-api-coop-nostd` unchanged.
+- W6: `wz_config.py --write` and `--check` as for W3; build and clippy of `wz-capi-coop` with its
+  defaults, with `--no-default-features --features std,key-matching-listener,listen,query,queryable`
+  (one send place for every face) and the same with `face-send-places` (each face's place on one
+  thread), with `--no-default-features --features std,app-transport,group` and the same with
+  `face-send-places`, with `listen` and with `group` (`threads`: each face's place), and with
+  `listen` under `WZ_COOP_VALUE_LOCKS=off` (the round: neither); of `wz-capi-pico` with
+  `os-host,link-udp,peer` (one thread, one send place), with
+  `os-host,link-udp,peer,face-send-places`, with `os-host,link-udp,peer,multicast-transport` and
+  with its defaults.
+- W6, off, 1 test each:
+  `cargo test -p wz-capi-coop --lib --no-default-features --features std,key-matching-listener,listen,query,queryable a_put_of_a_listener_of_one_thread`
+  and the filter `an_operation_holds_no_face_place`; the filter `held_operation` runs 0 there, and
+  the whole of that build runs as the gate's row of one thread runs it. The group's form:
+  `cargo test -p wz-capi-coop --lib --no-default-features --features std,app-transport,group one_thread::group`.
+- W6, on: the same two builds with `face-send-places` beside them run
+  `a_put_of_a_listener_of_one_thread` (1, two legs), `an_operation_reaches_each_face_through_the_wire_it_holds` (1),
+  `an_operation_holds_the_place_of_every_face_with_a_link` (1), `held_operation` (3) and
+  `an_operation_holds_no_face_place` (0); with `threads`,
+  `cargo test -p wz-capi-coop --lib --features listen,query,queryable held_operation` runs 3.
+- W6, Layer C1cs: `pico-peer-coop` lower by 3,000 to 5,000 (the held operations' wrappers,
+  `HeldOperation as UnderHeldFaces` `run`, and `hold_faces_from`, `try_leg`, `wait_leg`,
+  `on_face_legs`, `behind_held_place`), `nm -C` of it holding none of them;
+  `pico-client-coop-nostd` and `pico-api-coop-nostd` unchanged.

@@ -3,11 +3,13 @@
 
 //! The input a link has not yet been admitted to give.
 //!
-//! A session that listens keeps one face for each remote zid, and decides it in the link's
-//! handshake (`wz_session_core::link_admission`), so a link that completes its handshake is the
-//! session's link to its node. The link's task runs in the session's local set and reads frames as
-//! fast as the set is run, so the peer's first frames after the handshake would be dispatched to
-//! the session's tables before the engine has brought the face up and told its watchers.
+//! A session that listens keeps one face for each remote zid where it admits its links
+//! (`link-admission`), and decides it in the link's handshake (`wz_session_core::link_admission`),
+//! so a link that completes its handshake is the session's link to its node; without the admission
+//! each such link is a face of its own. Either way the engine brings the face up once the
+//! handshake is complete. The link's task runs in the session's local set and reads frames as fast
+//! as the set is run, so the peer's first frames after the handshake would be dispatched to the
+//! session's tables before the engine has brought the face up and told its watchers.
 //! [`AdmissionGate`] stands between the task and the link and gives the task nothing once the
 //! handshake is complete, until the engine has brought the face up (`CoopEngine::bring_up`). What
 //! the peer sent meanwhile stays queued in the link, and is read in order after.

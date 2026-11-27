@@ -98,6 +98,9 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("multicast-locator-keys", &["core", "pico"]),
     ("query-replies-with-final", &["core", "pico"]),
     ("udp-listen", &["core", "pico"]),
+    ("link-admission", &["core", "pico"]),
+    ("accept-cookie", &["core", "pico"]),
+    ("face-send-places", &["core", "pico"]),
 ];
 
 /// Each layout switch that is not a capability (`wz_config.arm_switches`) and the ABIs whose

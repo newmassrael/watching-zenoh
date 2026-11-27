@@ -161,6 +161,19 @@ EXEMPT: dict[tuple[str, str], Exemption] = {
             ),
         ),
     ),
+    ("wz-runtime-coop", "link-admission"): Exemption(
+        "lane",
+        "the say on a second link to a node that a session's transport state installs in each "
+        "link's handshake, which the cooperative engine forwards its `link-admission` to; the "
+        "engine's legs with it run the one-face tests, and the leg without it the face each link is",
+        (
+            ("crates/wz-capi-coop/Cargo.toml", '"wz-runtime-coop/link-admission"'),
+            (
+                "scripts/lib/nondefault-tests-gate.sh",
+                '"wz-capi-coop|hook|-default,std,key-matching-listener,link-admission,query,queryable|tests::one_thread::listen::"',
+            ),
+        ),
+    ),
     ("wz-runtime-coop", "query"): Exemption(
         "lane",
         "the faces a get asks, read off a session's transport state, which the "

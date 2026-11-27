@@ -503,6 +503,9 @@ object-pool|files::ext_handles_across_threads::"
     # behind `shared-key-ids`). The filter is each module path.
     "wz-capi-pico|hook|app-transport|app_transport::tests::"
     "wz-capi-pico|hook|config-document|config_policy::tests::"
+    # The refusal of an open whose document asks for the program's transport while the config is
+    # handed none: it needs the document reader and the program's transport together.
+    "wz-capi-pico|hook|config-document,app-transport|config_policy::tests::an_open_without_the_program_transport_its_document_asks_for_is_refused"
     # The cooperative engine's dispatch in a build with the program's transport: the host's links
     # and the program's are one type of links, so the engine is built once
     # (`session::static_dispatch_tests::`, its transport test behind `app-transport`).
@@ -582,6 +585,9 @@ object-pool|files::ext_handles_across_threads::"
     # ...`): every name says `time_base`, which is the filter. The tokio engine first (8), then the
     # cooperative one (8), where the session's clock itself and its read's word run too.
     "wz-capi-pico|hook|time-base|time_base"
+    # The cooperative opens on a time base waiting on the one sleep each open set aside, over the
+    # program's transport: the time base and the program's transport together.
+    "wz-capi-pico|hook|time-base,app-transport|time_base::tests::the_opens_of_a_session_on_a_time_base_wait_on_one_sleep_with_no_memory_taken"
     "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp,connectivity,time-base|time_base"
     # The files of the merged target `it` are built only with the pools' door, which the two rows
     # above leave out: the scouting window of the program's time runs with it, over the build of
@@ -810,22 +816,30 @@ files::decl_watch_doors::"
     # 4, compiled with `query`, `queryable` and `local-queryable`), and the session that listens,
     # taking two clients of its own engine over loopback (`tests::listen::`, 5, compiled with
     # `listen`, `query` and `queryable`, its `udp/` port's with `udp-listen`, and its answers to
-    # a peer's Interest with `interest-answer`); the crate's own tests were 65 passed with all of
-    # them.
+    # a peer's Interest with `interest-answer`), and one face to a node that dials and is dialled
+    # (`tests::one_face::`, 3, compiled with `link-admission`); the crate's own tests were 65
+    # passed with all of them.
     # The `tls/` provider of a host (`tests/tls_provider.rs`, 8, compiled with `tls-mbedtls`) builds
     # the pinned Mbed TLS from its submodules, which is why the feature is a leg of its own cost.
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
-    "wz-capi-coop|hook|connectivity,interest-answer,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats,udp-listen|"
+    "wz-capi-coop|hook|connectivity,interest-answer,link-admission,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats,udp-listen|"
     # The same suite in the form the C library ships for pico's single-threaded arm: no `threads`,
     # so the rows count their calls on the latch of one thread, a delivery is one flag and no read
     # task starts (`row_callback::OneThread`). The tests a read task or a second thread on one
     # session steps are `threads`' and leave this build; the rest must pass in it as they do above.
     # `tls-mbedtls` is the row above's cost and is not repeated. Matching listeners on a key stay
     # in (`key-matching-listener`, a default the row above has), so the suite's tests of them run
-    # in this form too. It listens without `udp-listen` and `interest-answer`, as the zenoh-pico
-    # preset's peer does, so a `udp/` endpoint to listen on is refused here and a peer's Interest
-    # is not answered.
+    # in this form too. It listens without `udp-listen`, `interest-answer`, `link-admission`,
+    # `accept-cookie` and `face-send-places`, as the zenoh-pico preset's peer does, so a `udp/`
+    # endpoint to listen on is refused here, a peer's Interest is not answered, a second link to a
+    # node is a face of its own (`tests::one_thread::listen::`), each accept is held with an empty
+    # cookie, no key drawn for a dial
+    # (`tests::an_open_whose_source_gives_nothing_opens_where_no_cookie_key_is_drawn`), and every
+    # face shares the session's lock as its one send place: an operation holds no face's place
+    # (`tests::direct_receive::an_operation_holds_no_face_place_where_the_faces_share_the_sessions_lock`)
+    # and a put is one leg that reaches every face
+    # (`tests::one_thread::listen::a_put_of_a_listener_of_one_thread_reaches_every_face_it_took`).
     "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
     # The declaration watch in the same form: a round of one thread tells a catch-up a declaration a
     # round with the links held, which the watch's tests prove only where they run in it.
@@ -833,9 +847,21 @@ files::decl_watch_doors::"
     # The features that hold more than one link, face or session, in the same form: each session
     # is opened, called and read on a thread of its own (`tests::one_thread::OwnThread`). The
     # `listen` ones (a listener, one face, the outbound pool, a dial under way) run in the row
-    # above; the dictionary of key ids and the group of the program's transport here.
+    # above; the dictionary of key ids and the group of the program's transport here, and the
+    # listener's again with its links admitted (`link-admission`), which the row above leaves out
+    # as the zenoh-pico preset's peer does: a second link to a node is refused here.
+    "wz-capi-coop|hook|-default,std,key-matching-listener,link-admission,query,queryable|tests::one_thread::listen::"
     "wz-capi-coop|hook|-default,std,listen,liveliness,liveliness-get,query,queryable,shared-key-ids|tests::one_thread::shared_key_ids::"
     "wz-capi-coop|hook|-default,std,app-transport,group|tests::one_thread::group::"
+    # The same forms of one thread with each face's own send place (`face-send-places`), which the
+    # rows above leave out as the zenoh-pico preset's peer does: here an operation holds every
+    # face's place before the session's lock and a put sends each face a leg of its own, its dial
+    # role's at rest (`tests::one_thread::listen::`, the put to every face among them, and
+    # `tests::direct_receive::`, the holds of an operation), and a member's put reaches its group
+    # by a leg of its own (`tests::one_thread::group::`). One build for the two rows of `listen`.
+    "wz-capi-coop|hook|-default,std,key-matching-listener,face-send-places,listen,query,queryable|tests::one_thread::listen::"
+    "wz-capi-coop|hook|-default,std,key-matching-listener,face-send-places,listen,query,queryable|tests::direct_receive::"
+    "wz-capi-coop|hook|-default,std,app-transport,face-send-places,group|tests::one_thread::group::"
     # The host's group in the same form: the joiner's tests run here; the engine's, which needs a
     # multicast route as its twin of `threads` does, Layer M runs with `--ignored` in this form.
     "wz-capi-coop|hook|-default,std,group-host|host_group::"
@@ -869,14 +895,19 @@ files::decl_watch_doors::"
     # its members' tokens, which a member answers from the tokens its session holds. Each of the
     # four runs the module's own tests too, a JOIN asked between two beacons among them.
     "wz-capi-coop|hook|app-transport,group,liveliness|tests::group::"
-    # And with `transport-stats`: what a group's queue drops for congestion is the transport's
-    # `tx.n_dropped`, as the tokio engine's group counts it (`tests::group::congested::`), and a
-    # member's datagram is still read where it lies and its records lent, each counted once against
-    # the member and in the session's `transport_stats` (`tests::group::in_place::`), with the
-    # module's other tests, a get and its answer
-    # among them. The second row adds the members' keyexprs read member by member.
+    # And with `transport-stats`: a member's datagram is still read where it lies and its records
+    # lent, each counted once against the member and in the session's `transport_stats`
+    # (`tests::group::in_place::`), with the module's other tests, a get and its answer among them.
+    # The second row adds the members' keyexprs read member by member.
     "wz-capi-coop|hook|app-transport,group,query,queryable,transport-stats|tests::group::"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable,transport-stats|tests::group::"
+    # What a group's dispatch stages past the reply limit is dropped and charged to the transport's
+    # `tx.n_dropped`, as the tokio engine's group counts it. The test is a full group's stage's
+    # (`tests::group_congested::`), a module beside `tests::group::` that the rows above do not
+    # reach, and the one test of it that `transport-stats` compiles; over the first row's build.
+    # NOT YET MEASURED.
+    "wz-capi-coop|hook|app-transport,group,query,queryable,transport-stats|\
+tests::group_congested::replies_past_the_reply_limit_are_the_transports_drops"
     # And with the lent-only receive the C library's final build selects (the session core's
     # `rx-lent-only`): a member's datagram is read where it lies and its records lent, its
     # declarations scoped by the member and its departure's retractions lent, and no table is handed
@@ -905,6 +936,19 @@ files::decl_watch_doors::"
     "wz-session-core|hook|alloc|round::tests::a_given_back_group_buffer_is_kept_while_a_record_reads_in_it"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::arena::a_groups_face_counts_every_members_aliases_in_the_pool"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|engine::registry::tests::a_groups_face_holds_its_members_aliases_until_its_set_is_given_back"
+    # The tests of a group in the form whose read steps each face's link session itself
+    # (`direct`), compiled where the build keeps no round (`not(wz_round)`, as every build of the
+    # tests on `std` is unless the environment withholds the value locks): the receive half split
+    # out of a group's transport and the read that waits in it to its deadline
+    # (`engine::group::side_tests::`), the mark a send on a group makes
+    # (`engine::sending_on_tests::`), and the groups' leg a session that joined none is not handed
+    # (`tests::direct_receive::`). Over the build of the `app-transport,group` rows above. NOT YET
+    # MEASURED.
+    "wz-capi-coop|hook|app-transport,group|engine::group::side_tests::"
+    "wz-capi-coop|hook|app-transport,group|\
+engine::sending_on_tests::a_send_on_a_group_is_marked_as_a_send"
+    "wz-capi-coop|hook|app-transport,group|\
+tests::direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg"
     # The node's message reading (`resource-snapshot`): what a link received, and what a group
     # received, kept across a join again and the close. One build for both rows.
     "wz-capi-coop|hook|app-transport,group,resource-snapshot|tests::congestion::the_sessions_message_reading_counts_what_its_link_received"
@@ -1134,7 +1178,13 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
     # (`reassembly_rx::tests`); the reading a let-go link keeps is `resource-snapshot`'s. The
     # row already names what `listen` implies (`session-unicast-accept`, `udp-listen`); the two
     # add the faces' listening half and the links' counters, which those tests read.
+    #
+    # `accept-cookie` joins: the session core's accepting role mints its InitAck's cookie only with
+    # it, which the session core's defaults hold and this crate takes the core without, so the
+    # crate's tests over an acceptor run its stateless form as they did before it was a switch,
+    # and the draw an acceptor asks of the session's source before its handshake is compiled.
     "wz-runtime-coop|hook|\
+        accept-cookie,\
         alloc,\
         codec-close,\
         codec-frame,\
@@ -1172,6 +1222,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
     # crate's defaults, on its own module. NOT YET MEASURED.
     "wz-runtime-coop|hook|\
         -default,\
+        accept-cookie,\
         alloc,\
         codec-close,\
         codec-frame,\
@@ -1522,7 +1573,8 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
     # `tx-fragment-credit`, `tx-held-wait`, each a default of the crate), as the zenoh-pico preset
     # builds the session core: the crate's defaults without the four, spelled out, over the first
     # lend-only row's features above with fragmentation, the send of the C library's cooperative
-    # engine.
+    # engine. The stateless acceptor (`accept-cookie`, a default) is left out with them, as that
+    # preset's peer leaves it, so the rows' acceptor holds each accept with an empty cookie.
     # Four filters, one build, each the test of what a behaviour's absence does: a chain its link
     # cuts ends where it was cut, a kept expiry never closes the session, a stated count of
     # expiries is refused by name, and every sender's deadline waits. NOT YET MEASURED.
@@ -1630,6 +1682,62 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         transport-keepalive,\
         tx-lend-only\
         |tx_deadline::tests::without_the_probe_stage_every_deadline_waits"
+    # The same build's acceptor without the stateless cookie (`accept-cookie` left out): an
+    # InitAck that mints nothing and draws nothing, the accept marked pending and the OpenSyn
+    # that echoes the configured cookie admitted, and a cookie key that is never drawn. Two
+    # filters, the same build. NOT YET MEASURED.
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_actions::bundle_tests::an_acceptor_without_the_stateless_cookie_holds_its_accept"
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_init_params::cookie_key_tests::an_acceptor_that_mints_no_cookie_holds_and_draws_no_key"
     # The same build has no `link-wire-reports` (a default left out with the four: no driver of
     # the cooperative engine queues its writes or carries a class apart), so the line mark and the
     # keepalive's deadline are the inline driver's alone, which this filter holds. NOT YET

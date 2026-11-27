@@ -202,11 +202,13 @@ client-slot = ["client-slot-queryable", "client-subscriber"]
 # The client on the slot profile that also TAKES the sessions a peer opens to it (`Listening`): the
 # accept side of the handshake, which a client does not carry. Without it a node cannot be given an
 # acceptor, because one it was given would read an InitSyn and never answer it.
-# It answers its peers' Interests, which the session core's accepting role no longer brings.
+# It answers its peers' Interests and mints its InitAck's cookie (`accept-cookie`), which the
+# session core's accepting role no longer brings.
 listen = [
     "client-slot",
     "wz-session-core/session-unicast-accept",
     "wz-session-core/interest-answer",
+    "wz-session-core/accept-cookie",
 ]
 # The client on the slot profile that is also a MEMBER of a multicast group (`slot_group`): the group's
 # JOIN beacons and datagrams, the node's subscriptions fed from what the members put and its publishers
@@ -234,6 +236,7 @@ adminspace-write = [
     "wz-session-core/pubsub-delete",
     "wz-session-core/session-unicast-accept",
     "wz-session-core/interest-answer",
+    "wz-session-core/accept-cookie",
     # R2838 — a router forwards a PUT only to a face that DECLARED a matching
     # subscriber, so the node declares `<root>/config/**` on every session,
     # as upstream's admin space does. Measured against a stock zenohd: the
@@ -306,6 +309,7 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # its domain for the test build alone.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "session-unicast-accept",
+    "accept-cookie",
     "lifecycle-contract",
     "action-trace",
     "policy-selection",
