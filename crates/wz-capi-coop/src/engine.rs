@@ -7830,12 +7830,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Ok(())
     }
 
-    /// Where the faces' rooms lie, which the test of the form that holds them apart reads.
-    #[cfg(all(test, feature = "std", wz_on_use))]
-    pub(crate) fn rooms_place(&self) -> *const u8 {
-        core::ptr::from_ref::<LinkRooms<L::Waits>>(&self.rooms).cast::<u8>()
-    }
-
     /// How many places of the faces' rooms are made, and how many rows their table counts
     /// ([`LinkRooms::places_made`]).
     #[cfg(all(test, feature = "std", wz_on_use))]
