@@ -1,0 +1,18 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Shrink the transport area of the no_std pico preset without moving the
+receive cost: the writer's and the runtime's duplicated bodies become one,
+measured against main on the same build.
+'''
+changes = '''
+- session-core and runtime-coop: the arch-transport step of size.md.
+- docs/win-budget/size.md records the step and its reading.
+'''
+verification = '''
+- size ledger pico-client-coop-nostd: total 217,524 B vs main 218,756 (-1,232).
+- receive Ir W 3,079.0 vs main 3,078.1, inside P's spread of 1.2 on fixed code.
+- session-core 1781 and runtime-coop lib tests pass; clippy, nondefault clean.
+'''
+carry = '''
+- none for this lane.
+'''
