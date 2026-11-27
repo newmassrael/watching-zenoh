@@ -27,15 +27,16 @@
 //!   lent no row: the engine's queryable answers into a stage of its own (`peer_rows`);
 //! - one pool of each kind of row a peer writes by its own choice, which every face's tables share
 //!   ([`PeerPoolRows`]): its aliases (`SESSION_MAX_PEER_KEYEXPR_ALIASES`), its subscribers,
-//!   queryables and tokens and the repeats of them (`SESSION_MAX_REMOTE_DECLS`) and its subscriber
-//!   interests (`SESSION_MAX_INBOUND_SUB_INTERESTS`), each the fewer of the session's value of its
-//!   limit and what the faces could hold at the bound of each peer (`MAX_PEER_KEYEXPR_ALIASES`,
-//!   `MAX_REMOTE_DECLS`, `MAX_INBOUND_SUB_INTERESTS`), each row the place of its key in the key
-//!   arena below. A face holds the rows its peer wrote and not the most it could, as zenoh-pico
-//!   takes each from its heap as it comes. A session of one face shares with no one: its tables
-//!   take spans of their own of that face's bounds instead, laid out as inline tables are, with no
-//!   link and no pool state. Either way one span more names where each kind's rows lie, which every
-//!   face's tables reach them through by the session's key arena;
+//!   queryables and tokens and the repeats of them (`SESSION_MAX_REMOTE_DECLS`) and, with
+//!   `interest-answer`, its subscriber interests (`SESSION_MAX_INBOUND_SUB_INTERESTS`), each the
+//!   fewer of the session's value of its limit and what the faces could hold at the bound of each
+//!   peer (`MAX_PEER_KEYEXPR_ALIASES`, `MAX_REMOTE_DECLS`, `MAX_INBOUND_SUB_INTERESTS`), each row
+//!   the place of its key in the key arena below. A face holds the rows its peer wrote and not the
+//!   most it could, as zenoh-pico takes each from its heap as it comes. A session of one face
+//!   shares with no one: its tables take spans of their own of that face's bounds instead, laid
+//!   out as inline tables are, with no link and no pool state. Either way one span more names
+//!   where each kind's rows lie, which every face's tables reach them through by the session's key
+//!   arena;
 //! - the buffers of the links the session may hold: a pool of receive buffers of the batch the
 //!   session advertises, a streamed batch's length counted inside it, as many as
 //!   `RX_POOL_BUFFERS` and no more than the links, which a link holds only while it holds part of
@@ -144,7 +145,7 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::locator_directory::LocatorText;
 #[cfg(feature = "runtime-plan")]
 use wz_session_core::peer_tables::PeerTables;
-use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, SHARES_ROWS};
+use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, KEEPS_INTEREST_ROWS, SHARES_ROWS};
 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 use wz_session_core::policy::HeldPublishDrop;
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
@@ -544,8 +545,10 @@ const FACE_ROWS: usize = cfg!(feature = "runtime-plan") as usize + TAKES_FACES a
 /// one set's place otherwise.
 const ROOM_ROWS: usize = 1 + cfg!(feature = "runtime-plan") as usize;
 /// The peers' tables, and the pools their rows lie in where the faces share them with the one span
-/// naming where those rows lie, where the arena lends them (`runtime-plan`).
-const PEER_ROWS: usize = cfg!(feature = "runtime-plan") as usize * (1 + 4 * SHARES_ROWS as usize);
+/// naming where those rows lie, where the arena lends them (`runtime-plan`): the aliases' and the
+/// declarations' pools, and the interests' where the build keeps a peer's (`KEEPS_INTEREST_ROWS`).
+const PEER_ROWS: usize = cfg!(feature = "runtime-plan") as usize
+    * (1 + (3 + KEEPS_INTEREST_ROWS as usize) * SHARES_ROWS as usize);
 /// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
 /// session whose faces share their pools, so counted where a build shares them at all.
 const OWED_ROWS: usize = (cfg!(all(
@@ -2301,8 +2304,13 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             self.put(ArenaPart::PeerAliasPool, 1, aliases);
             let declarations = self.sized(pools.decl_bytes());
             self.put(ArenaPart::PeerDeclarationPools, 1, declarations);
-            let interests = self.sized(pools.interest_bytes());
-            self.put(ArenaPart::PeerInterestPool, 1, interests);
+            // A build that answers no peer's Interest keeps none of their rows and is lent no span
+            // of them (`KEEPS_INTEREST_ROWS`): its plan lays out no row of them, as one that binds
+            // no udp port lays out none of a port's.
+            if KEEPS_INTEREST_ROWS {
+                let interests = self.sized(pools.interest_bytes());
+                self.put(ArenaPart::PeerInterestPool, 1, interests);
+            }
             // `PeerPools::lent` lends one span past the three, the directory the session's key
             // arena names them by: a plan without it leaves the arena a span short of the open's
             // last place.

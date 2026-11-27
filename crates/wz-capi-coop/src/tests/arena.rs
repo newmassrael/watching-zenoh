@@ -1293,9 +1293,9 @@ fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
 
 /// Each face's peer tables are lent the values of their limits the open resolved, the build's for a
 /// session that states none, the `Final`s none in a build without `queryable`; a limit lowered at
-/// the open lowers the row. The reply stage is lent no row in any build: the engine's queryable
-/// answers into a stage of its own, and a reply limit over the build's still refuses the open by
-/// its name.
+/// the open lowers the row where the build stages what the limit sizes. The reply stage is lent no
+/// row in any build: the engine's queryable answers into a stage of its own, and a reply limit over
+/// the build's still refuses the open by its name.
 #[test]
 fn each_faces_peer_tables_take_the_values_the_open_resolved() {
     let built =
@@ -1332,12 +1332,89 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
     // A build of the region's form lends no peer tables from its arena: its one face's lie in the
     // region (`crate::region::StateRegion`), held to the limit by the tables themselves.
     #[cfg(feature = "runtime-plan")]
-    assert!(
-        row(&at_one, "peer tables").entry_bytes < row(&built, "peer tables").entry_bytes,
-        "the staging lent fewer rows"
-    );
+    {
+        use wz_session_core::peer_tables::PeerTables;
+
+        let tables = |plan: &ArenaPlan| row(plan, "peer tables").entry_bytes;
+        for plan in [&built, &at_one] {
+            assert_eq!(
+                Some(tables(plan)),
+                PeerTables::<Lent>::arena_bytes(plan.peers().rows),
+                "the row is what the tables of the rows the open resolved take"
+            );
+        }
+        // `MAX_PENDING_DECLARES` sizes the answers staged for a peer's Interests
+        // (`interest-answer`) and for its liveliness Interests (`liveliness`): a build of neither
+        // stages none, and its row does not move with the limit.
+        #[cfg(any(feature = "interest-answer", feature = "liveliness"))]
+        assert!(
+            tables(&at_one) < tables(&built),
+            "the staging lent fewer rows"
+        );
+    }
     #[cfg(not(feature = "runtime-plan"))]
     assert!(at_one.rows().all(|laid| laid.part() != "peer tables"));
+}
+
+/// A plan lays out the pool of its peers' interests only where the build keeps their rows
+/// (`KEEPS_INTEREST_ROWS`): one area of what lending them takes in a build that answers a peer's
+/// Interest (`interest-answer`), and no row in one that answers none, as the zenoh-pico preset
+/// builds a peer, whose pools lend the interests nothing. For a client's one face and for faces
+/// that share the pools. Turned red by a row laid out for interests the pools do not keep (the
+/// `KEEPS_INTEREST_ROWS` of `ArenaPlan::lay_out`), or by none laid out where they keep them.
+#[cfg(feature = "runtime-plan")]
+#[test]
+fn the_peers_interest_pool_is_laid_out_only_where_the_build_keeps_their_rows() {
+    interest_pool_laid_as_kept(&client_config());
+    #[cfg(any(feature = "listen", feature = "group"))]
+    interest_pool_laid_as_kept(&CoopConfig {
+        max_faces: 3,
+        ..client_config()
+    });
+    #[cfg(feature = "interest-answer")]
+    {
+        let plan =
+            ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+        assert!(
+            row(&plan, "peer interest pool")
+                .bytes()
+                .is_some_and(|bytes| bytes > 0),
+            "a build that answers a peer's Interest keeps its rows"
+        );
+    }
+}
+
+/// The rows the plan of `config` lays out for its peers' interests: one area of the bytes lending
+/// them takes where the build keeps them, and none, of a pool that lends nothing, where it does
+/// not.
+#[cfg(feature = "runtime-plan")]
+fn interest_pool_laid_as_kept(config: &CoopConfig) {
+    use wz_session_core::peer_tables::KEEPS_INTEREST_ROWS;
+
+    let plan = ArenaPlan::of(config, &SessionLimits::defaults()).expect("lays an arena out");
+    let lent = plan
+        .peers()
+        .pools
+        .interest_bytes()
+        .expect("within the address space");
+    let laid: Vec<(usize, usize)> = plan
+        .rows()
+        .filter(|row| row.part() == "peer interest pool")
+        .map(|row| (row.count, row.entry_bytes))
+        .collect();
+    if KEEPS_INTEREST_ROWS {
+        assert_eq!(
+            laid,
+            [(1, lent)],
+            "one area of what lending the interests takes"
+        );
+    } else {
+        assert_eq!(
+            lent, 0,
+            "a build that keeps no interest of a peer lends them nothing"
+        );
+        assert!(laid.is_empty(), "and lays out no row of them: {laid:?}");
+    }
 }
 
 /// The pools of what the faces' peers write hold the fewer of the session's limit and what the

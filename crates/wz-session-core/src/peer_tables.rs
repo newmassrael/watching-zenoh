@@ -398,6 +398,16 @@ impl PeerTables<Lent> {
 /// the code that sizes and lends them is not in its text.
 pub const SHARES_ROWS: bool = cfg!(feature = "peer-row-pools");
 
+/// Whether this build's pools keep the rows of a peer's subscriber interests (`interest-answer`,
+/// beside `declare-subscriber` and `peer-row-pools`): a build that answers no peer's Interest keeps
+/// none and [`PeerPools::lent`] lends them no span, so an engine that lays its arena out by this
+/// constant lays out no area of them.
+pub const KEEPS_INTEREST_ROWS: bool = cfg!(all(
+    feature = "declare-subscriber",
+    feature = "interest-answer",
+    feature = "peer-row-pools"
+));
+
 /// How many rows each kind of what the peers of one session write by their own choice is lent
 /// ([`PeerPools::lent`]), and whether the session's faces share them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -925,6 +935,28 @@ mod tests {
             );
         }
         assert!(PeerTables::bytes() > 0);
+    }
+
+    /// The pools give a peer's subscriber interests bytes exactly where the build says it keeps
+    /// their rows (`KEEPS_INTEREST_ROWS`), shared by many faces or one face's own: an engine that
+    /// lays its arena out by the constant lays out the span the pools take, and none where they
+    /// take none. Turned red by a constant whose features differ from
+    /// `PeerPoolRows::interest_bytes`'s.
+    #[test]
+    fn the_interest_rows_take_bytes_exactly_where_the_build_keeps_them() {
+        for shared in [true, false] {
+            let rows = PeerPoolRows {
+                aliases: 0,
+                remote_decls: 0,
+                interests: 1,
+                shared,
+            };
+            assert_eq!(
+                rows.interest_bytes().is_some_and(|bytes| bytes > 0),
+                KEEPS_INTEREST_ROWS,
+                "shared: {shared}"
+            );
+        }
     }
 
     /// The tables take the bounds their creator states: held to two, a peer's third alias and
