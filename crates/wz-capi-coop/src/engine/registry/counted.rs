@@ -49,10 +49,10 @@ impl FaceTables {
     }
 }
 
-/// Write a set of no rows in the next row of `sets`, held to `limits`, and hand it back: the
-/// dial face's of a session that dials nothing, which never has a peer and is counted no row, and
-/// the first step of every other. `None` when `sets` holds every row it was counted, or when
-/// the allocator refuses the rows of `sets`, which the first push takes.
+/// Write a set of no rows taken in the next row of `sets`, held to `limits`, and hand it back:
+/// the first step of every set, whose tables are then counted ([`count_set`]). Each of its tables
+/// is as its default makes it, counted to the build's rows. `None` when `sets` holds every row
+/// it was counted, or when the allocator refuses the rows of `sets`, which the first push takes.
 fn push_rowless<'s>(
     sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     limits: &SessionLimits,
@@ -120,9 +120,18 @@ impl<H: Holders> RegistryOf<H> {
         let mut sets = BoundedVec::<FaceTables, MAX_FACE_SETS, RowPolicy>::counted(peers.sets());
         let holders = H::counted(peers.sets())?;
         // A session that dials nothing holds a set of no rows for its dial face, first, and every
-        // other set is for the faces to come; otherwise the first set is the dial face's.
+        // other set is for the faces to come; otherwise the first set is the dial face's. That
+        // face never has a peer, so each of its tables is counted to no row: a table's default
+        // is counted to the build's.
         if !peers.dial {
-            push_rowless(&mut sets, limits).ok_or(sets_refused)?;
+            count_set(
+                &mut sets,
+                keys,
+                RequesterRows::default(),
+                PeerRows::default(),
+                limits,
+            )
+            .ok_or(sets_refused)?;
         }
         // Where faces are added beside the dial role's, the dial face's set is built now and the
         // set of each other place when a face first takes it.
