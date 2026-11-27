@@ -68,6 +68,7 @@ fn a_query_is_answered_and_its_final_follows_the_reply() {
 /// go (the Final then never reaches the router).
 #[cfg(all(
     feature = "std",
+    feature = "query-replies-with-final",
     any(feature = "threads", feature = "listen", feature = "group")
 ))]
 #[test]
