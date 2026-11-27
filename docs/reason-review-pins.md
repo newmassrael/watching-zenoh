@@ -39,6 +39,7 @@ normal state once nothing remains.
 
 | atom | file | blob | round |
 |---|---|---|---|
+| session-close-ingress | crates/wz-integration-tests/tests/wz_declared_commander_zenohd_interop.rs | 31e6d74fa64604b576e73e6264dd071296a3c12a | R4738-read |
 | session-close-ingress | crates/wz-integration-tests/tests/wz_router_hat_connect_reconcile.rs | 1fce52d573512d7504a6a90322ee62650ffa38e5 | R4499 |
 | session-close-ingress | crates/wz-routing-graph/src/lib.rs | 360f6c5cfd8ef9d74f44324462008fd5207ec9ca | R4658 |
 | session-close-ingress | crates/wz-runtime-coop/src/session_drive.rs | cdf17624cb33a5efa41d967ea5a2c1838279d3b3 | R4725-read |

@@ -2913,7 +2913,11 @@ PIN_NO_SYMBOL = 0
 # R4699 -- 64 -> 25, one atom, and PAID LATE. `api-compat-rust` departs (COMPLETE) carrying the 39
 # wz citations of its reason; `session-close-ingress` keeps its 25 and AMBIGUOUS holds at 0. READ
 # off the census's own FAIL line, `wz citations: 25 against a pin of 64`.
-PIN_WZ_CITATIONS = 25
+# R4738 -- 25 -> 26, one atom. `session-close-ingress`'s correction for residues (c) and (d) cites
+# the declared commander's zenohd interop file, where the fixed profile's passive hold and the
+# dialling side's pinned control are witnessed. READ off the census's own FAIL line, `wz citations:
+# 26 against a pin of 25`.
+PIN_WZ_CITATIONS = 26
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
