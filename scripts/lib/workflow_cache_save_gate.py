@@ -48,10 +48,10 @@ The steps are read by parsing `.github/workflows/*.yml` and
 cache step at all FAILS: this repository has dozens, so zero means the reader
 stopped reading.
 
-## A further rule over the same parse
+## Two more rules over the same parse
 
-It is about whether a hosted run's verdict means what it says, and it is read
-off the same steps.
+Both are about whether a hosted run's verdict means what it says, and both are
+read off the same steps.
 
 3. THE PINNED KCONFIG INTERPRETER. The build configuration reader
    (`scripts/lib/wz_config.py`) resolves profiles and presets with one pinned
@@ -80,8 +80,19 @@ off the same steps.
    The limit, stated: a script reached through a path built at run time, or a
    python script that runs a shell script that reaches the reader, is not seen.
    A step the rule cannot see is a red on the host, which is where this started.
-Its population being empty FAILS, as rule 2's does: no step reaching the reader
-means the reader stopped reading.
+4. A RUN IN FLIGHT ON MAIN IS NEVER CANCELLED. Every workflow a push to `main`
+   starts has a workflow-level concurrency group keyed by `github.ref` with
+   `cancel-in-progress: false`, and no job-level group. The group replaces a
+   PENDING run with the newest one, which is what keeps the hosted queue bounded
+   when landings arrive faster than runs finish; cancelling the RUNNING one would
+   leave main with no graded commit at all, the state R311y704 measured. A group
+   not keyed by ref lets a pull request's run replace main's, and a job-level
+   group replaces a waiting job of an earlier run, which then reports
+   `cancelled` for a job it never ran. The cost and verdict balance is in
+   `docs/verdicts-in-the-fleet.md` (Hosted runs on main).
+
+A rule whose population is empty FAILS, as rule 2's does: no step reaching the
+reader, or no workflow pushed to main, means the reader stopped reading.
 """
 
 from __future__ import annotations
@@ -430,6 +441,67 @@ def kconfig_check(docs: dict[str, dict], callers: dict[str, str]) -> tuple[list[
     return failures, seen
 
 
+# ── rule 4: a run in flight on main is never cancelled ──────────────────────
+
+
+def _pushes_main(doc: dict) -> bool:
+    """Whether a push to `main` starts the workflow. PyYAML reads the key `on` as True."""
+    on = doc.get("on", doc.get(True))
+    if on == "push" or (isinstance(on, list) and "push" in on):
+        return True
+    if not isinstance(on, dict) or "push" not in on:
+        return False
+    push = on["push"]
+    if not isinstance(push, dict):
+        return True
+
+    def listed(key: str) -> list[str]:
+        value = push.get(key)
+        return [str(v) for v in value] if isinstance(value, list) else [str(value)]
+
+    if "branches" in push:
+        return "main" in listed("branches")
+    if "branches-ignore" in push:
+        return "main" not in listed("branches-ignore")
+    return "tags" not in push and "tags-ignore" not in push
+
+
+def concurrency_check(docs: dict[str, dict]) -> tuple[list[str], int]:
+    """(failures, workflows a push to main starts) over `{path: parsed yaml}`."""
+    failures: list[str] = []
+    seen = 0
+    for path, doc in sorted(docs.items()):
+        if not isinstance(doc.get("jobs"), dict) or not _pushes_main(doc):
+            continue
+        seen += 1
+        group = doc.get("concurrency")
+        if not isinstance(group, dict):
+            failures.append(
+                f"{path}: a push to main starts it and it has no concurrency group with "
+                "`cancel-in-progress: false`, so nothing bounds its queue or protects a run "
+                "in flight"
+            )
+        else:
+            if group.get("cancel-in-progress") is not False:
+                failures.append(
+                    f"{path}: `cancel-in-progress` is {group.get('cancel-in-progress')!r}, not "
+                    "false: a landing would cancel the run in flight and main would keep no "
+                    "graded commit"
+                )
+            if "github.ref" not in str(group.get("group") or ""):
+                failures.append(
+                    f"{path}: the concurrency group {group.get('group')!r} is not keyed by "
+                    "`github.ref`: another ref's run would replace main's waiting one"
+                )
+        for job_id, job in doc["jobs"].items():
+            if isinstance(job, dict) and "concurrency" in job:
+                failures.append(
+                    f"{path} [{job_id}]: a job-level concurrency group replaces a waiting job "
+                    "of an earlier run, which then reports `cancelled` for a job it never ran"
+                )
+    return failures, seen
+
+
 def load_tree() -> dict[str, dict]:
     files = sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml"))
     files += sorted((REPO_ROOT / ".github" / "actions").glob("**/action.yml"))
@@ -485,6 +557,16 @@ def main() -> int:
         "reading; the Platform jobs alone run it in a dozen steps.",
         f"every such step has `uses: {KCONFIG_ACTION}` before it in its job, and no "
         "other recipe installs the interpreter",
+    )
+
+    failures, seen = concurrency_check(docs)
+    print(f"workflow-concurrency: {seen} workflow(s) start on a push to main")
+    rc |= _report(
+        "workflow-concurrency",
+        failures,
+        seen,
+        "no workflow starts on a push to main, so the reader stopped reading.",
+        "each is grouped by ref and never cancels a run in flight",
     )
     return rc
 
@@ -566,9 +648,10 @@ def selftest() -> int:
     else:
         print("  ok   an empty population is seen as zero (main() FAILs on it)")
     arms, more = _selftest_kconfig()
+    arms2, more2 = _selftest_concurrency()
     arms3, more3 = _selftest_live()
-    total = len(cases) + 1 + arms + arms3
-    bad += more + more3
+    total = len(cases) + 1 + arms + arms2 + arms3
+    bad += more + more2 + more3
     print(f"  {total - bad}/{total} arm(s) behaved as claimed")
     return 1 if bad else 0
 
@@ -724,15 +807,58 @@ def _selftest_kconfig() -> tuple[int, int]:
     return arms, bad
 
 
+def _selftest_concurrency() -> tuple[int, int]:
+    """Rule 4 over fixtures. (arms, bad)."""
+    ref_group = {"group": "${{ github.workflow }}-${{ github.ref }}", "cancel-in-progress": False}
+
+    def wf(on, concurrency=None, job: dict | None = None, key: object = "on") -> dict:
+        doc = {key: on, "jobs": {"j": job or {"steps": []}}}
+        if concurrency is not None:
+            doc["concurrency"] = concurrency
+        return {".github/workflows/w.yml": doc}
+
+    main_push = {"push": {"branches": ["main"]}}
+    tags = {"push": {"tags": ["v*"]}}
+    cases = [
+        ("grouped by ref, never cancelling", wf(main_push, ref_group), None),
+        ("under the key PyYAML reads `on` as", wf(main_push, ref_group, key=True), None),
+        ("cancel-in-progress true", wf(main_push, {**ref_group, "cancel-in-progress": True}),
+         "not false"),
+        (
+            "cancel-in-progress as an expression",
+            wf(main_push, {**ref_group, "cancel-in-progress": "${{ github.ref != 'refs/heads/main' }}"}),
+            "not false",
+        ),
+        ("no concurrency group", wf(main_push), "no concurrency group"),
+        ("a group not keyed by ref", wf(main_push, {"group": "ci", "cancel-in-progress": False}),
+         "not keyed"),
+        ("a job-level group", wf(main_push, ref_group, job={"concurrency": "x", "steps": []}),
+         "job-level"),
+        ("a push of every branch", wf({"push": None}), "no concurrency group"),
+        ("main not ignored", wf({"push": {"branches-ignore": ["dev"]}}), "no concurrency group"),
+        ("a tag push is not held", wf(tags), None),
+        ("a schedule is not held", wf({"schedule": [{"cron": "1 1 * * *"}]}), None),
+    ]
+    bad = 0
+    for label, docs, want in cases:
+        failures, _ = concurrency_check(docs)
+        bad += _judge(f"concurrency: {label}", failures, want)
+    _, seen = concurrency_check(wf(tags))
+    bad += _judge("a tag push is not counted", [] if seen == 0 else [f"counted {seen}"], None)
+    return len(cases) + 1, bad
+
+
 def _selftest_live() -> tuple[int, int]:
-    """Rule 3 on this repository's own workflows, then on a copy with every use of the action
-    taken out of the workflows. (arms, bad)."""
+    """Rules 3 and 4 on this repository's own workflows, then on copies mutated: every use of
+    the action taken out of the workflows, and main's runs made cancellable. (arms, bad)."""
     import copy
 
     docs = load_tree()
     callers, failures = reader_callers(REPO_ROOT)
     more, seen = kconfig_check(docs, callers)
     bad = _judge("rule 3 holds on this tree", failures + more + ([] if seen else ["no subject"]), None)
+    failures, seen = concurrency_check(docs)
+    bad += _judge("rule 4 holds on this tree", failures + ([] if seen else ["no subject"]), None)
 
     stripped = copy.deepcopy(docs)
     for path, doc in stripped.items():
@@ -751,7 +877,14 @@ def _selftest_live() -> tuple[int, int]:
         [f for f in failures if f.startswith(".github/workflows/")],
         _UNPROVISIONED,
     )
-    return 2, bad
+
+    cancelling = copy.deepcopy(docs)
+    for doc in cancelling.values():
+        if isinstance(doc.get("concurrency"), dict) and _pushes_main(doc):
+            doc["concurrency"]["cancel-in-progress"] = True
+    failures, _ = concurrency_check(cancelling)
+    bad += _judge("main's runs made cancellable", failures, "not false")
+    return 4, bad
 
 
 if __name__ == "__main__":
