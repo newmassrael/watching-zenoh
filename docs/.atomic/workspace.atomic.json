@@ -9500,6 +9500,26 @@
       "carry_forward_bullets": [
         "D16, D17 and D18 are built in three lanes; each lands with its own round."
       ]
+    },
+    "Round 4745": {
+      "decision_summary": "Move the SCE pin to 66e9b2b9536, SCE's fix of the alias defect Layer Bc found, and drop the 39 refusals that waited for it.",
+      "changes_bullets": [
+        "vendor/sce at 66e9b2b9536: a codec imported under an alias other than its name is called by its name in C11 and Go.",
+        "deploy/c11/refusals.tsv loses the 39 rows of that defect and its paragraph; footprint.tsv records the 39 units (137 weighed, no earlier row moved).",
+        "docs/zenoh-logic-as-sce-kinds.md section 9 says every codec and algorithm unit compiles at this pin."
+      ],
+      "verification_bullets": [
+        "bx --action regen-codegen at the pin changes nothing under out/.",
+        "Layer Bc: 137 compiled and weighed, 13 calling what is declared, 4 refused by the generator as declared, 20 vectors held; before the rows went, each of the 39 was red as compiling.",
+        "Layer B passes: eight L2 mismatches, each an audited known divergence."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "SCE main has since landed orchestrate --with-imports and --features (6c093a02c86, 0386870fe29): the next pin lets Bc drop its own read of sce:std imports and judge the two feature-conditioned statecharts."
+      ]
     }
   },
   "inventory_entries": {
