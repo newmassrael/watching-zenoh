@@ -11,7 +11,7 @@
 //! depends on `wz-runtime-tokio` with `transport-unicast`, so `cargo test`'s
 //! feature unification forces `transport-unicast` ON and the multicast-only
 //! constructor is `cfg`'d out. This
-//! crate pulls `wz-runtime-tokio` with ONLY `transport-multicast,codec-push`
+//! crate takes `wz-runtime-tokio` with ONLY `transport-multicast,codec-push`
 //! (no test-support, no unicast) as a dev-dependency, so — built ISOLATED via
 //! `cargo test -p` (Layer C1s; excluded from the C1/C2 `--workspace`
 //! unification, the same feature-leak hazard the wz-mcu-* crates carry) — the

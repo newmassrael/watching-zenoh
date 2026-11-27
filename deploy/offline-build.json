@@ -110,6 +110,8 @@
     "wz-capi-dissect": [],
     "wz-capi-pico": [],
     "wz-capi-replay": [],
+    "wz-runtime-tokio": [],
+    "wz-session-core": [],
     "zenoh": [],
     "zenoh-macros": [],
     "zenoh-shm": [],
