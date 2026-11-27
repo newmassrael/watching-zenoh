@@ -3661,6 +3661,30 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         }
     }
 
+    /// Retire the next get at or after `cursor` whose callback `picks` names, standing or ended,
+    /// `mark` run on its callback first, under the same hold, so that no call of it made after
+    /// reads it unmarked (a cancellation's mark): its handle and how its row left
+    /// ([`Self::retire_get`]), for a caller that ends every get of one asker (a cancellation) or
+    /// of the session (its close), letting go of the session between two. A walk from cursor `0`
+    /// to `None` retires each such get once and ends: the cursor moves past every get it reads,
+    /// so a get is never read twice, whatever its retirement answered.
+    pub fn retire_next_get_of(
+        &mut self,
+        cursor: &mut usize,
+        picks: impl Fn(&F::Reply) -> bool,
+        mark: impl Fn(&F::Reply),
+    ) -> Option<(PendingGetHandle, Removal<PendingGet<F, P>>)> {
+        loop {
+            let handle = self.next_get_of(cursor, &picks)?;
+            if let Some(row) = self.kept_pending_gets().and_then(|gets| gets.get(handle)) {
+                mark(&row.callback);
+            }
+            if let Some(removal) = self.retire_get(handle) {
+                return Some((handle, removal));
+            }
+        }
+    }
+
     /// One leg of the standing get `handle` names has its Final, or will have none (its face is
     /// gone): what is left of the get. The last leg ends it answered; an ended get has no leg.
     pub fn end_leg(&mut self, handle: PendingGetHandle) -> Option<LegEnded> {
@@ -3719,7 +3743,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// Retire the get `handle` names, ended or not (its end handed out, or its asker cancelled it,
     /// or the session is closed): no call of its callback begins after this, and what it still
     /// holds back goes with it. Its row is handed back at once when no call runs, else the call
-    /// that ends last lets it go ([`Self::release_get`]).
+    /// that ends last lets it go ([`Self::release_get`]). `None` only when `handle` names no
+    /// live get: a get's slot is pinned by nothing but this retirement (no `&mut` of the gets'
+    /// table leaves these tables), and a retired get is found by no lookup, so its slot holds no
+    /// pin when the one a running call needs is taken here, and that pin is never refused.
     pub fn retire_get(&mut self, handle: PendingGetHandle) -> Option<Removal<PendingGet<F, P>>> {
         #[cfg(feature = "storage-profile")]
         self.held.forget(handle);
@@ -4261,7 +4288,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     }
 
     /// The pending gets' table, to write, where the tables keep one.
-    pub fn kept_pending_gets_mut(&mut self) -> Option<&mut PendingGets<F, P>> {
+    fn kept_pending_gets_mut(&mut self) -> Option<&mut PendingGets<F, P>> {
         <F::GetPresence as Presence>::get_mut::<PendingGets<F, P>>(&mut self.pending_gets)
     }
 }

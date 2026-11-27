@@ -1632,6 +1632,76 @@ fn a_walk_finds_each_get_its_pick_names_standing_or_ended() {
     );
 }
 
+/// A walk that retires the gets its pick names retires each once, marking each before it leaves,
+/// standing or ended, and ends; a get a call of which runs is retired to leave after the call, not
+/// refused, and the walk does not read it again. Turned red by a walk that reads a get twice (a
+/// cursor not moved past a get it retired), by a get left unmarked, or by a retirement refused
+/// while a call runs.
+#[test]
+fn a_walk_retires_each_get_its_pick_names_once_and_marks_it_first() {
+    let mut tables = Tables::new();
+    let mut begin = |callback| {
+        tables
+            .begin_get(
+                ReplyAcceptance::Any,
+                ConsolidationMode::None,
+                1,
+                u64::MAX,
+                callback,
+            )
+            .unwrap()
+            .handle
+    };
+    let (first, other, last) = (begin(7), begin(8), begin(7));
+    assert_eq!(tables.end_leg(last), Some(LegEnded::Over));
+    assert!(tables.owes_ended_get());
+    let marked = core::cell::Cell::new(0);
+    let mut retired = Vec::new();
+    let mut cursor = 0;
+    while let Some((handle, removal)) = tables.retire_next_get_of(
+        &mut cursor,
+        |callback| *callback == 7,
+        |_| marked.set(marked.get() + 1),
+    ) {
+        assert!(matches!(removal, Removal::Taken(_)), "no call runs");
+        retired.push(handle);
+    }
+    assert_eq!(retired, [first, last], "each once, the ended get too");
+    assert_eq!(marked.get(), 2, "each marked before it left");
+    assert!(!tables.owes_ended_get(), "the ended get is retired");
+    assert_eq!(
+        tables.next_get_of(&mut 0, |callback| *callback == 8),
+        Some(other),
+        "CONTROL: another asker's get stands"
+    );
+
+    let mut held = latched_tables();
+    let get = held
+        .begin_get(
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            u64::MAX,
+            latched(1),
+        )
+        .unwrap();
+    let call = held.begin_reply(get.handle).unwrap();
+    let mut cursor = 0;
+    let (handle, removal) = held
+        .retire_next_get_of(&mut cursor, |_| true, |_| {})
+        .expect("a get a call of which runs is retired, not refused");
+    assert_eq!(handle, get.handle);
+    assert!(matches!(removal, Removal::AfterCalls));
+    assert!(held
+        .retire_next_get_of(&mut cursor, |_| true, |_| {})
+        .is_none());
+    assert!(
+        ended::<CClosure<u32>>(call),
+        "the last call of a retired get"
+    );
+    assert!(held.release_drained_get(&mut 0).is_some());
+}
+
 /// A `Latest` get holds its replies in the tables until its caller takes them out, and a get
 /// retired with replies still held lets them go with it.
 #[cfg(feature = "storage-profile")]
