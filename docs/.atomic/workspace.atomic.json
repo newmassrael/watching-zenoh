@@ -8720,6 +8720,21 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4702": {
+      "decision_summary": "Pay a red two landings made together: the dial-only zid test named an\nopen's held places by value after the region open made them a reference,\nso wz-capi-coop's test build did not compile on main.",
+      "changes_bullets": [
+        "capi-coop tests.rs: PlanFrom::Config(&HeldPlaces::NONE) in the zid test."
+      ],
+      "verification_bullets": [
+        "wz-capi-coop lib tests and clippy --all-targets pass on main plus this."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
