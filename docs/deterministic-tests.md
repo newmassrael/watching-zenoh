@@ -101,6 +101,25 @@ Only a wait bounded at nothing changes. A read whose bound is above nothing (the
 wait, the arm the receive measurements wait in) takes the same path as before, and a read that
 finds input held makes no wait before the bound is looked at, as before.
 
+### What the lane's form found next
+
+Run in the lane's form with the fix, the three step tests that receive a push from the stand-in
+(the round trip, the lease, and the step bounded at nothing) were red on every run, whatever the
+bound of their steps (the lease test steps bounded at 10 ms). The cause was the simulated world,
+not the engine. The round's form reads a record's parts only where its link lent them (`place` in
+`wz_session_core::round`, which keeps no area to copy a part into), and the first simulated ends
+copied each datagram out of the network and let the copy go, so every sample with a payload was
+refused there. Every link the engine opens on a host lends its datagram from a buffer of its own
+until its next receive (`lends_until_next_receive`: the UDP, stream and serial drivers) and keeps
+one its session stopped in (`keeps_input`); the simulated ends now do the same (section 3).
+
+The engine's part holds as above: in the lane's form a step bounded at nothing makes a look of no
+time (no early return under `listen`, nor under `group` in the round's form), and what the look
+finds reaches each link's gate (`LinkSupervisor::waited`, `FaceSession::input_seen`,
+`RoundGate::input_seen`). A group's burst (`group_took`) still makes no look; the bookkeeping,
+owed at every step while the session holds a group (`links_settle`), moves the links once the
+burst ends.
+
 ## 2. Census: where tests reach nondeterminism
 
 Counted on origin/main `a9126d3242`, over the tracked `.rs` files whose path is a test's (a
@@ -202,7 +221,10 @@ a parameter of the open, and its waits are the stack's (`SessionLinks::waits`, `
 - **Network**: an in-memory network of datagram ends (`Net`, `SimEnd`, `SimLinks`), keyed by
   address and port, with the peer binding of a real datagram link
   (`wz_session_core::datagram_peer`) and the outbound slots a lend-only session needs. A
-  datagram for an end nobody bound is lost, as UDP loses it.
+  datagram for an end nobody bound is lost, as UDP loses it. An end receives as the host's
+  datagram link does: it lends each datagram from a buffer of its own, where the datagram lies
+  until the end's next receive, and lends one its session asked it to keep again
+  (`lends_until_next_receive`, `keeps_input`).
 - **Waits**: the session's ends are waited on by their owner (`input_wait`), as the host's links
   the engine opens are (`waited_by_owner`). A wait (`SimWaits`) takes no time: it turns the world,
   then finds ready exactly the ends that hold a datagram.
@@ -228,6 +250,11 @@ network, and it was the first candidate. It serves one count kind (`SessionLinks
 the default build counts a link's handles per face) and its ends name no owner wait, so the
 gate of section 1 never runs over it: a harness on it would have passed the very defect this note
 found. The simulated ends give the owner's wait because the host's links the engine opens do.
+The same holds for the receive: the round's form reads a record's parts where its link lent them,
+and ends that handed out a copy had every pushed sample refused in that form (section 1, "What
+the lane's form found next").
+`tests::sim::an_end_lends_what_it_received_where_it_lies_until_its_next_receive` holds the ends
+to the host link's lend.
 
 **Seeds.** Today the seed decides the entropy, so cookies and nonces are the seed's. The next
 step gives it the schedule: how many steps a wait makes before the world turns, which stand-in

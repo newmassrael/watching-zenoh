@@ -15,6 +15,11 @@
 //! host's links the engine opens are (`waited_by_owner`): the engine's reads that trust a wait to
 //! tell them which links to read run here as they run on a host. The stand-in's end waits in its
 //! own loop, as the stand-in of the host tests does.
+//!
+//! An end receives as the host's datagram link does (`UdpDriver`): it lends each datagram from a
+//! buffer of its own, where the datagram lies until the end's next receive, and lends one it was
+//! told to keep again from there. The round's form reads a record's parts only where its link
+//! lent them, so an end that handed out a copy would have every sample with a payload refused.
 
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::{BTreeMap, VecDeque};
@@ -25,7 +30,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use wz_capi_port::SessionDrive;
 use wz_runtime_coop::link_cells::{CellRc, CountKind, OneTask};
-use wz_runtime_coop::link_storage::{TxLender, TxStore};
+use wz_runtime_coop::link_storage::{copied_receive, RxDrops, TxLender, TxStore};
 use wz_runtime_coop::session_drive::{
     spawn_session, Dialled, LinkOpenError, LinkProto, LinkWait, LinkWaits, Locator, OpenedLink,
     SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionRole, WaitOn,
@@ -215,6 +220,10 @@ impl Net {
             },
             owner_waits,
             tx: TxLender::new(SimTx::new()),
+            rx: RefCell::new(Vec::new()),
+            kept: Cell::new(false),
+            keeping: Cell::new(false),
+            rx_drops: RxDrops::new(),
         };
         let end = CellRc::<SimEnd, N>::try_on_heap(end).ok_or(LinkOpenError::Exhausted)?;
         Ok(OpenedLink {
@@ -297,6 +306,31 @@ pub(super) struct SimEnd {
     binding: PeerBinding<SocketAddr>,
     owner_waits: bool,
     tx: TxLender<SimTx>,
+    /// The datagram the last receive lent, which lies here until the next receive.
+    rx: RefCell<Vec<u8>>,
+    /// Whether the datagram lent is kept, for the next receive to lend again.
+    kept: Cell<bool>,
+    /// Whether the receive under way was asked to keep its datagram.
+    keeping: Cell<bool>,
+    /// The datagrams the copying receive found no heap room to copy.
+    rx_drops: RxDrops,
+}
+
+impl SimEnd {
+    /// The next datagram from the end's peer: one from anyone else is let go of, as a host's
+    /// datagram link lets it go.
+    fn next_admitted(&self) -> Option<Vec<u8>> {
+        loop {
+            let datagram = self.net.state().queues.get_mut(&self.local)?.pop_front()?;
+            if self
+                .binding
+                .admit(datagram.from, &datagram.bytes)
+                .is_taken()
+            {
+                return Some(datagram.bytes);
+            }
+        }
+    }
 }
 
 impl Drop for SimEnd {
@@ -358,18 +392,49 @@ impl BoxedLinkDriver for SimEnd {
 impl SessionDatagramLink for SimEnd {
     fn service(&self) {}
 
+    // The datagram the lending receive hands over, copied out, as the host's link copies it.
     fn try_recv(&self) -> Option<RxFrame> {
-        loop {
-            let datagram = self.net.state().queues.get_mut(&self.local)?.pop_front()?;
-            // The peer's datagrams only, as a host's datagram link reads them.
-            if self
-                .binding
-                .admit(datagram.from, &datagram.bytes)
-                .is_taken()
-            {
-                return Some(RxFrame::new(datagram.bytes));
-            }
+        copied_receive(self, &self.rx_drops)
+    }
+
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        // A receive from inside `f` finds the buffer lent and reads nothing.
+        let Ok(mut rx) = self.rx.try_borrow_mut() else {
+            return false;
+        };
+        if !self.kept.replace(false) {
+            let Some(datagram) = self.next_admitted() else {
+                return false;
+            };
+            *rx = datagram;
         }
+        self.keeping.set(false);
+        f(rx.as_slice());
+        self.kept.set(self.keeping.replace(false));
+        true
+    }
+
+    fn take_rx_dropped(&self) -> usize {
+        self.rx_drops.take()
+    }
+
+    // A kept datagram is input the end took from the network already: no wait finds it, and the
+    // next receive lends it again.
+    fn holds_input(&self) -> bool {
+        self.kept.get()
+    }
+
+    fn keeps_input(&self) -> bool {
+        true
+    }
+
+    fn keep(&self) {
+        self.keeping.set(true);
+    }
+
+    // The buffer is written by a receive alone, so what a receive lent lies there until the next.
+    fn lends_until_next_receive(&self) -> bool {
+        true
     }
 
     wz_runtime_coop::with_heap_link_seams! {
@@ -797,4 +862,65 @@ impl Drop for StandInInner {
         // for a stand-in made after this one.
         self.local.drop_tasks();
     }
+}
+
+/// An end lends what it received from where it lies until its next receive, and lends a datagram
+/// it was told to keep again from the same place, holding it as input meanwhile, as the host's
+/// datagram link does: the round's form reads a record's parts only where its link lent them. A
+/// datagram from anyone but the end's peer is let go of. The CONTROL is the copying receive, which
+/// hands the next datagram's bytes. Turned red by an end that hands out a copy it lets go of (what
+/// it lends said not to stay, a kept datagram not lent again), and by a kept datagram not held as
+/// input, which a read's wait would pass over.
+#[test]
+fn an_end_lends_what_it_received_where_it_lies_until_its_next_receive() {
+    let net = Net::default();
+    let peer = SocketAddr::new(SESSION_HOST, FIRST_EPHEMERAL_PORT);
+    let stranger = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)), FIRST_EPHEMERAL_PORT);
+    let OpenedLink { pump: end, .. } = net
+        .bind::<OneTask>(Claim::At(STAND_IN_AT), Some(peer), false)
+        .expect("the address is free");
+    assert!(
+        end.lends_until_next_receive(),
+        "what an end lends stays where it lies until its next receive"
+    );
+    assert!(end.keeps_input(), "an end keeps a datagram it is told to");
+    net.deliver(peer, STAND_IN_AT, b"first");
+    net.deliver(stranger, STAND_IN_AT, b"stray");
+    net.deliver(peer, STAND_IN_AT, b"second");
+    net.deliver(peer, STAND_IN_AT, b"third");
+
+    let mut lent = None;
+    assert!(end.recv_with(&mut |datagram: &[u8]| {
+        lent = Some((datagram.as_ptr(), datagram.to_vec()));
+        end.keep();
+    }));
+    assert_eq!(
+        lent.as_ref().map(|(_, bytes)| bytes.as_slice()),
+        Some(&b"first"[..])
+    );
+    assert!(end.holds_input(), "a kept datagram is input the end holds");
+    let mut again = None;
+    assert!(end.recv_with(&mut |datagram: &[u8]| {
+        again = Some((datagram.as_ptr(), datagram.to_vec()));
+    }));
+    assert_eq!(
+        again, lent,
+        "a kept datagram is lent again from where it lies"
+    );
+    assert!(
+        !end.holds_input(),
+        "a datagram lent and not kept is not held"
+    );
+
+    let mut next = Vec::new();
+    assert!(end.recv_with(&mut |datagram: &[u8]| next = datagram.to_vec()));
+    assert_eq!(next, b"second", "the stranger's datagram is let go of");
+    let copied = end
+        .try_recv()
+        .expect("CONTROL: the copying receive takes the next datagram");
+    assert_eq!(copied.bytes, b"third");
+    assert!(
+        !end.recv_with(&mut |_: &[u8]| {}),
+        "nothing is lent once no datagram waits"
+    );
 }
