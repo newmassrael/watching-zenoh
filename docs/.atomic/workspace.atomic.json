@@ -9601,6 +9601,26 @@
       "carry_forward_bullets": [
         "S12 15 (the stray handshake judge) was written and held: its generated function is not inlined and grows libwz_capi_c .text by 64 B, and its policy enum would exist twice (wz_config and the SCE document). Held on branch k-core until SCE emits an inline hint for small algorithms."
       ]
+    },
+    "Round 4750": {
+      "decision_summary": "Move three cold or size-neutral rules into SCE algorithms (census S10 38, S10 40, S1 29) and keep three by hand whose move grew a library (S7 54, S9 72, S10 72), under the rule that a move loses no size or time.",
+      "changes_bullets": [
+        "abi_gate_verdict (plugin and volume ABI) and volume_abi_verdict, returning u8 so the ABI crates gain no dependency.",
+        "fragment_pacing_wait and its step record: how long a writer holds a fragment past its burst; FragmentPacingService and FragmentPacing in docs/formal.",
+        "Written and reverted: pico's link properties (link_of_row +180 B in libwz_capi_pico), the timestamping map by role (NodeHlc::for_node_by +55 B), the accept's handshake window (open_face_multilink +32 B in libwz_capi_c)."
+      ],
+      "verification_bullets": [
+        "Release libraries before and after: libwz_capi_pico .text 1266329 both; libwz_capi_c .text 8757008 to 8756992 (Paced::due and the paced writer each a few bytes smaller).",
+        "Tests of the six crates touched, clippy of each; regen-codegen leaves out/ unchanged; Layer Bc 137 units, four recorded.",
+        "TLC 1.7.4: FragmentPacing holds; without hold Spaced breaks, without end-run or restart LetsBurst, without subtract BoundedDelay."
+      ],
+      "impact_refs": [
+        "watching-zenoh/build-and-verify",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "The three reverted rules wait for SCE's inline hint for generated algorithms (accepted, request [7]) and are measured again when it lands."
+      ]
     }
   },
   "inventory_entries": {
