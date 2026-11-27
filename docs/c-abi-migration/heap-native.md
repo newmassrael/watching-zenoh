@@ -299,6 +299,7 @@ session takes its row at its open, as every policy's does.
 | **R1b, step 2 (landed on the lane: `8988bd43f3`, `3963ecf41d`)** | the tokens of the faces that went owed on `OnUse` as a relation of tokens keyed by face and id (`OwedTokens`, `FaceToken`), its bound kept by the faces' admission (`admits_face`); the engine names both forms by one type (`engine/registry/owed.rs`, `Owed`) (7.11) | `crates/wz-session-core` (`declare/liveliness_subscriber.rs`, `slot_observer.rs`), `crates/wz-capi-coop` (`engine/registry.rs`, `registry/{owed,adding}.rs`) | 0 (the lent arm is the code it replaced) | 0 | 0 |
 | **R1b, step 3 (landed on the lane: `d269055bd4`)** | the listening and grouped forms' registry on `OnUse`: `Registry::counted` generic over `Holders` and over the plan's `GetTables` and `FacePeers`, `ManyHolders` of `RowPolicy` with `Holders::counted`, `SpareSets`' on-use form (a set built at a place's first face, counted in its row), the rooms' places at `MAX_FACE_SETS` in the state, the plan's rows of the held index and the owed tokens the lent form's alone; `build.rs` names `OnUse` whatever faces the session takes (7.12) | `crates/wz-capi-coop` (`build.rs`, `lib.rs`, `arena.rs`, `engine.rs`, `engine/registry.rs`, `registry/{counted,held,adding}.rs`, `tests/{arena,on_use}.rs`), `scripts/lib/nondefault-tests-gate.sh` | 0 for every D12 case (no D12 build names `tables-on-use`); no case builds the listening on-use form until N5 | 0 | the on-use listening session: its sets' rows from the allocator at the open instead of the arena |
 | **R2 (landed on the lane: `c4105747a2`, `657b23623c`)** | the admission in an allocation of its own (`OwnPlaced`, as the rooms are) and each read slot of a face past the dial role's made at its place's first face (`OnceRows`, `DirectFaces::made_at`), a refusal answered as a face past `max_faces`; the plan lays out neither, and `SessionArena::arena_mut` is the D12 forms' and the tests' again (7.13) | `crates/wz-capi-coop` (`arena.rs`, `engine.rs`, `engine/direct.rs`, `engine/direct/once_rows.rs` (new), `engine/faces_added.rs`, `engine/state_places.rs` (a test's name), the tests), `scripts/lib/nondefault-tests-gate.sh` | 0 for every D12 case (each predicate added reads `not(wz_on_use)` over the code it guarded) | 0 for D12; on use a walk of the faces reads one pointer a row | the on-use listening session: a face's slot, its Router among it, from the allocator at its place's first face; the admission at the open |
+| **R2, the rooms (landed on the lane: `e5ee0e0d5a`)** | the places of the faces' rooms on use as the faces' read slots are (`OnceRows`, moved to `engine`): rows counted to the plan's sets at the open, each face's place made at its first hold of a wait and kept; `FACE_SETS` the region form's alone (7.14) | `crates/wz-capi-coop` (`engine.rs`, `engine/once_rows.rs` (moved), `engine/direct.rs`, `engine/registry.rs`, `engine/state_places.rs`, `tests/{congestion,on_use}.rs`) | 0 for every D12 case | 0 | the on-use session: its rooms' places one row a set and one place a face it held, in place of `MAX_FACE_SETS` places in its state |
 | R3 and R4 | the zenoh-pico preset's own library (`peer`, `multicast-transport`, so `runtime-plan`) on use: the listening and grouped forms' holders, sets and owed tokens on use and `build.rs`'s `!takes_faces` dropped (R1b, landed), the admission and the direct faces' slots per face (R2, landed), the listening and grouped stacks' memory (R3), its arena out (R4) (11.1) | `crates/wz-capi-coop` (`lib.rs`, `engine.rs`, `engine/registry/counted.rs`, `engine/state_places.rs`, `engine/direct.rs`), `crates/wz-runtime-coop` (the stacks' ports and groups) | the preset's library, read once N5 resolves it so | 0 | section 5 |
 | N5, after R2 to R4 (11.2, 11.3) | the switch and its guards (section 9): the `table-memory` axis, the zenoh-pico defconfig's `on-use`, the release profiles' `at-open`, the size cases of both forms (section 10) and C1nh's second reading | `deploy/wz-config.toml` and what it generates, `configs/zenoh-pico_defconfig`, `configs/profiles/host-peer-ext.conf`, `host-peer.conf`, `scripts/lib/capability_cost_gate.py`, `deploy/size_ledger.json`, `deploy/pico_host_ceiling.json`, `scripts/run-ci.sh` (C1nh) | 0 for the release form; the on-use case reads N3 and N4's figures | 0 | 0 |
 
@@ -737,9 +738,9 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   rest are built as each place's first face comes (`SpareSets::counted`, its `build` the same
   `count_set`), and `Owed::counted`, the aliases' quota and the spares are the struct's fields
   as on `Lent`. `ManyHolders` is of `RowPolicy`, with `Holders::counted`, which takes its rows
-  at the open. `FACE_SETS`, the places of the faces' rooms the state keeps, is `MAX_FACE_SETS`
-  where the build takes faces: `LinkRooms::init_at` writes a place for every set at the open, so
-  a counted table would take the same memory at the same moment, in one more allocation. The
+  at the open. `FACE_SETS`, the places of the faces' rooms the state keeps, was `MAX_FACE_SETS`
+  where the build takes faces, about a thousand places at the open whatever the config; 7.14
+  makes each face's place on use and keeps `FACE_SETS` the region form's. The
   plan's rows of the held index and of the owed tokens (`ArenaPart::HeldFaces`, `OwedTokens`,
   `FACE_ROWS`, `OWED_ROWS`, `HELD_SET_BYTES`) are the lent form's alone.
   `SessionArena::arena_mut` is compiled on use where the open still lends the arena the direct
@@ -844,7 +845,60 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   code they were, the two walks' lent arms the lines they were; C1cs's readings are not expected
   to move.
 
+### 7.14 R2, the rooms' places on use
+
+- What it does (`e5ee0e0d5a`): 7.12 put the places of the faces' rooms (`LinkRooms`, what a
+  droppable publish that finds the session held asks each face for) in the on-use session's own
+  state at `MAX_FACE_SETS`, `1 + MAX_FACES + GROUP_FACES`, about a thousand places taken at the
+  open whatever the config. They are now the faces' read slots' form (7.13): a table of
+  write-once rows counted at the open to the plan's sets (`RoomPlaces` is
+  `OnceRows<Option<RoomPlace>>`), each face's place made at its first hold of a wait
+  (`LinkRooms::hold`, through `RoomTable::taken` and `OnceRows::made_mut`) and kept for the
+  session's life and the next face of its place. `OnceRows` moved from `engine::direct` to
+  `engine` (every on-use build has rooms), and gained the forms a table under a lock of its own
+  asks: `made_mut` and `row_mut`, with the table held alone, so no exchange. `StatePlaces`
+  keeps no rooms' field on use, and `FACE_SETS` is the region form's alone again, at 1 (`listen`
+  and `group` each name `runtime-plan`, so no region build takes faces).
+- Why not the face's own owner: a face's place is read by the publish that finds the session
+  held under the rooms' lock alone, at every place in turn, the dial role's and a group's among
+  them; the rooms are the one layer that holds those facts for every face, as section 5 asks.
+- Why at the first hold and not at the face's admission: a place no face made reads as a place
+  no face holds, which the table already answers for (a face whose link gives no wait never holds
+  one). A place the allocator has no room for leaves its face naming no wait: no publish asks it
+  for room, `skips` sends it every publish, and `dropped_on` names every face, each the answer
+  the table gives a face of no wait; nothing else is refused or lost.
+- D12: `RoomPlaces` is the lent table, `RoomTable::over` the push of a free place for every row
+  that `LinkRooms::init_at` made, and `taken`, `held`, `place` and `free_all` the slice calls
+  each call site made; C1cs's readings are not expected to move.
+- Tests:
+  - `engine::once_rows::tests::an_on_use_row_held_alone_is_made_at_its_first_make_and_changed_in_place`
+    (every on-use build): red if `made_mut` makes a second value for a made row or none, or if
+    `row_mut` reads a row not made as past the rows. `an_on_use_table_of_no_row_holds_none` now
+    asks `row_mut` and `made_mut` too and runs without `listen`; the other two keep `listen`.
+  - `tests::congestion::an_on_use_rooms_place_is_made_at_its_faces_first_hold`: four rows and
+    no place at the making (the CONTROL), one place once a face holds a wait, still one when it is
+    let go of and its place held again, none past the table, and the place made is the one a
+    publish asks (`tx-held-wait`). Red if `RoomTable::over` makes every row's place, if
+    `RoomTable::held` makes one, or if `RoomTable::taken` reads through `row_mut`.
+  - `tests::on_use::an_on_use_session_with_one_face_holds_one_room_place`: a session with its one
+    face up holds one place. Red if the open makes every row's place, or if a face that comes up
+    makes none.
+  - `engine::state_places::tests::the_rooms_places_take_the_regions_sets_at_most` is the region
+    and lent forms' alone.
+- Not tested: a hold the allocator refuses; only a refusing allocator reaches it.
+
 ## 8. What the main session runs
+
+- R2, the rooms (`e5ee0e0d5a`), not built or run by this lane. `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features liveliness,listen,tables-on-use --lib on_use` 21
+  (18 before: one of `engine::once_rows`, one of `tests::congestion`, one of `tests::on_use`);
+  `--features link-admission,tables-on-use --lib on_use` three more than before; `--features
+  tables-on-use --lib on_use` four more (`engine::once_rows` now runs two there); `cargo test
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --lib tests::congestion` with the crate's
+  defaults (the D12 form, unchanged) and with `--all-features` (one more). `cargo clippy
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --all-targets -- -D warnings` with the legs
+  R2 lists below, and `--no-default-features --features std,tables-on-use` (no `tx-held-wait`:
+  `RoomTable::place` is then compiled only where the round and faces are).
 
 - R2 (`c4105747a2`, `657b23623c`), not built or run by this lane. The renamed test of
   `engine::state_places` now matches `on_use`, so every on-use leg runs one test more than
