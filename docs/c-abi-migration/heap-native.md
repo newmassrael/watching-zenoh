@@ -1469,7 +1469,64 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   them (none on use), the ABI's handle, entity places and lodgings, the advanced cache's ring, and
   the count the engine keeps the arena by.
 
+### 7.29 3d, steps 3 and 4: the caches' ring and the ABI's places on use
+
+- `59685c9a0d`: the ring the advanced publishers' caches keep their samples in is held as the
+  form holds it (`CacheRing`, `engine/cache_ring.rs`, new): the span the open claimed in the
+  arena (D12, `CacheSpan`, now the lent forms' alone), or, on use, `ADVANCED_CACHE_BYTES` of its
+  own taken zeroed by a fallible reservation at the caches' first use and kept for the engine's
+  life. A refused reservation hands an empty span, which `CacheStore::in_ring` refuses as a ring
+  that holds no record (the ABI's `CacheRingUnavailable`, pico's out of memory); a later use
+  asks again, and a ring once taken stands, so no cache made over it sees it change. The plan
+  counts the ring in both forms and lays its rows out in D12 alone (`CACHE_RING_ROWS`).
+- `898e504334`: the ABI's places (N4's share in the engine) are lent by the same
+  `PlaceLender`, so the ABI (`wz-capi-pico`) is unchanged. On use: an entity's place is an
+  allocation of its own taken at `claim_place`, at most as many of a kind at once as the session
+  keeps rows of the kind (`EntityPlaces::counted` from the plan's `PlaceRows` and `EntityRows`),
+  aligned to `ARENA_ALIGN` as the arena's are, its allocation recording the lending table's
+  address first so `give_back_place` refuses a place another session lent, as the arena's table
+  does by its span; the handle's place is `OwnHandle`, the plan's bytes zeroed at the open and
+  held by the session's state; each lodging is a cell of its own (`LodgingPlaces::lend`, its head
+  the cell's layout, given back by the last count from any thread). The plan records the layouts
+  and counts in both forms and lays out the handle, entity place and lodging rows in D12 alone
+  (`HANDLE_ROWS`, `ENTITY_PLACE_ROWS`, `LODGING_ROWS`). The lodgings on use are bounded by the
+  plan's layout and the values the ABI lodges (one hub and one watch a session, one watcher a
+  transport events listener), not by a table: no lodging outlives what lodged it by more than
+  its counts, and none keeps memory of the session's.
+- Tests. wz-capi-coop `engine::cache_ring::tests::an_on_use_ring_takes_its_bytes_zeroed_at_its_first_use_and_keeps_them`
+  (on use; red if the ring is taken at the open, taken again at each use, or not zeroed);
+  `tests::an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches` runs on use unchanged.
+  `arena::tests::an_on_use_plan_holds_the_abis_places_and_lends_each_of_its_own` (on use; red if
+  `lay_held` lays a row, `EntityPlaces::counted` reads another kind's count, `give_back` takes
+  another table's place, or the handle's place is not zeroed);
+  `lodging::tests::an_on_use_lodging_place_is_a_cell_of_its_own_given_back_by_its_last_count`
+  (on use). `tests::an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena` asserts
+  the place in the arena in D12 and apart from it on use (`arena_holds`), the arena two spans
+  larger in D12 and the same on use; `tests::an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena`
+  runs on use, the same-address relend read in D12 alone. The D12 tests of the places' rows
+  (`arena::tests` three, `tests::arena` five) are the lent forms'. No test refuses an allocation:
+  no allocator of the tests refuses one.
+- What the on-use arena still lays out after these steps: the links' cells where the plan holds
+  them (none on use) and the count the engine keeps the arena by (`ArenaKeep`); the arena and its
+  count are the next and last step of 3d.
+
 ## 8. What the main session runs
+
+- 3d, steps 3 and 4, the caches' ring and the ABI's places on use (`59685c9a0d`, `898e504334`),
+  not built or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
+  --features tables-on-use --lib` (three more: `cache_ring`, `lodging`, `arena::tests`; three fewer
+  in `arena::tests` and the lodging table's two, the lent forms'), `--features
+  tables-on-use,advanced` if the advanced set builds with it (`tests::an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches`
+  on use), `--features listen,tables-on-use --lib tests::arena` (five fewer), and `cargo test
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --lib` in the default set (unchanged). Clippy
+  of wz-capi-coop in the default set, `--features tables-on-use`, `--features
+  listen,tables-on-use`, `--features udp-listen,tables-on-use`, `--features group-host` and with
+  `advanced` beside `tables-on-use`; and `cargo test --manifest-path crates/Cargo.toml -p
+  wz-capi-pico` (the ABI unchanged). Size: D12 none but a newtype (`CacheRing`); on use the
+  arena smaller by the handle, entity place, lodging and ring rows, the code larger by the
+  per-kind allocation (`EntityPlaces::claim`, `give_back`), `OwnHandle` and the lodging cell,
+  smaller by the lent places' lend and `claim_handle`. Receive Ir: unchanged (no place is taken on
+  the receive).
 
 - 3d, step 2, the reassembly chains on use (`9dedb82d14`, `5a7c446e01`, `1d678048fc`) and the
   red of hn16 (`3d8b5368d9`), not built or run by this lane. `cargo test --manifest-path
@@ -2077,8 +2134,9 @@ The order that builds at each step:
    reads off the limits (`ArenaPlan::count`, `tables`, `peers`, `gets`, `session`) stay, the
    on-use constructors' only input. The size case reads group A's figure here. Written, step 1
    (7.27): the endpoints' texts by the state's policy, counted on use; step 2 (7.28): the
-   reassembly chains by the policy's `ChainStore`, each chain's own buffer on use; the ABI's
-   places, the cache's ring and the arena's count are next.
+   reassembly chains by the policy's `ChainStore`, each chain's own buffer on use; steps 3 and 4
+   (7.29): the cache's ring and the ABI's places of the allocator, through the same
+   `PlaceLender`; the arena and its count are next.
 6. The zenoh-pico preset's own library on use (11.1, R1 to R4), and N5 once R1 builds (11.2).
 
 The pushes of the tables step 2's second half counts, and of the tables beside them in the same
