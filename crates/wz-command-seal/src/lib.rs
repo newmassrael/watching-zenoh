@@ -38,12 +38,14 @@
 extern crate std;
 
 mod cbor;
+mod fresh;
 mod key;
 mod replay;
 #[cfg(feature = "ring")]
 mod ring_es256;
 
 use cbor::{Reader, Writer, MAJOR_ARRAY, MAJOR_BSTR, MAJOR_MAP, MAJOR_NINT, MAJOR_TAG, MAJOR_UINT};
+pub use fresh::{Freshness, Restart};
 pub use key::{
     point_of_spki, spki_of_point, zid_of_point, zid_of_spki, Zid, COORDINATE_LEN, P256_SPKI_LEN,
     P256_SPKI_PREFIX, POINT_LEN, UNCOMPRESSED, ZID_LEN,
@@ -56,8 +58,15 @@ pub use ring_es256::{RingEs256, RingSigner};
 pub const SIGNATURE_LEN: usize = 64;
 
 /// The most bytes a sealed command takes: a reset whose generation and counter need eight bytes
-/// each. A buffer this long holds every command [`seal`] writes.
-pub const MAX_SEALED_LEN: usize = 216;
+/// each and that carries an echo. A buffer this long holds every command [`seal`] writes.
+pub const MAX_SEALED_LEN: usize = 233;
+
+/// The length of an echo: the value a node hands a commander it holds no counter for, which the
+/// commander's next command carries (RFC 8613, appendix B.1.2; RFC 9175, section 2).
+pub const ECHO_LEN: usize = 16;
+
+/// An echo, as a node draws it and a command carries it.
+pub type Echo = [u8; ECHO_LEN];
 
 /// The COSE_Sign1 tag (RFC 9052, section 2).
 const COSE_SIGN1_TAG: u64 = 18;
@@ -68,12 +77,12 @@ const SIGNATURE1_CONTEXT: &str = "Signature1";
 /// The protected header's length: every item in it has a fixed size.
 const PROTECTED_LEN: usize = 83;
 
-/// The longest payload: a reset whose generation and counter need eight bytes each.
-const MAX_PAYLOAD_LEN: usize = 60;
+/// The longest payload: a reset whose generation and counter need eight bytes each, with an echo.
+const MAX_PAYLOAD_LEN: usize = 77;
 
 /// The longest Sig_structure: the context, both headers' strings, the empty external data and
 /// the longest payload.
-const MAX_TO_BE_SIGNED_LEN: usize = 160;
+const MAX_TO_BE_SIGNED_LEN: usize = 177;
 
 /// A COSE label or value that is a small integer, as its CBOR head.
 type Int = (u8, u64);
@@ -125,6 +134,13 @@ pub enum SealError {
     /// The node holds counters for as many commanders as it has room for, and this commander is
     /// not one of them.
     WindowFull,
+    /// The node holds no counter for this commander and the command does not carry the echo the
+    /// node drew when it started, so it may be a command sealed before the node last started: the
+    /// commander repeats it, under a new counter, carrying `echo` (RFC 8613, appendix B.1.2).
+    EchoRequired {
+        /// The echo the repeated command carries.
+        echo: Echo,
+    },
     /// The buffer given to [`seal`] cannot hold the object.
     BufferTooSmall,
     /// The signer did not sign.
@@ -142,6 +158,7 @@ impl core::fmt::Display for SealError {
             Self::BadSignature => f.write_str("the signature does not verify"),
             Self::Replay { last } => write!(f, "a replay: the last counter taken is {last}"),
             Self::WindowFull => f.write_str("no room for another commander's counter"),
+            Self::EchoRequired { .. } => f.write_str("the command must carry the node's echo"),
             Self::BufferTooSmall => f.write_str("the buffer cannot hold the sealed command"),
             Self::Signer => f.write_str("the signer did not sign"),
         }
@@ -219,6 +236,9 @@ pub struct Command {
     pub object: Object,
     /// The commander's counter, above every one it sealed before.
     pub counter: u64,
+    /// The echo the node handed the commander, when the command repeats one the node refused
+    /// for want of it ([`SealError::EchoRequired`]); `None` otherwise.
+    pub echo: Option<Echo>,
 }
 
 /// A sealed command a node opened: who commanded what.
@@ -232,6 +252,8 @@ pub struct Sealed {
     pub object: Object,
     /// The counter the node took.
     pub counter: u64,
+    /// The echo the command carried, if any.
+    pub echo: Option<Echo>,
 }
 
 /// Verifies ES256: ECDSA over P-256 with SHA-256 (RFC 9053, section 2.1).
@@ -329,6 +351,7 @@ where
             verb: parts.command.verb,
             object: parts.command.object,
             counter: parts.command.counter,
+            echo: parts.command.echo,
         },
     })
 }
@@ -444,16 +467,26 @@ fn point_of(x: &[u8; COORDINATE_LEN], y: &[u8; COORDINATE_LEN]) -> [u8; POINT_LE
     point
 }
 
-/// Read the payload, `[verb, node, [peer, generation or null], counter]`.
+/// Read the payload, `[verb, node, [peer, generation or null], counter]`, with the echo as a
+/// fifth item when the command carries one.
 fn read_payload(bytes: &[u8]) -> Result<Command, SealError> {
     let mut reader = Reader::new(bytes);
-    reader.expect((MAJOR_ARRAY, 4))?;
+    let echoed = match reader.head()? {
+        (MAJOR_ARRAY, 4) => false,
+        (MAJOR_ARRAY, 5) => true,
+        _ => return Err(SealError::Malformed),
+    };
     let verb = Verb::of_word(reader.tstr()?).ok_or(SealError::Malformed)?;
     let node = reader.bstr_array::<ZID_LEN>()?;
     reader.expect((MAJOR_ARRAY, 2))?;
     let peer = reader.bstr_array::<ZID_LEN>()?;
     let generation = reader.uint_or_null()?;
     let counter = reader.uint()?;
+    let echo = if echoed {
+        Some(reader.bstr_array::<ECHO_LEN>()?)
+    } else {
+        None
+    };
     reader.end()?;
     if verb.takes_generation() != generation.is_some() {
         return Err(SealError::Malformed);
@@ -463,6 +496,7 @@ fn read_payload(bytes: &[u8]) -> Result<Command, SealError> {
         node,
         object: Object { peer, generation },
         counter,
+        echo,
     })
 }
 
@@ -497,7 +531,8 @@ fn write_protected(point: &[u8; POINT_LEN], out: &mut [u8]) -> Result<usize, Sea
 
 fn write_payload(command: &Command, out: &mut [u8]) -> Result<usize, SealError> {
     let mut writer = Writer::new(out);
-    writer.head((MAJOR_ARRAY, 4))?;
+    let items = if command.echo.is_some() { 5 } else { 4 };
+    writer.head((MAJOR_ARRAY, items))?;
     writer.tstr(command.verb.word())?;
     writer.bstr(&command.node)?;
     writer.head((MAJOR_ARRAY, 2))?;
@@ -507,6 +542,9 @@ fn write_payload(command: &Command, out: &mut [u8]) -> Result<usize, SealError> 
         None => writer.null()?,
     }
     writer.head((MAJOR_UINT, command.counter))?;
+    if let Some(echo) = &command.echo {
+        writer.bstr(echo)?;
+    }
     Ok(writer.len())
 }
 

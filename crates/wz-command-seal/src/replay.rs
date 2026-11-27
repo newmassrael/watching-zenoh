@@ -40,6 +40,11 @@ impl<const N: usize> ReplayWindow<N> {
             .map(|(_, counter)| counter)
     }
 
+    /// Whether the window has room for a commander it holds no counter for.
+    pub fn has_room(&self) -> bool {
+        self.entries.iter().any(Option::is_none)
+    }
+
     /// Every commander held and its last counter: what a node that keeps the window across a
     /// restart writes down, and gives back to [`Self::accept`] when it starts.
     pub fn iter(&self) -> impl Iterator<Item = (&Zid, u64)> + '_ {

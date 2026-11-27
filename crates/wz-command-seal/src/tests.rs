@@ -154,6 +154,7 @@ fn pinned_command() -> Command {
             generation: Some(7),
         },
         counter: 42,
+        echo: None,
     }
 }
 
@@ -488,6 +489,7 @@ fn every_verb_seals_and_opens_with_its_word() {
                 generation: verb.takes_generation().then_some(3),
             },
             counter: at as u64,
+            echo: None,
         };
         let mut out = [0u8; MAX_SEALED_LEN];
         let len = seal(&command, &Fixed::pinned(), &mut out).expect("seals");
@@ -515,6 +517,7 @@ fn the_longest_command_fills_the_stated_bounds_exactly() {
             generation: Some(u64::MAX),
         },
         counter: u64::MAX,
+        echo: Some([0xee; ECHO_LEN]),
     };
     let signer = Fixed::pinned();
     let mut out = [0u8; MAX_SEALED_LEN];
@@ -555,6 +558,82 @@ fn seal_refuses_a_command_it_could_not_open_and_a_signer_that_does_not_sign() {
     assert_eq!(
         seal(&pinned_command(), &silent, &mut out),
         Err(SealError::Signer)
+    );
+}
+
+/// The node's echo of its last start.
+const BOOT_ECHO: Echo = [0x5e; ECHO_LEN];
+
+fn sealed_with_echo(counter: u64, echo: Option<Echo>) -> Vec<u8> {
+    let command = Command {
+        counter,
+        echo,
+        ..pinned_command()
+    };
+    let mut out = [0u8; MAX_SEALED_LEN];
+    let len = seal(&command, &Fixed::pinned(), &mut out).expect("seals");
+    out[..len].to_vec()
+}
+
+/// An echo travels as the fifth item of the payload, signed with the rest, and opens as it was
+/// sealed; a command without one has four items, as the pinned object does.
+#[test]
+fn an_echo_is_the_fifth_item_of_the_payload_and_opens_as_sealed() {
+    let with = sealed_with_echo(43, Some(BOOT_ECHO));
+    let without = sealed_with_echo(43, None);
+    assert_eq!(with.len(), without.len() + 1 + ECHO_LEN);
+    let opened = verify_sealed(&with, &NODE, &Recording::answering(true)).expect("verifies");
+    assert_eq!(opened.sealed().echo, Some(BOOT_ECHO));
+    let opened = verify_sealed(&without, &NODE, &Recording::answering(true)).expect("verifies");
+    assert_eq!(opened.sealed().echo, None);
+}
+
+/// A fifth item that is not sixteen bytes, and a sixth item, are not the format.
+#[test]
+fn an_echo_of_another_length_or_a_sixth_item_is_not_the_format() {
+    let base = pinned_payload_hex();
+    // The pinned payload's head names four items: the same items under a head of five or six,
+    // followed by what is appended.
+    let items = &base[2..];
+    let echo_hex = String::from("50") + &"5e".repeat(ECHO_LEN);
+    let short_echo = std::format!("85{items}4f{}", "5e".repeat(ECHO_LEN - 1));
+    let text_echo = std::format!("85{items}70{}", "5e".repeat(ECHO_LEN));
+    let six = std::format!("86{items}{echo_hex}00");
+    for payload in [short_echo, text_echo, six] {
+        assert_eq!(
+            open_unsigned(&protected_hex(), &payload),
+            Err(SealError::Malformed),
+            "{payload}"
+        );
+    }
+    let good = std::format!("85{items}{echo_hex}");
+    assert_eq!(
+        open_unsigned(&protected_hex(), &good).map(|sealed| sealed.echo),
+        Ok(Some(BOOT_ECHO))
+    );
+}
+
+/// After a start: a verified command of a commander the node holds no counter for is refused with
+/// the echo and takes nothing; repeated with the echo it is taken; the repeat sent again is a
+/// replay. Red if `Freshness::take` took a counter before `check` passed.
+#[test]
+fn after_a_start_the_echo_is_asked_then_taken_then_a_replay_refused() {
+    let mut fresh = Freshness::<2>::echo(BOOT_ECHO);
+    let verifier = Recording::answering(true);
+    let first = verify_sealed(&sealed_with_echo(43, None), &NODE, &verifier).expect("verifies");
+    assert_eq!(
+        fresh.take(first),
+        Err(SealError::EchoRequired { echo: BOOT_ECHO })
+    );
+    assert_eq!(fresh.window().iter().count(), 0);
+    let repeat = sealed_with_echo(44, Some(BOOT_ECHO));
+    let taken = fresh
+        .take(verify_sealed(&repeat, &NODE, &verifier).expect("verifies"))
+        .expect("taken with the echo");
+    assert_eq!(taken.counter, 44);
+    assert_eq!(
+        fresh.take(verify_sealed(&repeat, &NODE, &verifier).expect("verifies")),
+        Err(SealError::Replay { last: 44 })
     );
 }
 
@@ -615,6 +694,7 @@ mod with_ring {
                     generation: verb.takes_generation().then_some(9),
                 },
                 counter: counter as u64,
+                echo: None,
             };
             let sealed = open_sealed(
                 &sealed_by(&signer, &command),
