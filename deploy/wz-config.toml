@@ -95,7 +95,11 @@
 # without that capability reads the limit nowhere, so a reader of a document refuses a statement of
 # it by name there, as for a limit read from the `build`. The generated `READ_FROM_SNAPSHOT` reads
 # the capability's cargo feature in the crate the limit snapshots are generated into, whose features
-# are named after the capabilities, and `wz_config.py --check` holds that crate to have it.
+# are named after the capabilities, and `wz_config.py --check` holds that crate to have it. The
+# build refuses a statement there as well: the limit's symbol in `deploy/Kconfig.limits` depends on
+# the capability's, so a configuration without the capability has no value of it to state, and in
+# a build without the feature the generated `caps_generated.rs` does not compile a value the
+# environment states off the limit's default.
 #
 # `[limit.upstream]` names what the limit is in upstream zenoh. `zenoh` is the key of zenoh's
 # configuration that states the same number, as a path in its DEFAULT_CONFIG.json5, which

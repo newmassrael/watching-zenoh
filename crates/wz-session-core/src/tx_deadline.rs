@@ -78,13 +78,6 @@ pub struct ExpiryRun {
     run: u16,
 }
 
-// A count stated for a build that counts no run would be read by nothing.
-#[cfg(not(feature = "tx-expiry-run"))]
-const _: () = assert!(
-    crate::caps::TX_EXPIRY_CLOSE_AFTER == 0,
-    "TX_EXPIRY_CLOSE_AFTER is stated for a build without tx-expiry-run, which counts no run"
-);
-
 #[cfg(feature = "tx-expiry-run")]
 impl ExpiryRun {
     /// A message was pushed, so the link has room: the run ends.
