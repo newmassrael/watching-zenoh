@@ -7304,7 +7304,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         #[cfg(feature = "udp-listen")]
         links
-            .lend_port_rows(lent.transport.port_rows, lent.transport.port_slots)
+            .lend_ports(lent.transport.ports)
             .map_err(heap_refused)?;
         // Where the tables take their memory on use, every part of a link is made on the heap as
         // the link opens: the plan laid out no table of cells, and the links' kind names none.

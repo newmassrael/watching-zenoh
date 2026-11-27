@@ -1166,21 +1166,18 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
         let _ = cells;
     }
 
-    /// The rows every udp port the stack opens from now on keeps its peers and the datagrams it
-    /// sorted for them in, and the slots it reads those datagrams into and holds them in until the
-    /// links of their peers take them, for the session the ports serve: a peer or a datagram the
-    /// rows have no room for is dropped and counted, and none is kept on the heap; a port that
-    /// finds no slot free to read into is not opened. `slots` is `None` for a session that lent
-    /// none, whose ports read into memory of their own. The bytes the heap refused when the stack
-    /// cannot hold the rows, which refuses the session's open. The default ignores them, as a
-    /// stack that opens no udp port does.
+    /// Where every udp port the stack opens from now on keeps its peers and the datagrams it
+    /// sorted for them, and reads and holds those datagrams until the links of their peers take
+    /// them, for the session the ports serve
+    /// ([`CountKind::Ports`](crate::link_cells::CountKind::Ports)): the rows and the slots the
+    /// session lent, or the heap's memory counted to what it stated. A
+    /// peer or a datagram past the rows is dropped and counted, and a port that finds no memory to
+    /// read into is not opened; a stack whose session gave its ports nothing opens none. The bytes
+    /// the heap refused when the stack cannot hold the ports' book, which refuses the session's
+    /// open. The default ignores them, as a stack that opens no udp port does.
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(
-        &mut self,
-        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-        slots: Option<wz_session_core::byte_cells::LentByteCells<N::Flag>>,
-    ) -> Result<(), usize> {
-        let _ = (rows, slots);
+    fn lend_ports(&mut self, ports: N::Ports) -> Result<(), usize> {
+        let _ = ports;
         Ok(())
     }
 

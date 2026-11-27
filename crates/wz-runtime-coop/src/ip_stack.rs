@@ -83,6 +83,11 @@ use crate::udp_link::{DatagramSocket, UdpDriver};
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use crate::udp_link::{PortPeer, UdpPort};
 
+/// The socket of the link a `udp/` port of links of the kind `N` took for one peer: a share of a
+/// port counted as what those links share, over the memory their kind's ports keep.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+type PortPeerOf<U, N> = PortPeer<U, <N as CountKind>::Shared, <N as CountKind>::Ports>;
+
 /// The link of one session over a platform's datagram sockets `U`, its plain streams `T` and its
 /// secure-channel streams `L`: a datagram, a stream or a secure stream link, as its dial named.
 /// A stream link is the one its stream names ([`StreamSocket::Link`]), so on a stack that carries
@@ -379,15 +384,11 @@ pub struct IpLinks<U, D, L = NoDial, G = NoGroups, N: CountKind = OneTask, W = W
     tls: L,
     groups: G,
     shape: LinkShape<N>,
-    /// The rows every udp port of these links keeps its peers in, when the session lent some
-    /// ([`SessionLinks::lend_port_rows`]); a port of links lent none keeps rows of its own.
+    /// The book every udp port of these links keeps its peers in and makes its reads through,
+    /// over what the session gave its ports ([`SessionLinks::lend_ports`]): the rows and slots it
+    /// lent, or the heap's memory counted to what it stated. Links given nothing open no port.
     #[cfg(feature = "udp-listen")]
-    ports: Option<crate::udp_link::SharedBook<N::Shared>>,
-    /// The slots every udp port of these links reads its datagrams into and holds them in, when
-    /// the session lent some ([`SessionLinks::lend_port_rows`]); a port of links lent none reads
-    /// into memory of its own.
-    #[cfg(feature = "udp-listen")]
-    port_slots: Option<wz_session_core::byte_cells::LentByteCells<N::Flag>>,
+    ports: Option<crate::udp_link::SharedBook<N::Shared, N::Ports>>,
     /// The receive buffers of the groups these links join, when the session lent some
     /// ([`SessionLinks::lend_group_rx`]); a group of links lent none has a buffer of its own.
     group_rx: Option<wz_session_core::byte_cells::LentByteCells>,
@@ -569,8 +570,6 @@ where
             shape: LinkShape::default(),
             #[cfg(feature = "udp-listen")]
             ports: None,
-            #[cfg(feature = "udp-listen")]
-            port_slots: None,
             group_rx: None,
             datagrams: core::marker::PhantomData,
             waiter: core::marker::PhantomData,
@@ -594,8 +593,8 @@ where
     pub fn counted_by<M: CountKind>(self) -> IpLinks<U, D, L, G, M, W> {
         #[cfg(feature = "udp-listen")]
         debug_assert!(
-            self.ports.is_none() && self.port_slots.is_none(),
-            "a port's rows and slots are lent after the links are made"
+            self.ports.is_none(),
+            "a port's memory is given after the links are made"
         );
         IpLinks {
             local: self.local,
@@ -605,8 +604,6 @@ where
             shape: self.shape.counted_by(),
             #[cfg(feature = "udp-listen")]
             ports: None,
-            #[cfg(feature = "udp-listen")]
-            port_slots: None,
             group_rx: self.group_rx,
             datagrams: self.datagrams,
             waiter: self.waiter,
@@ -623,8 +620,6 @@ where
             shape: self.shape,
             #[cfg(feature = "udp-listen")]
             ports: self.ports,
-            #[cfg(feature = "udp-listen")]
-            port_slots: self.port_slots,
             group_rx: self.group_rx,
             datagrams: self.datagrams,
             waiter: self.waiter,
@@ -642,8 +637,6 @@ where
             shape: self.shape,
             #[cfg(feature = "udp-listen")]
             ports: self.ports,
-            #[cfg(feature = "udp-listen")]
-            port_slots: self.port_slots,
             group_rx: self.group_rx,
             datagrams: self.datagrams,
             waiter: self.waiter,
@@ -667,8 +660,6 @@ where
             shape,
             #[cfg(feature = "udp-listen")]
             ports: self.ports,
-            #[cfg(feature = "udp-listen")]
-            port_slots: self.port_slots,
             group_rx: self.group_rx,
             datagrams: self.datagrams,
             waiter: core::marker::PhantomData,
@@ -811,7 +802,7 @@ where
         #[cfg(feature = "udp-listen")]
         let datagram = crate::link_cells::larger_cell(
             datagram,
-            CellRc::<UdpDriver<PortPeer<U, N::Shared>, RxOf<N>, TxOf<N>, W>>::cell_bytes(),
+            CellRc::<UdpDriver<PortPeerOf<U, N>, RxOf<N>, TxOf<N>, W>>::cell_bytes(),
         );
         let stream = crate::link_cells::larger_cell(
             CellRc::<<D::Stream as StreamSocket>::Link<RxOf<N>, TxOf<N>>>::cell_bytes(),
@@ -827,16 +818,12 @@ where
     }
 
     /// Every udp port these links listen on from now on keeps its peers and their datagrams in
-    /// `rows`, which the ports share through one book on the heap: the bytes of its cell when the
-    /// heap refuses it, and the links keep no rows.
+    /// what `ports` gives, which the ports share through one book on the heap: the bytes of its
+    /// cell when the heap refuses it, and the links open no port. A source that gives nothing (a
+    /// session that lent its ports nothing, or sized nothing) leaves the links with no port.
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(
-        &mut self,
-        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-        slots: Option<wz_session_core::byte_cells::LentByteCells<N::Flag>>,
-    ) -> Result<(), usize> {
-        self.ports = Some(crate::udp_link::shared_book::<N::Shared>(Some(rows))?);
-        self.port_slots = slots;
+    fn lend_ports(&mut self, ports: N::Ports) -> Result<(), usize> {
+        self.ports = crate::udp_link::shared_book::<N::Shared, N::Ports>(ports)?;
         Ok(())
     }
 
@@ -913,29 +900,14 @@ where
         match ip.proto {
             #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
             LinkProto::Udp if U::CARRIED => {
+                // A port's memory is what its session gave the links' ports: links given none have
+                // no port, and a port its book has no memory for (a lent table with no slot free
+                // to read into, a heap with no room for its read buffer) is not opened, nor one
+                // whose cell the heap refuses, as a stack with no port left opens none. Asked
+                // before the socket is bound, so a refused port binds nothing.
+                let book = self.ports.as_ref().ok_or(LinkOpenError::Exhausted)?;
                 let socket = U::bind(ip.at).map_err(bind_refused::<U>)?;
-                // A session that lent its ports a table of datagram slots has the port read into
-                // them, and a port that finds none free to read into is not opened; without the
-                // table the port reads into memory of its own. A heap with no room for the book or
-                // the port's cell refuses the listener, as a stack with no port left does. Where a
-                // port keeps only what its session lent (`udp-port-lent-only`), links lent no rows
-                // or no slots have no memory for a port, and refuse it the same way.
-                let book = match &self.ports {
-                    Some(book) => book.clone(),
-                    #[cfg(not(feature = "udp-port-lent-only"))]
-                    None => crate::udp_link::shared_book::<N::Shared>(None)
-                        .map_err(|_| LinkOpenError::Exhausted)?,
-                    #[cfg(feature = "udp-port-lent-only")]
-                    None => return Err(LinkOpenError::Exhausted),
-                };
-                let port = match self.port_slots {
-                    Some(table) => UdpPort::lent_in_book(socket, table, &book)
-                        .ok_or(LinkOpenError::Exhausted)?,
-                    #[cfg(not(feature = "udp-port-lent-only"))]
-                    None => UdpPort::in_book(socket, self.shape.datagram_rx, &book),
-                    #[cfg(feature = "udp-port-lent-only")]
-                    None => return Err(LinkOpenError::Exhausted),
-                };
+                let port = UdpPort::in_book(socket, book).ok_or(LinkOpenError::Exhausted)?;
                 Ok(Box::new(IpUdpListener::<U, N, W> {
                     port: CellRc::try_on_heap(port).ok_or(LinkOpenError::Exhausted)?,
                     shape: self.shape,
@@ -1095,13 +1067,13 @@ impl<P: StreamSocket + 'static, N: CountKind> PendingDial<HeapLink<N>, N> for Pe
 /// shaped as the stack's links are and run as an acceptor's. The link's socket is the peer's share
 /// of the port, so the session reads that peer's datagrams alone and its replies leave by the port
 /// the peer sent to. Each link's buffers are claimed as a dialled link's are, from the session's
-/// tables when it lent the stack some; the port's own read buffer and the datagrams it sorts for
-/// each peer are the heap's either way.
+/// tables when it lent the stack some; the port reads and holds the datagrams it sorts for each
+/// peer in what its session gave the stack's ports ([`SessionLinks::lend_ports`]).
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 struct IpUdpListener<U: DatagramSocket, N: CountKind, W = WaitsInLoop> {
     /// The port, shared by the listener and every peer's link, which may be held by faces on
     /// several threads: counted as what the links share is.
-    port: CellRc<UdpPort<U, N::Shared>, N::Shared>,
+    port: CellRc<UdpPort<U, N::Shared, N::Ports>, N::Shared>,
     shape: LinkShape<N>,
     /// Who waits for the input of the links taken off the port: the stack's.
     waiter: core::marker::PhantomData<fn() -> W>,
@@ -3144,12 +3116,8 @@ mod tests {
     }
 
     /// The `udp/` listener of the heap profile against a socket whose datagrams the test queues,
-    /// its ports in the form of their own memory as well as the lent one.
-    #[cfg(all(
-        feature = "udp-listen",
-        not(feature = "session-slot"),
-        not(feature = "udp-port-lent-only")
-    ))]
+    /// its port over rows and slots a session lent.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
     mod udp_listener {
         use super::*;
         use crate::link_cells::OneTask;
@@ -3207,7 +3175,8 @@ mod tests {
         const SYN: &[u8] = &[0x01, 0x09];
 
         /// A listener over a fresh [`Inbox`], with the queue the test fills and what was sent:
-        /// counted for one task, as the links it opens (`HeapLink`) are.
+        /// counted for one task, as the links it opens (`HeapLink`) are, its port over rows of
+        /// two peers and slots enough for one peer's whole backlog beside the slot read into.
         fn listener() -> (IpUdpListener<Inbox, OneTask>, Queue, Sent) {
             let queued = Queue::default();
             let sent = Sent::default();
@@ -3215,9 +3184,11 @@ mod tests {
                 queued: Rc::clone(&queued),
                 sent: Rc::clone(&sent),
             };
+            let (ports, _slots) =
+                crate::udp_link::leaked_ports(2, crate::udp_link::PORT_PEER_BACKLOG + 2, 64);
+            let port = UdpPort::new(socket, Some(ports)).expect("a book and a slot to read into");
             let listener = IpUdpListener {
-                port: CellRc::try_on_heap(UdpPort::new(socket, 2048).expect("the heap has room"))
-                    .expect("the heap has room"),
+                port: CellRc::try_on_heap(port).expect("the heap has room"),
                 shape: LinkShape::default(),
                 waiter: core::marker::PhantomData,
             };
@@ -3390,49 +3361,35 @@ mod tests {
             assert_eq!(tables.in_use(), 1);
         }
 
-        /// A stack whose session lent its ports a table of datagram slots opens each port over it,
-        /// the port taking a slot to read into, and refuses a port the table has no slot left for as
-        /// exhausted. The CONTROL is the same stack lent no table, whose ports read into memory of
-        /// their own however many there are.
+        /// A stack whose session lent its ports rows and a table of slots opens each port over
+        /// them, the port taking a slot to read into, refuses a port the table has no slot left
+        /// for as exhausted, and has the slot back once the port goes. The refused case before it
+        /// is the same stack lent nothing, which opens no port at all. Turned red by a port of the
+        /// stack's own memory, which would open in both refused cases.
         #[test]
         fn a_port_reads_into_the_slots_its_session_lent() {
-            use wz_session_core::bounded::{Arena, ARENA_ALIGN};
-
-            #[derive(Clone, Copy)]
-            #[repr(C, align(16))]
-            struct Block([u8; ARENA_ALIGN]);
-
             let at = Locator::udp(SocketAddr::new(NODE, 0));
-            let own = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
-            for _ in 0..2 {
-                assert!(own.open_listener(at).is_ok(), "CONTROL: a port of its own");
-            }
-
-            let port_len = 64;
-            let bytes = Arena::byte_cells_bytes(port_len, 1).expect("within the address space");
-            let region: &'static mut [Block] =
-                vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
-            // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
-            // leaked, so nothing else uses it and it outlives every slot claimed from it.
-            let mut arena =
-                unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
-            let ports = arena.lend_byte_cells(port_len, 1).expect("the port table");
-            let mut lent = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
-            // Rows of no peer: the port opens over its slot whether or not one comes.
+            let bare = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
             assert!(
-                lent.lend_port_rows(crate::udp_link::PortRows::default(), Some(ports))
-                    .is_ok(),
+                matches!(bare.open_listener(at), Err(LinkOpenError::Exhausted)),
+                "links lent nothing keep no port"
+            );
+
+            let (ports, slots) = crate::udp_link::leaked_ports(1, 1, 64);
+            let mut lent = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
+            assert!(
+                lent.lend_ports(Some(ports)).is_ok(),
                 "the heap has room for the book"
             );
             let first = lent.open_listener(at);
             assert!(first.is_ok(), "a port over the table");
-            assert_eq!(ports.in_use(), 1, "the port took a slot to read into");
+            assert_eq!(slots.in_use(), 1, "the port took a slot to read into");
             assert!(matches!(
                 lent.open_listener(at),
                 Err(LinkOpenError::Exhausted)
             ));
             drop(first);
-            assert_eq!(ports.in_use(), 0, "a port that goes gives its slot back");
+            assert_eq!(slots.in_use(), 0, "a port that goes gives its slot back");
         }
 
         /// A stack listens on `udp/` where its datagram socket binds, at the port the socket chose,
@@ -3455,65 +3412,31 @@ mod tests {
         }
     }
 
-    /// A build whose udp ports keep only what their session lent opens a `udp/` listener on links
-    /// lent the rows of the ports' peers and a table of slots to read into, and refuses it as
-    /// exhausted on links lent nothing and on links lent the slots alone, taking no slot. Turned red
-    /// by a port over rows or a read buffer of the stack's own, which would open in both refused
-    /// cases.
-    #[cfg(all(
-        feature = "udp-listen",
-        not(feature = "session-slot"),
-        feature = "udp-port-lent-only"
-    ))]
+    /// A stack whose links take their memory on use opens a `udp/` listener over the rows and
+    /// buffers of the heap its session sized, and refuses it as exhausted while no session sized
+    /// them. Turned red by a port of the heap's memory no session counted, which would open in the
+    /// refused case. The CONTROL is the same links once sized.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
     #[test]
-    fn a_lent_only_port_opens_over_the_rows_and_slots_its_session_lent_alone() {
-        use crate::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
-        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
-
-        #[derive(Clone, Copy)]
-        #[repr(C, align(16))]
-        struct Block([u8; ARENA_ALIGN]);
+    fn an_on_use_stack_listens_on_udp_over_the_ports_its_session_sized_alone() {
+        use crate::link_cells::{OnHeap, OneTask};
+        use crate::udp_link::HeapPorts;
 
         let at = Locator::udp(SocketAddr::new(NODE, 0));
-        let bare = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
+        let mut links =
+            IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial).counted_by::<OnHeap<OneTask>>();
         assert!(
-            matches!(bare.open_listener(at), Err(LinkOpenError::Exhausted)),
-            "links lent nothing keep no port"
+            matches!(links.open_listener(at), Err(LinkOpenError::Exhausted)),
+            "no session sized the ports"
         );
-
-        let port_len = 64;
-        let bytes = Arena::byte_cells_bytes(port_len, 2)
-            .and_then(|cells| Arena::table_bytes::<PortPeerRow>(1).map(|peers| cells + peers))
-            .and_then(|lent| Arena::table_bytes::<QueuedDatagram>(2).map(|queue| lent + queue))
-            .expect("within the address space");
-        let region: &'static mut [Block] =
-            alloc::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
-        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
-        // leaked, so nothing else uses it and it outlives every slot and row lent from it.
-        let mut arena =
-            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
-        let ports = arena.lend_byte_cells(port_len, 2).expect("the port table");
-        let mut lent = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
         assert!(
-            lent.lend_port_rows(PortRows::default(), None).is_ok(),
+            links.lend_ports(HeapPorts::sized(2, 4, 64)).is_ok(),
             "the heap has room for the book"
         );
         assert!(
-            matches!(lent.open_listener(at), Err(LinkOpenError::Exhausted)),
-            "rows and no slots to read into: no port"
+            links.open_listener(at).is_ok(),
+            "CONTROL: a port over the memory the session sized"
         );
-
-        let rows = PortRows::over(
-            arena.lend(1).expect("the peers' rows"),
-            arena.lend(2).expect("the queue's rows"),
-        );
-        assert!(
-            lent.lend_port_rows(rows, Some(ports)).is_ok(),
-            "the heap has room for the book"
-        );
-        let listener = lent.open_listener(at);
-        assert!(listener.is_ok(), "a port over the rows and the slots lent");
-        assert_eq!(ports.in_use(), 1, "the port took a slot to read into");
     }
 
     /// A stream names the link a stack holds over it, and the stream there is none of names

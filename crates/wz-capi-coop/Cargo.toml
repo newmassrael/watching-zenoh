@@ -248,18 +248,15 @@ listen = [
 ]
 # `udp-listen`: the listening role on `udp/` too, the runtime's `udp-listen`, which gives the
 # host's links a `udp/` listener, one socket whose peers are told apart by the address each
-# datagram came from, each a face of its own. The open lends every udp port the rows of its peers
-# and the slots of its datagrams (`CoopEngine::assemble`), so the runtime's ports are compiled in
-# that form alone (`udp-port-lent-only`), and the session's plan lays those rows out for each
-# `udp/` endpoint it listens on. A behaviour zenoh-pico's peer does not have: its POSIX link
-# listens on no unicast `udp/` endpoint (`vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @
+# datagram came from, each a face of its own. The open gives the ports of a session that listens
+# on `udp/` their memory by the kind its links count by (`CoopEngine::assemble`): the rows of
+# their peers and the slots of their datagrams its plan lays out and lends, or, where the tables
+# take their memory on use, the heap's, counted to the same rows and slots. A behaviour
+# zenoh-pico's peer does not have: its POSIX link listens on no unicast `udp/` endpoint
+# (`vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @
 # `static z_result_t _z_udp_posix_listen(`). The pico ABI's capability of the same name
 # (deploy/wz-config.toml) turns it on, which the zenoh-pico preset leaves off.
-udp-listen = [
-    "listen",
-    "wz-runtime-coop/udp-listen",
-    "wz-runtime-coop/udp-port-lent-only",
-]
+udp-listen = ["listen", "wz-runtime-coop/udp-listen"]
 # `link-admission`: one link to a remote node when both dial, or one dials twice. Each link is
 # given its place in the session's admission (the session core's `LinkRegistry`, laid out in the
 # session's arena) before its handshake runs, and a second link to a node the session holds is

@@ -576,7 +576,7 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
 /// A session that listens is lent the slots its udp ports share for their datagrams, each a
 /// link's batch long, with the ports' rows; one that listens on nothing is lent none. Turned
 /// red by slots of anything but the links' batch, or slots reserved for a session with no port.
-#[cfg(feature = "udp-listen")]
+#[cfg(all(feature = "udp-listen", not(wz_on_use)))]
 #[test]
 fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     let listening = ArenaPlan::of(
@@ -599,11 +599,10 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     let mut session =
         SessionArena::reserve(&listening, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    #[cfg(not(wz_on_use))]
     let _links = listening.transport().links_from(&mut lend);
-    let slots = listening.transport().port_slots_from(&mut lend);
+    let ports = listening.transport().ports_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
-    let table = slots.expect("a table for the ports");
+    let table = ports.expect("a table for the ports").slots();
     assert_eq!(
         (table.capacity(), table.size()),
         (caps::UDP_PORT_SLOTS, batch)
@@ -632,13 +631,51 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     let mut session =
         SessionArena::reserve(&dialling, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    #[cfg(not(wz_on_use))]
     let _links = dialling.transport().links_from(&mut lend);
-    let slots = dialling.transport().port_slots_from(&mut lend);
+    let ports = dialling.transport().ports_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
     assert!(
-        slots.is_none(),
+        ports.is_none(),
         "a session that listens on nothing is lent no table for ports"
+    );
+}
+
+/// Where the tables take their memory on use, a session that listens on `udp/` lays out no row of
+/// its ports and sizes the heap's memory for them to the counts the lent form lends: a peer's row
+/// for each link it may hold, `UDP_PORT_SLOTS` datagrams, each port's read buffer a link's batch.
+/// One that listens on nothing sizes none, so its links open no port. Turned red by a plan that
+/// still lays the ports' rows out, or a source sized to other counts than the lent form's.
+#[cfg(all(feature = "udp-listen", wz_on_use))]
+#[test]
+fn an_on_use_listening_session_sizes_its_ports_and_lays_out_none() {
+    use wz_runtime_coop::udp_link::HeapPorts;
+
+    let listening = ArenaPlan::of(
+        &CoopConfig {
+            listen: vec!["udp/127.0.0.1:0".to_owned()],
+            max_faces: 2,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    assert!(
+        listening
+            .rows()
+            .all(|row| !PORT_PARTS.contains(&row.part())),
+        "an on-use plan lays out no row of the ports: {listening:?}"
+    );
+    let batch = usize::from(client_config().batch_size);
+    assert_eq!(
+        listening.transport().ports_sized(),
+        HeapPorts::sized(listening.links(), caps::UDP_PORT_SLOTS, batch)
+    );
+
+    let dialling = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
+    assert_eq!(
+        dialling.transport().ports_sized(),
+        HeapPorts::default(),
+        "a session that listens on nothing sizes no port"
     );
 }
 
@@ -647,7 +684,7 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
 /// row is printed, so a run with `--nocapture` shows the bytes the tcp listener does not reserve.
 /// Turned red by port rows planned from the count of listeners rather than of the `udp/` ones,
 /// or laid out empty for a session with no port.
-#[cfg(feature = "udp-listen")]
+#[cfg(all(feature = "udp-listen", not(wz_on_use)))]
 #[test]
 fn a_session_that_listens_on_tcp_alone_is_lent_no_port_slot() {
     let config = |listen: &[&str]| CoopConfig {

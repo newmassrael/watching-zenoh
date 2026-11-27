@@ -55,8 +55,9 @@
 //! - with `udp-listen`, for a session that listens on a `udp/` endpoint, the slots its udp ports
 //!   read their datagrams into and hold them in until the links of their peers take them
 //!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
-//!   with the ports' rows (`TransportRows::port_slots_from`); one that listens on `tcp/` alone
-//!   binds no port and holds none;
+//!   with the ports' rows (`TransportRows::ports_from`); one that listens on `tcp/` alone
+//!   binds no port and holds none. Where the tables take their memory on use none of them is laid
+//!   out: the ports take rows and buffers of the heap counted to the same (`HeapPorts`);
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
 //!   table for the session, as many as its `REASSEMBLY_CHAINS` for each face read where it lies
 //!   (under the build's; by default one for each reliability a peer has a chain open in and one for
@@ -133,11 +134,13 @@ use wz_runtime_coop::link_storage::HeapBuffers;
 #[cfg(not(wz_on_use))]
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
-#[cfg(feature = "udp-listen")]
-use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
+#[cfg(all(feature = "udp-listen", wz_on_use))]
+use wz_runtime_coop::udp_link::HeapPorts;
+#[cfg(all(feature = "udp-listen", not(wz_on_use)))]
+use wz_runtime_coop::udp_link::{LentPorts, PortPeerRow, PortRows, QueuedDatagram};
 #[cfg(not(wz_on_use))]
 use wz_runtime_coop::RuntimePlace;
-#[cfg(any(wz_lent, feature = "udp-listen"))]
+#[cfg(wz_lent)]
 use wz_session_core::bounded::Lent;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 use wz_session_core::bounded::ZeroEmpty;
@@ -180,7 +183,7 @@ use crate::engine::ROOM_PLACE_BYTES;
 use crate::engine::{CoopTables, FACE_SET_BYTES, ROUTER_LEND_BYTES};
 #[cfg(all(wz_round, wz_lent))]
 use crate::form::CoopForm;
-#[cfg(any(not(wz_on_use), feature = "udp-listen"))]
+#[cfg(not(wz_on_use))]
 use crate::form::SessionLock;
 use crate::lodging::{LodgingRows, LodgingSpan};
 use crate::open_source::EndpointList;
@@ -1381,7 +1384,7 @@ pub struct TransportRows {
 
 /// The flag of a cell of the links' tables: the session's lock kind's
 /// (`wz_runtime_coop::sync::LockKind::Flag`), which the handles placed in it are counted by.
-#[cfg(any(not(wz_on_use), feature = "udp-listen"))]
+#[cfg(not(wz_on_use))]
 type LinkCellFlag = <SessionLock as wz_runtime_coop::sync::LockKind>::Flag;
 
 /// What the session's links take their buffers through: the source their kind names
@@ -1399,12 +1402,14 @@ pub(crate) struct TransportTables {
     /// that counts no group.
     #[cfg(feature = "group")]
     pub(crate) group_rx: Option<LentByteCells>,
-    /// The slots the session's udp ports read their datagrams into and hold them in until the
-    /// links of their peers take them, which the ports share; none for a plan that listens on no
-    /// `udp/` endpoint. Flagged as the links' tables are: a datagram a port holds moves with the
-    /// link of its peer.
+    /// Where the session's udp ports keep their peers and the datagrams sorted for them, which the
+    /// ports share (`SessionLinks::lend_ports`), as the links' kind names it
+    /// (`wz_runtime_coop::link_cells::CountKind::Ports`): the rows and the slots the arena lends,
+    /// flagged as the links' tables are, since a datagram a port holds moves with the link of its
+    /// peer; where the tables take their memory on use, the heap's, counted to the same rows and
+    /// slots. Nothing for a plan that listens on no `udp/` endpoint, whose links open no port.
     #[cfg(feature = "udp-listen")]
-    pub(crate) port_slots: Option<LentByteCells<LinkCellFlag>>,
+    pub(crate) ports: <crate::LinkCount as CountKind>::Ports,
     /// The cells of the links' drivers, their gates and their actions, each `None` for a plan
     /// with no such table: each cell's flag the one the session's lock kind counts a link's
     /// handles by, so a handle let go of on any thread that may hold it gives its cell back. None
@@ -1420,9 +1425,6 @@ pub(crate) struct TransportTables {
     /// The places of the publishes the session keeps for its other faces.
     #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub(crate) handed: HandedTable,
-    /// The rows the session's udp ports keep their peers and the datagrams sorted for them in.
-    #[cfg(feature = "udp-listen")]
-    pub(crate) port_rows: PortRows<Lent, LinkCellFlag>,
 }
 
 impl TransportRows {
@@ -1462,8 +1464,11 @@ impl TransportRows {
             links: HeapBuffers::sized(self.link_bytes, LINK_TX_SLOTS),
             #[cfg(feature = "group")]
             group_rx: self.group_rx_from(lend),
-            #[cfg(feature = "udp-listen")]
-            port_slots: self.port_slots_from(lend),
+            #[cfg(all(feature = "udp-listen", not(wz_on_use)))]
+            ports: self.ports_from(lend),
+            // Laid out in no row: the ports take their rows and buffers as they use them.
+            #[cfg(all(feature = "udp-listen", wz_on_use))]
+            ports: self.ports_sized(),
             #[cfg(not(wz_on_use))]
             cells: self.cells_from(lend),
             // A chain's buffer is claimed when its first fragment arrives and given back when it
@@ -1476,8 +1481,6 @@ impl TransportRows {
                 lend.byte_cells(self.link_bytes, self.handed_legs),
                 lend.table(self.handed_legs),
             ),
-            #[cfg(feature = "udp-listen")]
-            port_rows: PortRows::over(lend.table(self.port_peers), lend.table(self.port_rx.0)),
         }
     }
 
@@ -1529,16 +1532,31 @@ impl TransportRows {
     }
 
     /// The slots the session's udp ports read their datagrams into and hold them in until the
-    /// links of their peers take them, lent by `lend` after the groups' buffers: the ports share
-    /// them, a slot of the links' batch each. `None` for a plan that listens on no `udp/`
-    /// endpoint, which laid no table of them out.
-    #[cfg(feature = "udp-listen")]
-    pub(crate) fn port_slots_from(
-        &self,
-        lend: &mut TableLender<'_>,
-    ) -> Option<LentByteCells<LinkCellFlag>> {
+    /// links of their peers take them, and the rows of their peers and of those datagrams, lent by
+    /// `lend` after the groups' buffers: the ports share them, a slot of the links' batch for each
+    /// datagram, a peer's row for each link the session may hold. `None` for a plan that listens
+    /// on no `udp/` endpoint, which laid none of them out.
+    #[cfg(all(feature = "udp-listen", not(wz_on_use)))]
+    pub(crate) fn ports_from(&self, lend: &mut TableLender<'_>) -> Option<LentPorts<LinkCellFlag>> {
         let (slots, bytes) = self.port_rx;
-        (slots > 0).then(|| lend.byte_cells_of(bytes, slots))
+        (slots > 0).then(|| {
+            let read = lend.byte_cells_of::<LinkCellFlag>(bytes, slots);
+            let rows = PortRows::over(lend.table(self.port_peers), lend.table(slots));
+            LentPorts::new(rows, read)
+        })
+    }
+
+    /// The ports' memory where the tables take theirs on use: the heap's, counted to the rows and
+    /// the slots the arena would lend (`Self::ports_from`), each port's read buffer a link's batch;
+    /// unsized, which opens no port, for a plan that listens on no `udp/` endpoint.
+    #[cfg(all(feature = "udp-listen", wz_on_use))]
+    pub(crate) fn ports_sized(&self) -> HeapPorts {
+        let (slots, bytes) = self.port_rx;
+        if slots > 0 {
+            HeapPorts::sized(self.port_peers, slots, bytes)
+        } else {
+            HeapPorts::default()
+        }
     }
 }
 
@@ -2071,7 +2089,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         }
         // The slots the udp ports of a session that listens read their datagrams into and hold
         // them in until the links of their peers take them, lent after the groups' buffers
-        // (`TransportRows::port_slots_from`): the ports share them, each a link's batch long. A
+        // (`TransportRows::ports_from`): the ports share them, each a link's batch long. A
         // session that listens on no `udp/` endpoint binds no port and holds none, nor does a
         // build without the udp listener (`udp-listen`), whose links refuse such an endpoint.
         #[cfg(feature = "udp-listen")]
@@ -2080,27 +2098,32 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
                 ArenaLimit::UdpPortSlots,
                 Quota::at_most(limits.udp_port_slots()),
             );
-            // A plan of a session with no udp port lays none of the ports' rows out, as one that
-            // names no group lays out no group's: their tables are lent no rows and take no byte
-            // of the arena (`TransportRows::port_slots_from`, `TransportRows::lent_from`).
+            // A plan of a session with no udp port counts none of the ports' rows, as one that
+            // names no group counts no group's: its links are given no memory for a port and open
+            // none (`TransportRows::ports_from`). The ports' book holds a row of a peer for each
+            // link the session may hold, and of a datagram sorted for it for each slot a datagram
+            // holds while it waits.
             if shape.udp_listens > 0 {
                 self.transport.port_rx = (slots, link_bytes);
-                self.put_table(
-                    [
-                        ArenaPart::LinkPortDatagramFlags,
-                        ArenaPart::LinkPortDatagramSlots,
-                    ],
-                    slots,
-                    link_bytes,
-                );
-                // The ports' book of their peers, a row for each link the session may hold, and
-                // of the datagrams sorted for them, a row for each slot a datagram holds while it
-                // waits (`TransportRows::lent_from`).
                 self.transport.port_peers = links;
-                let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(links));
-                self.put(ArenaPart::UdpPortPeers, 1, peer_rows);
-                let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
-                self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
+                // Where the tables take their memory on use none of them is laid out: the ports
+                // take their rows and buffers of the heap, counted to these, as they use them
+                // (`TransportRows::ports_sized`).
+                #[cfg(not(wz_on_use))]
+                {
+                    self.put_table(
+                        [
+                            ArenaPart::LinkPortDatagramFlags,
+                            ArenaPart::LinkPortDatagramSlots,
+                        ],
+                        slots,
+                        link_bytes,
+                    );
+                    let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(links));
+                    self.put(ArenaPart::UdpPortPeers, 1, peer_rows);
+                    let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
+                    self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
+                }
             }
         }
         // The round's tables (`crate::round::RoundRows::lent`): its records only where the arena
