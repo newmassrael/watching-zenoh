@@ -9467,6 +9467,24 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4743": {
+      "decision_summary": "Repay the two reds peers left on main, and witness session-close-ingress residues (c) and (d); its grade stays PARTIAL on the owner's commander question.",
+      "changes_bullets": [
+        "host-client-tcp-query states interest-answer and udp-listen off; Layer Bc names its report under the artifact root.",
+        "Three zenohd witnesses: the fixed node's passive hold of a client that connects in, the late intent, zenohd dialling with a pin.",
+        "session-close-ingress records (c) and (d) witnessed; pin row and census pin moved."
+      ],
+      "verification_bullets": [
+        "The three witnesses pass against zenohd 1.10.2, 3 of 3.",
+        "check-presets, wz_package and wz_config selftests pass; all 193 round-fed gates and citations at the pin."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "session-close-ingress stays PARTIAL: D12's heap commander is the owner's; no Zephyr image runs the passive hold."
+      ]
     }
   },
   "inventory_entries": {
