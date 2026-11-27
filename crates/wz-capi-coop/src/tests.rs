@@ -3429,8 +3429,7 @@ fn a_session_that_only_dials_opens_on_the_zid_its_stated_address_heads() {
             OpenKeyIds::none(),
             crate::arena::OpenStorage {
                 memory: &AllocatorMemory,
-                held: crate::arena::HeldPlaces::NONE,
-                plan: crate::arena::PlanFrom::Config,
+                plan: crate::arena::PlanFrom::Config(&crate::arena::HeldPlaces::NONE),
             },
         )
     };
