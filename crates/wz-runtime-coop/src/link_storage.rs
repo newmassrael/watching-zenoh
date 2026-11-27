@@ -839,7 +839,7 @@ fn own_link_buffers(
 /// `len` zero bytes on the heap, or `None` when the heap has no room for them: `vec![0; len]`
 /// with no path that ends the program.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub(crate) fn zeroed_bytes(len: usize) -> Option<Vec<u8>> {
+pub fn zeroed_bytes(len: usize) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(len).ok()?;
     // SAFETY: room for `len` bytes was reserved above, and each is written before the length

@@ -59,11 +59,8 @@ impl CacheRing {
         #[cfg(wz_on_use)]
         {
             if self.bytes.is_empty() && self.len != 0 {
-                let mut bytes = alloc::vec::Vec::new();
-                if bytes.try_reserve_exact(self.len).is_ok() {
-                    bytes.resize(self.len, 0);
-                    self.bytes = bytes;
-                }
+                self.bytes =
+                    wz_runtime_coop::link_storage::zeroed_bytes(self.len).unwrap_or_default();
             }
             with(&mut self.bytes)
         }
