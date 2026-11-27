@@ -901,6 +901,30 @@ Final (red if `note_ended_gets` after `dispatch_reply` is removed), and
 `crates/wz-capi-pico/link/run-text.ld` regenerated (`scripts/pico-compare.sh run-text`): its
 seven lines naming `get_plane` were taken out, and the legs' functions are not yet listed.
 
+**The switch, built in every form** (`fix(capi-coop): Build the switch of the gets in every
+form`, `test(capi-coop): Hand out a get its Final ends in the read of the Final`). The switch as
+landed did not compile `wz-capi-coop` in any build that asks queries:
+
+- `engine/get.rs` named `RowCallback` through `session_tables`, whose import of it is private;
+  it is named from `row_callback`, which makes it public, as the other rows' modules name it.
+  The `begin` and `retire` the tests of `get.rs` found missing on `LatchedRow<S, A, K>` were
+  that trait out of scope, not a bound lost with the anchor parameter.
+- `make_get_call` lay in `replies.rs`, which the direct form alone builds, while the hand-out of
+  the ended gets and the local queryable's reply call it in both forms. It lies beside
+  `end_get_call` in `engine.rs`; the tests' count of the replies the read handed itself
+  (`pinned_replies`) moves to the read's two callers (`hand_reply`, `hand_token`), so it counts
+  those alone, as before the switch, and not the ended gets' hand-out or the local replies.
+- `PlacedTables` holds the queryables' Finals alone since the get plane left it, so its import
+  is gated on `queryable`, as the struct is; the registry's `let mut`, which the index of the
+  deadlines needed, goes with that index.
+
+Test: `tests::direct_receive::a_get_its_final_ends_is_handed_out_by_the_read_that_read_the_final`
+(direct form: a `Latest` get holds its reply to its end, and the read that dispatched its Final
+hands out the reply and the end; red if `note_ended_gets` after `dispatch_reply` in `direct.rs`
+is removed, which leaves both to a later read's sweep). Expected size and Ir: unchanged by the
+fix, which moves one body and changes no path. Still owed: `crates/wz-capi-pico/link/run-text.ld`
+regenerated once the lane is green.
+
 ## 7. The receive
 
 None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message
