@@ -1758,6 +1758,86 @@ fn tables_that_keep_no_queryable_lend_none_and_refuse_one() {
     );
 }
 
+/// The bytes the table of held replies takes of an arena for `rows`.
+#[cfg(feature = "storage-profile")]
+fn held_arena_bytes(rows: usize) -> usize {
+    crate::reply_hold::HeldReplies::<PendingGetHandle, Lent>::arena_bytes(rows).unwrap()
+}
+
+/// None: a build without `storage-profile` holds no reply back.
+#[cfg(not(feature = "storage-profile"))]
+fn held_arena_bytes(_rows: usize) -> usize {
+    0
+}
+
+/// Lent tables are lent through their description, the one a region places the same tables by:
+/// each table's rows lie at the offset the plan's count of the lines before it says and hold the
+/// count of its line, no two tables' rows meet, every sequence lies inside the tables and no two
+/// share a place, and the arena took what `arena_bytes` counted. The region's description of the
+/// same tables states the same lines but for where they lie. Turned red by a line of
+/// `SessionTables::places` at another table's offset or outside the tables, by a count slot other
+/// than its table's limit, or by `arena_bytes` counting what the lend does not take.
+#[test]
+fn lent_tables_lie_where_their_description_counts_them() {
+    let rows = small_rows();
+    let bytes = SessionTables::<Calls, Lent>::arena_bytes(&rows).unwrap();
+    let mut lent = arena(bytes);
+    let tables = SessionTables::<Calls, Lent>::lent(&mut lent, keys(256), &rows).unwrap();
+    assert_eq!(
+        lent.high_water(),
+        bytes,
+        "the lend took what the plan counted"
+    );
+    let lines = SessionTables::<Calls, Lent>::places(0, 0);
+    let region = SessionTables::<Calls, Region>::places(0, 0);
+    let counts = rows.counts();
+    let base = NonNull::from(&tables).cast::<u8>();
+    let size = core::mem::size_of::<SessionTables<Calls, Lent>>();
+    let seq = core::mem::size_of::<crate::bounded::LentSeq<u8>>();
+    assert_eq!(lines.seq_lines().len(), region.seq_lines().len());
+    let mut first = None;
+    let mut offset = 0;
+    let mut spans: Vec<(core::ops::Range<usize>, core::ops::Range<usize>)> = Vec::new();
+    for (line, placed) in lines.seq_lines().iter().zip(region.seq_lines()) {
+        assert_eq!(
+            (line.stride, line.room, line.count),
+            (placed.stride, placed.room, placed.count),
+            "one description for both forms"
+        );
+        assert_ne!(
+            line.count,
+            RowCount::Bound,
+            "every table is held to its limit"
+        );
+        // SAFETY: the line names a sequence of `tables`, read and not written.
+        let (at, room) = unsafe { crate::bounded::seq_rows(base, line) };
+        let at = at.expect("a lent table has rows").as_ptr() as usize;
+        let start = *first.get_or_insert(at);
+        assert_eq!(
+            at - start,
+            offset,
+            "the rows lie where the plan's count says"
+        );
+        assert_eq!(room as usize, counts.of(line), "the table holds its count");
+        let span = Arena::stride_bytes(counts.of(line), line.stride as usize).unwrap();
+        let place = line.seq as usize..line.seq as usize + seq;
+        assert!(place.end <= size, "a sequence lies in the tables");
+        for (other_place, other_rows) in &spans {
+            assert!(
+                place.end <= other_place.start || other_place.end <= place.start,
+                "no two lines name one sequence"
+            );
+            assert!(
+                at + span <= other_rows.start || other_rows.end <= at,
+                "no two tables' rows meet"
+            );
+        }
+        spans.push((place, at..at + span));
+        offset += span;
+    }
+    assert_eq!(offset, bytes, "the lines are every byte the plan counts");
+}
+
 /// The rows of a session that keeps none of the kinds a build may leave out.
 struct NoneKept;
 
@@ -1783,7 +1863,7 @@ fn tables_that_keep_no_optional_kind_lend_none_and_refuse_each() {
     let none = SessionTables::<NoneKept, Lent>::arena_bytes(&rows).unwrap();
     let kept_alone = <Keyexprs<Lent>>::arena_bytes(rows.keyexprs).unwrap()
         + <Subscribers<Calls, Lent>>::arena_bytes(rows.subscribers).unwrap()
-        + held_arena_bytes(rows.held_replies).unwrap();
+        + held_arena_bytes(rows.held_replies);
     assert_eq!(none, kept_alone, "the optional kinds take no byte");
     let mut lent = arena(none);
     let mut tables = SessionTables::<NoneKept, Lent>::lent(&mut lent, keys(256), &rows).unwrap();

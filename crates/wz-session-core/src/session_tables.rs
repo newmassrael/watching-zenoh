@@ -65,12 +65,13 @@ use core::sync::atomic::AtomicU32;
 use portable_atomic::AtomicU32;
 
 use crate::bounded::{
-    Arena, BoundedVec, CapacityFull, KeyBacking, KeyLength, KeyMaker, KeyUnkept, LendRefused, Lent,
-    Profile, Region, RegionLines, Static, Storage, TableLender, ZeroEmpty,
+    lend_seqs, seq_bytes, Arena, BoundedVec, CapacityFull, KeyBacking, KeyLength, KeyMaker,
+    KeyUnkept, LaidOut, LendRefused, Lent, Profile, Region, RegionLines, RowCount, RowCounts,
+    SeqPlace, Static, Storage, TableLender, ZeroEmpty,
 };
 use crate::caps;
 use crate::declare_form::RetractionKey;
-use crate::key_arena::{KeyRef, KeySpace, LentKeys};
+use crate::key_arena::{KeySpace, LentKeys};
 use crate::key_gate::{ClassId, KeyGate};
 use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
@@ -302,10 +303,6 @@ pub trait Presence: sealed::Presence {
     /// The table, to write, where the kind is kept.
     fn get_mut<T>(table: &mut Self::Table<T>) -> Option<&mut T>;
 
-    /// The table lent by `lend`, `rows` rows of it, where the kind is kept; nothing is lent where
-    /// it is not.
-    fn lent_from<T: LentTable>(lend: &mut TableLender<'_>, rows: usize) -> Self::Table<T>;
-
     /// The table of `rows` rows that takes its memory at its first row ([`CountedTable`]), where
     /// the kind is kept; nothing is made where it is not.
     #[cfg(feature = "alloc")]
@@ -346,18 +343,6 @@ impl<T> Unkept<T> {
         match self {
             Self::Never(never, _) => match *never {},
         }
-    }
-}
-
-/// A table a session's arena lends at its open, `rows` rows of it ([`Presence::lent_from`]).
-pub trait LentTable {
-    /// The table of `rows` rows `lend` lends.
-    fn lent_from(lend: &mut TableLender<'_>, rows: usize) -> Self;
-}
-
-impl<K, T, const N: usize> LentTable for SlotMap<K, T, N, Lent> {
-    fn lent_from(lend: &mut TableLender<'_>, rows: usize) -> Self {
-        SlotMap::lent_from(lend, rows)
     }
 }
 
@@ -407,10 +392,6 @@ impl Presence for Present {
 
     fn get_mut<T>(table: &mut T) -> Option<&mut T> {
         Some(table)
-    }
-
-    fn lent_from<T: LentTable>(lend: &mut TableLender<'_>, rows: usize) -> T {
-        T::lent_from(lend, rows)
     }
 
     #[cfg(feature = "alloc")]
@@ -486,10 +467,6 @@ impl Presence for Absent {
 
     fn get_mut<T>(_table: &mut AbsentTable<T>) -> Option<&mut T> {
         None
-    }
-
-    fn lent_from<T: LentTable>(_lend: &mut TableLender<'_>, _rows: usize) -> AbsentTable<T> {
-        AbsentTable::new()
     }
 
     #[cfg(feature = "alloc")]
@@ -1768,19 +1745,6 @@ pub enum LegEnded<R> {
     Over(Removal<R>),
 }
 
-/// The bytes the table of held replies takes of an arena for `rows`; none in a build that holds
-/// none (no `storage-profile`).
-#[cfg(feature = "storage-profile")]
-const fn held_arena_bytes(rows: usize) -> Option<usize> {
-    crate::reply_hold::HeldReplies::<PendingGetHandle, Lent>::arena_bytes(rows)
-}
-
-/// See the `storage-profile` form.
-#[cfg(not(feature = "storage-profile"))]
-const fn held_arena_bytes(_rows: usize) -> Option<usize> {
-    Some(0)
-}
-
 /// A get begun: its row and the request id its query carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GetBegun {
@@ -2246,15 +2210,24 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// so were lent no rows and refuse every declaration; [`SessionTables::lent`] makes the ones a
     /// session holds.
     pub fn new() -> Self {
+        Self::of(
+            Default::default(),
+            MatchMemo::new(
+                <crate::limits::MatchMemoSlots as crate::limit_binding::LimitSpec>::DEFAULT,
+            ),
+        )
+    }
+
+    /// Tables of no rows, each holding at most the build's bound, their keys kept in `keys` and the
+    /// subscribers' receive match cache `memo`.
+    fn of(keys: P::Keys, memo: MatchMemo<P>) -> Self {
         Self {
-            keys: Default::default(),
+            keys,
             next_entity: EntityIds::default(),
             next_expr: 1,
             next_request: 0,
             subscriber_epoch: 0,
-            memo: MatchMemo::new(
-                <crate::limits::MatchMemoSlots as crate::limit_binding::LimitSpec>::DEFAULT,
-            ),
+            memo,
             key_gate: KeyGate::of_build(),
             keyexprs: SlotMap::new(),
             subscribers: SlotMap::new(),
@@ -4002,87 +3975,41 @@ impl<F: RowCallbacks, P: Storage> fmt::Debug for SessionTables<F, P> {
 }
 
 impl<F: RowCallbacks> SessionTables<F, Lent> {
-    /// The tables of a session, `rows` of each lent from `arena` in the order of
-    /// [`TableRows`], their keys kept in `keys`, the session's key arena. Refused past the
-    /// build's bound of a table or past what the arena has left.
+    /// The description of tables of the lent policy, the region's of the same tables: the lines
+    /// [`Self::lent`] lends and [`Self::arena_bytes`] counts, from the tables' start.
+    const LINES: RegionLines<SESSION_TABLE_LINES> = Self::places(0, 0);
+
+    /// The tables of a session, `rows` of each lent from `arena` in the order of their description
+    /// ([`SessionTables::places`]), their keys kept in `keys`, the session's key arena, and each
+    /// held to its rows. Refused past the build's bound of a table or past what the arena has left.
     pub fn lent(arena: &mut Arena, keys: KeySpace, rows: &TableRows) -> Result<Self, LendRefused> {
+        // A table whose rows are lent at open remembers no key: each slot of the cache would be
+        // rows of its own, which only the arena could give it.
+        let mut tables = Self::of(LentKeys::from(keys), MatchMemo::new(0));
         // Lent whole and given up whole: a refused table leaves the ones after it rowless, and
         // the set goes at once, not one table at a time behind each refusal.
         let mut lend = TableLender::new(arena);
-        let tables = Self {
-            keys: LentKeys::from(keys),
-            next_entity: EntityIds::default(),
-            next_expr: 1,
-            next_request: 0,
-            subscriber_epoch: 0,
-            // A table whose rows are lent at open remembers no key: each slot of the cache would
-            // be rows of its own, which only the arena could give it.
-            memo: MatchMemo::new(0),
-            key_gate: KeyGate::of_build(),
-            keyexprs: SlotMap::lent_from(&mut lend, rows.keyexprs),
-            subscribers: SlotMap::lent_from(&mut lend, rows.subscribers),
-            queryables: <F::QueryablePresence as Presence>::lent_from::<Queryables<F, Lent>>(
+        // SAFETY: the description is this type's: each line names a sequence of `tables`, which
+        // holds no value, and states the bytes of its rows (`SeqPlace::of`); `tables` is reached by
+        // nothing else during the call.
+        unsafe {
+            lend_seqs(
+                core::ptr::NonNull::from(&mut tables).cast::<u8>(),
+                Self::LINES.seq_lines(),
+                &rows.counts(),
                 &mut lend,
-                rows.queryables,
-            ),
-            tokens: <F::LivelinessPresence as Presence>::lent_from::<Tokens<Lent>>(
-                &mut lend,
-                rows.tokens,
-            ),
-            liveliness_subscribers: <F::LivelinessPresence as Presence>::lent_from::<
-                LivelinessSubscribers<F, Lent>,
-            >(&mut lend, rows.liveliness_subscribers),
-            write_filters: <F::FilterPresence as Presence>::lent_from::<WriteFilters<Lent>>(
-                &mut lend,
-                rows.write_filters(),
-            ),
-            plane_bounds: PlaneBounds::of(rows),
-            matching: <F::FilterPresence as Presence>::lent_from::<MatchingListeners<F, Lent>>(
-                &mut lend,
-                rows.matching_listeners,
-            ),
-            pending_gets: <F::GetPresence as Presence>::lent_from::<PendingGets<F, Lent>>(
-                &mut lend,
-                rows.pending_gets,
-            ),
-            #[cfg(feature = "storage-profile")]
-            held: lend
-                .lend_with(|arena| crate::reply_hold::HeldReplies::lent(arena, rows.held_replies)),
-        };
+            );
+        }
         lend.finish()?;
+        tables.limit_to(rows);
         Ok(tables)
     }
 
-    /// The bytes [`Self::lent`] takes of an arena for `rows`. `None` past the address space.
-    /// A const fn, so a build whose limits are fixed lays its session's arena out when it compiles.
+    /// The bytes [`Self::lent`] takes of an arena for `rows`: its description's lines summed. `None`
+    /// past the address space. A const fn, so a build whose limits are fixed lays its session's
+    /// arena out when it compiles.
     pub const fn arena_bytes(rows: &TableRows) -> Option<usize> {
-        let parts = [
-            <Keyexprs<Lent>>::arena_bytes(rows.keyexprs),
-            <Subscribers<F, Lent>>::arena_bytes(rows.subscribers),
-            kept_bytes::<F::QueryablePresence>(<Queryables<F, Lent>>::arena_bytes(rows.queryables)),
-            kept_bytes::<F::LivelinessPresence>(<Tokens<Lent>>::arena_bytes(rows.tokens)),
-            kept_bytes::<F::LivelinessPresence>(<LivelinessSubscribers<F, Lent>>::arena_bytes(
-                rows.liveliness_subscribers,
-            )),
-            kept_bytes::<F::FilterPresence>(<WriteFilters<Lent>>::arena_bytes(
-                rows.write_filters(),
-            )),
-            kept_bytes::<F::FilterPresence>(<MatchingListeners<F, Lent>>::arena_bytes(
-                rows.matching_listeners,
-            )),
-            kept_bytes::<F::GetPresence>(<PendingGets<F, Lent>>::arena_bytes(rows.pending_gets)),
-            held_arena_bytes(rows.held_replies),
-        ];
-        let mut sum = Some(0_usize);
-        let mut rest: &[Option<usize>] = &parts;
-        while let [part, tail @ ..] = rest {
-            sum = match (sum, *part) {
-                (Some(sum), Some(part)) => sum.checked_add(part),
-                _ => None,
-            };
-            rest = tail;
-        }
-        sum
+        seq_bytes(Self::LINES.seq_lines(), &rows.counts())
     }
 }
 
@@ -4141,110 +4068,155 @@ unsafe impl<F: RowCallbacks> ZeroEmpty for SessionTables<F, Region> {}
 /// two for each of its eight tables, one for its held replies; and its one key arena handle.
 pub const SESSION_TABLE_LINES: usize = 17;
 
-/// The rows of a [`SessionTables`] of the region policy, which a region lays out beside the tables:
-/// each table's [`SlotRows`] at the build's bound of it, none of a kind the build keeps none of.
-pub struct SessionRows<F: RowCallbacks> {
-    keyexprs: SlotRows<KeyexprRow<KeyRef>, { caps::MAX_DECLARED_KEYEXPRS }>,
-    subscribers: SlotRows<Subscriber<F, Region>, { caps::MAX_SUBSCRIPTIONS }>,
+/// The rows of a [`SessionTables`] of a policy a description places, which a region lays out beside
+/// the tables: each table's [`SlotRows`] at the build's bound of it, none of a kind the build keeps
+/// none of. The region policy's are a value of a region; the lent policy's are no value, the plan
+/// lending each line's rows from an arena, and stand only for the description's region offsets.
+pub struct SessionRows<F: RowCallbacks, P: LaidOut = Region> {
+    keyexprs: SlotRows<
+        KeyexprRow<<P as Storage>::Key, <P as Storage>::KeyLen>,
+        { caps::MAX_DECLARED_KEYEXPRS },
+    >,
+    subscribers: SlotRows<Subscriber<F, P>, { caps::MAX_SUBSCRIPTIONS }>,
     queryables: <F::QueryablePresence as Presence>::Table<
-        SlotRows<Queryable<F, Region>, { caps::MAX_QUERYABLES }>,
+        SlotRows<Queryable<F, P>, { caps::MAX_QUERYABLES }>,
     >,
     tokens: <F::LivelinessPresence as Presence>::Table<
-        SlotRows<TokenRow<KeyRef>, { caps::MAX_LOCAL_TOKENS }>,
+        SlotRows<TokenRow<<P as Storage>::Key>, { caps::MAX_LOCAL_TOKENS }>,
     >,
     liveliness_subscribers: <F::LivelinessPresence as Presence>::Table<
-        SlotRows<LivelinessSubscriber<F, Region>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
+        SlotRows<LivelinessSubscriber<F, P>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
     >,
-    write_filters:
-        <F::FilterPresence as Presence>::Table<SlotRows<WriteFilterRow<KeyRef>, FILTER_ROWS>>,
+    write_filters: <F::FilterPresence as Presence>::Table<
+        SlotRows<WriteFilterRow<<P as Storage>::Key>, FILTER_ROWS>,
+    >,
     matching: <F::FilterPresence as Presence>::Table<
         SlotRows<Matching<F>, { caps::MAX_MATCHING_LISTENERS }>,
     >,
     pending_gets: <F::GetPresence as Presence>::Table<
-        SlotRows<PendingGet<F, Region>, { caps::MAX_PENDING_QUERIES }>,
+        SlotRows<PendingGet<F, P>, { caps::MAX_PENDING_QUERIES }>,
     >,
     #[cfg(feature = "storage-profile")]
-    held: [core::mem::MaybeUninit<crate::reply_hold::HeldReply<PendingGetHandle, Region>>;
+    held: [core::mem::MaybeUninit<crate::reply_hold::HeldReply<PendingGetHandle, P>>;
         caps::MAX_PENDING_REPLIES],
 }
 
 // SAFETY: each table's rows are `SlotRows` (`ZeroEmpty`) or, of a kind not kept, no bytes
 // (`Presence` is sealed to the two); the held replies' rows are `MaybeUninit`.
-unsafe impl<F: RowCallbacks> ZeroEmpty for SessionRows<F> {}
+unsafe impl<F: RowCallbacks, P: LaidOut> ZeroEmpty for SessionRows<F, P> {}
 
-impl<F: RowCallbacks> SessionTables<F, Region> {
-    /// The description of tables of the region policy at `at` in a region and their rows, a
-    /// [`SessionRows`], at `rows`: a line for each column of each table the build keeps, one for
-    /// the held replies, and the tables' handle to the region's key arena. What
-    /// [`place_region`](crate::key_arena::place_region) reads to make zeroed tables a session's.
+/// The two lines of a table's columns, each lent the rows `count` states.
+const fn counted(columns: [SeqPlace; 2], count: RowCount) -> [SeqPlace; 2] {
+    let [meta, rows] = columns;
+    [meta.counted(count), rows.counted(count)]
+}
+
+impl TableRows {
+    /// The counts the lines of the tables' description are lent ([`SessionTables::places`]).
+    pub const fn counts(&self) -> RowCounts {
+        RowCounts::NONE
+            .with(RowCount::Keyexprs, self.keyexprs)
+            .with(RowCount::Subscribers, self.subscribers)
+            .with(RowCount::Queryables, self.queryables)
+            .with(RowCount::Tokens, self.tokens)
+            .with(RowCount::LivelinessSubscribers, self.liveliness_subscribers)
+            .with(RowCount::WriteFilters, self.write_filters())
+            .with(RowCount::MatchingListeners, self.matching_listeners)
+            .with(RowCount::PendingGets, self.pending_gets)
+            .with(RowCount::HeldReplies, self.held_replies)
+    }
+}
+
+impl<F: RowCallbacks, P: LaidOut> SessionTables<F, P> {
+    /// The description of tables at `at` and, in a region, their rows, a [`SessionRows`], at
+    /// `rows`: a line for each column of each table the build keeps and one for the held replies,
+    /// each lent the count of [`TableRows`] that holds it, and the tables' handle to the region's
+    /// key arena. What [`place_region`](crate::key_arena::place_region) reads to make a region's
+    /// zeroed tables a session's, and what the lent policy's open lends and counts
+    /// ([`SessionTables::lent`]).
     pub const fn places(at: usize, rows: usize) -> RegionLines<SESSION_TABLE_LINES> {
         let mut lines = RegionLines::EMPTY
             .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
-            .seqs(&<Keyexprs<Region>>::places(
-                at.wrapping_add(core::mem::offset_of!(Self, keyexprs)),
-                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, keyexprs)),
+            .seqs(&counted(
+                <Keyexprs<P>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, keyexprs)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, keyexprs)),
+                ),
+                RowCount::Keyexprs,
             ))
-            .seqs(&<Subscribers<F, Region>>::places(
-                at.wrapping_add(core::mem::offset_of!(Self, subscribers)),
-                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, subscribers)),
+            .seqs(&counted(
+                <Subscribers<F, P>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, subscribers)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, subscribers)),
+                ),
+                RowCount::Subscribers,
             ));
         if <F::QueryablePresence as Presence>::KEPT {
-            lines = lines.seqs(&<Queryables<F, Region>>::places(
-                at.wrapping_add(core::mem::offset_of!(Self, queryables)),
-                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, queryables)),
+            lines = lines.seqs(&counted(
+                <Queryables<F, P>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, queryables)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, queryables)),
+                ),
+                RowCount::Queryables,
             ));
         }
         if <F::LivelinessPresence as Presence>::KEPT {
             lines = lines
-                .seqs(&<Tokens<Region>>::places(
-                    at.wrapping_add(core::mem::offset_of!(Self, tokens)),
-                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, tokens)),
+                .seqs(&counted(
+                    <Tokens<P>>::places(
+                        at.wrapping_add(core::mem::offset_of!(Self, tokens)),
+                        rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, tokens)),
+                    ),
+                    RowCount::Tokens,
                 ))
-                .seqs(&<LivelinessSubscribers<F, Region>>::places(
-                    at.wrapping_add(core::mem::offset_of!(Self, liveliness_subscribers)),
-                    rows.wrapping_add(core::mem::offset_of!(
-                        SessionRows<F>,
-                        liveliness_subscribers
-                    )),
+                .seqs(&counted(
+                    <LivelinessSubscribers<F, P>>::places(
+                        at.wrapping_add(core::mem::offset_of!(Self, liveliness_subscribers)),
+                        rows.wrapping_add(core::mem::offset_of!(
+                            SessionRows<F, P>,
+                            liveliness_subscribers
+                        )),
+                    ),
+                    RowCount::LivelinessSubscribers,
                 ));
         }
         if <F::FilterPresence as Presence>::KEPT {
             lines = lines
-                .seqs(&<WriteFilters<Region>>::places(
-                    at.wrapping_add(core::mem::offset_of!(Self, write_filters)),
-                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, write_filters)),
+                .seqs(&counted(
+                    <WriteFilters<P>>::places(
+                        at.wrapping_add(core::mem::offset_of!(Self, write_filters)),
+                        rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, write_filters)),
+                    ),
+                    RowCount::WriteFilters,
                 ))
-                .seqs(&<MatchingListeners<F, Region>>::places(
-                    at.wrapping_add(core::mem::offset_of!(Self, matching)),
-                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, matching)),
+                .seqs(&counted(
+                    <MatchingListeners<F, P>>::places(
+                        at.wrapping_add(core::mem::offset_of!(Self, matching)),
+                        rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, matching)),
+                    ),
+                    RowCount::MatchingListeners,
                 ));
         }
         if <F::GetPresence as Presence>::KEPT {
-            lines = lines.seqs(&<PendingGets<F, Region>>::places(
-                at.wrapping_add(core::mem::offset_of!(Self, pending_gets)),
-                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, pending_gets)),
+            lines = lines.seqs(&counted(
+                <PendingGets<F, P>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, pending_gets)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, pending_gets)),
+                ),
+                RowCount::PendingGets,
             ));
         }
         #[cfg(feature = "storage-profile")]
         {
             lines = lines.seq(
-                crate::reply_hold::HeldReplies::<PendingGetHandle, Region>::place(
+                crate::reply_hold::HeldReplies::<PendingGetHandle, P>::place(
                     at.wrapping_add(core::mem::offset_of!(Self, held)),
-                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, held)),
-                ),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, held)),
+                )
+                .counted(RowCount::HeldReplies),
             );
         }
         lines
-    }
-}
-
-/// `bytes`, what a table of a kind takes of an arena, where the presence `K` keeps the kind, and
-/// none where it keeps none: a kind left out lends no table.
-const fn kept_bytes<K: Presence>(bytes: Option<usize>) -> Option<usize> {
-    if K::KEPT {
-        bytes
-    } else {
-        Some(0)
     }
 }
 

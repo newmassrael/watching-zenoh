@@ -208,11 +208,11 @@ mod requester_region_tests {
             ROWS + core::mem::size_of::<RequesterRegionRows<BoxedReplySink, BoxedReplySink>>();
         for line in seqs {
             assert!(
-                (AT..ROWS).contains(&line.seq),
+                (AT..ROWS).contains(&(line.seq as usize)),
                 "a table lies in the requesters"
             );
             assert!(
-                (ROWS..end).contains(&line.rows),
+                (ROWS..end).contains(&(line.rows as usize)),
                 "its rows lie in their rows"
             );
         }
