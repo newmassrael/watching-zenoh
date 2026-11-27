@@ -132,7 +132,7 @@ says where a step is larger there.
 | **F4 (landed, section 9.1)** | the accepting session machine of the reactive class: its eventless step from `SentOpenAck` to `Established` made an evented one in its SCXML source, so the reactive turn SCE is asked for (`docs/win-budget/size.md` section 10.3) covers the accepting build too | -1,500 to -2,500 (`Turn::run` 664 -> 1,336, `event_queue` +502, the general turn's other bodies) | -1,500 to -2,500 | per transport event fewer checks, never per sample | `machine_class_tests` with `session-unicast-accept`: the accepting machine of the class | the SCXML source here, the turn SCE's |
 | F5 | the read of many faces: `read_faces`, `wait_on_faces` and `face_turn` hold 10,949 against the client's 5,008 for the same face's turn; the inlined attribution of the three bodies says which part is the walk and which a form | to be measured; at most -3,000 | as the peer case | to be held to none | the read's tests over several faces | this lane, after a measurement cell |
 | F2 | the held operations as one hold and the operation in its caller where every face keeps its send place (W6 on): each face's hold kept by its site and let go of in reverse by one guard's drop, the held face found by a mark in the face rather than by the chain on the stack | 0 in the zenoh-pico preset (W6 off compiles none); today -2,100 to -2,900 (11 copies, 8,745 B: `declare_write_filter` 2,354, `undeclare_subscriber` 1,916, `declare_subscriber_on_wire` 1,126, `face_turn`'s replay 991; eight of them measured at 2,137 B over their client callers) | -4,500 to -6,000 (21 copies, 22,902 B) | none: an operation is a declaration, a query or a reply, never the read; `face_turn`'s replay hold is a turn's, not a message's | `direct::held_operation_tests`, the engine's declaration tests over faces | this lane; the send place's protocol is `wz-runtime-coop`'s `FaceSite` |
-| F3 (designed, not landed: section 9.3) | the plan form's lend by a description walked once (as the region's `place_region` walks `RegionLines`), not each table's constructor inlined into the registry's | 0 on the on-use twin (no plan); today -4,000 to -7,000 (`RegistryOf<ManyHolders>::new` 4,925, `ArenaPlan::lay_out` 2,284, `lend_set` 1,286, `pool_rows` 616) | -4,000 to -7,000 | none: the open only | the arena's plan tests, and a description's lines test as the region's | the arena's owner (D12 form) |
+| F3 (in steps: sections 9.3, 9.4) | the plan form's lend by a description walked once (as the region's `place_region` walks `RegionLines`), not each table's constructor inlined into the registry's | 0 on the on-use twin (no plan); today -4,000 to -7,000 (`RegistryOf<ManyHolders>::new` 4,925, `ArenaPlan::lay_out` 2,284, `lend_set` 1,286, `pool_rows` 616) | -4,000 to -7,000 | none: the open only | the arena's plan tests, and a description's lines test as the region's | the arena's owner (D12 form) |
 | **F6 (landed, section 9.2)** | one UDP driver for a dialled socket and a port's peer (`feat-peer.md` S2) | 0 (`udp-listen` off) | -1,500 to -2,500 (`UdpDriver<PortPeer<..>>` 3,699 beside `UdpDriver<PosixUdpSocket>` 1,836) | none: `recv_with` an arm per socket kind | the driver's tests over both sockets | lane T-LINK |
 
 No two forms of one thing are compiled side by side in the peer case: the client's region and the
@@ -335,3 +335,50 @@ layout the region's and the plan's tests must hold together, and the plan form i
 case's (`pico-api-coop-nostd`); a description wrong in one offset writes a sequence over another.
 Expected as section 5 says (-4,000 to -7,000 on the release case, 0 on the on-use twin, which has
 no plan); receive Ir none.
+
+### 9.4 F3: the steps landed, and the ones left
+
+The description is now one: a line of it (`bounded::SeqPlace`) states where a table's sequence
+lies, the bytes of one row (`stride`), the build's bound (`room`, which a region keeps and a plan
+lends at most) and which count of a plan sets the rows it is lent (`count`, a `bounded::RowCount`
+slot), beside the region's offset of the rows. A region walks it by `place_seqs` as before; a plan
+walks the same lines by `lend_seqs`, each line lent the next span of the arena, and counts them by
+`seq_bytes`, the lines summed, so the lend and the count of a table are one fact.
+`key_arena::lend_region` is `place_region`'s plan form, the key handles joined by one body for
+both. The fifteen descriptions are written over `bounded::LaidOut` (the two policies whose
+sequences are `LentSeq`), so `Lent` and `Region` read one const fn each; a type's region rows
+struct is generic over the policy with `Region` the default, standing only for the region's
+offsets in the plan form.
+
+| commit | what it did | what its tests hold |
+|---|---|---|
+| `abe9ff7cd4` | the line's `stride` and `count`, `lend_seqs`, `seq_bytes`, `seq_rows`; lines in 32 bits; `SessionTables::lent` and `arena_bytes` read `SessionTables::places` (the per-table `Presence::lent_from`, `LentTable` and `kept_bytes` go) | `bounded::tests::a_plan_lends_the_description_a_region_places` (each table at the offset the count says, a count past the room refused and every later table rowless); `session_tables::tests::lent_tables_lie_where_their_description_counts_them` (the lent and the region's lines agree but for offsets, every line held to a limit, no two sequences or row spans meet, the arena took `arena_bytes`) |
+| `2b770ef192` | `Requesters::lent` and `arena_bytes` read `Requesters::places` through `lend_region`; `ReplyRegistry`'s and `LivelinessGetRegistry`'s own `lent` and `arena_bytes` go; counts `Queries` and `LivelinessGets` | `slot_observer::requester_region_tests::lent_requesters_lie_where_their_description_counts_them`, through the shared `bounded::assert_lent_as_described` |
+
+Size: a line was 24 bytes on a 64-bit target and is 20 now (four `u32` and the count), so the
+region's description statics shrink there; on a 32-bit target a line was 12 bytes and is 20, and a
+`RegionLines<MAX>` holds `MAX` lines whether it uses them or not, so the region form's statics grow
+by 8 bytes a line there (the registry region's description most). The text the two steps take out
+is the per-table lends inlined into `SessionTables::lent` (nine `SlotMap::lent_from` and the held
+replies' `lend_with`) and into `Requesters::lent` (three `arena.lend`); each `lent` now carries one
+description static of its own. Receive Ir: none, the open only.
+
+Left, in order, each a step of its own over the same line:
+
+1. The observer's watcher lists and the session's own tokens (`SlotObserverOf::lent`,
+   `decl_watcher_bytes`, `DeclObserverPair`, `LocalTokenRegistry`): their count slots are the
+   watchers' (`decl_watcher_rows`) and `MAX_LOCAL_TOKENS`; then `App` is one walk.
+2. The peer's per-face lines (`PeerTables::lend_rows`: the subscriber side's staging, the reply and
+   final stages, the liveliness staging). The reply stage's byte area is a line of stride 1 counted
+   by `reply_bytes`. What `peer-row-pools` keeps in the session's pools is no line of a face's: the
+   pools stay `PeerPools::lent`, and `keep_rows_in` stays the hand-out.
+3. The registry's plan form as the region's: `RegistryOf::new` becomes `write_parts`, one
+   `lend_region` over the registry's description (the application's lines, the sets' table, the dial
+   face's set) and `bind`, the form `placed.rs` has; `lend_set` and `SpareSets` lend a set by the
+   set's description (`FaceTables::places`). The test the main session asked for belongs here: every
+   table of the registry laid through the shared description, no two meeting and each at the
+   offset the plan counted, under the release case's features and the peer case's.
+4. `ArenaPlan`'s count of the registry's rows read as the same lines summed (`seq_bytes`), so
+   `arena_bytes` of each type goes.
+5. A description static of the lines it uses (`RegionLines` sized by its lines, or a stride of 16
+   bits) so the 32-bit form does not carry `MAX` lines of 20 bytes; measured before it is chosen.
