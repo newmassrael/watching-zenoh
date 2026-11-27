@@ -724,6 +724,59 @@ callback record (`LatchedRow` of the callback, `shown`, the fan), the face's `Ge
 the cancellation and the close through `retire_get` and `forget`, the issue through
 `begin_get` and `add_leg`, and the plane deleted.
 
+**Where a face's replies and Finals reach its legs, read before the switch.** `GetLegs` cannot take
+`ReplyRegistry`'s place in the face's `Gets` as a drop-in: the session core's fan reaches a face's
+table of gets through `RequesterTables` and `SlotObserverOf::dispatch_reply`
+(`wz-session-core/src/slot_observer.rs`, the trait at 321, the fan's calls at 2046 and 2048), with
+`&mut self` of the observer that holds the tables, so nothing handed there can reach
+`SessionTables::end_leg` or `admit_reply`. How each form of the engine hands them now:
+
+| record | the direct form (`not(wz_round)`) | the round's form (`wz_round`) |
+|---|---|---|
+| a lent Response | the engine's own (`replies.rs`, `hand_lent_reply`) | the fan (`dispatch_event_among`) |
+| an owned Response | the engine's own, ahead of the fan (`pinned.rs`, `take_reply`) | the fan |
+| a lent ResponseFinal | the observer, on the engine's call (`Registry::dispatch_reply`) | the fan |
+| an owned ResponseFinal | the fan, after the engine took the Responses (`dispatch_finals_of`) | the fan |
+
+Decided: the engine hands every reply and every Final of its faces itself, in both forms, as the
+direct form already hands the Responses, so the face's legs and the tables' row meet under one
+hold with no fan between them. A Final ends its leg (`GetLegs::end_leg`) and the get's
+(`SessionTables::end_leg`) where the engine reads it: the lent one in `Registry::dispatch_reply`,
+the owned one in a walk of the frame's ResponseFinals in the face's dispatch, after its Responses
+were taken, as `dispatch_finals_of` runs now. The round's form reads a frame's Responses and
+Finals off the event after the fan, in their order (`Registry::dispatch_event_to`), so the fan
+of both forms carries no reply: the face's `Gets` answers `RequesterTables` for the snapshots
+alone until H7d moves them onto the row, and then is `NoRequesters` to the fan. No mark of an
+answered leg is kept in `GetLegs` for a caller that did not see its Final.
+
+The round's reply record holds a count of the plane's row (`Owed::Reply(C::Leg)`, held and let go
+of through `LegHolders`, `wz-session-core/src/round.rs` 1242 and 2225). With the get on the
+tables' row it holds a call begun on that row's latch, as a queryable's record does
+(`Owed::Query`): `RoundCalls::Leg` becomes the reply call, `Round::offer_reply` takes the call
+`admit_reply` passed, and `LegHolders`, `Round::calls_legs_of` and the released half's `legs`
+go. That change cannot land ahead of the switch: the plane is what `LegHolders` is, and a call
+type the plane made for it would be written only to be taken out.
+
+So the switch lands as three commits, each built whole:
+
+1. The queries onto the row. `CoopRows`' `GetPresence` is `Present` under `query` and its
+   `Reply` a `LatchedRow` of the reply callback showing the timestamp choice and the fan; the
+   plan lends the tables `pending_gets` and `held_replies` rows (`ArenaPlan::tables`, now 0
+   and 0) in every form (lent, region, on use). A face's `Gets` holds `GetLegs` of the row's
+   handle beside the snapshots' registry, and the session's own queryables' leg is a `GetLegs`
+   of the registry's own (`Registry::local`), answered under `LOCAL_QUERY` as now. The issue
+   begins the row at its first leg, adds a leg for each face held and ends the asker's at the
+   end of the issue; a reply is admitted under the hold and called after it; a Final, a lost
+   face and the deadline (`next_expired_get`, the `Dues` leaf of the queries replaced by the
+   tables' watermark) end the row in place; the deliveries walk `next_ended_get` when an end is
+   owed, hand out what the row held and its timeout under the row's id, retire it and forget its
+   legs; a cancellation and the close retire every row they name. The round's records take the
+   row's calls. The snapshot keeps the plane's rows, ends and capture.
+2. The snapshot onto the row: mode `None`, its key the gate, its legs a second `GetLegs` over
+   Interest ids or the one table, read then.
+3. The plane deleted (`get_plane.rs`, `engine/get.rs`, the plane's places and arena parts,
+   `LegHolders`), and the face's `Gets` the legs alone.
+
 ## 7. The receive
 
 None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message
