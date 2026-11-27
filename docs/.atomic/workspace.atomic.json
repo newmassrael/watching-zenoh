@@ -8879,6 +8879,23 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4711": {
+      "decision_summary": "Pay a red the push-form landing left: a helper that returned the writer\ncount for one test outside lent_push went dead in the feature sets that\nbuild no such test; the test now reads the kept count itself.",
+      "changes_bullets": [
+        "session-core lent_push: WRITER_RUNS pub(crate); plain_writer_runs gone.",
+        "bundle_tests: the head test reads the count and needs storage-profile."
+      ],
+      "verification_bullets": [
+        "nondefault-features gate for wz-session-core passes (heap, slot, fixed).",
+        "lent_frame_refusal 7 pass in the lend-only build."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
