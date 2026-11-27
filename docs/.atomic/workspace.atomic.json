@@ -9542,6 +9542,27 @@
         "S5 M5, S4 26 and S1 55's rule are written on branches sce-s5 and sce-link and do not land until measured at no loss.",
         "S10 22's bound sentence in the census is wrong: a heap session with no limit stated admits past the build's three limits."
       ]
+    },
+    "Round 4747": {
+      "decision_summary": "Move the sending counter's rollover (census S10 8 and S11 3) into one SCE algorithm, held to the owner's rule that a move keeps its cost and comes with its TLA+ model.",
+      "changes_bullets": [
+        "sources/algorithms/counter_after.scxml: after(sent, largest, restarts, restart_at), the rule the stream sender and the segment sender each wrote by hand; both call it, the restart value a parameter.",
+        "crates/wz-app-frame/benches/sender_cost.rs, added before the move: ns of protect_into and of split, with and without the CRC cache, across a wrap and a restart.",
+        "docs/formal E2eCounterService and E2eCounters: the sender's rollover against the receiver's verdict; a repeat read as a repeat, a gap as its count, a refused message no loss."
+      ],
+      "verification_bullets": [
+        "Machine code: protect_into, write_pieces, new and admit compile to the same instructions before and after (687 in protect_into); the generated function inlines and leaves no symbol. The bench medians of 8 alternated runs differ only within the run-to-run spread.",
+        "wz-app-frame tests 101 and the three named ones, wz-capture segment_sender_tests 12; clippy of both crates; Layer Bc 133 units, counter_after recorded.",
+        "TLC 1.7.4: E2eCounters and its refuse variant hold; each of the four parts taken out breaks Exact."
+      ],
+      "impact_refs": [
+        "watching-zenoh/build-and-verify",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "wz-capture's analyzer sender (e2e_sender.rs Sender::after) writes the same wrap rule a third time; it is outside the census.",
+        "A segment sender built with first equal to its largest number gives every message one number, which the reader cannot split; behaviour unchanged."
+      ]
     }
   },
   "inventory_entries": {
