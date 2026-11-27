@@ -889,14 +889,19 @@ files::decl_watch_doors::"
     # its members' tokens, which a member answers from the tokens its session holds. Each of the
     # four runs the module's own tests too, a JOIN asked between two beacons among them.
     "wz-capi-coop|hook|app-transport,group,liveliness|tests::group::"
-    # And with `transport-stats`: what a group's queue drops for congestion is the transport's
-    # `tx.n_dropped`, as the tokio engine's group counts it (`tests::group::congested::`), and a
-    # member's datagram is still read where it lies and its records lent, each counted once against
-    # the member and in the session's `transport_stats` (`tests::group::in_place::`), with the
-    # module's other tests, a get and its answer
-    # among them. The second row adds the members' keyexprs read member by member.
+    # And with `transport-stats`: a member's datagram is still read where it lies and its records
+    # lent, each counted once against the member and in the session's `transport_stats`
+    # (`tests::group::in_place::`), with the module's other tests, a get and its answer among them.
+    # The second row adds the members' keyexprs read member by member.
     "wz-capi-coop|hook|app-transport,group,query,queryable,transport-stats|tests::group::"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable,transport-stats|tests::group::"
+    # What a group's dispatch stages past the reply limit is dropped and charged to the transport's
+    # `tx.n_dropped`, as the tokio engine's group counts it. The test is a full group's stage's
+    # (`tests::group_congested::`), a module beside `tests::group::` that the rows above do not
+    # reach, and the one test of it that `transport-stats` compiles; over the first row's build.
+    # NOT YET MEASURED.
+    "wz-capi-coop|hook|app-transport,group,query,queryable,transport-stats|\
+tests::group_congested::replies_past_the_reply_limit_are_the_transports_drops"
     # And with the lent-only receive the C library's final build selects (the session core's
     # `rx-lent-only`): a member's datagram is read where it lies and its records lent, its
     # declarations scoped by the member and its departure's retractions lent, and no table is handed
@@ -925,6 +930,19 @@ files::decl_watch_doors::"
     "wz-session-core|hook|alloc|round::tests::a_given_back_group_buffer_is_kept_while_a_record_reads_in_it"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::arena::a_groups_face_counts_every_members_aliases_in_the_pool"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|engine::registry::tests::a_groups_face_holds_its_members_aliases_until_its_set_is_given_back"
+    # The tests of a group in the form whose read steps each face's link session itself
+    # (`direct`), compiled where the build keeps no round (`not(wz_round)`, as every build of the
+    # tests on `std` is unless the environment withholds the value locks): the receive half split
+    # out of a group's transport and the read that waits in it to its deadline
+    # (`engine::group::side_tests::`), the mark a send on a group makes
+    # (`engine::sending_on_tests::`), and the groups' leg a session that joined none is not handed
+    # (`tests::direct_receive::`). Over the build of the `app-transport,group` rows above. NOT YET
+    # MEASURED.
+    "wz-capi-coop|hook|app-transport,group|engine::group::side_tests::"
+    "wz-capi-coop|hook|app-transport,group|\
+engine::sending_on_tests::a_send_on_a_group_is_marked_as_a_send"
+    "wz-capi-coop|hook|app-transport,group|\
+tests::direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg"
     # The node's message reading (`resource-snapshot`): what a link received, and what a group
     # received, kept across a join again and the close. One build for both rows.
     "wz-capi-coop|hook|app-transport,group,resource-snapshot|tests::congestion::the_sessions_message_reading_counts_what_its_link_received"
