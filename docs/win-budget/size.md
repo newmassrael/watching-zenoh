@@ -410,6 +410,3 @@ callgrind of one handshake and one fragmented message (cell M9 of `text.md`).
 Together with 6.3 the transport area moves by about -1,800 to -2,700. The gap to pico that remains
 is the receive's (`drive` 4,657, `reassembly_dispatch` 2,111, `transport_timers` 786: `text.md`
 X2, X4, X5) and the send's admission jobs of section 6.1.
-||||||| parent of cb1055d1f4 (docs(size): Design the driver's steps against zenoh-pico's links)
-||||||| parent of 66494a4adb (docs(size): Read the driver's lock and count steps on the receive)
-instructions a message, which neither step should move.
