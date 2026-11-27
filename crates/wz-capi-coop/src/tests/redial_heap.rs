@@ -28,7 +28,7 @@ use wz_session_core::policy::SessionPolicy;
 use super::{client_config, config, CatchAll, Command, Router, LOOPBACK};
 use crate::arena::AllocatorMemory;
 use crate::open_source::{Counted, EndpointTextList, OpenEndpoints, OpenInput, OpenSource};
-use crate::{CoopConfig, CoopEngine, OpenError, OpenKeyIds};
+use crate::{CoopConfig, CoopEngine, OpenError, OpenKeyIds, RowClaim};
 
 thread_local! {
     /// Whether the thread's allocations are being counted.
@@ -495,9 +495,13 @@ fn refusing() -> Refusals {
 }
 
 /// The allocations of an open from `source` whose dials are all refused, and that it was refused
-/// as unreachable.
+/// as unreachable, less the row of the heap its claim took, if it took one. The process's table of
+/// engines takes that row only when no row it kept is vacant, which the opens of every test of the
+/// process decide, and keeps it for the next open, so it is no allocation of what the open was
+/// asked.
 fn open_counted(source: impl OpenSource) -> u64 {
     let mut refused = None;
+    let rows_before = RowClaim::rows_taken_here();
     let allocations = counted(|| {
         refused = CoopEngine::open_made_in(
             refusing(),
@@ -513,17 +517,28 @@ fn open_counted(source: impl OpenSource) -> u64 {
         )
         .err();
     });
+    let rows = RowClaim::rows_taken_here() - rows_before;
     assert!(
         matches!(refused, Some(OpenError::Unreachable(_))),
         "every dial is refused: {refused:?}"
     );
+    assert!(
+        rows <= 1,
+        "an open claims one row: {rows} taken of the heap"
+    );
     allocations
+        .checked_sub(rows)
+        .expect("the row taken of the heap is one of the allocations counted")
 }
 
 /// An open whose source writes its endpoints' texts into the session's rows itself allocates as
 /// much for three endpoints as for one: no text of an endpoint is a value of the heap at the open.
 /// The CONTROL is the host's form, whose config holds a text of the heap for each endpoint: there
 /// three endpoints allocate more than one, so the count sees an endpoint's text where it is one.
+/// Turned red by a text of an endpoint made a value of the heap at the open, or by the row of the
+/// heap the process's table takes counted as the open's own (`rows_taken_here` in
+/// `open_counted`): on the heap policy, run alone, the test's first open takes the process's first
+/// row and counts one more than the open after it.
 #[test]
 fn an_open_whose_source_writes_the_texts_allocates_nothing_for_each_endpoint() {
     let written = |dial: &'static [&'static str]| Written {

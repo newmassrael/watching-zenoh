@@ -4,8 +4,9 @@
 //! The process's table of engines with the build's `ENGINE_ROWS` rows held, under the build's
 //! storage policy: on the fixed policy one more open is refused before it reserves anything, and
 //! with a row let go of an open goes on past the rows; on the heap policy the count bounds nothing,
-//! and opens go on past it, each on a row of the heap. The table is the process's, so it is filled
-//! in a binary of its own, by this one test.
+//! and opens go on past it, each on a row of the heap. Then the table held to one session: each
+//! open refused gives its row back, on either policy. The table is the process's, so it is filled
+//! and held in a binary of its own, by this one test.
 
 use std::alloc::Layout;
 use std::ptr::NonNull;
@@ -84,6 +85,23 @@ fn config() -> CoopConfig {
 
 /// An open of [`config`] by the region its config lays out, its arena from [`Counting`].
 fn open() -> Result<EngineHold<Engine>, OpenError> {
+    open_in(&Counting)
+}
+
+/// Memory with no arena to give: an open over it is refused once it has claimed its row, before
+/// its engine is made.
+struct NoMemory;
+
+impl ArenaMemory for NoMemory {
+    fn reserve(&self, _layout: Layout) -> Option<NonNull<u8>> {
+        None
+    }
+
+    unsafe fn release(&self, _base: NonNull<u8>, _layout: Layout) {}
+}
+
+/// An open of [`config`] by the region its config lays out, its arena from `memory`.
+fn open_in(memory: &'static dyn ArenaMemory) -> Result<EngineHold<Engine>, OpenError> {
     let config = config();
     let rows = ArenaRegion::of(PlanShape::of(&config), SessionLimits::defaults())
         .expect("the build lays the config out");
@@ -100,7 +118,7 @@ fn open() -> Result<EngineHold<Engine>, OpenError> {
         SessionPolicy::defaults(),
         OpenKeyIds::none(),
         OpenStorage {
-            memory: &Counting,
+            memory,
             plan: PlanFrom::Region(region),
         },
     )
@@ -115,7 +133,6 @@ fn open() -> Result<EngineHold<Engine>, OpenError> {
 /// the next claim. Turned red by an open that takes no row, takes one past a fixed table, is
 /// refused past the count on the heap policy, reserves its arena before it is refused, or keeps
 /// the row of an open that failed.
-#[test]
 fn an_open_past_the_builds_rows_is_refused_only_where_the_storage_policy_is_fixed() {
     let mut held: Vec<RowClaim> = std::iter::from_fn(RowClaim::take)
         .take(caps::ENGINE_ROWS + 1)
@@ -153,4 +170,44 @@ fn an_open_past_the_builds_rows_is_refused_only_where_the_storage_policy_is_fixe
     let again = RowClaim::take().expect("the failed open let its row go");
     drop(again);
     drop(held);
+}
+
+/// With the table held to one session, the row the count leaves is taken by each open in turn: an
+/// open refused before its engine is made (no arena to give) lets go of its claim, and an open
+/// refused once its engine is made (the endpoint nothing answers) vacates the row with its engine's
+/// drop, so none is refused for want of a row and the count is let go of after with no row held.
+/// On the heap policy a table held to no count takes a row of the heap for an open whose row was
+/// kept, so only a count shows the row kept. Turned red by a claim let go of unfilled that leaves
+/// its row claimed (`let_go_unfilled` in the drop of `RowClaim`), or an engine whose drop leaves
+/// it in its row (`self.reach.clear()` in the drop of `CoopEngine`).
+fn a_refused_open_gives_its_row_back_on_either_policy() {
+    assert_eq!(RowClaim::hold_to(1), Ok(()), "no row is held or claimed");
+    assert!(
+        matches!(open_in(&NoMemory).err(), Some(OpenError::Arena(_))),
+        "the open is refused before its engine is made"
+    );
+    for _ in 0..2 {
+        let refused = open().err();
+        assert!(
+            refused.is_some() && refused != Some(OpenError::NoEngineRow),
+            "the one row is taken again: {refused:?}"
+        );
+        assert_eq!(
+            OUT.load(Ordering::SeqCst),
+            0,
+            "the failed open gave its arena back"
+        );
+    }
+    assert!(
+        RowClaim::let_go_of_count(),
+        "no open left its row held or claimed"
+    );
+}
+
+/// The two readings of the process's table, in turn: the first lets every row go before the
+/// second holds the table to a count, which a row held anywhere refuses.
+#[test]
+fn the_process_table_bounds_the_opens_by_policy_and_takes_back_a_refused_opens_row() {
+    an_open_past_the_builds_rows_is_refused_only_where_the_storage_policy_is_fixed();
+    a_refused_open_gives_its_row_back_on_either_policy();
 }

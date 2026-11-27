@@ -162,6 +162,12 @@ struct GrownRow {
     next: UnderLock<Option<&'static GrownRow>>,
 }
 
+#[cfg(all(test, feature = "std"))]
+std::thread_local! {
+    /// The rows of the heap the claims of this thread took (`RowClaim::rows_taken_here`).
+    static ROWS_TAKEN_HERE: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
 impl GrownRow {
     /// `count` vacant rows of the heap at their first generation, in one block, each linked before
     /// the next and the last before `next`: the first of them, or `None`, nothing taken, when the
@@ -196,6 +202,8 @@ impl GrownRow {
     fn claimed(next: Option<&'static GrownRow>) -> Option<&'static Self> {
         // SAFETY: a grown row is not of zero bytes.
         let place = NonNull::new(unsafe { alloc::alloc::alloc(Layout::new::<Self>()) })?;
+        #[cfg(all(test, feature = "std"))]
+        ROWS_TAKEN_HERE.with(|taken| taken.set(taken.get().saturating_add(1)));
         let place = place.cast::<Self>();
         // SAFETY: the heap gave `place` for a `GrownRow`, aligned for it; it is written once here
         // and never given back, so the row it lends stands for as long as the process.
@@ -509,6 +517,14 @@ impl RowClaim {
     /// `true` too when the table is held to no count.
     pub fn let_go_of_count() -> bool {
         ENGINES.let_go_of_count()
+    }
+
+    /// How many rows of the heap the claims of the calling thread took. The process's table takes
+    /// one only for a claim that finds none it kept vacant, which the opens of every thread decide,
+    /// so a test that counts the allocations of an open on its own thread sets the row apart.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn rows_taken_here() -> u64 {
+        ROWS_TAKEN_HERE.with(core::cell::Cell::get)
     }
 
     /// Put `engine` in the row and answer the reach of it there.
