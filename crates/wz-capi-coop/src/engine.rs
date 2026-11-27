@@ -2004,7 +2004,9 @@ impl<W: LinkWaits> LinkRooms<W> {
     /// alone ([`Self::for_held`]). Pico's is dropped on the face at once ([`Room::Held`]), as
     /// pico's try of that transport's transmit lock finds it taken; zenoh's asks that face alone
     /// for room within `wait_us`; and a build without the held-conduit wait (`tx-held-wait`)
-    /// answers either profile as pico's, with no face asked.
+    /// answers either profile as pico's, with no face asked. Asked by the read that steps each
+    /// face itself (`direct`), which a build that keeps the round has not.
+    #[cfg(not(wz_round))]
     pub(crate) fn for_held_place(&self, held_drop: HeldDrop, at: usize, wait_us: u64) -> Room {
         self.for_held(
             held_drop,

@@ -274,8 +274,9 @@ fn a_leg_held_alone_answers_for_its_own_face_behind_a_held_session() {
 /// on that face: under zenoh's profile it asks that face alone for room and is dropped on it when
 /// it took none, a place no face holds naming no wait; under pico's it is dropped on the face at
 /// once, with no face asked. Turned red by `LinkRooms::for_held_place` reading the held place as
-/// a holder other than a send on its own face, or asking past the leg's face.
-#[cfg(feature = "tx-held-wait")]
+/// a holder other than a send on its own face, or asking past the leg's face. A build that keeps
+/// the round (`wz_round`) asks no held face place, as its faces are not read where they lie.
+#[cfg(all(not(wz_round), feature = "tx-held-wait"))]
 #[test]
 fn a_held_face_place_answers_as_a_send_on_that_face() {
     use wz_session_core::session_init_params::HeldDrop;
@@ -374,8 +375,8 @@ fn without_the_held_wait_every_profile_answers_as_pico() {
 /// on that face at once under either profile, with no face asked for room, as zenoh-pico's try of
 /// a transport's transmit lock fails while another send holds it. Turned red by
 /// `LinkRooms::for_held_place` asking the face's room in this build, or answering otherwise than
-/// a drop on the held face.
-#[cfg(not(feature = "tx-held-wait"))]
+/// a drop on the held face. A build that keeps the round (`wz_round`) asks no held face place.
+#[cfg(all(not(wz_round), not(feature = "tx-held-wait")))]
 #[test]
 fn without_the_held_wait_a_held_face_place_drops_at_once() {
     use wz_session_core::session_init_params::HeldDrop;
