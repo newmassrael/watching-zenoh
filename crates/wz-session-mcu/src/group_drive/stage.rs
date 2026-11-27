@@ -1503,16 +1503,6 @@ impl<T: GroupTransport> GroupLink<T> {
     pub(super) fn send_now(&self, datagram: &[u8]) -> Option<GroupSend> {
         SendNow::send_now(&*self.0, datagram)
     }
-
-    /// Wait up to `timeout_us` for the socket to take another datagram
-    /// (`GroupTransport::wait_for_room`); a transport the session's task has in hand is not
-    /// waited on.
-    pub(super) fn wait_room(&self, timeout_us: u64) -> bool {
-        match self.0.transport.try_borrow() {
-            Ok(transport) => transport.wait_for_room(timeout_us),
-            Err(_) => true,
-        }
-    }
 }
 
 impl<T: GroupTransport> SendNow for LinkCell<T> {

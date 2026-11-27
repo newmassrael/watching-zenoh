@@ -13,6 +13,12 @@
 //! does, and holds nothing. With it the frame's slot is held, the send returns, and the next ask
 //! for room offers the held frame first and waits on the socket while it is refused, as a link
 //! whose queue is full answers its senders.
+//!
+//! Either wait is the host's ([`GroupTxPace`]): its tasks run and the socket's writability is
+//! waited on, so a socket that stays full is offered a frame once a wait, and never twice in a
+//! row. The transport's own wait (`GroupTransport::wait_for_room`) is not asked: a stack whose
+//! socket can be full but which gives no wait of its own answers it at once, and an offer after
+//! such an answer is an offer after none.
 
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::link_storage::{copied_send, HeapTx, TxLender};
@@ -24,7 +30,7 @@ use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 
-use super::GroupLink;
+use super::{GroupLink, GroupTxPace};
 
 /// The slots the driver lends: what a session needs of its link, and with the hold one more,
 /// which the frame the socket refused keeps out.
@@ -43,20 +49,24 @@ struct Held {
     len: usize,
 }
 
-/// A group's socket as a link driver: the transport it shares with the group's session task, and
-/// the slots its frames are encoded into, each a batch of the group.
-pub struct GroupDriver<T> {
+/// A group's socket as a link driver: the transport it shares with the group's session task, the
+/// host's wait for the socket's room (`P`), and the slots its frames are encoded into, each a
+/// batch of the group.
+pub struct GroupDriver<T, P> {
     link: GroupLink<T>,
+    pace: P,
     tx: TxLender<HeapTx>,
     #[cfg(feature = "multicast-send-hold")]
     held: core::cell::Cell<Option<Held>>,
 }
 
-impl<T: GroupTransport> GroupDriver<T> {
-    /// The driver of `link`, whose frames are at most `batch` bytes.
-    pub fn new(link: GroupLink<T>, batch: usize) -> Self {
+impl<T: GroupTransport, P: GroupTxPace> GroupDriver<T, P> {
+    /// The driver of `link`, whose frames are at most `batch` bytes, waiting on the socket's
+    /// room with `pace`.
+    pub fn new(link: GroupLink<T>, pace: P, batch: usize) -> Self {
         Self {
             link,
+            pace,
             tx: TxLender::new(HeapTx::new(SLOTS, batch)),
             #[cfg(feature = "multicast-send-hold")]
             held: core::cell::Cell::new(None),
@@ -102,7 +112,7 @@ impl<T: GroupTransport> GroupDriver<T> {
     }
 }
 
-impl<T: GroupTransport> BoxedLinkDriver for GroupDriver<T> {
+impl<T: GroupTransport, P: GroupTxPace> BoxedLinkDriver for GroupDriver<T, P> {
     // Bytes built apart (a transport message, a frame of a build that lends no slot) are copied
     // into a slot and sent as one, so the socket has one sender.
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
@@ -132,10 +142,14 @@ impl<T: GroupTransport> BoxedLinkDriver for GroupDriver<T> {
         };
         loop {
             match self.offer(frame) {
-                // The socket's own wait; one that cannot tell answers at once and is offered the
-                // frame again.
+                // A group whose session ended is written by nothing: the frame is lost with its
+                // link, as a stage's wait answers a producer of an ended group.
+                Some(GroupSend::Full) if self.pace.ended() => {
+                    return LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot);
+                }
                 Some(GroupSend::Full) => {
-                    let _ = self.link.wait_room(u64::MAX);
+                    self.pace.pass();
+                    let _ = self.pace.wait_writable(u64::MAX);
                 }
                 sent => return Self::outcome(sent),
             }
@@ -182,18 +196,23 @@ impl<T: GroupTransport> BoxedLinkDriver for GroupDriver<T> {
     }
 
     // A link whose queue is full: the held frame is offered first, and while the socket refuses
-    // it the ask waits on the socket, once, for as long as it may.
+    // it the ask runs the host's tasks and waits on the socket, once, for as long as it may.
     #[cfg(feature = "multicast-send-hold")]
     fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
         if !self.offer_held() {
             return RoomAnswer::at_once(LinkRoom::Free);
         }
         let wait_us = wait.wait_us();
-        if wait_us > 0 && self.link.wait_room(wait_us) && !self.offer_held() {
-            return RoomAnswer {
-                room: LinkRoom::Free,
-                waited_us: 0,
-            };
+        if wait_us > 0 && !self.pace.ended() {
+            let started = self.pace.now_us();
+            self.pace.pass();
+            let room = self.pace.wait_writable(wait_us);
+            if room && !self.offer_held() {
+                return RoomAnswer {
+                    room: LinkRoom::Free,
+                    waited_us: self.pace.now_us().saturating_sub(started).min(wait_us),
+                };
+            }
         }
         RoomAnswer {
             room: LinkRoom::Congested,
@@ -219,16 +238,24 @@ mod tests {
     use wz_session_core::link::{BoxedLinkDriver, LinkDropCause, LinkSendOutcome};
     use wz_session_core::reliability::Reliability;
 
-    use super::super::GroupLink;
+    use super::super::{GroupLink, GroupTxPace};
     use super::GroupDriver;
 
-    /// What the socket took, and how many more it takes before it is full. A wait on it frees
-    /// one datagram's room, as a socket that drains does.
+    /// What the socket took and was offered, how many more it takes before it is full, and what
+    /// the host did while it was: a wait of the host frees one datagram's room once `fills` is
+    /// spent, as a socket that drains does; a wait asked of the transport itself frees nothing,
+    /// as a stack that gives no wait of its own answers at once.
     #[derive(Default)]
     struct Wire {
         seen: Vec<Vec<u8>>,
+        offers: usize,
         room: usize,
+        /// How many of the host's waits find the socket still full before one frees room.
+        fills: usize,
         waits: usize,
+        passes: usize,
+        socket_waits: usize,
+        ended: bool,
     }
 
     struct Socket(Rc<RefCell<Wire>>);
@@ -252,6 +279,7 @@ mod tests {
 
         fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
             let mut wire = self.0.borrow_mut();
+            wire.offers += 1;
             if wire.room == 0 {
                 return GroupSend::Full;
             }
@@ -261,9 +289,7 @@ mod tests {
         }
 
         fn wait_for_room(&self, _timeout_us: u64) -> bool {
-            let mut wire = self.0.borrow_mut();
-            wire.waits += 1;
-            wire.room += 1;
+            self.0.borrow_mut().socket_waits += 1;
             true
         }
 
@@ -272,9 +298,37 @@ mod tests {
         }
     }
 
+    /// The host the driver waits with: its passes and waits counted on the wire.
+    struct Host(Rc<RefCell<Wire>>);
+
+    impl GroupTxPace for Host {
+        fn pass(&self) {
+            self.0.borrow_mut().passes += 1;
+        }
+
+        fn now_us(&self) -> u64 {
+            0
+        }
+
+        fn wait_writable(&self, _wait_us: u64) -> bool {
+            let mut wire = self.0.borrow_mut();
+            wire.waits += 1;
+            if wire.fills > 0 {
+                wire.fills -= 1;
+                return false;
+            }
+            wire.room += 1;
+            true
+        }
+
+        fn ended(&self) -> bool {
+            self.0.borrow().ended
+        }
+    }
+
     /// A driver over a socket with `room` datagrams of room, its link opened by the session when
     /// `open`, and the socket's record.
-    fn driver(room: usize, open: bool) -> (GroupDriver<Socket>, Rc<RefCell<Wire>>) {
+    fn driver(room: usize, open: bool) -> (GroupDriver<Socket, Host>, Rc<RefCell<Wire>>) {
         let wire = Rc::new(RefCell::new(Wire {
             room,
             ..Wire::default()
@@ -283,7 +337,7 @@ mod tests {
         if open {
             assert!(link.open());
         }
-        (GroupDriver::new(link, 64), wire)
+        (GroupDriver::new(link, Host(Rc::clone(&wire)), 64), wire)
     }
 
     /// A frame handed over leaves on the socket as it was written, from the slot it was copied
@@ -296,6 +350,11 @@ mod tests {
             LinkSendOutcome::Sent
         );
         assert_eq!(wire.borrow().seen, [vec![1, 2, 3]]);
+        assert_eq!(
+            wire.borrow().waits,
+            0,
+            "a socket with room is not waited on"
+        );
     }
 
     /// A link the session does not hold open sends nothing, and the frame is a drop that leaves
@@ -312,22 +371,53 @@ mod tests {
     }
 
     /// Without the hold a full socket is waited on inside the send until it takes the frame, and
-    /// nothing is held. Turned red by a send that returns on a full socket.
+    /// nothing is held: each refusal is followed by one pass of the host and one wait on the
+    /// socket's writability before the frame is offered again, and the transport's own wait,
+    /// which answers at once here, is never what the send waits on. Turned red by a send that
+    /// returns on a full socket, offers the frame twice with no wait between (a spin), or waits on
+    /// the transport's wait instead of the host's (which here never frees room, so the send would
+    /// not end).
     #[cfg(not(feature = "multicast-send-hold"))]
     #[test]
-    fn a_full_socket_is_waited_on_inside_the_send() {
+    fn a_full_socket_is_waited_on_before_each_offer_inside_the_send() {
         let (driver, wire) = driver(0, true);
+        wire.borrow_mut().fills = 2;
         assert_eq!(
             driver.send_blocking(&[7], Reliability::Reliable),
             LinkSendOutcome::Sent
         );
-        assert_eq!(wire.borrow().seen, [vec![7]]);
-        assert_eq!(wire.borrow().waits, 1, "one wait freed the room");
+        let wire = wire.borrow();
+        assert_eq!(wire.seen, [vec![7]]);
+        assert_eq!(wire.offers, 4, "three refusals and the offer taken");
+        assert_eq!(wire.waits, 3, "one wait after each refusal");
+        assert_eq!(wire.passes, 3, "one pass of the host before each wait");
+        assert_eq!(
+            wire.socket_waits, 0,
+            "the transport's own wait is not asked"
+        );
+    }
+
+    /// Without the hold a frame a full socket refuses after the group's session ended is a drop,
+    /// and nothing waits for a socket nothing will drain. Turned red by a send that waits on an
+    /// ended group.
+    #[cfg(not(feature = "multicast-send-hold"))]
+    #[test]
+    fn a_full_socket_of_an_ended_group_is_a_drop() {
+        let (driver, wire) = driver(0, true);
+        wire.borrow_mut().ended = true;
+        assert_eq!(
+            driver.send_blocking(&[7], Reliability::Reliable),
+            LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
+        );
+        let wire = wire.borrow();
+        assert!(wire.seen.is_empty());
+        assert_eq!((wire.offers, wire.waits, wire.passes), (1, 0, 0));
     }
 
     /// With the hold a frame a full socket refuses is kept and the send returns; the next ask
-    /// for room offers it first and is answered once the socket took it, which the frames after
-    /// it then follow. Turned red by a held frame lost, sent twice, or overtaken.
+    /// for room offers it first, waits on the host once, and is answered once the socket took it,
+    /// which the frames after it then follow. Turned red by a held frame lost, sent twice, or
+    /// overtaken, or by an ask that waits on the transport's own wait.
     #[cfg(feature = "multicast-send-hold")]
     #[test]
     fn a_frame_a_full_socket_refused_is_held_and_offered_first() {
@@ -343,11 +433,37 @@ mod tests {
         assert!(wire.borrow().seen.is_empty(), "the socket took nothing");
         let answer = driver.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 1_000 });
         assert_eq!(answer.room, LinkRoom::Free, "the wait freed the room");
+        assert_eq!((wire.borrow().waits, wire.borrow().passes), (1, 1));
+        assert_eq!(wire.borrow().socket_waits, 0);
         wire.borrow_mut().room = 1;
         assert_eq!(
             driver.send_blocking(&[8], Reliability::Reliable),
             LinkSendOutcome::Sent
         );
         assert_eq!(wire.borrow().seen, [vec![7], vec![8]]);
+        assert_eq!(wire.borrow().offers, 4, "each frame offered once a wait");
+    }
+
+    /// With the hold an ask for room whose wait finds the socket still full is congested, and
+    /// the held frame stays first. Turned red by an ask answered free while the frame is held.
+    #[cfg(feature = "multicast-send-hold")]
+    #[test]
+    fn a_held_frame_a_wait_did_not_free_leaves_the_link_congested() {
+        use wz_session_core::link::{LinkRoom, RoomWait};
+        use wz_session_core::qos::Priority;
+
+        let (driver, wire) = driver(0, true);
+        wire.borrow_mut().fills = 1;
+        assert_eq!(
+            driver.send_blocking(&[7], Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        let answer = driver.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 1_000 });
+        assert_eq!(answer.room, LinkRoom::Congested);
+        assert_eq!(answer.waited_us, 1_000, "the whole wait was spent");
+        wire.borrow_mut().room = 1;
+        let answer = driver.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 1_000 });
+        assert_eq!(answer.room, LinkRoom::Free, "the held frame left first");
+        assert_eq!(wire.borrow().seen, [vec![7]]);
     }
 }
