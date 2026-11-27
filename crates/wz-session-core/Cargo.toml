@@ -105,6 +105,7 @@ default = [
     "query-replies-with-final",
     "declaration-sync-watch",
     "link-admission",
+    "publish-statements",
 ]
 
 # `log`: the session core's diagnostics (`diag`), the warnings an operator reads when a peer sends
@@ -147,6 +148,17 @@ south-subregions = ["alloc", "handshake-regions"]
 # pico ABI turns it on through its capability of the same name (deploy/wz-config.toml), which the
 # zenoh-pico preset leaves off.
 handshake-regions = []
+
+# `publish-statements`: what a publish may state beside what it sends, each a policy of the session
+# model that only some engines carry out: a set of links (`entity-link-restriction`), a retry for a
+# publish that found no room (`publisher-admission-retry`) and the all-or-none form
+# (`multi-route-atomic-tx`), the fields `links`, `admission_retry` and `atomic_tx` of
+# `PublishOptions` and their setters. Without it the options hold none of them, so no publish
+# states one (`PublishOptions::statement` is `None`) and an engine has nothing to refuse or to keep
+# off its plain lane, as zenoh-pico's `_z_write` takes none. On by default; a crate that takes this
+# one without its defaults and has a door that states one names it (the zenoh-c ABI, the Rust API
+# and the C ABI's own engine), and the pico ABI, which has no such door, leaves it off.
+publish-statements = []
 
 # The Put and Del bodies of a Request, which zenoh-pico's decoder takes and zenoh 1.10.1's does not
 # (its `RequestBody` has the Query alone): the arms of `wz-codecs/request-put-del` and the code that

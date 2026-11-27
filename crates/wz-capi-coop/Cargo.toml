@@ -552,9 +552,12 @@ wz-ext-pubsub = { path = "../wz-ext-pubsub", features = ["engine-host"] }
 # publisher stamps a source info the advanced subscriber orders by (`pubsub-source-info`), which
 # the C ABI's `advanced` brings through its unstable API. The registry's tests read the pools its
 # faces share (`peer-row-pools`), in every test build. The tests select every value of a policy,
-# which `policy-selection` keeps in its domain for the test build alone.
+# which `policy-selection` keeps in its domain for the test build alone, and state each statement
+# of a publish the engine refuses (`publish-statements`, `tests::link_sets`), which a library
+# without them never sees.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "policy-selection",
+    "publish-statements",
     "pubsub-source-info",
     "peer-row-pools",
     "session-unicast-accept",

@@ -712,8 +712,9 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # conversions are every build's. `alloc` is the one feature named, because the conversions
 # build `String`s; it adds nothing to any dependent, since `wz-runtime-tokio`, which every build
 # of this crate links, already turns it on. `south-subregions` the same, for the partition the
-# open plan reads (`open_plan`'s `gateway_south`).
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc", "south-subregions"] }
+# open plan reads (`open_plan`'s `gateway_south`), and `publish-statements` for the set of links,
+# the retry and the all-or-none form of a publish its faces honour (`faces`).
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc", "south-subregions", "publish-statements"] }
 # The usrpwd auth method a node's config asks for (`NodeAuth`). Optional — pulled only by
 # `access-extauth-usrpwd`.
 wz-auth = { path = "../wz-auth", optional = true }

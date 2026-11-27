@@ -101,5 +101,12 @@ wz-node-time = { path = "../wz-node-time", optional = true, default-features = f
 # The host's lock and condition variable and its threads, with `std` and without (`os-sys`).
 wz-host-sync = { path = "../wz-host-sync", optional = true }
 
+[dev-dependencies]
+# The tests state each statement a publish may make (`publish-statements`), which the refusal of
+# an engine that honours none is read against; the library takes the session core without them.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "publish-statements",
+] }
+
 [lints]
 workspace = true

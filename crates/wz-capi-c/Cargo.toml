@@ -376,9 +376,10 @@ wz-abi-stamp = { path = "../wz-abi-stamp" }
 wz-capi-core = { path = "../wz-capi-core", default-features = false, features = ["rx-busy-poll", "transport-qos", "open-plan"] }
 # The lifecycle verbs' wire (`lifecycle_wire`: the key a verb is asked by, the answer read back), for
 # the doors of `src/lifecycle.rs`. Already in the graph through `wz-capi-core`; named here because
-# those doors are this crate's own and use it directly. No feature of its own: the module is
-# unconditional.
-wz-session-core = { path = "../wz-session-core", default-features = false }
+# those doors are this crate's own and use it directly. The statements of a publish its doors make
+# (`statement`: a set of links, a retry, the all-or-none form) are `publish-statements`, which
+# `wz-capi-core`'s runtime already turns on.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["publish-statements"] }
 # The engine's port and the advanced plane's rules, for the advanced subscriber's host
 # (`advanced`), for the doors of the observation plane, and for the counts a cancellation token
 # and a get's registration on it are shared by (`lodge::Strong`). Already in the graph through

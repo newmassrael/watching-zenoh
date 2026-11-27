@@ -800,16 +800,16 @@ pub enum StatementNotHonoured {
 
 impl StatementNotHonoured {
     /// The answer of an engine that honours none of a publish's statements: the first one
-    /// `opts` makes is refused, and a publish that states none passes.
+    /// `opts` makes is refused, and a publish that states none passes. Where the session core is
+    /// built without the statements (`publish-statements`), no publish states one and every one
+    /// passes, with nothing read.
     pub fn of_publish(opts: &wz_session_core::publish_options::PublishOptions) -> Result<(), Self> {
-        if opts.links.is_restricted() {
-            Err(Self::Links)
-        } else if opts.admission_retry.is_some() {
-            Err(Self::AdmissionRetry)
-        } else if opts.atomic_tx {
-            Err(Self::AtomicTx)
-        } else {
-            Ok(())
+        use wz_session_core::publish_options::PublishStatement;
+        match opts.statement() {
+            None => Ok(()),
+            Some(PublishStatement::Links) => Err(Self::Links),
+            Some(PublishStatement::AdmissionRetry) => Err(Self::AdmissionRetry),
+            Some(PublishStatement::AtomicTx) => Err(Self::AtomicTx),
         }
     }
 

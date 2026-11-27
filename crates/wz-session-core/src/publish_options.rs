@@ -22,9 +22,13 @@
 //! `pubsub-encoding`, `pubsub-source-info`, `pubsub-attachment`, `pubsub-qos`), and the plain-put
 //! lane exists only with `codec-push` and without `transport-stats` and `routing-namespace`. Those
 //! are features of this crate; the runtime's features of the same names forward to them, so the
-//! answer in a tokio build is the answer it always was.
+//! answer in a tokio build is the answer it always was. What a publish may state beside what it
+//! sends (a set of links, a retry, the all-or-none form) is `publish-statements`'s, and a build
+//! without it holds none of them ([`PublishOptions::statement`]).
 
+#[cfg(feature = "publish-statements")]
 use crate::admission_retry::AdmissionRetry;
+#[cfg(feature = "publish-statements")]
 use crate::link_restriction::LinkRestriction;
 use crate::locality::Locality;
 use crate::metadata::PushMetadata;
@@ -63,12 +67,14 @@ pub struct PublishOptions<'a> {
     /// default, and upstream's behaviour) sends on every link that wants the key; a restricted
     /// set sends only on the links of its slots. An engine with one link per node applies it
     /// per face; the loopback leg is not a link and is not restricted by it.
+    #[cfg(feature = "publish-statements")]
     pub links: LinkRestriction,
     /// The retry the publish makes when no link had room (policy `publisher-admission-retry`).
     /// `None` (the default, and upstream's behaviour) waits for room on every link as before; a
     /// retry offers the frame without waiting and, when no link queued it, again to the links
     /// that had no room (see [`AdmissionRetry`]). An engine with one link per node applies it
     /// per face; the loopback leg is not a link and has no queue to lack room in.
+    #[cfg(feature = "publish-statements")]
     pub admission_retry: Option<AdmissionRetry>,
     /// Whether the publish is delivered to all of the links it reaches or to none (policy
     /// `multi-route-atomic-tx`). `false` (the default, and upstream's behaviour) sends to each
@@ -76,6 +82,7 @@ pub struct PublishOptions<'a> {
     /// link has promised some (see [`crate::atomic_tx`]). An engine with one link per node applies
     /// it per face; the loopback leg is not a link, takes no reservation and is delivered to only
     /// when every link promised room.
+    #[cfg(feature = "publish-statements")]
     pub atomic_tx: bool,
     /// Link-layer reliability hint propagated to (a) the wire frame's reliable-flag (zenoh-pico
     /// `FLAG_T_FRAME_R`) and (b) the loopback `Sample.reliability` field.
@@ -200,8 +207,11 @@ impl<'a> PublishOptions<'a> {
     ) {
         let kept = PublishOptions {
             allowed_destination: self.allowed_destination,
+            #[cfg(feature = "publish-statements")]
             links: self.links,
+            #[cfg(feature = "publish-statements")]
             admission_retry: self.admission_retry,
+            #[cfg(feature = "publish-statements")]
             atomic_tx: self.atomic_tx,
             reliability: self.reliability,
             kind: self.kind,
@@ -231,8 +241,11 @@ impl<'a> PublishOptions<'a> {
     ) {
         let Self {
             allowed_destination,
+            #[cfg(feature = "publish-statements")]
             links,
+            #[cfg(feature = "publish-statements")]
             admission_retry,
+            #[cfg(feature = "publish-statements")]
             atomic_tx,
             reliability,
             kind,
@@ -250,8 +263,11 @@ impl<'a> PublishOptions<'a> {
         (
             PublishOptions {
                 allowed_destination,
+                #[cfg(feature = "publish-statements")]
                 links,
+                #[cfg(feature = "publish-statements")]
                 admission_retry,
+                #[cfg(feature = "publish-statements")]
                 atomic_tx,
                 reliability,
                 kind,
@@ -317,6 +333,7 @@ impl<'a> PublishOptions<'a> {
     }
 
     /// Limit the publish to the links of `links`.
+    #[cfg(feature = "publish-statements")]
     pub fn with_links(mut self, links: LinkRestriction) -> Self {
         self.links = links;
         self
@@ -325,6 +342,7 @@ impl<'a> PublishOptions<'a> {
     /// Make the publish retry as `retry` says when no link had room. A session whose
     /// `publisher-admission-retry` policy is off refuses it where the engine reads it
     /// ([`crate::admission_retry::admit_by`]).
+    #[cfg(feature = "publish-statements")]
     pub fn with_admission_retry(mut self, retry: AdmissionRetry) -> Self {
         self.admission_retry = Some(retry);
         self
@@ -333,6 +351,7 @@ impl<'a> PublishOptions<'a> {
     /// Make the publish reach all of its links or none. A session whose `multi-route-atomic-tx`
     /// policy is off refuses it where the engine reads it
     /// ([`crate::atomic_tx::admit_by`]).
+    #[cfg(feature = "publish-statements")]
     pub fn with_atomic_tx(mut self) -> Self {
         self.atomic_tx = true;
         self
@@ -708,11 +727,7 @@ impl<'a> PublishOptions<'a> {
             // The plain lane sends each frame with a wait for room and knows neither a retry nor
             // a reservation, and it writes to every face without reading which link a face is, so
             // a publish limited to some links would reach the others.
-            if self.kind != SampleKind::Put
-                || self.admission_retry.is_some()
-                || self.atomic_tx
-                || self.links.is_restricted()
-            {
+            if self.kind != SampleKind::Put || self.statement().is_some() {
                 return None;
             }
             let meta = self.push_metadata();
@@ -732,6 +747,44 @@ impl<'a> PublishOptions<'a> {
             None
         }
     }
+
+    /// The first statement these options make beside what they send, in the order a set of
+    /// links, a retry, the all-or-none form: `None` for a publish that states none, as the
+    /// defaults do. What an engine that honours none of them refuses a publish by, and what keeps
+    /// a publish off the plain lane ([`Self::plain_put_params`]).
+    #[cfg(feature = "publish-statements")]
+    pub fn statement(&self) -> Option<PublishStatement> {
+        if self.links.is_restricted() {
+            Some(PublishStatement::Links)
+        } else if self.admission_retry.is_some() {
+            Some(PublishStatement::AdmissionRetry)
+        } else if self.atomic_tx {
+            Some(PublishStatement::AtomicTx)
+        } else {
+            None
+        }
+    }
+
+    /// A build without `publish-statements` holds none of the statements, so no publish states
+    /// one, and what reads the answer is left with nothing to test.
+    #[cfg(not(feature = "publish-statements"))]
+    #[inline(always)]
+    pub fn statement(&self) -> Option<PublishStatement> {
+        None
+    }
+}
+
+/// A statement a publish makes beside what it sends ([`PublishOptions::statement`]), each a
+/// policy of the session model, off by default, that only some engines carry out. A build without
+/// `publish-statements` has the names and no publish that makes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishStatement {
+    /// A set of links (policy `entity-link-restriction`).
+    Links,
+    /// A retry for a publish that found no room (policy `publisher-admission-retry`).
+    AdmissionRetry,
+    /// The all-or-none form of a publish (policy `multi-route-atomic-tx`).
+    AtomicTx,
 }
 
 /// Whether this build sends a plain Put from borrowed bytes, which is the one answer
@@ -1199,6 +1252,7 @@ mod plain_put_tests {
         assert!(PublishOptions::del().plain_put_params().is_none());
     }
 
+    #[cfg(feature = "publish-statements")]
     #[test]
     fn a_publish_states_no_retry_unless_asked_and_a_retry_leaves_the_plain_lane() {
         assert_eq!(PublishOptions::put().admission_retry, None);
@@ -1214,6 +1268,7 @@ mod plain_put_tests {
         assert_eq!(stated.kind, SampleKind::Put);
     }
 
+    #[cfg(feature = "publish-statements")]
     #[test]
     fn a_publish_is_not_atomic_unless_asked_and_asking_leaves_the_plain_lane() {
         assert!(!PublishOptions::put().atomic_tx);
@@ -1228,6 +1283,7 @@ mod plain_put_tests {
         assert_eq!(stated.admission_retry, None, "it states nothing else");
     }
 
+    #[cfg(feature = "publish-statements")]
     #[test]
     fn a_publish_limited_to_some_links_leaves_the_plain_lane() {
         // The plain lane writes to every face and reads no slot, so a limit it took would be
@@ -1244,6 +1300,64 @@ mod plain_put_tests {
             PublishOptions::put().plain_put_params().is_some(),
             SENDS_PLAIN_PUTS,
             "an unlimited publish keeps the plain lane the build gives it",
+        );
+    }
+
+    /// Each statement a publish makes is named by itself, a set of links before a retry and a
+    /// retry before the all-or-none form, and the defaults name none: what an engine that honours
+    /// none refuses a publish by. Turned red by a statement named by another's name, or by one
+    /// that goes unnamed.
+    #[cfg(feature = "publish-statements")]
+    #[test]
+    fn each_statement_a_publish_makes_is_named_in_its_order() {
+        let retry = AdmissionRetry::new(2, 7).expect("both numbers set");
+        let one = LinkRestriction::only([1u8]).expect("one slot in range");
+        assert_eq!(PublishOptions::put().statement(), None);
+        assert_eq!(PublishOptions::del().statement(), None);
+        assert_eq!(
+            PublishOptions::put().with_links(one).statement(),
+            Some(PublishStatement::Links)
+        );
+        assert_eq!(
+            PublishOptions::put()
+                .with_admission_retry(retry)
+                .statement(),
+            Some(PublishStatement::AdmissionRetry)
+        );
+        assert_eq!(
+            PublishOptions::put().with_atomic_tx().statement(),
+            Some(PublishStatement::AtomicTx)
+        );
+        assert_eq!(
+            PublishOptions::put()
+                .with_atomic_tx()
+                .with_admission_retry(retry)
+                .statement(),
+            Some(PublishStatement::AdmissionRetry),
+            "a retry is named before the all-or-none form"
+        );
+        assert_eq!(
+            PublishOptions::put()
+                .with_atomic_tx()
+                .with_admission_retry(retry)
+                .with_links(one)
+                .statement(),
+            Some(PublishStatement::Links),
+            "a set of links is named first"
+        );
+    }
+
+    /// A build without the statements holds none of them: no publish states one, and a plain Put
+    /// keeps the plain lane the build gives it. Turned red by a statement answered where the
+    /// options can hold none.
+    #[cfg(not(feature = "publish-statements"))]
+    #[test]
+    fn a_build_without_the_statements_states_none() {
+        assert_eq!(PublishOptions::put().statement(), None);
+        assert_eq!(PublishOptions::del().statement(), None);
+        assert_eq!(
+            PublishOptions::put().plain_put_params().is_some(),
+            SENDS_PLAIN_PUTS
         );
     }
 }
