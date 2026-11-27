@@ -276,15 +276,13 @@ mod tests {
     /// nothing ahead leaves open past the bound.
     #[test]
     fn a_count_past_the_builds_value_is_refused() {
-        let bound = match subscriptions_bound() {
-            Some(bound) => bound,
-            // Only a build whose tables grow bounds no count, which Layer C1pc's leg over the
-            // fixed backing is not.
-            None => {
-                assert!(!wz_session_core::bounded::ENFORCES_CAPACITY);
-                return;
-            }
-        };
+        // Only a build whose tables are fixed bounds the count; one whose tables grow bounds none,
+        // which Layer C1pc's leg over the fixed backing is not.
+        if !wz_session_core::bounded::ENFORCES_CAPACITY {
+            assert_eq!(subscriptions_bound(), None);
+            return;
+        }
+        let bound = subscriptions_bound().expect("a build whose tables are fixed bounds the count");
         let past = alloc::format!("MAX_PUBLISHERS=1,MAX_SUBSCRIPTIONS={}", bound + 1);
         assert_eq!(state(Some(past.as_str())), Err(Z_ERR_CONFIG_INVALID_VALUE));
     }
