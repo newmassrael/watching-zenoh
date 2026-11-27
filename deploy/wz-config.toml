@@ -4501,6 +4501,27 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the transports a listener was told: zenoh-pico calls its connectivity listeners from the task that saw the transport come or go, so it loses no event and keeps none, and zenoh tells them under one lock."
 
 [[limit]]
+id = "MAX_SCOUT_INTERFACES"
+kconfig = "WZ_LIMIT_MAX_SCOUT_INTERFACES"
+kind = "bound"
+driven = "local"
+default = 10
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The interfaces a scouting window asks on, one socket each, held in rows of
+the window's own beside the scouting group's socket. An interface past them
+is left out of the window and counted, and the window asks on the others.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the interfaces a zenoh scout asks on: it asks on every interface that can carry multicast. zenoh-pico holds its scout's links in a vector of Z_MAX_NUM_SCOUT_INTERFACES, a constant of its configuration header and no build switch (10, and 0 with scouting off), and leaves out an interface past it with a warning (`vendor/zenoh-pico/src/session/scout.c` @ `_Z_WARN(\"Scouting link limit reached, ignoring interface: %s\", iface_name);`); the default is that constant."
+
+[[limit]]
 id = "MAX_STATIC_CONNECT"
 kconfig = "WZ_LIMIT_MAX_STATIC_CONNECT"
 kind = "bound"

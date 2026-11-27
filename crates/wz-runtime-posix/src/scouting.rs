@@ -24,11 +24,12 @@
 //! four must still discover. The rules of the window itself (what a Scout says, which datagrams
 //! answer it, when it is over) are the session's, pumped over these sockets by the engine.
 
-use alloc::vec::Vec;
 use core::ffi::c_int;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_runtime_coop::udp_link::DatagramSocket;
+use wz_session_core::bounded::{BoundedVec, Static};
+use wz_session_core::caps::MAX_SCOUT_INTERFACES;
 
 use crate::group::MulticastSocket;
 use crate::multicast::bind_scout_asker;
@@ -87,31 +88,59 @@ pub trait ReadableAmong: DatagramSocket {
     fn wait_readable_among(set: &mut [Self::Entry], timeout_ms: c_int);
 }
 
-/// The sockets a window holds. A member that fails a read is dropped, as a link that is lost is,
-/// and the window goes on with the rest: one interface going down does not end a window the others
-/// can still answer on.
+/// The rows a window holds its members in: one for each interface it asks on, and the group's
+/// socket.
+const MEMBER_ROWS: usize = MAX_SCOUT_INTERFACES + GROUP_ROWS;
+
+/// The row the group's socket takes beside the ask members.
+#[cfg(feature = "scout-group-socket")]
+const GROUP_ROWS: usize = 1;
+#[cfg(not(feature = "scout-group-socket"))]
+const GROUP_ROWS: usize = 0;
+
+/// The sockets a window holds, in rows of their own: as zenoh-pico's scout holds its links in a
+/// vector of `Z_MAX_NUM_SCOUT_INTERFACES` (`vendor/zenoh-pico/src/session/scout.c` @
+/// `#define _ZP_STATIC_VECTOR_TEMPLATE_SIZE Z_MAX_NUM_SCOUT_INTERFACES`), a window asks on at
+/// most `MAX_SCOUT_INTERFACES` interfaces, and the interfaces past them are left out and counted.
+/// A member that fails a read is dropped, as a link that is lost is, and the window goes on with
+/// the rest: one interface going down does not end a window the others can still answer on.
 pub struct ScoutMembers<S: ReadableAmong> {
-    members: Vec<ScoutMember<S>>,
+    members: BoundedVec<ScoutMember<S>, MEMBER_ROWS, Static>,
     /// What the window waits on, one entry for each member and in the members' order: made with
     /// them and dropped with each, so a wait hands the set as it stands.
-    readable: Vec<S::Entry>,
+    readable: BoundedVec<S::Entry, MEMBER_ROWS, Static>,
+    /// The ask members the bound left out.
+    left_out: usize,
     /// Where the next read starts, so one socket that is always ready cannot starve the others (a
     /// group socket is one anybody can send to).
     cursor: usize,
 }
 
 impl<S: MulticastSocket + ReadableAmong> ScoutMembers<S> {
-    /// Open one ask socket for each address of `locals` and, with `scout-group-socket`, the
-    /// group socket on `group:port` after them ([`Self::listen_on_group`]). A socket that cannot
-    /// be opened is left out and the others stand. An ask socket is bound to its address and
-    /// leaves by it; the address is handed to the socket layer as it was read from the interface
-    /// table, so a window writes and reads no address text.
-    pub fn open(group: IpAddr, port: u16, locals: &[Ipv4Addr]) -> Self {
-        let members = Self::asking(locals.iter().filter_map(|local| {
-            bind_scout_asker::<S>(group, port, *local)
-                .ok()
-                .map(|bound| ScoutMember::new(bound.socket, bound.peer))
-        }));
+    /// Open one ask socket for each address of `locals`, up to the window's bound, and, with
+    /// `scout-group-socket`, the group socket on `group:port` after them
+    /// (`listening_on_group`). An address past the bound opens nothing and is counted
+    /// ([`Self::left_out`]); a socket that cannot be opened is left out and the others stand. An
+    /// ask socket is bound to its address and leaves by it; the address is handed to the socket
+    /// layer as it was read from the interface table, so a window writes and reads no address text.
+    pub fn open(group: IpAddr, port: u16, locals: impl IntoIterator<Item = Ipv4Addr>) -> Self {
+        let mut members = Self::empty();
+        for local in locals {
+            if !members.room_to_ask() {
+                members.left_out = members.left_out.saturating_add(1);
+                continue;
+            }
+            // A refusal is the address's alone: it is left out and the others stand.
+            if let Ok(bound) = bind_scout_asker::<S>(group, port, local) {
+                members.ask_by(ScoutMember::new(bound.socket, bound.peer));
+            }
+        }
+        if members.left_out > 0 {
+            wz_session_core::diag_warn!(
+                "scout: the window asks on {MAX_SCOUT_INTERFACES} interface(s); {} left out",
+                members.left_out
+            );
+        }
         #[cfg(feature = "scout-group-socket")]
         let members = match bind_scout_group::<S>(group, port) {
             Ok(bound) => members.listening_on_group(bound.socket, bound.peer),
@@ -127,17 +156,43 @@ impl<S: MulticastSocket + ReadableAmong> ScoutMembers<S> {
 }
 
 impl<S: ReadableAmong> ScoutMembers<S> {
-    /// A window of the ask members `ask`, in their order; with none, there is no window.
-    pub fn asking(ask: impl IntoIterator<Item = ScoutMember<S>>) -> Self {
-        let mut this = Self {
-            members: Vec::new(),
-            readable: Vec::new(),
+    /// A window of no member.
+    fn empty() -> Self {
+        Self {
+            members: BoundedVec::new_static(),
+            readable: BoundedVec::new_static(),
+            left_out: 0,
             cursor: 0,
-        };
+        }
+    }
+
+    /// A window of the ask members `ask`, in their order, those past the bound left out
+    /// ([`Self::ask_by`]); with none, there is no window.
+    pub fn asking(ask: impl IntoIterator<Item = ScoutMember<S>>) -> Self {
+        let mut this = Self::empty();
         for member in ask {
-            this.admit(member);
+            this.ask_by(member);
         }
         this
+    }
+
+    /// Whether the window takes another ask member: it asks on at most `MAX_SCOUT_INTERFACES`.
+    fn room_to_ask(&self) -> bool {
+        self.askers() < MAX_SCOUT_INTERFACES
+    }
+
+    /// Take `member` as one that asks; past the bound it is dropped and counted, as zenoh-pico
+    /// leaves out an interface past its scout's links (`vendor/zenoh-pico/src/session/scout.c` @
+    /// `_Z_WARN("Scouting link limit reached, ignoring interface: %s", iface_name);`).
+    pub fn ask_by(&mut self, member: ScoutMember<S>) {
+        if !(self.room_to_ask() && self.admit(member)) {
+            self.left_out = self.left_out.saturating_add(1);
+        }
+    }
+
+    /// How many ask members the bound left out.
+    pub fn left_out(&self) -> usize {
+        self.left_out
     }
 
     /// The window with `socket`, joined to the scouting group, as a member that reads what the
@@ -156,10 +211,12 @@ impl<S: ReadableAmong> ScoutMembers<S> {
         self
     }
 
-    /// Take `member` with its entry of the set the window waits on.
-    fn admit(&mut self, member: ScoutMember<S>) {
-        self.readable.push(member.socket.readable_entry());
-        self.members.push(member);
+    /// Take `member` with its entry of the set the window waits on: whether there was a row for
+    /// it. The two tables have one bound and one length, so the entry has a row where the member
+    /// had one.
+    fn admit(&mut self, member: ScoutMember<S>) -> bool {
+        let entry = member.socket.readable_entry();
+        self.members.push(member).is_ok() && self.readable.push(entry).is_ok()
     }
 
     /// Whether the window has no socket at all.
@@ -226,8 +283,10 @@ impl<S: ReadableAmong> ScoutMembers<S> {
                 kept += 1;
             }
         }
-        self.members.truncate(kept);
-        self.readable.truncate(kept);
+        while self.members.len() > kept {
+            self.members.pop();
+            self.readable.pop();
+        }
         any
     }
 
@@ -243,6 +302,7 @@ impl<S: ReadableAmong> ScoutMembers<S> {
 mod tests {
     use super::*;
     use crate::net::PosixUdpSocket;
+    use alloc::vec::Vec;
     use core::net::Ipv6Addr;
 
     fn loopback() -> PosixUdpSocket {
@@ -290,8 +350,10 @@ mod tests {
     #[test]
     fn a_window_without_the_group_socket_holds_its_ask_sockets_alone() {
         let group = IpAddr::V4(Ipv4Addr::new(239, 255, 91, 77));
-        assert!(ScoutMembers::<PosixUdpSocket>::open(group, 47_477, &[]).is_empty());
-        let members = ScoutMembers::<PosixUdpSocket>::open(group, 47_477, &[Ipv4Addr::LOCALHOST]);
+        assert!(
+            ScoutMembers::<PosixUdpSocket>::open(group, 47_477, core::iter::empty()).is_empty()
+        );
+        let members = ScoutMembers::<PosixUdpSocket>::open(group, 47_477, [Ipv4Addr::LOCALHOST]);
         assert_eq!(members.members.len(), 1);
         assert_eq!(members.askers(), 1);
     }
@@ -477,13 +539,48 @@ mod tests {
         assert!(members.readable.is_empty(), "and nothing is waited on");
     }
 
+    /// A window asks on at most `MAX_SCOUT_INTERFACES` members: one past the bound is left out
+    /// and counted, the first ones kept in their order, each with its entry of the set. Turned red
+    /// by a window that keeps a member past the bound, or does not count the one it left out.
+    #[test]
+    fn a_window_keeps_the_bound_of_ask_members_and_counts_the_rest() {
+        let bound = MAX_SCOUT_INTERFACES;
+        let port = |k: usize| u16::try_from(k + 1).expect("a bound of a few rows");
+        let at = |port: u16| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let members = ScoutMembers::asking((0..=bound).map(|k| {
+            let socket = Scripted {
+                queued: core::cell::RefCell::new(Vec::new()),
+                broken: core::cell::Cell::new(false),
+                id: port(k),
+            };
+            ScoutMember::new(socket, at(port(k)))
+        }));
+        assert_eq!(members.askers(), bound);
+        assert_eq!(members.left_out(), 1);
+        let kept: Vec<u16> = members.readable.iter().copied().collect();
+        assert_eq!(kept, (0..bound).map(port).collect::<Vec<_>>());
+    }
+
+    /// An address past the window's bound opens no socket: the window holds the bound's ask
+    /// sockets and counts the rest. Turned red by a window that opens a socket it cannot keep, or
+    /// asks on more interfaces than the bound.
+    #[test]
+    fn an_address_past_the_bound_opens_no_socket() {
+        let group = IpAddr::V4(Ipv4Addr::new(239, 255, 91, 76));
+        let locals = core::iter::repeat(Ipv4Addr::LOCALHOST).take(MAX_SCOUT_INTERFACES + 2);
+        let members = ScoutMembers::<PosixUdpSocket>::open(group, 47_476, locals);
+        assert_eq!(members.askers(), MAX_SCOUT_INTERFACES);
+        assert_eq!(members.left_out(), 2);
+        assert!(members.members.len() <= MAX_SCOUT_INTERFACES + GROUP_ROWS);
+    }
+
     /// A window asks from a socket bound to each address it is handed, and from none of an
     /// address the group's family refuses: an IPv4 address for an IPv6 group asks nothing. Turned
     /// red by an ask socket bound elsewhere than its address, or one made for the other family.
     #[test]
     fn an_ask_socket_is_bound_to_the_address_it_is_handed() {
         let group = IpAddr::V4(Ipv4Addr::new(239, 255, 91, 79));
-        let members = ScoutMembers::<PosixUdpSocket>::open(group, 47_479, &[Ipv4Addr::LOCALHOST]);
+        let members = ScoutMembers::<PosixUdpSocket>::open(group, 47_479, [Ipv4Addr::LOCALHOST]);
         let askers: Vec<SocketAddr> = members
             .members
             .iter()
@@ -498,7 +595,7 @@ mod tests {
         assert_eq!(askers[0].ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
 
         let v6 = IpAddr::V6(Ipv6Addr::new(0xff05, 0, 0, 0, 0, 0, 0, 0x231));
-        let members = ScoutMembers::<PosixUdpSocket>::open(v6, 47_479, &[Ipv4Addr::LOCALHOST]);
+        let members = ScoutMembers::<PosixUdpSocket>::open(v6, 47_479, [Ipv4Addr::LOCALHOST]);
         assert!(
             members
                 .members
@@ -515,7 +612,7 @@ mod tests {
     fn a_window_opened_on_the_host_asks_the_group() {
         let group = IpAddr::V4(Ipv4Addr::new(239, 255, 91, 78));
         let locals = crate::interfaces::multicast_interface_addresses().unwrap_or_default();
-        let members = ScoutMembers::<PosixUdpSocket>::open(group, 47_478, &locals);
+        let members = ScoutMembers::<PosixUdpSocket>::open(group, 47_478, locals.iter().copied());
         for member in &members.members {
             assert_eq!(member.peer, SocketAddr::new(group, 47_478));
         }

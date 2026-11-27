@@ -117,27 +117,55 @@ impl Entry<'_> {
     }
 }
 
-/// The first IPv4 address of every interface that can carry multicast, one for each interface, in
-/// the order of `entries`: an entry is taken when no earlier one of its interface was, which is
-/// asked of the entries themselves (as zenoh-pico's walk asks whether an interface was visited,
-/// `vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @ `_z_udp_posix_iface_was_visited`), so
-/// the question keeps no list of names.
+/// A walk of the first IPv4 address of every interface that can carry multicast, one for each
+/// interface, in the order of its entries: an entry is taken when no earlier one of its interface
+/// was, which is asked of the entries themselves (as zenoh-pico's walk asks whether an interface was
+/// visited, `vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @
+/// `_z_udp_posix_iface_was_visited`), so the walk keeps no list of names and makes none.
 #[cfg(unix)]
-fn first_ipv4_of_each<'a>(entries: impl Iterator<Item = Entry<'a>> + Clone) -> Vec<Ipv4Addr> {
-    let mut addresses = Vec::new();
-    for (k, entry) in entries.clone().enumerate() {
-        let Some(address) = entry.scouting_ipv4() else {
-            continue;
-        };
-        let taken_before = entries
-            .clone()
-            .take(k)
-            .any(|earlier| earlier.name == entry.name && earlier.scouting_ipv4().is_some());
-        if !taken_before {
-            addresses.push(address);
+struct FirstIpv4OfEach<I> {
+    /// Every entry, from the first: what an entry's earlier ones are asked of.
+    all: I,
+    /// The entries not walked yet.
+    rest: I,
+    /// How many entries were walked.
+    walked: usize,
+}
+
+#[cfg(unix)]
+impl<I: Clone> FirstIpv4OfEach<I> {
+    /// The walk of `entries`.
+    fn new(entries: I) -> Self {
+        Self {
+            all: entries.clone(),
+            rest: entries,
+            walked: 0,
         }
     }
-    addresses
+}
+
+#[cfg(unix)]
+impl<'a, I: Iterator<Item = Entry<'a>> + Clone> Iterator for FirstIpv4OfEach<I> {
+    type Item = Ipv4Addr;
+
+    fn next(&mut self) -> Option<Ipv4Addr> {
+        loop {
+            let entry = self.rest.next()?;
+            let earlier = self.walked;
+            self.walked = self.walked.saturating_add(1);
+            let Some(address) = entry.scouting_ipv4() else {
+                continue;
+            };
+            let taken_before = self
+                .all
+                .clone()
+                .take(earlier)
+                .any(|before| before.name == entry.name && before.scouting_ipv4().is_some());
+            if !taken_before {
+                return Some(address);
+            }
+        }
+    }
 }
 
 /// The system's list as `getifaddrs` gives it, held until it is dropped, which gives it back.
@@ -261,7 +289,7 @@ impl InterfaceTable {
     /// interface would reach no node the first does not, and a loopback has no `IFF_MULTICAST` on
     /// the hosts this crate is built for, so the flag test leaves it out.
     pub fn multicast_interface_addresses(&self) -> Vec<Ipv4Addr> {
-        first_ipv4_of_each(self.rows.iter().map(InterfaceRow::entry))
+        FirstIpv4OfEach::new(self.rows.iter().map(InterfaceRow::entry)).collect()
     }
 
     /// Every unicast address, of either family, of every interface that can carry multicast, once
@@ -372,7 +400,20 @@ fn c_int_of(family: libc::sa_family_t) -> libc::c_int {
 /// window, whose one question this is, makes no table.
 #[cfg(unix)]
 pub fn multicast_interface_addresses() -> Option<Vec<Ipv4Addr>> {
-    Some(first_ipv4_of_each(HostList::read()?.entries()))
+    walk_multicast_interface_addresses(|addresses| addresses.collect())
+}
+
+/// Hand `ask` a walk of the first IPv4 address of every interface that can carry multicast, read
+/// from the host's list now where the system holds it, and answer what `ask` answers; `None`,
+/// `ask` not called, when the list could not be read. Nothing of the list is copied and no list
+/// of addresses made: a scouting window asks its interfaces with no allocation of its own. See
+/// [`InterfaceTable::multicast_interface_addresses`] for the rule.
+#[cfg(unix)]
+pub fn walk_multicast_interface_addresses<T>(
+    ask: impl FnOnce(&mut dyn Iterator<Item = Ipv4Addr>) -> T,
+) -> Option<T> {
+    let list = HostList::read()?;
+    Some(ask(&mut FirstIpv4OfEach::new(list.entries())))
 }
 
 /// The system's index of the interface whose name is `name`, 0 for none: `name` is a name the
@@ -438,6 +479,16 @@ pub fn interface_indices_of_address(address: IpAddr) -> Result<Vec<u32>, IfaceRe
 /// the host crate's reading answers there.
 #[cfg(windows)]
 pub fn multicast_interface_addresses() -> Option<Vec<Ipv4Addr>> {
+    None
+}
+
+/// See the Windows form of [`multicast_interface_addresses`]: there is no list to walk, and
+/// `ask` is not called.
+#[cfg(windows)]
+pub fn walk_multicast_interface_addresses<T>(
+    ask: impl FnOnce(&mut dyn Iterator<Item = Ipv4Addr>) -> T,
+) -> Option<T> {
+    let _ = ask;
     None
 }
 
@@ -752,6 +803,11 @@ mod tests {
                 multicast_interface_addresses(),
                 Some(table.multicast_interface_addresses()),
                 "the free function reads the same table"
+            );
+            assert_eq!(
+                walk_multicast_interface_addresses(|addresses| addresses.collect::<Vec<_>>()),
+                Some(table.multicast_interface_addresses()),
+                "the walk of the host's list answers what the table does"
             );
         }
 

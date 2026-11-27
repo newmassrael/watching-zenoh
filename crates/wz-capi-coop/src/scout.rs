@@ -17,7 +17,6 @@
 #[cfg(all(test, feature = "std", unix))]
 use alloc::sync::Arc;
 use core::ffi::c_int;
-use core::net::Ipv4Addr;
 
 use wz_capi_port::ScoutAsk;
 use wz_runtime_coop::{ClockSource, CoopRuntime};
@@ -41,13 +40,6 @@ pub use wz_session_core::scouting_host::{
 /// a few milliseconds, so the window ends close to its budget without spinning, and a Hello that
 /// arrives ends the wait at once.
 const IDLE_WAIT_MS: c_int = 2;
-
-/// The interface addresses a window asks by: the first IPv4 address of every interface that is up
-/// and can carry multicast (the host's own reading; none when it cannot be read, which is a window
-/// on the group socket alone).
-fn interface_addresses() -> Vec<Ipv4Addr> {
-    wz_runtime_posix::interfaces::multicast_interface_addresses().unwrap_or_default()
-}
 
 /// One scouting window over `members`: send the Scout, read until the machine resolves, and answer
 /// what was collected.
@@ -165,7 +157,13 @@ fn window_hellos<S: MulticastSocket + ReadableAmong, C: ClockSource + Clone + 's
     table: &mut HelloTable,
     buffer: &mut [u8],
 ) {
-    let members = ScoutMembers::<S>::open(ask.group, ask.port, &interface_addresses());
+    // The window asks by the first IPv4 address of every interface that is up and can carry
+    // multicast, walked where the host holds its list; a list that cannot be read is a window
+    // asked by no interface.
+    let members = wz_runtime_posix::interfaces::walk_multicast_interface_addresses(|locals| {
+        ScoutMembers::<S>::open(ask.group, ask.port, locals)
+    })
+    .unwrap_or_else(|| ScoutMembers::<S>::open(ask.group, ask.port, core::iter::empty()));
     let params = ScoutParams {
         what: ask.what,
         zid: ask.zid,
