@@ -1802,9 +1802,8 @@ fn a_session_rejoins_as_many_chains_at_once_as_its_config_states() {
     }
 }
 
-/// The ends of the session's legs, the rows of their callbacks and the session's note of each leg
-/// pending are lent a row for each get every table of pending gets holds: a leg takes one of
-/// each, and none is held anywhere else.
+/// The ends of the session's legs and the rows of their callbacks are lent a row for each get
+/// every table of pending gets holds: a leg takes one of each, and none is held anywhere else.
 #[cfg(feature = "query")]
 #[test]
 fn the_plan_lends_a_row_for_the_end_of_each_get() {
@@ -1822,12 +1821,7 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
     // A build of the region's form keeps these rows in its region at the build's bound
     // (`StatePlaces::tables`): its arena lays out none of them.
     #[cfg(not(feature = "runtime-plan"))]
-    for part in [
-        "ended legs",
-        "leg callbacks",
-        "pending legs",
-        "held replies",
-    ] {
+    for part in ["ended legs", "leg callbacks", "held replies"] {
         assert!(
             plan.rows().all(|laid| laid.part() != part),
             "the region holds the {part}"
@@ -1837,8 +1831,8 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
     the_arena_lends_a_row_for_the_end_of_each_get(&plan, legs);
 }
 
-/// The rows of the ends of `legs` legs, their callbacks, the session's notes of them and the
-/// replies the gets hold, as `plan` lays them out where the arena lends them.
+/// The rows of the ends of `legs` legs, their callbacks and the replies the gets hold, as `plan`
+/// lays them out where the arena lends them.
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
 fn the_arena_lends_a_row_for_the_end_of_each_get(plan: &ArenaPlan, legs: usize) {
     assert_eq!(row(plan, "ended legs").count, legs);
@@ -1851,18 +1845,15 @@ fn the_arena_lends_a_row_for_the_end_of_each_get(plan: &ArenaPlan, legs: usize) 
         row(plan, "leg callbacks").entry_bytes,
         core::mem::size_of::<Option<crate::engine::LegRow>>()
     );
-    assert_eq!(row(plan, "pending legs").count, legs);
-    assert_eq!(
-        row(plan, "pending legs").entry_bytes,
-        core::mem::size_of::<crate::engine::PendingGet>()
-    );
     // The replies held to their Finals are a row each, as many as the session holds at once, of
     // the rows the engine lends them (`HeldReplies::lent`).
     let held = row(plan, "held replies");
     assert_eq!(held.count, plan.session().held_replies());
     assert_eq!(
         held.span(),
-        wz_session_core::reply_hold::HeldReplies::<u64, Lent>::arena_bytes(held.count)
+        wz_session_core::reply_hold::HeldReplies::<crate::engine::LegId, Lent>::arena_bytes(
+            held.count
+        )
     );
 }
 
@@ -2609,16 +2600,9 @@ fn the_pico_preset_holds_an_advanced_subscribers_two_liveliness_subscribers() {
 }
 
 /// The parts of an arena held once for each face: the tables of what its peer writes and is owed,
-/// its table of pending gets, and the ends of their legs, their callbacks and the session's note
-/// of each.
+/// its table of pending gets, and the ends of their legs and their callbacks.
 #[cfg(feature = "listen")]
-const FACE_PARTS: [&str; 5] = [
-    "peer tables",
-    "pending gets",
-    "ended legs",
-    "leg callbacks",
-    "pending legs",
-];
+const FACE_PARTS: [&str; 4] = ["peer tables", "pending gets", "ended legs", "leg callbacks"];
 
 /// The parts of an arena held once for the session whose size follows its faces: the pools of what
 /// the faces' peers write, each one area.

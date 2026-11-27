@@ -170,8 +170,8 @@ impl AdvancedPublisherPlane for PicoPlane {
     type Publisher = PlainPublisher;
     /// Retracted on the plane's engine.
     type Queryable = PlainQueryable;
-    /// The token's id, retracted on the plane's engine.
-    type Token = wz_capi_port::TokenId;
+    /// The token's row in the session, retracted on the plane's engine.
+    type Token = wz_capi_port::EntityRow;
     type Beacon = BeaconPublisher;
     /// The engine's periodic job, which is its own to run: a task of the runtime on the tokio
     /// engine, a step of the session on the cooperative one. `None` from an engine with no
@@ -283,7 +283,7 @@ impl AdvancedPublisherPlane for PicoPlane {
     fn declare_token(
         &self,
         keyexpr: &str,
-    ) -> Result<wz_capi_port::TokenId, AdvancedPublisherError> {
+    ) -> Result<wz_capi_port::EntityRow, AdvancedPublisherError> {
         crate::liveliness::declare_token(self.session(), keyexpr, None)
             .map_err(|code| Self::refusal("liveliness token", code))
     }
@@ -310,7 +310,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         queryable.retract(&self.engine);
     }
 
-    fn retract_token(&self, token: wz_capi_port::TokenId) {
+    fn retract_token(&self, token: wz_capi_port::EntityRow) {
         self.engine.undeclare_liveliness_token(token);
     }
 

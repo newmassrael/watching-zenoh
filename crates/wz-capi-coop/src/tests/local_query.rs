@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    FilterPlane, HeldQueryId, MatchingSink, QblId, QueryHolder, QueryableSink, Refusal,
+    EntityRow, FilterPlane, HeldQueryId, MatchingSink, QueryHolder, QueryableSink, Refusal,
     ReplyCallback, SessionDrive, SessionEngine, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
@@ -43,7 +43,7 @@ fn declare(
     keyexpr: &str,
     origin: Locality,
     answer: impl Fn(&dyn QueryHolder, &dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static,
-) -> QblId {
+) -> EntityRow {
     engine
         .declare_queryable_on_wire(
             keyexpr,
@@ -58,7 +58,12 @@ fn declare(
 }
 
 /// A queryable that answers each query with `payload`, on the query's own key.
-fn answering(engine: &Engine, keyexpr: &str, origin: Locality, payload: &'static [u8]) -> QblId {
+fn answering(
+    engine: &Engine,
+    keyexpr: &str,
+    origin: Locality,
+    payload: &'static [u8],
+) -> EntityRow {
     declare(engine, keyexpr, origin, move |_, query, out| {
         out.reply_keyed(query.keyexpr(), payload)
             .expect("a reply on the query's own key");
@@ -203,7 +208,9 @@ fn within_five_seconds<R: Send + 'static>(
 
 /// A get made for any destination goes out and reaches the session's own queryables, and ends
 /// when both have answered: the own reply is there when the call returns, the leg is still open
-/// for the router's Final, and the router's reply and Final come with the steps.
+/// for the router's Final, and the router's reply and Final come with the steps. Both legs hand
+/// their replies to the one callback the get minted. Turned red by a leg that mints a callback of
+/// its own (`AskedGet::leg` opening a row for each leg).
 #[test]
 fn a_get_for_any_destination_waits_for_the_peer_and_the_session() {
     let router = Router::start(CatchAll::None);
@@ -226,6 +233,7 @@ fn a_get_for_any_destination_waits_for_the_peer_and_the_session() {
     );
     {
         let leg = leg.lock().unwrap();
+        assert_eq!(leg.minted, 1, "one callback for the get's two legs");
         assert!(!leg.ended, "CONTROL: the router's Final is still owed");
         assert_eq!(
             leg.replies,
@@ -243,6 +251,39 @@ fn a_get_for_any_destination_waits_for_the_peer_and_the_session() {
         .collect();
     payloads.sort();
     assert_eq!(payloads, [b"own".to_vec(), b"peer".to_vec()]);
+    assert_eq!(router.seen(|s| s.queries), 1);
+}
+
+/// A get for any destination that consolidates `Latest` hands its callback one reply of a key over
+/// its two legs, the peer's and the session's own, at its end, as zenoh consolidates a query over
+/// every Final; each leg consolidating apart handed one reply of the key from each. The CONTROL is
+/// the call's return, where the own leg's Final is in and its reply is still held for the get's
+/// end. Turned red by a leg's hold of its own (`LegHold` tagged with the leg), or by a leg's Final
+/// that flushes before the get's last.
+#[test]
+fn a_latest_get_of_two_legs_hands_one_reply_of_a_key_over_both() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Answer("demo/lq/**", b"peer"));
+    answering(&engine, "demo/lq/**", Locality::Any, b"own");
+    let latest = QueryOptions::get()
+        .with_consolidation(ConsolidationMode::Latest)
+        .with_allowed_destination(Locality::Any);
+    let (issued, leg) = ask(&engine, "demo/lq/a", &latest, None, None, None);
+    assert_eq!(
+        issued,
+        Ok(2),
+        "a leg to the peer and one to the session's own"
+    );
+    assert!(
+        leg.lock().unwrap().replies.is_empty(),
+        "CONTROL: the own reply is held back for the get's end"
+    );
+    until(&engine, "the get to end", || leg.lock().unwrap().ended);
+    let leg = leg.lock().unwrap();
+    assert_eq!(leg.replies.len(), 1, "one reply of the key over both legs");
+    assert_eq!(leg.replies[0].1, "demo/lq/a");
+    assert_eq!(leg.minted, 1);
     assert_eq!(router.seen(|s| s.queries), 1);
 }
 
@@ -654,7 +695,7 @@ fn a_queryable_that_undeclares_itself_inside_an_own_get_is_let_go_of_before_the_
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
     let dropped = Arc::new(AtomicUsize::new(0));
-    let own: Arc<Mutex<Option<QblId>>> = Arc::default();
+    let own: Arc<Mutex<Option<EntityRow>>> = Arc::default();
     let guard = Dropped(dropped.clone());
     let session = EngineHold::downgrade(&engine);
     let id = declare(&engine, "demo/lq/self/**", Locality::Any, {

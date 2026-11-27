@@ -88,6 +88,7 @@ advanced-retention = ["advanced-recovery"]
 engine-host = [
     "advanced-history",
     "dep:wz-capi-port",
+    "wz-capi-port/key-anchors",
     "wz-session-core/query-get",
     "wz-session-core/query-selector-parameters",
     "wz-session-core/query-timeout",

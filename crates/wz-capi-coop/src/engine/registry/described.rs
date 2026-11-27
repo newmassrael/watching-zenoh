@@ -257,17 +257,16 @@ impl RegistryRowsAt {
 
 impl<H: Holders> RegistryOf<H> {
     /// The description of a registry at `at` and, in a region, its rows where `rows` says: the
-    /// application's lists' lines (the session's own tokens are rows of its one table set, so its
-    /// observer's own registry of them has no room) and its tables', the sets' table's, a set for
-    /// each face a plan counts (`RowCount::FaceSets`), the index of which face holds each where
-    /// the form keeps one (`RowCount::HeldSets`), the tokens owed by the faces that went where
-    /// faces go, and the session's own gets' where it answers its own; and the handle each keeps to
-    /// the key arena. A set's own lines are the set's description (`FaceTables::places`), walked
+    /// application's lists' lines and its tables' (the session's own tokens among their rows), the
+    /// sets' table's, a set for each face a plan counts (`RowCount::FaceSets`), the index of which
+    /// face holds each where the form keeps one (`RowCount::HeldSets`), the tokens owed by the
+    /// faces that went where faces go, and the session's own gets' where it answers its own; and
+    /// the handle each keeps to the key arena. A set's own lines are the set's description (`FaceTables::places`), walked
     /// where the set lies.
     pub(super) const fn places(at: usize, rows: RegistryRowsAt) -> RegionLines<REGISTRY_LINES> {
         let app = at.wrapping_add(offset_of!(Self, app));
         let lines = RegionLines::EMPTY
-            .with(&App::places::<0>(app, rows.app), 0)
+            .with(&App::places(app, rows.app), 0)
             .with(
                 &CoopTables::places(app.wrapping_add(offset_of!(App, tables)), rows.tables),
                 0,

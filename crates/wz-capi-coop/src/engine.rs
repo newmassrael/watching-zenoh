@@ -101,13 +101,11 @@ use wz_session_core::row_callback::{RowCallback, ThreadForm};
 use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
 use wz_session_core::session_tables::{
-    kind, DeclaredRow, DeclaredTable, FilterInterest, InterestKind, InterestName, KeyexprHandle,
-    KeyexprRef, MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks, RowKey,
-    SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
+    kind, DeclaredKind, DeclaredRow, DeclaredTable, FilterInterest, InterestKind, InterestName,
+    KeyexprHandle, KeyexprRef, MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks,
+    RowKey, SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
-#[cfg(feature = "runtime-plan")]
-use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
@@ -116,6 +114,7 @@ use crate::admission_gate::AdmissionGate;
 use wz_capi_port::os::{self, Mutex, MutexGuard};
 #[cfg(feature = "threads")]
 use wz_capi_port::os::{JoinHandle, ThreadId};
+use wz_capi_port::EntityRow;
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, Declared, EngineDeliveries, FanoutError, FilterId, FilterPlane,
     FilteredPut, HoldRefused, KeyAnchor, KeyHold, KeyView, MatchId, MatchingSink, PeerIdentity,
@@ -224,7 +223,7 @@ use wz_session_core::WhatAmI;
 #[cfg(feature = "queryable")]
 use {
     query::{CoopHolder, Onward, QueryPlane, QueryableRow},
-    wz_capi_port::{QblId, QueryableSink},
+    wz_capi_port::QueryableSink,
     wz_session_core::query::QueryResponder,
     wz_session_core::query_sink::ReplyError,
     wz_session_core::query_sink::{ProvenQuery, QueryView},
@@ -428,7 +427,7 @@ pub(crate) use liveliness::{LivelinessCall, LivelinessRow};
 #[cfg(feature = "liveliness")]
 use {
     registry::HistoryCursor,
-    wz_capi_port::{LivelinessSink, TokenId},
+    wz_capi_port::LivelinessSink,
     wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind},
     wz_session_core::session_tables::LivelinessSubscriberHandle,
 };
@@ -438,12 +437,12 @@ mod get;
 /// What a face's table of pending gets holds for each leg ([`get::LegSink`]). A build that asks no
 /// query keeps no such table (`registry::Gets`), so it names no leg.
 #[cfg(feature = "query")]
-pub(crate) use get::{Ended, LegHold, LegId, LegRow, LegSink, PendingGet};
+pub(crate) use get::{Ended, LegHold, LegId, LegRow, LegSink};
 #[cfg(feature = "query")]
 use wz_session_core::round::LegHolders;
 #[cfg(feature = "query")]
 use {
-    get::{EndedLegs, GetKind, GetPlane, LegRows},
+    get::{EndedLegs, GetPlane, LegRows},
     wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey},
     wz_capi_port::ReplyCallback,
     wz_session_core::query_options::QueryOptionsOf,
@@ -892,9 +891,6 @@ struct SessionLent {
     /// replies the gets that consolidate hold, and the legs' callbacks.
     #[cfg(feature = "query")]
     gets: Placed<GetPlane>,
-    /// The session's own note of each leg pending, a row for each get its tables hold.
-    #[cfg(feature = "query")]
-    pending_gets: Rows<PendingGet, { usize::MAX }>,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
     /// The places for values lodged by counts, each of which keeps the arena's memory while lent.
@@ -936,8 +932,8 @@ struct SessionLent {
 }
 
 /// The plain tables of a session's state, lent by an open's one lender
-/// (`SessionRows::lent_from`): the ends of its legs, their callbacks and the session's note of
-/// each leg pending, and the Finals its queryables hold, where the arena lends them
+/// (`SessionRows::lent_from`): the ends of its legs and their callbacks, and the Finals its
+/// queryables hold, where the arena lends them
 /// (`runtime-plan`; a region holds them otherwise, `StatePlaces::tables`), and the ring of the
 /// advanced publishers' caches.
 struct StateTables {
@@ -945,8 +941,6 @@ struct StateTables {
     legs: Rows<Ended, { usize::MAX }>,
     #[cfg(all(feature = "query", feature = "runtime-plan"))]
     leg_rows: Rows<Option<LegRow>, { usize::MAX }>,
-    #[cfg(all(feature = "query", feature = "runtime-plan"))]
-    pending_gets: Rows<PendingGet, { usize::MAX }>,
     /// The Finals the queryables' plane holds and the requests a dispatch refused, a row of each
     /// for each query held at once (`query::FinalHolds`).
     #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
@@ -978,8 +972,6 @@ impl SessionRows {
             legs: lend.table(legs),
             #[cfg(all(feature = "query", feature = "runtime-plan"))]
             leg_rows: lend.table(legs),
-            #[cfg(all(feature = "query", feature = "runtime-plan"))]
-            pending_gets: lend.table(legs),
             #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
             held_finals: lend.table(self.held_queries()),
             #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
@@ -1061,8 +1053,6 @@ fn lend_session(
         legs,
         #[cfg(all(feature = "query", feature = "runtime-plan"))]
         leg_rows,
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
-        pending_gets,
         #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         held_finals,
         #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
@@ -1119,8 +1109,6 @@ fn lend_session(
         legs,
         #[cfg(feature = "query")]
         leg_rows,
-        #[cfg(feature = "query")]
-        pending_gets,
         #[cfg(feature = "query")]
         held_replies,
         #[cfg(feature = "queryable")]
@@ -1244,19 +1232,13 @@ fn lend_session(
         resolve_limits(config),
         arena.arena_mut(),
         keys,
-        // The session's tokens are rows of its one table set, which answers a peer's Interest
-        // too, so the observer's own registry of them is lent none.
-        ObserverRows {
-            tables: plan.tables(),
-            local_tokens: 0,
-        },
+        plan.tables(),
         plan.gets(),
         plan.peers(),
         delivery,
     )
     .map_err(ArenaRefused::Lend)?;
-    // The application's tables are the region's, placed above; the session's one table set holds
-    // its tokens as rows, so the observer's own registry of them has none (`RegistryRegion`).
+    // The application's tables are the region's, placed above (`RegistryRegion`).
     // SAFETY: the region was written and placed by `StateRegion::place` above and nothing reaches
     // its registry yet; the block is held after the handle (`SessionLent`, then `Core`).
     #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
@@ -1316,8 +1298,6 @@ fn lend_session(
         registry,
         #[cfg(feature = "query")]
         gets,
-        #[cfg(feature = "query")]
-        pending_gets,
         handle_place,
         places,
         lodgings,
@@ -1536,10 +1516,9 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     decl_watches: DeclWatches,
     zid: SessionZid,
     closed: AtomicBool,
-    /// The ids of what the session holds for the program and never names to a peer: the legs
-    /// of its gets and its periodic jobs. A space of their own, so they are not refused when the
-    /// entity ids are spent.
-    #[cfg(any(feature = "query", feature = "ticker"))]
+    /// The ids of what the session holds for the program and never names to a peer: its periodic
+    /// jobs. A space of their own, so they are not refused when the entity ids are spent.
+    #[cfg(feature = "ticker")]
     next_local: AtomicU64,
     #[cfg(feature = "threads")]
     reader: Mutex<Option<ReadTask>>,
@@ -2771,6 +2750,18 @@ fn row_of<K>(id: u64) -> Option<Handle<K>> {
     Handle::from_bits(NonZeroU32::new(u32::try_from(id).ok()?)?)
 }
 
+/// The row the port names an entity of the session's tables of declarations by: the row's word,
+/// its table and its handle, generation and all ([`DeclaredRow::to_bits`]).
+fn entity_row<K: DeclaredKind>(handle: Handle<K>) -> EntityRow {
+    EntityRow::from_bits(DeclaredRow::of(handle).to_bits())
+}
+
+/// The row of kind `K` that `row` names, as [`entity_row`] made it: `None` for a row of another
+/// table, or a word no row writes. Whether it still stands is its table's to say.
+fn entity_handle<K: DeclaredKind>(row: EntityRow) -> Option<Handle<K>> {
+    DeclaredRow::from_bits(row.bits())?.handle()
+}
+
 /// What a write filter or a matching listener on `plane` counts, as the session's tables name it.
 fn plane_of(plane: FilterPlane) -> Plane {
     match plane {
@@ -3123,12 +3114,6 @@ impl SessionParts for CoopSession {
     type Queryables = Placed<QueryPlane>;
     #[cfg(not(feature = "queryable"))]
     type Queryables = ();
-    /// The legs of the session's gets still pending on its links, in rows of the policy of the
-    /// state's plain tables.
-    #[cfg(feature = "query")]
-    type PendingGets = Rows<PendingGet, { usize::MAX }>;
-    #[cfg(not(feature = "query"))]
-    type PendingGets = ();
     #[cfg(feature = "query")]
     type Gets = Placed<GetPlane>;
     #[cfg(not(feature = "query"))]
@@ -3559,25 +3544,46 @@ fn sleep_ms(ms: u32) {
     os::sleep_ms(ms.into());
 }
 
-/// One of the session's own subscribers, as a row of the session's tables holds it: the row keeps
-/// its entity id, the pattern the subscriber matches, the declaration its key is named by, which
-/// it holds, and what its retraction names, and this everything else the session knows of it, its
-/// callback among it. The subscriber is that one row (`docs/c-abi-architecture.md`, P1), and so
+/// One of the session's own entities whose callback the program registered, as a row of the
+/// session's tables holds it: the tables' row keeps the entity's id, its key, the declaration its
+/// key is named by and what its retraction names, and this everything else the session knows of
+/// it, its callback among it. The entity is that one row (`docs/c-abi-architecture.md`, P1), and so
 /// is its callback's life (P11): a call is begun on the row's latch with the session held and made
-/// after it, and an undeclared row is let go of by whoever sees its last call end.
-pub(crate) struct SubscriberRow {
+/// after it, and an undeclared row is let go of by whoever sees its last call end. One record for
+/// every kind, which is the callback it keeps (`S`) and what that callback is shown beside what it
+/// is handed (`A`): a subscriber's ([`SubscriberRow`]), a queryable's, a liveliness subscriber's.
+pub(crate) struct LatchedRow<S, A = ()> {
     /// What the ABI's key kept alive (an object of the ABI's), let go of with the row, with no
     /// lock of the session held: the declarations the key and the retraction name are the tables'
     /// row's to hold.
     _anchor: KeyAnchor,
     /// The program's callback, called where the row lies: the tables lend their rows from the
     /// session's arena and never move one.
-    sink: SubscriberSink,
-    /// Whether the callback is shown each sample's timestamp (`entity-timestamp-opt-in`).
-    expose: bool,
-    /// How many calls of the callback run, and whether the subscriber was undeclared.
+    sink: S,
+    /// What the callback is shown beside what it is handed: for a subscriber's, whether it sees
+    /// each sample's timestamp (`entity-timestamp-opt-in`); nothing for the other kinds. A field of
+    /// the row and not of the callback's, so the row is laid out as one record.
+    shown: A,
+    /// How many calls of the callback run, and whether the entity was undeclared.
     latch: Latch,
 }
+
+impl<S> LatchedRow<S> {
+    /// An entity keeping `anchor`, calling `sink`: a queryable's or a liveliness subscriber's.
+    #[cfg(any(feature = "queryable", feature = "liveliness"))]
+    pub(crate) fn new(anchor: KeyAnchor, sink: S) -> Self {
+        Self {
+            _anchor: anchor,
+            sink,
+            shown: (),
+            latch: Latch::new(),
+        }
+    }
+}
+
+/// One of the session's own subscribers: its callback, and whether it is shown each sample's
+/// timestamp.
+pub(crate) type SubscriberRow = LatchedRow<SubscriberSink, bool>;
 
 impl SubscriberRow {
     /// A subscriber keeping `anchor`, handing what it hears to `sink`, the timestamp shown when
@@ -3588,7 +3594,7 @@ impl SubscriberRow {
         Self {
             _anchor: anchor,
             sink,
-            expose,
+            shown: expose,
             latch: Latch::new(),
         }
     }
@@ -3598,7 +3604,7 @@ impl SubscriberRow {
     /// its callback is not to see. Whether a call begun before an undeclaration still hands it is
     /// the call's to say (`SubscriberCall`).
     fn hand(&self, sample: &SampleRef<'_>) {
-        self.sink.call_ref(sample, self.expose);
+        self.sink.call_ref(sample, self.shown);
     }
 
     /// Declare subscriber `id`, the id its row in the tables holds, on `key`, over `actions`:
@@ -3644,21 +3650,21 @@ const _: () = assert!(
     "a call of a subscriber's callback ends with no lock held"
 );
 
-/// A call of a subscriber's callback, begun on its row's latch: where the row lies.
-pub(crate) struct RowCall(NonNull<SubscriberRow>);
+/// A call of an entity's callback, begun on its row's latch: where the row lies.
+pub(crate) struct RowCall<S, A = ()>(NonNull<LatchedRow<S, A>>);
 
-impl RowCallback for SubscriberRow {
-    type Call = RowCall;
+impl<S, A> RowCallback for LatchedRow<S, A> {
+    type Call = RowCall<S, A>;
 
     const READS_ROW_IN_PLACE: bool = true;
 
     #[inline]
-    fn begin(&self) -> Option<RowCall> {
+    fn begin(&self) -> Option<RowCall<S, A>> {
         self.latch.begin().then(|| RowCall(NonNull::from(self)))
     }
 
     #[inline]
-    unsafe fn end(call: RowCall) -> bool {
+    unsafe fn end(call: RowCall<S, A>) -> bool {
         // SAFETY: the caller's: the row has not moved since the call began and is still in its
         // table, which keeps it until its last call ended.
         unsafe { call.0.as_ref() }.latch.end()
@@ -3681,12 +3687,12 @@ impl RowCallback for SubscriberRow {
 /// ([`Self::end`]), or its row would keep its slot for good.
 #[must_use = "a call is ended, or its row is never let go of"]
 pub(crate) struct SubscriberCall {
-    call: RowCall,
+    call: RowCall<SubscriberSink, bool>,
 }
 
 impl SubscriberCall {
     /// `call`, begun on a subscriber's row.
-    pub(crate) fn new(call: RowCall) -> Self {
+    pub(crate) fn new(call: RowCall<SubscriberSink, bool>) -> Self {
         Self { call }
     }
 
@@ -3975,10 +3981,9 @@ fn lend_through<C: ClockSource + 'static, U: Send>(
 enum LegTurn {
     /// No face is left to ask.
     Done,
-    /// The face was not asked, or its leg was not counted.
+    /// The face was not asked, or its leg was not counted: a leg held and not issued went with
+    /// its entry, which stood down from the get.
     Skipped,
-    /// The leg was not issued and is over: let go of with nothing held.
-    Ended(u64),
     /// The leg was issued.
     Issued,
 }
@@ -4207,26 +4212,32 @@ fn leg_deadline_ms(now_us: u64, timeout_ms: u32) -> u64 {
 }
 
 /// What every leg of one get is held pending with (`CoopEngine::hold_leg`): the key it was asked
-/// under, its options, the consolidation and the replies' keys its parameters state, read once
-/// for every leg, whether its callbacks show a reply's timestamp, and the mint of each leg's
-/// callback.
+/// under, the consolidation and the replies' keys its parameters state, read once for every leg,
+/// whether its callback shows a reply's timestamp, its deadline, the mint of that callback and the
+/// get as its asker holds it, whose one callback every leg hands its replies to.
 #[cfg(feature = "query")]
-struct LegAsk<'a, 'o> {
+struct LegAsk<'a> {
     keyexpr: &'a str,
-    opts: &'a QueryOptionsOf<'o>,
     consolidation: wz_session_core::query_mode::ConsolidationMode,
     accept: wz_session_core::reply_acceptance::ReplyKeyExpr,
     expose: bool,
+    /// The fan the get was asked under, which its row names.
+    fan: Option<FanKey>,
+    /// The get's one deadline, in milliseconds on the session's clock, read under the hold of its
+    /// first leg, which every leg is held with, so its legs time out in one sweep; `None` for a get
+    /// that waits with no timeout.
+    deadline_ms: Option<u64>,
     mint: &'a mut dyn FnMut() -> ReplyCallback,
+    /// The get's callback's row, opened at its first leg, of which each leg holds a count.
+    get: get::AskedGet<'a>,
 }
 
 /// Where one leg of a get is held pending (`CoopEngine::hold_leg`): in the table of `face` (a
-/// link's, a group's, or the session's own, `LOCAL_FACE`) under the id `rid` makes, the leg's id
-/// `leg`, owed `finals` Finals.
+/// link's, a group's, or the session's own, `LOCAL_FACE`) under the id `rid` makes, owed `finals`
+/// Finals.
 #[cfg(feature = "query")]
 struct LegEntry {
     face: FaceId,
-    leg: u64,
     rid: LegRid,
     finals: u32,
 }
@@ -4265,10 +4276,11 @@ enum LegHeld {
     },
     /// The table is no longer the session's: the leg is asked of nobody.
     Gone,
-    /// No row of the table, or of the plane's callbacks, was free: no callback was minted.
+    /// No row of the table, or of the plane's callbacks or ends, was free: nothing was minted or
+    /// held for the leg.
     NoRoom,
-    /// The table refused the registration, `table_full` when for want of a row: the leg's minted
-    /// callback is to be let go of with no lock held.
+    /// The table refused the registration, `table_full` when for want of a row: the leg's count of
+    /// the get's row went with its sink, and the get stands on what else holds it.
     Refused { table_full: bool },
 }
 
@@ -7216,10 +7228,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 #[cfg(not(feature = "queryable"))]
                 plane: (),
                 #[cfg(feature = "query")]
-                pending_gets: lent.pending_gets,
-                #[cfg(not(feature = "query"))]
-                pending_gets: (),
-                #[cfg(feature = "query")]
                 gets: lent.gets,
                 #[cfg(not(feature = "query"))]
                 gets: (),
@@ -7438,7 +7446,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 addr_of_mut!((*at).decl_watches).write(decl_watches);
                 addr_of_mut!((*at).zid).write(wire);
                 addr_of_mut!((*at).closed).write(AtomicBool::new(false));
-                #[cfg(any(feature = "query", feature = "ticker"))]
+                #[cfg(feature = "ticker")]
                 addr_of_mut!((*at).next_local).write(AtomicU64::new(1));
                 #[cfg(feature = "threads")]
                 os::mutex_in(
@@ -7504,7 +7512,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     decl_watches: _,
                 zid: _,
                 closed: _,
-                #[cfg(any(feature = "query", feature = "ticker"))]
+                #[cfg(feature = "ticker")]
                     next_local: _,
                 #[cfg(feature = "threads")]
                     reader: _,
@@ -8469,12 +8477,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let Some(ended) = self.gets.take_end() else {
                 break;
             };
-            if let Some(mut core) = self.live() {
-                core.0
-                    .session
-                    .pending_gets
-                    .retain(|pending| pending.leg != ended.leg());
-            }
             // The callback the end holds is let go of after what it was owed, with no lock held.
             self.hand_held(ended);
         }
@@ -8511,17 +8513,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         handed
     }
 
-    /// Hand the callback of the leg that `ended` what its entry held to its end, with no lock held:
-    /// the replies its consolidation made due, each taken out of its row, then those held whole,
-    /// each taken out of the plane's held table, then the timeout that ended it, as upstream's
-    /// querier hands them.
+    /// Hand the callback of the get that `ended` what it held to its end, with no lock held: the
+    /// replies it held back over its legs, each taken out of its row, then the timeout that ended
+    /// it, as upstream's querier hands them.
     #[cfg(feature = "query")]
     fn hand_held(&self, ended: Ended) {
-        let (leg, row) = (ended.leg(), ended.row());
-        while let Some(reply) = self.gets.take_due(leg) {
-            self.gets.call(row, &reply);
-        }
-        while let Some(reply) = self.gets.take_held(leg) {
+        let row = ended.row();
+        while let Some(reply) = self.gets.take_due(row) {
             self.gets.call(row, &reply);
         }
         if let Some(rid) = ended.timed_out() {
@@ -9919,6 +9917,57 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         );
     }
 
+    /// Undeclare liveliness subscriber `handle`, which the port retracts as a subscriber
+    /// ([`SessionEngine::undeclare_subscriber`]): its row goes and its Interest ends, and its row
+    /// is let go of as a subscriber's is.
+    #[cfg(feature = "liveliness")]
+    fn undeclare_liveliness_subscriber(&self, handle: LivelinessSubscriberHandle) {
+        let undeclared = self
+            .live_on_link(|core, tx| {
+                // A row of an earlier generation stands in no slot, and is retracted by nothing.
+                let standing = tables(&core.session.registry)
+                    .liveliness_subscribers()
+                    .get(handle)?;
+                let (id, prefix) = (standing.id(), standing.key().prefix());
+                // The links are asked while the rows stand, which are their places in the replay's
+                // order: the subscriber's, then the declaration's its key is named by.
+                let place = core.place_of(DeclaredRow::of(handle));
+                let keyexpr_place = core.prefix_retraction(prefix);
+                // The groups asked for it are told the asking ended.
+                #[cfg(feature = "group")]
+                for group in &core.transport.groups {
+                    group.end_liveliness_ask(id);
+                }
+                let undeclared = tables_mut(&mut core.session.registry)
+                    .undeclare_liveliness_subscriber(handle)?;
+                // The rows went before the links are told: a send never finds the tables borrowed.
+                core.retract_at(place, Some(Retract::Interest(u64::from(id))), tx);
+                core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
+                Some(undeclared.taken)
+            })
+            .flatten();
+        // The row, and its callback with it, is let go of here with no lock held; one a call of
+        // which runs is let go of by the call that ends last.
+        match undeclared {
+            Some(Some(taken)) => drop(taken),
+            Some(None) => self.wait_for_liveliness_release(handle),
+            None => {}
+        }
+    }
+
+    /// The row of the liveliness subscriber the wire numbers `id`, for a test whose callback
+    /// retracts its own subscriber before the declaration has answered its row.
+    #[cfg(all(test, feature = "liveliness", not(wz_round)))]
+    pub(crate) fn liveliness_subscriber_numbered(&self, id: EntityId) -> Option<EntityRow> {
+        let guard = self.live()?;
+        let found = tables(&guard.0.session.registry)
+            .liveliness_subscribers()
+            .iter()
+            .find(|(_, row)| row.id() == id)
+            .map(|(handle, _)| handle);
+        found.map(entity_row)
+    }
+
     /// [`Self::wait_for_release`] for queryable `handle`: a query queued for it holds a call of it
     /// until a delivery hands the query out, which hands the undeclared queryable nothing.
     #[cfg(feature = "queryable")]
@@ -10035,16 +10084,443 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
-    /// Drop leg `leg`'s callback here, its end decided by the session itself (cancelled, or never
-    /// sent), and leave no end of it waiting for a delivery.
+    /// Let go of what the get in row `row` held back and of its end, if its last leg or its asker
+    /// wrote one: the session ended it itself (cancelled), so nothing of it is handed out, and its
+    /// callback is dropped here, with no lock held, when the end's count was its last.
     #[cfg(feature = "query")]
-    fn end_leg_now(&self, leg: u64) {
-        let ended = self.gets.forget_end(leg);
-        self.gets.forget_due(leg);
-        while self.gets.take_held(leg).is_some() {}
-        if let Some(ended) = ended {
+    fn end_get_now(&self, row: LegId) {
+        self.gets.forget_due(row);
+        if let Some(ended) = self.gets.forget_end(row) {
             drop(self.gets.release(ended.row()));
         }
+    }
+
+    /// Hand out the end of a get its asker wrote as it let go, its legs having ended while they
+    /// were issued, as a step hands out the ends its read wrote: with no lock held.
+    #[cfg(feature = "query")]
+    fn hand_out_asked_ends(&self) {
+        if self.gets.ends_pending() {
+            self.deliver();
+        }
+    }
+
+    /// [`SessionEngine::get_on_wire`]'s issue of the legs, the get's asker held by its `LegAsk`
+    /// until it returns.
+    #[cfg(feature = "query")]
+    fn ask_get_legs(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        opts: &QueryOptionsOf<'_>,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Result<usize, Declined> {
+        // One leg for each face whose link is up, when the destination admits a peer, and one to
+        // the session's own queryables, when it admits the session and the build has them
+        // (`local-queryable`: zenoh-pico's default build asks none, `Z_FEATURE_LOCAL_QUERYABLE`
+        // 0). A get that reaches nobody, because its destination admits neither or because no
+        // link is up, is over at once. Each leg is issued under the session's lock and no lock is
+        // held between two of them.
+        //
+        // A get limited to some links or addressed to one node is refused by that statement:
+        // this engine reads neither, and asking every link would widen it.
+        StatementNotHonoured::of_query(opts)?;
+        // A fan cancelled before a leg is issued issues none: the get reached nobody.
+        let Ok(tag) = self.tag_of(fan) else {
+            return Ok(0);
+        };
+        // What the get reads of the session before its first leg (the row of its own Final, the
+        // timestamp policy) is read under the hold of that leg, the faces' places taken before the
+        // session's lock as every operation that sends takes them: one hold for both.
+        //
+        // The session's own queryables are asked all or none, under a row of the plane's held
+        // Finals taken before any leg is issued: a session with none free refuses the get whole,
+        // with nothing sent and no queryable asked, where zenoh-pico refuses a get whose delivery
+        // to its own queryables failed (`vendor/zenoh-pico/src/net/primitives.c` @
+        // `_Z_CLEAN_RETURN_IF_ERR(ret, _z_unregister_pending_query(zn, qid));`).
+        #[cfg(feature = "local-queryable")]
+        let mut own: Option<query::OwnFinalHold<'_>> = None;
+        #[cfg(feature = "local-queryable")]
+        let mut refused = false;
+        let mut started = false;
+        // What every link is asked, read from the options once: the sink of each leg consolidates
+        // as the Request states.
+        let request = opts.query_parts();
+        // What every leg of this get is held with, the mint of its one callback among it; whether
+        // that callback shows a reply's timestamp is read under the first hold.
+        let mut ask = LegAsk {
+            keyexpr,
+            consolidation: request.sink_consolidation(),
+            accept: opts.effective_accept_replies(),
+            expose: false,
+            fan: tag,
+            mint: leg,
+            get: get::AskedGet::new(&self.gets),
+            deadline_ms: None,
+        };
+        let remote = opts.allowed_destination.allows_remote();
+        let mut issued: usize = 0;
+        // The legs refused for want of a row in their face's table of pending gets: a get that
+        // issued none, and found no room for one, is refused whole.
+        let mut unheld = 0usize;
+        // Why the last leg whose face was up did not go out: a get that issued none is refused
+        // with it, as zenoh-pico's get answers the error of the send that failed.
+        let mut unsent: Option<Declined> = None;
+        // The faces whose links are up, each asked once in the order of their ids: the walk keeps
+        // the last face it asked and holds the faces and the session for each, holding no list of
+        // them; it ends with the face after which none is up, read in that face's hold, so none is
+        // taken only to learn that no face is left.
+        let mut asked = None;
+        let mut more = true;
+        loop {
+            let turn = self.live_on_link(|core, tx| {
+                if !started {
+                    started = true;
+                    #[cfg(feature = "local-queryable")]
+                    if opts.allowed_destination.allows_local() {
+                        // The session's own request ids are a space of their own: the leg is
+                        // registered in the session's own pending gets (`Registry::local`) and
+                        // answered under the local generation (`query::LOCAL_QUERY`), so no table
+                        // a link's ids reach holds it, and the two counters never meet.
+                        let rid = core.session.local_requests.take();
+                        match query::OwnFinalHold::take(&self.plane, rid) {
+                            Some(hold) => own = Some(hold),
+                            None => {
+                                refused = true;
+                                return LegTurn::Done;
+                            }
+                        }
+                    }
+                    // `entity-timestamp-opt-in`: the query's choice, or the session's policy when
+                    // it states none, applied to every leg's callback, after its replies are
+                    // consolidated.
+                    ask.expose = opts.expose_timestamp_by(&core.policy);
+                    // One deadline for every leg, read here as the expose is: the legs time out
+                    // in one sweep, so the get ends with one timeout.
+                    let timeout_ms = opts.effective_timeout_ms();
+                    ask.deadline_ms =
+                        (timeout_ms > 0).then(|| leg_deadline_ms(core.clock.now_us(), timeout_ms));
+                }
+                let Some(face) = core.transport.next_up_face(remote, asked) else {
+                    return LegTurn::Done;
+                };
+                asked = Some(face);
+                // A serial the face's actions allocate, which the entry's row is put below.
+                let Some(serial) = core.up_wire(face).and_then(|link| {
+                    lend_through(link, tx, |actions: &LinkActions<C>| {
+                        actions.alloc_next_request_id()
+                    })
+                }) else {
+                    return LegTurn::Skipped;
+                };
+                // One Final: the face's peer's. Held before the request goes out, so no answer
+                // can arrive before its entry, under a request id of the face's actions' serial
+                // and the entry's row, so its peer's answer names both.
+                let rid = match self.hold_leg(
+                    &mut core.session.registry,
+                    &mut core.ledger,
+                    &mut ask,
+                    LegEntry {
+                        face,
+                        rid: LegRid::Serial(serial),
+                        finals: 1,
+                    },
+                ) {
+                    LegHeld::Held { rid } => rid,
+                    LegHeld::Gone => return LegTurn::Skipped,
+                    LegHeld::NoRoom => {
+                        unheld = unheld.saturating_add(1);
+                        return LegTurn::Skipped;
+                    }
+                    LegHeld::Refused { table_full } => {
+                        unheld = unheld.saturating_add(usize::from(table_full));
+                        // A leg no table holds went with its sink, its count of the get's row
+                        // with it.
+                        return LegTurn::Skipped;
+                    }
+                };
+                // The link names the key as its own key-wire form says, and the query is written
+                // from the options where they lie, with nothing copied.
+                let abi = abi_names(wire, keyexpr);
+                let refused = core::cell::Cell::new(None);
+                let sent = core.up_wire(face).and_then(|link| {
+                    send_through(link, tx, &|actions: &LinkActions<C>| {
+                        get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
+                            wz_session_core::wire_key::WireKey::from_parts(mapping_id, suffix)
+                                .is_some_and(|key| {
+                                    actions
+                                        .send_get_parts(wz_session_core::query_parts::GetParts {
+                                            rid,
+                                            key,
+                                            query: request,
+                                        })
+                                        .map_err(|why| refused.set(Some(why)))
+                                        .is_ok()
+                                })
+                        })
+                    })
+                }) == Some(true);
+                if !sent {
+                    // Nothing went out: the entry and the leg go, and the leg is over. The get is
+                    // told why when no other leg goes out, not ended as one that reached nobody.
+                    if let Some(tables) = core.session.registry.face_mut(face) {
+                        tables.gets.replies.unregister(rid);
+                    }
+                    unsent = Some(unsent_refusal(refused.get()));
+                    return LegTurn::Skipped;
+                }
+                more = core.transport.next_up_face(remote, asked).is_some();
+                LegTurn::Issued
+            });
+            #[cfg(feature = "local-queryable")]
+            if refused {
+                return Err(Declined::TableFull);
+            }
+            match turn {
+                None => return issued_so_far(issued),
+                Some(LegTurn::Done) => break,
+                Some(LegTurn::Skipped) => continue,
+                Some(LegTurn::Issued) => {}
+            }
+            issued = issued.saturating_add(1);
+            // A fan cancelled while the legs are issued stops the issuing.
+            if self.cut_short(fan, tag) {
+                return Ok(issued);
+            }
+            if !more {
+                break;
+            }
+        }
+        // And one leg for each group the session asks queries of
+        // (`GroupDeclarations::asks_queries`), owed a Final by each member it holds when the get
+        // is asked: the shared count (`QueryOptions::remote_finals`) over the members the
+        // group's JOINs admitted, as the tokio engine's group counts them. A member that leaves
+        // before its Final is not taken off the count, there as here: the leg ends at its
+        // deadline.
+        #[cfg(feature = "group")]
+        let mut asked = None;
+        #[cfg(feature = "group")]
+        loop {
+            let Some(mut guard) = self.live() else {
+                return issued_so_far(issued);
+            };
+            let core = &mut guard.0;
+            let Some(face) = core.transport.next_group_to_ask(remote, asked) else {
+                break;
+            };
+            asked = Some(face);
+            let Some(group) = core
+                .transport
+                .groups
+                .iter()
+                .find(|group| group.id() == face)
+            else {
+                continue;
+            };
+            let finals = opts.remote_finals(group.member_count());
+            // A group that holds no member reaches nobody, as zenoh-pico's get with no peer does.
+            if finals == 0 {
+                continue;
+            }
+            // Held before the query is queued, as a link's leg is before it is sent, under a
+            // request id of the group's serial and the entry's row, so a member's answer names it
+            // on this face.
+            let rid = match self.hold_leg(
+                &mut core.session.registry,
+                &mut core.ledger,
+                &mut ask,
+                LegEntry {
+                    face,
+                    rid: LegRid::Serial(group.alloc_request_id()),
+                    finals,
+                },
+            ) {
+                LegHeld::Held { rid } => rid,
+                LegHeld::Gone => continue,
+                LegHeld::NoRoom => {
+                    unheld = unheld.saturating_add(1);
+                    continue;
+                }
+                LegHeld::Refused { table_full } => {
+                    unheld = unheld.saturating_add(usize::from(table_full));
+                    continue;
+                }
+            };
+            if !group.ask(rid, keyexpr, wire, request) {
+                // Nothing was queued: the entry and the leg go, and the leg is over.
+                if let Some(tables) = core.session.registry.face_mut(face) {
+                    tables.gets.replies.unregister(rid);
+                }
+                continue;
+            }
+            drop(guard);
+            issued = issued.saturating_add(1);
+            if self.cut_short(fan, tag) {
+                return Ok(issued);
+            }
+        }
+        #[cfg(feature = "local-queryable")]
+        if let Some(own) = own {
+            let Some(mut guard) = self.live() else {
+                return issued_so_far(issued);
+            };
+            let core = &mut guard.0;
+            let rid = own.rid();
+            match self.hold_leg(
+                &mut core.session.registry,
+                &mut core.ledger,
+                &mut ask,
+                LegEntry {
+                    face: LOCAL_FACE,
+                    rid: LegRid::Taken(rid),
+                    finals: 1,
+                },
+            ) {
+                LegHeld::Held { .. } => {
+                    // Asked once the legs to the peers were, as zenoh-pico asks it only once the
+                    // send succeeded.
+                    let asked = self.ask_own_queryables(core, own, keyexpr, opts);
+                    drop(guard);
+                    issued = issued.saturating_add(1);
+                    let _ = self.cut_short(fan, tag);
+                    self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
+                }
+                // A leg the session's own table refused went with its sink, its count of the row with it.
+                LegHeld::Refused { .. } => {}
+                LegHeld::NoRoom | LegHeld::Gone => unheld = unheld.saturating_add(1),
+            }
+        }
+        get_outcome(issued, unheld, unsent)
+    }
+
+    /// [`SessionEngine::liveliness_get_on_wire`]'s issue of the legs, the snapshot's asker held
+    /// until it returns.
+    #[cfg(feature = "liveliness-get")]
+    fn ask_snapshot_legs(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        timeout_ms: u32,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Result<usize, Declined> {
+        // One leg for each face whose link is up; a session with no link up reaches nobody, and
+        // the snapshot is over at once. A closed session asks nothing.
+        if self.live().is_none() {
+            return Err(Declined::Closed);
+        }
+        let Ok(tag) = self.tag_of(fan) else {
+            return Ok(0);
+        };
+        // `0` is the platform default and never no deadline, as pico's `z_liveliness_get`
+        // rewrites it (`vendor/zenoh-pico/src/api/liveliness.c` @
+        // `if (opt.timeout_ms == 0) {`); rounded up as a query's deadline is.
+        let timeout_ms = match timeout_ms {
+            0 => DEFAULT_QUERY_TIMEOUT_MS,
+            set => set,
+        };
+        let mut issued: usize = 0;
+        // The snapshot's one callback, minted at its first leg and held by every leg after it, and
+        // its one deadline, read under the hold of its first leg, so its legs time out in one sweep.
+        let mut asked_get = get::AskedGet::new(&self.gets);
+        let mut deadline = None;
+        // The faces whose links are up, each asked once, as a query's are.
+        let mut asked = None;
+        loop {
+            let turn = self.live_on_link(|core, tx| {
+                let Some(face) = core.transport.next_up_face(true, asked) else {
+                    return LegTurn::Done;
+                };
+                asked = Some(face);
+                // A face whose session has no interest id left is not asked, as one that could
+                // not hold the entry.
+                let Some(interest_id) = core
+                    .up_wire(face)
+                    .and_then(|link| {
+                        lend_through(link, tx, |actions: &LinkActions<C>| {
+                            actions.alloc_next_interest_id()
+                        })
+                    })
+                    .flatten()
+                else {
+                    return LegTurn::Skipped;
+                };
+                let interest_id = u64::from(interest_id);
+                let deadline_ms = Some(
+                    *deadline
+                        .get_or_insert_with(|| leg_deadline_ms(core.clock.now_us(), timeout_ms)),
+                );
+                // A snapshot no row holds is refused before its leg's callback is minted.
+                if !core
+                    .session
+                    .registry
+                    .face_mut(face)
+                    .is_some_and(|tables| tables.gets.liveliness_gets.has_room())
+                {
+                    return LegTurn::Skipped;
+                }
+                // A snapshot's replies are tokens, shown as they came.
+                let Some(row) = asked_get.leg(&mut *leg, true, tag) else {
+                    return LegTurn::Skipped;
+                };
+                // SAFETY: the sink goes into a table of pending gets, which the session
+                // reaches under its lock alone, and is handed its replies there; the table is the
+                // registry's, dropped before the owners of the plane and of the round where the
+                // build keeps one, the session state's fields after the registry's.
+                let leg_sink = unsafe { get::LegSink::new(row, self.gets, self.uncaptured()) };
+                // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
+                // answer can arrive before its entry.
+                // Through the registry's writer of the gets, which lowers the index of their deadlines.
+                let registered = core
+                    .session
+                    .registry
+                    .write_gets(face, |gets| {
+                        gets.liveliness_gets
+                            .register(interest_id, deadline_ms, leg_sink)
+                    })
+                    .is_some_and(|registered| matches!(registered, Ok(true)));
+                if !registered {
+                    return LegTurn::Skipped;
+                }
+                // Its deadline bounds a read's wait as a query leg's does, and a pending snapshot
+                // owes the bookkeeping at every step, which drains the gets it ends
+                // (`Core::settle_ledger`).
+                core.ledger.owe_leg_due(deadline_ms);
+                core.ledger.owe();
+                // The Interest names the key as the link's own key-wire form says, as a query
+                // does.
+                let abi = abi_names(wire, keyexpr);
+                let sent = core.up_wire(face).and_then(|link| {
+                    send_through(link, tx, &|actions: &LinkActions<C>| {
+                        get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
+                            actions
+                                .send_interest_liveliness_get(interest_id, mapping_id, suffix)
+                                .is_ok()
+                        })
+                    })
+                }) == Some(true);
+                if !sent {
+                    // Nothing went out: the entry and the leg go, and the leg is over.
+                    if let Some(tables) = core.session.registry.face_mut(face) {
+                        tables.gets.liveliness_gets.unregister(interest_id);
+                    }
+                    return LegTurn::Skipped;
+                }
+                LegTurn::Issued
+            });
+            match turn {
+                None => return issued_so_far(issued),
+                Some(LegTurn::Done) => break,
+                Some(LegTurn::Skipped) => continue,
+                Some(LegTurn::Issued) => {}
+            }
+            issued = issued.saturating_add(1);
+            // A fan cancelled while the legs are issued stops the issuing.
+            if self.cut_short(fan, tag) {
+                return Ok(issued);
+            }
+        }
+        Ok(issued)
     }
 
     /// Where a leg's sink hands a reply no thread captured (`get::Uncaptured`): the session's
@@ -10074,9 +10550,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         true
     }
 
-    /// Hold one leg of a get pending under `entry`: the leg's callback minted in a row of the
-    /// plane's, and its sink registered with the deadline and the accepted key the get states,
-    /// that deadline owed in `ledger` with it, so a read waits no longer and the step's
+    /// Hold one leg of a get pending under `entry`: a count of the get's callback's row, minted
+    /// at its first leg, and its sink registered with the deadline and the accepted key the get
+    /// states, that deadline owed in `ledger` with it, so a read waits no longer and the step's
     /// bookkeeping sweeps the leg when it is due. Out of line where a get issues more than one
     /// kind of leg (to groups, or to the session itself, besides its links), so those legs are
     /// held by one body and not by a copy each; a build whose get asks its links alone has one
@@ -10085,22 +10561,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg_attr(any(feature = "group", feature = "local-queryable"), inline(never))]
     fn hold_leg(
         &self,
-        now_us: u64,
         registry: &mut Registry,
         ledger: &mut Ledger,
-        ask: &mut LegAsk<'_, '_>,
+        ask: &mut LegAsk<'_>,
         entry: LegEntry,
     ) -> LegHeld {
-        let LegEntry {
-            face,
-            leg: leg_id,
-            rid,
-            finals,
-        } = entry;
-        let timeout_ms = ask.opts.effective_timeout_ms();
-        // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never ends
-        // before its timeout.
-        let deadline_ms = (timeout_ms > 0).then(|| leg_deadline_ms(now_us, timeout_ms));
+        let LegEntry { face, rid, finals } = entry;
+        let deadline_ms = ask.deadline_ms;
         // A get no row holds is refused before its leg's callback is minted; the row it takes is
         // what its id carries.
         let rid = match registry.gets_mut(face) {
@@ -10108,19 +10575,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             Some(_) => return LegHeld::NoRoom,
             None => return LegHeld::Gone,
         };
-        // The leg's callback, in a row of the plane's the entry's sink holds.
-        let Some(row) = self.gets.open_leg(&mut *ask.mint, ask.expose) else {
+        // A count of the get's callback's row, minted at its first leg, which the entry's sink
+        // holds.
+        let Some(row) = ask.get.leg(&mut *ask.mint, ask.expose, ask.fan) else {
             return LegHeld::NoRoom;
         };
         // SAFETY: the sink goes into a table of pending gets, which the session
         // reaches under its lock alone, and is handed its replies there; the table is the
         // registry's, dropped before the owners of the plane and of the round where the build
         // keeps one, the session state's fields after the registry's.
-        let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.uncaptured()) };
+        let leg_sink = unsafe { get::LegSink::new(row, self.gets, self.uncaptured()) };
         let sink = ConsolidatingSink::with_hold(
             ask.consolidation,
             leg_sink,
-            get::LegHold::new(leg_id, self.gets),
+            get::LegHold::new(row, self.gets),
         );
         let accept = ReplyAcceptance::for_query(ask.keyexpr, ask.accept);
         // Through the registry's writer of the gets, which lowers the index of their deadlines.
@@ -10562,7 +11030,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// The id of something the session holds and never names to a peer (`next_local`).
-    #[cfg(any(feature = "query", feature = "ticker"))]
+    #[cfg(feature = "ticker")]
     fn next_local_id(&self) -> u64 {
         self.next_local.fetch_add(1, Ordering::Relaxed)
     }
@@ -11246,7 +11714,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<Declared<SubId>, Declined> {
+    ) -> Result<Declared<EntityRow>, Declined> {
         // A closed session declares nothing, and takes no id for what it does not declare. The
         // subscriber is one row of the session's tables, numbered by the id they hand out next: a
         // full table, a key the session cannot hold or no id left refuses it before anything is
@@ -11291,9 +11759,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     return Err(Declined::from(refused.why));
                 }
             };
-            // The id the tables numbered the row by: they mint it, after the room and the key, so
-            // a declaration is refused in their one order.
-            let id = declared.id;
             // The key as the tables read it off the row they put it in: its text is the row's own,
             // which does not move while the row stands.
             let lent = lent_key(tables(&core.session.registry), declared.key);
@@ -11308,7 +11773,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     let retraction = tables.retraction_of(row.key());
                     core.transport.announce_to_groups(GroupEntity {
                         what: GroupDeclaration::Subscriber,
-                        entity: id,
+                        entity: declared.id,
                         keyexpr: row.key().as_str(),
                         wire: &wire,
                         retraction: retraction.as_ref(),
@@ -11323,7 +11788,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             // told, outside the lock.
             #[cfg(feature = "local-subscriber")]
             self.read_matching(core);
-            Ok(Declared { id, key: lent })
+            Ok(Declared {
+                id: entity_row(declared.handle),
+                key: lent,
+            })
         });
         drop(refused_row);
         match declared {
@@ -11338,69 +11806,38 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     }
 
     #[inline(never)]
-    fn undeclare_subscriber(&self, id: SubId) {
-        // The session is held once, whichever table the id's row is in, after the faces' places
-        // as every operation that tells the links takes them. A liveliness subscriber's id is one
-        // of these too (the port's one id space): its row goes and its Interest ends, and what it
-        // took is carried out of the hold here.
+    fn undeclare_subscriber(&self, row: EntityRow) {
+        // The row names its table: a liveliness subscriber's names its own, whose row goes and
+        // whose Interest ends.
         #[cfg(feature = "liveliness")]
-        let mut live = None;
+        if let Some(handle) = entity_handle::<kind::LivelinessSubscriber>(row) {
+            self.undeclare_liveliness_subscriber(handle);
+            return;
+        }
+        let Some(handle) = entity_handle::<kind::Subscriber>(row) else {
+            return;
+        };
         // The row is taken out of the tables under the lock and let go of after it: what its key
         // kept may reach the session as it goes (`KeyAnchor`). One a call of which runs is
         // let go of once that call ends (`Self::wait_for_release`).
         let undeclared = self
             .live_on_link(|core, tx| {
-                #[cfg(feature = "liveliness")]
-                {
-                    let found = tables(&core.session.registry)
-                        .liveliness_subscribers()
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (_, row))| row.id() == id)
-                        .map(|(rank, (handle, row))| (rank, handle, row.key().prefix()));
-                    if let Some((rank, handle, prefix)) = found {
-                        // The links are asked while the rows stand, which are their places in the
-                        // replay's order: the subscriber's, ranked by the walk that found it, then
-                        // the declaration's its key is named by.
-                        let place = core.place(DeclaredTable::LivelinessSubscribers, rank);
-                        let keyexpr_place = core.prefix_retraction(prefix);
-                        // The groups asked for it are told the asking ended.
-                        #[cfg(feature = "group")]
-                        for group in &core.transport.groups {
-                            group.end_liveliness_ask(id);
-                        }
-                        if let Some(undeclared) = tables_mut(&mut core.session.registry)
-                            .undeclare_liveliness_subscriber(handle)
-                        {
-                            // The rows went before the links are told: a send never finds the
-                            // tables borrowed.
-                            core.retract_at(place, Some(Retract::Interest(u64::from(id))), tx);
-                            core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
-                            live = Some((handle, undeclared.taken));
-                            return None;
-                        }
-                    }
-                }
                 // The declaration its key is named by goes with it when it is the last that holds
-                // it; what the links are told is read while the row stands.
-                let found = tables(&core.session.registry)
-                    .subscribers()
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (_, row))| row.id() == id)
-                    .map(|(rank, (handle, row))| (rank, handle, row.key().holds()));
-                let (rank, handle, (prefix, named)) = found?;
+                // it; what the links are told is read while the row stands. A row of an earlier
+                // generation stands in no slot, and is retracted by nothing.
+                let standing = tables(&core.session.registry).subscribers().get(handle)?;
+                let (id, (prefix, named)) = (standing.id(), standing.key().holds());
                 // The links are asked while the rows stand, which are their places in the
-                // replay's order: the subscriber's, ranked by the walk that found it, then the
-                // declaration's, which comes before every subscriber.
-                let place = core.place(DeclaredTable::Subscribers, rank);
+                // replay's order: the subscriber's, then the declaration's, which comes before
+                // every subscriber.
+                let place = core.place_of(DeclaredRow::of(handle));
                 let keyexpr_place = core.prefix_retraction(prefix);
                 let named_place = core.prefix_retraction(named);
                 #[cfg(feature = "group")]
                 core.transport.retract_from_groups(id);
                 let undeclared =
                     tables_mut(&mut core.session.registry).undeclare_subscriber(handle)?;
-                let row = undeclared.taken;
+                let taken = undeclared.taken;
                 // The rows went before the links are told: a send never finds the tables borrowed.
                 // The retraction names the key as the row named it, holding the key past the row.
                 let names = undeclared
@@ -11416,26 +11853,45 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 // One that counted it may now match no more.
                 #[cfg(feature = "local-subscriber")]
                 self.read_matching(core);
-                Some((handle, row))
+                Some(taken)
             })
             .flatten();
         // The row, and its callback with it, is let go of here with no lock held; one a call of
         // which runs is let go of by the call that ends last.
-        #[cfg(feature = "liveliness")]
-        if let Some(undeclared) = live {
-            match undeclared {
-                (_, Some(row)) => drop(row),
-                (handle, None) => self.wait_for_liveliness_release(handle),
-            }
-            return;
-        }
         match undeclared {
-            Some((_, Some(row))) => drop(row),
-            Some((handle, None)) => self.wait_for_release(handle),
+            Some(Some(taken)) => drop(taken),
+            Some(None) => self.wait_for_release(handle),
             None => {}
         }
         #[cfg(feature = "local-subscriber")]
         self.deliver();
+    }
+
+    fn entity_id_of(&self, row: EntityRow) -> Option<EntityId> {
+        // Read off the row where it stands: a closed session's rows are gone, as zenoh-pico
+        // answers its entities' ids with the null id.
+        let declared = DeclaredRow::from_bits(row.bits())?;
+        let guard = self.live()?;
+        let tables = tables(&guard.0.session.registry);
+        match declared.table {
+            DeclaredTable::Subscribers => tables
+                .subscribers()
+                .get(declared.handle()?)
+                .map(|row| row.id()),
+            #[cfg(feature = "queryable")]
+            DeclaredTable::Queryables => tables
+                .queryables()
+                .get(declared.handle()?)
+                .map(|row| row.id()),
+            #[cfg(feature = "liveliness")]
+            DeclaredTable::Tokens => tables.tokens().get(declared.handle()?).map(|row| row.id()),
+            #[cfg(feature = "liveliness")]
+            DeclaredTable::LivelinessSubscribers => tables
+                .liveliness_subscribers()
+                .get(declared.handle()?)
+                .map(|row| row.id()),
+            _ => None,
+        }
     }
 
     #[inline(never)]
@@ -11818,22 +12274,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<Declared<QblId>, Declined> {
-        // Taken by the declaration once it has an id; let go of, with the session and the link's
-        // place, after it, whether it was declared or not.
+    ) -> Result<Declared<EntityRow>, Declined> {
+        // Taken by the declaration into the row it offers the tables; let go of, with the session
+        // and the link's place, after it, whether it was declared or not.
         let mut unmade = Some((wire, sink));
         // The row the tables refuse, let go of as the key and the sink are: the declaration
         // answers only why, so its answer carries no row.
         let mut refused_row = None;
         let declared = self.live_on_link(|core, tx| {
-            // The queryable is one row of the session's tables, numbered by the id they hand out
-            // next: a full table, a key the session cannot hold or no id left refuses it before
-            // anything is sent, and before its callback is minted. The row holds the key
-            // expression declaration its key is named by for as long as it stands.
-            let next = tables(&core.session.registry).next_entity_id();
-            let Some(id) = next else {
-                return Err(Declined::NoEntityId);
-            };
+            // The queryable is one row of the session's tables, numbered by the id they mint for
+            // it: a full table, a key the session cannot hold or no id left refuses it before
+            // anything is sent. The row holds the key expression declaration its key is named by
+            // for as long as it stands.
             // Taken once: the declaration runs once.
             let Some((wire, sink)) = unmade.take() else {
                 return Err(Declined::NoEntityId);
@@ -11864,10 +12316,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     return Err(Declined::from(refused.why));
                 }
             };
-            debug_assert_eq!(
-                declared.id, id,
-                "the tables number a row as they said they would"
-            );
             // The key as the tables read it off the row they put it in: its text is the row's own,
             // which does not move while the row stands.
             let lent = lent_key(tables(&core.session.registry), declared.key);
@@ -11884,7 +12332,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                         what: GroupDeclaration::Queryable {
                             complete: row.complete(),
                         },
-                        entity: id,
+                        entity: declared.id,
                         keyexpr: row.key().as_str(),
                         wire: &wire,
                         retraction: retraction.as_ref(),
@@ -11896,7 +12344,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             // told, outside the lock.
             #[cfg(feature = "local-queryable")]
             self.read_matching(core);
-            Ok(Declared { id, key: lent })
+            Ok(Declared {
+                id: entity_row(declared.handle),
+                key: lent,
+            })
         });
         drop(refused_row);
         match declared {
@@ -11919,321 +12370,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Declined> {
-        // One leg for each face whose link is up, when the destination admits a peer, and one to
-        // the session's own queryables, when it admits the session and the build has them
-        // (`local-queryable`: zenoh-pico's default build asks none, `Z_FEATURE_LOCAL_QUERYABLE`
-        // 0). A get that reaches nobody, because its destination admits neither or because no
-        // link is up, is over at once. Each leg is issued under the session's lock and no lock is
-        // held between two of them.
-        //
-        // A get limited to some links or addressed to one node is refused by that statement:
-        // this engine reads neither, and asking every link would widen it.
-        StatementNotHonoured::of_query(opts)?;
-        // A fan cancelled before a leg is issued issues none: the get reached nobody.
-        let Ok(tag) = self.tag_of(fan) else {
-            return Ok(0);
-        };
-        // What the get reads of the session before its first leg (the row of its own Final, the
-        // timestamp policy) is read under the hold of that leg, the faces' places taken before the
-        // session's lock as every operation that sends takes them: one hold for both.
-        //
-        // The session's own queryables are asked all or none, under a row of the plane's held
-        // Finals taken before any leg is issued: a session with none free refuses the get whole,
-        // with nothing sent and no queryable asked, where zenoh-pico refuses a get whose delivery
-        // to its own queryables failed (`vendor/zenoh-pico/src/net/primitives.c` @
-        // `_Z_CLEAN_RETURN_IF_ERR(ret, _z_unregister_pending_query(zn, qid));`).
-        #[cfg(feature = "local-queryable")]
-        let mut own: Option<query::OwnFinalHold<'_>> = None;
-        #[cfg(feature = "local-queryable")]
-        let mut refused = false;
-        let mut started = false;
-        // What every link is asked, read from the options once: the sink of each leg consolidates
-        // as the Request states.
-        let request = opts.query_parts();
-        // What every leg of this get is held with, the mint of each leg's callback among it; whether
-        // its callbacks show a reply's timestamp is read under the first hold.
-        let mut ask = LegAsk {
-            keyexpr,
-            opts,
-            consolidation: request.sink_consolidation(),
-            accept: opts.effective_accept_replies(),
-            expose: false,
-            mint: leg,
-        };
-        let remote = opts.allowed_destination.allows_remote();
-        let mut issued: usize = 0;
-        // The legs refused for want of a row in their face's table of pending gets: a get that
-        // issued none, and found no room for one, is refused whole.
-        let mut unheld = 0usize;
-        // Why the last leg whose face was up did not go out: a get that issued none is refused
-        // with it, as zenoh-pico's get answers the error of the send that failed.
-        let mut unsent: Option<Declined> = None;
-        // The faces whose links are up, each asked once in the order of their ids: the walk keeps
-        // the last face it asked and holds the faces and the session for each, holding no list of
-        // them; it ends with the face after which none is up, read in that face's hold, so none is
-        // taken only to learn that no face is left.
-        let mut asked = None;
-        let mut more = true;
-        loop {
-            let turn = self.live_on_link(|core, tx| {
-                if !started {
-                    started = true;
-                    #[cfg(feature = "local-queryable")]
-                    if opts.allowed_destination.allows_local() {
-                        // The session's own request ids are a space of their own: the leg is
-                        // registered in the session's own pending gets (`Registry::local`) and
-                        // answered under the local generation (`query::LOCAL_QUERY`), so no table
-                        // a link's ids reach holds it, and the two counters never meet.
-                        let rid = core.session.local_requests.take();
-                        match query::OwnFinalHold::take(&self.plane, rid) {
-                            Some(hold) => own = Some(hold),
-                            None => {
-                                refused = true;
-                                return LegTurn::Done;
-                            }
-                        }
-                    }
-                    // `entity-timestamp-opt-in`: the query's choice, or the session's policy when
-                    // it states none, applied to every leg's callback, after its replies are
-                    // consolidated.
-                    ask.expose = opts.expose_timestamp_by(&core.policy);
-                }
-                let Some(face) = core.transport.next_up_face(remote, asked) else {
-                    return LegTurn::Done;
-                };
-                asked = Some(face);
-                let leg_id = self.next_local_id();
-                // A serial the face's actions allocate, which the entry's row is put below.
-                let Some(serial) = core.up_wire(face).and_then(|link| {
-                    lend_through(link, tx, |actions: &LinkActions<C>| {
-                        actions.alloc_next_request_id()
-                    })
-                }) else {
-                    return LegTurn::Skipped;
-                };
-                // One Final: the face's peer's. Held before the request goes out, so no answer
-                // can arrive before its entry, under a request id of the face's actions' serial
-                // and the entry's row, so its peer's answer names both.
-                let rid = match self.hold_leg(
-                    core.clock.now_us(),
-                    &mut core.session.registry,
-                    &mut core.ledger,
-                    &mut ask,
-                    LegEntry {
-                        face,
-                        leg: leg_id,
-                        rid: LegRid::Serial(serial),
-                        finals: 1,
-                    },
-                ) {
-                    LegHeld::Held { rid } => rid,
-                    LegHeld::Gone => return LegTurn::Skipped,
-                    LegHeld::NoRoom => {
-                        unheld = unheld.saturating_add(1);
-                        return LegTurn::Skipped;
-                    }
-                    LegHeld::Refused { table_full } => {
-                        unheld = unheld.saturating_add(usize::from(table_full));
-                        // A leg no table holds is let go of with no lock held.
-                        return LegTurn::Ended(leg_id);
-                    }
-                };
-                // The link names the key as its own key-wire form says, and the query is written
-                // from the options where they lie, with nothing copied.
-                let abi = abi_names(wire, keyexpr);
-                let refused = core::cell::Cell::new(None);
-                let sent = core.up_wire(face).and_then(|link| {
-                    send_through(link, tx, &|actions: &LinkActions<C>| {
-                        get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
-                            wz_session_core::wire_key::WireKey::from_parts(mapping_id, suffix)
-                                .is_some_and(|key| {
-                                    actions
-                                        .send_get_parts(wz_session_core::query_parts::GetParts {
-                                            rid,
-                                            key,
-                                            query: request,
-                                        })
-                                        .map_err(|why| refused.set(Some(why)))
-                                        .is_ok()
-                                })
-                        })
-                    })
-                }) == Some(true);
-                if !sent {
-                    // Nothing went out: the entry and the leg go, and the leg is over. The get is
-                    // told why when no other leg goes out, not ended as one that reached nobody.
-                    if let Some(tables) = core.session.registry.face_mut(face) {
-                        tables.gets.replies.unregister(rid);
-                    }
-                    unsent = Some(unsent_refusal(refused.get()));
-                    return LegTurn::Ended(leg_id);
-                }
-                if !core.session.note_pending(PendingGet {
-                    face,
-                    leg: leg_id,
-                    kind: GetKind::Query(rid),
-                    fan: tag,
-                }) {
-                    unheld = unheld.saturating_add(1);
-                    return LegTurn::Skipped;
-                }
-                more = core.transport.next_up_face(remote, asked).is_some();
-                LegTurn::Issued
-            });
-            #[cfg(feature = "local-queryable")]
-            if refused {
-                return Err(Declined::TableFull);
-            }
-            match turn {
-                None => return issued_so_far(issued),
-                Some(LegTurn::Done) => break,
-                Some(LegTurn::Skipped) => continue,
-                Some(LegTurn::Ended(leg_id)) => {
-                    self.end_leg_now(leg_id);
-                    continue;
-                }
-                Some(LegTurn::Issued) => {}
-            }
-            issued = issued.saturating_add(1);
-            // A fan cancelled while the legs are issued stops the issuing.
-            if self.cut_short(fan, tag) {
-                return Ok(issued);
-            }
-            if !more {
-                break;
-            }
-        }
-        // And one leg for each group the session asks queries of
-        // (`GroupDeclarations::asks_queries`), owed a Final by each member it holds when the get
-        // is asked: the shared count (`QueryOptions::remote_finals`) over the members the
-        // group's JOINs admitted, as the tokio engine's group counts them. A member that leaves
-        // before its Final is not taken off the count, there as here: the leg ends at its
-        // deadline.
-        #[cfg(feature = "group")]
-        let mut asked = None;
-        #[cfg(feature = "group")]
-        loop {
-            let Some(mut guard) = self.live() else {
-                return issued_so_far(issued);
-            };
-            let core = &mut guard.0;
-            let Some(face) = core.transport.next_group_to_ask(remote, asked) else {
-                break;
-            };
-            asked = Some(face);
-            let leg_id = self.next_local_id();
-            let Some(group) = core
-                .transport
-                .groups
-                .iter()
-                .find(|group| group.id() == face)
-            else {
-                continue;
-            };
-            let finals = opts.remote_finals(group.member_count());
-            // A group that holds no member reaches nobody, as zenoh-pico's get with no peer does.
-            if finals == 0 {
-                continue;
-            }
-            // Held before the query is queued, as a link's leg is before it is sent, under a
-            // request id of the group's serial and the entry's row, so a member's answer names it
-            // on this face.
-            let rid = match self.hold_leg(
-                core.clock.now_us(),
-                &mut core.session.registry,
-                &mut core.ledger,
-                &mut ask,
-                LegEntry {
-                    face,
-                    leg: leg_id,
-                    rid: LegRid::Serial(group.alloc_request_id()),
-                    finals,
-                },
-            ) {
-                LegHeld::Held { rid } => rid,
-                LegHeld::Gone => continue,
-                LegHeld::NoRoom => {
-                    unheld = unheld.saturating_add(1);
-                    continue;
-                }
-                LegHeld::Refused { table_full } => {
-                    unheld = unheld.saturating_add(usize::from(table_full));
-                    drop(guard);
-                    self.end_leg_now(leg_id);
-                    continue;
-                }
-            };
-            if !group.ask(rid, keyexpr, wire, request) {
-                // Nothing was queued: the entry and the leg go, and the leg is over.
-                if let Some(tables) = core.session.registry.face_mut(face) {
-                    tables.gets.replies.unregister(rid);
-                }
-                drop(guard);
-                self.end_leg_now(leg_id);
-                continue;
-            }
-            if !core.session.note_pending(PendingGet {
-                face,
-                leg: leg_id,
-                kind: GetKind::Query(rid),
-                fan: tag,
-            }) {
-                unheld = unheld.saturating_add(1);
-                continue;
-            }
-            drop(guard);
-            issued = issued.saturating_add(1);
-            if self.cut_short(fan, tag) {
-                return Ok(issued);
-            }
-        }
-        #[cfg(feature = "local-queryable")]
-        if let Some(own) = own {
-            let leg_id = self.next_local_id();
-            let Some(mut guard) = self.live() else {
-                return issued_so_far(issued);
-            };
-            let core = &mut guard.0;
-            let rid = own.rid();
-            match self.hold_leg(
-                core.clock.now_us(),
-                &mut core.session.registry,
-                &mut core.ledger,
-                &mut ask,
-                LegEntry {
-                    face: LOCAL_FACE,
-                    leg: leg_id,
-                    rid: LegRid::Taken(rid),
-                    finals: 1,
-                },
-            ) {
-                LegHeld::Held { .. } => {
-                    if !core.session.note_pending(PendingGet {
-                        face: LOCAL_FACE,
-                        leg: leg_id,
-                        kind: GetKind::Query(rid),
-                        fan: tag,
-                    }) {
-                        unheld = unheld.saturating_add(1);
-                    } else {
-                        // Asked once the legs to the peers were, as zenoh-pico asks it only once
-                        // the send succeeded.
-                        let asked = self.ask_own_queryables(core, own, keyexpr, opts);
-                        drop(guard);
-                        issued = issued.saturating_add(1);
-                        let _ = self.cut_short(fan, tag);
-                        self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
-                    }
-                }
-                // A leg the session's own table refused is let go of with no lock held.
-                LegHeld::Refused { .. } => {
-                    drop(guard);
-                    self.end_leg_now(leg_id);
-                }
-                LegHeld::NoRoom | LegHeld::Gone => unheld = unheld.saturating_add(1),
-            }
-        }
-        get_outcome(issued, unheld, unsent)
+        let issued = self.ask_get_legs(keyexpr, wire, opts, fan, leg);
+        self.hand_out_asked_ends();
+        issued
     }
 
     #[cfg(feature = "liveliness-get")]
@@ -12245,130 +12384,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Result<usize, Declined> {
-        // One leg for each face whose link is up; a session with no link up reaches nobody, and
-        // the snapshot is over at once. A closed session asks nothing.
-        if self.live().is_none() {
-            return Err(Declined::Closed);
-        }
-        let Ok(tag) = self.tag_of(fan) else {
-            return Ok(0);
-        };
-        // `0` is the platform default and never no deadline, as pico's `z_liveliness_get`
-        // rewrites it (`vendor/zenoh-pico/src/api/liveliness.c` @
-        // `if (opt.timeout_ms == 0) {`); rounded up as a query's deadline is.
-        let timeout_ms = match timeout_ms {
-            0 => DEFAULT_QUERY_TIMEOUT_MS,
-            set => set,
-        };
-        let mut issued: usize = 0;
-        // The faces whose links are up, each asked once, as a query's are.
-        let mut asked = None;
-        loop {
-            let turn = self.live_on_link(|core, tx| {
-                let Some(face) = core.transport.next_up_face(true, asked) else {
-                    return LegTurn::Done;
-                };
-                asked = Some(face);
-                let leg_id = self.next_local_id();
-                // A face whose session has no interest id left is not asked, as one that could
-                // not hold the entry.
-                let Some(interest_id) = core
-                    .up_wire(face)
-                    .and_then(|link| {
-                        lend_through(link, tx, |actions: &LinkActions<C>| {
-                            actions.alloc_next_interest_id()
-                        })
-                    })
-                    .flatten()
-                else {
-                    return LegTurn::Skipped;
-                };
-                let interest_id = u64::from(interest_id);
-                let deadline_ms = Some(leg_deadline_ms(core.clock.now_us(), timeout_ms));
-                // A snapshot no row holds is refused before its leg's callback is minted.
-                if !core
-                    .session
-                    .registry
-                    .face_mut(face)
-                    .is_some_and(|tables| tables.gets.liveliness_gets.has_room())
-                {
-                    return LegTurn::Skipped;
-                }
-                // A snapshot's replies are tokens, shown as they came.
-                let Some(row) = self.gets.open_leg(&mut *leg, true) else {
-                    return LegTurn::Skipped;
-                };
-                // SAFETY: the sink goes into a table of pending gets, which the session
-                // reaches under its lock alone, and is handed its replies there; the table is the
-                // registry's, dropped before the owners of the plane and of the round where the
-                // build keeps one, the session state's fields after the registry's.
-                let leg_sink =
-                    unsafe { get::LegSink::new(leg_id, row, self.gets, self.uncaptured()) };
-                // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
-                // answer can arrive before its entry.
-                // Through the registry's writer of the gets, which lowers the index of their deadlines.
-                let registered = core
-                    .session
-                    .registry
-                    .write_gets(face, |gets| {
-                        gets.liveliness_gets
-                            .register(interest_id, deadline_ms, leg_sink)
-                    })
-                    .is_some_and(|registered| matches!(registered, Ok(true)));
-                if !registered {
-                    return LegTurn::Ended(leg_id);
-                }
-                // Its deadline bounds a read's wait as a query leg's does, and a pending snapshot
-                // owes the bookkeeping at every step, which drains the gets it ends
-                // (`Core::settle_ledger`).
-                core.ledger.owe_leg_due(deadline_ms);
-                core.ledger.owe();
-                // The Interest names the key as the link's own key-wire form says, as a query
-                // does.
-                let abi = abi_names(wire, keyexpr);
-                let sent = core.up_wire(face).and_then(|link| {
-                    send_through(link, tx, &|actions: &LinkActions<C>| {
-                        get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
-                            actions
-                                .send_interest_liveliness_get(interest_id, mapping_id, suffix)
-                                .is_ok()
-                        })
-                    })
-                }) == Some(true);
-                if !sent {
-                    // Nothing went out: the entry and the leg go, and the leg is over.
-                    if let Some(tables) = core.session.registry.face_mut(face) {
-                        tables.gets.liveliness_gets.unregister(interest_id);
-                    }
-                    return LegTurn::Ended(leg_id);
-                }
-                if !core.session.note_pending(PendingGet {
-                    face,
-                    leg: leg_id,
-                    kind: GetKind::Liveliness(interest_id),
-                    fan: tag,
-                }) {
-                    return LegTurn::Skipped;
-                }
-                LegTurn::Issued
-            });
-            match turn {
-                None => return issued_so_far(issued),
-                Some(LegTurn::Done) => break,
-                Some(LegTurn::Skipped) => continue,
-                Some(LegTurn::Ended(leg_id)) => {
-                    self.end_leg_now(leg_id);
-                    continue;
-                }
-                Some(LegTurn::Issued) => {}
-            }
-            issued = issued.saturating_add(1);
-            // A fan cancelled while the legs are issued stops the issuing.
-            if self.cut_short(fan, tag) {
-                return Ok(issued);
-            }
-        }
-        Ok(issued)
+        let issued = self.ask_snapshot_legs(keyexpr, wire, timeout_ms, fan, leg);
+        self.hand_out_asked_ends();
+        issued
     }
 
     #[cfg(feature = "queryable")]
@@ -12386,7 +12404,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         self.answer(id.generation, id.rid, query::Release::Kept, false);
     }
     #[cfg(feature = "queryable")]
-    fn undeclare_queryable(&self, id: QblId) {
+    fn undeclare_queryable(&self, row: EntityRow) {
+        let Some(handle) = entity_handle::<kind::Queryable>(row) else {
+            return;
+        };
         // The row is taken out of the tables under the lock and let go of after it: what its key
         // kept may reach the session as it goes (`KeyAnchor`). One a call of which is owed,
         // a query queued for it or handed to its callback now, is let go of once that call ends
@@ -12394,55 +12415,41 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         let undeclared = self
             .live_on_link(|core, tx| {
                 // The declaration its key is named by goes with it when it is the last that holds
-                // it; what the links are told is read while the row stands.
-                let found = {
-                    let tables = tables(&core.session.registry);
-                    let found = tables
-                        .queryables()
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (_, row))| row.id() == id)
-                        .map(|(rank, (handle, row))| {
-                            (
-                                rank,
-                                handle,
-                                row.key().holds(),
-                                // Read against the key, held past the row.
-                                tables
-                                    .retraction_of(row.key())
-                                    .map(|names| (names, row.key().backing().clone())),
-                            )
-                        });
-                    found
-                };
-                let (rank, handle, (prefix, named), retraction) = found?;
+                // it; what the links are told is read while the row stands. A row of an earlier
+                // generation stands in no slot, and is retracted by nothing.
+                let standing = tables(&core.session.registry).queryables().get(handle)?;
+                let (id, (prefix, named)) = (standing.id(), standing.key().holds());
                 // The links are asked while the rows stand, which are their places in the replay's
-                // order: the queryable's, ranked by the walk that found it, then the declaration's,
-                // which comes before every queryable.
-                let place = core.place(DeclaredTable::Queryables, rank);
+                // order: the queryable's, then the declaration's, which comes before every
+                // queryable.
+                let place = core.place_of(DeclaredRow::of(handle));
                 let keyexpr_place = core.prefix_retraction(prefix);
                 let named_place = core.prefix_retraction(named);
                 #[cfg(feature = "group")]
                 core.transport.retract_from_groups(id);
                 let undeclared =
                     tables_mut(&mut core.session.registry).undeclare_queryable(handle)?;
-                let row = undeclared.taken;
+                let taken = undeclared.taken;
                 // The rows went before the links are told: a send never finds the tables borrowed.
-                let names = retraction.as_ref().map(|(names, key)| names.names(key));
+                // The retraction names the key as the row named it, holding the key past the row.
+                let names = undeclared
+                    .retraction
+                    .as_ref()
+                    .map(|retraction| retraction.names());
                 core.retract_at(place, Some(Retract::Queryable { id, names }), tx);
                 core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
                 core.retract_keyexpr(named_place, undeclared.named, tx);
                 // One that counted it may now match no more.
                 #[cfg(feature = "local-queryable")]
                 self.read_matching(core);
-                Some((handle, row))
+                Some(taken)
             })
             .flatten();
         // The row, and its callback with it, is let go of here, with no lock held; one a call of
         // which is owed is let go of by the call that ends last.
         match undeclared {
-            Some((_, Some(row))) => drop(row),
-            Some((handle, None)) => self.wait_for_queryable_release(handle),
+            Some(Some(taken)) => drop(taken),
+            Some(None) => self.wait_for_queryable_release(handle),
             None => {}
         }
         #[cfg(feature = "local-queryable")]
@@ -12455,11 +12462,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         keyexpr: &str,
         wire: WireKey,
         retraction: Option<RetractionKey>,
-    ) -> Result<TokenId, Declined> {
+    ) -> Result<EntityRow, Declined> {
         // zenoh-pico's token takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `uint32_t id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`).
         let declared = self
-            .live_on_link(|core, tx| -> Result<TokenId, Declined> {
+            .live_on_link(|core, tx| -> Result<EntityRow, Declined> {
                 // The token is a row of the session's tables, which takes its id: a full table, a
                 // key the session cannot hold or no id left refuses it before anything is
                 // registered or sent. It holds the key expression declaration its key is named by
@@ -12483,7 +12490,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 // the announcement finds it held: the tokio engine's group holds it the same way.
                 #[cfg(feature = "group")]
                 core.announce_token_to_groups(declared.handle);
-                Ok(declared.id)
+                Ok(entity_row(declared.handle))
             })
             .unwrap_or(Err(Declined::Closed));
         // The row holds the declaration its key is named by, so the key the ABI named it by is
@@ -12493,23 +12500,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     }
 
     #[cfg(feature = "liveliness")]
-    fn undeclare_liveliness_token(&self, id: TokenId) {
+    fn undeclare_liveliness_token(&self, row: EntityRow) {
+        let Some(handle) = entity_handle::<kind::Token>(row) else {
+            return;
+        };
         let _ = self.live_on_link(|core, tx| {
-            let retracted =
-                {
-                    let tables = tables(&core.session.registry);
-                    let found = tables.tokens().iter().find(|(_, row)| row.id() == id).map(
-                        |(handle, row)| {
-                            // What its retraction names, read while the declaration stands.
-                            let names = tables.retraction_of(row.key());
-                            (handle, names, row.key().prefix())
-                        },
-                    );
-                    found
-                };
-            let Some((handle, names, prefix)) = retracted else {
+            // A row of an earlier generation stands in no slot, and is retracted by nothing.
+            let Some(standing) = tables(&core.session.registry).tokens().get(handle) else {
                 return;
             };
+            let (id, prefix) = (standing.id(), standing.key().prefix());
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the token's, then the declaration's, which comes before every token.
             let token_place = core.place_of(DeclaredRow::of(handle));
@@ -12521,12 +12521,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             #[cfg(feature = "group")]
             core.transport.retract_from_groups(id);
             // The rows went before the links are told: a send never finds the tables borrowed.
-            let key = undeclared.taken.as_ref().map(|row| row.key().as_str());
-            let retract = key.map(|key| Retract::Token {
-                id,
-                names: names.map(|names| names.names(key)),
-            });
-            core.retract_at(token_place, retract, tx);
+            // The retraction names the key as the row named it, holding the key past the row.
+            let names = undeclared
+                .retraction
+                .as_ref()
+                .map(|retraction| retraction.names());
+            core.retract_at(token_place, Some(Retract::Token { id, names }), tx);
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
         });
     }
@@ -12538,7 +12538,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Result<Declared<SubId>, Declined> {
+    ) -> Result<Declared<EntityRow>, Declined> {
         // A closed session declares nothing, and takes no id for what it does not declare; what
         // the key holds goes back with the refusal, let go of, with the session and the link's
         // place, after the declaration.
@@ -12546,15 +12546,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // The row the tables refuse, let go of as the key and the sink are.
         let mut refused_row = None;
         let declared = self.live_on_link(|core, tx| {
-            // The subscriber is one row of the session's tables, numbered by the id they hand out
-            // next, which its Interest carries: a full table, a key the session cannot hold or no
-            // id left refuses it before anything is asked, and the sink goes with the refusal. The
+            // The subscriber is one row of the session's tables, numbered by the id they mint for
+            // it, which its Interest carries: a full table, a key the session cannot hold or no id
+            // left refuses it before anything is asked, and the sink goes with the refusal. The
             // row holds the key expression declaration its Interest names the key by for as long
             // as it stands.
-            let next = tables(&core.session.registry).next_entity_id();
-            let Some(id) = next else {
-                return Err(Declined::NoEntityId);
-            };
             // Taken once: the declaration runs once.
             let Some((wire, sink)) = unmade.take() else {
                 return Err(Declined::NoEntityId);
@@ -12578,18 +12574,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     return Err(Declined::from(refused.why));
                 }
             };
-            debug_assert_eq!(
-                declared.id, id,
-                "the tables number a row as they said they would"
-            );
             // One with no history asks the links as it is declared.
             if !history {
                 core.ask_liveliness_subscriber(declared.handle, tx);
             }
-            Ok((id, declared.handle))
+            Ok(declared.handle)
         });
         drop(refused_row);
-        let (id, handle) = match declared {
+        let handle = match declared {
             Some(Ok(declared)) => declared,
             Some(Err(why)) => return Err(why),
             None => return Err(Declined::Closed),
@@ -12616,7 +12608,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         });
         self.deliver();
         Ok(Declared {
-            id,
+            id: entity_row(handle),
             key: lent.unwrap_or(KeyView::ABSENT),
         })
     }
@@ -12777,12 +12769,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         // A get still pending ends with its session: its entry goes here, its leg's callback with
         // the table.
         #[cfg(feature = "query")]
-        {
-            let registry = CoopSession::faces_mut(&mut core.session.registry);
-            while let Some(pending) = core.session.pending_gets.pop() {
-                pending.unregister(&mut *registry);
-            }
-        }
+        CoopSession::faces_mut(&mut core.session.registry).end_every_get();
         // The session's tokens end with its link: the rows of its tables go, each with its hold of the
         // declaration its key is named by.
         #[cfg(feature = "liveliness")]
@@ -12834,10 +12821,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
             // Each end gives back its count of its leg's row, and the callback goes there when no
             // record of the round still holds it, with no lock held.
             while let Some(ended) = self.gets.take_end() {
-                self.gets.forget_due(ended.leg());
+                self.gets.forget_due(ended.row());
                 drop(self.gets.release(ended.row()));
             }
-            drop(self.gets.take_all_held());
         }
         // A round sealed and handed out by no delivery is emptied unhanded, its calls ended: no
         // callback of the session is called after its close. The rows whose last call that was
@@ -12930,27 +12916,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
 struct FanCancelled;
 
 /// The legs a cancelled fan tagged are ended one at a time: each pending entry is taken out under
-/// the session's lock and its callback dropped after it, with no lock held, so a token's `cancel`
-/// that waits for the callbacks returns whether or not the session is stepped.
+/// the session's lock, and what its get held back and its end are let go of after it, the callback
+/// dropped with no lock held, so a token's `cancel` that waits for the callbacks returns whether or
+/// not the session is stepped.
 #[cfg(feature = "query")]
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for CoopEngine<L, C> {
     fn cancel_fan(&self, key: FanKey) {
         loop {
-            let leg = self.live().and_then(|mut core| {
-                let core = &mut core.0;
-                let at = core
-                    .session
-                    .pending_gets
-                    .iter()
-                    .position(|pending| pending.fan == Some(key))?;
-                let pending = core.session.pending_gets.remove(at);
-                pending.unregister(CoopSession::faces_mut(&mut core.session.registry));
-                Some(pending.leg)
+            // The legs of the fan are the entries whose callback's row names it, on any face.
+            let row = self.live().and_then(|mut core| {
+                CoopSession::faces_mut(&mut core.0.session.registry)
+                    .end_first_leg(|sink| self.gets.in_fan(sink.row(), key))
             });
-            let Some(leg) = leg else {
+            let Some(row) = row else {
                 break;
             };
-            self.end_leg_now(leg);
+            self.end_get_now(row);
         }
     }
 }
@@ -13210,11 +13191,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngi
         // of the ends and the rows after, the callbacks still held among them.
         #[cfg(feature = "query")]
         {
-            let core = self.core.dropping();
-            let registry = CoopSession::faces_mut(&mut core.session.registry);
-            while let Some(pending) = core.session.pending_gets.pop() {
-                pending.unregister(&mut *registry);
-            }
+            CoopSession::faces_mut(&mut self.core.dropping().session.registry).end_every_get();
             self.gets.let_go();
         }
         // The held Finals' rows lie in the arena too; the round's calls were ended above.

@@ -1255,20 +1255,8 @@ pub struct ReplyRegistry<C: ReplySink, P: Storage = Profile> {
     /// session's key arena on the lent policy ([`Self::lent`]). A keyexpr with no room there is
     /// refused as a full table refuses the query ([`RegisterError::TableFull`]).
     keys: P::Keys,
-    /// Which keys a reply from a peer may be on: open takes every key, closed takes the keys of the
-    /// image's key set. Starts as the build's `key-set` policy; see [`Self::set_key_gate`].
-    key_gate: KeyGate<'static>,
-    /// transport-shm -- the receive side of shared memory for a reply: the same
-    /// state a push has (the negotiated capability, the resolver, the means of
-    /// acknowledging the peer's slices, the drop counters, the un-swap). Upstream
-    /// un-swaps the payload of a reply as it does a push's, before routing it; this
-    /// registry held no resolver, so a reply whose slice named a segment was dropped
-    /// unread and unacknowledged, and its sender kept the buffer, confirmed, until
-    /// the transport ended (MEASURED against `z_queryable_shm`: a getter that asked
-    /// past the size of the queryable's pool stopped being answered). The session
-    /// keeps it in step with the subscriber registry's.
-    #[cfg(feature = "transport-shm")]
-    shm: crate::extshm::ShmReceiveState,
+    /// How a Response from a peer is read: the key gate and shared memory.
+    receive: ReplyReceive,
 }
 
 impl<C: ReplySink, P: Storage> Default for ReplyRegistry<C, P> {
@@ -1279,6 +1267,34 @@ impl<C: ReplySink, P: Storage> Default for ReplyRegistry<C, P> {
             quota: Default::default(),
             key_quota: Default::default(),
             keys: Default::default(),
+            receive: ReplyReceive::default(),
+        }
+    }
+}
+
+/// How a Response from a peer is read into the reply its gets are handed: the gate on the keys a
+/// reply may be on, and the receive side of shared memory for a reply's value. Whatever holds a
+/// face's pending gets holds one, so a reply is read the same whichever table finds its get.
+pub struct ReplyReceive {
+    /// Which keys a reply from a peer may be on: open takes every key, closed takes the keys of the
+    /// image's key set. Starts as the build's `key-set` policy; see [`Self::set_key_gate`].
+    key_gate: KeyGate<'static>,
+    /// transport-shm -- the receive side of shared memory for a reply: the same
+    /// state a push has (the negotiated capability, the resolver, the means of
+    /// acknowledging the peer's slices, the drop counters, the un-swap). Upstream
+    /// un-swaps the payload of a reply as it does a push's, before routing it; a
+    /// reply whose slice named a segment and was dropped unread and unacknowledged
+    /// left its sender holding the buffer, confirmed, until the transport ended
+    /// (MEASURED against `z_queryable_shm`: a getter that asked past the size of the
+    /// queryable's pool stopped being answered). The session keeps it in step with
+    /// the subscriber registry's.
+    #[cfg(feature = "transport-shm")]
+    shm: crate::extshm::ShmReceiveState,
+}
+
+impl Default for ReplyReceive {
+    fn default() -> Self {
+        Self {
             key_gate: KeyGate::of_build(),
             #[cfg(feature = "transport-shm")]
             shm: crate::extshm::ShmReceiveState::default(),
@@ -1286,100 +1302,12 @@ impl<C: ReplySink, P: Storage> Default for ReplyRegistry<C, P> {
     }
 }
 
-/// ARCHITECTURE section 9.2 -- the delivery of a Response the in-place receive
-/// path lends ([`IterationEvent::InPlace`]).
-#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
-mod in_place;
-#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
-pub use in_place::{lend_response, LentReply, LentResponse, ReplyRoom};
-
-impl<C: ReplySink> ReplyRegistry<C, Profile> {
-    /// New empty registry over an explicit sink backing `C`. Pending
-    /// entries are stored in a `Vec` so duplicate-rid registrations (an
-    /// application registering two independent z_gets that happen to
-    /// share the same rid via a careless rid allocator) fire in
-    /// registration order; the registry imposes no uniqueness on rid.
-    ///
-    /// R311gb-3c — the generic constructor (the no-`alloc` / MCU entry
-    /// point, paired with [`register_sink`](Self::register_sink)). AP
-    /// callers use the inferring [`new`](ReplyRegistry::new) shorthand,
-    /// which fixes `C = BoxedReplySink`; mirrors
-    /// [`crate::pubsub::SubscriberRegistry::with_sink_backing`].
-    pub fn with_sink_backing() -> Self {
-        Self::default()
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl<C: ReplySink> ReplyRegistry<C, crate::bounded::OnUse> {
-    /// An empty registry of at most `rows` pending queries, under `MAX_PENDING_QUERIES`, taken at
-    /// its first query, the keyexpr each was asked under counted against `keys`, the session's key
-    /// budget: the gets a session holds pending on one face, at its open.
-    pub fn counted(keys: crate::on_use::BudgetKeys, rows: usize) -> Self {
-        Self {
-            pending: BoundedVec::counted(rows),
-            keys,
-            ..Self::default()
-        }
-    }
-}
-
-/// The rows of a [`ReplyRegistry`] of a policy a description places, which a region lays out
-/// beside it: its pending queries', at the build's bound.
-pub struct ReplyRegistryRows<C: ReplySink, P: crate::bounded::LaidOut = crate::bounded::Region> {
-    pending: [core::mem::MaybeUninit<Pending<C, P>>; caps::MAX_PENDING_QUERIES],
-}
-
-// SAFETY: the rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
-unsafe impl<C: ReplySink, P: crate::bounded::LaidOut> crate::bounded::ZeroEmpty
-    for ReplyRegistryRows<C, P>
-{
-}
-
-/// The lines a description holds for one [`ReplyRegistry`]: its pending queries' rows (and its
-/// handle to the key arena, a line of the other kind).
-pub const REPLY_REGISTRY_LINES: usize = 1;
-
-impl<C: ReplySink, P: crate::bounded::LaidOut> ReplyRegistry<C, P> {
-    /// The description of a registry at `at` and, in a region, its [`ReplyRegistryRows`] at
-    /// `rows`: the line of its pending queries' rows, lent a face's `MAX_PENDING_QUERIES`, and its
-    /// handle to the key arena. The registry is written as [`Default`] makes one before it is
-    /// placed or lent, since a deadline of none and the build's key gate are not zero bytes.
-    pub const fn places(
-        at: usize,
-        rows: usize,
-    ) -> crate::bounded::RegionLines<REPLY_REGISTRY_LINES> {
-        crate::bounded::RegionLines::EMPTY
-            .seq(
-                crate::bounded::SeqPlace::of_room::<Pending<C, P>, { caps::MAX_PENDING_QUERIES }>(
-                    at.wrapping_add(core::mem::offset_of!(Self, pending)),
-                    rows.wrapping_add(core::mem::offset_of!(ReplyRegistryRows<C, P>, pending)),
-                )
-                .counted(crate::bounded::RowCount::Queries),
-            )
-            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
-    }
-}
-
-impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
-    /// The bytes one pending query takes in the table's storage: the key its replies are held to
-    /// with it where the storage policy keeps the text in the row, and its sink as the table holds
-    /// it.
-    pub const ROW_BYTES: usize = core::mem::size_of::<Pending<C, P>>();
-
-    /// Hold the registry to the `MAX_PENDING_QUERIES` its creator resolved: a registration that
-    /// would leave more queries pending than `quota` admits is refused
-    /// ([`RegisterError::TableFull`]), and the queries already pending are kept, as a lowered
-    /// soft limit keeps what it holds.
-    pub fn limit_to(&mut self, quota: crate::limits::MaxPendingQueriesHeld) {
-        self.quota = quota;
-    }
-
-    /// Hold the registry to the `MAX_KEYEXPR_BYTES` its creator resolved: a query asked under a
-    /// keyexpr longer than `quota` admits, whose replies are gated on it, is refused
-    /// ([`RegisterError::KeyexprTooLong`]), as a fixed row that cannot hold it refuses it.
-    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
-        self.key_quota = quota;
+impl ReplyReceive {
+    /// Whether a reply from a peer is on a key the gate takes, the refusal counted: an Err names
+    /// no key and is always taken.
+    pub fn admits_key(&mut self, reply: &dyn ReplyView) -> bool {
+        reply.kind() == crate::reply_sink::ReplyKind::Err
+            || self.key_gate.admit_key(reply.keyexpr()).is_ok()
     }
 
     /// Replace the gate that decides which keys a reply from a peer may be on; it starts as what the
@@ -1440,262 +1368,9 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         self.shm.unnegotiated_drops()
     }
 
-    /// R311gb-3c — register a pending z_get with an explicit
-    /// [`ReplySink`]. The seam-native registration entry point: works on
-    /// every profile (`C = BoxedReplySink` heap closures on AP, a
-    /// consumer-supplied closed `enum` on MCU). The `alloc`-only
-    /// [`register`](ReplyRegistry::register) convenience wrapper funnels
-    /// through here after wrapping the `on_reply` + `on_final` closures in
-    /// a [`BoxedReplySink`].
-    ///
-    /// `expected_finals` mirrors zenoh-pico's
-    /// `_z_pending_query_t._remaining_finals` slot
-    /// (`vendor/zenoh-pico/src/session/query.c:222-256`): one for a
-    /// pure-wire (`Locality::Remote`) z_get expecting one peer
-    /// `ResponseFinal`; one for a pure-loopback
-    /// (`Locality::SessionLocal`) z_get expecting one synthetic
-    /// final from [`Self::deliver_local_final`]; two for a
-    /// `Locality::Any` z_get with at least one local queryable AND a
-    /// wire branch.
-    ///
-    /// The returned [`ReplyHandle`] is the rid wrapped — exposed so
-    /// callers that allocate rids opaquely (e.g. a future
-    /// `z_get_builder` adapter) can carry the rid without leaking
-    /// the integer all the way back to user code.
-    ///
-    /// R311gb (Track 2) — fallible on the no-alloc backing: a pending
-    /// registration past [`caps::MAX_PENDING_QUERIES`] is rejected with
-    /// [`RegisterError::TableFull`] (fail-fast, no silent drop). On
-    /// every backing a registration past the quota the creator stated
-    /// ([`Self::limit_to`]) is refused as a full table.
-    /// R311y833 — `accept` is REQUIRED, and there is deliberately no shorter
-    /// overload that omits it. zenoh states the matching-keyexpr guarantee as
-    /// part of `get()`'s own contract (`zenoh/src/api/session.rs:1181`), so a
-    /// registration that cannot say which keyexpr it was asked under cannot
-    /// keep it. A caller that genuinely accepts anything passes
-    /// [`ReplyAcceptance::Any`], which reads as the decision it is; before
-    /// y833 that was the silent default and every wz `Session::query`
-    /// delivered replies both upstreams drop.
-    ///
-    /// Fails with [`RegisterError::KeyexprTooLong`] when a
-    /// [`ReplyAcceptance::Matching`] keyexpr is longer than the quota the creator
-    /// stated ([`Self::limit_keys_to`]), or than [`caps::MAX_KEYEXPR_BYTES`] on the
-    /// no-alloc backing — see
-    /// `ReplyAcceptance::store` (private) for why refusing beats truncating.
-    pub fn register_sink(
-        &mut self,
-        rid: crate::wire_id::RequestId,
-        expected_finals: u32,
-        deadline_ms: Option<u64>,
-        accept: ReplyAcceptance<'_>,
-        sink: C,
-    ) -> Result<ReplyHandle, RegisterError> {
-        let accept = accept.store(&self.keys, self.key_quota)?;
-        if !self.has_room() {
-            return Err(RegisterError::TableFull);
-        }
-        if let Some(deadline_ms) = deadline_ms {
-            self.due_ms = self.due_ms.min(deadline_ms);
-        }
-        self.pending
-            .push(Pending {
-                rid,
-                remaining_finals: expected_finals,
-                deadline_ms,
-                sink,
-                accept,
-            })
-            .map_err(|_| RegisterError::TableFull)?;
-        Ok(ReplyHandle(rid))
-    }
-
-    /// Drop every pending query without firing its final: what the loss of the face the queries
-    /// were asked of does to them, each sink's drop being its end. The rows stay the table's.
-    pub fn clear(&mut self) {
-        self.pending.clear();
-        self.due_ms = u64::MAX;
-    }
-
-    /// Whether one more query may be held pending: inside the quota its creator stated and in a
-    /// row its storage has free. A table lent no rows has none, so a get it cannot hold is refused
-    /// before anything is put in it.
-    pub fn has_room(&self) -> bool {
-        self.pending.free_slots() > 0 && self.quota.admits(self.pending.len().saturating_add(1))
-    }
-
-    /// Remove a previously-registered pending entry by rid. Returns
-    /// `true` if at least one entry was removed. Removes every entry
-    /// matching the rid (the duplicate-rid registration shape is
-    /// supported on `register`; symmetric on `unregister`). Idempotent
-    /// — calling on a rid that was never registered or already
-    /// fired-and-removed returns `false` without panicking.
-    pub fn unregister(&mut self, rid: crate::wire_id::RequestId) -> bool {
-        let before = self.pending.len();
-        let due_ms = self.due_ms;
-        let mut held_due = false;
-        self.pending.retain(|p| {
-            let keep = p.rid != rid;
-            held_due |= !keep && p.deadline_ms == Some(due_ms);
-            keep
-        });
-        if held_due {
-            self.rearm_due();
-        }
-        before != self.pending.len()
-    }
-
-    /// Number of currently-pending registrations.
-    pub fn len(&self) -> usize {
-        self.pending.len()
-    }
-
-    /// Whether the registry holds any pending registration.
-    pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
-    }
-
-    /// The row the next entry is held in: what a table whose request ids each name one entry puts
-    /// in the id of the entry it is about to hold ([`crate::wire_id::request_id_at`]).
-    pub fn next_row(&self) -> usize {
-        self.pending.len()
-    }
-
-    /// The row of the entry `rid` names, in a table whose ids each name one entry: the row the
-    /// id carries when the entry is still in it, else the first entry of the id. An entry moves
-    /// only toward the front, when one before it ends, so the carried row is read first and the
-    /// walk is the case of an earlier end. The id is compared whole, so a row held again under a
-    /// later serial is not named by the id of the entry it held before.
-    fn row_of(&self, rid: crate::wire_id::RequestId) -> Option<usize> {
-        let carried = crate::wire_id::request_row(rid);
-        if self
-            .pending
-            .get(carried)
-            .is_some_and(|entry| entry.rid == rid)
-        {
-            return Some(carried);
-        }
-        self.pending.iter().position(|entry| entry.rid == rid)
-    }
-
-    /// Hand a reply from a peer to the one entry its id names (`Self::row_of`), through the key
-    /// gate and the entry's accepted keys as `Self::fire_replies_for` hands it: whether the
-    /// entry was handed it. For a table whose ids each name one entry; a table whose ids its
-    /// callers chose, two of which may share one, hands a reply to each ([`Self::dispatch_borrowed`]).
-    pub fn reply_to_one(&mut self, reply: &dyn ReplyView) -> bool {
-        if reply.kind() != crate::reply_sink::ReplyKind::Err
-            && self.key_gate.admit_key(reply.keyexpr()).is_err()
-        {
-            return false;
-        }
-        let Some(at) = self.row_of(reply.rid()) else {
-            return false;
-        };
-        let Some(entry) = self.pending.get_mut(at) else {
-            return false;
-        };
-        if !entry.accept.admits(reply) {
-            return false;
-        }
-        entry.sink.on_reply(reply);
-        true
-    }
-
-    /// A Final for the one entry `rid` names (`Self::row_of`): it owes one fewer, and the last
-    /// ends it, as `Self::fire_final_for` ends an entry. An entry that owes none is left alone.
-    pub fn final_to_one(&mut self, rid: crate::wire_id::RequestId) {
-        let Some(at) = self.row_of(rid) else {
-            return;
-        };
-        let Some(entry) = self.pending.get_mut(at) else {
-            return;
-        };
-        match entry.remaining_finals.checked_sub(1) {
-            Some(0) => {}
-            Some(left) => {
-                entry.remaining_finals = left;
-                return;
-            }
-            None => return,
-        }
-        let mut entry = self.pending.remove(at);
-        let held_due = entry.deadline_ms == Some(self.due_ms);
-        entry.sink.on_final(rid);
-        if held_due {
-            self.rearm_due();
-        }
-    }
-
-    /// Route an inbound `Response` through the pending table.
-    ///
-    /// - The Response's keyexpr is resolved through
-    ///   `peer_keyexpr_table` (the shared mapping populated by the
-    ///   subscriber side's `absorb_declare` from inbound
-    ///   `Declare(DeclKexpr)`). The composition rule mirrors
-    ///   `crate::query::QueryPeer::dispatch_request`:
-    ///   `id == 0` → suffix verbatim; `id != 0` → `table[id]` +
-    ///   optional suffix. Un-resolvable mapping ids drop the
-    ///   dispatch silently rather than firing on a partial keyexpr.
-    /// - Each pending entry whose `rid == response.request_id`
-    ///   fires once, in registration order. The pending entry stays
-    ///   in the table — `Response(Reply|Err)` does NOT terminate the
-    ///   chain; only `ResponseFinal` does (via
-    ///   [`Self::dispatch_response_final`]).
-    /// - `ResponseVariant::Default { tag, .. }` arms — which the
-    ///   codec surfaces when the inner-body MID falls outside
-    ///   `{Reply, Err}` — are dropped silently. This matches
-    ///   zenoh-pico's `_z_handle_response` dispatch which only
-    ///   recognises the Reply / Err inner MIDs and treats other tags
-    ///   as wire-spec violations to be ignored at the application
-    ///   layer (the transport FSM's framing path is responsible for
-    ///   surfacing them as `FramingError` if needed).
-    ///
-    /// R311dy — `codec-response`-gated: the `&ResponseOwned` parameter
-    /// type lives in the `codec-response` codec_group, so the wire
-    /// dispatch entry point elides in a `codec-response`-OFF subset
-    /// (the loopback `deliver_local_reply` keeps the registry useful).
-    #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    pub fn dispatch_response<'a, PS: Storage, OS: Storage>(
-        &mut self,
-        response: &ResponseOwned,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
-    ) {
-        self.dispatch_response_with(response, peer_keyexpr_table.into(), None);
-    }
-
-    /// [`Self::dispatch_response`] for a reply whose Put value the caller has read already into
-    /// `payload`. A router node reads the chunk of shared memory a reply to its own session names
-    /// while the pass that routes the reply holds it, with a reference of its own, as it reads a
-    /// publication for its own subscribers; that pass took the reference the sender made for the
-    /// node, so the chunk is not to be read a second time here. `payload` is delivered as the
-    /// value of a Put reply and let go for any other, and a reply that routing cannot place
-    /// settles nothing, since nothing of it is owed any more.
-    #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    pub fn dispatch_response_read<'a, PS: Storage, OS: Storage>(
-        &mut self,
-        response: &ResponseOwned,
-        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
-        payload: crate::link::RxBytes,
-    ) {
-        self.dispatch_response_with(response, peer_keyexpr_table.into(), Some(payload));
-    }
-
-    /// The dispatch of a `Response`, its Put value being `read` when the caller read it and the
-    /// response's own otherwise.
-    #[cfg(all(feature = "codec-response", feature = "alloc"))]
-    fn dispatch_response_with<PS: Storage, OS: Storage>(
-        &mut self,
-        response: &ResponseOwned,
-        peer_keyexpr_table: MappingSpaces<'_, PS, OS>,
-        read: Option<crate::link::RxBytes>,
-    ) {
-        if let Some(inbound) = self.inbound_reply(response, peer_keyexpr_table, read) {
-            self.fire_replies_for(&inbound, true);
-        }
-    }
-
     /// The reply `response`, a record of a frame the copying receive decoded, is delivered as, for
-    /// a caller that hands it to the pending gets itself ([`Self::dispatch_borrowed`]): what they
-    /// are then handed is what [`Self::dispatch_response`] hands them. `None` for one it drops.
+    /// a caller that hands it to the pending gets itself: what they are then handed is what
+    /// [`ReplyRegistry::dispatch_response`] hands them. `None` for one it drops.
     #[cfg(all(feature = "codec-response", feature = "alloc"))]
     pub fn take_response<'a, PS: Storage, OS: Storage>(
         &mut self,
@@ -1868,6 +1543,426 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                     let _ = self.reply_put_payload(put, response);
                 }
             }
+        }
+    }
+}
+
+/// ARCHITECTURE section 9.2 -- the delivery of a Response the in-place receive
+/// path lends ([`IterationEvent::InPlace`]).
+#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
+mod in_place;
+#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
+pub use in_place::{lend_response, LentReply, LentResponse, ReplyRoom};
+
+impl<C: ReplySink> ReplyRegistry<C, Profile> {
+    /// New empty registry over an explicit sink backing `C`. Pending
+    /// entries are stored in a `Vec` so duplicate-rid registrations (an
+    /// application registering two independent z_gets that happen to
+    /// share the same rid via a careless rid allocator) fire in
+    /// registration order; the registry imposes no uniqueness on rid.
+    ///
+    /// R311gb-3c — the generic constructor (the no-`alloc` / MCU entry
+    /// point, paired with [`register_sink`](Self::register_sink)). AP
+    /// callers use the inferring [`new`](ReplyRegistry::new) shorthand,
+    /// which fixes `C = BoxedReplySink`; mirrors
+    /// [`crate::pubsub::SubscriberRegistry::with_sink_backing`].
+    pub fn with_sink_backing() -> Self {
+        Self::default()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<C: ReplySink> ReplyRegistry<C, crate::bounded::OnUse> {
+    /// An empty registry of at most `rows` pending queries, under `MAX_PENDING_QUERIES`, taken at
+    /// its first query, the keyexpr each was asked under counted against `keys`, the session's key
+    /// budget: the gets a session holds pending on one face, at its open.
+    pub fn counted(keys: crate::on_use::BudgetKeys, rows: usize) -> Self {
+        Self {
+            pending: BoundedVec::counted(rows),
+            keys,
+            ..Self::default()
+        }
+    }
+}
+
+/// The rows of a [`ReplyRegistry`] of a policy a description places, which a region lays out
+/// beside it: its pending queries', at the build's bound.
+pub struct ReplyRegistryRows<C: ReplySink, P: crate::bounded::LaidOut = crate::bounded::Region> {
+    pending: [core::mem::MaybeUninit<Pending<C, P>>; caps::MAX_PENDING_QUERIES],
+}
+
+// SAFETY: the rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
+unsafe impl<C: ReplySink, P: crate::bounded::LaidOut> crate::bounded::ZeroEmpty
+    for ReplyRegistryRows<C, P>
+{
+}
+
+/// The lines a description holds for one [`ReplyRegistry`]: its pending queries' rows (and its
+/// handle to the key arena, a line of the other kind).
+pub const REPLY_REGISTRY_LINES: usize = 1;
+
+impl<C: ReplySink, P: crate::bounded::LaidOut> ReplyRegistry<C, P> {
+    /// The description of a registry at `at` and, in a region, its [`ReplyRegistryRows`] at
+    /// `rows`: the line of its pending queries' rows, lent a face's `MAX_PENDING_QUERIES`, and its
+    /// handle to the key arena. The registry is written as [`Default`] makes one before it is
+    /// placed or lent, since a deadline of none and the build's key gate are not zero bytes.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<REPLY_REGISTRY_LINES> {
+        crate::bounded::RegionLines::EMPTY
+            .seq(
+                crate::bounded::SeqPlace::of_room::<Pending<C, P>, { caps::MAX_PENDING_QUERIES }>(
+                    at.wrapping_add(core::mem::offset_of!(Self, pending)),
+                    rows.wrapping_add(core::mem::offset_of!(ReplyRegistryRows<C, P>, pending)),
+                )
+                .counted(crate::bounded::RowCount::Queries),
+            )
+            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
+    }
+}
+
+impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
+    /// The bytes one pending query takes in the table's storage: the key its replies are held to
+    /// with it where the storage policy keeps the text in the row, and its sink as the table holds
+    /// it.
+    pub const ROW_BYTES: usize = core::mem::size_of::<Pending<C, P>>();
+
+    /// Hold the registry to the `MAX_PENDING_QUERIES` its creator resolved: a registration that
+    /// would leave more queries pending than `quota` admits is refused
+    /// ([`RegisterError::TableFull`]), and the queries already pending are kept, as a lowered
+    /// soft limit keeps what it holds.
+    pub fn limit_to(&mut self, quota: crate::limits::MaxPendingQueriesHeld) {
+        self.quota = quota;
+    }
+
+    /// Hold the registry to the `MAX_KEYEXPR_BYTES` its creator resolved: a query asked under a
+    /// keyexpr longer than `quota` admits, whose replies are gated on it, is refused
+    /// ([`RegisterError::KeyexprTooLong`]), as a fixed row that cannot hold it refuses it.
+    pub fn limit_keys_to(&mut self, quota: crate::limits::MaxKeyexprBytesHeld) {
+        self.key_quota = quota;
+    }
+
+    /// How the registry reads a Response from a peer: its key gate and shared memory.
+    pub fn receive_mut(&mut self) -> &mut ReplyReceive {
+        &mut self.receive
+    }
+
+    /// Replace the gate that decides which keys a reply from a peer may be on
+    /// ([`ReplyReceive::set_key_gate`]).
+    pub fn set_key_gate(&mut self, gate: KeyGate<'static>) {
+        self.receive.set_key_gate(gate);
+    }
+
+    /// How many replies from a peer the key gate dropped, by reason.
+    pub const fn key_gate_refused(&self) -> crate::key_gate::Refused {
+        self.receive.key_gate_refused()
+    }
+
+    /// transport-shm -- install the resolver a reply's shared-memory slices are read
+    /// through ([`ReplyReceive::set_shm_resolver_shared`]).
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_resolver_shared(
+        &mut self,
+        resolver: alloc::sync::Arc<dyn crate::extshm::ShmResolver + Send + Sync>,
+    ) {
+        self.receive.set_shm_resolver_shared(resolver);
+    }
+
+    /// transport-shm -- restamp the live negotiated capability
+    /// ([`ReplyReceive::set_shm_negotiated`]).
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_negotiated(&mut self, negotiated: bool) {
+        self.receive.set_shm_negotiated(negotiated);
+    }
+
+    /// transport-shm -- install or withdraw the means of acknowledging the peer's
+    /// shared-memory slices ([`ReplyReceive::set_shm_handoff_shared`]).
+    #[cfg(feature = "transport-shm")]
+    pub fn set_shm_handoff_shared(
+        &mut self,
+        handoff: Option<alloc::sync::Arc<dyn crate::extshm::ShmHandoff>>,
+    ) {
+        self.receive.set_shm_handoff_shared(handoff);
+    }
+
+    /// transport-shm -- replies dropped because a slice did not resolve.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unresolved_drops(&self) -> u64 {
+        self.receive.shm_unresolved_drops()
+    }
+
+    /// transport-shm -- replies dropped because a descriptor arrived on a session
+    /// that never negotiated shared memory.
+    #[cfg(feature = "transport-shm")]
+    pub fn shm_unnegotiated_drops(&self) -> u64 {
+        self.receive.shm_unnegotiated_drops()
+    }
+
+    /// R311gb-3c — register a pending z_get with an explicit
+    /// [`ReplySink`]. The seam-native registration entry point: works on
+    /// every profile (`C = BoxedReplySink` heap closures on AP, a
+    /// consumer-supplied closed `enum` on MCU). The `alloc`-only
+    /// [`register`](ReplyRegistry::register) convenience wrapper funnels
+    /// through here after wrapping the `on_reply` + `on_final` closures in
+    /// a [`BoxedReplySink`].
+    ///
+    /// `expected_finals` mirrors zenoh-pico's
+    /// `_z_pending_query_t._remaining_finals` slot
+    /// (`vendor/zenoh-pico/src/session/query.c:222-256`): one for a
+    /// pure-wire (`Locality::Remote`) z_get expecting one peer
+    /// `ResponseFinal`; one for a pure-loopback
+    /// (`Locality::SessionLocal`) z_get expecting one synthetic
+    /// final from [`Self::deliver_local_final`]; two for a
+    /// `Locality::Any` z_get with at least one local queryable AND a
+    /// wire branch.
+    ///
+    /// The returned [`ReplyHandle`] is the rid wrapped — exposed so
+    /// callers that allocate rids opaquely (e.g. a future
+    /// `z_get_builder` adapter) can carry the rid without leaking
+    /// the integer all the way back to user code.
+    ///
+    /// R311gb (Track 2) — fallible on the no-alloc backing: a pending
+    /// registration past [`caps::MAX_PENDING_QUERIES`] is rejected with
+    /// [`RegisterError::TableFull`] (fail-fast, no silent drop). On
+    /// every backing a registration past the quota the creator stated
+    /// ([`Self::limit_to`]) is refused as a full table.
+    /// R311y833 — `accept` is REQUIRED, and there is deliberately no shorter
+    /// overload that omits it. zenoh states the matching-keyexpr guarantee as
+    /// part of `get()`'s own contract (`zenoh/src/api/session.rs:1181`), so a
+    /// registration that cannot say which keyexpr it was asked under cannot
+    /// keep it. A caller that genuinely accepts anything passes
+    /// [`ReplyAcceptance::Any`], which reads as the decision it is; before
+    /// y833 that was the silent default and every wz `Session::query`
+    /// delivered replies both upstreams drop.
+    ///
+    /// Fails with [`RegisterError::KeyexprTooLong`] when a
+    /// [`ReplyAcceptance::Matching`] keyexpr is longer than the quota the creator
+    /// stated ([`Self::limit_keys_to`]), or than [`caps::MAX_KEYEXPR_BYTES`] on the
+    /// no-alloc backing — see
+    /// `ReplyAcceptance::store` (private) for why refusing beats truncating.
+    pub fn register_sink(
+        &mut self,
+        rid: crate::wire_id::RequestId,
+        expected_finals: u32,
+        deadline_ms: Option<u64>,
+        accept: ReplyAcceptance<'_>,
+        sink: C,
+    ) -> Result<ReplyHandle, RegisterError> {
+        let accept = accept.store(&self.keys, self.key_quota)?;
+        if !self.has_room() {
+            return Err(RegisterError::TableFull);
+        }
+        if let Some(deadline_ms) = deadline_ms {
+            self.due_ms = self.due_ms.min(deadline_ms);
+        }
+        self.pending
+            .push(Pending {
+                rid,
+                remaining_finals: expected_finals,
+                deadline_ms,
+                sink,
+                accept,
+            })
+            .map_err(|_| RegisterError::TableFull)?;
+        Ok(ReplyHandle(rid))
+    }
+
+    /// Drop every pending query without firing its final: what the loss of the face the queries
+    /// were asked of does to them, each sink's drop being its end. The rows stay the table's.
+    pub fn clear(&mut self) {
+        self.pending.clear();
+        self.due_ms = u64::MAX;
+    }
+
+    /// Whether one more query may be held pending: inside the quota its creator stated and in a
+    /// row its storage has free. A table lent no rows has none, so a get it cannot hold is refused
+    /// before anything is put in it.
+    pub fn has_room(&self) -> bool {
+        self.pending.free_slots() > 0 && self.quota.admits(self.pending.len().saturating_add(1))
+    }
+
+    /// Remove a previously-registered pending entry by rid. Returns
+    /// `true` if at least one entry was removed. Removes every entry
+    /// matching the rid (the duplicate-rid registration shape is
+    /// supported on `register`; symmetric on `unregister`). Idempotent
+    /// — calling on a rid that was never registered or already
+    /// fired-and-removed returns `false` without panicking.
+    pub fn unregister(&mut self, rid: crate::wire_id::RequestId) -> bool {
+        let before = self.pending.len();
+        let due_ms = self.due_ms;
+        let mut held_due = false;
+        self.pending.retain(|p| {
+            let keep = p.rid != rid;
+            held_due |= !keep && p.deadline_ms == Some(due_ms);
+            keep
+        });
+        if held_due {
+            self.rearm_due();
+        }
+        before != self.pending.len()
+    }
+
+    /// Drop the first pending entry whose sink `pick` names, without firing its final: what the
+    /// cancellation of the get the sink is a leg of does to it, the sink's drop being the leg's end.
+    /// Whether one was dropped.
+    pub fn unregister_first(&mut self, mut pick: impl FnMut(&C) -> bool) -> bool {
+        let Some(at) = self.pending.iter().position(|entry| pick(&entry.sink)) else {
+            return false;
+        };
+        if self.pending.remove(at).deadline_ms == Some(self.due_ms) {
+            self.rearm_due();
+        }
+        true
+    }
+
+    /// Number of currently-pending registrations.
+    pub fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Whether the registry holds any pending registration.
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// The row the next entry is held in: what a table whose request ids each name one entry puts
+    /// in the id of the entry it is about to hold ([`crate::wire_id::request_id_at`]).
+    pub fn next_row(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// The row of the entry `rid` names, in a table whose ids each name one entry: the row the
+    /// id carries when the entry is still in it, else the first entry of the id. An entry moves
+    /// only toward the front, when one before it ends, so the carried row is read first and the
+    /// walk is the case of an earlier end. The id is compared whole, so a row held again under a
+    /// later serial is not named by the id of the entry it held before.
+    fn row_of(&self, rid: crate::wire_id::RequestId) -> Option<usize> {
+        let carried = crate::wire_id::request_row(rid);
+        if self
+            .pending
+            .get(carried)
+            .is_some_and(|entry| entry.rid == rid)
+        {
+            return Some(carried);
+        }
+        self.pending.iter().position(|entry| entry.rid == rid)
+    }
+
+    /// Hand a reply from a peer to the one entry its id names (`Self::row_of`), through the key
+    /// gate and the entry's accepted keys as `Self::fire_replies_for` hands it: whether the
+    /// entry was handed it. For a table whose ids each name one entry; a table whose ids its
+    /// callers chose, two of which may share one, hands a reply to each ([`Self::dispatch_borrowed`]).
+    pub fn reply_to_one(&mut self, reply: &dyn ReplyView) -> bool {
+        if !self.receive.admits_key(reply) {
+            return false;
+        }
+        let Some(at) = self.row_of(reply.rid()) else {
+            return false;
+        };
+        let Some(entry) = self.pending.get_mut(at) else {
+            return false;
+        };
+        if !entry.accept.admits(reply) {
+            return false;
+        }
+        entry.sink.on_reply(reply);
+        true
+    }
+
+    /// A Final for the one entry `rid` names (`Self::row_of`): it owes one fewer, and the last
+    /// ends it, as `Self::fire_final_for` ends an entry. An entry that owes none is left alone.
+    pub fn final_to_one(&mut self, rid: crate::wire_id::RequestId) {
+        let Some(at) = self.row_of(rid) else {
+            return;
+        };
+        let Some(entry) = self.pending.get_mut(at) else {
+            return;
+        };
+        match entry.remaining_finals.checked_sub(1) {
+            Some(0) => {}
+            Some(left) => {
+                entry.remaining_finals = left;
+                return;
+            }
+            None => return,
+        }
+        let mut entry = self.pending.remove(at);
+        let held_due = entry.deadline_ms == Some(self.due_ms);
+        entry.sink.on_final(rid);
+        if held_due {
+            self.rearm_due();
+        }
+    }
+
+    /// Route an inbound `Response` through the pending table.
+    ///
+    /// - The Response's keyexpr is resolved through
+    ///   `peer_keyexpr_table` (the shared mapping populated by the
+    ///   subscriber side's `absorb_declare` from inbound
+    ///   `Declare(DeclKexpr)`). The composition rule mirrors
+    ///   `crate::query::QueryPeer::dispatch_request`:
+    ///   `id == 0` → suffix verbatim; `id != 0` → `table[id]` +
+    ///   optional suffix. Un-resolvable mapping ids drop the
+    ///   dispatch silently rather than firing on a partial keyexpr.
+    /// - Each pending entry whose `rid == response.request_id`
+    ///   fires once, in registration order. The pending entry stays
+    ///   in the table — `Response(Reply|Err)` does NOT terminate the
+    ///   chain; only `ResponseFinal` does (via
+    ///   [`Self::dispatch_response_final`]).
+    /// - `ResponseVariant::Default { tag, .. }` arms — which the
+    ///   codec surfaces when the inner-body MID falls outside
+    ///   `{Reply, Err}` — are dropped silently. This matches
+    ///   zenoh-pico's `_z_handle_response` dispatch which only
+    ///   recognises the Reply / Err inner MIDs and treats other tags
+    ///   as wire-spec violations to be ignored at the application
+    ///   layer (the transport FSM's framing path is responsible for
+    ///   surfacing them as `FramingError` if needed).
+    ///
+    /// R311dy — `codec-response`-gated: the `&ResponseOwned` parameter
+    /// type lives in the `codec-response` codec_group, so the wire
+    /// dispatch entry point elides in a `codec-response`-OFF subset
+    /// (the loopback `deliver_local_reply` keeps the registry useful).
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    pub fn dispatch_response<'a, PS: Storage, OS: Storage>(
+        &mut self,
+        response: &ResponseOwned,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
+    ) {
+        self.dispatch_response_with(response, peer_keyexpr_table.into(), None);
+    }
+
+    /// [`Self::dispatch_response`] for a reply whose Put value the caller has read already into
+    /// `payload`. A router node reads the chunk of shared memory a reply to its own session names
+    /// while the pass that routes the reply holds it, with a reference of its own, as it reads a
+    /// publication for its own subscribers; that pass took the reference the sender made for the
+    /// node, so the chunk is not to be read a second time here. `payload` is delivered as the
+    /// value of a Put reply and let go for any other, and a reply that routing cannot place
+    /// settles nothing, since nothing of it is owed any more.
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    pub fn dispatch_response_read<'a, PS: Storage, OS: Storage>(
+        &mut self,
+        response: &ResponseOwned,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
+        payload: crate::link::RxBytes,
+    ) {
+        self.dispatch_response_with(response, peer_keyexpr_table.into(), Some(payload));
+    }
+
+    /// The dispatch of a `Response`, its Put value being `read` when the caller read it and the
+    /// response's own otherwise.
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    fn dispatch_response_with<PS: Storage, OS: Storage>(
+        &mut self,
+        response: &ResponseOwned,
+        peer_keyexpr_table: MappingSpaces<'_, PS, OS>,
+        read: Option<crate::link::RxBytes>,
+    ) {
+        if let Some(inbound) = self
+            .receive
+            .inbound_reply(response, peer_keyexpr_table, read)
+        {
+            self.fire_replies_for(&inbound, true);
         }
     }
 
@@ -2115,10 +2210,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// so no path skips it: an error reply names no key and a reply of the application's own
     /// (loopback) is not a peer's, so neither is gated.
     fn fire_replies_for(&mut self, reply: &dyn ReplyView, from_peer: bool) -> usize {
-        if from_peer
-            && reply.kind() != crate::reply_sink::ReplyKind::Err
-            && self.key_gate.admit_key(reply.keyexpr()).is_err()
-        {
+        if from_peer && !self.receive.admits_key(reply) {
             return 0;
         }
         let rid = reply.rid();
@@ -2231,8 +2323,8 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
 
     /// [`Self::dispatch_iteration_event`] to the `ResponseFinal`s of a frame the copying receive
     /// decoded alone, for a caller that took each of its Responses itself
-    /// (`Self::take_response`, with `codec-response` and `alloc`), in their order, before this: a
-    /// `Final` then ends its get after every reply the frame carried. Any other event is a no-op.
+    /// (`ReplyReceive::take_response`, with `codec-response` and `alloc`), in their order,
+    /// before this: a `Final` then ends its get after every reply the frame carried. Any other event is a no-op.
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_finals_of(&mut self, event: IterationEvent<'_, '_>) {
         #[cfg(all(feature = "alloc", feature = "codec-response-final"))]
@@ -2839,6 +2931,49 @@ mod tests {
         );
         assert_eq!(reg.len(), 1);
         assert!(reg.unregister(8));
+        assert!(reg.is_empty());
+    }
+
+    /// A sink that names itself, for a test that finds an entry by its sink.
+    struct Tagged(u8);
+
+    impl ReplySink for Tagged {
+        fn on_reply(&mut self, _reply: &dyn crate::reply_sink::ReplyView) {}
+
+        fn on_final(&mut self, _rid: crate::wire_id::RequestId) {
+            panic!("an entry dropped by its sink fires no final");
+        }
+    }
+
+    /// The first entry whose sink the pick names is dropped, its final not fired, and the
+    /// earliest deadline is worked out again from the entries left; a pick that names none drops
+    /// nothing. Turned red by a drop that keeps the deadline of the entry gone, or one that takes
+    /// every entry the pick names.
+    #[test]
+    fn the_first_entry_its_sink_names_is_dropped_and_the_deadline_moves_on() {
+        let mut reg = ReplyRegistry::<Tagged>::with_sink_backing();
+        for (rid, tag, due) in [(1, 1, 100), (2, 2, 300), (3, 1, 500)] {
+            reg.register_sink(
+                rid,
+                1,
+                Some(due),
+                crate::reply_acceptance::ReplyAcceptance::Any,
+                Tagged(tag),
+            )
+            .expect("a row is free");
+        }
+        assert_eq!(reg.due_ms(), 100);
+        assert!(reg.unregister_first(|sink| sink.0 == 1));
+        assert_eq!(reg.len(), 2, "the first the pick names, and no other");
+        assert_eq!(
+            reg.due_ms(),
+            300,
+            "the deadline of the entry gone is not kept"
+        );
+        assert!(!reg.unregister_first(|sink| sink.0 == 9));
+        assert_eq!(reg.len(), 2);
+        assert!(reg.unregister_first(|sink| sink.0 == 1));
+        assert!(reg.unregister_first(|sink| sink.0 == 2));
         assert!(reg.is_empty());
     }
 
@@ -4299,6 +4434,7 @@ mod tests {
         for message in &messages {
             if let NetworkMessage::Response(response) = message {
                 let reply = reg
+                    .receive_mut()
                     .take_response(response, &HashMap::new())
                     .expect("a reply the dispatch delivers");
                 assert_eq!(reg.dispatch_borrowed(&reply), 1, "one get is pending");
@@ -5944,6 +6080,31 @@ mod tests {
         assert_eq!(ends.load(Ordering::SeqCst), 1);
         assert!(reg.is_empty());
         assert_eq!(reg.due_ms(), u64::MAX, "its deadline left with it");
+    }
+
+    /// The read a face's gets share takes a peer's reply on a key of a closed set and an error
+    /// reply, which names no key, and drops and counts one on a key outside the set, as the
+    /// registry that holds it does.
+    #[cfg(feature = "key-set-closed")]
+    #[test]
+    fn a_receive_alone_gates_a_peers_reply_by_its_key() {
+        use crate::key_catalogue::tests::TABLE;
+        use crate::reply_sink::BorrowedReply;
+        let mut receive = ReplyReceive::default();
+        receive.set_key_gate(crate::key_gate::KeyGate::closed(&TABLE));
+        let reply = |keyexpr, kind| BorrowedReply {
+            rid: 5,
+            keyexpr,
+            kind,
+            payload: b"v",
+            err_encoding: None,
+            attachment: None,
+            put_encoding: None,
+        };
+        assert!(receive.admits_key(&reply("a/b", ReplyKind::Put)));
+        assert!(!receive.admits_key(&reply("a/c", ReplyKind::Put)));
+        assert!(receive.admits_key(&reply("", ReplyKind::Err)));
+        assert_eq!(receive.key_gate_refused().outside_set, 1);
     }
 
     /// A closed key set drops a reply a peer sent on a key outside the set, on every path that

@@ -1763,8 +1763,6 @@ pub enum RowCount {
     LivelinessGets,
     /// `MAX_DECL_OBSERVERS` of each of the application's lists of declaration watchers.
     DeclWatchers,
-    /// `MAX_LOCAL_TOKENS` of the registry of the session's own tokens beside its tables.
-    LocalTokens,
     /// `MAX_PENDING_DECLARES` of each staging of the answers to one face's peer's interests.
     PendingDeclares,
     /// `MAX_PENDING_REPLIES` staged for one face's peer's queries.

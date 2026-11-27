@@ -19,7 +19,7 @@
 //! - what it ASKED to be told, and what is staged back to it: its subscriber
 //!   interests ([`crate::caps::MAX_INBOUND_SUB_INTERESTS`]) and the staged
 //!   answers ([`crate::caps::MAX_PENDING_DECLARES`]), the interest answers of the
-//!   liveliness plane (`PeerTables::pending_declares`);
+//!   liveliness plane (`TokenAnswers`);
 //! - what its queries make us OWE it: the replies staged and the `Final`s that
 //!   follow ([`crate::reply_stage::ReplyStage`],
 //!   [`crate::caps::MAX_PENDING_REPLIES`]; [`crate::reply_stage::FinalStage`],
@@ -61,11 +61,9 @@ use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut};
 
 #[cfg(feature = "liveliness-token")]
-use crate::bounded::BoundedVec;
-#[cfg(feature = "liveliness-token")]
 use crate::caps;
 #[cfg(feature = "liveliness-token")]
-use crate::declare::local_token::DeclResponseItem;
+use crate::declare::local_token::{DeclResponseItem, TokenAnswers};
 
 /// The tables of one session's peer. See the module documentation.
 ///
@@ -91,13 +89,9 @@ pub struct PeerTables<P: Storage = Profile> {
     /// to a key it cannot resolve, the bounds of its queries and the shared memory of their values.
     pub queries: QueryPeer,
     /// The answers to the peer's liveliness interests, staged until the next
-    /// drain: [`caps::MAX_PENDING_DECLARES`] items, whole chains or none.
+    /// drain under their own bound, whole chains or none, and the chains refused.
     #[cfg(feature = "liveliness-token")]
-    pub pending_declares: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
-    /// The liveliness interests whose answer chain `pending_declares` could not
-    /// take whole, and which were therefore staged not at all.
-    #[cfg(feature = "liveliness-token")]
-    pub token_interest_chains_refused: u32,
+    pub token_answers: TokenAnswers<P>,
 }
 
 impl<P: Storage> Default for PeerTables<P> {
@@ -134,9 +128,7 @@ impl<P: Storage> PeerTables<P> {
                 finals: _,
                 queries: _,
                 #[cfg(feature = "liveliness-token")]
-                    pending_declares: _,
-                #[cfg(feature = "liveliness-token")]
-                    token_interest_chains_refused: _,
+                    token_answers: _,
             } = tables;
         };
         // Each gated statement opens with the path `ptr::write(`, not with the `addr_of_mut!`
@@ -159,9 +151,7 @@ impl<P: Storage> PeerTables<P> {
             ptr::write(addr_of_mut!((*at).finals), FinalStage::default());
             ptr::write(addr_of_mut!((*at).queries), QueryPeer::new());
             #[cfg(feature = "liveliness-token")]
-            ptr::write(addr_of_mut!((*at).pending_declares), BoundedVec::default());
-            #[cfg(feature = "liveliness-token")]
-            ptr::write(addr_of_mut!((*at).token_interest_chains_refused), 0);
+            ptr::write(addr_of_mut!((*at).token_answers), TokenAnswers::default());
             &mut *at
         }
     }
@@ -180,9 +170,7 @@ impl PeerTables<Static> {
             finals: FinalStage::new_static(),
             queries: QueryPeer::new(),
             #[cfg(feature = "liveliness-token")]
-            pending_declares: BoundedVec::new_static(),
-            #[cfg(feature = "liveliness-token")]
-            token_interest_chains_refused: 0,
+            token_answers: TokenAnswers::new_static(),
         }
     }
 }
@@ -207,7 +195,7 @@ pub struct PeerRows {
 
 // SAFETY: every table of the region policy is `ZeroEmpty` (the peer's side, its remote
 // declarations, its tokens, the reply and final stages, the query side) and holds no value at all
-// zero bytes; the liveliness staging is a `LentSeq` of no rows and its refusal count is zero.
+// zero bytes; the liveliness staging is `ZeroEmpty` as the final stage is.
 unsafe impl ZeroEmpty for PeerTables<Region> {}
 
 /// The lines a description holds for one [`PeerTables`] in its own lines ([`PeerTables::places`]),
@@ -227,7 +215,7 @@ pub const LENT_PEER_TABLE_LINES: usize = PEER_TABLE_LINES + 3;
 pub struct PeerTableRows {
     subscribers: SubscriberPeerRows,
     #[cfg(feature = "liveliness-token")]
-    pending_declares: [MaybeUninit<DeclResponseItem>; caps::MAX_PENDING_DECLARES],
+    token_answers: [MaybeUninit<DeclResponseItem>; caps::MAX_PENDING_DECLARES],
 }
 
 // SAFETY: each field is rows of `MaybeUninit` (`ZeroEmpty`), holding no value until placed.
@@ -275,9 +263,9 @@ impl<P: crate::bounded::LaidOut> PeerTables<P> {
             ));
         #[cfg(feature = "liveliness-token")]
         let lines = lines.seq(
-            crate::bounded::SeqPlace::of_room::<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>(
-                at.wrapping_add(core::mem::offset_of!(Self, pending_declares)),
-                rows.wrapping_add(core::mem::offset_of!(PeerTableRows, pending_declares)),
+            TokenAnswers::<P>::place(
+                at.wrapping_add(core::mem::offset_of!(Self, token_answers)),
+                rows.wrapping_add(core::mem::offset_of!(PeerTableRows, token_answers)),
             )
             .counted(crate::bounded::RowCount::PendingDeclares),
         );
@@ -447,9 +435,7 @@ impl PeerTables<crate::bounded::OnUse> {
         self.replies = ReplyStage::counted(rows.replies, rows.reply_bytes);
         self.finals = FinalStage::counted(rows.finals);
         #[cfg(feature = "liveliness-token")]
-        {
-            self.pending_declares = BoundedVec::counted(rows.pending_declares);
-        }
+        self.token_answers.count_rows(rows.pending_declares);
         self.limit_to(limits);
     }
 }
@@ -933,6 +919,9 @@ impl<P: Storage> PeerTables<P> {
         self.remote_subscribers.limit_to(remote_decls);
         self.remote_queryables.limit_to(remote_decls);
         self.tokens.limit_to(remote_decls);
+        #[cfg(feature = "liveliness-token")]
+        self.token_answers
+            .limit_to(limits.max_pending_declares_held());
         let keys = limits.max_keyexpr_bytes_held();
         self.subscribers.limit_keys_to(keys);
         self.remote_subscribers.limit_keys_to(keys);
@@ -969,7 +958,7 @@ impl<P: Storage> PeerTables<P> {
         self.replies.clear();
         self.finals.clear();
         #[cfg(feature = "liveliness-token")]
-        self.pending_declares.clear();
+        self.token_answers.clear();
     }
 }
 
@@ -1503,14 +1492,9 @@ mod lent_tests {
             assert!(!tables.finals.has_room(), "one row of Finals");
             #[cfg(feature = "liveliness-token")]
             {
-                assert!(tables
-                    .pending_declares
-                    .push(DeclResponseItem::Final { interest_id: 1 })
-                    .is_ok());
-                assert!(tables
-                    .pending_declares
-                    .push(DeclResponseItem::Final { interest_id: 2 })
-                    .is_err());
+                let none = crate::declare::local_token::LocalTokenRegistry::new();
+                assert!(tables.token_answers.stage(&none, None, 1).is_ok());
+                assert!(tables.token_answers.stage(&none, None, 2).is_err());
             }
         }
         // SAFETY: `init_in` wrote the whole tables into `place`, and they are dropped once.
@@ -1680,14 +1664,14 @@ mod lent_tests {
     #[test]
     fn a_lent_peer_holds_a_liveliness_answer() {
         let mut tables = lent(rows(1));
-        assert!(tables
-            .pending_declares
-            .push(DeclResponseItem::Final { interest_id: 1 })
-            .is_ok());
-        assert!(tables
-            .pending_declares
-            .push(DeclResponseItem::Final { interest_id: 2 })
-            .is_err());
+        let none = crate::declare::local_token::LocalTokenRegistry::new();
+        assert!(tables.token_answers.stage(&none, None, 1).is_ok());
+        assert!(tables.token_answers.stage(&none, None, 2).is_err());
+        assert_eq!(
+            tables.token_answers.refusals(),
+            1,
+            "the chain the lent row could not take is counted"
+        );
     }
 
     /// An interest the peer asks keeps its key in the key arena the tables were handed, though
@@ -2348,19 +2332,14 @@ mod on_use_tests {
 
         #[cfg(feature = "liveliness-token")]
         {
+            let none = crate::declare::local_token::LocalTokenRegistry::new();
             assert!(
-                !tables.pending_declares.holds_rows(),
+                !tables.token_answers.holds_rows(),
                 "nothing is taken before the first answer"
             );
-            assert!(tables
-                .pending_declares
-                .push(DeclResponseItem::Final { interest_id: 1 })
-                .is_ok());
-            assert!(tables.pending_declares.holds_rows());
-            assert!(tables
-                .pending_declares
-                .push(DeclResponseItem::Final { interest_id: 2 })
-                .is_err());
+            assert!(tables.token_answers.stage(&none, None, 1).is_ok());
+            assert!(tables.token_answers.holds_rows());
+            assert!(tables.token_answers.stage(&none, None, 2).is_err());
         }
     }
 

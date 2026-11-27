@@ -36,7 +36,7 @@ use core::ffi::c_void;
 use wz_capi_port::cancellation::CancellationToken;
 #[cfg(feature = "liveliness-get")]
 use wz_capi_port::lodge::Strong;
-use wz_capi_port::TokenId;
+use wz_capi_port::EntityRow;
 #[cfg(feature = "liveliness-get")]
 use wz_capi_port::WireKey;
 use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
@@ -122,7 +122,7 @@ pub(crate) struct TokenState {
     /// The session's engine on the tokio engine, whose places are its pools' and hold none.
     #[cfg(feature = "engine-tokio")]
     shared: EngineHold,
-    id: TokenId,
+    row: EntityRow,
 }
 
 /// A token reaches its session's engine through its place, whose lender keeps the one count.
@@ -137,7 +137,7 @@ impl crate::object_slot::SessionEntity for TokenState {
 }
 
 /// Declare a token on `keyexpr`: the whole key's declaration, then the token
-/// announced on it and retracted naming the key. Answers the token's id, which its owner
+/// announced on it and retracted naming the key. Answers the token's row, which its owner
 /// retracts on the session's engine (`undeclare_liveliness_token`).
 ///
 /// R2959 — pico declares the whole key, announces the token on that
@@ -152,15 +152,15 @@ pub(crate) fn declare_token(
     session: PicoSession<'_>,
     keyexpr: &str,
     existing: Option<&DeclaredKeyexpr>,
-) -> Result<TokenId, ZResult> {
+) -> Result<EntityRow, ZResult> {
     let key = EntityKey::whole(session.engine, keyexpr, existing)?;
-    let id = session
+    let row = session
         .engine
         .declare_liveliness_token_on_wire(keyexpr, key.wire(), Some(key.retraction_key()))
         .map_err(|refused| refusal_code(refused, Door::Token))?;
     // The session's record holds the declaration from here on: the door's hold goes.
     drop(key);
-    Ok(id)
+    Ok(row)
 }
 
 /// Default token options (pico `z_liveliness_token_options_default`).
@@ -228,10 +228,10 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         };
         let session = PicoSession::of(handle);
         let state = match declare_token(session, ke, declared_of(keyexpr)) {
-            Ok(id) => slot.fill(TokenState {
+            Ok(row) => slot.fill(TokenState {
                 #[cfg(feature = "engine-tokio")]
                 shared: EngineHold::clone(session.engine),
-                id,
+                row,
             }),
             Err(rc) => return rc,
         };
@@ -258,7 +258,7 @@ pub unsafe extern "C" fn z_liveliness_undeclare_token(
             // `z_liveliness_token_drop` takes this same path — deliberately, so an explicit
             // undeclare and an implicit one cannot drift apart.
             let state = handle as *mut TokenState;
-            crate::object_slot::entity_engine(state).undeclare_liveliness_token((*state).id);
+            crate::object_slot::entity_engine(state).undeclare_liveliness_token((*state).row);
             crate::object_slot::release_entity(state);
             (*token)._this = z_owned_liveliness_token_t::null_value();
         }

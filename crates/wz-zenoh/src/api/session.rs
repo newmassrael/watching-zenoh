@@ -1261,7 +1261,7 @@ impl Engine {
     /// Stop the delivery to the subscription `id` and let go of what it keeps.
     fn undeclare_subscriber(&self, id: Id) {
         match self {
-            Engine::Tokio(state) => state.shared.as_engine().undeclare_subscriber(id),
+            Engine::Tokio(state) => state.shared.undeclare_subscriber(id),
             Engine::Router(router) => {
                 if id & RouterEngine::LIVELINESS_ID != 0 {
                     router
@@ -1467,7 +1467,7 @@ impl Engine {
     /// Stop the queries to the queryable `id` and let go of what it keeps.
     fn undeclare_queryable(&self, id: Id) {
         match self {
-            Engine::Tokio(state) => state.shared.as_engine().undeclare_queryable(id),
+            Engine::Tokio(state) => state.shared.undeclare_queryable(id),
             Engine::Router(router) => {
                 router.node.forwarder().unhost_queryable(u64::from(id));
             }
@@ -1665,7 +1665,7 @@ impl Engine {
     fn undeclare_liveliness_token(&self, id: Id) {
         match self {
             Engine::Router(router) => router.node.undeclare_token(u64::from(id)),
-            Engine::Tokio(state) => state.shared.as_engine().undeclare_liveliness_token(id),
+            Engine::Tokio(state) => state.shared.undeclare_liveliness_token(id),
         }
     }
 

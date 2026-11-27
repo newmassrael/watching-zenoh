@@ -4,6 +4,7 @@
 use super::*;
 use crate::bounded::{Static, ARENA_ALIGN};
 use crate::limits::SessionLimits;
+use crate::query_mode::ConsolidationMode;
 use crate::reply_acceptance::ReplyAcceptance;
 use crate::row_callback::{CClosure, CallLatch};
 use crate::sink::RowAccess;
@@ -482,7 +483,13 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
         .declare_matching_listener(filter, latched(3))
         .unwrap();
     let get = tables
-        .begin_get(ReplyAcceptance::Matching("g"), 1, 10, latched(4))
+        .begin_get(
+            ReplyAcceptance::Matching("g"),
+            ConsolidationMode::None,
+            1,
+            10,
+            latched(4),
+        )
         .unwrap();
     let calls = (
         tables.begin_queryable(qbl.handle).unwrap(),
@@ -510,7 +517,7 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
         .row
         .is_none());
     assert!(matches!(
-        tables.end_get(get.handle),
+        tables.retire_get(get.handle),
         Some(Removal::AfterCalls)
     ));
     assert!(ended::<CClosure<u32>>(calls.0));
@@ -1356,15 +1363,35 @@ fn a_listeners_callback_is_owed_its_verdict_until_it_takes_it() {
 fn a_get_is_found_by_its_request_and_ended_by_its_last_leg_or_its_deadline() {
     let mut tables = Tables::new();
     let first = tables
-        .begin_get(ReplyAcceptance::Matching("k"), 2, 100, 7)
+        .begin_get(
+            ReplyAcceptance::Matching("k"),
+            ConsolidationMode::Latest,
+            2,
+            100,
+            7,
+        )
         .unwrap();
-    let second = tables.begin_get(ReplyAcceptance::Any, 1, 50, 8).unwrap();
+    let second = tables
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 50, 8)
+        .unwrap();
     assert_ne!(first.request, second.request);
     let (found, row) = tables.pending_get(first.request).unwrap();
     assert_eq!(found, first.handle);
     assert_eq!(
-        (row.gate(), row.legs(), row.deadline()),
-        (Some("k"), 2, 100)
+        (
+            row.gate(),
+            row.mode(),
+            row.legs(),
+            row.deadline(),
+            row.end()
+        ),
+        (
+            Some("k"),
+            ConsolidationMode::Latest,
+            2,
+            100,
+            GetEnd::Standing
+        )
     );
     assert_eq!(
         tables
@@ -1380,23 +1407,76 @@ fn a_get_is_found_by_its_request_and_ended_by_its_last_leg_or_its_deadline() {
         Some(second.handle)
     );
     assert_eq!(tables.next_expired_get(60, &mut cursor), None);
-    assert!(matches!(
-        tables.end_leg(first.handle),
-        Some(LegEnded::Owed(1))
-    ));
+    assert!(tables.time_out_get(second.handle));
     assert!(
-        tables.pending_get(first.request).is_some(),
-        "a leg still owes"
+        !tables.time_out_get(second.handle),
+        "an ended get times out once"
     );
-    match tables.end_leg(first.handle) {
-        Some(LegEnded::Over(Removal::Taken(row))) => assert_eq!(row.into_callback(), 7),
-        _ => panic!("the last leg ends a get no call runs on, and hands it back at once"),
+    assert_eq!(
+        tables.next_get_deadline(),
+        Some(100),
+        "the due time moves past a get that stopped standing"
+    );
+    assert_eq!(
+        tables.next_expired_get(200, &mut 0),
+        Some(first.handle),
+        "a get that timed out is not found expired again"
+    );
+    assert_eq!(tables.end_leg(first.handle), Some(LegEnded::Owed(1)));
+    assert_eq!(tables.end_leg(first.handle), Some(LegEnded::Over));
+    assert_eq!(tables.next_get_deadline(), None, "no get stands");
+    assert_eq!(
+        tables.end_leg(first.handle),
+        None,
+        "an ended get has no leg"
+    );
+    assert!(!tables.add_leg(first.handle), "nor takes one");
+    let mut ends = Vec::new();
+    let mut cursor = 0;
+    while let Some(end) = tables.next_ended_get(&mut cursor) {
+        ends.push(end);
+    }
+    assert_eq!(ends.len(), 2, "each ended get is found once");
+    assert!(ends.contains(&(first.handle, GetEnd::Answered)));
+    assert!(ends.contains(&(second.handle, GetEnd::TimedOut)));
+    match tables.retire_get(first.handle) {
+        Some(Removal::Taken(row)) => assert_eq!(row.into_callback(), 7),
+        _ => panic!("a get no call runs on is handed back at once"),
     }
     assert!(tables.pending_get(first.request).is_none());
-    assert_eq!(tables.next_get_deadline(), Some(50));
-    assert!(
-        tables.end_leg(first.handle).is_none(),
-        "an ended get has no leg"
+}
+
+/// A get issued a leg at a time counts each leg its asker adds beside its own, and ends answered
+/// at the last of them.
+#[test]
+fn a_get_counts_the_legs_added_to_it_and_ends_at_the_last() {
+    let mut tables = Tables::new();
+    let get = tables
+        .begin_get(
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            u64::MAX,
+            1,
+        )
+        .unwrap();
+    assert_eq!(
+        tables.next_get_deadline(),
+        None,
+        "a get with no deadline is never due"
+    );
+    assert!(tables.add_leg(get.handle));
+    assert!(tables.add_leg(get.handle));
+    assert_eq!(tables.end_leg(get.handle), Some(LegEnded::Owed(2)));
+    assert_eq!(
+        tables.end_leg(get.handle),
+        Some(LegEnded::Owed(1)),
+        "the asker's own, once it issued every leg"
+    );
+    assert_eq!(tables.end_leg(get.handle), Some(LegEnded::Over));
+    assert_eq!(
+        tables.pending_get(get.request).map(|(_, row)| row.end()),
+        Some(GetEnd::Answered)
     );
 }
 
@@ -1416,9 +1496,17 @@ fn a_gets_gate_admits_its_key_and_every_err() {
     };
     let mut tables = Tables::new();
     let gated = tables
-        .begin_get(ReplyAcceptance::Matching("a/b"), 1, 0, 1)
+        .begin_get(
+            ReplyAcceptance::Matching("a/b"),
+            ConsolidationMode::None,
+            1,
+            0,
+            1,
+        )
         .unwrap();
-    let any = tables.begin_get(ReplyAcceptance::Any, 1, 0, 2).unwrap();
+    let any = tables
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 0, 2)
+        .unwrap();
     let gated = tables.pending_get(gated.request).unwrap().1;
     assert!(gated.admits(&reply("a/b", ReplyKind::Put)));
     assert!(gated.admits(&reply("a/b", ReplyKind::Del)));
@@ -1432,11 +1520,17 @@ fn a_gets_gate_admits_its_key_and_every_err() {
 fn a_request_id_skips_the_ones_still_pending() {
     let mut tables = Tables::new();
     tables.next_request = u32::MAX;
-    let last = tables.begin_get(ReplyAcceptance::Any, 1, 0, 1).unwrap();
-    let wrapped = tables.begin_get(ReplyAcceptance::Any, 1, 0, 2).unwrap();
+    let last = tables
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 0, 1)
+        .unwrap();
+    let wrapped = tables
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 0, 2)
+        .unwrap();
     assert_eq!((last.request, wrapped.request), (u32::MAX, 0));
     tables.next_request = u32::MAX;
-    let next = tables.begin_get(ReplyAcceptance::Any, 1, 0, 3).unwrap();
+    let next = tables
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 0, 3)
+        .unwrap();
     assert_eq!(next.request, 1);
 }
 
@@ -1448,19 +1542,171 @@ fn a_full_get_table_refuses_and_hands_the_callback_back() {
         ..rows()
     });
     let refused = tables
-        .begin_get(ReplyAcceptance::Matching("k"), 1, 0, 5)
+        .begin_get(
+            ReplyAcceptance::Matching("k"),
+            ConsolidationMode::None,
+            1,
+            0,
+            5,
+        )
         .unwrap_err();
     assert_eq!(refused.why, RegisterError::TableFull);
     assert_eq!(refused.callback, 5);
 }
 
+/// A get retired while a call of it ran keeps its slot until that call ends, and is then taken
+/// out by the walk, once, as the other rows a call may outlive are. The CONTROL is the walk while
+/// the call still runs, which takes nothing.
+#[test]
+fn a_get_retired_while_its_call_ran_is_let_go_by_the_walk_once_the_call_ended() {
+    let mut tables = latched_tables();
+    let get = tables
+        .begin_get(
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            u64::MAX,
+            latched(1),
+        )
+        .unwrap();
+    let call = tables.begin_reply(get.handle).unwrap();
+    assert!(matches!(
+        tables.retire_get(get.handle),
+        Some(Removal::AfterCalls)
+    ));
+    assert!(
+        tables.begin_reply(get.handle).is_none(),
+        "a retired get begins no call"
+    );
+    assert!(
+        tables.release_drained_get(&mut 0).is_none(),
+        "CONTROL: its call still runs"
+    );
+    assert!(
+        ended::<CClosure<u32>>(call),
+        "the last call of a retired get"
+    );
+    let mut cursor = 0;
+    assert!(tables.release_drained_get(&mut cursor).is_some());
+    assert!(
+        tables.release_drained_get(&mut cursor).is_none(),
+        "each once"
+    );
+    assert!(tables.release_drained_get(&mut 0).is_none());
+    assert!(!tables.pending_gets().holds_slot(get.handle));
+}
+
+/// A walk of the gets by their callbacks finds every get its pick names, standing or ended, each
+/// once, and none of another asker's; a get retired is not found again.
+#[test]
+fn a_walk_finds_each_get_its_pick_names_standing_or_ended() {
+    let mut tables = Tables::new();
+    let mut begin = |callback| {
+        tables
+            .begin_get(
+                ReplyAcceptance::Any,
+                ConsolidationMode::None,
+                1,
+                u64::MAX,
+                callback,
+            )
+            .unwrap()
+            .handle
+    };
+    let (first, other, last) = (begin(7), begin(8), begin(7));
+    assert_eq!(tables.end_leg(last), Some(LegEnded::Over));
+    let mut found = Vec::new();
+    let mut cursor = 0;
+    while let Some(handle) = tables.next_get_of(&mut cursor, |callback| *callback == 7) {
+        found.push(handle);
+    }
+    assert_eq!(found.len(), 2, "each once");
+    assert!(found.contains(&first));
+    assert!(found.contains(&last), "the ended get too");
+    assert!(!found.contains(&other));
+    assert!(tables.retire_get(first).is_some());
+    assert_eq!(
+        tables.next_get_of(&mut 0, |callback| *callback == 7),
+        Some(last),
+        "a retired get is not found again"
+    );
+}
+
+/// A walk that retires the gets its pick names retires each once, marking each before it leaves,
+/// standing or ended, and ends; a get a call of which runs is retired to leave after the call, not
+/// refused, and the walk does not read it again. Turned red by a walk that reads a get twice (a
+/// cursor not moved past a get it retired), by a get left unmarked, or by a retirement refused
+/// while a call runs.
+#[test]
+fn a_walk_retires_each_get_its_pick_names_once_and_marks_it_first() {
+    let mut tables = Tables::new();
+    let mut begin = |callback| {
+        tables
+            .begin_get(
+                ReplyAcceptance::Any,
+                ConsolidationMode::None,
+                1,
+                u64::MAX,
+                callback,
+            )
+            .unwrap()
+            .handle
+    };
+    let (first, other, last) = (begin(7), begin(8), begin(7));
+    assert_eq!(tables.end_leg(last), Some(LegEnded::Over));
+    assert!(tables.owes_ended_get());
+    let marked = core::cell::Cell::new(0);
+    let mut retired = Vec::new();
+    let mut cursor = 0;
+    while let Some((handle, removal)) = tables.retire_next_get_of(
+        &mut cursor,
+        |callback| *callback == 7,
+        |_| marked.set(marked.get() + 1),
+    ) {
+        assert!(matches!(removal, Removal::Taken(_)), "no call runs");
+        retired.push(handle);
+    }
+    assert_eq!(retired, [first, last], "each once, the ended get too");
+    assert_eq!(marked.get(), 2, "each marked before it left");
+    assert!(!tables.owes_ended_get(), "the ended get is retired");
+    assert_eq!(
+        tables.next_get_of(&mut 0, |callback| *callback == 8),
+        Some(other),
+        "CONTROL: another asker's get stands"
+    );
+
+    let mut held = latched_tables();
+    let get = held
+        .begin_get(
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            u64::MAX,
+            latched(1),
+        )
+        .unwrap();
+    let call = held.begin_reply(get.handle).unwrap();
+    let mut cursor = 0;
+    let (handle, removal) = held
+        .retire_next_get_of(&mut cursor, |_| true, |_| {})
+        .expect("a get a call of which runs is retired, not refused");
+    assert_eq!(handle, get.handle);
+    assert!(matches!(removal, Removal::AfterCalls));
+    assert!(held
+        .retire_next_get_of(&mut cursor, |_| true, |_| {})
+        .is_none());
+    assert!(
+        ended::<CClosure<u32>>(call),
+        "the last call of a retired get"
+    );
+    assert!(held.release_drained_get(&mut 0).is_some());
+}
+
 /// A `Latest` get holds its replies in the tables until its caller takes them out, and a get
-/// ended with replies still held lets them go with it.
+/// retired with replies still held lets them go with it.
 #[cfg(feature = "storage-profile")]
 #[test]
-fn a_latest_get_holds_its_replies_until_they_are_taken_and_ends_with_the_rest() {
-    use crate::query_mode::ConsolidationMode;
-    use crate::reply_hold::Consolidated;
+fn a_latest_get_holds_its_replies_until_they_are_taken_and_retires_with_the_rest() {
     use crate::reply_sink::{BorrowedReply, ReplyKind, ReplyView};
     let reply = |keyexpr, payload| BorrowedReply {
         rid: 0,
@@ -1472,32 +1718,116 @@ fn a_latest_get_holds_its_replies_until_they_are_taken_and_ends_with_the_rest() 
         put_encoding: None,
     };
     let mut tables = Tables::new();
-    let first = tables.begin_get(ReplyAcceptance::Any, 1, 0, 1).unwrap();
-    let second = tables.begin_get(ReplyAcceptance::Any, 1, 0, 2).unwrap();
     let latest = ConsolidationMode::Latest;
-    assert_eq!(
-        tables.consolidate_reply(first.handle, latest, &reply("a", b"one")),
-        Consolidated::Held
-    );
-    assert_eq!(
-        tables.consolidate_reply(first.handle, latest, &reply("a", b"two")),
-        Consolidated::Held,
+    let first = tables
+        .begin_get(ReplyAcceptance::Any, latest, 1, 0, 1)
+        .unwrap();
+    let second = tables
+        .begin_get(ReplyAcceptance::Any, latest, 1, 0, 2)
+        .unwrap();
+    assert!(matches!(
+        tables.admit_reply(first.handle, &reply("a", b"one")),
+        ReplyAdmitted::Held
+    ));
+    assert!(
+        matches!(
+            tables.admit_reply(first.handle, &reply("a", b"two")),
+            ReplyAdmitted::Held
+        ),
         "two unstamped replies tie, and the later is held"
     );
-    assert_eq!(
-        tables.consolidate_reply(second.handle, latest, &reply("b", b"other")),
-        Consolidated::Held
-    );
+    assert!(matches!(
+        tables.admit_reply(second.handle, &reply("b", b"other")),
+        ReplyAdmitted::Held
+    ));
     let taken = tables
         .take_held(first.handle)
         .expect("the first get holds a reply");
     assert_eq!((taken.keyexpr(), taken.payload()), ("a", b"two".as_slice()));
     assert!(tables.take_held(first.handle).is_none());
-    assert!(tables.end_get(second.handle).is_some());
+    assert!(tables.retire_get(second.handle).is_some());
     assert!(
         tables.take_held(second.handle).is_none(),
-        "what an ended get held went with it"
+        "what a retired get held went with it"
     );
+}
+
+/// A reply passes to a get that does not consolidate, and an Err to any get, each with a call
+/// begun on the get's row; one off the gate's key, or handed to a get that ended, is dropped, and
+/// what an ended get held stays for its end.
+#[cfg(feature = "storage-profile")]
+#[test]
+fn a_reply_is_admitted_by_its_gets_gate_mode_and_standing() {
+    use crate::reply_sink::{BorrowedReply, ReplyKind};
+    let reply = |keyexpr, kind| BorrowedReply {
+        rid: 0,
+        keyexpr,
+        kind,
+        payload: &[],
+        err_encoding: None,
+        attachment: None,
+        put_encoding: None,
+    };
+    let mut tables = latched_tables();
+    let plain = tables
+        .begin_get(
+            ReplyAcceptance::Matching("a/*"),
+            ConsolidationMode::None,
+            1,
+            10,
+            latched(4),
+        )
+        .unwrap();
+    let latest = tables
+        .begin_get(
+            ReplyAcceptance::Any,
+            ConsolidationMode::Latest,
+            1,
+            10,
+            latched(5),
+        )
+        .unwrap();
+    match tables.admit_reply(plain.handle, &reply("a/b", ReplyKind::Put)) {
+        ReplyAdmitted::Passed(Some(call)) => {
+            assert_eq!(call.call, 4);
+            assert!(!ended::<CClosure<u32>>(call), "the get still stands");
+        }
+        _ => panic!("a reply on the gate's key passes, its call begun"),
+    }
+    assert!(
+        matches!(
+            tables.admit_reply(plain.handle, &reply("c/d", ReplyKind::Put)),
+            ReplyAdmitted::Dropped
+        ),
+        "a reply off the gate's key is not the get's"
+    );
+    match tables.admit_reply(latest.handle, &reply("x", ReplyKind::Err)) {
+        ReplyAdmitted::Passed(Some(call)) => {
+            assert_eq!(call.call, 5);
+            assert!(!ended::<CClosure<u32>>(call));
+        }
+        _ => panic!("an Err is never held"),
+    }
+    assert!(matches!(
+        tables.admit_reply(latest.handle, &reply("x", ReplyKind::Put)),
+        ReplyAdmitted::Held
+    ));
+    assert!(tables.time_out_get(latest.handle));
+    assert!(
+        matches!(
+            tables.admit_reply(latest.handle, &reply("x", ReplyKind::Err)),
+            ReplyAdmitted::Dropped
+        ),
+        "an ended get takes no reply"
+    );
+    assert!(
+        tables.take_held(latest.handle).is_some(),
+        "what it held stays for its end"
+    );
+    let call = tables
+        .begin_reply(latest.handle)
+        .expect("an ended get's end is handed by calls begun on its row");
+    assert!(!ended::<CClosure<u32>>(call));
 }
 
 /// A get whose gate is longer than a fixed row keeps is refused before it spends a request id, and
@@ -1508,7 +1838,13 @@ fn a_get_whose_gate_is_too_long_is_refused_and_spends_no_request_id() {
     let before = tables.next_request;
     let long = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
     let refused = tables
-        .begin_get(ReplyAcceptance::Matching(&long), 1, 0, 6)
+        .begin_get(
+            ReplyAcceptance::Matching(&long),
+            ConsolidationMode::None,
+            1,
+            0,
+            6,
+        )
         .unwrap_err();
     assert_eq!(refused.why, RegisterError::KeyexprTooLong);
     assert_eq!(refused.callback, 6);
@@ -1864,7 +2200,7 @@ fn tables_that_keep_no_optional_kind_lend_none_and_refuse_each() {
         RegisterError::TableFull
     );
     let refused = tables
-        .begin_get(ReplyAcceptance::Any, 1, 10, 5)
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 10, 5)
         .unwrap_err();
     assert_eq!(
         (refused.why, refused.callback),
@@ -1881,7 +2217,9 @@ fn tables_that_keep_no_optional_kind_lend_none_and_refuse_each() {
     assert!(control
         .declare_write_filter(Plane::Subscribers, "w", false)
         .is_ok());
-    assert!(control.begin_get(ReplyAcceptance::Any, 1, 10, 5).is_ok());
+    assert!(control
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 10, 5)
+        .is_ok());
 }
 
 #[test]
@@ -2112,6 +2450,131 @@ fn a_subscriber_undeclared_while_its_callback_runs_names_its_retraction_past_the
         Some((own.id, "/x")),
         "the retraction's own hold reads the key past the row"
     );
+}
+
+/// A queryable's undeclaration names its retraction off the row it removes, as a subscriber's
+/// does: against the row's own key, which it hands over with it, the declaration the retraction
+/// names named by its id though the row was its last holder and it went with the row. One
+/// retracted by its id alone names nothing.
+///
+/// # Control
+///
+/// Reading the retraction in `undeclare_entity` after the row's holds are let go of names the key
+/// whole; handing the retraction no key of the row that left (`undeclare_retracted`) names
+/// nothing.
+#[test]
+fn a_queryables_undeclaration_names_its_retraction_off_the_row_it_removes() {
+    let mut tables = Tables::new();
+    let own = tables.declare_keyexpr("demo/qr").unwrap();
+    let key = "demo/qr/**";
+    let named = KeyForm {
+        prefix: None,
+        own: None,
+        retraction: Retraction::Named(RetractionKey::declared(own.id, "/**")),
+    };
+    let qbl = tables
+        .declare_queryable(key, Locality::Any, false, named, 1)
+        .unwrap();
+    assert_eq!(
+        tables.undeclare_keyexpr(own.handle),
+        None,
+        "the queryable holds it"
+    );
+    let undeclared = tables.undeclare_queryable(qbl.handle).unwrap();
+    assert_eq!(undeclared.named, Some(own.id), "it went with the row");
+    assert_eq!(tables.keyexpr_by_id(own.id), None);
+    assert_eq!(
+        undeclared.retraction.as_ref().map(Retracting::names),
+        Some((own.id, "/**")),
+        "the retraction names it as the row did"
+    );
+    assert_eq!(undeclared.taken, Some(1));
+    let quiet = tables
+        .declare_queryable(key, Locality::Any, false, KeyForm::default(), 2)
+        .unwrap();
+    let undeclared = tables.undeclare_queryable(quiet.handle).unwrap();
+    assert!(undeclared.retraction.is_none(), "retracted by its id alone");
+    assert_eq!(undeclared.taken, Some(2));
+}
+
+/// A queryable undeclared while a call of its callback runs names its retraction as one whose row
+/// its undeclaration takes out does: the row keeps its key in its slot until the call ends, and
+/// the retraction holds the key once more, so the key reads after the row left every lookup and
+/// after the call that ended last let the row go.
+///
+/// # Control
+///
+/// Taking no hold of the key of a row a call keeps (`kept` always `None` in
+/// `undeclare_retracted`) leaves the retraction nothing to name.
+#[test]
+fn a_queryable_undeclared_while_its_callback_runs_names_its_retraction_past_the_row() {
+    let mut tables = latched_tables();
+    let own = tables.declare_keyexpr("demo/qc").unwrap();
+    let key = "demo/qc/x";
+    let named = KeyForm {
+        prefix: None,
+        own: None,
+        retraction: Retraction::Named(RetractionKey::declared(own.id, "/x")),
+    };
+    let qbl = tables
+        .declare_queryable(key, Locality::Any, false, named, latched(7))
+        .unwrap();
+    let call = tables.begin_queryable(qbl.handle).unwrap();
+    let undeclared = tables.undeclare_queryable(qbl.handle).unwrap();
+    assert!(undeclared.taken.is_none(), "a call of it runs");
+    assert!(ended::<CClosure<u32>>(call), "the last call lets it go");
+    assert!(tables.release_queryable(qbl.handle).is_some());
+    assert!(!tables.queryables().holds_slot(qbl.handle));
+    assert_eq!(
+        undeclared.retraction.as_ref().map(Retracting::names),
+        Some((own.id, "/x")),
+        "the retraction's own hold reads the key past the row"
+    );
+}
+
+/// A token's undeclaration names its retraction off the row it removes, as a subscriber's does: a
+/// token retracted as it is announced names the declaration its key is named by and the rest of
+/// the key, though the row was the declaration's last holder and it went with the row. One
+/// retracted by its id alone names nothing.
+///
+/// # Control
+///
+/// Reading the retraction in `undeclare_entity` after the row's holds are let go of names the key
+/// whole, the declaration gone; handing the retraction no key of the row that left
+/// (`undeclare_retracted`) names nothing.
+#[test]
+fn a_tokens_undeclaration_names_its_retraction_off_the_row_it_removes() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/tk").unwrap();
+    let announced = KeyForm {
+        prefix: Some(declared.handle),
+        own: None,
+        retraction: Retraction::AsAnnounced,
+    };
+    let token = tables.declare_token("demo/tk/a", announced).unwrap();
+    assert_eq!(
+        tables.undeclare_keyexpr(declared.handle),
+        None,
+        "the token holds it"
+    );
+    let undeclared = tables.undeclare_token(token.handle).unwrap();
+    assert_eq!(
+        undeclared.keyexpr,
+        Some(declared.id),
+        "it went with the row"
+    );
+    assert_eq!(tables.keyexpr_by_id(declared.id), None);
+    assert_eq!(
+        undeclared.retraction.as_ref().map(Retracting::names),
+        Some((declared.id, "/a")),
+        "the retraction names it as the row's announcement did"
+    );
+    assert_eq!(undeclared.taken, Some(()), "a token's row always leaves");
+    let quiet = tables
+        .declare_token("demo/tk/a", KeyForm::default())
+        .unwrap();
+    let undeclared = tables.undeclare_token(quiet.handle).unwrap();
+    assert!(undeclared.retraction.is_none(), "retracted by its id alone");
 }
 
 /// A declaration an entity's key is named by and its retraction names alike is held once, and
@@ -3762,6 +4225,48 @@ fn each_table_of_declarations_is_read_through_its_own_slots() {
     );
 }
 
+/// A row's word names its table and its handle, and names that handle back only as a row of its
+/// own table: the first subscriber and the first liveliness subscriber hold the same handle's bits
+/// (the CONTROL), and each one's word names no row of the other's table. A word that names no
+/// table, or no handle, names no row. Turned red by a word that leaves out its table, or a
+/// handle read off a row of another table.
+#[test]
+fn a_rows_word_names_its_handle_in_its_own_table_alone() {
+    let mut tables = Tables::new();
+    let subscriber = tables
+        .declare_subscriber("s", Locality::Any, KeyForm::default(), 1)
+        .unwrap()
+        .handle;
+    let live = tables
+        .declare_liveliness_subscriber("l", false, KeyForm::default(), 2)
+        .unwrap()
+        .handle;
+    assert_eq!(
+        DeclaredRow::of(subscriber).row,
+        DeclaredRow::of(live).row,
+        "CONTROL: the two tables' first rows hold the same handle's bits"
+    );
+    let word = DeclaredRow::of(subscriber).to_bits();
+    assert_ne!(
+        word,
+        DeclaredRow::of(live).to_bits(),
+        "the table tells them apart"
+    );
+    let read = DeclaredRow::from_bits(word).expect("a row's word names a row");
+    assert_eq!(read, DeclaredRow::of(subscriber));
+    assert_eq!(read.handle::<kind::Subscriber>(), Some(subscriber));
+    assert_eq!(read.handle::<kind::LivelinessSubscriber>(), None);
+    let read = DeclaredRow::from_bits(DeclaredRow::of(live).to_bits()).expect("a row's word");
+    assert_eq!(read.handle::<kind::LivelinessSubscriber>(), Some(live));
+    assert_eq!(read.handle::<kind::Subscriber>(), None);
+    assert_eq!(DeclaredRow::from_bits(0), None, "no handle's bits");
+    assert_eq!(
+        DeclaredRow::from_bits((6 << 32) | u64::from(DeclaredRow::of(subscriber).row.get())),
+        None,
+        "a code past the last table's"
+    );
+}
+
 /// A write filter that asks nothing holds a place among the Interests' slots, its row read there
 /// with no Interest, so a filter declared after it has the rank the filters' walk gives it. Turned
 /// red by Interests read through slots other than the filters', or a quiet filter's row that
@@ -5196,4 +5701,35 @@ fn an_on_use_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last
     assert!(ended::<CClosure<u32>>(call), "the last call lets it go");
     assert!(tables.release_subscriber(sub.handle).is_some());
     assert!(!tables.subscribers().holds_slot(sub.handle));
+}
+
+/// The tables count the gets an answer or a deadline ended until each is retired, so a delivery
+/// reads whether an end is owed with no walk; a get retired while it stands (its asker cancelled
+/// it) is no end owed. Turned red by an end left uncounted in `end_leg` or `time_out_get`, by
+/// `retire_get` not taking an ended get off the count, or by it taking a standing get off it.
+#[test]
+fn the_tables_count_the_ended_gets_until_each_is_retired() {
+    let mut tables = Tables::new();
+    let answered = tables
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 100, 7)
+        .unwrap();
+    let timed = tables
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 50, 8)
+        .unwrap();
+    let cancelled = tables
+        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 70, 9)
+        .unwrap();
+    assert!(!tables.owes_ended_get(), "no get ended");
+    assert!(tables.retire_get(cancelled.handle).is_some());
+    assert!(
+        !tables.owes_ended_get(),
+        "a get retired standing is no end owed"
+    );
+    assert_eq!(tables.end_leg(answered.handle), Some(LegEnded::Over));
+    assert!(tables.time_out_get(timed.handle));
+    assert!(tables.owes_ended_get());
+    assert!(tables.retire_get(answered.handle).is_some());
+    assert!(tables.owes_ended_get(), "one end is still owed");
+    assert!(tables.retire_get(timed.handle).is_some());
+    assert!(!tables.owes_ended_get(), "every end was handed out");
 }

@@ -698,12 +698,12 @@ pub(super) enum Retract<'a> {
     },
     #[cfg(feature = "queryable")]
     Queryable {
-        id: super::QblId,
+        id: wz_capi_port::QblId,
         names: Option<(ExprId, &'a str)>,
     },
     #[cfg(feature = "liveliness")]
     Token {
-        id: super::TokenId,
+        id: wz_capi_port::TokenId,
         names: Option<(ExprId, &'a str)>,
     },
 }

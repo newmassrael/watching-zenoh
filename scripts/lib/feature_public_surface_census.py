@@ -519,6 +519,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`shared-sinks` gates `SubscriberSink::shared`, `MatchingSink::shared` and "
         "`SharedSampleFn`, a Rust program's own closure as a callback, which the engines with a "
         "Rust API name and this crate's `shared_sink_tests` and the cooperative engine's tests run. "
+        "`key-anchors` gates `WireKey::keeping` and `WireKey::aliased_in`, a key that keeps an "
+        "object of the ABI's alive past its declaration, which the advanced subscriber's host, the "
+        "Rust API and the cooperative engine's `liveliness` tests make and this crate's own "
+        "`tests::a_kept_` run; without it `KeyAnchor` is of no size, which "
+        "`tests::an_anchor_is_of_no_size_where_no_abi_keeps_one` holds. "
         "`os-sys` makes, for a host library built without `std`, the lock, condition variable "
         "and threads `std` makes, of the host's own calls (`os`: the `wz-host-sync` "
         "re-export, `StaticMutex`, `StaticCondvar`); every site is `any(std, os-sys)`, so it "
@@ -527,6 +532,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
             {
                 "clock-source",
                 "event-ring",
+                "key-anchors",
                 "os-sys",
                 "resource-snapshot",
                 "shared-key-ids",

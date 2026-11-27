@@ -27,6 +27,8 @@ use crate::EngineHold;
 pub(super) struct Leg {
     pub(super) replies: Vec<(ReplyKind, String, Vec<u8>)>,
     pub(super) ended: bool,
+    /// The callbacks minted, one for the get however many legs it issued.
+    pub(super) minted: usize,
     /// The callbacks minted and not yet dropped.
     open: usize,
 }
@@ -36,7 +38,10 @@ struct Ends(Arc<Mutex<Leg>>);
 
 impl Ends {
     fn mint(leg: &Arc<Mutex<Leg>>) -> Self {
-        leg.lock().unwrap().open += 1;
+        let mut seen = leg.lock().unwrap();
+        seen.minted += 1;
+        seen.open += 1;
+        drop(seen);
         Self(leg.clone())
     }
 }
@@ -127,6 +132,7 @@ fn a_get_is_answered_and_ends_with_its_final() {
         leg.lock().unwrap().replies,
         vec![(ReplyKind::Put, "demo/g/a".to_owned(), b"r".to_vec())]
     );
+    assert_eq!(leg.lock().unwrap().minted, 1, "one callback for the get");
     assert_eq!(router.seen(|s| s.queries), 1);
 }
 
@@ -388,6 +394,32 @@ fn a_cancelled_get_ends_without_a_step() {
     assert_eq!(token.active(), 0);
 }
 
+/// A get whose link goes ends with it, long before its deadline: the peer that owed its Final is
+/// gone, and the face's table of pending gets is emptied with the loss, each entry's drop being
+/// its leg's end. Turned red by a loss that leaves the face's entries standing, where the leg would
+/// wait for its deadline.
+#[test]
+fn a_get_ends_with_its_link() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let before = router.seen(|s| s.queries);
+    let (issued, leg) = ask(&engine, "demo/g/a", &remote_get(), None, None, None);
+    assert_eq!(issued, Ok(1));
+    until(&engine, "the query to reach the router", || {
+        router.seen(|s| s.queries) == before + 1
+    });
+    assert!(
+        !leg.lock().unwrap().ended,
+        "CONTROL: open while its link stands"
+    );
+    router.send(Command::Close);
+    until(&engine, "the leg to end with the link", || {
+        leg.lock().unwrap().ended
+    });
+    assert!(leg.lock().unwrap().replies.is_empty());
+}
+
 /// A get cancelled before its deadline bounds a read's wait no longer, with no step between: the
 /// index of the gets' deadlines reads the table its earliest key names when a read asks, so the
 /// end it was not told of is read then. The CONTROL is the wait while the sooner get is open,
@@ -616,25 +648,6 @@ fn a_get_on_a_closed_session_is_refused_as_closed() {
     let (issued, leg) = ask(&engine, "demo/g/b", &remote_get(), None, None, None);
     assert_eq!(issued, Err(Refusal::Closed));
     assert_eq!(leg.lock().unwrap().open, 0, "no leg was minted");
-}
-
-/// A get whose link goes ends with it, long before its deadline: the peer that owed its Final is
-/// gone.
-#[test]
-fn a_get_ends_with_its_link() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
-    settle(&router, &engine, Command::Silence);
-    let (issued, leg) = ask(&engine, "demo/g/a", &remote_get(), None, None, None);
-    assert_eq!(issued, Ok(1));
-    until(&engine, "the query to reach the router", || {
-        router.seen(|s| s.queries) == 1
-    });
-    router.send(Command::Close);
-    until(&engine, "the leg to end with the link", || {
-        leg.lock().unwrap().ended
-    });
-    assert!(leg.lock().unwrap().replies.is_empty());
 }
 
 /// A get that issued no leg is refused when its legs' requests went out on no link, with why the

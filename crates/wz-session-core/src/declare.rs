@@ -70,9 +70,9 @@ pub mod liveliness_subscriber;
 // its OWN tokens has no local-token state to reply with.
 // R311hn (Track 2, Decision 2 no-heap emit) — un-gated from `alloc`: the
 // bounded token table + the borrowed no-heap response staging
-// (`respond_to_interest_borrowed` -> `DeclResponseItem`) compile on the
+// (`TokenAnswers::stage` -> `DeclResponseItem`) compile on the
 // MCU no-heap profile; only the owned `InterestOwned`-consuming inbound
-// parse (`respond_to_interest` / `dispatch_*`, which resolve keyexprs
+// parse (`TokenAnswers::answer` / `answer_messages`, which resolve keyexprs
 // through the peer `HashMap`) stays `alloc`-gated per-method. The owned
 // `DeclareOwned` builders moved to the AP sink (wz-runtime-tokio), which
 // implements the borrowed `ResponseSink` emit seam.

@@ -3623,9 +3623,10 @@ pub unsafe extern "C" fn z_subscriber_keyexpr(
 
 /// A subscriber's global entity id (pico `z_subscriber_id`).
 ///
-/// The `eid` is the registry's own `SubId` rather than a fresh allocation:
-/// subscriptions already have a session-scope id, and minting a second one
-/// would leave the handle and the registry naming the same entity differently.
+/// The `eid` is read off the session's record of the subscription, which the handle names by its
+/// row: the one id the session numbered it by, not a copy the handle keeps. A closed session
+/// holds no record, and the null id is answered, as zenoh-pico answers a subscriber of a closed
+/// session.
 ///
 /// # Safety
 /// `subscriber` must be null or a live loaned subscriber.
@@ -3639,7 +3640,9 @@ pub unsafe extern "C" fn z_subscriber_id(
             // SAFETY: the caller's: a live loaned subscriber names a live state.
             let engine = unsafe { crate::object_slot::entity_engine(state) };
             // SAFETY: as above.
-            Some((engine.zid(), unsafe { (*state).id() }?))
+            let row = unsafe { (*state).row() }?;
+            let eid = wz_capi_port::SessionEngine::entity_id_of(&**engine, row)?;
+            Some((engine.zid(), eid))
         }),
     )
 }

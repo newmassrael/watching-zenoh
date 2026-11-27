@@ -414,38 +414,33 @@ fn a_lent_reply_to_a_liveliness_get_is_delivered_and_its_final_ends_the_get_as_t
 
 #[test]
 fn a_lent_interest_is_answered_by_the_local_tokens_as_the_owned_one_is() {
-    use super::local_token::{DeclResponseItem, LocalTokenRegistry};
-    use crate::bounded::BoundedVec;
-    use crate::caps;
+    use super::local_token::{DeclResponseItem, LocalTokenRegistry, TokenAnswers};
     use crate::interest_build::{build_interest_final, build_interest_liveliness_get};
 
     let mut registry = LocalTokenRegistry::new();
     registry.register(1, "live/a").expect("register");
     registry.register(2, "other/b").expect("register");
     let table: HashMap<u64, String> = HashMap::new();
-    let tokens_and_finals =
-        |pending: &BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>| {
-            pending
-                .iter()
-                .map(|item| match item {
-                    DeclResponseItem::Token {
-                        token_id,
-                        interest_id,
-                    } => format!("token {token_id} for {interest_id}"),
-                    DeclResponseItem::Final { interest_id } => format!("final for {interest_id}"),
-                })
-                .collect::<Vec<_>>()
-        };
+    let tokens_and_finals = |staged: &[DeclResponseItem]| {
+        staged
+            .iter()
+            .map(|item| match item {
+                DeclResponseItem::Token {
+                    token_id,
+                    interest_id,
+                } => format!("token {token_id} for {interest_id}"),
+                DeclResponseItem::Final { interest_id } => format!("final for {interest_id}"),
+            })
+            .collect::<Vec<_>>()
+    };
     for interest in [
         build_interest_liveliness_get(5, 0, Some("live/**")).expect("build"),
         build_interest_liveliness_get(6, 0, None).expect("build"),
         // A FINAL solicits nothing.
         build_interest_final(5),
     ] {
-        let mut owned_pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =
-            BoundedVec::new();
-        let mut lent_pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =
-            BoundedVec::new();
+        let mut owned_pending: TokenAnswers = TokenAnswers::default();
+        let mut lent_pending: TokenAnswers = TokenAnswers::default();
         let owned_frame = frame(vec![NetworkMessage::Interest(interest.clone())]);
         let wire = interest
             .try_as_borrowed()
@@ -459,15 +454,13 @@ fn a_lent_interest_is_answered_by_the_local_tokens_as_the_owned_one_is() {
             0,
             Priority::DEFAULT,
         ));
-        let owned_refused = registry.answer_iteration_event(
-            &registry,
-            owned_form(&owned_frame, record),
-            &table,
-            &mut owned_pending,
+        owned_pending.answer_iteration_event(&registry, owned_form(&owned_frame, record), &table);
+        lent_pending.answer_iteration_event(&registry, record, &table);
+        assert_eq!(
+            owned_pending.refusals(),
+            lent_pending.refusals(),
+            "refused chains"
         );
-        let lent_refused =
-            registry.answer_iteration_event(&registry, record, &table, &mut lent_pending);
-        assert_eq!(owned_refused, lent_refused, "refused chains");
         assert_eq!(
             tokens_and_finals(&lent_pending),
             tokens_and_finals(&owned_pending),
@@ -476,15 +469,14 @@ fn a_lent_interest_is_answered_by_the_local_tokens_as_the_owned_one_is() {
         );
     }
     // And the lent one staged something: the first interest matched one token.
-    let mut pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =
-        BoundedVec::new();
+    let mut pending: TokenAnswers = TokenAnswers::default();
     let first = build_interest_liveliness_get(5, 0, Some("live/**")).expect("build");
     let wire = first
         .try_as_borrowed()
         .expect("a borrowed view")
         .encode_to_vec();
     let view = wz_codecs::lent::Interest::decode(&mut SceCursor::new(&wire)).expect("it decodes");
-    registry.answer_iteration_event(
+    pending.answer_iteration_event(
         &registry,
         IterationEvent::InPlace(InPlaceRecord::interest_of_frame(
             &view,
@@ -493,7 +485,6 @@ fn a_lent_interest_is_answered_by_the_local_tokens_as_the_owned_one_is() {
             Priority::DEFAULT,
         )),
         &table,
-        &mut pending,
     );
     assert_eq!(
         tokens_and_finals(&pending),

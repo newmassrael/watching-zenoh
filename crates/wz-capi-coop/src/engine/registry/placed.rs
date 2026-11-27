@@ -40,7 +40,7 @@ unsafe impl ZeroEmpty for FaceTableRows {}
 /// The rows of the registry: the application's watchers' and tables', the one set's and its
 /// tables', and the session's own gets'.
 struct RegistryRows {
-    app: ObserverRegionRows<CoopSinks, 0>,
+    app: ObserverRegionRows<CoopSinks>,
     tables: SessionRows<CoopRows>,
     /// The sets, written field by field where they lie before the region is placed, then counted
     /// by the registry's table of them.

@@ -50,8 +50,8 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use wz_capi_port::cancellation::{CancellableFan, CancellationToken, TokenRef};
 use wz_capi_port::{
-    EngineHolder, LivelinessSink, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink,
-    Ticker, TokenId, WireKey,
+    EngineHolder, EntityRow, LivelinessSink, Refusal, ReplyCallback, SessionEngine, SubId,
+    SubscriberSink, Ticker, WireKey,
 };
 use wz_session_core::caps;
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
@@ -524,7 +524,7 @@ unsafe fn let_go_weak<E: EngineHolder>(context: *mut c_void) {
 /// A subscription (or liveliness subscription) the engine holds, retracted when this is dropped.
 struct Subscription<E: EngineHolder> {
     engine: E,
-    id: SubId,
+    id: EntityRow,
     retract: bool,
 }
 
@@ -539,7 +539,7 @@ impl<E: EngineHolder> Drop for Subscription<E> {
 /// A liveliness token the engine holds, retracted when this is dropped.
 struct Token<E: EngineHolder> {
     engine: E,
-    id: TokenId,
+    id: EntityRow,
     retract: bool,
 }
 
@@ -824,7 +824,13 @@ impl<E: EngineHolder> EngineSubscriber<E> {
             options.allowed_origin,
             own_sink(&shared, on_live::<E>),
         )?;
-        let id = identity_of(zid, subscriber.entity.id, forms.as_ref());
+        // A subscription its session's close retracted at once names the null id, as
+        // zenoh-pico's `z_subscriber_id` answers for a closed session.
+        let id = identity_of(zid, forms.as_ref(), || {
+            engine
+                .entity_id_of(subscriber.entity.id)
+                .unwrap_or_default()
+        });
 
         // The retention sweep and the periodic re-ask: jobs the engine runs, over one body
         // (`start_job`). The sweep is a build's that lets go of the sources that went away
@@ -1092,15 +1098,16 @@ unsafe fn write_shared_part<E: EngineHolder>(
 }
 
 /// The identity a subscriber reports: its host's, when the host has one, else its subscription's
-/// own id, which is the entity id its declaration carries.
+/// own id, which is the entity id its declaration carries, read off the engine's record of it
+/// (`subscription`).
 fn identity_of(
     zid: SessionZid,
-    subscription: SubId,
     forms: Option<&FormsHandle>,
+    subscription: impl FnOnce() -> SubId,
 ) -> EntityGlobalId {
     let eid = forms
         .and_then(|f| f.forms().entity_id())
-        .unwrap_or(subscription);
+        .unwrap_or_else(subscription);
     EntityGlobalId::of_session(zid, eid)
 }
 

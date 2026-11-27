@@ -818,6 +818,11 @@ pub mod plane_lock;
 /// registered in, as the session's state ends them. Unconditional: its rows are a bounded table.
 pub mod pending_get;
 
+/// The legs of the gets pending on one face: which of its peer's answers names which get of the
+/// session's tables, and how a Response of that peer is read. Unconditional: its rows are a
+/// bounded table.
+pub mod get_legs;
+
 /// The session's round of deliveries: what the session hands its callbacks under its lock, held
 /// until the lock is let go and handed to them after it, with the calls it owes and the kinds of
 /// record it keeps named by the engine. Its rows are shared with the deliveries across threads,

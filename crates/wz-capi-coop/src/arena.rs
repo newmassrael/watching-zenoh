@@ -263,7 +263,6 @@ pub enum ArenaPart {
     PendingGets,
     EndedLegs,
     LegCallbacks,
-    PendingLegs,
     HeldReplies,
     FaceTables,
     HeldFaces,
@@ -376,7 +375,6 @@ impl ArenaPart {
             Self::PendingGets => ("pending gets", GETS),
             Self::EndedLegs => ("ended legs", GETS),
             Self::LegCallbacks => ("leg callbacks", GETS),
-            Self::PendingLegs => ("pending legs", GETS),
             Self::HeldReplies => ("held replies", "MAX_PENDING_REPLIES"),
             Self::FaceTables => ("face tables", "MAX_FACES + 1"),
             Self::HeldFaces => ("held faces", "MAX_FACES + 1"),
@@ -519,11 +517,11 @@ const HANDED_ROWS: usize =
 /// The application's tables apart from the session's one table set: the declaration watchers,
 /// where the arena lends them (`runtime-plan`).
 const OBSERVER_ROWS: usize = cfg!(feature = "runtime-plan") as usize;
-/// The pending gets, the ends of the legs, the legs' callbacks, the session's note of each leg
-/// pending and the replies the gets that consolidate hold, of a build that asks (`query`), where
-/// the arena lends them (`runtime-plan`): one that asks nothing holds no table of gets, and a
-/// region holds them otherwise (`crate::engine::StatePlaces`).
-const GET_ROWS: usize = 5 * cfg!(all(feature = "query", feature = "runtime-plan")) as usize;
+/// The pending gets, the ends of the legs, the legs' callbacks and the replies the gets that
+/// consolidate hold, of a build that asks (`query`), where the arena lends them (`runtime-plan`):
+/// one that asks nothing holds no table of gets, and a region holds them otherwise
+/// (`crate::engine::StatePlaces`).
+const GET_ROWS: usize = 4 * cfg!(all(feature = "query", feature = "runtime-plan")) as usize;
 /// The faces' sets where the arena lends them (`runtime-plan`), and the index of the held ones
 /// where the build takes faces beside its dial role's (`TAKES_FACES`): a session of that face
 /// alone knows it holds the first set.
@@ -1152,9 +1150,8 @@ pub struct GetTables {
 
 impl GetTables {
     /// How many gets every table together holds pending at once: the rows of the tables of the
-    /// ends of the legs, of their callbacks and of the session's note of each leg pending
-    /// (`crate::engine`'s `EndedLegs`, `LegRows` and `PendingGet`). `None` past the address
-    /// space.
+    /// ends of the legs and of their callbacks (`crate::engine`'s `EndedLegs` and `LegRows`).
+    /// `None` past the address space.
     pub const fn legs(&self) -> Option<usize> {
         match self.rows.queries.checked_add(self.rows.liveliness_gets) {
             Some(each) => each.checked_mul(self.tables),
@@ -2187,10 +2184,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             let get_bytes = self.sized(set_get_bytes(self.session.gets.rows));
             self.put(ArenaPart::PendingGets, self.session.gets.tables, get_bytes);
         }
-        // The ends of the legs, the rows of their callbacks and the session's note of each leg
-        // pending, a row of each for each get every table holds (`GetTables::legs`). A build of
-        // the region's form holds them in its region, at the build's bound
-        // (`crate::engine::StatePlaces`).
+        // The ends of the legs and the rows of their callbacks, a row of each for each get every
+        // table holds (`GetTables::legs`). A build of the region's form holds them in its region,
+        // at the build's bound (`crate::engine::StatePlaces`).
         #[cfg(all(feature = "query", feature = "runtime-plan"))]
         {
             let legs = self.sized(self.session.gets.legs());
@@ -2204,14 +2200,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
                 legs,
                 core::mem::size_of::<Option<crate::engine::LegRow>>(),
             );
-            self.put(
-                ArenaPart::PendingLegs,
-                legs,
-                core::mem::size_of::<crate::engine::PendingGet>(),
-            );
         }
         // The replies the gets that consolidate hold to their Finals: a row for each reply, in one
-        // table shared by every get, each tagged with its leg (`engine::get::LegHold`).
+        // table shared by every get, each tagged with its get's row (`engine::get::LegHold`).
         // The limit is held either way, so a config over the build's is refused under its name.
         #[cfg(feature = "query")]
         {
@@ -2223,7 +2214,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             self.put(
                 ArenaPart::HeldReplies,
                 self.session.held_replies,
-                core::mem::size_of::<HeldReply<u64, Lent>>(),
+                core::mem::size_of::<HeldReply<crate::engine::LegId, Lent>>(),
             );
         }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the

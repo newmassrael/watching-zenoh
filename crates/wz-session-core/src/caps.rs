@@ -428,8 +428,9 @@ const _: () = assert!(
 pub const MAX_PENDING_LIVELINESS_GETS: usize = generated::MAX_PENDING_LIVELINESS_GETS;
 
 /// Maximum number of [`crate::declare::local_token::DeclResponseItem`]
-/// records the application-layer observer stages for one drain cycle
-/// (the declarer-side liveliness interest-response buffer). One inbound
+/// records one peer's staging holds for one drain cycle
+/// (the declarer-side liveliness interest-response buffer,
+/// `TokenAnswers`). One inbound
 /// CURRENT Interest stages up to [`MAX_LOCAL_TOKENS`] `DeclToken` items
 /// plus one `DeclFinal` — 9 items per chain. R311hn (Track 2) — replaces
 /// the prior unbounded `Vec<DeclareOwned>` staging.
@@ -440,18 +441,18 @@ pub const MAX_PENDING_LIVELINESS_GETS: usize = generated::MAX_PENDING_LIVELINESS
 /// ([`crate::bounded::BoundedVec`]):
 ///
 /// - **AP (`alloc`)** — the backing is a `Vec` and `N` is ADVISORY; `push`
-///   cannot fail. Batching is real here (`dispatch_messages` threads one
+///   cannot fail. Batching is real here (`answer_messages` threads one
 ///   buffer across every Interest in a frame, and it is `alloc`-gated), so
 ///   chains do accumulate — but nothing can be dropped, and this constant
 ///   does not bound anything. It is a footprint declaration, not a limit.
 /// - **MCU (no-alloc)** — `N` is the HARD limit `push` enforces, but the
 ///   `alloc`-gated batching does not exist: the consumer drives
-///   `respond_to_interest_borrowed` per Interest, so one 9-item chain meets
+///   `TokenAnswers::stage` per Interest, so one 9-item chain meets
 ///   32 with room to spare.
 ///
 /// The batching and the hard bound therefore sat on OPPOSITE sides of the
-/// `alloc` cfg, which is why the swallowed `let _ = push(Final)` in
-/// `respond_to_interest_borrowed` was unreachable as shipped. That was a
+/// `alloc` cfg, which is why the swallowed `let _ = push(Final)` in the
+/// token staging was unreachable as shipped. That was a
 /// property of the cfg split, NOT a guarantee this constant provides.
 ///
 /// `bounded-heapless` (a fixed backing WITH `alloc`) is exactly the

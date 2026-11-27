@@ -18,7 +18,7 @@ use wz_session_core::peer_tables::PeerRows;
 #[cfg(feature = "local-queryable")]
 use wz_session_core::pending_get::DueRow;
 use wz_session_core::session_tables::TableRows;
-use wz_session_core::slot_observer::{ObserverRows, RequesterRows};
+use wz_session_core::slot_observer::RequesterRows;
 
 use super::held::OneHolder;
 #[cfg(any(
@@ -64,17 +64,7 @@ impl RegistryOf<OneHolder> {
         peer: PeerRows,
         delivery: RoundDelivery,
     ) -> Result<Self, ArenaRefused> {
-        // The session's tokens are rows of its one table set, which answers a peer's Interest too,
-        // so the observer's own registry of them is counted none.
-        let app = App::counted(
-            keys,
-            ObserverRows {
-                tables,
-                local_tokens: 0,
-            },
-            limits,
-        )
-        .map_err(ArenaRefused::Lend)?;
+        let app = App::counted(keys, tables, limits).map_err(ArenaRefused::Lend)?;
         let mut sets = BoundedVec::<FaceTables, MAX_FACE_SETS, RowPolicy>::counted(FACE_SETS);
         // SAFETY: `rowless_in` writes a whole set into the row it is handed and cannot unwind.
         let set = unsafe {

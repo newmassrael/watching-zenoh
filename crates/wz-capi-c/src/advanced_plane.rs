@@ -26,8 +26,7 @@ use std::time::Duration;
 use wz_capi_core::drive::PeriodicJob;
 use wz_capi_core::faces::SharedSession;
 use wz_capi_port::{
-    FilterId, FilterPlane, QblId, QueryHolder, QueryableSink, SessionEngine, Ticker, TokenId,
-    WireKey,
+    EntityRow, FilterId, FilterPlane, QueryHolder, QueryableSink, SessionEngine, Ticker, WireKey,
 };
 use wz_ext_pubsub::advanced_cache::{CacheStore, Retained};
 use wz_ext_pubsub::advanced_publisher::{
@@ -66,7 +65,7 @@ impl CPlane {
 /// A cache queryable the engine holds, retracted when this is dropped.
 pub(crate) struct CacheQueryable {
     engine: Arc<dyn SessionEngine>,
-    id: QblId,
+    id: EntityRow,
 }
 
 impl Drop for CacheQueryable {
@@ -78,7 +77,7 @@ impl Drop for CacheQueryable {
 /// A liveliness token the engine holds, retracted when this is dropped.
 pub(crate) struct Token {
     engine: Arc<dyn SessionEngine>,
-    id: TokenId,
+    id: EntityRow,
 }
 
 impl Drop for Token {

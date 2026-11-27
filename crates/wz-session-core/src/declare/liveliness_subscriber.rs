@@ -2309,7 +2309,7 @@ impl<P: Storage> PeerTokens<P> {
                     }
                 }
                 // R311xx — an inbound `Interest` is the responder's
-                // concern (`LocalTokenRegistry::respond_to_interest`), not
+                // concern (`TokenAnswers::answer`), not
                 // the subscriber's; the CURRENT-replay completion arrives
                 // as the `Declare(DeclFinal)` handled above. Ignored here.
                 _ => {}
@@ -3971,9 +3971,7 @@ mod tests {
     #[cfg(all(feature = "storage-profile", feature = "liveliness-token"))]
     #[test]
     fn responder_replay_drives_subscriber_put_and_history_complete() {
-        use crate::bounded::BoundedVec;
-        use crate::caps;
-        use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
+        use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry, TokenAnswers};
         use crate::transport_profile::owned::InterestOwned;
         use wz_codecs::interest_body::InterestBodyOwned;
         use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
@@ -4004,10 +4002,9 @@ mod tests {
             ),
             extensions: None,
         };
-        let mut pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =
-            BoundedVec::new();
-        responder
-            .respond_to_interest(&interest, &HashMap::new(), &mut pending)
+        let mut pending: TokenAnswers = TokenAnswers::default();
+        pending
+            .answer(&responder, &interest, &HashMap::new())
             .expect("an empty buffer takes the chain");
 
         // Reify the staged replay into the wire Declares the sink emits:

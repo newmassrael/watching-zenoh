@@ -53,7 +53,7 @@ use core::cell::Cell;
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
-use wz_capi_port::{QblId, QueryHolder, QueryableSink};
+use wz_capi_port::{EntityRow, QueryHolder, QueryableSink};
 use wz_session_core::keyexpr_canon::CanonKey;
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
@@ -1387,11 +1387,12 @@ pub(crate) struct QueryableState {
     loaned_keyexpr: z_loaned_keyexpr_t,
 }
 
-/// A queryable's declaration: its id in the session, whose record of the queryable keeps its key
-/// and holds the declaration pico makes for the key's non-wild prefix, from the declaration until
-/// the queryable is retracted; the door keeps no copy of the key.
+/// A queryable's declaration: its row in the session ([`EntityRow`]), whose record of the queryable
+/// keeps its key and its entity id and holds the declaration pico makes for the key's non-wild
+/// prefix, from the declaration until the queryable is retracted; the door keeps no copy of the
+/// key.
 struct DeclaredQueryable {
-    id: QblId,
+    row: EntityRow,
     /// The session and the declaration the record holds that the key begins with, as the
     /// declaration lent it ([`wz_capi_port::Declared::key`]): what the loan of the key names, and
     /// what a key made of the loan holds.
@@ -1496,10 +1497,10 @@ impl z_owned_queryable_t {
 /// `h` must be a live `QueryableState` handle, let go of once.
 unsafe fn free_queryable(h: *mut c_void) {
     let state = h as *mut QueryableState;
-    if let Some(id) = (*state).declared.as_ref().map(|declared| declared.id) {
+    if let Some(row) = (*state).declared.as_ref().map(|declared| declared.row) {
         wz_capi_port::SessionEngine::undeclare_queryable(
             crate::session::EngineHold::as_ref(crate::object_slot::entity_engine(state)),
-            id,
+            row,
         );
     }
     crate::object_slot::closures_of::<QueryableState, QueryableKept>(state).wait_none();
@@ -1592,7 +1593,7 @@ unsafe fn declare_queryable_in(
     ) {
         Ok(declared) => {
             (*state).declared = Some(DeclaredQueryable {
-                id: declared.id,
+                row: declared.id,
                 record: crate::keyexpr::RecordKey::UNLENT,
             });
             // The loan names the state where it lies, which is where it stays; a background
@@ -1635,7 +1636,7 @@ pub(crate) fn declare_queryable_on(
     complete: bool,
     allowed_origin: wz_session_core::locality::Locality,
     sink: QueryableSink,
-) -> Result<wz_capi_port::Declared<QblId>, ZResult> {
+) -> Result<wz_capi_port::Declared<EntityRow>, ZResult> {
     let key = crate::keyexpr::EntityKey::non_wild_prefix(session.engine, keyexpr, existing)?;
     let declared = wz_capi_port::SessionEngine::declare_queryable_on_wire(
         crate::session::EngineHold::as_ref(session.engine),
@@ -1661,7 +1662,7 @@ pub(crate) fn declare_queryable_on(
 /// retracts it there ([`Self::retract`]).
 #[cfg(any(feature = "advanced", feature = "admin-space"))]
 pub(crate) struct PlainQueryable {
-    id: QblId,
+    row: EntityRow,
 }
 
 #[cfg(any(feature = "advanced", feature = "admin-space"))]
@@ -1676,7 +1677,7 @@ impl PlainQueryable {
     ) -> Result<Self, ZResult> {
         // Declared as pico declares its own (`z_declare_queryable` with NULL options):
         // the default origin.
-        let id = declare_queryable_on(
+        let row = declare_queryable_on(
             session,
             keyexpr,
             existing,
@@ -1685,7 +1686,7 @@ impl PlainQueryable {
             sink,
         )?
         .id;
-        Ok(Self { id })
+        Ok(Self { row })
     }
 
     /// Retract the queryable from `engine`, the session it was declared on: once, by its owner,
@@ -1693,7 +1694,7 @@ impl PlainQueryable {
     pub(crate) fn retract(self, engine: &crate::session::EngineHold) {
         wz_capi_port::SessionEngine::undeclare_queryable(
             crate::session::EngineHold::as_ref(engine),
-            self.id,
+            self.row,
         );
     }
 }
@@ -2158,15 +2159,15 @@ pub unsafe extern "C" fn z_query_encoding(
 #[cfg(feature = "unstable-api")]
 pub(crate) unsafe fn queryable_identity(
     queryable: *const z_loaned_queryable_t,
-) -> Option<([u8; 16], QblId)> {
+) -> Option<([u8; 16], wz_session_core::wire_id::EntityId)> {
+    // Read off the session's record of the queryable, which a closed session no longer holds: the
+    // null id is answered then, as zenoh-pico answers.
     crate::abi::handle_at::<z_loaned_queryable_t, QueryableState>(queryable).and_then(|state| {
         // A live loaned queryable names a live state in its place, whose lender holds the engine.
-        let engine = crate::object_slot::entity_engine(state);
+        let engine = crate::session::EngineHold::as_ref(crate::object_slot::entity_engine(state));
         let declared = (*state).declared.as_ref()?;
-        Some((
-            wz_capi_port::SessionEngine::zid(crate::session::EngineHold::as_ref(engine)),
-            declared.id,
-        ))
+        let eid = wz_capi_port::SessionEngine::entity_id_of(engine, declared.row)?;
+        Some((wz_capi_port::SessionEngine::zid(engine), eid))
     })
 }
 

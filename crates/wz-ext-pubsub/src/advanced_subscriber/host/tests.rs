@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use wz_capi_port::cancellation::{CancellableFan, Canceller, FanCanceller, FanKey, TokenRef};
 use wz_capi_port::{
-    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
-    MatchingSink, QblId, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick,
-    TickerId, TokenId, WireKey,
+    BatchStep, EntityRow, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
+    MatchingSink, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick, TickerId,
+    WireKey,
 };
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::declare_form::{InterestAsk, RetractionKey};
@@ -247,7 +247,7 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
+    ) -> Result<wz_capi_port::Declared<EntityRow>, Refusal> {
         if self.ids_spent.load(Ordering::SeqCst) {
             return Err(Refusal::NoEntityId);
         }
@@ -261,22 +261,23 @@ impl SessionEngine for Script {
             .lock()
             .unwrap()
             .push((id, key, wire, Arc::new(sink)));
-        Ok(wz_capi_port::Declared { id, key: lent })
+        Ok(wz_capi_port::Declared { id, key: lent }.by_id())
     }
-    fn undeclare_subscriber(&self, id: SubId) {
+    fn undeclare_subscriber(&self, row: EntityRow) {
+        let id = row.as_id();
         let known = self
             .subscriptions
             .lock()
             .unwrap()
             .iter()
-            .find(|s| s.0 == id)
+            .find(|s| Some(s.0) == id)
             .map(|s| s.1.clone())
             .or_else(|| {
                 self.liveliness
                     .lock()
                     .unwrap()
                     .iter()
-                    .find(|s| s.0 == id)
+                    .find(|s| Some(s.0) == id)
                     .map(|s| s.1.clone())
             });
         self.event(format!("retract {}", known.unwrap_or_default()));
@@ -359,12 +360,12 @@ impl SessionEngine for Script {
         keyexpr: &str,
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
-    ) -> Result<TokenId, Refusal> {
+    ) -> Result<EntityRow, Refusal> {
         let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare token {keyexpr}"));
-        Ok(id)
+        Ok(EntityRow::by_id(id))
     }
-    fn undeclare_liveliness_token(&self, _id: TokenId) {
+    fn undeclare_liveliness_token(&self, _row: EntityRow) {
         self.event("retract token");
     }
     fn declare_liveliness_subscriber_on_wire(
@@ -373,7 +374,7 @@ impl SessionEngine for Script {
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
+    ) -> Result<wz_capi_port::Declared<EntityRow>, Refusal> {
         let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare liveliness {keyexpr}"));
         let key = keyexpr.to_owned();
@@ -382,7 +383,7 @@ impl SessionEngine for Script {
             .lock()
             .unwrap()
             .push((id, key, history, Arc::new(sink)));
-        Ok(wz_capi_port::Declared { id, key: lent })
+        Ok(wz_capi_port::Declared { id, key: lent }.by_id())
     }
     fn get_on_wire(
         &self,
@@ -429,7 +430,7 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         _sink: wz_capi_port::QueryableSink,
-    ) -> Result<wz_capi_port::Declared<QblId>, Refusal> {
+    ) -> Result<wz_capi_port::Declared<EntityRow>, Refusal> {
         Err(Refusal::NotBuilt)
     }
 }
@@ -1043,7 +1044,7 @@ fn a_session_with_no_id_left_refuses_the_subscriber() {
 /// identity holds.
 #[test]
 fn a_subscriber_without_a_host_identity_reports_its_subscription_id() {
-    let id = super::identity_of(ZID.into(), u32::MAX, None);
+    let id = super::identity_of(ZID.into(), None, || u32::MAX);
     assert_eq!((id.zid(), id.eid()), (&ZID[..], u32::MAX));
 }
 

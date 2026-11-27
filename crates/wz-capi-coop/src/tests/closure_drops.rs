@@ -53,7 +53,7 @@ fn declare(
     engine: &super::Engine,
     key: &str,
     sink: SubscriberSink,
-) -> Result<wz_capi_port::SubId, Refusal> {
+) -> Result<wz_capi_port::EntityRow, Refusal> {
     engine
         .declare_subscriber_on_wire(key, WireKey::literal(), Locality::Any, None, sink)
         .map(|declared| declared.id)
@@ -325,12 +325,12 @@ fn a_queryables_callback_is_dropped_once_on_each_end() {
 #[test]
 fn a_queryable_undeclared_while_a_query_owes_it_a_call_is_let_go_of_after_it() {
     use std::sync::Mutex;
-    use wz_capi_port::{QblId, QueryHolder, QueryableSink};
+    use wz_capi_port::{EntityRow, QueryHolder, QueryableSink};
     use wz_session_core::query_sink::{QueryView, ReplyOut};
 
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let ids: Arc<Mutex<Option<[QblId; 2]>>> = Arc::default();
+    let ids: Arc<Mutex<Option<[EntityRow; 2]>>> = Arc::default();
     let called = Arc::new(AtomicUsize::new(0));
     let counts = Counts::default();
     let sink = |me: usize| -> QueryableSink {
@@ -411,12 +411,12 @@ fn a_queryable_undeclared_while_a_query_owes_it_a_call_is_let_go_of_after_it() {
 #[test]
 fn a_liveliness_subscriber_undeclared_while_a_token_owes_it_a_call_is_let_go_of_after_it() {
     use std::sync::Mutex;
-    use wz_capi_port::{LivelinessSink, SubId};
+    use wz_capi_port::{EntityRow, LivelinessSink};
     use wz_session_core::declare::liveliness_sample::LivelinessSample;
 
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let ids: Arc<Mutex<Option<[SubId; 2]>>> = Arc::default();
+    let ids: Arc<Mutex<Option<[EntityRow; 2]>>> = Arc::default();
     let called = Arc::new(AtomicUsize::new(0));
     let counts = Counts::default();
     let sink = |me: usize| -> LivelinessSink {
