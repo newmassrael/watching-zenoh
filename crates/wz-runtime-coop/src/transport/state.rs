@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use core::ops::Deref;
 
+use wz_session_core::bounded::Storage;
 use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 #[cfg(feature = "group")]
 use wz_session_core::group_locator::parse_group_locator;
@@ -158,6 +159,10 @@ pub trait TransportFaces {
     /// pump of the one link it steps itself, so that a receive that lends the Router does so with
     /// nothing of the session's state held.
     type Router: TransportRouter;
+    /// The storage of the transport's own rows, the texts of the session's endpoints: the rows
+    /// its open lent, or rows of the allocator counted to the endpoints it names and taken at the
+    /// first text written, where the session's tables take their memory on use.
+    type Policy: Storage;
 }
 
 /// The Router a transport holds of its session ([`TransportFaces::Router`]): what the transport
@@ -209,9 +214,9 @@ pub struct TransportState<T: TransportFaces> {
     /// asked of each.
     pub links: LinkSupervisor<T::Links, T::Face, T::Places, CountOf<T>>,
     /// The texts of the endpoints the session dials and listens on, written once when it opened
-    /// into rows of its arena: a dial and a port name their endpoint by its row, and the config's
-    /// copies went with the open.
-    pub endpoints: EndpointTexts,
+    /// into rows of the transport's storage (`TransportFaces::Policy`): a dial and a port name
+    /// their endpoint by its row, and the config's copies went with the open.
+    pub endpoints: EndpointTexts<T::Policy>,
     /// The multicast groups the session joined, each a face of its own (`group`).
     #[cfg(feature = "group")]
     pub groups: Vec<T::Group>,

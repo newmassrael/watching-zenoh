@@ -158,6 +158,7 @@ use wz_session_core::caps;
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
+#[cfg(not(wz_on_use))]
 use wz_session_core::locator_directory::LocatorText;
 #[cfg(wz_lent)]
 use wz_session_core::peer_tables::PeerTables;
@@ -509,8 +510,9 @@ impl ArenaPart {
 // same features: a group that gains or loses a row changes its own count, and the plan's length
 // follows ([`ARENA_ROWS`]).
 
-/// The texts of the endpoints the session dials and listens on: one row of both tables.
-const ENDPOINT_ROWS: usize = 1;
+/// The texts of the endpoints the session dials and listens on: one row of both tables, none where
+/// the tables take their memory on use, whose texts take their own rows as they are written.
+const ENDPOINT_ROWS: usize = !cfg!(wz_on_use) as usize;
 /// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
 /// places: none where the tables take their memory on use, whose links take their own as they
 /// open.
@@ -1436,8 +1438,9 @@ pub(crate) struct TransportTables {
     pub(crate) reassembly: LentByteCells,
     /// The most chains one face's Router holds open at once in `reassembly`.
     pub(crate) face_chains: usize,
-    /// The rows of the endpoints' texts, none written.
-    pub(crate) endpoints: EndpointTexts,
+    /// The rows of the endpoints' texts, none written: lent, or, where the tables take their
+    /// memory on use, counted to the endpoints the config names and taken at the first written.
+    pub(crate) endpoints: EndpointTexts<crate::StatePolicy>,
     /// The places of the publishes the session keeps for its other faces: lent, or, where the
     /// tables take their memory on use, its own, counted to the plan's.
     #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
@@ -1495,7 +1498,11 @@ impl TransportRows {
             // ends; the session holds the table for its life.
             reassembly: lend.byte_cells(self.reassembly_bytes, self.reassembly_chains),
             face_chains: self.face_chains,
+            #[cfg(not(wz_on_use))]
             endpoints: EndpointTexts::over(lend.table(dials), lend.table(listens)),
+            // Laid out in no row: each role's texts take their rows as the first is written.
+            #[cfg(wz_on_use)]
+            endpoints: EndpointTexts::counted(dials, listens),
             #[cfg(all(wz_round, any(feature = "listen", feature = "group"), not(wz_on_use)))]
             handed: HandedTable::over(
                 lend.byte_cells(self.link_bytes, self.handed_legs),
@@ -2073,18 +2080,22 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         }
         // The texts of the endpoints the session dials and listens on, a text a row of one table
         // each, written once when it opens and named by place after
-        // (`TransportRows::lent_from`): one row of the plan, the two tables' spans.
-        let (dial_rows, listen_rows) = self.transport.endpoint_rows;
-        let texts = self.sized(
-            match (
-                Arena::table_bytes::<LocatorText>(dial_rows),
-                Arena::table_bytes::<LocatorText>(listen_rows),
-            ) {
-                (Some(dial), Some(listen)) => dial.checked_add(listen),
-                _ => None,
-            },
-        );
-        self.put(ArenaPart::EndpointTexts, 1, texts);
+        // (`TransportRows::lent_from`): one row of the plan, the two tables' spans. Where the
+        // tables take their memory on use the texts take their own rows, and none is laid out.
+        #[cfg(not(wz_on_use))]
+        {
+            let (dial_rows, listen_rows) = self.transport.endpoint_rows;
+            let texts = self.sized(
+                match (
+                    Arena::table_bytes::<LocatorText>(dial_rows),
+                    Arena::table_bytes::<LocatorText>(listen_rows),
+                ) {
+                    (Some(dial), Some(listen)) => dial.checked_add(listen),
+                    _ => None,
+                },
+            );
+            self.put(ArenaPart::EndpointTexts, 1, texts);
+        }
         // The links' rows are lent when the session opens, in this order
         // (`TransportRows::links_from`). Where the tables take their memory on use each link
         // takes its own as it opens, and none is laid out.

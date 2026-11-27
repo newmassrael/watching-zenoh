@@ -1337,7 +1337,7 @@ fn lend_session(
 fn session_zid(
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
-    endpoints: &EndpointTexts,
+    endpoints: &EndpointTexts<crate::StatePolicy>,
     entropy: &mut SessionEntropy<SharedCount>,
 ) -> Result<SessionZid, OpenError> {
     match (&config.zid, policy.zid_derivation()) {

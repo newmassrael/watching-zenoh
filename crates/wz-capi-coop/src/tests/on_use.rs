@@ -368,7 +368,8 @@ fn an_on_use_sessions_link_parts_lie_on_the_heap() {
 /// tables, the tokens the faces that went owe, the places of the rooms or of a step, the
 /// declaration watchers, the gets' tables, the held Finals or the round's tables, each counted from
 /// the plan and taking its memory at its first row, nor the links' buffers and places, which each
-/// link takes of the heap as it opens; the CONTROL row, the endpoints' texts, is laid out.
+/// link takes of the heap as it opens, nor the endpoints' texts, which each role's table takes as
+/// its first is written; the CONTROL row, the reassembly buffers, is laid out.
 /// Turned red by a row of those tables put where the build lays its plans out at the open
 /// (`feature = "runtime-plan"`) rather than where the policy lends them (`wz_lent`), as
 /// `ArenaPlan::put_entities` was put, in a build of both features.
@@ -382,8 +383,12 @@ fn an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts() {
     let plan = ArenaPlan::of(&config, &config.limits).expect("the client's limits lay a plan out");
     let laid = |part: &str| plan.rows().any(|row| row.part() == part);
     assert!(
-        laid("endpoint texts"),
-        "CONTROL: the transport's texts are laid out"
+        laid("reassembly buffers"),
+        "CONTROL: the transport's chains are laid out"
+    );
+    assert!(
+        !laid("endpoint texts"),
+        "the endpoints' texts take their own rows"
     );
     for part in [
         "link receive flags",
