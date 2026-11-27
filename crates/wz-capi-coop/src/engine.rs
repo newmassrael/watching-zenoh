@@ -73,11 +73,11 @@ use wz_runtime_coop::kept::Shared;
     all(not(wz_round), any(feature = "listen", feature = "group"))
 ))]
 use wz_session_core::bounded::Arena;
-use wz_session_core::bounded::{KeyMaker, KeyUnkept, LendRefused, TableLender};
+use wz_session_core::bounded::{KeyUnkept, LendRefused, TableLender};
 use wz_session_core::caps;
 #[cfg(all(feature = "liveliness", wz_round))]
 use wz_session_core::key_arena::KeyRef;
-use wz_session_core::key_arena::{KeySpace, LentKeys};
+use wz_session_core::key_arena::{KeySpace, KeysLocked};
 use wz_session_core::placed::{Placed, PlacedRef};
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_hold::HeldReplies;
@@ -1660,6 +1660,15 @@ struct CoreGuard<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
 }
 
 impl<'a, L: CoopLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
+    /// The proof that this hold holds the lock that guards the session's key arena, for as long as
+    /// the hold is borrowed: what a key an object of the C ABI holds apart is shared and let go of
+    /// through, and nothing else makes one.
+    fn keys_locked(&self) -> KeysLocked<'_> {
+        // SAFETY: this guard holds the session's lock from its taking to its drop, the lock that
+        // guards the arena (`CoreLock::init_at`), and the proof borrows the guard.
+        unsafe { KeysLocked::vouched(&self.guard.0.session.keys) }
+    }
+
     fn taken(
         guard: StateGuard<'a, Confined<Core<L, C>>>,
         held: wz_capi_port::sync::SessionHeld,
@@ -2499,6 +2508,13 @@ struct LiveCore<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
     core: core::mem::ManuallyDrop<CoreGuard<'a, L, C>>,
     #[cfg(wz_round)]
     lane: &'a Round,
+}
+
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> LiveCore<'_, L, C> {
+    /// The proof of the hold this is ([`CoreGuard::keys_locked`]).
+    fn keys_locked(&self) -> KeysLocked<'_> {
+        self.core.keys_locked()
+    }
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> Deref for LiveCore<'_, L, C> {
@@ -11796,20 +11812,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for C
                 KeyAsk::Release(_) => Ok(None),
             };
         };
-        let core = &core.0;
+        let keys = core.keys_locked();
         match ask {
             // A text the arena keeps already, whoever holds it, is that block shared, so a key the
             // session's declarations and the program's objects name alike takes one block.
-            KeyAsk::Hold(text) => match LentKeys::from(core.session.keys).shared(text) {
+            KeyAsk::Hold(text) => match keys.shared(text) {
                 Ok(key) => Ok(Some(HeldKey::of(key))),
                 Err(KeyUnkept::TooLong) => Err(KeyNotHeld::TooLong),
                 Err(KeyUnkept::NoRoom) => Err(KeyNotHeld::NoRoom),
             },
-            // SAFETY: the session's lock is held (`core`), and the key is its arena's.
-            KeyAsk::Share(key) => Ok(Some(unsafe { key.share(&core.session.keys) })),
+            // SAFETY: the key is of the arena whose lock `keys` proves held: the session's.
+            KeyAsk::Share(key) => Ok(Some(unsafe { key.share(&keys) })),
             KeyAsk::Release(key) => {
                 // SAFETY: as a share.
-                unsafe { key.release(&core.session.keys) };
+                unsafe { key.release(&keys) };
                 Ok(None)
             }
         }

@@ -35,6 +35,12 @@
 //! neither `Send` nor `Sync`: they are reached by the one thread that holds the session's state at
 //! a time, as the rest of that state is (the cooperative engine keeps it behind its one lock).
 //!
+//! A key held apart from every row ([`KeyRef::into_raw`]), as an object outside that lock holds
+//! one, is made a holder again, shared or let go of only through a [`KeysLocked`]: the proof of a
+//! hold of the lock, which the lock's owner makes from its own hold and lends no further. Code that
+//! has the arena and no hold of its lock has no way to adopt such a key, so the path does not
+//! compile.
+//!
 //! # Lifetime
 //!
 //! The arena's state lies at the start of its span, and every [`KeyRef`] points at it. Like a
@@ -47,9 +53,12 @@
 //! [`BLOCK_ALIGN`]: crate::key_arena::BLOCK_ALIGN
 //! [`KeysExhausted`]: crate::key_arena::KeysExhausted
 //! [`KeySpace`]: crate::key_arena::KeySpace
+//! [`KeysLocked`]: crate::key_arena::KeysLocked
+//! [`KeyRef::into_raw`]: crate::key_arena::KeyRef::into_raw
 
 use core::cell::Cell;
 use core::fmt;
+use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr::NonNull;
 #[cfg(debug_assertions)]
@@ -514,19 +523,6 @@ impl KeySpace {
         unsafe { core::str::from_utf8_unchecked(self.store().text(at, len)) }
     }
 
-    /// The key a holder kept as [`KeyRef::into_raw`] gave it, one of its block's holders again.
-    ///
-    /// # Safety
-    /// `at` and `len` are what `into_raw` gave for a key of this arena, whose holder they still
-    /// are, and are not used again.
-    pub unsafe fn adopt(&self, at: u32, len: u32) -> KeyRef {
-        KeyRef {
-            store: self.store,
-            at,
-            len,
-        }
-    }
-
     /// Keep the arena behind its owner's one lock from now on, the lock that lies at `at`: in a
     /// build with debug assertions a key of it made, shared or let go of while the owner has not
     /// marked the lock held ([`Self::owner_lock_taken`]), or on a thread for which `held_here`
@@ -626,6 +622,55 @@ impl From<KeySpace> for LentKeys {
 // SAFETY: `LentKeys` is an `Option` of a transparent `NonNull`, whose `None` is the null pointer:
 // all zero bytes are the table handed no key arena, which holds nothing to give back.
 unsafe impl ZeroEmpty for LentKeys {}
+
+/// The proof that the calling thread holds the one lock that guards a key arena, for as long as it
+/// is borrowed. A key held apart from every row of the arena ([`KeyRef::into_raw`]) is made a
+/// holder again through it alone ([`Self::adopt`]), and a holder outside the rows asks the arena
+/// for a key through it ([`Self::shared`]), so code with a [`KeySpace`] and no hold of its lock
+/// cannot reach those counts. The lock's owner makes it from its own hold ([`Self::vouched`]) and
+/// lends it no further: it borrows that hold, and it is neither `Send` nor `Sync`, so it never
+/// reaches a thread that does not hold the lock.
+pub struct KeysLocked<'a> {
+    keys: &'a KeySpace,
+    /// A hold of a lock is the thread's that took it.
+    _held_here: PhantomData<*const ()>,
+}
+
+impl<'a> KeysLocked<'a> {
+    /// The proof of a hold of the lock that guards `keys`, for `'a`.
+    ///
+    /// # Safety
+    /// For all of `'a` the calling thread holds the one lock that guards `keys`
+    /// ([`KeySpace::guard_by_owner_lock`]), or holds the arena alone, as its owner does once no
+    /// lock guards it ([`KeySpace::owner_alone`]).
+    pub unsafe fn vouched(keys: &'a KeySpace) -> Self {
+        Self {
+            keys,
+            _held_here: PhantomData,
+        }
+    }
+
+    /// The key a holder kept as [`KeyRef::into_raw`] gave it, one of its block's holders again,
+    /// under the hold this proves.
+    ///
+    /// # Safety
+    /// `at` and `len` are what `into_raw` gave for a key of this arena, whose holder they still
+    /// are, and are not used again.
+    pub unsafe fn adopt(&self, at: u32, len: u32) -> KeyRef {
+        KeyRef {
+            store: self.keys.store,
+            at,
+            len,
+        }
+    }
+
+    /// `text` for a holder outside the arena's rows: the block the arena keeps it in already, one
+    /// holder more, whoever holds it, or a block of its own; refused, taking nothing, as a row's
+    /// key is (the session's `MAX_KEYEXPR_BYTES`, or no room).
+    pub fn shared(&self, text: &str) -> Result<KeyRef, KeyUnkept> {
+        LentKeys::from(*self.keys).shared(text)
+    }
+}
 
 /// A key arena a region of the build's shape holds as a field: its state and `BYTES` bytes of
 /// blocks inline, laid out as [`Arena::lend_keys`] lays out the span it lends, so the blocks are
@@ -790,14 +835,14 @@ impl KeyRef {
 
     /// One more holder of the key's block, kept apart as [`Self::into_raw`] keeps one: what a
     /// holder outside the arena owner's lock reads the key by ([`KeySpace::held_text`]) and hands
-    /// back to [`KeySpace::adopt`] under that lock. Taken under the lock, as a clone is.
+    /// back to [`KeysLocked::adopt`] under that lock. Taken under the lock, as a clone is.
     pub fn hold_apart(&self) -> (u32, u32) {
         self.clone().into_raw()
     }
 
     /// The key as its block's place and its length, still one of the block's holders, which
     /// nothing counts while it is apart: for a holder outside the arena owner's lock, which hands
-    /// them back to [`KeySpace::adopt`] under it to share or let go of the key.
+    /// them back to [`KeysLocked::adopt`] under it to share or let go of the key.
     pub fn into_raw(self) -> (u32, u32) {
         let this = core::mem::ManuallyDrop::new(self);
         (this.at, this.len)
@@ -1308,8 +1353,10 @@ mod tests {
         let keys = keys_of(128);
         let (at, len) = keys.key("demo/raw").expect("room").into_raw();
         assert!(keys.counts().used > 0, "the raw parts hold the block");
+        // SAFETY: no lock guards the arena, which the test holds alone.
+        let locked = unsafe { KeysLocked::vouched(&keys) };
         // SAFETY: the parts are the raw form of a key of this arena, adopted once.
-        let key = unsafe { keys.adopt(at, len) };
+        let key = unsafe { locked.adopt(at, len) };
         assert_eq!(key.as_str(), "demo/raw");
         drop(key);
         assert_eq!(keys.counts().used, 0);
@@ -1334,12 +1381,79 @@ mod tests {
         );
         // SAFETY: the parts are a holder of a key of this arena, read while held.
         assert_eq!(unsafe { keys.held_text(at, len) }, "demo/held");
+        // SAFETY: no lock guards the arena, which the test holds alone.
+        let locked = unsafe { KeysLocked::vouched(&keys) };
         // SAFETY: the parts are the holder's, adopted once.
-        drop(unsafe { keys.adopt(at, len) });
+        drop(unsafe { locked.adopt(at, len) });
         assert_eq!(keys.counts().used, 0, "the last holder gave the block back");
         let (at, len) = keys.key("").expect("the empty key").hold_apart();
         // SAFETY: the empty key holds no block, and reads as itself.
         assert_eq!(unsafe { keys.held_text(at, len) }, "");
+    }
+
+    /// A key the arena keeps is asked for through the proof of a hold of its lock as one holder
+    /// more of the block that keeps it, a key held apart is made a holder again through it, and the
+    /// block goes back with the last holder. Turned red by a proof whose ask takes a second block
+    /// for a text the arena keeps, or whose adopted key is no holder of its block.
+    #[test]
+    fn a_hold_of_the_lock_asks_for_shares_and_adopts_a_key() {
+        let keys = keys_of(128);
+        keys.guard_by_owner_lock(core::ptr::null(), held_by_every_thread);
+        keys.owner_lock_taken();
+        // SAFETY: the owner marked its lock held, and every thread holds it.
+        let locked = unsafe { KeysLocked::vouched(&keys) };
+        let block = block_bytes("demo/locked".len()).expect("short");
+        let row = locked.shared("demo/locked").expect("room");
+        let apart = locked
+            .shared("demo/locked")
+            .expect("the block that keeps it");
+        assert_eq!(keys.counts().used, block, "the second ask shares the block");
+        let (at, len) = apart.into_raw();
+        drop(row);
+        assert_eq!(
+            keys.counts().used,
+            block,
+            "the key held apart keeps the block"
+        );
+        // SAFETY: the parts are the raw form of a key of this arena, adopted once.
+        let adopted = unsafe { locked.adopt(at, len) };
+        assert_eq!(adopted.as_str(), "demo/locked");
+        drop(adopted);
+        assert_eq!(keys.counts().used, 0, "the adopted holder was the last");
+        keys.owner_lock_released();
+    }
+
+    /// A key the arena has no room for is refused through the proof as a row's is: nothing taken,
+    /// the refusal counted. Turned red by an ask that bypasses the arena's room.
+    #[test]
+    fn a_hold_of_the_lock_is_refused_a_key_past_the_arenas_room() {
+        let keys = keys_of(block_bytes(4).expect("short"));
+        // SAFETY: no lock guards the arena, which the test holds alone.
+        let locked = unsafe { KeysLocked::vouched(&keys) };
+        assert_eq!(
+            locked.shared("demo/far/too/long").err(),
+            Some(KeyUnkept::NoRoom)
+        );
+        assert_eq!(keys.counts().used, 0, "a refusal takes nothing");
+        assert_eq!(keys.counts().refused, 1, "the arena counts the refusal");
+        let fits = locked
+            .shared("demo")
+            .expect("CONTROL: a key the room holds");
+        assert_eq!(keys.counts().used, block_bytes(4).expect("short"));
+        drop(fits);
+    }
+
+    /// The proof of a hold of a lock stays on the thread that holds the lock. Turned red, at build,
+    /// by a proof that is `Send` or `Sync`: the call below is then ambiguous.
+    #[test]
+    fn a_hold_of_the_lock_crosses_no_thread() {
+        trait AmbiguousIfSendOrSync<A> {
+            fn some_item() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSendOrSync<()> for T {}
+        impl<T: ?Sized + Send> AmbiguousIfSendOrSync<u8> for T {}
+        impl<T: ?Sized + Sync> AmbiguousIfSendOrSync<u16> for T {}
+        <KeysLocked<'static> as AmbiguousIfSendOrSync<_>>::some_item();
     }
 
     /// A key arena keeps keys up to the `MAX_KEYEXPR_BYTES` its creator lent it with, lowered
