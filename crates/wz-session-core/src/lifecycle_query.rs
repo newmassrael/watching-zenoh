@@ -8,7 +8,7 @@
 //! The close verb has always been a Push on a switchboard row
 //! (`@/<zid>/<whatami>/session/close/<peer-zid>`, [`crate::drive::LifecycleKey`]):
 //! a matched sample becomes a close request on the session it is bound to, gated
-//! by a [`crate::drive::SessionLifecycleAuthority`], and nothing comes back. A
+//! by the node's reference monitor ([`crate::lifecycle_monitor`]), and nothing comes back. A
 //! Push has no reply path, so a caller could not tell a close that ran from one
 //! that was refused or aimed at nobody. This is the same verb asked as a GET, which has one.
 //!
@@ -82,13 +82,20 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use sce_portable_bytes::Heap;
 
-// Re-exported: the two types a host binds the queries with, so it names one module.
-pub use crate::drive::{LifecycleKey, SessionLifecycleAuthority};
+// Re-exported: the types a host binds the queries with, so it names one module. The policy of a
+// heap node is the grants of its declaration (`HeapGrants`), judged by the reference monitor of
+// every profile (decision D16), and every decision is written to the host's record.
+pub use crate::drive::LifecycleKey;
+pub use crate::lifecycle_monitor::{
+    CommanderGrant, Decided, Decision, DecisionRecord, GrantError, Grounds, HeapGrants, LogRecord,
+    NoGrants, Policy, Refusal,
+};
 // The vocabulary a node with no allocator answers in too: the words of every verb are
 // written once, in `lifecycle_wire`.
 use crate::credential_identity::canonical_zid;
+use crate::lifecycle_monitor::{Asker, Monitor};
 use crate::lifecycle_node::{
-    lifecycle_verdict, Command, Commander, Generation, LifecycleNode, Verb, Verdict, Zid,
+    lifecycle_verdict, Command, Generation, LifecycleNode, Verb, Verdict, Zid,
 };
 pub use crate::lifecycle_wire::{
     write_verbs_json, CloseOrder, CloseVerdict, MachineReport, OpenMode, OpenOutcome, OpenVerdict,
@@ -104,7 +111,7 @@ use crate::zid_hex::same_zid;
 /// The node's table of sessions, as the close query needs it: told a peer's zid,
 /// it orders closed every session it holds with that peer.
 ///
-/// A port, for the reason [`SessionLifecycleAuthority`] is one: the sessions live
+/// A port, for the reason [`Policy`] is one: the sessions live
 /// in a host's face table, which this crate cannot name. The host implements it
 /// over that table (`request_close` on each face's session bundle), and the same
 /// answerer serves every host.
@@ -249,18 +256,20 @@ pub fn query_patterns(zid_hex: &str, whatami: &str, open_bound: bool) -> Vec<Str
 
 /// Answers the lifecycle queries of one node.
 ///
-/// Holds nothing it does not borrow from the host but one record: the node's
-/// identity, the authority that says who may close, reset or read, the directory
-/// that holds the sessions, the intent a close withdraws the peer from, the
-/// machines the status query reads and the opener an open asks. The record
+/// Holds nothing it does not borrow from the host but one table: the node's
+/// identity, the policy that says who may open, close, reset or read (the grants of
+/// its declaration, judged by the reference monitor of decision D16), the record each
+/// decision is written to, the directory that holds the sessions, the intent a close withdraws the peer from, the
+/// machines the status query reads and the opener an open asks. The table
 /// is the latest reset generation taken per peer, the duplicate suppression of
 /// at-most-once calls (decision D6; Birrell and Nelson, 1984), and it lives here
 /// because this is where a reset is taken. [`Self::answer`] is the body of the
 /// queryable handler the host registers on [`query_patterns`].
-pub struct LifecycleQueries<A, D, I = NoIntent, M = NoMachines, O = NoOpener> {
+pub struct LifecycleQueries<A, D, I = NoIntent, M = NoMachines, O = NoOpener, R = LogRecord> {
     zid_hex: String,
     whatami: String,
-    authority: A,
+    policy: A,
+    record: R,
     directory: D,
     intent: I,
     machines: M,
@@ -290,24 +299,20 @@ pub enum Answered {
     Unserved,
 }
 
-impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D> {
+impl<A: Policy, D: SessionDirectory> LifecycleQueries<A, D> {
     /// The queries of the node `zid_hex` (zenoh's spelling) of role `whatami`,
-    /// for a host that holds no peer by intent, by a machine or by an opener
-    /// ([`Self::with_intent`], [`Self::with_machines`] and [`Self::with_opener`]
-    /// say it does). `reset_seed` keys the table of reset generations
+    /// granted as `policy` states, for a host that holds no peer by intent, by a
+    /// machine or by an opener ([`Self::with_intent`], [`Self::with_machines`] and
+    /// [`Self::with_opener`] say it does), and whose decisions are written to the
+    /// process's log ([`Self::with_record`] names another record). `reset_seed` keys the table of reset generations
     /// ([`ResetGenerations::with_seed`] says what a host hands): a seed drawn from the host's
     /// entropy, so a peer cannot choose zids that crowd one chain of that table.
-    pub fn new(
-        zid_hex: &str,
-        whatami: &str,
-        authority: A,
-        directory: D,
-        reset_seed: MapSeed,
-    ) -> Self {
+    pub fn new(zid_hex: &str, whatami: &str, policy: A, directory: D, reset_seed: MapSeed) -> Self {
         Self {
             zid_hex: String::from(zid_hex),
             whatami: String::from(whatami),
-            authority,
+            policy,
+            record: LogRecord,
             directory,
             intent: NoIntent,
             machines: NoMachines,
@@ -317,21 +322,38 @@ impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D> {
     }
 }
 
-impl<A, D, I, M, O> LifecycleQueries<A, D, I, M, O>
+impl<A, D, I, M, O, R> LifecycleQueries<A, D, I, M, O, R>
 where
-    A: SessionLifecycleAuthority,
+    A: Policy,
     D: SessionDirectory,
     I: PeerIntent,
     M: PeerMachines,
     O: PeerOpener,
+    R: DecisionRecord,
 {
-    /// These queries for a host that holds its peers by `intent`: a close also
-    /// withdraws the peer from it, so no machine dials the peer again.
-    pub fn with_intent<J: PeerIntent>(self, intent: J) -> LifecycleQueries<A, D, J, M, O> {
+    /// These queries with their decisions written to `record`.
+    pub fn with_record<S: DecisionRecord>(self, record: S) -> LifecycleQueries<A, D, I, M, O, S> {
         LifecycleQueries {
             zid_hex: self.zid_hex,
             whatami: self.whatami,
-            authority: self.authority,
+            policy: self.policy,
+            record,
+            directory: self.directory,
+            intent: self.intent,
+            machines: self.machines,
+            opener: self.opener,
+            resets: self.resets,
+        }
+    }
+
+    /// These queries for a host that holds its peers by `intent`: a close also
+    /// withdraws the peer from it, so no machine dials the peer again.
+    pub fn with_intent<J: PeerIntent>(self, intent: J) -> LifecycleQueries<A, D, J, M, O, R> {
+        LifecycleQueries {
+            zid_hex: self.zid_hex,
+            whatami: self.whatami,
+            policy: self.policy,
+            record: self.record,
             directory: self.directory,
             intent,
             machines: self.machines,
@@ -342,11 +364,12 @@ where
 
     /// These queries for a host that holds its peers by `machines`: the status
     /// query reports each one that holds the peer it names.
-    pub fn with_machines<N: PeerMachines>(self, machines: N) -> LifecycleQueries<A, D, I, N, O> {
+    pub fn with_machines<N: PeerMachines>(self, machines: N) -> LifecycleQueries<A, D, I, N, O, R> {
         LifecycleQueries {
             zid_hex: self.zid_hex,
             whatami: self.whatami,
-            authority: self.authority,
+            policy: self.policy,
+            record: self.record,
             directory: self.directory,
             intent: self.intent,
             machines,
@@ -357,11 +380,12 @@ where
 
     /// These queries for a host that can open a session by a zid: the open query
     /// is served, and the capability query lists `open`.
-    pub fn with_opener<P: PeerOpener>(self, opener: P) -> LifecycleQueries<A, D, I, M, P> {
+    pub fn with_opener<P: PeerOpener>(self, opener: P) -> LifecycleQueries<A, D, I, M, P, R> {
         LifecycleQueries {
             zid_hex: self.zid_hex,
             whatami: self.whatami,
-            authority: self.authority,
+            policy: self.policy,
+            record: self.record,
             directory: self.directory,
             intent: self.intent,
             machines: self.machines,
@@ -436,14 +460,13 @@ where
         // The body is a list for a status, so it has no bound a fixed buffer could be
         // sized to: a string, which this profile has.
         let mut body = String::new();
+        // The commander is whom the key of the link the query arrived on proved, and nobody shown
+        // otherwise (decision D12): the dispatch of the host hands the view that says it.
         let requester = view.requester();
         let verdict = lifecycle_verdict(
-            &Asked {
-                queries: self,
-                key: &parsed,
-            },
+            &Asked { queries: self },
             command,
-            Commander::of_requester(requester.as_ref()),
+            Asker::query(requester.as_ref(), key),
             &mut body,
         );
         // A reply the stage refused still happened as an order or a read: the verdict is
@@ -458,33 +481,31 @@ where
     }
 }
 
-/// The node of one query: the host's ports and the key being asked, as the
-/// [`LifecycleNode`] [`lifecycle_verdict`] decides on. The permits read the key because the
-/// heap profile's authority judges a target.
-struct Asked<'q, 'k, A, D, I, M, O> {
-    queries: &'q LifecycleQueries<A, D, I, M, O>,
-    key: &'q LifecycleKey<'k>,
+/// The node of one query: the host's ports, as the [`LifecycleNode`] [`lifecycle_verdict`]
+/// decides on.
+struct Asked<'q, A, D, I, M, O, R> {
+    queries: &'q LifecycleQueries<A, D, I, M, O, R>,
 }
 
-impl<A, D, I, M, O> LifecycleNode for Asked<'_, '_, A, D, I, M, O>
+impl<A, D, I, M, O, R> LifecycleNode for Asked<'_, A, D, I, M, O, R>
 where
-    A: SessionLifecycleAuthority,
+    A: Policy,
     D: SessionDirectory,
     I: PeerIntent,
     M: PeerMachines,
     O: PeerOpener,
+    R: DecisionRecord,
 {
-    /// The heap profile's authority judges the KEY, which is what a grant here names; it does not
-    /// yet judge the commander, whom the query now carries (decision D12 leaves the owner to rule
-    /// whether it should), so every commander is judged alike.
-    fn permits(&self, verb: Verb, _commander: Commander<'_>) -> bool {
-        let authority = &self.queries.authority;
-        match verb {
-            Verb::Open => authority.admits_open(self.key),
-            Verb::Close => authority.admits_close(self.key),
-            Verb::Reset => authority.admits_reset(self.key),
-            Verb::Status => authority.admits_status(self.key),
-        }
+    /// The open verb is bound only on a host with an opener; the answer serves no open query on
+    /// one without, so this is said for the record's sake.
+    fn binds(&self, verb: Verb) -> bool {
+        !matches!(verb, Verb::Open) || O::BOUND
+    }
+
+    /// The grants of the node's declaration, judged by the monitor of every profile (decision
+    /// D16): the commander and, for a grant narrowed to one, the key the query arrived on.
+    fn monitor(&self) -> Monitor<'_> {
+        Monitor::new(&self.queries.policy, &self.queries.record)
     }
 
     fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome {
@@ -639,8 +660,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lifecycle_monitor::Grant;
     use crate::peer_connection::PeerConnectionState;
-    use crate::query_sink::BorrowedQuery;
+    use crate::query_sink::{BorrowedQuery, ProvenQuery};
     use crate::sample::{EncodingHint, QosLevel};
     use crate::zid_hex::zenoh_hex_to_zid;
     use alloc::vec;
@@ -682,6 +704,18 @@ mod tests {
         }
     }
 
+    /// The zid the link of every test query proved, unless a test says otherwise.
+    const COMMANDER: Zid = [0x1f; 16];
+
+    /// `view` as the dispatch hands it when the link's key proved `requester`.
+    fn proven(view: &dyn QueryView, requester: Option<Zid>) -> ProvenQuery<'_> {
+        ProvenQuery {
+            inner: view,
+            peer: requester,
+            encoding: None,
+        }
+    }
+
     fn query(keyexpr: &str) -> impl QueryView + '_ {
         BorrowedQuery {
             keyexpr,
@@ -696,31 +730,22 @@ mod tests {
         }
     }
 
-    /// An authority with one answer for every key, counting how often it is asked.
+    /// A policy with one answer for every verb: a grant of it to [`COMMANDER`] when it admits,
+    /// none when it does not. Counts how often its grants are read.
     struct Authority {
         admits: bool,
         asked: Cell<u32>,
     }
 
-    impl SessionLifecycleAuthority for Authority {
-        fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
+    impl Policy for Authority {
+        fn each_grant(&self, _verb: Verb, visit: &mut dyn FnMut(Grant<'_>) -> bool) {
             self.asked.set(self.asked.get() + 1);
-            self.admits
-        }
-
-        fn admits_reset(&self, _key: &LifecycleKey<'_>) -> bool {
-            self.asked.set(self.asked.get() + 1);
-            self.admits
-        }
-
-        fn admits_status(&self, _key: &LifecycleKey<'_>) -> bool {
-            self.asked.set(self.asked.get() + 1);
-            self.admits
-        }
-
-        fn admits_open(&self, _key: &LifecycleKey<'_>) -> bool {
-            self.asked.set(self.asked.get() + 1);
-            self.admits
+            if self.admits {
+                visit(Grant {
+                    commander: &COMMANDER,
+                    key: None,
+                });
+            }
         }
     }
 
@@ -782,7 +807,7 @@ mod tests {
         key: &str,
     ) -> (Answered, Vec<(String, String)>) {
         let mut out = Recorder::default();
-        let answered = node.answer(&query(key), &mut out);
+        let answered = node.answer(&proven(&query(key), Some(COMMANDER)), &mut out);
         for (_, _, encoding) in &out.replies {
             // The PACKED id of application/json, 5 << 1: the bare 5 has its
             // schema-present bit set, and a querier reads it as a malformed reply.
@@ -941,7 +966,7 @@ mod tests {
             assert!(replies.is_empty(), "{key}");
         }
         assert_eq!(
-            node.authority.asked.get(),
+            node.policy.asked.get(),
             0,
             "no key above reached the authority"
         );
@@ -956,7 +981,7 @@ mod tests {
             let (answered, _) = ask(&node, &pattern);
             assert_eq!(answered, Answered::Verbs, "{pattern}");
         }
-        assert_eq!(node.authority.asked.get(), 0);
+        assert_eq!(node.policy.asked.get(), 0);
         assert!(!node.directory.0.borrow()[0].ordered.get());
     }
 
@@ -983,7 +1008,7 @@ mod tests {
                     "{asked}"
                 );
             }
-            assert_eq!(node.authority.asked.get(), 0);
+            assert_eq!(node.policy.asked.get(), 0);
         }
         // Another node's capability is not this node's to answer.
         let node = node(true, Vec::new());
@@ -1558,6 +1583,108 @@ mod tests {
         assert_eq!(words, OpenVerdict::WORDS);
     }
 
+    /// Decision D16 on the heap profile: a query whose link proved no zid is refused whatever the
+    /// policy grants, and the sessions are not touched. Red if the heap queries judged the key
+    /// alone again, as their authority did before the monitor.
+    #[test]
+    fn an_unproven_commander_is_refused_on_the_heap_profile() {
+        let key = alloc::format!("@/{ME}/peer/session/close/{PEER_A}");
+        let node = node(true, vec![fake(PEER_A)]);
+        let mut out = Recorder::default();
+        let answered = node.answer(&query(&key), &mut out);
+        assert_eq!(
+            answered,
+            Answered::Close(CloseVerdict::Refused(RefusedReason::NotPermitted))
+        );
+        assert!(!node.directory.0.borrow()[0].ordered.get());
+        // The control: the same query from the commander the policy grants closes the session.
+        assert_eq!(
+            ask(&node, &key).0,
+            Answered::Close(CloseVerdict::Closing { links: 1 })
+        );
+    }
+
+    /// The grants of a heap node, read as its declaration states them: a listed zid commands only
+    /// the verbs it is listed for, and a zid on no list commands none. Red if `HeapGrants` granted
+    /// a zid every verb it is listed for any one of, or if an unlisted zid passed.
+    #[test]
+    fn a_listed_zid_commands_only_its_verbs_on_the_heap_profile() {
+        let grants = HeapGrants::parse(["1f=status"]).expect("grants");
+        let node = LifecycleQueries::new(
+            ME,
+            "peer",
+            grants,
+            Table(RefCell::new(vec![fake(PEER_A)])),
+            TEST_SEED,
+        );
+        let reader = crate::credential_identity::zid_from_key_text("1f");
+        let stranger = crate::credential_identity::zid_from_key_text("2e");
+        let status = alloc::format!("@/{ME}/peer/session/status/{PEER_A}");
+        let close = alloc::format!("@/{ME}/peer/session/close/{PEER_A}");
+        let asked = |key: &str, requester: Option<Zid>| {
+            let mut out = Recorder::default();
+            node.answer(&proven(&query(key), requester), &mut out)
+        };
+        assert!(matches!(
+            asked(&status, reader),
+            Answered::Status(StatusVerdict::Status { .. })
+        ));
+        assert_eq!(
+            asked(&close, reader),
+            Answered::Close(CloseVerdict::Refused(RefusedReason::NotPermitted))
+        );
+        assert_eq!(
+            asked(&status, stranger),
+            Answered::Status(StatusVerdict::Refused(RefusedReason::StatusNotPermitted))
+        );
+        assert!(!node.directory.0.borrow()[0].ordered.get());
+    }
+
+    /// Every decision of the heap queries reaches the host's record, the permit and the refusal,
+    /// with the subject, the verb, the peer and the channel. Red if a verdict were reached without
+    /// the monitor's record.
+    #[test]
+    fn the_record_carries_every_decision_of_the_heap_queries() {
+        #[derive(Default)]
+        struct Kept(RefCell<Vec<Decided>>);
+        impl DecisionRecord for Kept {
+            fn record(&self, request: &crate::lifecycle_monitor::Request<'_>, decision: Decision) {
+                self.0.borrow_mut().push(Decided::of(request, decision));
+            }
+        }
+        let kept = Kept::default();
+        let node = node(true, vec![fake(PEER_A)]).with_record(&kept);
+        let key = alloc::format!("@/{ME}/peer/session/close/{PEER_A}");
+        let mut out = Recorder::default();
+        node.answer(&query(&key), &mut out);
+        node.answer(&proven(&query(&key), Some(COMMANDER)), &mut out);
+        // A key that is no query of this node's reaches no decision.
+        node.answer(&query("demo/anything"), &mut out);
+        use crate::lifecycle_monitor::{Channel, Subject};
+        let peer = crate::credential_identity::zid_from_key_text(PEER_A);
+        assert_eq!(
+            *kept.0.borrow(),
+            [
+                Decided {
+                    subject: Subject::Unproven,
+                    verb: Verb::Close,
+                    peer,
+                    generation: None,
+                    channel: Channel::Query,
+                    decision: Decision::Deny(Refusal::Unproven),
+                },
+                Decided {
+                    subject: Subject::Verified(COMMANDER),
+                    verb: Verb::Close,
+                    peer,
+                    generation: None,
+                    channel: Channel::Query,
+                    decision: Decision::Permit(Grounds::Granted),
+                },
+            ]
+        );
+    }
+
     /// What a case's world is, for the ports of the heap profile: the sessions the directory
     /// holds, and one flag that is both the intent a close withdraws the peer from and the
     /// machine that holds it while it is there.
@@ -1570,15 +1697,20 @@ mod tests {
     }
 
     #[cfg(feature = "lifecycle-contract")]
-    impl SessionLifecycleAuthority for World {
-        fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
-            self.permits.close
-        }
-        fn admits_reset(&self, _key: &LifecycleKey<'_>) -> bool {
-            self.permits.reset
-        }
-        fn admits_status(&self, _key: &LifecycleKey<'_>) -> bool {
-            self.permits.status
+    impl Policy for World {
+        fn each_grant(&self, verb: Verb, visit: &mut dyn FnMut(Grant<'_>) -> bool) {
+            let granted = match verb {
+                Verb::Close => self.permits.close,
+                Verb::Reset => self.permits.reset,
+                Verb::Status => self.permits.status,
+                Verb::Open => false,
+            };
+            if granted {
+                visit(Grant {
+                    commander: &COMMANDER,
+                    key: None,
+                });
+            }
         }
     }
 
@@ -1652,7 +1784,7 @@ mod tests {
                         }
                     };
                     let mut out = Recorder::default();
-                    queries.answer(&query(&key), &mut out);
+                    queries.answer(&proven(&query(&key), Some(COMMANDER)), &mut out);
                     out.replies.into_iter().next().map(|(_, body, _)| body)
                 })
                 .collect();
