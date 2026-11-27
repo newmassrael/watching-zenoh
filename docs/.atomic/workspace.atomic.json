@@ -8632,6 +8632,23 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4697": {
+      "decision_summary": "Shrink the doors area of the no_std pico preset: a payload's segment ends\nare read from one top word, and a callback table of one entry is read\nwhere it lies, with no counter or claim loop in a one-thread build.",
+      "changes_bullets": [
+        "capi-pico bytes: end_table; segment and append_segments over it.",
+        "capi-pico ffi: Threads<1> claims its one entry directly."
+      ],
+      "verification_bullets": [
+        "size ledger: total 214,351 B vs main 214,870 (-519; doors -516).",
+        "capi-pico lib tests incl. two new pass; clippy default and multi-thread."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
