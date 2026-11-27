@@ -78,10 +78,12 @@ the explain document of 2026-11-27 places them (read by the arch-engine-own lane
    `docs/win-budget/ir-send-query.md`).
 2. **A plain put is sent by the publish's run.** In a `wz_round` build with `listen` or `group`
    it now sends what was handed to the session before and after it, as a publish does; in a
-   `listen` build whose links share fewer outbound slots than they are, a plain put that may not
-   be dropped (read from its way under the take) probes and waits for a slot with nothing of the
-   session held (`wait_for_slots`), where it waited under the session's lock. The planned path
-   stays as it was: every face, each send the caller's own.
+   `listen` build with the probe stage (`tx-probe`) whose links share fewer outbound slots than
+   they are, a plain put that may not be dropped (read from its way under the take) probes and
+   waits for a slot with nothing of the session held (`wait_for_slots`), where it waited under
+   the session's lock. A build without `tx-probe` sends each face as the caller's own send, as
+   a publish there does (`probes`). The planned path stays as it was: every face, each send the
+   caller's own.
 3. **E4's owner.** The plan made the filter's row the one owner of the publisher's way and had
    the door keep only the filter's id. A put with options must know before the take whether it
    may be dropped and on which priority it waits (point 1), so the door's declared QoS stays the
