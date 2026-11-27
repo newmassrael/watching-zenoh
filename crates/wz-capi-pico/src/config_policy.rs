@@ -340,8 +340,8 @@ impl PolicyStatements {
 }
 
 /// What the open's resolution does with the statements [`PolicyStatements::against_the_resolution`]
-/// hands a test.
-#[cfg(test)]
+/// hands a test. Only a build with the policy doors states one, so only its tests read it.
+#[cfg(all(test, feature = "config-policy"))]
 pub(crate) enum Against {
     /// Statements the set holds and the resolution refuses.
     Refused(PolicyStatements),
