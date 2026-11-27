@@ -160,6 +160,52 @@ fn parse_sn_range_mirrors_decode_range() {
     assert_eq!(parse_sn_range("7"), (Some(7), Some(7)));
 }
 
+/// A selector's value is read in `u32`'s grammar, as upstream reads `_sn` and `_max`: a leading
+/// `+` and leading zeros are a number; a sign, a space, an empty side, a fraction or a value past
+/// `u32` is none, and a side that is none is open.
+#[test]
+fn a_selector_value_is_read_as_a_u32_is() {
+    for text in [
+        "0",
+        "7",
+        "+7",
+        "007",
+        "4294967295",
+        "4294967296",
+        "-1",
+        " 7",
+        "7 ",
+        "",
+        "+",
+        "x",
+        "1e3",
+        "1.5",
+    ] {
+        assert_eq!(selector_u32(text), text.parse::<u32>().ok(), "{text:?}");
+    }
+    assert_eq!(selector_u32("+7"), Some(7));
+    assert_eq!(selector_u32("4294967296"), None);
+    assert_eq!(parse_sn_range("+3..4294967296"), (Some(3), None));
+    assert_eq!(parse_sn_range("-1..2"), (None, Some(2)));
+    assert_eq!(parse_sn_range(" 5"), (None, None));
+}
+
+/// A `_max` past `u32` caps nothing, as no `_max` does, and one with a leading `+` caps as its
+/// number does.
+#[test]
+fn a_max_past_u32_caps_nothing_and_a_signed_one_caps_by_its_number() {
+    let ring = test_ring::HeapRing::new(1024);
+    let store = ring_store(&ring, 4);
+    for sn in 0..3u32 {
+        keep_plain(&store, sn);
+    }
+    assert_eq!(answered(&store, None), vec![0, 1, 2]);
+    assert_eq!(answered(&store, Some(b"_max=4294967296")), vec![0, 1, 2]);
+    assert_eq!(answered(&store, Some(b"_max=-1")), vec![0, 1, 2]);
+    assert_eq!(answered(&store, Some(b"_max=+2")), vec![1, 2]);
+    assert_eq!(answered(&store, Some(b"_sn=+1..+1")), vec![1]);
+}
+
 /// A bounded `_sn` range holds a sample's sn at both of its ends and refuses one past either, an
 /// open end refuses none on its side, a sample with no sn is held only by an unbounded range, and
 /// no range holds every sample.

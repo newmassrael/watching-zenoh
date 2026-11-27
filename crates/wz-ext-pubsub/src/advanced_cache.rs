@@ -750,7 +750,10 @@ fn answer_from_ring<R: HeldSamples + ?Sized>(
 ) {
     let params = view.parameters();
     let sn_range = param_value(params, "_sn").map(parse_sn_range);
-    let max = param_value(params, "_max").and_then(|v| v.parse::<usize>().ok());
+    // Read as upstream reads it, a `u32`: a cap past one caps no ring's samples, as no cap does.
+    let max = param_value(params, "_max")
+        .and_then(selector_u32)
+        .and_then(|cap| usize::try_from(cap).ok());
     // R311y98 — the `_time` age filter (zenoh advanced_cache.rs:264-272). A
     // history GET carries `_time=[now(-age)..]`; only samples whose timestamp
     // lies in the range are replied. Absent, or a value zenoh's own parser
@@ -866,12 +869,20 @@ fn param_value<'a>(params: Option<&'a [u8]>, key: &str) -> Option<&'a str> {
 /// `(Some(a), Some(a))`; an unparseable side is unbounded (`None`).
 fn parse_sn_range(val: &str) -> (Option<u32>, Option<u32>) {
     match val.split_once("..") {
-        Some((lo, hi)) => (lo.parse().ok(), hi.parse().ok()),
+        Some((lo, hi)) => (selector_u32(lo), selector_u32(hi)),
         None => {
-            let v = val.parse().ok();
+            let v = selector_u32(val);
             (v, v)
         }
     }
+}
+
+/// A selector's unsigned value in `u32`'s own grammar, the one upstream reads `_sn`'s bounds and
+/// `_max` in; `None` for any other text.
+// Out of line, so every value an answer reads shares this one body of the integer reader.
+#[inline(never)]
+fn selector_u32(text: &str) -> Option<u32> {
+    text.parse().ok()
 }
 
 /// Whether a ring sample's `source_sn` satisfies the parsed `_sn` range.

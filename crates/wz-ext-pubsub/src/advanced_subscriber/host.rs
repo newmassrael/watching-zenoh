@@ -177,10 +177,16 @@ impl<E: EngineHolder> Shared<E> {
     ) {
         let at = place.as_ptr();
         // SAFETY: the caller's: each field is written once through a pointer to it, not null as
-        // it is inside the place, the token made there.
+        // it is inside the place, the token made there; each row of the table of gets is written
+        // once through a pointer to it, inside the table, as every row index is below its length.
         unsafe {
             addr_of_mut!((*at).engine).write(engine);
-            addr_of_mut!((*at).gets).write(core::array::from_fn(|_| GetSlot::new()));
+            // Row by row through one out-of-line body, so the rows' stores are not copied into
+            // the declaration once a row.
+            let gets = addr_of_mut!((*at).gets).cast::<GetSlot<E>>();
+            for row in 0..caps::MAX_PENDING_QUERIES {
+                GetSlot::write_empty(gets.add(row));
+            }
             addr_of_mut!((*at).state).write(Mutex::new(state));
             CancellationToken::init_in(NonNull::new_unchecked(addr_of_mut!((*at).token)));
             addr_of_mut!((*at).closing).write(AtomicBool::new(false));
@@ -266,13 +272,22 @@ unsafe impl<E: EngineHolder> Send for GetSlot<E> {}
 unsafe impl<E: EngineHolder> Sync for GetSlot<E> {}
 
 impl<E: EngineHolder> GetSlot<E> {
-    fn new() -> Self {
-        Self {
-            taken: AtomicBool::new(false),
-            holders: AtomicUsize::new(0),
-            owner: UnsafeCell::new(core::ptr::null()),
-            finish: UnsafeCell::new(None),
-            fan: UnsafeCell::new(None),
+    /// A free slot, holding no get, written in `place`.
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a `Self`, aligned for it, and holds none.
+    // Out of line, so the rows of a table share this one body of stores.
+    #[inline(never)]
+    unsafe fn write_empty(place: *mut Self) {
+        // SAFETY: the caller's.
+        unsafe {
+            place.write(Self {
+                taken: AtomicBool::new(false),
+                holders: AtomicUsize::new(0),
+                owner: UnsafeCell::new(core::ptr::null()),
+                finish: UnsafeCell::new(None),
+                fan: UnsafeCell::new(None),
+            });
         }
     }
 

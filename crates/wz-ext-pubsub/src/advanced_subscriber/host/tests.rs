@@ -1082,6 +1082,40 @@ fn shared_on_key(
     unsafe { Strong::try_boxed_in(make) }.expect("the test's heap")
 }
 
+/// Every row of a subscriber's table of gets is written free and empty, and each is claimed
+/// once: a claim past the table's last row is refused.
+#[test]
+fn every_row_of_the_table_of_gets_is_written_free() {
+    let script = Script::new(1);
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let shared = shared_on(&script, &delivered);
+
+    for slot in shared.gets.iter() {
+        assert!(!slot.taken.load(Ordering::SeqCst), "a row is free");
+        assert_eq!(
+            slot.holders.load(Ordering::SeqCst),
+            0,
+            "a row has no holder"
+        );
+        // SAFETY: no row is taken, so nothing writes a row while it is read.
+        let empty = unsafe {
+            (*slot.owner.get()).is_null()
+                && (*slot.finish.get()).is_none()
+                && (*slot.fan.get()).is_none()
+        };
+        assert!(empty, "a row names no subscriber, no end and no fan");
+    }
+    let mut claimed = 0usize;
+    while shared.claim().is_some() {
+        claimed += 1;
+    }
+    assert_eq!(
+        claimed,
+        wz_session_core::caps::MAX_PENDING_QUERIES,
+        "each row is claimed once"
+    );
+}
+
 /// A get's slot, its fan's registration, its legs, a reply keyed outside the subscription and
 /// the get's end take no memory: the end frees the slot, drops the fan from the token and lets go
 /// of every count of the subscriber the legs held.
