@@ -552,30 +552,93 @@ pub type Callback<T> = Option<unsafe extern "C" fn(*mut T, *mut c_void)>;
 /// brought to the faces as they stand when its replay ends (`MAX_CONNECTIVITY_REPLAY_EVENTS`).
 const REPLAY_ROWS: usize = wz_session_core::caps::MAX_CONNECTIVITY_REPLAY_EVENTS;
 
-/// An event a listener may be handed while its history is replayed, which says whether the row it
-/// is of came (`PUT`) or left.
-pub(crate) trait Arrival: ConnValue {
+/// An event a listener is told, naming the plane it is of, each as that plane's C callback reads
+/// it.
+enum ConnEvent {
+    /// A transport came (`PUT`) or left.
+    Transport(z_loaned_transport_event_t),
+    /// A link came (`PUT`) or left.
+    Link(z_loaned_link_event_t),
+}
+
+impl ConnEvent {
+    /// The plane whose listeners are told the event.
+    fn plane(&self) -> ToldPlane {
+        match self {
+            Self::Transport(_) => ToldPlane::Transports,
+            Self::Link(_) => ToldPlane::Links,
+        }
+    }
+
     /// Whether the event tells its row came.
-    fn came(&self) -> bool;
-}
-
-impl Arrival for z_loaned_transport_event_t {
     fn came(&self) -> bool {
-        self.kind == Z_SAMPLE_KIND_PUT
+        let kind = match self {
+            Self::Transport(event) => event.kind,
+            Self::Link(event) => event.kind,
+        };
+        kind == Z_SAMPLE_KIND_PUT
+    }
+
+    /// The event as its plane's callback is handed it, for the length of one call.
+    fn as_loaned(&mut self) -> *mut c_void {
+        match self {
+            Self::Transport(event) => core::ptr::from_mut(event).cast(),
+            Self::Link(event) => core::ptr::from_mut(event).cast(),
+        }
+    }
+
+    /// Release what the event owns and leave it null.
+    ///
+    /// # Safety
+    /// Not while a bitwise copy of the event is still in use.
+    unsafe fn clear(&mut self) {
+        // SAFETY: the caller's.
+        unsafe {
+            match self {
+                Self::Transport(event) => event.clear(),
+                Self::Link(event) => event.clear(),
+            }
+        }
     }
 }
 
-impl Arrival for z_loaned_link_event_t {
-    fn came(&self) -> bool {
-        self.kind == Z_SAMPLE_KIND_PUT
-    }
+/// A listener's C callback as its delivery holds it: the event's type is left out, as the plane
+/// the delivery is of names it, and the delivery hands the callback that plane's events alone
+/// ([`Delivery::call`]).
+type EventCall = Callback<c_void>;
+
+/// A transport events listener's C callback as its delivery holds it.
+fn erase_transport_call(call: Callback<z_loaned_transport_event_t>) -> EventCall {
+    call.map(|call| {
+        // SAFETY: the two differ in the pointee of the first argument alone, and pointers to sized
+        // types are passed alike, so the function is called as it was written to be.
+        unsafe {
+            core::mem::transmute::<
+                unsafe extern "C" fn(*mut z_loaned_transport_event_t, *mut c_void),
+                unsafe extern "C" fn(*mut c_void, *mut c_void),
+            >(call)
+        }
+    })
+}
+
+/// A link events listener's C callback as its delivery holds it.
+fn erase_link_call(call: Callback<z_loaned_link_event_t>) -> EventCall {
+    call.map(|call| {
+        // SAFETY: as `erase_transport_call`'s.
+        unsafe {
+            core::mem::transmute::<
+                unsafe extern "C" fn(*mut z_loaned_link_event_t, *mut c_void),
+                unsafe extern "C" fn(*mut c_void, *mut c_void),
+            >(call)
+        }
+    })
 }
 
 /// What arrives while a history is replayed, waiting behind it in order, each event with the key
 /// of the row it is of, in [`REPLAY_ROWS`] rows reserved with the listener. What arrives of a row
 /// already waiting is folded into it, so a row holds at most two events, its DEL and then its PUT.
-struct Pending<E> {
-    rows: [Option<(E, ToldKey)>; REPLAY_ROWS],
+struct Pending {
+    rows: [Option<(ConnEvent, ToldKey)>; REPLAY_ROWS],
     len: usize,
     /// An event found every row held: it and what follows it are not held, and the listener is
     /// brought to the faces as they stand once what is held was delivered
@@ -583,7 +646,7 @@ struct Pending<E> {
     overflowed: bool,
 }
 
-impl<E: Arrival> Pending<E> {
+impl Pending {
     fn new() -> Self {
         Self {
             rows: core::array::from_fn(|_| None),
@@ -596,7 +659,7 @@ impl<E: Arrival> Pending<E> {
     /// its row are neither told: the row came and went inside the replay. The same kind of event
     /// again is told once. A DEL waiting and the PUT of its row are both told, in order: a
     /// reconnect. An event that finds every row held is let go of.
-    fn hold(&mut self, mut event: E, key: ToldKey) {
+    fn hold(&mut self, mut event: ConnEvent, key: ToldKey) {
         if !self.overflowed {
             match self.last_of(&key) {
                 Some((at, true)) if !event.came() => self.remove(at),
@@ -644,7 +707,7 @@ impl<E: Arrival> Pending<E> {
     }
 
     /// The first event waiting, taken out.
-    fn next(&mut self) -> Option<(E, ToldKey)> {
+    fn next(&mut self) -> Option<(ConnEvent, ToldKey)> {
         let first = self.rows.first_mut()?.take()?;
         if let Some(held) = self.rows.get_mut(..self.len) {
             if !held.is_empty() {
@@ -671,10 +734,10 @@ impl<E: Arrival> Pending<E> {
 }
 
 /// Where a listener's deliveries stand.
-enum Phase<E> {
+enum Phase {
     /// The history is being replayed on the declaring thread; what arrives
     /// meanwhile waits here, in order.
-    Replaying(Pending<E>),
+    Replaying(Pending),
     /// Deliveries go straight to the closure.
     Live,
 }
@@ -685,27 +748,35 @@ enum Phase<E> {
 /// thread that undeclares can take the closure out under it and know nothing is
 /// running; `phase` is only ever held briefly and never across a call, so a peer
 /// arriving during a replay is queued rather than made to wait.
-pub(crate) struct Delivery<E: Arrival + Send> {
-    gate: Mutex<Option<CClosure<Callback<E>>>>,
-    phase: Mutex<Phase<E>>,
+pub(crate) struct Delivery {
+    /// The plane whose events the closure reads.
+    plane: ToldPlane,
+    gate: Mutex<Option<CClosure<EventCall>>>,
+    phase: Mutex<Phase>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock()
 }
 
-impl<E: Arrival + Send> Delivery<E> {
-    /// A delivery to `closure`, holding what arrives while `replaying`, made in `place`, where it
-    /// stays: its locks are made there ([`mutex_in`]).
+impl Delivery {
+    /// A delivery of `plane`'s events to `closure`, holding what arrives while `replaying`, made
+    /// in `place`, where it stays: its locks are made there ([`mutex_in`]).
     ///
     /// # Safety
     /// `place` is valid for writes of a `Self`, aligned for it and holds none; the delivery is not
-    /// moved from it until it is dropped there.
-    unsafe fn write_in(place: NonNull<Self>, closure: CClosure<Callback<E>>, replaying: bool) {
+    /// moved from it until it is dropped there. `closure`'s function reads `plane`'s events.
+    unsafe fn write_in(
+        place: NonNull<Self>,
+        plane: ToldPlane,
+        closure: CClosure<EventCall>,
+        replaying: bool,
+    ) {
         let at = place.as_ptr();
-        // SAFETY: the caller's: each lock is made once through a pointer to it, not null as it is
-        // inside the place.
+        // SAFETY: the caller's: each field is written once through a pointer to it, not null as
+        // it is inside the place, and each lock is made there.
         unsafe {
+            addr_of_mut!((*at).plane).write(plane);
             mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).gate)), |gate| {
                 gate.write(Some(closure))
             });
@@ -720,7 +791,7 @@ impl<E: Arrival + Send> Delivery<E> {
     }
 
     /// Deliver `event` of the row of `key`, or hold it while the history is being replayed.
-    fn deliver(&self, event: E, key: ToldKey) {
+    fn deliver(&self, event: ConnEvent, key: ToldKey) {
         {
             let mut phase = lock(&self.phase);
             if let Phase::Replaying(pending) = &mut *phase {
@@ -732,17 +803,21 @@ impl<E: Arrival + Send> Delivery<E> {
     }
 
     /// Call the closure with `event`, then release the event. A listener that
-    /// has been undeclared has no closure and the event is just released.
-    fn call(&self, mut event: E) {
+    /// has been undeclared has no closure and the event is just released, as is an event of a
+    /// plane the closure does not read.
+    fn call(&self, mut event: ConnEvent) {
         {
             let gate = lock(&self.gate);
             if let Some(closure) = gate.as_ref() {
-                if let Some(call) = closure.call {
+                if let Some(call) = closure.call.filter(|_| event.plane() == self.plane) {
                     let context = closure.context.0;
+                    let loaned = event.as_loaned();
                     // A panic unwinding out of the C callback across this
                     // `extern "C"` boundary is UB and would tear down the drive
                     // thread.
-                    let _ = catch(|| unsafe { call(&mut event as *mut E, context) });
+                    // SAFETY: the function reads this delivery's plane's events (`write_in`),
+                    // and `loaned` is one of them, standing for the call.
+                    let _ = catch(|| unsafe { call(loaned, context) });
                 }
             }
         }
@@ -806,7 +881,7 @@ impl<E: Arrival + Send> Delivery<E> {
     }
 }
 
-impl<E: Arrival + Send> Drop for Delivery<E> {
+impl Drop for Delivery {
     fn drop(&mut self) {
         self.retire();
     }
@@ -818,7 +893,7 @@ trait LetGo {
     fn let_go(&self);
 }
 
-impl<E: Arrival + Send> LetGo for Delivery<E> {
+impl LetGo for Delivery {
     fn let_go(&self) {
         self.retire();
     }
@@ -827,7 +902,7 @@ impl<E: Arrival + Send> LetGo for Delivery<E> {
 /// What a link events listener's place keeps past its handle: its delivery and the transport it
 /// is filtered to, if any.
 pub(crate) struct LinkListener {
-    delivery: Delivery<z_loaned_link_event_t>,
+    delivery: Delivery,
     /// `(zid, is_multicast)` — pico's transport filter matches on exactly these
     /// two (`vendor/zenoh-pico/src/api/api.c` @
     /// `bool _z_info_transport_filter_match(`).
@@ -862,7 +937,7 @@ pub(crate) struct TransportListenerState {
 pub(crate) type TransportPlace = Answering<TransportListenerState, TransportKept>;
 
 /// What a transport events listener's place keeps past its handle: the delivery the hub calls.
-pub(crate) type TransportKept = Delivery<z_loaned_transport_event_t>;
+pub(crate) type TransportKept = Delivery;
 
 /// Behind an owned link events listener, as [`TransportListenerState`] is behind a transport one,
 /// in a place of the session's own for the kind (`crate::object_slot::Kind::LinkEventsListener`).
@@ -1060,17 +1135,17 @@ fn converge_transports(engine: &Engine, listener: usize, delivery: &TransportKep
         if !SessionEngine::tell_went(engine, plane, listener, &ToldKey::of_row(&row)) {
             break;
         }
-        delivery.call(z_loaned_transport_event_t {
+        delivery.call(ConnEvent::Transport(z_loaned_transport_event_t {
             kind: Z_SAMPLE_KIND_DELETE,
             transport: transport_of_row(&row),
-        });
+        }));
     }
     for row in rows(engine).filter(|row| row.link == 0) {
         if SessionEngine::tell_came(engine, plane, listener, &ToldKey::of_row(&row)) {
-            delivery.call(z_loaned_transport_event_t {
+            delivery.call(ConnEvent::Transport(z_loaned_transport_event_t {
                 kind: Z_SAMPLE_KIND_PUT,
                 transport: transport_of_row(&row),
-            });
+            }));
         }
     }
 }
@@ -1083,19 +1158,23 @@ fn converge_links(engine: &Engine, slot: usize, listener: &LinkListener) {
         if !SessionEngine::tell_went(engine, plane, slot, &ToldKey::of_row(&row)) {
             break;
         }
-        listener.delivery.call(z_loaned_link_event_t {
-            kind: Z_SAMPLE_KIND_DELETE,
-            link: link_of_row(&row),
-        });
+        listener
+            .delivery
+            .call(ConnEvent::Link(z_loaned_link_event_t {
+                kind: Z_SAMPLE_KIND_DELETE,
+                link: link_of_row(&row),
+            }));
     }
     for row in rows(engine) {
         if listener.wants(&transport_of_row(&row))
             && SessionEngine::tell_came(engine, plane, slot, &ToldKey::of_row(&row))
         {
-            listener.delivery.call(z_loaned_link_event_t {
-                kind: Z_SAMPLE_KIND_PUT,
-                link: link_of_row(&row),
-            });
+            listener
+                .delivery
+                .call(ConnEvent::Link(z_loaned_link_event_t {
+                    kind: Z_SAMPLE_KIND_PUT,
+                    link: link_of_row(&row),
+                }));
         }
     }
 }
@@ -1326,10 +1405,10 @@ impl Connectivity {
             // SAFETY: `hold` keeps the place, and so its delivery, standing for the call.
             let delivery = unsafe { &*kept_at::<TransportListenerState, TransportKept>(object) };
             delivery.deliver(
-                z_loaned_transport_event_t {
+                ConnEvent::Transport(z_loaned_transport_event_t {
                     kind,
                     transport: transport_of_row(row),
-                },
+                }),
                 key,
             );
             drop(hold);
@@ -1344,10 +1423,10 @@ impl Connectivity {
             let listener = unsafe { &*kept_at::<LinkListenerState, LinkListener>(object) };
             if listener.wants(&transport) {
                 listener.delivery.deliver(
-                    z_loaned_link_event_t {
+                    ConnEvent::Link(z_loaned_link_event_t {
                         kind,
                         link: link_of_row(row),
-                    },
+                    }),
                     ToldKey::of_row(row),
                 );
             }
@@ -1363,7 +1442,7 @@ impl Connectivity {
         hub: &Strong<Self>,
         engine: &crate::session::EngineHold,
         history: bool,
-        closure: CClosure<Callback<z_loaned_transport_event_t>>,
+        closure: CClosure<EventCall>,
     ) -> Result<*mut TransportListenerState, ZResult> {
         let Some(place) =
             Slot::<TransportPlace>::take_entity(engine, Kind::TransportEventsListener)
@@ -1380,8 +1459,8 @@ impl Connectivity {
         };
         let write_kept = |at: NonNull<TransportKept>| {
             // SAFETY: the place is the listener's, valid for its delivery, holding none, never
-            // moved while the listener's place stands.
-            unsafe { Delivery::write_in(at, closure, history) }
+            // moved while the listener's place stands; the door erased a transport callback.
+            unsafe { Delivery::write_in(at, ToldPlane::Transports, closure, history) }
         };
         let write = |at: *mut TransportPlace| {
             // SAFETY: the slot hands a place valid for writes of a `TransportPlace`, holding none;
@@ -1414,10 +1493,10 @@ impl Connectivity {
             let plane = ToldPlane::Transports;
             for row in rows(engine).filter(|row| row.link == 0) {
                 if SessionEngine::tell_came(engine, plane, slot, &ToldKey::of_row(&row)) {
-                    delivery.call(z_loaned_transport_event_t {
+                    delivery.call(ConnEvent::Transport(z_loaned_transport_event_t {
                         kind: Z_SAMPLE_KIND_PUT,
                         transport: transport_of_row(&row),
-                    });
+                    }));
                 }
             }
             delivery.finish_replay(
@@ -1439,7 +1518,7 @@ impl Connectivity {
         engine: &crate::session::EngineHold,
         history: bool,
         filter: Option<([u8; 16], bool)>,
-        closure: CClosure<Callback<z_loaned_link_event_t>>,
+        closure: CClosure<EventCall>,
     ) -> Result<*mut LinkListenerState, ZResult> {
         let Some(place) = Slot::<LinkPlace>::take_entity(engine, Kind::LinkEventsListener) else {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
@@ -1456,10 +1535,12 @@ impl Connectivity {
             let listener = at.as_ptr();
             // SAFETY: the place is the listener's, valid for its delivery and filter, holding
             // none, never moved while the listener's place stands; each field is written once
-            // through a pointer to it, not null as it is inside the place.
+            // through a pointer to it, not null as it is inside the place; the door erased a link
+            // callback.
             unsafe {
                 Delivery::write_in(
                     NonNull::new_unchecked(addr_of_mut!((*listener).delivery)),
+                    ToldPlane::Links,
                     closure,
                     history,
                 );
@@ -1495,10 +1576,12 @@ impl Connectivity {
                 if listener.wants(&transport_of_row(&row))
                     && SessionEngine::tell_came(engine, plane, slot, &ToldKey::of_row(&row))
                 {
-                    listener.delivery.call(z_loaned_link_event_t {
-                        kind: Z_SAMPLE_KIND_PUT,
-                        link: link_of_row(&row),
-                    });
+                    listener
+                        .delivery
+                        .call(ConnEvent::Link(z_loaned_link_event_t {
+                            kind: Z_SAMPLE_KIND_PUT,
+                            link: link_of_row(&row),
+                        }));
                 }
             }
             listener.delivery.finish_replay(
@@ -2405,7 +2488,10 @@ pub unsafe extern "C" fn z_declare_transport_events_listener(
         };
         let closure = adopt(
             callback,
-            |c| (c._this.context, c._this.call, c._this.drop),
+            |c| {
+                let call = erase_transport_call(c._this.call);
+                (c._this.context, call, c._this.drop)
+            },
             |c| c._this = z_owned_closure_transport_event_t::null_value(),
         );
         if handle.drive.is_closed() {
@@ -2495,7 +2581,10 @@ pub unsafe extern "C" fn z_declare_link_events_listener(
         };
         let closure = adopt(
             callback,
-            |c| (c._this.context, c._this.call, c._this.drop),
+            |c| {
+                let call = erase_link_call(c._this.call);
+                (c._this.context, call, c._this.drop)
+            },
             |c| c._this = z_owned_closure_link_event_t::null_value(),
         );
         let (history, transport) = if options.is_null() {
@@ -2595,7 +2684,7 @@ pub(crate) mod tests {
         released: AtomicUsize,
         /// A delivery the transport callback re-enters, to put an arrival in the
         /// middle of a replay.
-        reenter: OnceLock<(Strong<Delivery<z_loaned_transport_event_t>>, u8)>,
+        reenter: OnceLock<(Strong<Delivery>, u8)>,
     }
 
     fn log() -> &'static Log {
@@ -2636,13 +2725,7 @@ pub(crate) mod tests {
             // when a callback undeclares its own listener; the replay is the one
             // window in which a delivery is queued and not called.
             if matches!(event.transport.zid.id[0], 1 | 2) {
-                delivery.deliver(
-                    z_loaned_transport_event_t {
-                        kind: Z_SAMPLE_KIND_PUT,
-                        transport: transport_with_zid(*arriving),
-                    },
-                    key_of(*arriving),
-                );
+                delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, *arriving), key_of(*arriving));
             }
         }
     }
@@ -2663,17 +2746,22 @@ pub(crate) mod tests {
             .fetch_add(1, Ordering::SeqCst);
     }
 
-    fn transport_closure(log: &'static Log) -> CClosure<Callback<z_loaned_transport_event_t>> {
-        CClosure::uncounted(ctx(log), Some(on_transport), Some(released))
+    fn transport_closure(log: &'static Log) -> CClosure<EventCall> {
+        CClosure::uncounted(
+            ctx(log),
+            erase_transport_call(Some(on_transport)),
+            Some(released),
+        )
     }
 
     /// A replaying delivery to `log`'s transport closure, made in a box of its own with its locks
     /// made there, as a listener's is made in its place.
-    fn replaying_delivery(log: &'static Log) -> Strong<Delivery<z_loaned_transport_event_t>> {
+    fn replaying_delivery(log: &'static Log) -> Strong<Delivery> {
         let closure = transport_closure(log);
-        let make = |place: NonNull<Delivery<z_loaned_transport_event_t>>| {
-            // SAFETY: the place is the box's, valid for one delivery, holding none, never moved.
-            unsafe { Delivery::write_in(place, closure, true) }
+        let make = |place: NonNull<Delivery>| {
+            // SAFETY: the place is the box's, valid for one delivery, holding none, never moved;
+            // the closure reads transport events.
+            unsafe { Delivery::write_in(place, ToldPlane::Transports, closure, true) }
         };
         // SAFETY: `make` makes the whole delivery in the place it is handed.
         unsafe { Strong::try_boxed_in(make) }.expect("the test's heap")
@@ -2684,8 +2772,8 @@ pub(crate) mod tests {
         Connectivity::new(Lent::try_boxed().expect("the test's heap"))
     }
 
-    fn link_closure(log: &'static Log) -> CClosure<Callback<z_loaned_link_event_t>> {
-        CClosure::uncounted(ctx(log), Some(on_link), Some(released))
+    fn link_closure(log: &'static Log) -> CClosure<EventCall> {
+        CClosure::uncounted(ctx(log), erase_link_call(Some(on_link)), Some(released))
     }
 
     /// The key of the transport `transport_with_zid(first)` reports.
@@ -2698,11 +2786,11 @@ pub(crate) mod tests {
     }
 
     /// The transport event `kind` of the peer whose zid starts with `first`.
-    fn event_of(kind: z_sample_kind_t, first: u8) -> z_loaned_transport_event_t {
-        z_loaned_transport_event_t {
+    fn event_of(kind: z_sample_kind_t, first: u8) -> ConnEvent {
+        ConnEvent::Transport(z_loaned_transport_event_t {
             kind,
             transport: transport_with_zid(first),
-        }
+        })
     }
 
     pub(crate) use crate::test_heap::allocations;
@@ -3082,10 +3170,7 @@ pub(crate) mod tests {
 
         // The replay: two peers connected now.
         for first in [1u8, 2] {
-            delivery.call(z_loaned_transport_event_t {
-                kind: Z_SAMPLE_KIND_PUT,
-                transport: transport_with_zid(first),
-            });
+            delivery.call(event_of(Z_SAMPLE_KIND_PUT, first));
         }
         // The callback re-entered `deliver` while replaying: nothing ran yet.
         assert_eq!(
@@ -3236,6 +3321,31 @@ pub(crate) mod tests {
             Some(0),
             "a row past the table is no row"
         );
+    }
+
+    /// A delivery hands its closure the events of its own plane alone: a link event handed to a
+    /// transport listener's delivery reaches no callback and is released, and the delivery goes on
+    /// telling transport events.
+    ///
+    /// # Control
+    ///
+    /// A call that hands the closure whatever event it is given calls the transport callback with
+    /// a link event, which logs a transport line and reds the first assertion.
+    #[test]
+    fn a_delivery_hands_its_closure_the_events_of_its_plane_alone() {
+        let log = log();
+        let delivery = replaying_delivery(log);
+        let peer = face(7, false, "tcp/127.0.0.1:7447");
+        delivery.call(ConnEvent::Link(z_loaned_link_event_t {
+            kind: Z_SAMPLE_KIND_PUT,
+            link: link_of(peer.zid, &peer.links[0]),
+        }));
+        assert!(
+            seen(log).is_empty(),
+            "a link event reaches no transport callback"
+        );
+        delivery.call(event_of(Z_SAMPLE_KIND_PUT, 3));
+        assert_eq!(seen(log), ["transport PUT 3"]);
     }
 
     /// Undeclaring runs the closure's `drop(context)` exactly once, before it
