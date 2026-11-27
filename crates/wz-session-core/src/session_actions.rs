@@ -10500,49 +10500,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     link.link_driver().tx_fence()
                 });
         }
+        // From the lock on, the message is the transmit state's: the conduit's windows decide
+        // whether it joins the open frame, and it is written in one walk for every build and both
+        // kinds of frame (`TxRoute::write`). Its room is not yet asked for out of the deadline it
+        // carries, and its SN is not taken here but where the frame is written, so `sn` stays
+        // zero until then.
+        #[cfg(feature = "transport-batching")]
+        let held = conduit.held;
+        #[cfg(not(feature = "transport-batching"))]
+        let held = false;
         let stage_and_emit = |batch: &mut crate::transport_tx::BatchTx| {
-            // Whatever this sender does with the conduit, a wait for room included, is a send
-            // in progress to a droppable message that finds the conduit held.
-            let _sender =
-                crate::transport_tx::SenderInside::mark(self.tx.conduits.sender_flag(priority));
-            // A held reply joins its conduit's open frame as a message of a window does, and
-            // leaves with what follows it in that frame. One load of the face's windows decides
-            // both whether the message joins the open frame and whether a frame it does not join
-            // may be open.
-            #[cfg(feature = "transport-batching")]
-            let windows = self.tx.conduits.windows();
-            #[cfg(feature = "transport-batching")]
-            let window = crate::transport_tx::window_joins(windows, conduit.held);
-            // A frame held replies, or a window being drained, left open leaves before a message
-            // that does not join it takes the conduit's next SN: sent after that message, its
-            // earlier SN would read as stale to the peer's reliable channel. With no window and no
-            // drain no frame is open, and the conduit's frame is not read.
-            #[cfg(feature = "transport-batching")]
-            if !window
-                && crate::transport_tx::window_may_hold_open(windows)
-                && batch.stage.is_open()
-            {
-                self.route().flush_conduit(
-                    crate::transport_tx::TxConduits::<R>::conduit_index(priority),
-                    priority,
-                    batch,
-                );
-            }
-            #[cfg(not(feature = "transport-batching"))]
-            let window = false;
-            // R311y835 — the message works on THIS message's own priority conduit (R2920: the one
-            // locked here); it never sees, and never flushes, another priority's staged frame.
-            // One writer for every build and both kinds of frame: it joins the window's open
-            // frame, or sends that frame once and opens the next, or sends a frame of its own,
-            // in a slot the conduit's link lent or, in a build with a heap, on the heap. A
-            // message past the budget leaves as a chain of fragments (with fragmentation); a
-            // lend-only build refuses and counts what no slot takes.
-            //
-            // The frame's room is not yet asked for out of the deadline it carries, and its SN is
-            // not taken here but where the frame is written, so `sn` stays zero until then.
-            self.route().write_n_msg(
+            self.route().write(
                 batch,
-                window,
+                held,
                 priority,
                 reserved,
                 crate::transport_tx::FrameEmit {

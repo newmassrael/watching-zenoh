@@ -1362,6 +1362,53 @@ impl<R: SessionRuntime> TxRoute<'_, R> {
         answer.room == crate::link::LinkRoom::Congested
     }
 
+    /// One message on the conduit its sender holds (`batch`), from the lock on. The sender is
+    /// marked inside the conduit for the whole of it, a wait for room included. One load of the
+    /// windows decides whether the message joins the conduit's open frame (`held`: a reply under
+    /// the hold of the replies joins it as a message of a window does) and whether a frame it does
+    /// not join may be open; such a frame leaves first, so the message's SN follows it on the wire
+    /// (an earlier SN sent after it would read as stale to the peer's reliable channel). The frame
+    /// is then written by [`Self::write_n_msg`].
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    #[inline]
+    pub(crate) fn write(
+        &self,
+        batch: &mut BatchTx,
+        held: bool,
+        priority: Priority,
+        reserved: bool,
+        emit: FrameEmit,
+        encode_body: &dyn crate::tx_buf::WireWrite,
+    ) -> Result<UnicastPush, crate::send_wire_error::SendWireError> {
+        let _sender = SenderInside::mark(self.tx.conduits.sender_flag(priority));
+        #[cfg(feature = "transport-batching")]
+        let windows = self.tx.conduits.windows();
+        #[cfg(feature = "transport-batching")]
+        let in_window = window_joins(windows, held);
+        #[cfg(feature = "transport-batching")]
+        if !in_window && window_may_hold_open(windows) && batch.stage.is_open() {
+            self.flush_conduit(TxConduits::<R>::conduit_index(priority), priority, batch);
+        }
+        // A build without batching opens no window and holds no reply.
+        #[cfg(not(feature = "transport-batching"))]
+        let in_window = {
+            let _ = held;
+            false
+        };
+        self.write_n_msg(batch, in_window, priority, reserved, emit, encode_body)
+    }
+
     /// The frame one message goes into, in one body from the open frame to the answer, for every
     /// build. In the batch window (`in_window`) the message first joins the frame its conduit
     /// holds open, in a lent slot or, in a build with a heap, on the heap, which needs no room
@@ -2670,7 +2717,7 @@ const WINDOW_DRAINING: u64 = 1 << 3;
         feature = "liveliness-token",
     )
 ))]
-pub(crate) fn window_joins(windows: u64, reply: bool) -> bool {
+fn window_joins(windows: u64, reply: bool) -> bool {
     windows & (WINDOW_CALLER | WINDOW_LINK) != 0 || (reply && windows & WINDOW_REPLIES != 0)
 }
 
@@ -2692,7 +2739,7 @@ pub(crate) fn window_joins(windows: u64, reply: bool) -> bool {
         feature = "liveliness-token",
     )
 ))]
-pub(crate) fn window_may_hold_open(windows: u64) -> bool {
+fn window_may_hold_open(windows: u64) -> bool {
     windows != 0
 }
 
@@ -2825,7 +2872,7 @@ pub struct TxConduits<R: SessionRuntime> {
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
-pub(crate) struct SenderInside<'a, F: crate::runtime_cell::FlagCell>(&'a F);
+struct SenderInside<'a, F: crate::runtime_cell::FlagCell>(&'a F);
 
 #[cfg(any(
     feature = "codec-push",
@@ -2840,7 +2887,7 @@ pub(crate) struct SenderInside<'a, F: crate::runtime_cell::FlagCell>(&'a F);
     feature = "liveliness-token",
 ))]
 impl<'a, F: crate::runtime_cell::FlagCell> SenderInside<'a, F> {
-    pub(crate) fn mark(flag: &'a F) -> Self {
+    fn mark(flag: &'a F) -> Self {
         flag.store(true, core::sync::atomic::Ordering::Relaxed);
         Self(flag)
     }
@@ -3060,7 +3107,7 @@ impl<R: SessionRuntime> TxConduits<R> {
 
     /// The face's windows as they stand (the `window` field), in one load.
     #[cfg(feature = "transport-batching")]
-    pub(crate) fn windows(&self) -> u64 {
+    fn windows(&self) -> u64 {
         crate::runtime_cell::WordCell::load(&self.window, core::sync::atomic::Ordering::SeqCst)
     }
 
@@ -3288,7 +3335,7 @@ impl BatchStage {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    pub(crate) fn is_open(&self) -> bool {
+    fn is_open(&self) -> bool {
         #[cfg(feature = "transport-tx-lend")]
         if self.lent.is_some() {
             return true;
