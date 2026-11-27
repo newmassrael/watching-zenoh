@@ -81,6 +81,12 @@ pub(crate) use core::sync::atomic::AtomicBool;
 #[cfg(not(target_has_atomic = "8"))]
 pub(crate) use portable_atomic::AtomicBool;
 
+// A stream link's cause of loss and first failure, which its receive and its sends both reach.
+#[cfg(all(target_has_atomic = "8", feature = "session-unicast"))]
+pub(crate) use core::sync::atomic::AtomicU8;
+#[cfg(all(not(target_has_atomic = "8"), feature = "session-unicast"))]
+pub(crate) use portable_atomic::AtomicU8;
+
 // The count of a value's holders (`crate::kept`), which only the heap forms share by count.
 #[cfg(all(
     target_has_atomic = "ptr",
