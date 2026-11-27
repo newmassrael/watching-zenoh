@@ -3,7 +3,8 @@
 Status: the reading of what a group sends with, beside what a link sends with and beside
 zenoh-pico's one transmit path; the design that makes the group a destination of the links' writer;
 its steps, each with the bytes it is expected to move on `pico-api-coop-nostd`; and steps T1 and
-T2, which land beside this note. Nothing here was built or measured by this lane. Every figure is **read**
+T2, which land beside this note. Steps T3 and T4 are not taken: the code does not hold the premise
+S2 was designed on (section 7). Nothing here was built or measured by this lane. Every figure is **read**
 from the library the cost gate's run of 2026-11-27 kept for `pico-api-coop-nostd`
 (`shipped/pico-api-coop-nostd/libwz_capi_pico.so` under the gate's target directory: `nm
 --defined-only -S -C` for the bodies, `objdump -d` for who calls each body by its address), or is
@@ -70,11 +71,11 @@ slot. The seams, in the order they can be taken:
   encoders behind it leave the library. Steps T1 and T2.
 - **S2, one frame walk.** The group's framer (`multicast_tx::push_frame` over `StageQueue`) and
   the link's (`dispatch_network_message_in`, `send_fragment`, the window of `TxConduits`) are the
-  same walk: room, mint, envelope, fragments, drop marker. The link's walk already runs over a
-  driver behind `dyn BoxedLinkDriver` in this library, so the group's stage presented as such a
-  driver (its lane storage the slot it lends, its writer the send) takes the link's walk without a
-  second copy of it. Step T3, designed with the line reading in hand: the link's walk must not gain
-  a call on its own path for it.
+  same walk: room, mint, envelope, fragments, drop marker. The link's walk is a method of a unicast
+  session's link actions over that session's own conduits, with the driver below it taking bytes
+  already numbered (section 7), so a group does not take it by presenting its stage as a driver:
+  one walk for both needs one conduit set for both. Step T3, designed with the line reading in
+  hand: the link's walk must not gain a call on its own path for it.
 - **S3, the stage keeps D2 alone.** Once the walk is the link's, the stage's re-entrant keep of a
   push made while the conduits are held (`push_deferred`, `Staged`) is the link's own
   serialization of its writer, and what is left is the held datagram, the order behind the beacon
@@ -92,8 +93,8 @@ or the new walk to the old, wire by wire) and moves nothing on `pico-client-coop
 |---|---|---|---|---|
 | **T1 (landed)** | every reply the group stages written from its parts by the links' writer of its kind: the declarations that answer a member's interest (final, subscriber, queryable, an aggregate's retraction, the session's keyexprs) as `multicast_tx::DeclarationReply`, the final of a query's replies from its two numbers; the stage's owned-item entry is reached by no path of the engine | -15,000 to -20,000 | read: 21,804 of bodies every caller of which is in the owned-item entry (section 2), and the group's drain and answer bodies above the links' (2,081 and part of 2,909); less, estimated, 2,000 to 4,000 for the one writer of the five reply kinds, the stage's two admits and the kind writers it outlines | `group_declarations_written_from_parts` and `push_tests` (the lent reply and final are the owned ones' bytes, framing, size and tally), `multicast_reply_sink::tests` (the sink hands parts; the default builds the builders' replies), `lent_control::tests` (the keyexpr answer is its builder's bytes), the stage's tests (framed as the owned reply at once and kept, the slot, the refusal) |
 | **T2 (landed)** | the group's remaining writers of the all-kinds `Declare`: the token reply as a declaration of one kind (`DeclarationOf`), and the announcements, retractions and keyexpr declarations through the one reply writer of T1 rather than one `multicast_tx_declaration` instance each (section 6) | -1,500 to -3,000 | read: `multicast_tx_token_reply`'s closure 2,561 against the link's 738, and the eight instances of `multicast_tx_declaration` (`feat-mcast.md` row E, 1,202 together); estimate: the token reply's arm and the four instances left, 300 to 600 | the existing `group_declarations_written_from_parts` tests, unchanged, and `a_keyexpr_declared_to_the_group_is_its_builders_bytes`, `a_kind_without_its_plane_is_refused_before_it_is_written`; `lent_control::tests::a_token_reply_of_one_kind_is_the_borrowed_reply_of_the_responder` |
-| T3 | the group's stage as a `BoxedLinkDriver` of a writer of its own, so its messages take the links' walk (S2) | -4,000 to -7,000 | read: the framer 6,559; estimate: the driver's lend and send over the lanes, 1,500 to 2,500 | the group's wire held to the link's for the same items; `push_tests` moved onto the driver |
-| T4 | the stage keeps D2 alone (S3) | -10,000 to -15,000 | read: the stage 19,458; estimate: what D2 keeps, 3,000 to 6,000 | the stage's tests of a held datagram, the beacon's order and the quota |
+| T3 (not taken, section 7) | the group's stage as a `BoxedLinkDriver` of a writer of its own, so its messages take the links' walk (S2) | -4,000 to -7,000 | read: the framer 6,559; estimate: the driver's lend and send over the lanes, 1,500 to 2,500 | the group's wire held to the link's for the same items; `push_tests` moved onto the driver |
+| T4 (not taken, with T3) | the stage keeps D2 alone (S3) | -10,000 to -15,000 | read: the stage 19,458; estimate: what D2 keeps, 3,000 to 6,000 | the stage's tests of a held datagram, the beacon's order and the quota |
 | T5 | F6, the group's leg out of line | -3,000 to -4,500 | `feat-mcast.md` F6 | `direct::held_operation_tests` |
 | T6 | F4, one shell for a group | -15,000 to -25,000 | `feat-mcast.md` F4; read today: the shell's bodies of row D other than the open, 29,387 | the engine's group tests |
 | T7 | F5, the open in place | -5,000 to -12,000 | `feat-mcast.md` F5; read today: `Core::join_group` 18,325 | the engine's open tests with a group |
@@ -160,7 +161,51 @@ the same seam's remainder. T3 and T4 are the large ones and are designed with
   all-kinds encoder; whether that encoder then leaves the library is an `nm -C` reading. It is
   the link's writer (`session_actions.rs`), planned with that lane.
 
-## 7. Verification (the main session's)
+## 7. Steps T3 and T4, as the code reads them: not taken
+
+T3 assumed that the link's walk runs over a driver behind `dyn BoxedLinkDriver`, so that the
+group's stage presented as such a driver would take the walk without a second copy of it. The code
+does not hold that:
+
+- The walk is `SessionLinkActions::dispatch_network_message_in`
+  (`crates/wz-session-core/src/session_actions.rs` @ `fn dispatch_network_message_in<const STAGED: bool>(`),
+  a method of a unicast session's link actions. Before and while it frames it reads that session's
+  own state: the deferral of its owner's sends, the availability gate and the limits its handshake
+  negotiated (`negotiated_tx_limits_for`), and it mints and batches in the session's conduits
+  (`crates/wz-session-core/src/session_actions.rs` @ `pub struct TxConduits<R: SessionRuntime> {`):
+  one `R::Mutex<BatchTx>` per conduit, the windows in one `R::Word`, a sender flag per conduit.
+- The driver is below all of it: `emit_on_link` hands it bytes already framed and numbered
+  (`crates/wz-session-core/src/link.rs` @ `pub trait BoxedLinkDriver {`), and no seam of it carries a
+  conduit set. A group's sequence numbers are its own (`crates/wz-session-core/src/sn.rs` @
+  `pub struct MulticastTxConduits {`), the ones its JOIN advertises (`GroupTxStage::on_wire`); a
+  group has no `SessionLinkActions` (lease, handshake, deferred sends) whose conduits could number
+  its frames, and a stage under some link's walk would carry that link's numbers.
+
+One walk for a group and a link therefore needs one transmit component over one conduit set, and
+the forms it can take are a choice this lane cannot make without the measurements S2 names:
+
+- the walk lifted out of `SessionLinkActions` and made generic over its conduit set: the link's and
+  the group's are two instances of it, which is the second copy S2 is to remove;
+- the same over a conduit set behind a trait object: one copy, but an indirect call for each mint
+  and batch decision on the link's own path, which S2's condition refuses and the send Ir of the
+  perf matrix's arm W would read;
+- one conduit set for both: the group's conduits a `TxConduits<R>` of the group's runtime, the
+  JOIN's advertisement read off the conduits as written. One copy and no call added; it changes the
+  link's conduits (their locks, windows and sender flags), and where a link's sender takes its
+  conduit's lock (`R::try_with_mutex_mut`, then `R::with_mutex_mut`), the group's stage keeps a
+  push made while its conduits are held, encoded, and frames it when they are let go
+  (`GroupTxStage::push_deferred`). It is the one form that keeps both of S2's conditions, and
+  it is a design of the links' transmit lane and this one together, read with
+  `size_ledger_gate.py --explain pico-api-coop-nostd` and the send Ir of arm W before it is
+  written.
+
+T4 (S3) is stated once the walk is the link's. With T3 not taken, the stage's re-entrant keep
+(`push_deferred`, `Staged`) is still what holds a push made while the conduits are held in the
+order it was made, behind the beacon, inside the reply quota; taking it out alone would lose that
+order. D2 stays as `feat-mcast.md` section 4.1 decides it: one change with F7, whose first step
+is T3. Nothing of T3 or T4 is in the code.
+
+## 8. Verification (the main session's)
 
 - `cargo test -p wz-session-core --lib --features
   session-multicast,codec-frame,alloc,codec-push,codec-declare,declare-final,declare-subscriber,declare-queryable,declare-undeclare,liveliness-token,codec-response,codec-response-final,transport-stats`

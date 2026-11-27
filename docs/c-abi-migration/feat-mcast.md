@@ -4,7 +4,9 @@ Status: the reading of the feature, the pairing of its work with zenoh-pico's, t
 out what is shape, and the owner's decision items for what is work; step F1 landed beside this note,
 and steps F2a and F8a and the decisions of section 4.1 land after it. Steps F4, F5 and F7 (the
 group's shell and its transmit pipeline) and the decision item D2 they keep are the transmit lane's;
-F3 follows F4, as the one sink it leaves is read by the group face F4 makes.
+F3 follows F4, as the one sink it leaves is read by the group face F4 makes (section 3.1 reads why
+from the code). D2 is not taken with them: the first step of F7 (`mcast-tx1.md` T3) does not hold
+against the code as designed (`mcast-tx1.md` section 7).
 Nothing here was built or measured by this lane: every byte figure is **read** from the libraries
 the size ledger's `--per-feature` run kept (section 1), or is an **estimate** from the code, and
 says which. It extends `docs/c-abi-architecture.md` and the lanes beside it
@@ -106,6 +108,27 @@ walk had (the reader answers the decoder's, by `inbound::control_read_tests`), a
 other lane's files. F2 is `arch-mono.md`'s rule and is planned with that lane. F4 and F7 are the
 large ones and are designed with the line reading in hand.
 
+### 3.1 F3, as the code reads it: after F4
+
+A record of a group reaches the engine today through the MCU image's group loop, which the engine's
+group face steps as a task: `GroupPump::step` (`crates/wz-capi-coop/src/engine/group.rs` @
+`let outcome = self.place.step_reading(`) calls `MulticastSessionPlace::step_reading` and so
+`MulticastPump::step_reading`, whose walk hands its datagram's records to the holder's gate
+(`crates/wz-session-mcu/src/group_drive.rs` @ `struct GatedEvents<'a, F: ?Sized> {`), the session
+core's walk wraps that in the member scope (`crates/wz-session-core/src/multicast_dispatch.rs` @
+`pub(crate) struct MemberRecords<'s, E: ?Sized> {`), and the gate calls the pump's `on_event`, which
+answers the group's asks, notes its members and hands the record on (`hand`) to the engine's
+`DirectSink` and `hand_lent_push`.
+
+F3's one sink is the engine's `DirectSink` wrapped by the member scope alone. That needs the
+engine to call the session core's walk with its own sink: the group face stepping the dispatcher
+itself, which is F4. Before F4 the engine's sink type would have to be carried through the MCU
+loop's generic step (`MulticastPump::step_reading<F, G>` and `MulticastSessionPlace`), whose sink
+is the MCU image's, for the engine alone, and F4 then takes that loop out of the engine. F3 is also
+a step of a group's receive: what it does to the receive of a build with groups is read by the perf
+matrix, and no body of that receive is moved out of line for it. So F3 waits for F4
+(`mcast-tx1.md` T6).
+
 ## 4. The owner's decision items: work zenoh-pico does not do
 
 | item | what wz does | how zenoh-pico does it | off in the pico preset, what is lost | bytes, estimate |
@@ -127,7 +150,7 @@ the multicast transport, not on `pico-api-coop-nostd`, which reads `host-peer`.
 | item | decision | why | bytes, estimate, in the zenoh-pico preset |
 |---|---|---|---:|
 | D1 | landed: a capability, `multicast-locator-keys`: off, a group's `#ttl=`, `#bind=` and `#dscp=` are refused by name (`GroupLocatorError::KeyNotCarried`) and no socket is given a hop limit, a bound address or a traffic class | zenoh-pico reads `iface` and `join` alone. The egress pin is zenoh-pico's as well: it binds its send socket to the interface's address and names it the multicast interface (`vendor/zenoh-pico/src/link/transport/udp/udp_multicast_posix.c` @ `IP_MULTICAST_IF`), so it is no part of the switch; nor is `parse_dscp_value`, which a unicast locator's `#dscp=` reads (`locator::parse_socket_options`) | 500 to 2,000 |
-| D2 | the transmit lane's, with F7 | the stage F7 reduces is what D2 keeps; the two are one change | - |
+| D2 | the transmit lane's, with F7; not taken while T3 is not (`mcast-tx1.md` section 7) | the stage F7 reduces is what D2 keeps; the two are one change | - |
 | D3 | no capability: kept in every build | zenoh-pico does the part that costs: a member whose lease runs out is told to every interest of the session (`vendor/zenoh-pico/src/transport/multicast/lease.c` @ `_z_interest_peer_disconnected(s, &peer->common);`), and a write filter and a matching listener forget its targets by it (`vendor/zenoh-pico/src/net/filtering.c` @ `case _Z_INTEREST_MSG_TYPE_CONNECTION_DROPPED: {`). wz's filter forgets a member's subscriber only by its retraction, so a build without D3 would keep a departed member's subscriber in this node's filters where zenoh-pico's forget it. What zenoh-pico does not do (a liveliness subscriber told the tokens went, a Close read as a departure) is the same retraction, a branch of it; its containers are F8a's | - |
 | D4 | not yet a capability | the pico ABI opens every group under the Pico rule (`crates/wz-capi-pico/src/session.rs`, the group's `MulticastParams`); the Zenoh rule is two compares on the group's parameters (`multicast_join::judge_join` and the walk's room-first branch), and a member is one machine under either rule | under 300 |
 
