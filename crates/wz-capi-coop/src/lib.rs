@@ -128,7 +128,10 @@ mod lodging;
 #[cfg(not(feature = "runtime-plan"))]
 pub mod region;
 // The tables take their memory on use in a session whose shape the build fixes; a session whose
-// arena the open lays out from its config keeps its faces' tables in pools that arena lends.
+// arena the open lays out from its config keeps its faces' tables in pools that arena lends. Each
+// item of the on-use form reads the feature beside `not(feature = "runtime-plan")`, and its twin
+// the negation of both (`region`, compiled only without `runtime-plan`, reads the feature alone),
+// so the refused build is the form that plans at the open and this is its one error.
 #[cfg(all(feature = "tables-on-use", feature = "runtime-plan"))]
 compile_error!(
     "wz-capi-coop: `tables-on-use` is a form of the session whose shape the build fixes; a session \
@@ -152,7 +155,7 @@ pub(crate) type RowPolicy = wz_session_core::bounded::OnUse;
 // D12): the moment this engine lays its tables out at, which every form above but the on-use one
 // answers. A policy that takes its memory at another moment is a form of its own, chosen with the
 // moment, so no form builds whose policy disagrees with its moment.
-#[cfg(not(feature = "tables-on-use"))]
+#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
 const _: () = assert!(
     matches!(
         <RowPolicy as wz_session_core::bounded::Storage>::TAKEN,
@@ -160,7 +163,7 @@ const _: () = assert!(
     ),
     "the session's tables take their memory at its open"
 );
-#[cfg(feature = "tables-on-use")]
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 const _: () = assert!(
     matches!(
         <RowPolicy as wz_session_core::bounded::Storage>::TAKEN,

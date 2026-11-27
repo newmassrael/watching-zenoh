@@ -321,7 +321,7 @@ mod held;
 use held::Holders;
 // The registry made by value, its tables counted at the open, where they take their memory at
 // their first row.
-#[cfg(feature = "tables-on-use")]
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 mod counted;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(crate) mod placed;

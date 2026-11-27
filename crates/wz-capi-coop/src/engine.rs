@@ -73,13 +73,13 @@ use wz_runtime_coop::kept::Shared;
     all(not(wz_round), any(feature = "listen", feature = "group"))
 ))]
 use wz_session_core::bounded::Arena;
-#[cfg(not(feature = "tables-on-use"))]
+#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
 use wz_session_core::bounded::KeyUnkept;
 use wz_session_core::bounded::{LendRefused, TableLender};
 use wz_session_core::caps;
 #[cfg(all(feature = "liveliness", wz_round))]
 use wz_session_core::key_arena::KeyRef;
-#[cfg(not(feature = "tables-on-use"))]
+#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
 use wz_session_core::key_arena::{KeySpace, KeysLocked};
 use wz_session_core::placed::{Placed, PlacedRef};
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
@@ -298,11 +298,11 @@ type RegistryHold = RegionField<Registry>;
 
 /// The store the rows of the session's tables keep their keys in, as the session's state holds it
 /// (`SessionParts::Keys`): the session's key arena, where the tables take their memory at the open.
-#[cfg(not(feature = "tables-on-use"))]
+#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
 type KeyStore = KeySpace;
 /// See the form of a build without `tables-on-use`: the handle of the session's key budget, which
 /// its region holds, where the tables take their memory at their first row.
-#[cfg(feature = "tables-on-use")]
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 type KeyStore = wz_session_core::on_use::BudgetKeys;
 
 mod replay;
@@ -1075,9 +1075,13 @@ fn lend_session(
         // A key a peer's alias keeps in the key arena is read where it lies; a key of the on-use
         // policy is its row's own allocation, which the round copies, as it copies every key it is
         // not told the place of.
-        #[cfg(not(feature = "tables-on-use"))]
+        #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
         round.reads_keys_in(keys);
-        #[cfg(all(feature = "tables-on-use", not(feature = "query")))]
+        #[cfg(all(
+            feature = "tables-on-use",
+            not(feature = "runtime-plan"),
+            not(feature = "query")
+        ))]
         let _ = round;
         #[cfg(feature = "query")]
         {
@@ -1160,7 +1164,7 @@ fn lend_session(
     // The application's tables and the dial face's, made by value and counted from the rows the
     // plan counts for them, none taking a row before its first, their keys counted against the
     // region's budget; the session's one table set holds its tokens as rows, as above.
-    #[cfg(feature = "tables-on-use")]
+    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
     let registry = Registry::counted(
         resolve_limits(config),
         keys,
@@ -1727,7 +1731,7 @@ impl<'a, L: CoopLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
     /// The proof that this hold holds the lock that guards the session's key arena, for as long as
     /// the hold is borrowed: what a key an object of the C ABI holds apart is shared and let go of
     /// through, and nothing else makes one.
-    #[cfg(not(feature = "tables-on-use"))]
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
     fn keys_locked(&self) -> KeysLocked<'_> {
         // SAFETY: this guard holds the session's lock from its taking to its drop, the lock that
         // guards the arena (`CoreLock::init_at`), and the proof borrows the guard.
@@ -2709,7 +2713,7 @@ struct LiveCore<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> LiveCore<'_, L, C> {
     /// The proof of the hold this is ([`CoreGuard::keys_locked`]).
-    #[cfg(not(feature = "tables-on-use"))]
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
     fn keys_locked(&self) -> KeysLocked<'_> {
         self.core.keys_locked()
     }
@@ -10362,9 +10366,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // The session's queryables only begin a call and hold the query's Final
         // (`QueryPlane::arrive`, `QueryPlane::arrive_own`), so none stages a reply here: the
         // stage they are handed has no room.
-        #[cfg(not(feature = "tables-on-use"))]
+        #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
         let mut staged = ReplyStage::<RowPolicy>::default();
-        #[cfg(feature = "tables-on-use")]
+        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
         let mut staged = ReplyStage::<RowPolicy>::counted(0, 0);
         let registry = &mut core.session.registry;
         if let Some(query) = &query {
@@ -10480,8 +10484,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// Mint key expression ids from `next` on: how a test reaches the wrap of the id space
-    /// without spending it.
-    #[cfg(all(test, feature = "std"))]
+    /// without spending it. Compiled with the key arena's tests that ask it (`tests::held_keys`),
+    /// which a build of the on-use form leaves out.
+    #[cfg(all(
+        test,
+        feature = "std",
+        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+    ))]
     pub(crate) fn expr_ids_from(&self, next: ExprId) {
         tables_mut(&mut self.core.lock().0.session.registry).expr_ids_from(next);
     }
@@ -12370,7 +12379,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::Cac
 /// given back whole when the engine goes, which a holder's hold on the engine keeps from happening
 /// first. So a key shared or let go of after the close takes no lock, and a holder the close itself
 /// lets go of, under the lock, does not wait on it.
-#[cfg(not(feature = "tables-on-use"))]
+#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for CoopEngine<L, C> {
     #[inline(never)]
     fn key(&self, ask: KeyAsk<'_>) -> Result<Option<HeldKey>, KeyNotHeld> {
@@ -12409,7 +12418,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for C
 /// room when the heap has none. Their bytes are not counted against the session's key budget until
 /// a held key is a holder of the key its row keeps (section 4 of
 /// `docs/c-abi-migration/heap-native.md`, N3e).
-#[cfg(feature = "tables-on-use")]
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for CoopEngine<L, C> {
     #[inline(never)]
     fn key(&self, ask: KeyAsk<'_>) -> Result<Option<HeldKey>, KeyNotHeld> {
