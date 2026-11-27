@@ -3,7 +3,8 @@
 Status: the reading, the steps and the first step built (B1, commit `248c36d42d`). Nothing here
 was built, run or measured by this lane: every byte and instruction figure of a step is an
 **estimate** from the code, to be read on the size ledger's explain document of the case and on
-the perf matrix's receive line.
+the perf matrix's receive line. Section 5 reads B3's and B4's bodies line by line in a built
+library, splits each step by what the lines hold, and records B3a, the first of them, as built.
 
 The case is `pico-client-coop-nostd` (`wz-capi-pico` without its defaults, `os-host,link-udp`,
 profile `capi-nostd`): one thread, the dial face alone, the four send behaviours beyond
@@ -94,8 +95,8 @@ too: the preset's contract is zenoh-pico's.
 | step | rows | kind | what | expected | receive Ir | before it |
 |------|------|------|------|---------:|------------|-----------|
 | S-SCE | T1 | form, SCE's | the reactive turn, exit paths beside entry paths, `process_event` out of line and the per-machine halves folded (`docs/win-budget/size.md` section 6.4; the reactive turn of branch `sz-transport2`, section 10.3) | -2,000 to -2,900 | none per sample | an SCE session |
-| B3 | T7, T8, T9 | form | for a single-threaded lend-only build, a frame written in place into the link's one batch slot held for the batch: no counting pass (`CountTxBuf`, `try_encoded_len`), no per-frame `TxLease`; a fragment written into the same slot | -800 to -1,300 | none (send only) | the send's Ir on the perf matrix, and which lines of `write_n_msg` the lease holds |
-| B4 | T4 | form | for a session of one peer, the rejoin of a fragment chain into one lent chain per reliability, with the slot machine kept (P8) and the router's ingest folded into it | -600 to -1,000 | none per sample (a fragment is the cold path) | a reading of which of the router's lines hold the 1,277 (cell M13 of branch `sz-transport2`, section 10.4) |
+| B3 | T7, T8, T9 | form | for a single-threaded lend-only build, a frame written in place into the link's one batch slot held for the batch: no counting pass (`CountTxBuf`, `try_encoded_len`), no per-frame `TxLease`; a fragment written into the same slot. Split by its lines into B3a to B3d (section 5.3) | -640 to -1,105 | none (send only) | B3a built; B3b first, with a build loop (section 5.3) |
+| B4 | T4 | form | for a session of one peer, the rejoin of a fragment chain into one lent chain per reliability, with the slot machine kept (P8) and the router's ingest folded into it. Split into B4a and B4b (section 5.3) | -350 to -650 | none per sample (a fragment is the cold path) | a line reading of the case's own Router, which the build read in section 5 cannot give (section 5.2) |
 | B1 | T5 (and T7's `emit_on_link`) | form | the four write facts of a link driver (whether it reports its writes, its last write, a class carried apart, that carriage's last write) compiled only with `link-wire-reports`, which only the tokio runtime names | -350 to -500 | lower: no clock read and four indirect calls fewer at each keep-alive deadline read; two fewer at each frame handed over | **built, `248c36d42d`** |
 | W1 | T3, T9 | work | the handshake's regions: the peer's region name and remote bound read and refused when malformed, the bound the session decides and stages on its Open | -250 to -450 | none | owner's key path for the capability |
 | W5 | T5 | work | the watch of the peer's initial declarations (its deadline in the lease, its expiry in `judge_lease`) | -250 to -400 | none | as W1 |
@@ -105,8 +106,9 @@ too: the preset's contract is zenoh-pico's.
 | B5 | T6 | form | no Control barrier on one conduit | -60 to -150 | none | merging `sz-transport2` |
 | W3 | T3 | work | a dial's expected peer (the InitAck's zid against the node the dial was made for) | -80 to -150 | none | as W1 |
 
-Together, the wz steps (B and W) are about -2,850 to -4,850 on the row, S-SCE another -2,000 to
--2,900; the rest of the gap is attribution (T10, T11) and the hot receive walk (T2).
+Together, the wz steps (B and W) are about -2,430 to -4,305 on the row with B3 and B4 as section
+5.3 splits them (-2,850 to -4,850 before that reading), S-SCE another -2,000 to -2,900; the rest of
+the gap is attribution (T10, T11) and the hot receive walk (T2).
 
 **Why B1 is the step built first, though B3 and B4 are larger by estimate.** B3 and B4 each change
 a send or a receive form, and their bytes lie in lines inlined into bodies this document does not
@@ -149,3 +151,87 @@ A build with it is unchanged. Tests (`session_actions::bundle_tests::link_stamps
   carried apart mark nothing, a control frame marks, and one judge at the end of the first tick
   sends one keepalive on the link and one on the companion. Red if the feature's build loses the
   driver's answers or the companion's keepalive.
+
+## 5. B3 and B4 read line by line
+
+The two steps' bytes lie in lines inlined into `write_n_msg` and `fragment_in_place`, which the
+explain document places by body and owner but not by line. They are read here in a library with
+line tables: the `capi-nostd` build of `wz-capi-pico` of 2026-11-27, disassembled with
+`objdump -d -l --inlines`, each instruction's bytes given to the line of the read body that holds
+it, the deepest such line of its inline stack. That build is not the case: it has threads (its
+locks and SN counters are atomics), the accept side, `tx-fragment-credit`, the probe and a
+`ManyPeers` Router, and its source is main before B1. Its figures are its own; what only it has
+is said where it matters. The case's library carries no line tables, so no line of the case is
+read here.
+
+### 5.1 `write_n_msg` (1,557 bytes in that build; 1,498 in the case's transport area)
+
+| part | bytes |
+|------|------:|
+| **join the frame the conduit holds open** (`batch.stage.lent`) | **514** |
+| the window's test and the open slot taken out of the stage | 54 |
+| its holder found (`with_batch_holder`, one record read) and the holder-gone arm | 42 |
+| picked up as a lease (`TxLease::pick_up`) | 53 |
+| the frame's reliability read off its first byte | 45 |
+| the message written (`TxSink`, `write_body`) | 45 |
+| joined: the count, and the slot put down again (`keep_open`) | 92 |
+| not joined: the roll-back 26, the record and the count cleared 27, the frame sent (`send_lent_batch`, inlined) 130: of it 52 the lease copied whole into the callee's parameter, 37 the emit call, 41 the lease's drop test and give-back call | 183 |
+| **the congestion ask** (`congested_within`) | **113** |
+| **the lend's budget and band** | **29** |
+| **lend a slot and write a frame** (the `with_conduit_link` closure) | **672** |
+| the lend (`lease_on`, the `acquire` call, the `None` test) and a window slot's shortness | 55 |
+| the SN minted (an atomic add in that build, a cell in the case) | 42 |
+| held to the budget (`hold_to`) | 40 |
+| the envelope and the message (`encode_frame_envelope_into`: the `begin_frame` call, `TxSink`, `write_body`) and its answer | 130 |
+| a window's frame kept open: the window's test 11, the stale-record arm 41, the frame counter 3, `tx_slot_spare` and its test 22 (accept side only), `keep_open` and the record 70, the count 18 | 165 |
+| a frame sent whole: the emit call | 38 |
+| the lease's drop at the closure's end (the sent test and the give-back call) | 80 |
+| the SN handed on, the frame counter, the closure's own lines | 122 |
+| **the lend-only answer** (refusals, the chain's call, the SN given back) | **156** |
+| **entry and exit** | **73** |
+
+The lease is per-frame code in four places of this one body: picked up 53, put down 64 and 70,
+copied 52, dropped 41 and 80, 360 bytes; the holder record that says which link lent the open
+frame is 42, 19, 41 and 13 more, 115 bytes. Around the body, in the case: `TxLease::acquire` 149,
+the lease's `TxBuf` table 267, its drop glue 33. The counting pass is the fragment chain's alone (a
+lend-only frame asks for the whole budget and measures nothing): `emit_fragments_encoded` 145,
+`try_encoded_len` 93, `CountTxBuf`'s table 72, 310 bytes in the case.
+
+### 5.2 `fragment_in_place` (3,581 bytes in that build; 2,152 in the case's transport area)
+
+| part | bytes |
+|------|------:|
+| **the Router's ingest** (`ingest_keeping`, `judge`) | **2,594** |
+| the chain's machine driven and the chain delivered (`drive_open_chain`): `finish` 481 with the delivery closure 113, the stage's append 255, the rest 179 | 915 |
+| a chain opened (`admit_chain_start`): the staging's `acquire` 237, the quota's count 228, the open chain written 111, a full pool's policy (`make_room`) 80, the chain's key 58, the bound 38, the rest 110 | 862 |
+| a continuation admitted (`admit_continuation`) | 240 |
+| the open chain found (`find_active`) | 185 |
+| the chain markers | 100 |
+| the rest of `judge` and the slot ended | 292 |
+| **the facts read in one hold** (a lock in that build, a cell in the case) | **158** |
+| **the head's gates, the events and the reports around the ingest** | **829** |
+
+Of the Router's 2,594, about 360 are `ManyPeers`' own: the peer comparison in the quota's count
+and in `find_active` (105 and 117), the peer key written into the open chain (58) and a full
+pool's eviction (80), which a `OnePeer` Router refuses at once. The case's Router has none of
+them, so this build cannot say which lines hold the case's 1,277 router bytes; it says where a
+fold can cut. The search for the open chain, the free
+slot and the quota's count are three walks of the same two slots; the `Judged` and `admitted`
+answers carry a slot index and an outcome between `judge`, the two admissions and the drive; the
+delivery is compiled once, but `finish` keeps two hand-up orders (released first for a kept or
+lent chain, after for a borrowed one).
+
+### 5.3 The steps, split by what the lines hold
+
+| step | what | expected | send Ir | receive Ir | before it |
+|------|------|---------:|---------|------------|-----------|
+| B3a | **built** (commit "Borrow the open frame's lease into its send"): the open frame's lease lent to `send_lent_batch` by reference, so a message that does not join the open frame copies no lease whole (the 52 of 5.1) | -40 to -55 | lower: one 56-byte copy fewer on that message, no call added | none | built |
+| B3b | the conduit's open frame written where it lies: one write cursor over the slot's memory, the one `TxBuf` table of a lent frame, which the lease holds as a field, so neither the pick-up nor the put-down copies the frame's state | -150 to -250 | lower | none | a build loop: the lease and its put-down forms are named on 115 lines of 9 other files |
+| B3c | the slot held for the batch: a single-conduit lend-only link lends the batch one slot, and a frame that does not join leaves before the next opens in it, as zenoh-pico's batch does; no per-frame `acquire`, no holder record | -250 to -500 | lower: no lend per frame | none | B3b; the cooperative link's slot pool (driver area) |
+| B3d | the chain's length read off its first fragment's run (`BodyWindow` counts the message's position already): no counting pass, so `emit_fragments_encoded`, `try_encoded_len` and `CountTxBuf`'s table leave the lend-only build | -200 to -300 | none (a chain only) | none | B3b; the cap's refusal moved between the first fragment's write and its emit |
+| B4a | one open chain per reliability in a `OnePeer` Router: the slot is the reliability's index, so no search, no free-slot walk and no quota count | -150 to -250 | none | none per sample (a fragment is the cold path) | a line reading of the case's own Router |
+| B4b | the ingest one body: the admissions and the drive without the `Judged` and `admitted` hand-offs, one hand-up order | -200 to -400 | none | none per sample | B4a |
+
+B3 is -640 to -1,105 by these lines, below the earlier -800 to -1,300 at both ends; B4 is -350
+to -650, below the earlier -600 to -1,000. None of the steps touches the receive's hot path (a
+frame's records are walked as before), and none adds a call to the send path.
