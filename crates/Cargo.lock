@@ -4084,6 +4084,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-command-seal"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ring",
+ "sha2",
+]
+
+[[package]]
 name = "wz-conformance-build"
 version = "0.1.0"
 dependencies = [
