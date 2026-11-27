@@ -58,7 +58,7 @@ use super::QueryPlane;
 #[cfg(wz_round)]
 use super::Registry;
 #[cfg(feature = "query")]
-use super::{Ended, LegRow, PendingGet, Rows};
+use super::{Ended, LegRow, Rows};
 #[cfg(feature = "query")]
 use super::{EndedLegs, LegRows};
 #[cfg(all(
@@ -111,8 +111,6 @@ pub(super) struct PlacedTables {
     #[cfg(feature = "query")]
     pub(super) leg_rows: Rows<Option<LegRow>, { usize::MAX }>,
     #[cfg(feature = "query")]
-    pub(super) pending_gets: Rows<PendingGet, { usize::MAX }>,
-    #[cfg(feature = "query")]
     pub(super) held_replies: HeldReplies<u64, StatePolicy>,
     #[cfg(feature = "queryable")]
     pub(super) held_finals: query::HeldFinals<StatePolicy>,
@@ -136,8 +134,6 @@ impl PlacedTables {
             legs: BoundedVec::counted(legs),
             #[cfg(feature = "query")]
             leg_rows: BoundedVec::counted(legs),
-            #[cfg(feature = "query")]
-            pending_gets: BoundedVec::counted(legs),
             #[cfg(feature = "query")]
             held_replies: HeldReplies::counted(rows.held_replies()),
             #[cfg(feature = "queryable")]
@@ -176,8 +172,8 @@ pub(crate) struct StatePlaces {
     /// region holds.
     room_places: [MaybeUninit<Option<RoomPlace>>; FACE_SETS],
     /// The rows of the session's plain tables, each table's at the build's bound: the ends of the
-    /// legs, their callbacks, the session's note of each leg pending and the replies the gets that
-    /// consolidate hold, and the Finals the queryables' plane holds and the requests it refused.
+    /// legs, their callbacks and the replies the gets that consolidate hold, and the Finals the
+    /// queryables' plane holds and the requests it refused.
     #[cfg(all(
         feature = "query",
         not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
@@ -188,11 +184,6 @@ pub(crate) struct StatePlaces {
         not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
     ))]
     leg_rows: [MaybeUninit<Option<LegRow>>; LEG_ROWS],
-    #[cfg(all(
-        feature = "query",
-        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-    ))]
-    pending_gets: [MaybeUninit<PendingGet>; LEG_ROWS],
     #[cfg(all(
         feature = "query",
         not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
@@ -301,11 +292,6 @@ impl StatePlaces {
                 #[cfg(feature = "query")]
                 leg_rows: BoundedVec::placed_over(
                     NonNull::new_unchecked(addr_of_mut!((*at).leg_rows)),
-                    legs,
-                ),
-                #[cfg(feature = "query")]
-                pending_gets: BoundedVec::placed_over(
-                    NonNull::new_unchecked(addr_of_mut!((*at).pending_gets)),
                     legs,
                 ),
                 #[cfg(feature = "query")]
@@ -729,12 +715,10 @@ mod tests {
             );
             assert_eq!(tables.legs.free_slots(), legs);
             assert_eq!(tables.leg_rows.free_slots(), legs);
-            assert_eq!(tables.pending_gets.free_slots(), legs);
             assert!(tables.held_replies.is_empty());
             for table in [
                 tables.legs.as_ptr() as usize,
                 tables.leg_rows.as_ptr() as usize,
-                tables.pending_gets.as_ptr() as usize,
             ] {
                 assert!(within.contains(&table), "the rows are the region's");
             }
@@ -771,11 +755,8 @@ mod tests {
             let legs = rows.gets().legs().expect("within the address space");
             assert_eq!(tables.legs.free_slots(), legs);
             assert_eq!(tables.leg_rows.free_slots(), legs);
-            assert_eq!(tables.pending_gets.free_slots(), legs);
             assert!(
-                !tables.legs.holds_rows()
-                    && !tables.leg_rows.holds_rows()
-                    && !tables.pending_gets.holds_rows(),
+                !tables.legs.holds_rows() && !tables.leg_rows.holds_rows(),
                 "no row before the first"
             );
             assert!(tables.held_replies.is_empty());

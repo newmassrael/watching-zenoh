@@ -1562,6 +1562,19 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         before != self.pending.len()
     }
 
+    /// Drop the first pending entry whose sink `pick` names, without firing its final: what the
+    /// cancellation of the get the sink is a leg of does to it, the sink's drop being the leg's end.
+    /// Whether one was dropped.
+    pub fn unregister_first(&mut self, mut pick: impl FnMut(&C) -> bool) -> bool {
+        let Some(at) = self.pending.iter().position(|entry| pick(&entry.sink)) else {
+            return false;
+        };
+        if self.pending.remove(at).deadline_ms == Some(self.due_ms) {
+            self.rearm_due();
+        }
+        true
+    }
+
     /// Number of currently-pending registrations.
     pub fn len(&self) -> usize {
         self.pending.len()
@@ -2857,6 +2870,49 @@ mod tests {
         );
         assert_eq!(reg.len(), 1);
         assert!(reg.unregister(8));
+        assert!(reg.is_empty());
+    }
+
+    /// A sink that names itself, for a test that finds an entry by its sink.
+    struct Tagged(u8);
+
+    impl ReplySink for Tagged {
+        fn on_reply(&mut self, _reply: &dyn crate::reply_sink::ReplyView) {}
+
+        fn on_final(&mut self, _rid: crate::wire_id::RequestId) {
+            panic!("an entry dropped by its sink fires no final");
+        }
+    }
+
+    /// The first entry whose sink the pick names is dropped, its final not fired, and the
+    /// earliest deadline is worked out again from the entries left; a pick that names none drops
+    /// nothing. Turned red by a drop that keeps the deadline of the entry gone, or one that takes
+    /// every entry the pick names.
+    #[test]
+    fn the_first_entry_its_sink_names_is_dropped_and_the_deadline_moves_on() {
+        let mut reg = ReplyRegistry::<Tagged>::with_sink_backing();
+        for (rid, tag, due) in [(1, 1, 100), (2, 2, 300), (3, 1, 500)] {
+            reg.register_sink(
+                rid,
+                1,
+                Some(due),
+                crate::reply_acceptance::ReplyAcceptance::Any,
+                Tagged(tag),
+            )
+            .expect("a row is free");
+        }
+        assert_eq!(reg.due_ms(), 100);
+        assert!(reg.unregister_first(|sink| sink.0 == 1));
+        assert_eq!(reg.len(), 2, "the first the pick names, and no other");
+        assert_eq!(
+            reg.due_ms(),
+            300,
+            "the deadline of the entry gone is not kept"
+        );
+        assert!(!reg.unregister_first(|sink| sink.0 == 9));
+        assert_eq!(reg.len(), 2);
+        assert!(reg.unregister_first(|sink| sink.0 == 1));
+        assert!(reg.unregister_first(|sink| sink.0 == 2));
         assert!(reg.is_empty());
     }
 

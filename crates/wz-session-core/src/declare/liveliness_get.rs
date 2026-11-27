@@ -418,6 +418,19 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         before != self.pending.len()
     }
 
+    /// Remove the first pending get whose sink `pick` names without firing `on_final`: what the
+    /// cancellation of the get the sink is a leg of does to it, the sink's drop being the leg's end.
+    /// Whether one was removed.
+    pub fn unregister_first(&mut self, mut pick: impl FnMut(&C) -> bool) -> bool {
+        let Some(at) = self.pending.iter().position(|entry| pick(&entry.sink)) else {
+            return false;
+        };
+        if self.pending.remove(at).deadline_ms == Some(self.due_ms) {
+            self.rearm_due();
+        }
+        true
+    }
+
     /// Number of currently-outstanding pending gets.
     pub fn len(&self) -> usize {
         self.pending.len()
@@ -968,6 +981,43 @@ mod tests {
         assert!(reg.unregister(7));
         assert_eq!(reg.len(), 0);
         assert!(!reg.unregister(7), "double-unregister is idempotent");
+    }
+
+    /// A sink that names itself, for a test that finds a get by its sink.
+    struct Tagged(u8);
+
+    impl ReplySink for Tagged {
+        fn on_reply(&mut self, _reply: &dyn ReplyView) {}
+
+        fn on_final(&mut self, _rid: crate::wire_id::RequestId) {
+            panic!("a get removed by its sink fires no final");
+        }
+    }
+
+    /// The first get whose sink the pick names is removed, its final not fired, and the earliest
+    /// deadline is worked out again from the gets left; a pick that names none removes nothing.
+    /// Turned red by a removal that keeps the deadline of the get gone, or one that takes every
+    /// get the pick names.
+    #[test]
+    fn the_first_get_its_sink_names_is_removed_and_the_deadline_moves_on() {
+        let mut reg = LivelinessGetRegistry::<Tagged>::with_sink_backing();
+        for (interest_id, tag, due) in [(1, 1, 100), (2, 2, 300), (3, 1, 500)] {
+            assert!(reg
+                .register(interest_id, Some(due), Tagged(tag))
+                .expect("a row is free"));
+        }
+        assert_eq!(reg.due_ms(), 100);
+        assert!(reg.unregister_first(|sink| sink.0 == 1));
+        assert_eq!(reg.len(), 2, "the first the pick names, and no other");
+        assert_eq!(
+            reg.due_ms(),
+            300,
+            "the deadline of the get gone is not kept"
+        );
+        assert!(!reg.unregister_first(|sink| sink.0 == 9));
+        assert!(reg.unregister_first(|sink| sink.0 == 1));
+        assert!(reg.unregister_first(|sink| sink.0 == 2));
+        assert!(reg.is_empty());
     }
 
     /// R311y740 (N37) — the own-space WITNESS for the liveliness-GET reply

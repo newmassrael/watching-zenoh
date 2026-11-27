@@ -653,6 +653,12 @@ impl<S: ReplySink, H: ReplyHold> ConsolidatingSink<S, H> {
         }
     }
 
+    /// The sink it hands what it lets through to: what a caller that finds a pending entry by its
+    /// sink reads.
+    pub fn inner(&self) -> &S {
+        &self.inner
+    }
+
     /// Have the node complete the timestamp stack of each reply that carries one as the reply
     /// ARRIVES, before the mode of the sink holds it back, with `arrival` when there is one.
     #[cfg(feature = "pubsub-ts-stack")]

@@ -93,9 +93,9 @@ use crate::arena::{FacePeers, GetTables};
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::MatchingSink;
+use wz_session_core::pending_get::SessionFaces;
 #[cfg(feature = "query")]
 use wz_session_core::pending_get::{DueIndex, DueRow, LegTables};
-use wz_session_core::pending_get::{GetKind, SessionFaces};
 use wz_session_core::session_tables::{PeerDeclarations, Plane};
 
 #[allow(unused_imports)]
@@ -677,21 +677,18 @@ pub(super) struct RegistryOf<H: Holders> {
     drains_within_frames: usize,
 }
 
-/// The faces as the session's state reaches them (`SessionState`): a
-/// leg's entry ended in its face's tables, what a lost face's peer declared let go of, the
-/// earliest deadline of the gets pending on them, and the tokens of lost links retracted.
+/// The faces as the session's state reaches them (`SessionState`): what a lost face's peer
+/// declared and the gets asked of it let go of, the earliest deadline of the gets pending on them,
+/// and the tokens of lost links retracted.
 impl<H: Holders> SessionFaces for RegistryOf<H> {
-    fn end_leg(&mut self, face: FaceId, kind: GetKind) {
-        #[cfg(feature = "query")]
-        if let Some(gets) = self.gets_mut(face) {
-            gets.end_leg(kind);
-        }
-        #[cfg(not(feature = "query"))]
-        let _ = (face, kind);
-    }
-
     fn lose_face(&mut self, face: FaceId) {
         self.flush_declarations_on_link_loss(face);
+        // Its peer can send no Final now: every get asked of it ends, each entry's drop saying its
+        // leg's end, and the face's tables keep their rows for the link that comes up next.
+        #[cfg(feature = "query")]
+        if let Some(gets) = self.gets_mut(face) {
+            gets.clear();
+        }
         // Its peer's tokens are retracted as the round of deliveries takes each, the rest owed.
         #[cfg(feature = "liveliness")]
         self.lose_tokens(face);
@@ -1099,11 +1096,8 @@ impl<H: Holders> RegistryOf<H> {
         gets
     }
 
-    /// [`Self::all_gets`], to write.
-    #[cfg(all(
-        feature = "query",
-        any(feature = "liveliness-get", all(test, feature = "runtime-plan"))
-    ))]
+    /// The pending gets of every face the session holds, and the session's own, to write.
+    #[cfg(feature = "query")]
     pub(super) fn all_gets_mut(&mut self) -> impl Iterator<Item = &mut Gets> {
         let gets = self
             .sets
@@ -1114,6 +1108,41 @@ impl<H: Holders> RegistryOf<H> {
         #[cfg(feature = "local-queryable")]
         let gets = gets.chain(core::iter::once(&mut self.local));
         gets
+    }
+
+    /// End the first leg pending on any face, or on the session's own queryables, whose entry's
+    /// sink `pick` names: the entry is dropped where it lies, which says the leg's end. The leg,
+    /// for the caller to let its callback go with no lock held; `None` when no entry is named.
+    /// A leg is its entry alone, so a cancellation finds it here and nowhere else.
+    #[cfg(feature = "query")]
+    pub(super) fn end_first_leg(&mut self, mut pick: impl FnMut(&LegSink) -> bool) -> Option<u64> {
+        let mut ended = None;
+        for gets in self.all_gets_mut() {
+            let mut named = |sink: &LegSink| {
+                let hit = pick(sink);
+                if hit {
+                    ended = Some(sink.leg());
+                }
+                hit
+            };
+            if gets.replies.unregister_first(|sink| named(sink.inner())) {
+                break;
+            }
+            #[cfg(feature = "liveliness-get")]
+            if gets.liveliness_gets.unregister_first(named) {
+                break;
+            }
+        }
+        ended
+    }
+
+    /// End every get pending on any face and on the session's own queryables, each entry's drop
+    /// saying its leg's end: what the session's close and its last handle do.
+    #[cfg(feature = "query")]
+    pub(super) fn end_every_get(&mut self) {
+        for gets in self.all_gets_mut() {
+            gets.clear();
+        }
     }
 
     /// The pending gets of the face `id` names, or the session's own for [`LOCAL_FACE`], while it

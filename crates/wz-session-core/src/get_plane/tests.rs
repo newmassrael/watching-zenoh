@@ -72,6 +72,8 @@ impl PlaneCalls for Asking {
 }
 
 impl GetCalls for Asking {
+    type Fan = u8;
+
     fn call(callback: &Counted, _reply: &dyn ReplyView) {
         callback.0.calls.fetch_add(1, SeqCst);
     }
@@ -110,6 +112,8 @@ impl PlaneCalls for Remote {
 }
 
 impl GetCalls for Remote {
+    type Fan = u8;
+
     fn call(callback: &Counted, _reply: &dyn ReplyView) {
         callback.0.calls.fetch_add(1, SeqCst);
     }
@@ -149,6 +153,8 @@ impl PlaneCalls for Stepped {
 }
 
 impl GetCalls for Stepped {
+    type Fan = u8;
+
     fn call(callback: &Counted, _reply: &dyn ReplyView) {
         callback.0.calls.fetch_add(1, SeqCst);
     }
@@ -187,6 +193,8 @@ impl PlaneCalls for RemoteOnUse {
 }
 
 impl GetCalls for RemoteOnUse {
+    type Fan = u8;
+
     fn call(callback: &Counted, _reply: &dyn ReplyView) {
         callback.0.calls.fetch_add(1, SeqCst);
     }
@@ -388,7 +396,7 @@ fn a_legs_row_holds_its_callback_until_its_last_count() {
     let plane = plane::<Remote>(2, 1);
     let seen = Arc::new(Seen::default());
     let row = plane
-        .open_leg(&mut || Counted(seen.clone()), true)
+        .open_leg(&mut || Counted(seen.clone()), true, None)
         .expect("a row is free");
     assert!(plane.hold(row), "a record's count of it");
     plane.call(row, &REPLY);
@@ -408,6 +416,33 @@ fn a_legs_row_holds_its_callback_until_its_last_count() {
     assert_eq!(seen.calls(), 1, "a row given back calls nothing");
 }
 
+/// A leg's row names the fan its get was asked under and no other, read through the sink of the
+/// leg's entry; a get asked under no fan is in none, and a row given back is in none. Turned red by
+/// a row that keeps no fan, or one that keeps it past its last count.
+#[test]
+fn a_legs_row_names_the_fan_its_get_was_asked_under() {
+    let plane = plane::<Remote>(2, 1);
+    let seen = Arc::new(Seen::default());
+    let fanned = plane
+        .open_leg(&mut || Counted(seen.clone()), true, Some(7))
+        .expect("a row is free");
+    let alone = plane
+        .open_leg(&mut || Counted(seen.clone()), true, None)
+        .expect("a second row is free");
+    // SAFETY: the test hands the sink nothing, and the sink is dropped before the plane.
+    let sink = unsafe { LegSink::new(4, fanned, plane.share(), EveryReplyCaptured) };
+    assert_eq!((sink.leg(), sink.row()), (4, fanned));
+    assert!(plane.in_fan(sink.row(), 7));
+    assert!(!plane.in_fan(sink.row(), 8), "another fan's");
+    assert!(!plane.in_fan(alone, 7), "a get asked under no fan");
+    drop(sink);
+    let ended = plane.take_end().expect("the sink's drop is its leg's end");
+    drop(plane.release(ended.row()));
+    assert!(!plane.in_fan(fanned, 7), "a row given back is in no fan");
+    drop(plane.release(alone));
+    assert_eq!(seen.drops(), 2);
+}
+
 /// A leg that finds every row held is refused before its callback is minted, and a row given back
 /// is the next leg's.
 #[test]
@@ -415,7 +450,7 @@ fn a_leg_past_the_rows_mints_no_callback_and_a_row_given_back_is_reused() {
     let plane = plane::<Remote>(1, 1);
     let (first, second) = (Arc::new(Seen::default()), Arc::new(Seen::default()));
     let row = plane
-        .open_leg(&mut || Counted(first.clone()), true)
+        .open_leg(&mut || Counted(first.clone()), true, None)
         .expect("one row");
     let mut minted = 0;
     let refused = plane.open_leg(
@@ -424,12 +459,13 @@ fn a_leg_past_the_rows_mints_no_callback_and_a_row_given_back_is_reused() {
             Counted(second.clone())
         },
         true,
+        None,
     );
     assert_eq!(refused, None, "one row holds one leg");
     assert_eq!(minted, 0, "refused before its callback is minted");
     drop(plane.release(row));
     assert_eq!(first.drops(), 1);
-    let again = plane.open_leg(&mut || Counted(second.clone()), true);
+    let again = plane.open_leg(&mut || Counted(second.clone()), true, None);
     assert_eq!(again, Some(row), "the row given back is the next leg's");
     drop(plane.release(row));
     assert_eq!(second.drops(), 1);
@@ -442,10 +478,10 @@ fn a_plane_let_go_drops_the_callbacks_its_rows_and_ends_still_hold() {
     let plane = plane::<Remote>(2, 1);
     let (ended, open) = (Arc::new(Seen::default()), Arc::new(Seen::default()));
     let one = plane
-        .open_leg(&mut || Counted(ended.clone()), true)
+        .open_leg(&mut || Counted(ended.clone()), true, None)
         .expect("a row");
     let two = plane
-        .open_leg(&mut || Counted(open.clone()), true)
+        .open_leg(&mut || Counted(open.clone()), true, None)
         .expect("a row");
     plane.ended.with(|ends| {
         ends.note(Ended {
@@ -473,7 +509,7 @@ fn a_captured_leg_keeps_a_count_of_its_row_for_the_capturing_thread() {
     unsafe { round.get_mut().calls_legs_of(legs) };
     let seen = Arc::new(Seen::default());
     let row = plane
-        .open_leg(&mut || Counted(seen.clone()), true)
+        .open_leg(&mut || Counted(seen.clone()), true, None)
         .expect("a row");
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is, and the
     // sink, made after the round, is dropped before it.
@@ -509,7 +545,7 @@ fn a_plane_whose_session_answers_none_of_its_gets_captures_nothing() {
     unsafe { round.get_mut().calls_legs_of(legs) };
     let seen = Arc::new(Seen::default());
     let row = plane
-        .open_leg(&mut || Counted(seen.clone()), true)
+        .open_leg(&mut || Counted(seen.clone()), true, None)
         .expect("a row");
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is, and the
     // sink, made after the round, is dropped before it.
@@ -541,7 +577,7 @@ fn a_plane_whose_read_hands_each_record_captures_a_peers_reply() {
     unsafe { round.get_mut().calls_legs_of(legs) };
     let seen = Arc::new(Seen::default());
     let row = plane
-        .open_leg(&mut || Counted(seen.clone()), true)
+        .open_leg(&mut || Counted(seen.clone()), true, None)
         .expect("a row");
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is, and the
     // sink, made after the round, is dropped before it.
@@ -576,7 +612,7 @@ fn a_sink_that_keeps_no_round_hands_each_reply_to_its_capture() {
     let plane = plane::<Stepped>(2, 1);
     let seen = Arc::new(Seen::default());
     let row = plane
-        .open_leg(&mut || Counted(seen.clone()), true)
+        .open_leg(&mut || Counted(seen.clone()), true, None)
         .expect("a row");
     // SAFETY: the test hands the sink its replies alone, as the holder of the session's lock
     // does, and the sink, made after the plane, is dropped before it.
@@ -612,7 +648,7 @@ fn a_reply_outside_a_capture_reaches_no_round_and_is_a_defect() {
     let plane = plane::<Stepped>(2, 1);
     let seen = Arc::new(Seen::default());
     let row = plane
-        .open_leg(&mut || Counted(seen.clone()), true)
+        .open_leg(&mut || Counted(seen.clone()), true, None)
         .expect("a row");
     // SAFETY: as above.
     let mut sink = unsafe { LegSink::new(3, row, plane.share(), EveryReplyCaptured) };
@@ -632,7 +668,7 @@ fn a_sinks_drop_is_its_legs_end_with_the_timeout_it_was_told() {
     let round = round::<Remote>();
     let seen = Arc::new(Seen::default());
     let row = plane
-        .open_leg(&mut || Counted(seen.clone()), true)
+        .open_leg(&mut || Counted(seen.clone()), true, None)
         .expect("a row");
     // SAFETY: the test hands the sink nothing; it is the round's one writer, and the sink, made
     // after the round, is dropped before it.
@@ -715,6 +751,7 @@ fn a_leg_whose_ends_rows_the_heap_refuses_is_refused_at_its_open() {
                 Counted(seen.clone())
             },
             true,
+            None,
         )
     });
     assert_eq!(
@@ -723,7 +760,7 @@ fn a_leg_whose_ends_rows_the_heap_refuses_is_refused_at_its_open() {
     );
     assert_eq!(minted, 0, "refused before its callback is minted");
     let row = plane
-        .open_leg(&mut || Counted(seen.clone()), true)
+        .open_leg(&mut || Counted(seen.clone()), true, None)
         .expect("the heap has room again");
     drop(plane.release(row));
     assert_eq!(seen.drops(), 1);
@@ -738,7 +775,7 @@ fn a_legs_end_finds_the_row_its_open_had_taken_whatever_the_heap_holds() {
     let plane = plane_on_use::<RemoteOnUse>(2, 1);
     let seen = Arc::new(Seen::default());
     let row = plane
-        .open_leg(&mut || Counted(seen.clone()), true)
+        .open_leg(&mut || Counted(seen.clone()), true, None)
         .expect("a row");
     // SAFETY: the test hands the sink nothing, and the sink, made after the plane, is dropped
     // before it.

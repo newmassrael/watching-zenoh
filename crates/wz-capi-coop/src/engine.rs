@@ -436,12 +436,12 @@ mod get;
 /// What a face's table of pending gets holds for each leg ([`get::LegSink`]). A build that asks no
 /// query keeps no such table (`registry::Gets`), so it names no leg.
 #[cfg(feature = "query")]
-pub(crate) use get::{Ended, LegHold, LegId, LegRow, LegSink, PendingGet};
+pub(crate) use get::{Ended, LegHold, LegId, LegRow, LegSink};
 #[cfg(feature = "query")]
 use wz_session_core::round::LegHolders;
 #[cfg(feature = "query")]
 use {
-    get::{EndedLegs, GetKind, GetPlane, LegRows},
+    get::{EndedLegs, GetPlane, LegRows},
     wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey},
     wz_capi_port::ReplyCallback,
     wz_session_core::query_options::QueryOptionsOf,
@@ -890,9 +890,6 @@ struct SessionLent {
     /// replies the gets that consolidate hold, and the legs' callbacks.
     #[cfg(feature = "query")]
     gets: Placed<GetPlane>,
-    /// The session's own note of each leg pending, a row for each get its tables hold.
-    #[cfg(feature = "query")]
-    pending_gets: Rows<PendingGet, { usize::MAX }>,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
     /// The places for values lodged by counts, each of which keeps the arena's memory while lent.
@@ -934,8 +931,8 @@ struct SessionLent {
 }
 
 /// The plain tables of a session's state, lent by an open's one lender
-/// (`SessionRows::lent_from`): the ends of its legs, their callbacks and the session's note of
-/// each leg pending, and the Finals its queryables hold, where the arena lends them
+/// (`SessionRows::lent_from`): the ends of its legs and their callbacks, and the Finals its
+/// queryables hold, where the arena lends them
 /// (`runtime-plan`; a region holds them otherwise, `StatePlaces::tables`), and the ring of the
 /// advanced publishers' caches.
 struct StateTables {
@@ -943,8 +940,6 @@ struct StateTables {
     legs: Rows<Ended, { usize::MAX }>,
     #[cfg(all(feature = "query", feature = "runtime-plan"))]
     leg_rows: Rows<Option<LegRow>, { usize::MAX }>,
-    #[cfg(all(feature = "query", feature = "runtime-plan"))]
-    pending_gets: Rows<PendingGet, { usize::MAX }>,
     /// The Finals the queryables' plane holds and the requests a dispatch refused, a row of each
     /// for each query held at once (`query::FinalHolds`).
     #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
@@ -976,8 +971,6 @@ impl SessionRows {
             legs: lend.table(legs),
             #[cfg(all(feature = "query", feature = "runtime-plan"))]
             leg_rows: lend.table(legs),
-            #[cfg(all(feature = "query", feature = "runtime-plan"))]
-            pending_gets: lend.table(legs),
             #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
             held_finals: lend.table(self.held_queries()),
             #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
@@ -1059,8 +1052,6 @@ fn lend_session(
         legs,
         #[cfg(all(feature = "query", feature = "runtime-plan"))]
         leg_rows,
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
-        pending_gets,
         #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         held_finals,
         #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
@@ -1117,8 +1108,6 @@ fn lend_session(
         legs,
         #[cfg(feature = "query")]
         leg_rows,
-        #[cfg(feature = "query")]
-        pending_gets,
         #[cfg(feature = "query")]
         held_replies,
         #[cfg(feature = "queryable")]
@@ -1308,8 +1297,6 @@ fn lend_session(
         registry,
         #[cfg(feature = "query")]
         gets,
-        #[cfg(feature = "query")]
-        pending_gets,
         handle_place,
         places,
         lodgings,
@@ -3115,12 +3102,6 @@ impl SessionParts for CoopSession {
     type Queryables = Placed<QueryPlane>;
     #[cfg(not(feature = "queryable"))]
     type Queryables = ();
-    /// The legs of the session's gets still pending on its links, in rows of the policy of the
-    /// state's plain tables.
-    #[cfg(feature = "query")]
-    type PendingGets = Rows<PendingGet, { usize::MAX }>;
-    #[cfg(not(feature = "query"))]
-    type PendingGets = ();
     #[cfg(feature = "query")]
     type Gets = Placed<GetPlane>;
     #[cfg(not(feature = "query"))]
@@ -4230,6 +4211,8 @@ struct LegAsk<'a, 'o> {
     consolidation: wz_session_core::query_mode::ConsolidationMode,
     accept: wz_session_core::reply_acceptance::ReplyKeyExpr,
     expose: bool,
+    /// The fan the get was asked under, which its legs' rows name.
+    fan: Option<FanKey>,
     mint: &'a mut dyn FnMut() -> ReplyCallback,
 }
 
@@ -7229,10 +7212,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 #[cfg(not(feature = "queryable"))]
                 plane: (),
                 #[cfg(feature = "query")]
-                pending_gets: lent.pending_gets,
-                #[cfg(not(feature = "query"))]
-                pending_gets: (),
-                #[cfg(feature = "query")]
                 gets: lent.gets,
                 #[cfg(not(feature = "query"))]
                 gets: (),
@@ -8482,12 +8461,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let Some(ended) = self.gets.take_end() else {
                 break;
             };
-            if let Some(mut core) = self.live() {
-                core.0
-                    .session
-                    .pending_gets
-                    .retain(|pending| pending.leg != ended.leg());
-            }
             // The callback the end holds is let go of after what it was owed, with no lock held.
             self.hand_held(ended);
         }
@@ -10122,7 +10095,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             None => return LegHeld::Gone,
         };
         // The leg's callback, in a row of the plane's the entry's sink holds.
-        let Some(row) = self.gets.open_leg(&mut *ask.mint, ask.expose) else {
+        let Some(row) = self.gets.open_leg(&mut *ask.mint, ask.expose, ask.fan) else {
             return LegHeld::NoRoom;
         };
         // SAFETY: the sink goes into a table of pending gets, which the session
@@ -11966,6 +11939,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             consolidation: request.sink_consolidation(),
             accept: opts.effective_accept_replies(),
             expose: false,
+            fan: tag,
             mint: leg,
         };
         let remote = opts.allowed_destination.allows_remote();
@@ -12076,15 +12050,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     unsent = Some(unsent_refusal(refused.get()));
                     return LegTurn::Ended(leg_id);
                 }
-                if !core.session.note_pending(PendingGet {
-                    face,
-                    leg: leg_id,
-                    kind: GetKind::Query(rid),
-                    fan: tag,
-                }) {
-                    unheld = unheld.saturating_add(1);
-                    return LegTurn::Skipped;
-                }
                 more = core.transport.next_up_face(remote, asked).is_some();
                 LegTurn::Issued
             });
@@ -12180,15 +12145,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 self.end_leg_now(leg_id);
                 continue;
             }
-            if !core.session.note_pending(PendingGet {
-                face,
-                leg: leg_id,
-                kind: GetKind::Query(rid),
-                fan: tag,
-            }) {
-                unheld = unheld.saturating_add(1);
-                continue;
-            }
             drop(guard);
             issued = issued.saturating_add(1);
             if self.cut_short(fan, tag) {
@@ -12216,22 +12172,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 },
             ) {
                 LegHeld::Held { .. } => {
-                    if !core.session.note_pending(PendingGet {
-                        face: LOCAL_FACE,
-                        leg: leg_id,
-                        kind: GetKind::Query(rid),
-                        fan: tag,
-                    }) {
-                        unheld = unheld.saturating_add(1);
-                    } else {
-                        // Asked once the legs to the peers were, as zenoh-pico asks it only once
-                        // the send succeeded.
-                        let asked = self.ask_own_queryables(core, own, keyexpr, opts);
-                        drop(guard);
-                        issued = issued.saturating_add(1);
-                        let _ = self.cut_short(fan, tag);
-                        self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
-                    }
+                    // Asked once the legs to the peers were, as zenoh-pico asks it only once the
+                    // send succeeded.
+                    let asked = self.ask_own_queryables(core, own, keyexpr, opts);
+                    drop(guard);
+                    issued = issued.saturating_add(1);
+                    let _ = self.cut_short(fan, tag);
+                    self.hand_own_get(asked, &query::OwnGet::of(keyexpr, opts, rid));
                 }
                 // A leg the session's own table refused is let go of with no lock held.
                 LegHeld::Refused { .. } => {
@@ -12303,7 +12250,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     return LegTurn::Skipped;
                 }
                 // A snapshot's replies are tokens, shown as they came.
-                let Some(row) = self.gets.open_leg(&mut *leg, true) else {
+                let Some(row) = self.gets.open_leg(&mut *leg, true, tag) else {
                     return LegTurn::Skipped;
                 };
                 // SAFETY: the sink goes into a table of pending gets, which the session
@@ -12349,14 +12296,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                         tables.gets.liveliness_gets.unregister(interest_id);
                     }
                     return LegTurn::Ended(leg_id);
-                }
-                if !core.session.note_pending(PendingGet {
-                    face,
-                    leg: leg_id,
-                    kind: GetKind::Liveliness(interest_id),
-                    fan: tag,
-                }) {
-                    return LegTurn::Skipped;
                 }
                 LegTurn::Issued
             });
@@ -12763,12 +12702,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         // A get still pending ends with its session: its entry goes here, its leg's callback with
         // the table.
         #[cfg(feature = "query")]
-        {
-            let registry = CoopSession::faces_mut(&mut core.session.registry);
-            while let Some(pending) = core.session.pending_gets.pop() {
-                pending.unregister(&mut *registry);
-            }
-        }
+        CoopSession::faces_mut(&mut core.session.registry).end_every_get();
         // The session's tokens end with its link: the rows of its tables go, each with its hold of the
         // declaration its key is named by.
         #[cfg(feature = "liveliness")]
@@ -12922,16 +12856,10 @@ struct FanCancelled;
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for CoopEngine<L, C> {
     fn cancel_fan(&self, key: FanKey) {
         loop {
+            // The legs of the fan are the entries whose callback's row names it, on any face.
             let leg = self.live().and_then(|mut core| {
-                let core = &mut core.0;
-                let at = core
-                    .session
-                    .pending_gets
-                    .iter()
-                    .position(|pending| pending.fan == Some(key))?;
-                let pending = core.session.pending_gets.remove(at);
-                pending.unregister(CoopSession::faces_mut(&mut core.session.registry));
-                Some(pending.leg)
+                CoopSession::faces_mut(&mut core.0.session.registry)
+                    .end_first_leg(|sink| self.gets.in_fan(sink.row(), key))
             });
             let Some(leg) = leg else {
                 break;
@@ -13196,11 +13124,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngi
         // of the ends and the rows after, the callbacks still held among them.
         #[cfg(feature = "query")]
         {
-            let core = self.core.dropping();
-            let registry = CoopSession::faces_mut(&mut core.session.registry);
-            while let Some(pending) = core.session.pending_gets.pop() {
-                pending.unregister(&mut *registry);
-            }
+            CoopSession::faces_mut(&mut self.core.dropping().session.registry).end_every_get();
             self.gets.let_go();
         }
         // The held Finals' rows lie in the arena too; the round's calls were ended above.

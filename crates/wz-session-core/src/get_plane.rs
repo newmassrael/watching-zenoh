@@ -73,6 +73,9 @@ use crate::wire_id::RequestId;
 /// answer reaches ([`GetPlane::capture`]), and the locks of the plane's queues ([`Queued`]) are
 /// the planes' ([`PlaneCalls`]).
 pub trait GetCalls: PlaneCalls<Leg = LegId> {
+    /// What names the fan a get was asked under, which a cancellation ends every leg of.
+    type Fan: Copy + PartialEq;
+
     /// Hand `reply` to `callback`.
     fn call(callback: &Self::ReplyCallback, reply: &dyn ReplyView);
 
@@ -126,12 +129,14 @@ impl LegId {
 }
 
 /// A leg's callback in its row, whether the replies it is handed show their timestamps
-/// (`entity-timestamp-opt-in`), and how many hold it. The count is changed under the plane's lock
-/// alone, and is a word of its own so that a caller that read the row's place under that lock can
-/// call the callback after it with no write to the bytes it reads.
+/// (`entity-timestamp-opt-in`), the fan its get was asked under, and how many hold it: the get as
+/// its asker holds it, of which the leg's entry in its face's table is the wire's part. The count
+/// is changed under the plane's lock alone, and is a word of its own so that a caller that read the
+/// row's place under that lock can call the callback after it with no write to the bytes it reads.
 pub struct LegRow<C: GetCalls> {
     callback: C::ReplyCallback,
     shows_timestamp: bool,
+    fan: Option<C::Fan>,
     holders: AtomicU32,
 }
 
@@ -167,12 +172,14 @@ impl<C: GetCalls> LegRows<C> {
         Self { rows }
     }
 
-    /// Keep the callback `mint` makes, shown timestamps when `shows_timestamp`, in a free row,
-    /// held once: its place, or `None`, with nothing minted, when every row is held.
+    /// Keep the callback `mint` makes, shown timestamps when `shows_timestamp`, of a get asked
+    /// under `fan`, in a free row, held once: its place, or `None`, with nothing minted, when
+    /// every row is held.
     fn open(
         &mut self,
         mint: &mut dyn FnMut() -> C::ReplyCallback,
         shows_timestamp: bool,
+        fan: Option<C::Fan>,
     ) -> Option<LegId> {
         let at = match self.rows.iter().position(Option::is_none) {
             Some(at) => at,
@@ -186,6 +193,7 @@ impl<C: GetCalls> LegRows<C> {
         *slot = Some(LegRow {
             callback: mint(),
             shows_timestamp,
+            fan,
             holders: AtomicU32::new(1),
         });
         Some(id)
@@ -404,14 +412,16 @@ impl<C: GetCalls> GetPlane<C> {
         })
     }
 
-    /// Keep the callback `mint` makes in a row of the plane's, held once, for the leg's entry:
-    /// its place, or `None`, with nothing minted, when every row is held or a table the leg needs
-    /// cannot take its rows, which a session refuses as a table of pending gets with no row. Asked
-    /// under the session's lock, so the callback is minted there as it was before it had a row.
+    /// Keep the callback `mint` makes, of a get asked under `fan`, in a row of the plane's, held
+    /// once, for the leg's entry: its place, or `None`, with nothing minted, when every row is held
+    /// or a table the leg needs cannot take its rows, which a session refuses as a table of pending
+    /// gets with no row. Asked under the session's lock, so the callback is minted there as it was
+    /// before it had a row.
     pub fn open_leg(
         &self,
         mint: &mut dyn FnMut() -> C::ReplyCallback,
         shows_timestamp: bool,
+        fan: Option<C::Fan>,
     ) -> Option<LegId> {
         // The leg's end is written by the drop of its entry, which can answer no refusal, so the
         // ends take their rows here, before the leg is kept. Only a policy that takes a table's
@@ -421,7 +431,15 @@ impl<C: GetCalls> GetPlane<C> {
         {
             return None;
         }
-        C::Locks::with(&self.legs, |legs| legs.open(mint, shows_timestamp))
+        C::Locks::with(&self.legs, |legs| legs.open(mint, shows_timestamp, fan))
+    }
+
+    /// Whether the row `leg` names is a leg of a get asked under `fan`: what a cancellation of the
+    /// fan asks of each pending entry's sink to find the legs it ends ([`LegSink::row`]).
+    pub fn in_fan(&self, leg: LegId, fan: C::Fan) -> bool {
+        C::Locks::with(&self.legs, |legs| {
+            legs.row(leg).is_some_and(|row| row.fan == Some(fan))
+        })
     }
 
     /// Let go of every end, every held reply and every leg's row before the arena that lent them
@@ -621,6 +639,17 @@ impl<C: GetCalls, U: UncapturedReplies<C>> LegSink<C, U> {
                 plane,
             },
         }
+    }
+
+    /// The leg the sink is the entry's of.
+    pub fn leg(&self) -> u64 {
+        self.leg
+    }
+
+    /// The row of the leg's callback, of which the sink holds a count: what names the get the leg
+    /// belongs to ([`GetPlane::in_fan`]).
+    pub fn row(&self) -> LegId {
+        self.end.row
     }
 }
 

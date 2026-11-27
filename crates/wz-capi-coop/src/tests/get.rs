@@ -388,6 +388,32 @@ fn a_cancelled_get_ends_without_a_step() {
     assert_eq!(token.active(), 0);
 }
 
+/// A get whose link goes ends with it, long before its deadline: the peer that owed its Final is
+/// gone, and the face's table of pending gets is emptied with the loss, each entry's drop being
+/// its leg's end. Turned red by a loss that leaves the face's entries standing, where the leg would
+/// wait for its deadline.
+#[test]
+fn a_get_ends_with_its_link() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Silence);
+    let before = router.seen(|s| s.queries);
+    let (issued, leg) = ask(&engine, "demo/g/a", &remote_get(), None, None, None);
+    assert_eq!(issued, Ok(1));
+    until(&engine, "the query to reach the router", || {
+        router.seen(|s| s.queries) == before + 1
+    });
+    assert!(
+        !leg.lock().unwrap().ended,
+        "CONTROL: open while its link stands"
+    );
+    router.send(Command::Close);
+    until(&engine, "the leg to end with the link", || {
+        leg.lock().unwrap().ended
+    });
+    assert!(leg.lock().unwrap().replies.is_empty());
+}
+
 /// A get cancelled before its deadline bounds a read's wait no longer, with no step between: the
 /// index of the gets' deadlines reads the table its earliest key names when a read asks, so the
 /// end it was not told of is read then. The CONTROL is the wait while the sooner get is open,
