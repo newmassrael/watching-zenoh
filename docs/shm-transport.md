@@ -326,6 +326,13 @@ The order, each step landing whole with its tests:
    ABI's provider over `zenoh-shm`); the text grows because `zenoh-shm`'s provider is generic
    over its backend and its allocation policies, and the C ABI instantiates zenoh-c's five
    policy compositions over two backends, where the engine's provider was one type.
+   Measured again on 2026-11-27 by symbol, that guess was wrong: the second backend's provider was
+   5,550 bytes beside the pool's 3,537, and most of the growth is `zenoh-shm`'s own reader,
+   subscription and watchdog. The C ABI's providers now share one boxed backend
+   (`ShmProvider<DynBackend>`), and the reader's table of mapped segments, which the paid debt
+   above made, is a short list rather than three search trees (13,842 bytes of text down to
+   2,156): the arm reads 9,274,704 against 9,288,720 on main `9136bec74` by step 1's command
+   (-14,016).
 
 `wz-runtime-tokio` then depends on `crates/wz-zenoh-shm`, which the layer gates allow (it is a crate
 below the top crate, not the top crate), and the capability-cost budgets of the C images with shared
