@@ -22,7 +22,7 @@ use wz_session_core::reply_hold::{HeldReplies, HeldReplyPlaces};
 use wz_session_core::round::RoundRowPlaces;
 use wz_session_core::step_lend::LendCell;
 
-use super::registry::placed::FACE_SETS;
+use super::registry::FACE_SETS;
 #[cfg(feature = "connectivity")]
 use super::FacePlane;
 #[cfg(feature = "query")]

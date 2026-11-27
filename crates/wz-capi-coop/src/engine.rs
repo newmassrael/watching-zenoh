@@ -73,10 +73,13 @@ use wz_runtime_coop::kept::Shared;
     all(not(wz_round), any(feature = "listen", feature = "group"))
 ))]
 use wz_session_core::bounded::Arena;
-use wz_session_core::bounded::{KeyUnkept, LendRefused, TableLender};
+#[cfg(not(feature = "tables-on-use"))]
+use wz_session_core::bounded::KeyUnkept;
+use wz_session_core::bounded::{LendRefused, TableLender};
 use wz_session_core::caps;
 #[cfg(all(feature = "liveliness", wz_round))]
 use wz_session_core::key_arena::KeyRef;
+#[cfg(not(feature = "tables-on-use"))]
 use wz_session_core::key_arena::{KeySpace, KeysLocked};
 use wz_session_core::placed::{Placed, PlacedRef};
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
@@ -104,10 +107,11 @@ use wz_capi_port::os::{self, Mutex, MutexGuard};
 use wz_capi_port::os::{JoinHandle, ThreadId};
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, Declared, EngineDeliveries, FanoutError, FilterId, FilterPlane,
-    FilteredPut, HeldKey, HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, KeyView, MatchId,
-    MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive,
-    SessionEngine, SessionKeys, StatementNotHonoured, StepRefused, SubId, SubscriberSink, WireKey,
+    FilteredPut, HoldRefused, KeyAnchor, KeyHold, KeyView, MatchId, MatchingSink, PeerIdentity,
+    PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine,
+    StatementNotHonoured, StepRefused, SubId, SubscriberSink, WireKey,
 };
+use wz_capi_port::{HeldKey, KeyAsk, KeyNotHeld, SessionKeys};
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
 use wz_capi_port::Refusal as Declined;
 #[cfg(feature = "ticker")]
@@ -260,9 +264,11 @@ mod replies;
 mod queries;
 
 mod registry;
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
+use crate::region::RegionField;
 #[cfg(not(feature = "runtime-plan"))]
-use crate::region::{RegionBlock, RegionField, StateRegion};
-#[cfg(not(feature = "runtime-plan"))]
+use crate::region::{RegionBlock, StateRegion};
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(crate) use registry::placed::{RegistryRegion, REGISTRY_REGION_LINES};
 // The values the state owns and its tasks reach by handles, as fields of the region.
 #[cfg(not(feature = "runtime-plan"))]
@@ -283,12 +289,21 @@ use state_places::PlacedTables;
 pub(crate) use state_places::StatePlaces;
 
 /// How the session's state holds its registry: by value where the open lent its tables from the
-/// arena, and by the handle of the field of the session's region where the build laid it out
-/// (`crate::region`), which drops it in place.
-#[cfg(feature = "runtime-plan")]
+/// arena or where they take their memory at their first row, and by the handle of the field of the
+/// session's region where the build laid it out (`crate::region`), which drops it in place.
+#[cfg(any(feature = "runtime-plan", feature = "tables-on-use"))]
 type RegistryHold = Registry;
-#[cfg(not(feature = "runtime-plan"))]
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 type RegistryHold = RegionField<Registry>;
+
+/// The store the rows of the session's tables keep their keys in, as the session's state holds it
+/// (`SessionParts::Keys`): the session's key arena, where the tables take their memory at the open.
+#[cfg(not(feature = "tables-on-use"))]
+type KeyStore = KeySpace;
+/// See the form of a build without `tables-on-use`: the handle of the session's key budget, which
+/// its region holds, where the tables take their memory at their first row.
+#[cfg(feature = "tables-on-use")]
+type KeyStore = wz_session_core::on_use::BudgetKeys;
 
 mod replay;
 use replay::{Replay, Retract, SendTo, TurnEnd};
@@ -789,7 +804,7 @@ struct SessionLent {
     /// places (`ArenaPlan::lay_direct_faces`), which the open lends and makes.
     #[cfg(all(not(wz_round), feature = "listen"))]
     taken_faces: usize,
-    keys: KeySpace,
+    keys: KeyStore,
     registry: RegistryHold,
     /// After the registry, whose dispatch reaches it by a handle that counts nothing.
     #[cfg(feature = "queryable")]
@@ -827,8 +842,9 @@ struct SessionLent {
     runtime: RuntimePlace,
     /// The place the session's engine is written at, and the count of the arena it is kept by.
     engine: EnginePlace,
-    /// The region the session's registry and its key arena lie in: after the registry's handle,
-    /// which drops the registry in place, and every table that keeps a key there.
+    /// The region the session's registry and its key arena lie in, or its key budget alone where
+    /// the tables take their memory on use: after the registry, which its handle drops in place
+    /// where it lies there, and every table that keeps a key there.
     #[cfg(not(feature = "runtime-plan"))]
     state: RegionBlock<StateRegion>,
     arena: SessionArena,
@@ -972,8 +988,8 @@ fn lend_session(
     #[cfg(not(feature = "runtime-plan"))]
     lend.finish().map_err(ArenaRefused::Lend)?;
     // SAFETY: the block is a zeroed `StateRegion` this open alone reaches; it neither moves nor goes
-    // back before the registry's handle and every key of it are let go of, being held after them
-    // by what this hands back and then by the session's state.
+    // back before the registry and every key of it are let go of, being held after them by what
+    // this hands back and then by the session's state.
     #[cfg(not(feature = "runtime-plan"))]
     let keys = unsafe { StateRegion::place(state.as_ptr(), resolve_limits(config)) };
     // The plane, the round, the step places, the queryables' plane and the plain tables' rows lie
@@ -1056,7 +1072,13 @@ fn lend_session(
     #[cfg(wz_round)]
     {
         let round = samples.get_mut();
+        // A key a peer's alias keeps in the key arena is read where it lies; a key of the on-use
+        // policy is its row's own allocation, which the round copies, as it copies every key it is
+        // not told the place of.
+        #[cfg(not(feature = "tables-on-use"))]
         round.reads_keys_in(keys);
+        #[cfg(all(feature = "tables-on-use", not(feature = "query")))]
+        let _ = round;
         #[cfg(feature = "query")]
         {
             let legs: NonNull<dyn LegHolders<crate::calls::CoopCalls>> = NonNull::from(&*gets);
@@ -1125,7 +1147,7 @@ fn lend_session(
     // its tokens as rows, so the observer's own registry of them has none (`RegistryRegion`).
     // SAFETY: the region was written and placed by `StateRegion::place` above and nothing reaches
     // its registry yet; the block is held after the handle (`SessionLent`, then `Core`).
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     let registry = unsafe {
         RegistryRegion::bind(
             StateRegion::registry_at(state.as_ptr()),
@@ -1135,6 +1157,18 @@ fn lend_session(
         )
     }
     .map_err(ArenaRefused::Lend)?;
+    // The application's tables and the dial face's, made by value and counted from the rows the
+    // plan counts for them, none taking a row before its first, their keys counted against the
+    // region's budget; the session's one table set holds its tokens as rows, as above.
+    #[cfg(feature = "tables-on-use")]
+    let registry = Registry::counted(
+        resolve_limits(config),
+        keys,
+        plan.tables(),
+        plan.gets().rows,
+        plan.peers().rows,
+        delivery,
+    )?;
     let runtime = arena
         .runtime_place(runtime_bytes)
         .map_err(ArenaRefused::Lend)?;
@@ -1619,10 +1653,11 @@ impl HandBack {
 struct Confined<T>(T);
 
 /// The session's state behind its one lock. Every hold of it goes through here, and tells the
-/// session's key arena that the lock is held for as long as it is
-/// ([`KeySpace::guard_by_owner_lock`]): the arena's counts are touched only under this lock, so a
-/// key let go of after the lock (a row taken out of a table and dropped outside it) fails a debug
-/// build at once instead of racing a reader that holds the lock.
+/// session's key arena, or its key budget, that the lock is held for as long as it is
+/// ([`KeySpace::guard_by_owner_lock`](wz_session_core::key_arena::KeySpace::guard_by_owner_lock)):
+/// the counts of the session's keys are touched only under this lock, so a key let go of after the
+/// lock (a row taken out of a table and dropped outside it) fails a debug build at once instead of
+/// racing a reader that holds the lock.
 struct CoreLock<L: CoopLinks + 'static, C: ClockSource + 'static>(StateLock<Confined<Core<L, C>>>);
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
@@ -1670,7 +1705,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
 }
 
 /// Whether the calling thread holds the session lock that lies at `lock`, as the key arena's check
-/// asks it ([`KeySpace::guard_by_owner_lock`]): by the marks each hold leaves on its thread, and
+/// asks it ([`KeySpace::guard_by_owner_lock`](wz_session_core::key_arena::KeySpace::guard_by_owner_lock)):
+/// by the marks each hold leaves on its thread, and
 /// `true` where they cannot tell, which leaves the arena's own mark to answer.
 fn session_held_here(lock: *const ()) -> bool {
     wz_capi_port::sync::SessionHeld::held_on_this_thread(lock).unwrap_or(true)
@@ -1691,6 +1727,7 @@ impl<'a, L: CoopLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
     /// The proof that this hold holds the lock that guards the session's key arena, for as long as
     /// the hold is borrowed: what a key an object of the C ABI holds apart is shared and let go of
     /// through, and nothing else makes one.
+    #[cfg(not(feature = "tables-on-use"))]
     fn keys_locked(&self) -> KeysLocked<'_> {
         // SAFETY: this guard holds the session's lock from its taking to its drop, the lock that
         // guards the arena (`CoreLock::init_at`), and the proof borrows the guard.
@@ -2672,6 +2709,7 @@ struct LiveCore<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> LiveCore<'_, L, C> {
     /// The proof of the hold this is ([`CoreGuard::keys_locked`]).
+    #[cfg(not(feature = "tables-on-use"))]
     fn keys_locked(&self) -> KeysLocked<'_> {
         self.core.keys_locked()
     }
@@ -2901,6 +2939,7 @@ impl SessionParts for CoopSession {
     type Faces = Registry;
     type Callbacks = CoopRows;
     type Storage = RowPolicy;
+    type Keys = KeyStore;
     /// Where a face coming up or going down is reported (`connectivity`).
     #[cfg(feature = "connectivity")]
     type Watchers = Placed<FacePlane>;
@@ -10323,7 +10362,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // The session's queryables only begin a call and hold the query's Final
         // (`QueryPlane::arrive`, `QueryPlane::arrive_own`), so none stages a reply here: the
         // stage they are handed has no room.
+        #[cfg(not(feature = "tables-on-use"))]
         let mut staged = ReplyStage::<RowPolicy>::default();
+        #[cfg(feature = "tables-on-use")]
+        let mut staged = ReplyStage::<RowPolicy>::counted(0, 0);
         let registry = &mut core.session.registry;
         if let Some(query) = &query {
             self.plane.asking_locally(|| {
@@ -10503,9 +10545,9 @@ fn lent_key(tables: &CoopTables, key: RowKey) -> KeyView {
         .held
         .and_then(|handle| Some((handle, tables.keyexprs().get(handle)?)))
     {
-        // SAFETY: the session's rows lie in its region, or in the span lent at its open
-        // (`RowPolicy`), neither of which moves while the session's state stands; and the entity's
-        // row holds the declaration until the entity is retracted.
+        // SAFETY: the session's rows lie in its region, in the span lent at its open, or in the
+        // rows their table took at its first (`RowPolicy`), none of which moves while the session's
+        // state stands; and the entity's row holds the declaration until the entity is retracted.
         Some((handle, row)) => unsafe {
             KeyView::holding(text, handle, row.key(), row.id(), row.head().count())
         },
@@ -11144,8 +11186,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             #[cfg(test)]
             self.takes.holds.fetch_add(1, Ordering::Relaxed);
             // SAFETY: the hold just taken keeps the row standing, and the session's rows lie in its
-            // region, or in the span lent at its open (`RowPolicy`), neither of which moves while
-            // the session's state stands.
+            // region, in the span lent at its open, or in the rows their table took at its first
+            // (`RowPolicy`), none of which moves while the session's state stands.
             Ok(unsafe { KeyHold::taken(id, declared.handle).placed_at(declared.count()) })
         })
         .unwrap_or(Err(Declined::Closed))
@@ -12328,6 +12370,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::Cac
 /// given back whole when the engine goes, which a holder's hold on the engine keeps from happening
 /// first. So a key shared or let go of after the close takes no lock, and a holder the close itself
 /// lets go of, under the lock, does not wait on it.
+#[cfg(not(feature = "tables-on-use"))]
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for CoopEngine<L, C> {
     #[inline(never)]
     fn key(&self, ask: KeyAsk<'_>) -> Result<Option<HeldKey>, KeyNotHeld> {
@@ -12354,6 +12397,47 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for C
             KeyAsk::Release(key) => {
                 // SAFETY: as a share.
                 unsafe { key.release(&keys) };
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// The keys the C ABI's objects hold where the session's tables take their memory on use: the
+/// session keeps no key arena, so each is a copy of its own, made, shared and let go of with no
+/// lock taken, and refused past the session's `MAX_KEYEXPR_BYTES` as the arena refuses it, or as no
+/// room when the heap has none. Their bytes are not counted against the session's key budget until
+/// a held key is a holder of the key its row keeps (section 4 of
+/// `docs/c-abi-migration/heap-native.md`, N3e).
+#[cfg(feature = "tables-on-use")]
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for CoopEngine<L, C> {
+    #[inline(never)]
+    fn key(&self, ask: KeyAsk<'_>) -> Result<Option<HeldKey>, KeyNotHeld> {
+        match ask {
+            KeyAsk::Hold(text) => {
+                let kept = match self.live() {
+                    Some(core) => core
+                        .0
+                        .session
+                        .keys
+                        .budget()
+                        .is_some_and(|budget| budget.holds_key(text.len())),
+                    None => return Err(KeyNotHeld::Closed),
+                };
+                if !kept {
+                    return Err(KeyNotHeld::TooLong);
+                }
+                HeldKey::own(text).map(Some).ok_or(KeyNotHeld::NoRoom)
+            }
+            KeyAsk::Share(key) => HeldKey::own(key.as_str())
+                .map(Some)
+                .ok_or(KeyNotHeld::NoRoom),
+            KeyAsk::Release(key) => {
+                // Every key this engine hands out is a copy of its own.
+                if key.is_own() {
+                    // SAFETY: a copy of its own, which its holder lets go of here, once.
+                    unsafe { key.free_own() };
+                }
                 Ok(None)
             }
         }

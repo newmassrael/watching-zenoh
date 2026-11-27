@@ -963,6 +963,15 @@ files::decl_watch_doors::"
     # `rx-lent-only` with `tx-lend-only`): the router stand-in lends its links send slots, so a
     # lend-only session answers it; 130 passed on a build host (2026-11-23).
     "wz-capi-coop|hook|wz-session-core/rx-lent-only,tx-lend-only|"
+    # The engine whose tables take their memory at their first row (`tables-on-use`): the region
+    # that holds the session's key budget, the registry counted at the open with no row taken, and a
+    # session that counts a declaration's key against its budget and receives what its subscriber is
+    # pushed (`on_use` in every module path of them). Once with the crate's defaults, whose build
+    # answers no query, so the face's Finals are counted none; once with the planes of a query and
+    # of the liveliness, whose counted tables the registry and the session's own gets make. Not
+    # measured on a build host yet.
+    "wz-capi-coop|hook|tables-on-use|on_use"
+    "wz-capi-coop|hook|liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use|on_use"
     # The crate's whole suite in the build form the C library ships: a domain of
     # `declaration-sync-pacing` without `on`, where a link is told the session's declarations in
     # one lap when it comes up and the engine holds no code of paced turns

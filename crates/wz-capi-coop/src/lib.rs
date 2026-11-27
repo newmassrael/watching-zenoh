@@ -127,23 +127,46 @@ mod lodging;
 // The state of a session whose shape the build fixes, one struct the allocator hands zeroed.
 #[cfg(not(feature = "runtime-plan"))]
 pub mod region;
+// The tables take their memory on use in a session whose shape the build fixes; a session whose
+// arena the open lays out from its config keeps its faces' tables in pools that arena lends.
+#[cfg(all(feature = "tables-on-use", feature = "runtime-plan"))]
+compile_error!(
+    "wz-capi-coop: `tables-on-use` is a form of the session whose shape the build fixes; a session \
+     laid out at the open from its config (`runtime-plan`, which `listen` and `group` turn on) \
+     takes its tables' memory at the open"
+);
 /// The storage policy of the session's registry, named once so every table of it and the rows each
 /// is given agree on it: lent from the arena where the open lays the arena out from its config
-/// (`runtime-plan`), and placed in the region the build lays out otherwise (`region`).
+/// (`runtime-plan`), placed in the region the build lays out otherwise (`region`), and taken from
+/// the allocator at each table's first row where the tables take their memory on use
+/// (`tables-on-use`).
 #[cfg(feature = "runtime-plan")]
 pub(crate) type RowPolicy = wz_session_core::bounded::Lent;
 /// See the form of a build with `runtime-plan`.
-#[cfg(not(feature = "runtime-plan"))]
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(crate) type RowPolicy = wz_session_core::bounded::Region;
+/// See the form of a build with `runtime-plan`.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+pub(crate) type RowPolicy = wz_session_core::bounded::OnUse;
 // The session takes the memory of its tables when it opens and none after (docs/upstream-parity.md,
-// D12): the moment this engine lays its tables out at, which every form above answers. A policy
-// that takes its memory at another moment is a form of its own, chosen with the moment.
+// D12): the moment this engine lays its tables out at, which every form above but the on-use one
+// answers. A policy that takes its memory at another moment is a form of its own, chosen with the
+// moment, so no form builds whose policy disagrees with its moment.
+#[cfg(not(feature = "tables-on-use"))]
 const _: () = assert!(
     matches!(
         <RowPolicy as wz_session_core::bounded::Storage>::TAKEN,
         wz_session_core::bounded::Taken::AtOpen
     ),
     "the session's tables take their memory at its open"
+);
+#[cfg(feature = "tables-on-use")]
+const _: () = assert!(
+    matches!(
+        <RowPolicy as wz_session_core::bounded::Storage>::TAKEN,
+        wz_session_core::bounded::Taken::AtFirstUse
+    ),
+    "the session's tables take their memory at their first row"
 );
 // How the engine's calls stand to its threads, and the locks that choice decides.
 mod form;

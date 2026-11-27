@@ -12,16 +12,32 @@
 //! A region is reached through a pointer to it, never by a reference to the whole: the tables'
 //! rows and the key arena lie in it beside the tables, reached through the tables, and a unique
 //! reference to the whole would cover them too. Each field is projected from the pointer alone.
+//!
+//! Where the tables take their memory at their first row (`tables-on-use`), the region holds no
+//! registry and no key arena: the registry is the session's state's own value, each table of it
+//! counted and holding no row, and the region holds the key budget its keys are counted against,
+//! where the key arena would lie, beside the places of the state's own values.
 
 use core::ops::{Deref, DerefMut};
 use core::ptr::{addr_of_mut, NonNull};
 
-use wz_session_core::bounded::{RegionLines, ZeroEmpty};
+#[cfg(feature = "tables-on-use")]
+use core::mem::MaybeUninit;
+
+#[cfg(not(feature = "tables-on-use"))]
+use wz_session_core::bounded::RegionLines;
+use wz_session_core::bounded::ZeroEmpty;
+#[cfg(not(feature = "tables-on-use"))]
 use wz_session_core::caps;
+#[cfg(not(feature = "tables-on-use"))]
 use wz_session_core::key_arena::{place_region, KeyArena, KeySpace};
 use wz_session_core::limits::SessionLimits;
+#[cfg(feature = "tables-on-use")]
+use wz_session_core::on_use::{BudgetKeys, KeyBudget};
 
-use crate::engine::{RegistryRegion, StatePlaces, REGISTRY_REGION_LINES};
+use crate::engine::StatePlaces;
+#[cfg(not(feature = "tables-on-use"))]
+use crate::engine::{RegistryRegion, REGISTRY_REGION_LINES};
 
 /// The zeroed `T` at the head of the one block an open reserves for its arena as well
 /// (`SessionArena::reserve_after`), every field of it empty (`ZeroEmpty`) until its owner binds
@@ -114,26 +130,44 @@ unsafe impl<T: Send> Send for RegionField<T> {}
 unsafe impl<T: Sync> Sync for RegionField<T> {}
 
 /// The lines of a [`StateRegion`]'s description, at most: its registry's.
-pub const STATE_REGION_LINES: usize = REGISTRY_REGION_LINES;
+#[cfg(not(feature = "tables-on-use"))]
+pub(crate) const STATE_REGION_LINES: usize = REGISTRY_REGION_LINES;
 
-/// The state of a session of the build's shape: see the module documentation. The key arena is the
-/// last field, so a region dropped in place lets go of its keys after the registry, whose handle
-/// drops it first.
+/// The state of a session of the build's shape: see the module documentation. The key arena, or
+/// the key budget, is the last field, so a region dropped in place lets go of its keys after the
+/// registry, whose handle drops it first.
 pub struct StateRegion {
+    #[cfg(not(feature = "tables-on-use"))]
     registry: RegistryRegion,
     /// The values the state owns and its tasks reach by handles: its round, its planes and its
     /// step places, written by the open (`StatePlaces`), none of them laid out over rows here.
     places: StatePlaces,
+    #[cfg(not(feature = "tables-on-use"))]
     keys: KeyArena<{ caps::KEY_ARENA_BYTES }>,
+    /// The budget the session's keys are counted against, written by the open
+    /// ([`Self::place`]): a key is an allocation of its own, which points at its budget, so the
+    /// budget lies where it never moves while a key of it lives.
+    #[cfg(feature = "tables-on-use")]
+    keys: MaybeUninit<KeyBudget>,
 }
 
-// SAFETY: the registry's region, the places and the key arena are `ZeroEmpty`.
+// SAFETY: the registry's region, the places and the key arena are `ZeroEmpty`; the key budget a
+// region of the on-use form holds instead is a `MaybeUninit`, valid as any bytes.
 unsafe impl ZeroEmpty for StateRegion {}
+
+// The budget lies in a `MaybeUninit`, which the region's drop leaves alone: a budget whose drop did
+// anything would not have it done.
+#[cfg(feature = "tables-on-use")]
+const _: () = assert!(
+    !core::mem::needs_drop::<KeyBudget>(),
+    "the region's drop leaves the key budget as it lies"
+);
 
 impl StateRegion {
     /// The region's description: the lines that place each table of the registry over its rows
     /// and hand each the key arena, read as the region is placed.
-    pub const DESCRIPTION: RegionLines<STATE_REGION_LINES> =
+    #[cfg(not(feature = "tables-on-use"))]
+    pub(crate) const DESCRIPTION: RegionLines<STATE_REGION_LINES> =
         RegistryRegion::places(core::mem::offset_of!(Self, registry));
 
     /// Place each table of the zeroed region at `region` over its rows and hand it the key arena,
@@ -145,6 +179,7 @@ impl StateRegion {
     /// # Safety
     /// `region` points at a `StateRegion` of all zero bytes, aligned, that nothing else reaches,
     /// and which neither moves nor is given back while a table or a key of it lives.
+    #[cfg(not(feature = "tables-on-use"))]
     pub(crate) unsafe fn place(region: NonNull<Self>, limits: &SessionLimits) -> KeySpace {
         // SAFETY: the caller's contract; the registry's field of it is zeroed and reached by this
         // call alone.
@@ -163,10 +198,39 @@ impl StateRegion {
         keys
     }
 
+    /// Write the budget the session's keys are counted against in the zeroed region at `region`:
+    /// its keys at most `limits`' `MAX_KEYEXPR_BYTES` long and together at most its
+    /// `KEY_ARENA_BYTES`, counted as the key arena would count them; and hand back the handle the
+    /// session's tables make their keys through. The region's places are written by their owners
+    /// after, as in the region that holds the registry.
+    ///
+    /// # Safety
+    /// `region` points at a `StateRegion` of all zero bytes, aligned, that nothing else reaches,
+    /// and which neither moves nor is given back while a key counted against its budget, or a
+    /// table or a handle holding the budget, lives.
+    #[cfg(feature = "tables-on-use")]
+    pub(crate) unsafe fn place(region: NonNull<Self>, limits: &SessionLimits) -> BudgetKeys {
+        // SAFETY: the caller's contract: the budget's field is the region's, aligned for a budget,
+        // and reached by this write and the reference after it alone, before any key exists; it is
+        // not written again.
+        let budget = unsafe {
+            let field = addr_of_mut!((*region.as_ptr()).keys).cast::<KeyBudget>();
+            field.write(KeyBudget::new(
+                limits.key_arena_bytes(),
+                limits.max_keyexpr_bytes_held(),
+            ));
+            &*field
+        };
+        // SAFETY: the caller's contract: the region, and the budget in it, neither moves nor is
+        // given back while a key, a table or a handle of the budget lives.
+        unsafe { budget.keys() }
+    }
+
     /// Where the registry of the region at `region` lies.
     ///
     /// # Safety
     /// `region` points at a `StateRegion`.
+    #[cfg(not(feature = "tables-on-use"))]
     pub(crate) unsafe fn registry_at(region: NonNull<Self>) -> NonNull<RegistryRegion> {
         // SAFETY: the caller's contract: a field of a region that lies at a pointer that is not
         // null is not null either.
@@ -178,7 +242,8 @@ impl StateRegion {
     /// # Safety
     /// `region` points at a `StateRegion`.
     pub(crate) unsafe fn places_at(region: NonNull<Self>) -> NonNull<StatePlaces> {
-        // SAFETY: as `registry_at`.
+        // SAFETY: the caller's contract: a field of a region that lies at a pointer that is not
+        // null is not null either.
         unsafe { NonNull::new_unchecked(addr_of_mut!((*region.as_ptr()).places)) }
     }
 }
@@ -191,6 +256,7 @@ mod tests {
     /// sequence or the same rows, and no two hand the key arena to the same handle. Turned red by
     /// an offset of a part of the registry that is not the field it names, or by a set's lines
     /// that reuse another's rows.
+    #[cfg(not(feature = "tables-on-use"))]
     #[test]
     fn a_state_regions_lines_lie_inside_it_and_name_nothing_twice() {
         let size = core::mem::size_of::<StateRegion>();
@@ -213,6 +279,41 @@ mod tests {
         for (at, key) in keys.iter().enumerate() {
             assert!(*key < size, "a handle lies in the region");
             assert!(!keys.iter().skip(at + 1).any(|other| other == key));
+        }
+    }
+
+    /// The region of a session whose tables take their memory on use holds the session's key
+    /// budget, which the open writes at the session's `KEY_ARENA_BYTES`: a key made through the
+    /// handle it hands back is counted there as its arena block and given back. Turned red by a
+    /// budget of other bytes than the limits state, or by a handle of no budget
+    /// (`BudgetKeys::default` in place of `budget.keys()`), which keeps no key.
+    #[cfg(feature = "tables-on-use")]
+    #[test]
+    fn an_on_use_region_holds_the_sessions_key_budget() {
+        use wz_session_core::bounded::KeyMaker;
+        use wz_session_core::key_arena::block_bytes;
+        let layout = core::alloc::Layout::new::<StateRegion>();
+        // SAFETY: the layout is of a type of some bytes.
+        let block = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        let region = NonNull::new(block.cast::<StateRegion>()).expect("the test allocator answers");
+        let limits = SessionLimits::BUILD;
+        // SAFETY: the region is zeroed, aligned and this test's alone, and is given back after the
+        // last key counted against its budget.
+        let keys = unsafe { StateRegion::place(region, &limits) };
+        assert_eq!(keys.counts().bytes, limits.key_arena_bytes());
+        assert_eq!(keys.counts().used, 0);
+        let key = keys.key("demo/region").expect("room for a key");
+        assert_eq!(
+            keys.counts().used,
+            block_bytes("demo/region".len()).expect("a short key's block")
+        );
+        drop(key);
+        assert_eq!(keys.counts().used, 0, "the key's bytes went back");
+        // SAFETY: no key of the budget lives; the region is dropped once, in place, and given back
+        // with the layout it was taken with.
+        unsafe {
+            core::ptr::drop_in_place(region.as_ptr());
+            alloc::alloc::dealloc(block, layout);
         }
     }
 }

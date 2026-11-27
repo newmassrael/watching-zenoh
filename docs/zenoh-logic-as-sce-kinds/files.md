@@ -184,6 +184,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/reach.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/adding.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/registry/counted.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/held.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/placed.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/replay.rs` | S7 | |
@@ -230,6 +231,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/liveliness.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/local.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/local_query.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/on_use.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/one_face.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/one_thread.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/plain_put.rs` | excluded: test | Test-only file by its name. |

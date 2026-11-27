@@ -419,8 +419,9 @@ impl QueryView for OwnGet<'_> {
 }
 
 /// A plane that holds the Finals of at most `rows` queries at once, in rows lent from an arena
-/// the test leaks. Only the registry's tests, which a build that plans at the open runs, ask one.
-#[cfg(all(test, feature = "runtime-plan"))]
+/// the test leaks. Only the registry's tests ask one, which a build that plans at the open runs, or
+/// one whose tables take their memory on use.
+#[cfg(all(test, any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(super) fn leaked_plane(rows: usize) -> Box<QueryPlane> {
     use wz_session_core::bounded::Arena;
     let held = Arena::table_bytes::<FinalHold>(rows).expect("rows the address space holds");
