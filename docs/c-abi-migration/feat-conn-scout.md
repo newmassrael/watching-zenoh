@@ -61,8 +61,8 @@ wz's is `crates/wz-capi-pico/src/connectivity.rs` over the engine's face rows
 | a group member's link | `_z_endpoint_to_string` of the group's endpoint, once per member (`src/transport/multicast/rx.c`) | `pico_group_endpoint_text`: the group's endpoint read again with `PicoEndpoint::read` and written into a `String` at every row handed out | **form**: the text is the group's, fixed when it is joined (CN2) |
 | the info walks | `z_info_transports`, `z_info_links` walk the peers under the session's lock | `rows`: `face_link_at` row by row, no lock held between two rows | same work |
 | listeners: declare, undeclare, the table | `z_declare_transport_events_listener` and its link twin: a callback in the session's list, removed under its lock | `Table<S, N>`, `Entry<S>`, `next_in`, `take_in`, `admit`, `end_replay`, `retire_entry`, `Delivery<E>`, each written once and instantiated for the transport listener and again for the link listener | **form**: two copies of one table (CN3) |
-| dispatching an arrival and a departure | `_z_connectivity_peer_connected` and `_disconnected` dispatch to every listener from the task that saw the peer, under the session's lock (`_z_connectivity_dispatch_transport_event`) | one hub per session handed rows by the engine's face watch through a queue of `MAX_FACE_WATCH_ROWS`, delivered outside every lock | **contract** (row K3): a callback that calls the session back runs; zenoh-pico holds its lock across it |
-| history | `_z_connectivity_replay_transport_history` replays under the peer's and the session's locks, so nothing interleaves | the replay runs outside the lock; what arrives meanwhile waits in `Pending<E>` (`MAX_CONNECTIVITY_REPLAY_EVENTS`), folded by row | part of K3: the queue exists because the replay holds no lock |
+| dispatching an arrival and a departure | `_z_connectivity_peer_connected` and `_disconnected` dispatch to every listener from the task that saw the peer: `_z_connectivity_dispatch_transport_event` clones the listener map under the session's lock, lets it go and calls each closure outside it | one hub per session handed rows by the engine's face watch through a queue of `MAX_FACE_WATCH_ROWS`, delivered outside every lock | same work, outside every lock in both (section 5 corrects the first reading); the queue is form (CN4) |
+| history | `_z_connectivity_replay_transport_history` replays under the transport's peer lock, before the listener is inserted, so no arrival interleaves | the replay runs outside the lock; what arrives meanwhile waits in `Pending<E>` (`MAX_CONNECTIVITY_REPLAY_EVENTS`), folded by row | **contract** (row K3): the queue exists because the replay holds no lock |
 | a row the queue lost | none: nothing is queued, nothing is lost | `Told`, `converge_transports`, `converge_links`: the rows told kept (`MAX_CONNECTIVITY_TOLD_ROWS`) and the listener brought to the faces as they stand after a loss | **form**: the loss exists because the hand-out is queued; delivering as the face changes (CN4) removes the queue, the loss and the reconciliation |
 | what a link of a kind zenoh-pico lacks reports | none | the registry's answers (QUIC, unixpipe, vsock, unix sockets) | wz's link kinds; no code of the plane's own |
 
@@ -88,24 +88,45 @@ twin's (`pico-api-coop-nostd`) for connectivity; each names its basis.
 | CN4 | The hub told as the face changes, from the engine's face watch, outside the engine's lock, with no queue between: no row is lost, so no row told is kept and no listener is brought to the faces after a loss | -4,000 to -7,000 (`Told`, `converge_transports`, `converge_links`, `MAX_CONNECTIVITY_TOLD_ROWS`' rows; the face watch's queue in the twin) | `told_tests` retire with what they test; `connectivity_events`'s order (transport `PUT` then link `PUT`, link `DELETE` then transport `DELETE`) holds |
 
 Order: SC1, SC3 and SC4 (done), then SC2, SC5 and SC7 (the scout's plane alone), SC6 after
-`lang-rt.md` L2; CN3 and CN2 (the door alone), CN1 (the engine's face row
-and the door), CN4 last (the engine's face watch).
+`lang-rt.md` L2; CN3, then CN1 with CN2 (the engine's face row, the open plan and the door), CN4
+last (the engine's face watch). Section 8 says why SC7 and CN2 changed.
 
 ## 5. Contract: rows for `contract-switches.md`
 
 Each behaviour of these planes that zenoh-pico lacks, for the owner's ruling (a capability on in a
 build that names nothing, off in the zenoh-pico preset). `contract-switches.md` was not on the base
-of this lane; these rows are to be appended there with its next free ids.
+of this lane; these rows are to be appended there with its next free ids. Each row's evidence was
+read in the pinned zenoh-pico tree (`vendor/zenoh-pico`), and K3's was corrected by that reading
+(below the table).
 
-| row | behaviour | zenoh-pico's absence | off, it loses | estimate |
-|-----|-----------|----------------------|---------------|---------:|
-| K1 `scout-group-socket` | a window also reads on a socket joined to the scouting group, and asks on it when no interface can be asked on | `_z_scout_init_links` opens per-interface links alone and fails a scout with none (`return _z_scout_links_size(&scout->_links) > 0 ? _Z_RES_OK : _Z_ERR_TRANSPORT_OPEN_FAILED;`) | a Hello sent to the group rather than to the asker is not heard, and a host that lists no interface finds nobody | 800 to 1,500 (`joined_on`'s join and the group's bind) |
-| K2 `scout-rx-verdicts` | a datagram a window does not take is classified (self echo, another node's Scout, locator-less Hello, unknown MID, undecodable), counted and logged by verdict | `_z_scout_recv` returns the decode's error or `_Z_ERR_MESSAGE_UNEXPECTED` and `_z_scout_read` logs it | the counts (`IgnoredCounts`) and the debug lines; a malformed datagram is still dropped | 600 to 1,200 (`classify_ignored_scout_rx`, `record_ignored`) |
-| K3 `connectivity-unlocked-delivery` | a connectivity listener is called outside the session's locks, so it may call the session; a history replay holds no lock and what arrives meanwhile is told after it (`Pending`) | `_z_connectivity_dispatch_transport_event` and the history replay run under `_z_session_mutex_lock` | the replay and the events dispatched under the face table's read, as zenoh-pico does; a callback that calls the session back waits on itself | 1,500 to 2,500 (`Pending`, `end_replay`) |
+| row | behaviour | evidence in zenoh-pico | off, it loses | estimate (bytes) | proposed switch | defaults |
+|-----|-----------|------------------------|---------------|-----------------:|-----------------|----------|
+| K1 `scout-group-socket` | a window also reads on a socket joined to the scouting group, and asks on it when no interface can be asked on | `src/session/scout.c` @ `return _z_scout_links_size(&scout->_links) > 0 ? _Z_RES_OK : _Z_ERR_TRANSPORT_OPEN_FAILED;`: a scout opens per-interface unicast links alone and fails with none; no link of it is joined to the group | a Hello sent to the group rather than to the asker is not heard, and a host that lists no interface finds nobody (its window has no member and ends at once, as zenoh-pico's fails) | 800 to 1,500 (`bind_scout_group`, `joined_on`'s join and the group's bind, the group member's arm of `ScoutMembers::from_parts`) | `CONFIG_WZ_CAP_SCOUT_GROUP_SOCKET`, cargo feature `scout-group-socket` of `wz-runtime-posix` and `wz-capi-coop` | on (Kconfig `default y`); `n` in `configs/zenoh-pico_defconfig`; implies `scout` |
+| K2 `scout-rx-verdicts` | a datagram a window does not take is classified (self echo, another node's Scout, a locator-less Hello, an unknown MID, undecodable), counted by verdict (`IgnoredCounts`) and logged at the verdict's severity | `src/session/scout.c` @ `ret = _Z_ERR_MESSAGE_UNEXPECTED;` in `_z_scout_recv`, and `_z_scout_read`'s `_Z_ERROR("Failed to receive scouting message from link %zu: %d", i, ret);`: one error code, one line, no count | the counts and the per-verdict lines; a datagram not taken is still dropped and still does not advance the window (`hello_advances_window` is the window's rule, not the verdict's) | 600 to 1,200 (`classify_ignored_scout_rx`, `ScoutingActions::record_ignored`'s arms, `IgnoredCounts`) | `CONFIG_WZ_CAP_SCOUT_RX_VERDICTS`, cargo feature `scout-rx-verdicts` of `wz-session-core` | on; `n` in the zenoh-pico defconfig; implies `scout` |
+| K3 `connectivity-unlocked-replay` | a listener's history replay holds no lock of the session's faces, so a callback in it may read the faces (`z_info_transports`, `z_info_links`); what arrives meanwhile is told after it, folded by row (`Pending`) | `src/api/connectivity.c` @ `_z_connectivity_replay_transport_history`: the replay calls the closure under `_z_transport_peer_mutex_lock(transport_common);`, and the listener is inserted only after it (`id = session->_connectivity_next_listener_id++;` under `_z_session_mutex_lock_if_open`) | the queue: the replay runs under the face table's read, as zenoh-pico's runs under its peer lock, so an arrival waits for it rather than queueing; a callback of the replay that reads the faces waits on itself, as in zenoh-pico | 1,500 to 2,500 (`Pending`, `end_replay`, `finish_replay`'s fold) | `CONFIG_WZ_CAP_CONNECTIVITY_UNLOCKED_REPLAY`, cargo feature `connectivity-unlocked-replay` of `wz-capi-pico` | on; `n` in a preset based on zenoh-pico that turns `connectivity` on (the zenoh-pico defconfig has `CONFIG_WZ_CAP_CONNECTIVITY=n`, so it names nothing of it); implies `connectivity` |
+
+K3 corrected: the lane's first reading said zenoh-pico dispatches an arrival and a departure under
+its session lock. It does not: `_z_connectivity_dispatch_transport_event` and its link twin clone
+the listener map under `_z_session_mutex_lock(session);`, let it go, and call each closure outside
+it. Delivery outside every lock is therefore shared behaviour and no row; what zenoh-pico lacks is
+the replay without a lock, which is K3 as it now stands.
 
 Not rows: the claim of the process's scout table (the no-heap contract: a static table is shared
 by every thread), a Hello's locator quota (`MAX_LOCATOR_LEN`, the same contract), the link kinds
 zenoh-pico lacks (no code of the plane's own).
+
+What each switch needs to land, none of which this lane can run: a `[[capability]]` of
+`deploy/wz-config.toml` with the id, `kconfig`, `upstream_off = ["zenoh-pico"]`, `abis`
+(`["core", "pico"]` for K1 and K2, `["pico"]` for K3) and `implies` above, and
+`scripts/lib/wz_config.py` run to emit `deploy/Kconfig.capabilities`, the defconfigs and the
+generated limits it writes (its `--check` fails on a hand-edited one); then the cargo feature at
+every use, with the build without it compiling: K1 gates `bind_scout_group` and the group member
+of `ScoutMembers::open` (a window then has ask members alone, and `from_parts`'s fallback to the
+group goes with it); K2 gates `classify_ignored_scout_rx` and the per-verdict arms, leaving one
+count of datagrams not taken (the conservation the window's tests read: taken or counted); K3 gates
+`Pending` and the replay's fold, the off form holding the face table's read across the replay.
+The census (`upstream_feature_census.py`), the prose-name and the no-allocator gates read a new
+capability name, so the main session runs them with the generator.
 
 ## 6. Measurement cells
 
@@ -123,3 +144,44 @@ zenoh-pico lacks (no code of the plane's own).
 | SC1 | `refactor(runtime-posix): Make a scout's sockets from plans, not keys` | as planned; `bind_joined` and `bind_sender` keep the key resolution for the group plane and share `joined_on` with the scout's group socket. `multicast_interface_addresses` answers `Ipv4Addr`, the type of what it gives | an asker is bound to its address, leaves by it, keeps the options the pinned sender keeps, does not block, and is refused for an IPv6 group; the scout's group plan is the plan of no key |
 | SC4 | `refactor(capi-pico): Trim a scout's config values of ASCII space alone` | as planned; zenoh-pico reads the numbers with `strtol`, which skips the C locale's (ASCII) space, and the locator untrimmed | ASCII padding is taken off `what` and the budget; a value led by a no-break space states nothing and leaves the default |
 | SC3 | `refactor(runtime-posix): Ask a scout's interfaces of the host's list` | as planned; `InterfaceTable::read` reads through the same walk, an interface's index asked by its name's bytes | the rule over made rows (one address an interface, IPv6, joined groups, loopback, down and carrier-less interfaces left out); the walk and the owned table list the same entries; each index is the one its name finds |
+| SC2 | `refactor(session-core): Name a scout window's record and holding` | as planned, as two pairs of types. The record: `ScoutingActions<R, K>` over `K: HelloRecord<R>`, the heap collection `HelloList` (the tokio engine's, the default `K`) or the lent table `LentTable` (the C library's), each with the reads of its own form (`scouted_hellos` and `ignored_datagrams` of the list, `hellos_refused` of the table); the count of datagrams not taken stays every window's. The holding: `ScoutWindow<S: WindowHolding>`, `SharedWindowState` (an `Arc`) or `LentWindowState` (held in the window's place), the machine reaching it through `ActionsReach` (the `Arc`, or `PlacedActions`, a pointer). The actions' bodies are the state's own methods, so the binding is four calls. `ScoutingActions::over_table`'s `Arc` form had no caller and is gone | the window's tests over both forms, unchanged in what they assert (the collection has no bound, a lent table counts past its rows, a window built in its place is the window built by value); `a_window_over_a_lent_table_holds_its_state_in_its_place` now reads the lent record as a pointer that owns nothing it would drop (red if it grows a list, a string or an `Arc`), records its answer in the table, and holds a shared window's `Arc` at two (the window and its machine) |
+| SC5 (the set) | `refactor(runtime-posix): Make a scout window's wait set with its members` | the half of SC5 that needs no new limit: `ReadableAmong`, a socket's poll entry (`pollfd`, `WSAPOLLFD`) made once as a member joins the window, kept in the members' order and dropped with each lost member; `ScoutMembers::wait` hands the set as it stands, so neither collect is made at a wait (`wait_readable_any` is gone from `MulticastSocket`) | `a_member_whose_read_fails_is_dropped_and_the_rest_keep_their_order` reads the set against the members after every drain (red if the set leaves their order or keeps a lost member's entry); the real wait test is unchanged |
+
+## 8. What waits, and why
+
+- **SC5, the members' fixed storage.** The members in a table of the scout's interface bound needs a
+  limit the build states (zenoh-pico's `Z_MAX_NUM_SCOUT_INTERFACES`, 10 in `config.h.in`, 0 with
+  scouting off). A limit is a `deploy/wz-config.toml` entry whose `caps_generated.rs`,
+  `caps_binding_generated.rs`, `limits_generated.rs` and conformance vectors
+  `scripts/lib/wz_config.py` emits; this lane cannot run it, and a number written in
+  `wz-runtime-posix` would be a second home of the fact. Next: `MAX_SCOUT_INTERFACES` (default 10,
+  the zenoh-pico preset's 10) in the toml, emitted; `ScoutMembers` over two arrays of that many
+  rows plus the group member (`members`, `readable`), an ask address past the bound skipped and
+  counted, as zenoh-pico warns `Scouting link limit reached, ignoring interface`; the test a window
+  of one more interface than the bound keeps the bound and counts one.
+- **SC7: its premise is false on the measured cases.** `z_hello_clone` boxes a `HelloState` with a
+  `StringArrayState` of `String`s only in a library without the process pools, which is the tokio
+  engine's without `object-pool` (`crates/wz-capi-pico/build.rs`). Every cooperative library has
+  the pools, and there an owned hello is already one block of its own, `KeptHello` (the hello, its
+  array, the views and the locator text) in a slot of the pool of kept hellos. The 1,752 bytes read
+  in section 1 are that block's copy (`KeptHello::write_at`) and the pool's slot code, not a
+  boxed array. What remains of the step is a smaller copy: a kept hello holding a `HelloRow` (its
+  `ends` and `text`, which a row already holds) and making its views from it, so the text and
+  its bounds have one layout; to be measured before it is planned.
+- **SC6 waits on `lang-rt.md` L2**, owned by another lane. What it needs from L2: a reader in
+  `wz-session-core`, beside `locator_grammar`, of a socket address's text (`IPV4:PORT` and
+  `[IPV6]:PORT`, the bracketed form `parse_multicast_locator` documents and tests) answering
+  `(IpAddr, u16)` or `SocketAddr`, refusing what `SocketAddr::from_str` refuses (an unbracketed
+  IPv6 address with a port, a missing port). With it, `parse_multicast_locator` reads `rest` with
+  that reader in place of `rest.parse::<SocketAddr>()`, its tests unchanged
+  (`the_multicast_locator_grammar_is_exact`), and a scout links no `core::net` reader.
+- **CN1 to CN4** are not begun in this lane's round. CN2's door-only form is not one: the text
+  pico writes of a group endpoint (`pico_group_endpoint_text`) is the pico ABI's reading, and the
+  engine's row carries the endpoint the group was joined by, which other ABIs read as it is. Written
+  once, it is the pico ABI's open plan that writes it, when it plans the join, kept with the
+  session's pico state and read by the door; that is the open plan's file and the face row's, so
+  CN2 goes with CN1, which changes the face row. CN3 (one table over an event naming its plane)
+  and CN4 (no queue between the face watch and the hub) keep their plan and their order: CN3, then
+  CN1 with CN2, then CN4.
+- **K1 to K3** are not implemented: section 5 states what each needs, and the capability catalog
+  is generated by a tool this lane does not run.
