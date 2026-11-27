@@ -1167,6 +1167,19 @@ the dial role's (none for the client); it now leaves that row to the faces' test
 the listener ran, whose open then found no answer: the listener's and the member's read tasks
 start before the client dials.
 
+**The host group tests' reds on the run after, read as the host's.** The three tests of the host's
+group sockets (`host_group`'s `a_datagram_one_member_sends_reaches_another_from_its_send_socket`
+and `tests::host_group`'s two) were red on a run of this lane and green on main's. The two runs
+were made on two hosts: this lane's on a host whose firewall drops what it receives unless a rule
+lets it in, main's on one that drops nothing. A datagram a member sends to its own group comes back
+on the input path of the interface it left by (the multicast loopback), not on the loopback
+interface, so that firewall drops it as it drops a peer's, and no member hears another. The
+datagram test reads no code of this lane: `host_group.rs`, `wz_runtime_posix::multicast` and
+`wz_runtime_coop::group_transport` are main's byte for byte, and it opens no engine, so the host
+decides it, not the lane. Nothing is changed for it. The tests stay ignored where the host gives its
+own sockets no multicast route, and run where one is given (Layer M); `a_quiet_read` is read on
+such a host before it is taken as held.
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)
