@@ -321,6 +321,27 @@ unsafe fn give_back_lent_place(place: NonNull<u8>, lender_at: usize) {
     lender.give_back();
 }
 
+/// The engine of the session whose arena lent the place `object` lies in, as the place's lender
+/// holds it: an entity's object reaches its session through the one count its place keeps, and
+/// keeps none of its own beside it.
+///
+/// # Safety
+/// `object` is the object of a place [`Slot::take_entity`] lent for a `T` and filled, read through
+/// the pointer the place was filled at, and the place stands for `'a`.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) unsafe fn lent_engine<'a, T>(object: *const T) -> &'a crate::session::EngineHold {
+    // SAFETY: the caller's: the object is the start of an `InSession<T>` (`repr(C)`, its value
+    // first), whose lender the take wrote `LENDER_AT` bytes in, where it stays until the place goes
+    // back.
+    let lender = unsafe {
+        &*object
+            .cast::<u8>()
+            .add(InSession::<T>::LENDER_AT)
+            .cast::<core::mem::ManuallyDrop<Lender>>()
+    };
+    &lender.engine
+}
+
 /// The entity kind of the engine's arena an object of `kind` is placed as, and the layout of its
 /// place: the one table both the open's places ([`held_places`]) and each place taken
 /// ([`Slot::take_entity`]) read. `None` for a kind that is no entity.

@@ -1814,7 +1814,10 @@ impl z_owned_publisher_t {
 /// C closure lies in the row ([`subscriber_sink`]), so its place holds the state alone and goes
 /// back with its handle.
 pub(crate) struct SubscriberState {
-    pub(crate) shared: crate::session::EngineHold,
+    /// The session's engine, on the tokio engine, whose places are its pools' and hold none. On the
+    /// cooperative engine the place's lender holds it ([`subscriber_engine`]).
+    #[cfg(feature = "engine-tokio")]
+    shared: crate::session::EngineHold,
     /// The declaration, once made: the place is filled before the subscriber is declared, as the
     /// closure its row calls lies in it, and one whose declaration was refused is let go of with
     /// none.
@@ -1841,7 +1844,7 @@ pub(crate) struct DeclaredSubscriber {
 }
 
 impl DeclaredSubscriber {
-    /// Subscription `id`, its key not lent yet ([`SubscriberState::bind`]).
+    /// Subscription `id`, its key not lent yet (`bind_subscriber`).
     pub(crate) fn new(id: SubId) -> Self {
         Self {
             id,
@@ -1850,35 +1853,93 @@ impl DeclaredSubscriber {
     }
 }
 
-impl SubscriberState {
-    /// Point the cached loan at `lent`, the key the session's record of the subscription keeps as
-    /// its declaration answered it, once declared and placed.
-    ///
-    /// A subscription already gone when its declaration returned answers no key: no loan is bound,
-    /// and `z_subscriber_keyexpr` lends the empty loan it was filled with.
-    fn bind(&mut self, lent: wz_capi_port::KeyView) {
-        let Some(declared) = self.declared.as_mut() else {
-            return;
-        };
-        if lent.is_absent() {
-            return;
-        }
-        declared.record = crate::keyexpr::RecordKey::lent(&self.shared, lent.own);
-        self.loaned_keyexpr = crate::keyexpr::record_loan(lent, &declared.record);
+/// Point the cached loan of the subscriber at `state` at `lent`, the key the session's record of
+/// the subscription keeps as its declaration answered it, once declared and placed.
+///
+/// A subscription already gone when its declaration returned answers no key: no loan is bound,
+/// and `z_subscriber_keyexpr` lends the empty loan it was filled with.
+///
+/// # Safety
+/// As [`subscriber_engine`]'s, and the state's owner holds it.
+unsafe fn bind_subscriber(state: *mut SubscriberState, lent: wz_capi_port::KeyView) {
+    if lent.is_absent() {
+        return;
     }
+    // The record names the engine where the subscriber reaches it, standing while the state does.
+    // SAFETY: the caller's.
+    let record = crate::keyexpr::RecordKey::lent(unsafe { subscriber_engine(state) }, lent.own);
+    // SAFETY: the caller's: the state is live and its owner holds it.
+    let state = unsafe { &mut *state };
+    let Some(declared) = state.declared.as_mut() else {
+        return;
+    };
+    declared.record = record;
+    state.loaned_keyexpr = crate::keyexpr::record_loan(lent, &declared.record);
+}
 
+/// The engine of the session the subscriber at `state` was declared on: the one count its place's
+/// lender keeps on the cooperative engine, so the subscriber holds no count of its own beside it.
+///
+/// # Safety
+/// `state` is a live subscriber [`fill_subscriber_place`] filled in a place
+/// [`Slot::take_entity`](crate::object_slot::Slot::take_entity) took, read through the pointer it
+/// was filled at, and stands for `'a`.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) unsafe fn subscriber_engine<'a>(
+    state: *const SubscriberState,
+) -> &'a crate::session::EngineHold {
+    // SAFETY: the caller's.
+    unsafe { crate::object_slot::lent_engine(state) }
+}
+
+/// The engine of the session the subscriber at `state` was declared on, which the state holds on
+/// the tokio engine, whose places are its pools'.
+///
+/// # Safety
+/// `state` is a live subscriber [`fill_subscriber_place`] filled, which stands for `'a`.
+#[cfg(feature = "engine-tokio")]
+pub(crate) unsafe fn subscriber_engine<'a>(
+    state: *const SubscriberState,
+) -> &'a crate::session::EngineHold {
+    // SAFETY: the caller's.
+    unsafe { &(*state).shared }
+}
+
+/// The state a loaned subscriber's handle names, read as the pointer the place was filled at, so
+/// the engine its place keeps is reached through it ([`subscriber_engine`]); `None` for a null
+/// loan or a null handle.
+///
+/// # Safety
+/// `subscriber` must be null or a live loaned subscriber.
+#[cfg(feature = "unstable-api")]
+pub(crate) unsafe fn subscriber_at(
+    subscriber: *const z_loaned_subscriber_t,
+) -> Option<*const SubscriberState> {
+    if subscriber.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's: a live loan, whose handle lies at its start.
+    let handle = unsafe { (*subscriber).handle };
+    (!handle.is_null()).then_some(handle as *const SubscriberState)
+}
+
+impl SubscriberState {
     /// The subscription's id, once declared.
     pub(crate) fn id(&self) -> Option<SubId> {
         self.declared.as_ref().map(|declared| declared.id)
     }
 }
 
-/// Fill `slot` with a subscriber of `engine` not declared yet.
+/// Fill `slot` with a subscriber of `engine` not declared yet. On the cooperative engine the
+/// place's lender already holds `engine` (`subscriber_engine`), so the state takes no count.
 pub(crate) fn fill_subscriber_place(
     slot: crate::object_slot::Slot<SubscriberState>,
     engine: &crate::session::EngineHold,
 ) -> *mut SubscriberState {
+    #[cfg(not(feature = "engine-tokio"))]
+    let _ = engine;
     slot.fill(SubscriberState {
+        #[cfg(feature = "engine-tokio")]
         shared: crate::session::EngineHold::clone(engine),
         declared: None,
         loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
@@ -1899,7 +1960,7 @@ pub(crate) unsafe fn settle_subscriber(
             // SAFETY: the caller's: the owner holds the state.
             unsafe {
                 (*state).declared = Some(DeclaredSubscriber::new(declared.id));
-                (*state).bind(declared.key);
+                bind_subscriber(state, declared.key);
             }
             Ok(state)
         }
@@ -1963,7 +2024,7 @@ unsafe fn free_publisher(h: *mut c_void) {
 unsafe fn free_subscriber(h: *mut c_void) {
     let state = h as *mut SubscriberState;
     if let Some(id) = (*state).id() {
-        (*state).shared.undeclare_subscriber(id);
+        subscriber_engine(state).undeclare_subscriber(id);
     }
     crate::object_slot::release_entity(state);
 }
@@ -4445,6 +4506,58 @@ mod tests {
         drop(sink);
         assert_eq!(DROPS.load(Ordering::SeqCst), 1, "the C drop ran once");
 
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// A subscriber reaches its session's engine through the count its place's lender keeps, and
+    /// takes none of its own: filling the place leaves the engine's count where the take put it, the
+    /// engine reached is the session's, and the release gives back the place's one count. Turned red
+    /// by a subscriber's state that holds the engine again (`fill_subscriber_place`) or a lender
+    /// read at another offset (`crate::object_slot::lent_engine`).
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_subscriber_reaches_its_engine_through_its_places_one_count() {
+        use crate::object_slot::{release_entity, Kind, Slot};
+        use crate::session::{
+            engine_held, listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
+            EngineHold,
+        };
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
+        let before = EngineHold::holders(&engine);
+        let slot =
+            Slot::<SubscriberState>::take_entity(&engine, Kind::Subscriber).expect("a place");
+        let taken = EngineHold::holders(&engine);
+        assert_eq!(
+            taken,
+            before + 1,
+            "CONTROL: the place's lender holds the engine"
+        );
+        let state = fill_subscriber_place(slot, &engine);
+        assert_eq!(
+            EngineHold::holders(&engine),
+            taken,
+            "the state takes no count of its own"
+        );
+        // SAFETY: the state was filled in a place `take_entity` took, and stands until it is
+        // released below.
+        let reached = unsafe { subscriber_engine(state) };
+        assert!(
+            EngineHold::ptr_eq(reached, &engine),
+            "the place's engine is the session's"
+        );
+        // SAFETY: the state's owner lets go of it once, here.
+        unsafe { release_entity(state) };
+        assert_eq!(
+            EngineHold::holders(&engine),
+            before,
+            "the place's one count went back"
+        );
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };
