@@ -3638,6 +3638,38 @@ fn made_bytes_of_zero_or_seventeen_are_refused_as_a_zid() {
     );
 }
 
+/// The open's refusals of memory, built out of line where they are read, are the values each step
+/// answered in line: the lend's own refusal as the arena gave it, `asked` bytes past none left, and
+/// the heap's refusal of `bytes`. Turned red by a maker that builds a refusal of another class or
+/// size than the step's.
+#[test]
+fn the_opens_refusals_of_memory_are_the_values_its_steps_answered() {
+    use crate::arena::ArenaRefused;
+    use crate::engine::{heap_refused, lend_exhausted, lend_refused};
+    use crate::OpenError;
+    use wz_session_core::bounded::LendRefused;
+
+    let over = LendRefused::OverCeiling {
+        rows: 3,
+        ceiling: 2,
+    };
+    assert_eq!(
+        lend_refused(over),
+        OpenError::Arena(ArenaRefused::Lend(over))
+    );
+    assert_eq!(
+        lend_exhausted(96),
+        OpenError::Arena(ArenaRefused::Lend(LendRefused::Exhausted {
+            asked: Some(96),
+            left: 0
+        }))
+    );
+    assert_eq!(
+        heap_refused(40),
+        OpenError::Arena(ArenaRefused::NoMemory { bytes: 40 })
+    );
+}
+
 /// The limits an open holds its tables to are read where the config holds them: every reader
 /// of them is handed the config's own, and no copy is made to read them. Turned red by a
 /// resolver that hands back limits of its own.

@@ -1,7 +1,7 @@
 # Structural lane sz-open: the session's open, line by line
 
 Status: the reading and the design of the lane, with its steps carried in beside it as section 5
-onwards records them (O1, O2; O3 held, section 7).
+onwards records them (O1, O2, O4; O3 held, section 7).
 Nothing here was built or measured by this lane: every byte figure is either **read** (from the
 size ledger's explain document of the case, from the case's shipped library, or from a line table
 named below) or an **estimate** from the code, to be read on the explain document after the merge.
@@ -201,3 +201,19 @@ owners below are one:
 What would carry it: a `Core` built where the engine lies (`engine_of` writes it there today, after
 `assemble` built it in the frame), each group written there once by its lender. That is the
 structure of the place the engine is written at, and it is read on the case before it is written.
+
+## 8. O4 as carried
+
+`crates/wz-capi-coop/src/engine.rs`: the open's refusals of memory are built by three bodies, each
+out of line and cold: `lend_refused` (`OpenError::Arena(ArenaRefused::Lend(..))`, the lend's own
+refusal), `lend_exhausted` (`LendRefused::Exhausted { asked: Some(asked), left: 0 }`, the runtime's
+span and the wait room) and `heap_refused` (`ArenaRefused::NoMemory { bytes }`, the entropy's cell,
+the admission's rows, the ports' book). Each step of `assemble` that may be refused so hands its
+refusal or its size to one of them (`map_err`, `ok_or_else`), and builds no value of the open's
+refusal in line; the two refusals that were built eagerly (`ok_or`) on the path that succeeds are
+built only when they are taken.
+
+The values keep their sizes: the Rust surface and the tests read them (`OpenError` is `PartialEq`),
+so the class alone, which is all `coop_open_refusal` reads, is not what the open answers. The test
+`the_opens_refusals_of_memory_are_the_values_its_steps_answered` (`tests.rs`) holds each body's
+value. What the main session reads: `assemble` and the case's total; the three bodies appear apart.

@@ -735,6 +735,35 @@ impl From<TransportRefusal> for OpenError {
     }
 }
 
+/// The refusal of an open whose arena had no room for a table or a place it lends, as the lend
+/// gave it. Out of line and cold, so each step of the open that may be refused so hands its lend's
+/// refusal here and builds no value of the open's refusal in line.
+#[cold]
+#[inline(never)]
+pub(crate) fn lend_refused(refused: LendRefused) -> OpenError {
+    OpenError::Arena(ArenaRefused::Lend(refused))
+}
+
+/// The refusal of an open that had no room left for `asked` bytes it would hold for the session
+/// (the runtime's span, the waits a read gathers), built as `lend_refused` builds it.
+#[cold]
+#[inline(never)]
+pub(crate) fn lend_exhausted(asked: usize) -> OpenError {
+    lend_refused(LendRefused::Exhausted {
+        asked: Some(asked),
+        left: 0,
+    })
+}
+
+/// The refusal of an open whose heap had no room for `bytes` it takes there (the entropy's cell,
+/// the admission's rows, the ports' book, and the engine's own allocation where the tables take
+/// their memory on use). Out of line and cold, as `lend_refused` is.
+#[cold]
+#[inline(never)]
+pub(crate) fn heap_refused(bytes: usize) -> OpenError {
+    OpenError::Arena(ArenaRefused::NoMemory { bytes })
+}
+
 /// The key ids every node of a deployment shares that an open hands the session, and the
 /// endpoints whose key-wire form is stated apart from the session's
 /// (`CoopEngine::open_with_key_ids`). A build without `shared-key-ids` hands none, and an ABI
@@ -6927,10 +6956,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // Where the tables take their memory on use, the engine lies in an allocation of its own,
         // claimed here beside its row: an open the allocator has no room for reserves nothing.
         #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-        let claim =
-            SharedClaim::<Self>::try_new().ok_or(OpenError::Arena(ArenaRefused::NoMemory {
-                bytes: Shared::<Self>::layout().size(),
-            }))?;
+        let claim = SharedClaim::<Self>::try_new()
+            .ok_or_else(|| heap_refused(Shared::<Self>::layout().size()))?;
         // The runtime's tables are placed in the arena, so its plan holds their span.
         #[cfg(wz_round)]
         let tables = RuntimeTables::of::<C>(&config);
@@ -6969,15 +6996,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // each group's among them.
         let (wire, entropy, rooms_at) = written.and_then(|()| {
             // A heap with no room for the source's cell is memory the open cannot be given.
-            let mut entropy = SessionEntropy::<SharedCount>::try_held(entropy)
-                .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;
+            let mut entropy =
+                SessionEntropy::<SharedCount>::try_held(entropy).map_err(heap_refused)?;
             let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
             #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
             let rooms_at = lent
                 .arena
                 .arena_mut()
                 .vacant::<LinkRooms<L::Waits>>()
-                .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+                .map_err(lend_refused)?;
             // Where the tables take their memory on use, the rooms lie in an allocation of their
             // own, reserved here alike and filled at the same step: a refusal before the fill
             // gives the allocation back unwritten, and once filled their owner (`Core::rooms`)
@@ -6996,7 +7023,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             &lent.transport.reassembly,
             lent.transport.face_chains,
         )
-        .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+        .map_err(lend_refused)?;
         let wait_room = read_wait_room(&config);
         #[cfg(feature = "time-base")]
         let clock_wake = config.clock_moves.as_ref().and_then(|moves| {
@@ -7012,8 +7039,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(feature = "connectivity")]
         let face_rows = face_event_rows(config.max_faces, config.groups.len());
         #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
-        let watchers = FacePlane::place_in(lent.arena.arena_mut(), face_rows)
-            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+        let watchers =
+            FacePlane::place_in(lent.arena.arena_mut(), face_rows).map_err(lend_refused)?;
         // SAFETY: the state's places were placed by the open's lend and its faces' field is
         // reached by this write alone; the block is held by `Core` after the session's state,
         // which holds the plane's owner, and neither moves nor goes back before it.
@@ -7030,15 +7057,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             policy.link_tie_order(),
             wz_session_core::limit_binding::Quota::at_most(lent.links),
         )
-        .ok_or(OpenError::Arena(ArenaRefused::NoMemory {
-            bytes: lent.links.saturating_mul(LinkBook::row_bytes()),
-        }))?;
+        .ok_or_else(|| heap_refused(lent.links.saturating_mul(LinkBook::row_bytes())))?;
         #[cfg(feature = "link-admission")]
         let admission = lent
             .arena
             .arena_mut()
             .place(admission)
-            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+            .map_err(lend_refused)?;
         // SAFETY: the handle is held by the transport and by each link's lease, in the link's
         // actions, which the faces, the tasks and the transport hold: the engine's drop drops the
         // session's tasks before `Core` (`CoopLocalSet::drop_tasks`), and `Core` drops its
@@ -7050,25 +7075,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let places = lent.registry.places();
         // The waits a read makes at once, reserved here while the links hold nothing of what was
         // lent: none grows after.
-        let room = WaitRoom::reserved(wait_room).ok_or(OpenError::Arena(ArenaRefused::Lend(
-            LendRefused::Exhausted {
-                asked: Some(wait_room.saturating_mul(core::mem::size_of::<
+        let room =
+            WaitRoom::reserved(wait_room).ok_or_else(|| {
+                lend_exhausted(wait_room.saturating_mul(core::mem::size_of::<
                     wz_runtime_coop::session_drive::LinkWait,
-                >())),
-                left: 0,
-            },
-        )))?;
+                >()))
+            })?;
         // The task and timer tables and the session's local set, placed here once in the arena: no
         // spawn and no sleep of the session takes memory after its open (`open_links` seals them).
-        let (runtime, local) =
-            tables
-                .runtime(clock.clone(), lent.runtime)
-                .ok_or(OpenError::Arena(ArenaRefused::Lend(
-                    LendRefused::Exhausted {
-                        asked: Some(runtime_bytes),
-                        left: 0,
-                    },
-                )))?;
+        let (runtime, local) = tables
+            .runtime(clock.clone(), lent.runtime)
+            .ok_or_else(|| lend_exhausted(runtime_bytes))?;
         // SAFETY: the runtime is the session's alone: it and its local set go into the `Core` made
         // below and into no other value, the opening frame owns them until the `Core` is behind
         // its `CoreLock`, and from then on every spawn, pass and handle of its tasks is reached
@@ -7082,7 +7099,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(feature = "udp-listen")]
         links
             .lend_port_rows(lent.transport.port_rows)
-            .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;
+            .map_err(heap_refused)?;
         if let Some(driver_cells) = lent.transport.cells.driver {
             links.lend_cells(driver_cells);
         }
