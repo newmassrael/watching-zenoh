@@ -2693,12 +2693,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             if core.session.matching.moved(written) {
                 self.read_matching(core);
             }
-            let record = core.transport.links.face(slot.at());
-            slot.life_due_us = record
-                .and_then(|row| row.life.wake_at(now_us))
-                .unwrap_or(u64::MAX);
             // A life standing by is not at rest: it dials again once no other face holds its
             // node, which only a look at it reads.
+            #[cfg(any(feature = "listen", feature = "group"))]
+            let record = core.transport.links.face(slot.at());
             #[cfg(any(feature = "listen", feature = "group"))]
             face.rests.store(
                 slot.life_due_us == u64::MAX
@@ -2904,9 +2902,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// Tell the link's life `input` at `now_us` and carry out its effects (`link_life::carry`)
-    /// with what the read holds of the face's link (`DirectLinkIo`). `Err` with why the last
-    /// endpoint came to no link when the life ends the session. Out of line: the open's first
-    /// input and each look at the life carry the effects out through one body.
+    /// with what the read holds of the face's link (`DirectLinkIo`), then note when the life is
+    /// next to be looked at. `Err` with why the last endpoint came to no link when the life ends
+    /// the session. Out of line: the open's first input and each look at the life carry the
+    /// effects out through one body.
     #[inline(never)]
     fn drive_link(
         &self,
@@ -2917,6 +2916,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         now_us: u64,
     ) -> Result<(), OpenError> {
         let Some(record) = core.transport.links.face_mut(slot.at()) else {
+            slot.life_due_us = u64::MAX;
             return Ok(());
         };
         // A close is told to the life by the slot alone, which lets go of what it holds itself
@@ -2928,8 +2928,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             core,
             slot,
         };
-        carry(&mut io, effects, now_us)
-            .map_err(|SessionEnded| io.slot.last.take().unwrap_or(OpenError::NoEndpoint))
+        // The life's next look is the wake its last answer named: the wait-set entry is written
+        // from the answer, with no second ask of the life.
+        match carry(&mut io, effects, now_us) {
+            Ok(wake_us) => {
+                io.slot.life_due_us = wake_us.unwrap_or(u64::MAX);
+                Ok(())
+            }
+            Err(SessionEnded) => {
+                io.slot.life_due_us = u64::MAX;
+                Err(io.slot.last.take().unwrap_or(OpenError::NoEndpoint))
+            }
+        }
     }
 
     /// Hand the liveliness subscribers the declaration `record` of the face `records` reads, lent
@@ -3179,9 +3189,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 self.direct.hold_face(at, true);
                 let now_us = core.now_us();
                 if let Some(record) = core.transport.links.face_mut(at) {
-                    // A taken link's handshake asks for nothing of the session.
-                    let _ = record.life.input(LinkInput::Taken, now_us);
-                    slot.life_due_us = record.life.wake_at(now_us).unwrap_or(u64::MAX);
+                    // A taken link's handshake asks for nothing of the session: its answer is
+                    // when the life is next to be looked at.
+                    slot.life_due_us = record
+                        .life
+                        .input(LinkInput::Taken, now_us)
+                        .wake_at()
+                        .unwrap_or(u64::MAX);
                 }
             }
             placed.is_ok()

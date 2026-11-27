@@ -5781,7 +5781,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             read,
             last,
         };
-        carry(&mut io, effects, now_us).map_err(|SessionEnded| SessionEnds)
+        // The round reads each face's wake off its life when it plans its wait
+        // (`LinkSupervisor::idle_wait`), so the answer's is not kept here.
+        carry(&mut io, effects, now_us)
+            .map(|_wake_us| ())
+            .map_err(|SessionEnded| SessionEnds)
     }
 
     /// What a lost link of the face at `at`, numbered `id`, takes with it: its peer's chains,

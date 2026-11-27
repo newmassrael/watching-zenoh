@@ -232,6 +232,8 @@ pub struct Effects {
     from: usize,
     gone: bool,
     gave_up_dial: bool,
+    /// [`UnicastLink::wake_at`] at the input's time, read once the input moved the link.
+    wake_us: Option<u64>,
 }
 
 impl Effects {
@@ -290,6 +292,13 @@ impl Effects {
     /// A taken face's link is gone: the face goes, with its tables.
     pub fn removes(self) -> bool {
         self.gone
+    }
+
+    /// When the owner is next to look at the life though the link brings no input, as
+    /// [`UnicastLink::wake_at`] answers at the input's time once the input moved the link: the
+    /// owner's wait-set entry, with no second ask of the life.
+    pub fn wake_at(self) -> Option<u64> {
+        self.wake_us
     }
 
     /// Nothing to do.
@@ -531,8 +540,8 @@ impl UnicastLink {
             }
         };
         match event {
-            Some(event) => self.drive(event, from, gave_up_dial),
-            None => Effects::default(),
+            Some(event) => self.drive(event, from, gave_up_dial, now_us),
+            None => self.waits(now_us),
         }
     }
 
@@ -545,7 +554,7 @@ impl UnicastLink {
             DriverOutcome::Terminated | DriverOutcome::Refused => {
                 self.input(LinkInput::Ended, now_us)
             }
-            DriverOutcome::IterationLimit => Effects::default(),
+            DriverOutcome::IterationLimit => self.waits(now_us),
         }
     }
 
@@ -649,11 +658,27 @@ impl UnicastLink {
         self.data.stage = DialStage::Owed;
     }
 
-    /// Raise `event`, the input's at endpoint `from`, and take the duties it ran. Called from one
-    /// place (`Self::input`): the machine's event push and turn are in this image once.
-    fn drive(&mut self, event: UnicastLinkEvent, from: usize, gave_up_dial: bool) -> Effects {
+    /// The answer to an input that moved the link nowhere: nothing to do, and when to look again.
+    fn waits(&self, now_us: u64) -> Effects {
+        Effects {
+            wake_us: self.wake_at(now_us),
+            ..Effects::default()
+        }
+    }
+
+    /// Raise `event`, the input's at endpoint `from` at `now_us`, and take the duties it ran.
+    /// Called from one place (`Self::input`): the machine's event push and turn are in this image
+    /// once.
+    fn drive(
+        &mut self,
+        event: UnicastLinkEvent,
+        from: usize,
+        gave_up_dial: bool,
+        now_us: u64,
+    ) -> Effects {
         self.engine.process_event(event);
         Effects {
+            wake_us: self.wake_at(now_us),
             duties: self.engine.policy().actions().duties.take(),
             row: self.data.row,
             from,
@@ -715,14 +740,19 @@ pub trait LinkIo {
 
 /// Carry out `effects`, what the life answered an input reported at `now_us`, with the owner's
 /// I/O, in the order [`Effects`] names, and tell the life what the dial or the handshake it asked
-/// for came to as its next input, at the time read after that I/O, until it asks for no more.
-/// [`SessionEnded`] once the life ends the session; carrying stops too where a taken face goes
-/// or the face is gone.
+/// for came to as its next input, at the time read after that I/O, until it asks for no more:
+/// then when the life is next to be looked at, as its last answer names it
+/// ([`Effects::wake_at`]), `None` where a taken face went or the face is gone.
+/// [`SessionEnded`] once the life ends the session.
 ///
 /// A close is not carried: whoever tells the life it closes lets go of what it holds itself.
 // Always inlined: each owner has one carrier of its own, out of line, which this is the body of.
 #[inline(always)]
-pub fn carry<I: LinkIo>(io: &mut I, effects: Effects, now_us: u64) -> Result<(), SessionEnded> {
+pub fn carry<I: LinkIo>(
+    io: &mut I,
+    effects: Effects,
+    now_us: u64,
+) -> Result<Option<u64>, SessionEnded> {
     let (mut effects, mut now_us) = (effects, now_us);
     loop {
         debug_assert!(!effects.let_go(), "a close told to the life is not carried");
@@ -745,22 +775,21 @@ pub fn carry<I: LinkIo>(io: &mut I, effects: Effects, now_us: u64) -> Result<(),
         }
         if I::TAKES_FACES && effects.removes() {
             io.take_out();
-            return Ok(());
+            return Ok(None);
         }
         let input = if effects.begin_handshake() {
             io.begin_handshake()
         } else if let Some(row) = effects.dial() {
             io.dial(row)
         } else {
-            // A wait to dial again is the life's: its wake (`UnicastLink::wake_at`) brings the
-            // owner's next look.
-            return Ok(());
+            // A wait to dial again is the life's: its wake brings the owner's next look.
+            return Ok(effects.wake_at());
         };
         // A host may take a while to refuse a dial, and a wait to dial again counted from before
         // the dial would be over by then, so that each look would dial again at once.
         now_us = io.now_us();
         let Some(life) = io.life() else {
-            return Ok(());
+            return Ok(None);
         };
         effects = life.input(input, now_us);
     }
@@ -1312,6 +1341,55 @@ mod tests {
         assert!(!close.gives_up_dial(), "a close lets go of the dial itself");
     }
 
+    /// Tell `link` `input` at `now_us`: the wake its answer names, held to what `wake_at` reads
+    /// at that time once the input moved the link.
+    fn told(link: &mut UnicastLink, input: LinkInput, now_us: u64) -> Option<u64> {
+        let effects = link.input(input, now_us);
+        assert_eq!(
+            effects.wake_at(),
+            link.wake_at(now_us),
+            "{input:?} at {now_us}"
+        );
+        effects.wake_at()
+    }
+
+    /// Every answer names when the life is next to be looked at, as `wake_at` reads it at the
+    /// input's time once the input moved the link, whether the input raised an event or not: a
+    /// dial owed a report, under way, made, a handshake, an established link, a wait and a closed
+    /// link. Turned red by a wake read before the input moved the link, or one left out of an
+    /// answer that raised no event (`UnicastLink::waits`).
+    #[test]
+    fn every_answer_names_the_lifes_next_look_as_wake_at_reads_it() {
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 1);
+        assert_eq!(told(link, LinkInput::Tick, 0), None, "idle");
+        assert_eq!(told(link, LinkInput::Open, 0), Some(0), "owed a report");
+        assert_eq!(told(link, LinkInput::DialPending, 0), Some(MS), "the look");
+        assert_eq!(
+            told(link, LinkInput::Tick, 5),
+            Some(5 + MS),
+            "no event: the next look from now"
+        );
+        assert_eq!(
+            told(link, LinkInput::DialMade, 10),
+            Some(10),
+            "owed a report"
+        );
+        assert_eq!(
+            told(link, LinkInput::HandshakeBegun, 10),
+            Some(1000 * MS),
+            "the deadline the dial was given"
+        );
+        assert_eq!(told(link, LinkInput::Established, 20), None, "up");
+        assert_eq!(told(link, LinkInput::Ended, 30), Some(30), "dialled again");
+        assert_eq!(
+            told(link, LinkInput::DialRefused, 40),
+            Some(40 + 5000 * MS),
+            "the end of the wait"
+        );
+        assert_eq!(told(link, LinkInput::Close, 50), None, "closed");
+    }
+
     /// What a recording owner was asked, in the order it was asked.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Asked {
@@ -1354,7 +1432,7 @@ mod tests {
         }
 
         /// Tell the life `input` at the owner's clock and carry out what it answers.
-        fn give(&mut self, input: LinkInput) -> Result<(), SessionEnded> {
+        fn give(&mut self, input: LinkInput) -> Result<Option<u64>, SessionEnded> {
             let now_us = self.clock_us;
             let effects = self.life.input(input, now_us);
             carry(self, effects, now_us)
@@ -1422,7 +1500,11 @@ mod tests {
         let link = made(&mut slot, TIMES, 2);
         let mut io = Recording::<false>::over(link, 0);
         io.refuses = &[0];
-        assert_eq!(io.give(LinkInput::Open), Ok(()));
+        assert_eq!(
+            io.give(LinkInput::Open),
+            Ok(Some(20 + 1000 * MS)),
+            "the handshake's deadline, the life's next look"
+        );
         assert_eq!(
             io.asked,
             [
@@ -1454,10 +1536,14 @@ mod tests {
         let mut io = Recording::<false>::over(link, 0);
         io.pends = &[1];
         io.refuses = &[2];
-        assert_eq!(io.give(LinkInput::Open), Ok(()));
+        assert_eq!(io.give(LinkInput::Open), Ok(Some(10 + 1000 * MS)));
         io.asked.clear();
         io.clock_us = 40;
-        assert_eq!(io.give(LinkInput::Ended), Ok(()));
+        assert_eq!(
+            io.give(LinkInput::Ended),
+            Ok(Some(50 + MS)),
+            "the next look of the dial under way, from the time read after it"
+        );
         assert_eq!(
             io.asked,
             [Asked::EndHandshake(0), Asked::Dial(1), Asked::Now(50)]
@@ -1483,15 +1569,19 @@ mod tests {
             let mut slot = MaybeUninit::uninit();
             let link = made(&mut slot, LinkTimes { redial_ms, ..TIMES }, 1);
             let mut io = Recording::<false>::over(link, 0);
-            assert_eq!(io.give(LinkInput::Open), Ok(()));
+            assert_eq!(io.give(LinkInput::Open), Ok(Some(10 + 1000 * MS)));
             io.asked.clear();
             io.clock_us = 77;
-            assert_eq!(io.give(LinkInput::Established), Ok(()));
+            assert_eq!(
+                io.give(LinkInput::Established),
+                Ok(None),
+                "a link that is up moves on input alone"
+            );
             assert_eq!(io.asked, [Asked::BringUp(77)]);
             io.asked.clear();
             let lost = io.give(LinkInput::Ended);
             if redial_ms.is_some() {
-                assert_eq!(lost, Ok(()));
+                assert_eq!(lost, Ok(Some(87 + 1000 * MS)));
                 assert_eq!(io.asked[0], Asked::Lose(false));
                 assert_eq!(io.asked[1], Asked::Dial(0));
             } else {
@@ -1510,22 +1600,22 @@ mod tests {
         let mut slot = MaybeUninit::uninit();
         let link = UnicastLink::init_in(&mut slot, TIMES, LinkRole::Taken, 1);
         let mut io = Recording::<true>::over(link, 0);
-        assert_eq!(io.give(LinkInput::Taken), Ok(()));
-        assert_eq!(io.give(LinkInput::Ended), Ok(()));
+        assert_eq!(io.give(LinkInput::Taken), Ok(Some(2000 * MS)));
+        assert_eq!(io.give(LinkInput::Ended), Ok(None));
         assert_eq!(io.asked, [Asked::EndHandshake(0), Asked::TakeOut]);
 
         let mut slot = MaybeUninit::uninit();
         let link = UnicastLink::init_in(&mut slot, TIMES, LinkRole::Taken, 1);
         let mut io = Recording::<false>::over(link, 0);
-        assert_eq!(io.give(LinkInput::Taken), Ok(()));
-        assert_eq!(io.give(LinkInput::Ended), Ok(()));
+        assert_eq!(io.give(LinkInput::Taken), Ok(Some(2000 * MS)));
+        assert_eq!(io.give(LinkInput::Ended), Ok(None));
         assert_eq!(io.asked, [Asked::EndHandshake(0)]);
 
         let mut slot = MaybeUninit::uninit();
         let link = made(&mut slot, TIMES, 1);
         let mut io = Recording::<false>::over(link, 0);
         io.gone = true;
-        assert_eq!(io.give(LinkInput::Open), Ok(()));
+        assert_eq!(io.give(LinkInput::Open), Ok(None));
         assert_eq!(io.asked, [Asked::Dial(0), Asked::Now(10)]);
         assert_eq!(
             io.life.phase(),
