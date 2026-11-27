@@ -5,13 +5,19 @@
 //! link the config admits, in the bytes a link's session task takes, held with the groups' cells to
 //! the build's `MAX_TASKS`; and the deadlines a task of the build that sleeps places
 //! (`RUNTIME_TIMERS`): none in a build none of whose tasks sleeps.
+//!
+//! The clock the tables are for is the simulated world's (`tests::sim`): what a cell holds of a
+//! clock is its type's, and the runtimes made here read it only at the test's reading.
+
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::{CoopLocalSet, CoopRuntime};
-use wz_runtime_posix::PosixClock;
 use wz_session_core::caps;
 
 use super::client_config;
+use super::sim::SetClock;
 use crate::arena::{AllocatorMemory, ArenaPlan, SessionArena};
 use crate::engine::{link_task_bytes, read_wait_room, RuntimeTables, RUNTIME_TIMERS};
 use crate::CoopConfig;
@@ -19,16 +25,16 @@ use crate::CoopConfig;
 /// The runtime `tables` are for, placed as an open places it: in a span of an arena that holds
 /// that span alone, which the runtime keeps until its last holder lets go, with the set of the
 /// session's tasks it runs.
-fn placed_runtime(tables: RuntimeTables) -> (CoopRuntime<PosixClock>, CoopLocalSet<PosixClock>) {
+fn placed_runtime(tables: RuntimeTables) -> (CoopRuntime<SetClock>, CoopLocalSet<SetClock>) {
     let bytes = tables
-        .placed_bytes::<PosixClock>()
+        .placed_bytes::<SetClock>()
         .expect("a span of the tables' rows");
     let mut plan = ArenaPlan::vacant();
     plan.holding_runtime(bytes).expect("the span fits");
     let mut arena = SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has it");
     let place = arena.runtime_place(bytes).expect("the plan holds the span");
     tables
-        .runtime(PosixClock, place)
+        .runtime(SetClock(Arc::new(AtomicU64::new(0))), place)
         .expect("the span fits the runtime")
 }
 
@@ -63,13 +69,13 @@ fn a_reads_waits_are_reserved_for_every_face_the_session_admits() {
 /// link's session, of the bytes the session's task takes.
 #[test]
 fn a_client_reserves_one_cell_for_the_link_it_dials() {
-    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+    let tables = RuntimeTables::of::<SetClock>(&CoopConfig {
         max_faces: 0,
         ..client_config()
     });
     assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(1));
     assert_eq!(tables.groups, 0, "the config joins no group");
-    assert_eq!(tables.rows.task_bytes, link_task_bytes::<PosixClock>());
+    assert_eq!(tables.rows.task_bytes, link_task_bytes::<SetClock>());
     assert!(tables.rows.task_bytes > 0, "a session's task has bytes");
     assert_eq!(tables.rows.timers, RUNTIME_TIMERS);
 }
@@ -84,7 +90,7 @@ fn a_client_reserves_one_cell_for_the_link_it_dials() {
 /// tasks sleeps, reds the capacity of its table.
 #[test]
 fn a_sessions_runtime_reserves_timers_only_for_a_task_that_sleeps() {
-    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+    let tables = RuntimeTables::of::<SetClock>(&CoopConfig {
         max_faces: 0,
         ..client_config()
     });
@@ -109,9 +115,9 @@ fn a_listener_reserves_a_cell_for_each_face_it_admits() {
         accept_pending: 2,
         ..client_config()
     };
-    let tables = RuntimeTables::of::<PosixClock>(&listener(Vec::new()));
+    let tables = RuntimeTables::of::<SetClock>(&listener(Vec::new()));
     assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(3));
-    let tables = RuntimeTables::of::<PosixClock>(&listener(vec!["tcp/127.0.0.1:7447".to_owned()]));
+    let tables = RuntimeTables::of::<SetClock>(&listener(vec!["tcp/127.0.0.1:7447".to_owned()]));
     assert_eq!(tables.rows.tasks, caps::MAX_TASKS.min(1 + 3));
 }
 
@@ -122,14 +128,14 @@ fn a_listener_reserves_a_cell_for_each_face_it_admits() {
 #[cfg(any(feature = "listen", feature = "group"))]
 #[test]
 fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
-    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+    let tables = RuntimeTables::of::<SetClock>(&CoopConfig {
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         max_faces: 10,
         accept_pending: 1,
         ..client_config()
     });
     assert_eq!(tables.rows.tasks, 10, "the ten faces, and no dial");
-    let dialling = RuntimeTables::of::<PosixClock>(&CoopConfig {
+    let dialling = RuntimeTables::of::<SetClock>(&CoopConfig {
         endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         max_faces: 10,
@@ -169,7 +175,7 @@ fn a_listener_with_the_ten_peers_pico_takes_runs_a_task_for_each() {
 #[cfg(not(any(feature = "listen", feature = "group")))]
 #[test]
 fn a_dial_only_runtime_runs_one_task_at_a_time_whatever_faces_the_config_states() {
-    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+    let tables = RuntimeTables::of::<SetClock>(&CoopConfig {
         max_faces: 3,
         ..client_config()
     });
@@ -200,7 +206,7 @@ fn a_dial_only_runtime_runs_one_task_at_a_time_whatever_faces_the_config_states(
 /// address space too: a face past them is refused as one past `max_faces` is.
 #[test]
 fn the_cells_reserved_are_never_more_than_max_tasks() {
-    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+    let tables = RuntimeTables::of::<SetClock>(&CoopConfig {
         max_faces: usize::MAX,
         ..client_config()
     });
@@ -213,8 +219,8 @@ fn the_cells_reserved_are_never_more_than_max_tasks() {
 /// build, as no cell of the runtime takes the bytes a task asks for once it is made.
 #[test]
 fn the_runtime_of_the_tables_places_a_task_a_link_cell_fits_and_refuses_a_larger_one() {
-    const LARGER: usize = link_task_bytes::<PosixClock>() + 1;
-    let tables = RuntimeTables::of::<PosixClock>(&CoopConfig {
+    const LARGER: usize = link_task_bytes::<SetClock>() + 1;
+    let tables = RuntimeTables::of::<SetClock>(&CoopConfig {
         max_faces: 0,
         ..client_config()
     });
@@ -254,7 +260,7 @@ fn print_the_parts_of_a_link_tasks_cell() {
 
     use crate::engine::FaceDispatch;
 
-    type C = PosixClock;
+    type C = SetClock;
     type Link = wz_runtime_coop::link_cells::CellRc<dyn SessionDatagramLink>;
     type Router = RouterLend<SessionReassembly>;
     let cell = link_task_bytes::<C>();
