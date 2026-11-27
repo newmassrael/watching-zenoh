@@ -72,6 +72,7 @@ udp-listen = ["wz-capi-pico/udp-listen"]
 interest-answer = ["wz-capi-pico/interest-answer"]
 link-admission = ["wz-capi-pico/link-admission"]
 accept-cookie = ["wz-capi-pico/accept-cookie"]
+face-send-places = ["wz-capi-pico/face-send-places"]
 
 [dependencies]
 libfuzzer-sys = "0.4.10"

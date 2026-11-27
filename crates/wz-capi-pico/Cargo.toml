@@ -124,6 +124,7 @@ default = [
     "interest-answer",
     "link-admission",
     "accept-cookie",
+    "face-send-places",
 ]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
@@ -759,6 +760,16 @@ link-admission = ["peer", "wz-capi-core?/link-admission", "wz-capi-coop?/link-ad
 # key, and the library links no cookie codec and no MAC. The tokio engine's runtime mints whatever
 # is named, so it selects neither engine.
 accept-cookie = ["peer", "wz-capi-core?/accept-cookie", "wz-capi-coop?/accept-cookie"]
+# `face-send-places`: each face of a peer its own send place (`wz-capi-coop`'s
+# `face-send-places`): a put to one peer does not wait behind a send to another, a droppable one
+# passes a peer another send holds over, and a declaration holds every peer's place before the
+# session's. Off, as zenoh-pico sends to every peer under one transmit lock of its transport
+# (`vendor/zenoh-pico/src/transport/common/tx.c` @ `_z_transport_tx_mutex_lock(`), the
+# single-threaded library has one send place for every face, the session's lock: a put is one leg
+# that writes each peer in turn, and the library links none of the per-face holds. The
+# multi-threaded library (`multi-thread`) keeps each face's place whatever is named. The tokio
+# engine's runtime sends whatever is named, so it selects neither engine.
+face-send-places = ["peer", "wz-capi-core?/face-send-places", "wz-capi-coop?/face-send-places"]
 # `config-document`: `zext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a

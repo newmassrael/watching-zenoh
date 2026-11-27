@@ -29,6 +29,15 @@
 //! is owed to the read, which carries it out once the lock is let go of
 //! (`DirectSlot::pay_site`).
 //!
+//! Where the read takes faces past the dial role's, an operation holds the send place of every
+//! face before the session's lock, and a publish each face's place alone for that face's leg, so a
+//! send to one face waits behind no send on another (`wz_face_places`, `build.rs`: named by
+//! `face-send-places`, and every build with `threads`). A build of one thread without it has one
+//! send place for every face, the session's lock (`wz_one_send_place`), as zenoh-pico has one
+//! transmit lock for all its peers: an operation runs under that lock in its caller, a publish is
+//! one leg that reaches every face, and each send lends its face's link by a try of the face's
+//! place, which no other holder has while the one thread holds the session.
+//!
 //! Where the link stands is the life of the face's record ([`UnicastLink`]), the session's one
 //! record of it, as in a build whose links are tasks: the engine's face holds what the life's
 //! effects are carried out with (the dial under way, the link it made, the pump) and nothing of
@@ -101,7 +110,7 @@ pub(crate) struct DirectEnd {
 impl DirectEnd {
     /// Whether this is the end of the face whose flags are `flags`: each face's flags lie in the
     /// face, so they name it.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     pub(super) fn is_of(&self, flags: &EndFlags) -> bool {
         core::ptr::eq(self.flags(), flags)
     }
@@ -548,7 +557,7 @@ type DirectSite<L, C> = FaceSite<DirectLock, DirectParts<L, C>>;
 /// One face's send place an operation holds, taken before the session's lock: the face, named
 /// by the flags its link's end shares with the read, the face's wire while the place holds one,
 /// and the place held before it, so the places an operation holds are one chain on its stack.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(wz_face_places)]
 pub(super) struct HeldSend<'a, C: ClockSource + 'static> {
     face: &'a EndFlags,
     wire: Option<&'a Wire<C>>,
@@ -559,7 +568,7 @@ pub(super) struct HeldSend<'a, C: ClockSource + 'static> {
 /// (`CoopEngine::live_on_link`), on the session's state and the places it holds. Reached by a
 /// vtable of its one method: a closure's vtable would carry a `call_once` shim beside it, into
 /// which a small operation is copied whole.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(wz_face_places)]
 trait UnderHeldFaces<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
     /// Run the operation, once.
     fn run(&mut self, core: &mut Core<L, C>, tx: LinkTx<'_, C>);
@@ -568,7 +577,7 @@ trait UnderHeldFaces<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
 /// The operation `f` until it runs, then what it answered: one state, so the answer is written
 /// over a state that holds nothing. Two slots, an operation's and its answer's, would have each
 /// operation's body drop the answer slot it writes over, a drop of a value it never held.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(wz_face_places)]
 enum HeldOperation<F, U> {
     /// Not run yet.
     Waiting(F),
@@ -578,7 +587,7 @@ enum HeldOperation<F, U> {
     Answered(U),
 }
 
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(wz_face_places)]
 impl<F, U> HeldOperation<F, U> {
     /// `run` handed the operation, once: a state that is not waiting runs nothing. The answer
     /// is written over the running state this body wrote, which holds nothing to drop.
@@ -603,7 +612,7 @@ impl<F, U> HeldOperation<F, U> {
     }
 }
 
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(wz_face_places)]
 impl<L, C, F, U> UnderHeldFaces<L, C> for HeldOperation<F, U>
 where
     L: CoopLinks + 'static,
@@ -621,18 +630,23 @@ where
 /// link by a try of its place, which waits for nothing under the session's lock
 /// (`super::send_through`). A build that takes no face beside the dial role's holds that face's
 /// place alone, and every face's record names that face, so what it holds is the face's wire: no
-/// walk finds it and no try reaches past it.
+/// walk finds it and no try reaches past it. A build whose faces share one send place, the
+/// session's lock (`wz_one_send_place`), holds no face's: every send is lent its face's link by a
+/// try of the face's place, which no other holder has while the one thread holds the session.
 pub(super) struct FaceTx<'a, C: ClockSource + 'static> {
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     held: Option<&'a HeldSend<'a, C>>,
     /// The place of the face a publish's leg through it holds alone (`CoopEngine::on_faces`,
     /// `CoopEngine::on_publish_legs`); `None` for an operation's hold, which reaches every face.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     alone: Option<usize>,
     /// The dial role's wire while its place holds one; a place that holds none is not held, and
     /// a try of it would find no link either.
     #[cfg(not(any(feature = "listen", feature = "group")))]
     wire: Option<&'a Wire<C>>,
+    /// No face's wire: the hold is the session's lock alone, which reaches every face.
+    #[cfg(wz_one_send_place)]
+    every: PhantomData<&'a Wire<C>>,
 }
 
 /// The place a publish's leg to the session's groups holds alone (`FaceTx::reaches_groups`):
@@ -655,7 +669,7 @@ impl<C: ClockSource + 'static> Copy for FaceTx<'_, C> {}
 
 impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
     /// The hold of the face whose record holds `link`, when its place is held.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     #[inline]
     fn held_of<L: CoopLinks + 'static>(
         &self,
@@ -666,7 +680,7 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
     }
 
     /// Whether `link`, a face's record of its link, lies in a face whose place is held.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     #[inline]
     pub(super) fn holds<L: CoopLinks + 'static>(&self, link: &DirectWire<L, C>) -> bool {
         self.held_of(link).is_some()
@@ -675,7 +689,7 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
     /// The wire of the face whose record holds `link`, through its held place, found by one walk
     /// of the holds: `None` while that place is not held, and `Some(None)` while it is held and
     /// holds no link, which no try of the place reaches either.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     #[inline]
     pub(super) fn held_wire<L: CoopLinks + 'static>(
         &self,
@@ -695,10 +709,21 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
         Some(self.wire)
     }
 
+    /// No face's place is held where the faces share the session's lock as their one place: every
+    /// send reaches its face by a try of the face's place.
+    #[cfg(wz_one_send_place)]
+    #[inline(always)]
+    pub(super) fn held_wire<L: CoopLinks + 'static>(
+        &self,
+        _link: &DirectWire<L, C>,
+    ) -> Option<Option<&'a Wire<C>>> {
+        None
+    }
+
     /// Whether a publish's leg sent through this hold goes to the face whose record holds
     /// `link`: a hold of one face for a leg of its own reaches that face alone, as each face's
     /// leg is sent under its own hold, and an operation's hold reaches every face.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     #[inline(always)]
     pub(super) fn reaches<L: CoopLinks + 'static>(&self, link: &DirectWire<L, C>) -> bool {
         self.alone.is_none() || self.holds(link)
@@ -708,15 +733,24 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
     /// operation's hold reaches every face and every group, and a publish reaches the groups by
     /// the one leg of its own that holds no face's place (`CoopEngine::on_publish_legs`, at
     /// [`GROUPS_LEG`]), so each group is sent a publish once, whatever the faces it is sent on.
-    #[cfg(feature = "group")]
+    #[cfg(all(wz_face_places, feature = "group"))]
     #[inline(always)]
     pub(super) fn reaches_groups(&self) -> bool {
         self.alone.is_none() || self.held.is_none()
     }
 
-    /// Every leg reaches the dial role's face where it is the only face: a publish hands a leg
-    /// only to a face whose place it holds.
-    #[cfg(not(any(feature = "listen", feature = "group")))]
+    /// The one leg of a publish where the faces share one send place reaches every group, as it
+    /// reaches every face (`CoopEngine::on_faces`), so each group is sent a publish once.
+    #[cfg(all(wz_one_send_place, feature = "group"))]
+    #[inline(always)]
+    pub(super) fn reaches_groups(&self) -> bool {
+        true
+    }
+
+    /// Every leg reaches every face where a publish hands out one leg: the dial role's face, where
+    /// it is the only face and a leg is handed only to a face whose place it holds, and each face,
+    /// where the faces share one send place (`CoopEngine::on_faces`).
+    #[cfg(not(wz_face_places))]
     #[inline(always)]
     pub(super) fn reaches<L: CoopLinks + 'static>(&self, _link: &DirectWire<L, C>) -> bool {
         true
@@ -725,7 +759,7 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
     /// The wire of the face a publish's leg holds alone, while its place holds one: what the
     /// leg's send writes with that face's send place held and nothing of the session. `None`
     /// for a hold that reaches every face, or a place that holds no link.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     pub(super) fn alone_wire(&self) -> Option<&'a Wire<C>> {
         self.held
             .filter(|_| self.alone.is_some())
@@ -738,10 +772,16 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
         self.wire
     }
 
+    /// None where the faces share one send place: the one leg holds no face's alone.
+    #[cfg(wz_one_send_place)]
+    pub(super) fn alone_wire(&self) -> Option<&'a Wire<C>> {
+        None
+    }
+
     /// The place of the face a publish's leg holds alone, which a droppable leg that finds the
     /// session held answers for (`LinkRooms::for_held`); `None` for a hold that reaches every
     /// face.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     pub(super) fn leg_place(&self) -> Option<usize> {
         self.alone
     }
@@ -750,6 +790,12 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
     #[cfg(not(any(feature = "listen", feature = "group")))]
     pub(super) fn leg_place(&self) -> Option<usize> {
         Some(0)
+    }
+
+    /// None where the faces share one send place: the one leg reaches every face.
+    #[cfg(wz_one_send_place)]
+    pub(super) fn leg_place(&self) -> Option<usize> {
+        None
     }
 
     /// Wait for room for a blocking message of `priority` on the link of the face a publish's
@@ -3141,7 +3187,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// (`Self::on_faces`, `Self::on_publish_legs`), so no two holders wait on each other. A
     /// place that holds no link is not held, and its face is reached by a try, as no send is owed
     /// a face with no link. `None` once the session is closed.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     #[inline(always)]
     pub(super) fn live_on_link<U>(
         &self,
@@ -3157,7 +3203,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// place in the reverse of the order it was taken. Each place's hold lies in this frame, so
     /// holding every face takes no storage but the stack.
     // Out of line: every operation but a publish holds the faces through this one body.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     #[inline(never)]
     fn hold_faces_from<'f>(
         &'f self,
@@ -3200,7 +3246,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// last leg that failed came to, else `Ok(0)`, as a leg's own faces answer. A build that joins
     /// groups walks the faces by `Self::on_publish_legs`, whose groups' leg is a body of its own.
     // Inlined whole: a publish's path is the one a message takes each time.
-    #[cfg(all(feature = "listen", not(feature = "group")))]
+    #[cfg(all(wz_face_places, not(feature = "group")))]
     #[inline(always)]
     pub(super) fn on_faces(
         &self,
@@ -3215,7 +3261,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// by one leg of their own, `groups`, which reaches them alone ([`FaceTx::reaches_groups`])
     /// and reads only what a group is sent, none of what a face's leg reads to send on a face's
     /// link. What the last leg that failed came to, else `Ok(0)`, as a leg's own faces answer.
-    #[cfg(feature = "group")]
+    #[cfg(all(wz_face_places, feature = "group"))]
     #[inline(always)]
     pub(super) fn on_publish_legs(
         &self,
@@ -3231,7 +3277,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// face that may hold a link. A face at rest (`DirectFace::rests`) holds no link that is up,
     /// so a leg would send it nothing, and its place is not tried; nor is a row past the last that
     /// holds a face (`DirectFaces::walked`).
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     #[inline(always)]
     fn on_face_legs(
         &self,
@@ -3262,7 +3308,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// own stage, under the session's lock, so its leg holds no face's place and reaches no face's
     /// link. A session that joined no group is handed none, which would take the session for
     /// nothing.
-    #[cfg(feature = "group")]
+    #[cfg(all(wz_face_places, feature = "group"))]
     #[inline(always)]
     fn on_groups_leg(
         &self,
@@ -3285,7 +3331,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// `leg` on `face`, the face at place `at`, under a hold of its send place, which waits for
     /// whatever holds it now. `None`, with `leg` not run, while the place holds no parts.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     #[inline(always)]
     fn wait_leg(
         face: &DirectFace<L, C>,
@@ -3312,7 +3358,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// so a place found held is a transmit lock found taken. What the leg left owed on the link
     /// is told to the place as the try lets go. `None`, with `leg` not run, while the place
     /// holds no parts.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(wz_face_places)]
     #[inline(never)]
     fn try_leg(
         &self,
@@ -3450,6 +3496,42 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Ok(0)
     }
 
+    /// `f` on the session's state where the faces share one send place, the session's lock: `f`
+    /// runs in the caller's own body under that lock alone, as zenoh-pico's operations run under
+    /// its one transmit lock, and each send of `f` lends its face's link by a try of the face's
+    /// place (`super::send_through`). On the one thread of the form no other holder has a face's
+    /// place while this one holds the session: a send never waits behind a read's step, which
+    /// holds no face's place, and a callback, which the read hands out with the session free,
+    /// runs no operation inside another. A face with no link is passed over by its try, as no
+    /// send is owed a face with no link. `None` once the session is closed.
+    #[cfg(wz_one_send_place)]
+    #[inline(always)]
+    pub(super) fn live_on_link<U>(
+        &self,
+        f: impl FnOnce(&mut Core<L, C>, LinkTx<'_, C>) -> U,
+    ) -> Option<U> {
+        let mut guard = self.live()?;
+        Some(f(&mut guard.0, FaceTx { every: PhantomData }))
+    }
+
+    /// A publish's one leg where the faces share one send place: `leg` takes the session's lock
+    /// its own way and reaches every face that is up and every group the session joined
+    /// (`FaceTx::reaches`), each face's link lent by a try of its place, as zenoh-pico's put
+    /// writes every peer's socket under its one transmit lock
+    /// (`vendor/zenoh-pico/src/transport/common/tx.c` @ `_z_transport_tx_mutex_lock(`). What the
+    /// leg came to. A droppable publish is never held behind another send: on the one thread of
+    /// the form nothing else holds the session or a face's place while it is called.
+    // Inlined whole: a publish's path is the one a message takes each time.
+    #[cfg(wz_one_send_place)]
+    #[inline(always)]
+    pub(super) fn on_faces(
+        &self,
+        _droppable: bool,
+        leg: impl FnOnce(LinkTx<'_, C>) -> Result<usize, FanoutError>,
+    ) -> Result<usize, FanoutError> {
+        leg(FaceTx { every: PhantomData })
+    }
+
     /// What a droppable publish does on the face at place `at`, whose send place another send
     /// holds now, by the queue profile's `held_drop`, with nothing of the session held
     /// (`LinkRooms::for_held_place`): pico's drops it on the face at once and tells the caller, as
@@ -3457,7 +3539,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// link for room within `wait_before_drop`, tries the place again once the link took room and
     /// drops the publish on the face, untold, when it took none. A face that names no wait for its
     /// room is waited for. A build without the held-conduit wait (`tx-held-wait`) answers either
-    /// profile as pico's.
+    /// profile as pico's. Where the faces share one send place no publish finds a face's held.
+    #[cfg(not(wz_one_send_place))]
     fn behind_held_place(&self, at: usize) -> Behind<DroppedOn> {
         self.rooms
             .for_held_place(self.held_drop, at, self.wait_before_drop_us)
@@ -3466,6 +3549,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// What a droppable publish's leg answers once it is dropped on a face whose send place
     /// another holder has, counted as the transport's drop as a drop behind the session is.
+    #[cfg(not(wz_one_send_place))]
     fn dropped_on_face(&self, told: bool) -> Result<usize, FanoutError> {
         #[cfg(feature = "transport-stats")]
         self.unsent_drops.fetch_add(1, Ordering::Relaxed);
@@ -3567,15 +3651,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             Ok(0)
         };
-        #[cfg(feature = "group")]
+        #[cfg(all(wz_face_places, feature = "group"))]
         let _ = self.on_publish_legs(false, leg, leg);
-        #[cfg(not(feature = "group"))]
+        #[cfg(not(all(wz_face_places, feature = "group")))]
         let _ = self.on_faces(false, leg);
         (legs.get(), reached.get())
     }
 
     /// How many of a publish's legs reach the session's groups (`FaceTx::reaches_groups`), the
-    /// faces' legs and the groups' own of the walk a publish makes (`Self::on_publish_legs`).
+    /// faces' legs and the groups' own of the walk a publish makes (`Self::on_publish_legs`), or
+    /// the one leg where the faces share one send place (`Self::on_faces`).
     #[cfg(all(test, feature = "std", feature = "group"))]
     pub(crate) fn group_legs_of_a_publish(&self) -> usize {
         let legs = core::cell::Cell::new(0);
@@ -3583,7 +3668,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             legs.set(legs.get() + usize::from(tx.reaches_groups()));
             Ok(0)
         };
+        #[cfg(wz_face_places)]
         let _ = self.on_publish_legs(false, leg, leg);
+        #[cfg(wz_one_send_place)]
+        let _ = self.on_faces(false, leg);
         legs.get()
     }
 
@@ -3696,7 +3784,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 }
 
-#[cfg(all(test, feature = "std", any(feature = "listen", feature = "group")))]
+#[cfg(all(test, feature = "std", wz_face_places))]
 mod held_operation_tests {
     use super::HeldOperation;
     use core::cell::Cell;

@@ -272,6 +272,46 @@ mod listen {
         });
     }
 
+    /// A put of a listener of one thread that dials nothing reaches each of the two clients it
+    /// took. Without `face-send-places`, as the zenoh-pico preset's peer, the faces share the
+    /// session's lock as their one send place and the put is one leg that reaches both, as
+    /// zenoh-pico's put writes every peer under its one transmit lock
+    /// (`vendor/zenoh-pico/src/transport/common/tx.c` @ `_z_transport_tx_mutex_lock(`); with it
+    /// each face is sent a leg of its own, the listener's dial role, which holds no link, at rest.
+    /// CONTROL: the walk of a publish reaches both faces before the put is made. Turned red by a
+    /// put of the shared place that holds the dial role's place alone (the dial role's
+    /// `CoopEngine::on_faces`, which answers `Ok(0)` where that place holds no link) or reaches
+    /// its faces through a held wire (`FaceTx::held_wire` answering `Some`): neither client hears
+    /// it. The count of legs is turned red by a shared place that hands each face a leg.
+    #[test]
+    fn a_put_of_a_listener_of_one_thread_reaches_every_face_it_took() {
+        let (listener, endpoint) = listening(0xa1, |_| {});
+        let first = client(&endpoint, 0xc1);
+        let second = client(&endpoint, 0xc2);
+        let heard_first = hearing(&first, "demo/all/**", payload);
+        let heard_second = hearing(&second, "demo/all/**", payload);
+        eventually("the listener to hold both faces", || {
+            faces_up(&listener) == 2
+        });
+        let (legs, reached) = listener.call(|engine| engine.legs_of_a_publish());
+        assert_eq!(reached, 2, "CONTROL: a publish's legs reach both faces");
+        assert_eq!(
+            legs,
+            if cfg!(wz_one_send_place) { 1 } else { 2 },
+            "one leg where the faces share one send place, one for each face where each has its own"
+        );
+        put(&listener, "demo/all/x", b"to-every-face");
+        eventually("both clients to hear the listener's put", || {
+            [&heard_first, &heard_second].iter().all(|heard| {
+                heard
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|got| got == b"to-every-face")
+            })
+        });
+    }
+
     /// A node of one thread dialled twice by one peer of one thread holds the first link and
     /// refuses the second: each end holds one face, and keeps it, and the link carries a put. Twin
     /// of `one_face::a_second_dial_to_a_node_the_session_holds_is_refused`. The refusal is the
@@ -615,10 +655,12 @@ mod group {
     }
 
     /// A publish of a member of one thread that joined the group hands the group one leg of its
-    /// own, beside the faces', so a put is sent to the group once. Turned red by a walk that hands
-    /// a session's groups no leg, as it hands none to a session that joined no group
-    /// (`CoopEngine::on_groups_leg`), or by a face's leg that reaches the groups too
-    /// (`FaceTx::reaches_groups`). Twin of
+    /// own, beside the faces', so a put is sent to the group once; where the faces share the
+    /// session's lock as their one send place (without `face-send-places`), the one leg of the
+    /// publish reaches the faces and the group alike. Turned red by a walk that hands a session's
+    /// groups no leg, as it hands none to a session that joined no group
+    /// (`CoopEngine::on_groups_leg`), by a face's leg that reaches the groups too, or by a shared
+    /// place's one leg that reaches none (`FaceTx::reaches_groups`). Twin of
     /// `direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg`.
     #[test]
     fn a_publish_of_a_member_of_one_thread_reaches_the_group_by_one_leg() {

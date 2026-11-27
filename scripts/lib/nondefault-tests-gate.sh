@@ -824,11 +824,16 @@ files::decl_watch_doors::"
     # session steps are `threads`' and leave this build; the rest must pass in it as they do above.
     # `tls-mbedtls` is the row above's cost and is not repeated. Matching listeners on a key stay
     # in (`key-matching-listener`, a default the row above has), so the suite's tests of them run
-    # in this form too. It listens without `udp-listen`, `interest-answer`, `link-admission` and
-    # `accept-cookie`, as the zenoh-pico preset's peer does, so a `udp/` endpoint to listen on is
-    # refused here, a peer's Interest is not answered, a second link to a node is a face of its own
-    # (`tests::one_thread::listen::`), and each accept is held with an empty cookie, no key drawn
-    # for a dial (`tests::an_open_whose_source_gives_nothing_opens_where_no_cookie_key_is_drawn`).
+    # in this form too. It listens without `udp-listen`, `interest-answer`, `link-admission`,
+    # `accept-cookie` and `face-send-places`, as the zenoh-pico preset's peer does, so a `udp/`
+    # endpoint to listen on is refused here, a peer's Interest is not answered, a second link to a
+    # node is a face of its own (`tests::one_thread::listen::`), each accept is held with an empty
+    # cookie, no key drawn for a dial
+    # (`tests::an_open_whose_source_gives_nothing_opens_where_no_cookie_key_is_drawn`), and every
+    # face shares the session's lock as its one send place: an operation holds no face's place
+    # (`tests::direct_receive::an_operation_holds_no_face_place_where_the_faces_share_the_sessions_lock`)
+    # and a put is one leg that reaches every face
+    # (`tests::one_thread::listen::a_put_of_a_listener_of_one_thread_reaches_every_face_it_took`).
     "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
     # The declaration watch in the same form: a round of one thread tells a catch-up a declaration a
     # round with the links held, which the watch's tests prove only where they run in it.
@@ -842,6 +847,15 @@ files::decl_watch_doors::"
     "wz-capi-coop|hook|-default,std,key-matching-listener,link-admission,query,queryable|tests::one_thread::listen::"
     "wz-capi-coop|hook|-default,std,listen,liveliness,liveliness-get,query,queryable,shared-key-ids|tests::one_thread::shared_key_ids::"
     "wz-capi-coop|hook|-default,std,app-transport,group|tests::one_thread::group::"
+    # The same forms of one thread with each face's own send place (`face-send-places`), which the
+    # rows above leave out as the zenoh-pico preset's peer does: here an operation holds every
+    # face's place before the session's lock and a put sends each face a leg of its own, its dial
+    # role's at rest (`tests::one_thread::listen::`, the put to every face among them, and
+    # `tests::direct_receive::`, the holds of an operation), and a member's put reaches its group
+    # by a leg of its own (`tests::one_thread::group::`). One build for the two rows of `listen`.
+    "wz-capi-coop|hook|-default,std,key-matching-listener,face-send-places,listen,query,queryable|tests::one_thread::listen::"
+    "wz-capi-coop|hook|-default,std,key-matching-listener,face-send-places,listen,query,queryable|tests::direct_receive::"
+    "wz-capi-coop|hook|-default,std,app-transport,face-send-places,group|tests::one_thread::group::"
     # The host's group in the same form: the joiner's tests run here; the engine's, which needs a
     # multicast route as its twin of `threads` does, Layer M runs with `--ignored` in this form.
     "wz-capi-coop|hook|-default,std,group-host|host_group::"

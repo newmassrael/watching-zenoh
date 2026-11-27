@@ -1535,7 +1535,7 @@ pub(crate) struct Takes {
     /// The sends on a face marked as the session's holder's while they were made (`SendingOn`).
     pub(crate) face_marks: core::sync::atomic::AtomicUsize,
     /// The faces' send places a publish's walk of the faces tried or held for a leg (`direct`).
-    #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
+    #[cfg(wz_face_places)]
     pub(crate) place_tries: core::sync::atomic::AtomicUsize,
     /// The sends on a face of a plain put written from the head its publisher's plain way made.
     pub(crate) planned: core::sync::atomic::AtomicUsize,
@@ -2103,8 +2103,10 @@ impl<W: LinkWaits> LinkRooms<W> {
     /// pico's try of that transport's transmit lock finds it taken; zenoh's asks that face alone
     /// for room within `wait_us`; and a build without the held-conduit wait (`tx-held-wait`)
     /// answers either profile as pico's, with no face asked. Asked by the read that steps each
-    /// face itself (`direct`), which a build that keeps the round has not.
-    #[cfg(not(wz_round))]
+    /// face itself (`direct`), which a build that keeps the round has not, where a face's send
+    /// place is held apart from the session's lock: a build whose faces share that lock as their
+    /// one place (`wz_one_send_place`) finds none held.
+    #[cfg(not(any(wz_round, wz_one_send_place)))]
     pub(crate) fn for_held_place(&self, held_drop: HeldDrop, at: usize, wait_us: u64) -> Room {
         self.for_held(
             held_drop,
@@ -3385,8 +3387,10 @@ type FaceLink<C, L> = <L as HeldLink<C>>::Wire;
 /// A lend of a face's link that found it held. Never so where the read steps the faces itself: an
 /// operation holds the place of every face that holds a link before the session's lock
 /// (`CoopEngine::live_on_link`) and tries only a place that held none when it walked the faces,
-/// which nothing holds then, so a debug build of that form fails on it; a release build owes the
-/// send's debt, as any other form does.
+/// which nothing holds then; where the faces share the session's lock as their one place
+/// (`wz_one_send_place`), it tries every face's place on the one thread of the form, which holds
+/// none of them while it holds the session. A debug build of either fails on it; a release build
+/// owes the send's debt, as any other form does.
 #[inline(always)]
 fn found_held<U>(lent: &Lend<U>) {
     #[cfg(not(wz_round))]
@@ -8477,8 +8481,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let asked = Asked::new();
         let sent = if remote {
             // Where each face's leg is sent apart, the groups' leg is a body of its own, which
-            // reads none of what a face's leg reads to send on a face's link.
-            #[cfg(all(not(wz_round), feature = "group"))]
+            // reads none of what a face's leg reads to send on a face's link. Where the faces share
+            // one send place, the one leg reaches the groups too (`FaceTx::reaches_groups`).
+            #[cfg(all(wz_face_places, feature = "group"))]
             {
                 self.on_publish_legs(
                     droppable,
@@ -8489,7 +8494,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     },
                 )
             }
-            #[cfg(not(all(not(wz_round), feature = "group")))]
+            #[cfg(not(all(wz_face_places, feature = "group")))]
             {
                 self.on_faces(droppable, |tx| self.put_leg(put, &asked, tx))
             }
@@ -8644,7 +8649,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// plan of its publisher read, and no walk of the faces' links. A key a face's leg refuses
     /// (`Self::leg_of`, an empty key, which names nothing whatever declaration it is named by) is
     /// refused here too, as zenoh refuses a key that is not one on every transport alike.
-    #[cfg(all(not(wz_round), feature = "group"))]
+    #[cfg(all(wz_face_places, feature = "group"))]
     #[inline(never)]
     fn publish_to_groups_on(
         &self,
@@ -8704,7 +8709,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// its key named as `put.wire` names it. Nothing is named in the session's tables, which a
     /// group's key does not read, and no plan is kept. An empty key is left to the general publish
     /// (`NotPlain`), which refuses it on every leg alike.
-    #[cfg(all(not(wz_round), feature = "group"))]
+    #[cfg(all(wz_face_places, feature = "group"))]
     #[inline(never)]
     fn put_plain_groups_leg(&self, put: &PutOn<'_>, asked: &Asked) -> Result<usize, FanoutError> {
         if asked.stops() {

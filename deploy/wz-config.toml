@@ -1924,6 +1924,23 @@ abis = ["core", "pico"]
 implies = ["peer"]
 help = "The stateless acceptor, upstream zenoh's: the InitAck carries what the handshake negotiated, sealed (HMAC-SHA256) under a key drawn for each attempt and bound to it by a nonce, the acceptor holds nothing of the accept until the OpenSyn, and only an OpenSyn that echoes that cookie is admitted. Off, each accept is held by its link's session until the OpenSyn, as under handshake-cookie = fixed whatever that policy states, and the InitAck carries the session's configured cookie, empty unless one is stated, as zenoh-pico's acceptor answers with an empty cookie; nothing is drawn for it and no cookie codec is linked."
 
+[[capability]]
+id = "face-send-places"
+kconfig = "WZ_CAP_FACE_SEND_PLACES"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico sends to every peer
+# of its transport under one transmit lock (`vendor/zenoh-pico/src/transport/common/tx.c` @
+# `_z_transport_tx_mutex_lock(`), so a put to one peer waits behind a send to another. It changes
+# when a send waits and is off in that preset all the same, the preset's contract being
+# zenoh-pico's. A behaviour of the cooperative engine (wz-capi-coop's feature of the same name),
+# never of the receive: a single-threaded library without it runs every send under the session's
+# lock, which is its one send place, and a multi-threaded one keeps each face's place whatever is
+# named. The tokio engine's runtime sends on each link apart whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["peer"]
+help = "Each face its own send place: a put to one peer does not wait behind a send to another, a droppable one passes over a peer another send holds, and a declaration holds every peer's place before the session's (wz-own). Off, in the single-threaded library, every face shares one send place, the session's lock, as zenoh-pico sends to every peer under one transmit lock: a put is one leg that writes each peer in turn, and a declaration runs under that lock alone. The multi-threaded library keeps each face's place either way."
+
 # ## The upstream switches (a complete map: every upstream switch is classified)
 #
 # Every build switch of zenoh-pico (each `Z_FEATURE_*` its CMakeLists defines) and of zenoh-c

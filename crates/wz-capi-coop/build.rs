@@ -19,6 +19,13 @@
 //! round, is then built on a host, whose tests have `std`. No feature can say it, since `std` is
 //! both what the tests need and what gives the locks; a leg of the non-default tests gate builds
 //! the crate's tests so, and it is the one host build that compiles the round.
+//!
+//! And of how the direct form's sends hold the faces they send on, where the read takes faces
+//! past the dial role's (`listen`, `group`): each face's send place apart, taken before the
+//! session's lock, as the cfg `wz_face_places` reads it, where `face-send-places` is named or a
+//! read task beside the program's calls sends from another thread (`threads`); else one place for
+//! every face, the session's lock on the one thread of the form, as the cfg `wz_one_send_place`
+//! reads it (`src/engine/direct.rs`). A build whose only face is the dial role's has neither.
 
 /// The environment word that withholds the value locks a host lock would give ([`withheld`]).
 const VALUE_LOCKS: &str = "WZ_COOP_VALUE_LOCKS";
@@ -26,6 +33,8 @@ const VALUE_LOCKS: &str = "WZ_COOP_VALUE_LOCKS";
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(wz_round)");
     println!("cargo:rustc-check-cfg=cfg(wz_value_locks)");
+    println!("cargo:rustc-check-cfg=cfg(wz_face_places)");
+    println!("cargo:rustc-check-cfg=cfg(wz_one_send_place)");
     println!("cargo:rerun-if-env-changed={VALUE_LOCKS}");
     // Read whatever the target, so a word the script refuses is refused on every build.
     let withheld = withheld();
@@ -33,8 +42,20 @@ fn main() {
     if value_locks {
         println!("cargo:rustc-cfg=wz_value_locks");
     }
-    if set("CARGO_FEATURE_THREADS") && !value_locks {
+    let threads = set("CARGO_FEATURE_THREADS");
+    let round = threads && !value_locks;
+    if round {
         println!("cargo:rustc-cfg=wz_round");
+    }
+    // A form that keeps the round reaches each link under the session's lock and holds no face's
+    // send place at all.
+    let takes_faces = set("CARGO_FEATURE_LISTEN") || set("CARGO_FEATURE_GROUP");
+    if !round && takes_faces {
+        if threads || set("CARGO_FEATURE_FACE_SEND_PLACES") {
+            println!("cargo:rustc-cfg=wz_face_places");
+        } else {
+            println!("cargo:rustc-cfg=wz_one_send_place");
+        }
     }
 }
 
