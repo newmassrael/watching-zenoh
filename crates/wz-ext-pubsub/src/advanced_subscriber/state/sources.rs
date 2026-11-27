@@ -136,7 +136,7 @@ impl<K: PartialEq + Clone, V> Sources<K, V> {
 
     /// Keep the rows `keep(slot, state)` says to and let the others go; the answer is how many
     /// went.
-    #[cfg(feature = "advanced-recovery")]
+    #[cfg(feature = "advanced-retention")]
     pub(super) fn retain(&mut self, mut keep: impl FnMut(usize, &mut V) -> bool) -> usize {
         let mut gone = 0;
         let used = self.used;
@@ -262,7 +262,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "advanced-recovery")]
+    #[cfg(feature = "advanced-retention")]
     #[test]
     fn a_row_let_go_is_taken_before_one_never_held() {
         let mut table = Sources::new();

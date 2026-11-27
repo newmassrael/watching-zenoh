@@ -661,7 +661,7 @@ impl<'a> RecordRing<'a> {
     }
 
     /// Let every record of `owner` go, and take back what the ring's tail then holds dead.
-    #[cfg(feature = "advanced-recovery")]
+    #[cfg(feature = "advanced-retention")]
     pub(crate) fn let_go_all(&mut self, owner: u32) {
         self.forget(owner);
         self.take_back();
