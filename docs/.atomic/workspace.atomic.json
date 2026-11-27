@@ -8503,6 +8503,24 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4690": {
+      "decision_summary": "Shrink the doors area of the no_std pico preset: a lent place carries its\nlender from the moment it is lent and an engine refusal is answered from\none body; also drop a merge residue the driver landing left in size.md.",
+      "changes_bullets": [
+        "capi-pico object_slot: the lender is written where the place is lent.",
+        "capi-pico: one body answers an engine refusal.",
+        "docs/win-budget/size.md: doors design 3.2.1 and 7; diff3 residue removed."
+      ],
+      "verification_bullets": [
+        "size ledger: total 218,554 B vs its base 218,756 (-202); Ir W 3,076.6.",
+        "capi-pico object_slot tests and clippy pass; size ledger --check passes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
