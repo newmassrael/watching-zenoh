@@ -592,6 +592,66 @@ size reading is read again. None of the three changes what the library does, onl
 section is not aligned to a window: aligning it would pad the file by up to 64 KiB, which the size gate counts,
 for at most one window a process.
 
+**The list's place, how it is made again, and what catches a stale one.**
+
+- The place. `crates/wz-capi-pico/link/run-text.ld` is the list: its SECTIONS statement, one line a function
+  sorted by name, is generated, and its head comment is written by hand and kept. It is the one artifact of the
+  layout: GNU ld reads it as it is, and the order file of a Windows link is made from its lines (below). It is
+  committed rather than made at build time because making it needs a traced run of both probes, which no build
+  has, and because every build of the library (the size case, arm W of the matrix, the instruction counts'
+  arm) must link by the same list; a new list shows in review as lines added and dropped.
+- Made again. `bash scripts/pico-compare.sh run-text`, on a quiet build host as `perf` is run: it builds the
+  arms as `perf` does, runs every tcp, udp and multicast cell once (both workloads, batching off and on, the
+  three sizes; 500 round trips, 0.5 s of warm-up, a 2 s window, a 1 s ping timeout) with each probe under
+  callgrind, prints arm P's executed functions and bytes against its text, and writes arm W's list into the
+  tree it runs in, printing the bytes executed, the windows they span laid out together and the lines added
+  and dropped. The script it writes is committed. It is run again when a change renames, moves or adds a
+  function on the run's path, and whenever one of the two checks below fires.
+- What catches a stale list, twice. (1) The size gate (`capability_cost_gate.link_findings`): a library linked
+  by a list that names functions and holding no `.text.run` is a finding, since no line matched a function of
+  that build (the whole list names another build's functions, or the linker did not apply the script). (2)
+  `perf_matrix.py resident-text` on a `PERF_SMAPS=1` run of the laid-out library: for each process, the
+  present pages of its executable mapping past the fault-around window that holds `.text.run`'s last byte,
+  the windows taken in the address space from the start address the probe prints, named by crate; any is exit 1,
+  STALE. Fault-around maps no page outside the window of the fault, so such a page was mapped by a fault past
+  the run's code: a function no line places ran. No threshold is needed. The C runtime's own `.text` (the
+  constructors' `frame_dummy`, run at load, in no section of its own a line could name) lies first in
+  `.text`, right after the run's code, so it shares the run's last window unless `.text.run` ends within a
+  few hundred bytes of a window's end, and then (2) names the window it costs. A line that matches no function
+  of a build (a function inlined after a change) costs nothing, since a pattern that matches nothing places
+  nothing, and is not a finding; a function newly on the run's path is seen only by a run, so (2) is the check
+  that gates the lane's figure.
+
+**Size and the receive's instructions.** The layout moves functions and changes none of their bytes. The size
+case's text moves by alignment alone: a function keeps its own alignment (16 bytes for code built for speed, and
+less for code built for size, the crates `crates/Cargo.toml` builds at `opt-level = "s"`), so the padding
+ahead of a function depends on what ends before it and may differ by up to 15 bytes at each place the order
+puts a function after one of another alignment, and `.text` after `.text.run` starts at its own alignment. With a section a function
+every call and jump between two functions is a relocation, written as a 32-bit displacement whatever the
+distance, so the instructions a run executes are the same: the receive's Ir (docs/win-budget/ir-receive.md,
+the window harness of `scripts/pico-compare.sh subprofile`) reads equal. A difference beyond that padding in
+the size ledger, or any difference in the receive's Ir, is a finding of the layout, not noise.
+
+**Windows: the same list through lld-link.** The DLL is linked by the toolchain's `lld-link`
+(`crates/.cargo/capi-nostd.toml`), which takes no linker script. Its form of an order is `/ORDER:@file`: a file
+of exact symbol names, one a line, which lays the functions named (each in a COMDAT of its own, as rustc puts
+every function on COFF) in that order ahead of the rest; a name no function has is a warning (LNK4037), never an
+error. A Rust name there has the path of the Linux one and another hash (cargo's metadata of a build differs by
+target), so the file is made from the committed list's lines and the Windows build's own names, two links:
+
+1. Link the DLL once with its map, names left mangled: `-C link-arg=/lldmap:<dir>/wz.map
+   -C link-arg=/demangle:no` beside the release build's own flags.
+2. `python3 -I scripts/host-bench/perf_matrix.py run-text-order crates/wz-capi-pico/link/run-text.ld
+   <dir>/wz.map <dir>/run-order.txt`: each name of the map whose patterns are a line of the list, in the list's
+   order (`order_names`, the last word of each line of the map taken as a name).
+3. Link again with `-C link-arg=/ORDER:@<dir>/run-order.txt`.
+
+The order file is not committed: it is the Windows build's own names, made from the committed list at each
+build, as the Linux link reads the committed script. Nothing of this is wired into the Windows package yet
+(`pico_windows_package.py`, which would run the two links), and none of it was run on Windows: the map's form
+under `/demangle:no` is the one assumption of step 2, and whether the DLL's working set falls with the layout is
+read on Windows, not carried over from the Linux reading.
+
 ## 6. Measurement cells
 
 - **R0, the absolute figure and its parts.** `PERF_SMAPS=1` in the matrix's environment makes
@@ -634,25 +694,24 @@ for at most one window a process.
     --features "$(python3 -I scripts/lib/wz_config.py --print-preset-features coop)" \
     the_arena_a_listening_session_opens_by_row_measured -- --ignored --nocapture
   ```
-- **R6, the run's executed text and its layout.** On the directory `scripts/pico-compare.sh perf` built (`<perf>`:
-  `bin/`, `lib-W`, `lib-P`, `reference.json`), one traced repetition of every transport, then the list, then the
-  matrix again on the library linked by it:
+- **R6, the run's executed text and its layout.** The list made from a traced run, then the matrix again on the
+  library linked by it, and the two checks the layout lands under:
 
   ```
-  python3 -I scripts/host-bench/perf_matrix.py run --bin-dir <perf>/bin --run <perf>/traced \
-    --reference-record <perf>/reference.json --reps 1 --sizes 64 --pings 500 --warmup-ms 500 \
-    --window-s 2 --trace-text <perf>/trace
-  python3 -I scripts/host-bench/perf_matrix.py run-text <perf>/lib-P/libzenohpico.so - <perf>/trace/*
-  python3 -I scripts/host-bench/perf_matrix.py run-text <perf>/lib-W/libwz_capi_pico.so \
-    crates/wz-capi-pico/link/run-text.ld <perf>/trace/*
+  bash scripts/pico-compare.sh run-text
+  # commit crates/wz-capi-pico/link/run-text.ld as the run wrote it
   PERF_SMAPS=1 bash scripts/pico-compare.sh perf
   python3 -I scripts/host-bench/perf_matrix.py resident-text <run>/perf.json <perf>/lib-W/libwz_capi_pico.so
+  python3 -I scripts/lib/capability_cost_gate.py --measure pico-client-coop-nostd
+  bash scripts/pico-compare.sh subprofile
   ```
 
-  The first `run-text` reads arm P's executed bytes and writes nothing; the second writes the list. The cell's
-  figures: the bytes each arm executes against its text, the windows W's span, and after the layout R0's
-  `smaps_library_kib` and the present pages of `resident-text` against that span. `readelf -SW` of the new
-  library names `.text.run` and its size, the bytes the list placed.
+  `run-text` prints arm P's executed bytes and writes arm W's list. The cell's figures: the bytes each arm
+  executes against its text, the windows W's span, and after the layout R0's `smaps_library_kib` and the
+  present pages of `resident-text` against that span, its exit 0 (every role inside the laid-out run) or 1
+  (STALE, the list is made again). `readelf -SW` of the new library names `.text.run` and its size, the bytes
+  the list placed. The size case's text and the receive's Ir (`subprofile`) are read before and after, and
+  the lane lands when `smaps_library_kib` falls with both equal (section 5.4).
 
 ## 7. What this lane landed
 
@@ -687,3 +746,6 @@ for at most one window a process.
 - Section 5.4: the resident set by part with the reading of each, and R1 (b)'s layout: the run's code traced
   (`run --trace-text`), listed (`run-text`) and laid out together ahead of the rest of the text by the
   library's link (`run-text.ld`, `capi-run-text.toml`); its list comes from cell R6.
+- Section 5.4's list made again by one command (`scripts/pico-compare.sh run-text`), the two checks of a stale
+  list (the size gate's `.text.run` finding, `resident-text`'s pages past the laid-out run), and the order
+  file of a Windows link made from the same list (`perf_matrix.py run-text-order`).
