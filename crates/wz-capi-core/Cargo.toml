@@ -94,8 +94,10 @@ default = [
     "tx-fragment-credit",
     "tx-held-wait",
     "tx-stream-owed",
-    # A dial that does not hold the session (deploy/wz-config.toml, `dial-in-flight`).
+    # A dial that does not hold the session, and the reader of the address a dial's endpoint
+    # writes (deploy/wz-config.toml, `dial-in-flight`, `dial-address-reader`).
     "dial-in-flight",
+    "dial-address-reader",
     # The numbered key that states a session's limits (`config-limits`), read by the pico ABI.
     "config-limits",
     "multicast-locator-keys",
@@ -353,6 +355,10 @@ tx-stream-owed = []
 # A dial that does not hold the session (`wz-capi-pico/dial-in-flight`): this engine's dials
 # connect on its own tasks whatever is named, so the feature only carries the capability's name.
 dial-in-flight = []
+# The reader of the address a dial's endpoint writes (`wz-capi-pico/dial-address-reader`): this
+# engine reads its locators with its own parser whatever is named, so the feature only carries the
+# capability's name.
+dial-address-reader = []
 # The numbered key a pico config states its session's limits by (`wz-capi-pico/config-limits`):
 # the pico ABI's own crate reads it on either engine, so the feature only carries the name.
 config-limits = []

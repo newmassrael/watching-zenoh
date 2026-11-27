@@ -116,6 +116,7 @@ default = [
     "tx-held-wait",
     "tx-stream-owed",
     "dial-in-flight",
+    "dial-address-reader",
     "config-limits",
     "multicast-locator-keys",
     "query-replies-with-final",
@@ -688,6 +689,11 @@ tx-stream-owed = ["wz-capi-core?/tx-stream-owed", "wz-capi-coop?/tx-stream-owed"
 # Off, a dial connects and waits in the call that begins it, walking the host's addresses there, as
 # zenoh-pico's open does, and the faces keep no address to pass to later.
 dial-in-flight = ["wz-capi-core?/dial-in-flight", "wz-capi-coop?/dial-in-flight"]
+# `dial-address-reader`: a dial reads the address its endpoint writes by zenoh's grammar and hands
+# the host's resolver names alone. Off, every host a dial names is handed to the resolver, an
+# address as well as a name, as zenoh-pico hands it to `getaddrinfo`, so a dial links no reader of
+# addresses and reads one by the C library's grammar.
+dial-address-reader = ["wz-capi-core?/dial-address-reader", "wz-capi-coop?/dial-address-reader"]
 # `config-limits`: the numbered key `ZEXT_CONFIG_LIMITS_KEY` (`zext.h`) by which a config states
 # its session's limits and, with process pools, the values a program holds apart from any
 # session, judged at the insert and read by the open (`src/config_limits.rs`). A parity contract

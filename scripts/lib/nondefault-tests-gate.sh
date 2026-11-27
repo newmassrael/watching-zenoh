@@ -1317,6 +1317,72 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         unixpipe,\
         ws\
         |ip_stack::tests::a_stream_dial_without_dials_in_flight_is_made_where_it_is_begun"
+    # A dial over a network that resolves without the reader of addresses (`dial-address-reader`,
+    # the crate's third default, left out with the other two, as the zenoh-pico preset builds the
+    # cooperative engine): every host the text names, an address as well as a name, is handed to
+    # the resolver out of its brackets, and the first step of the dial asks for it (the two tests
+    # gated `not(feature = "dial-address-reader")`). The row above, on each of those tests. NOT YET
+    # MEASURED.
+    "wz-runtime-coop|hook|\
+        -default,\
+        alloc,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        host-lock,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        keyexpr-wildcard-double,\
+        keyexpr-wildcard-single,\
+        listen,\
+        reassembly,\
+        resource-snapshot,\
+        rx-in-place,\
+        scouting-static,\
+        serial,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        switchboard,\
+        transport-batching,\
+        transport-keepalive,\
+        transport-qos,\
+        udp-listen,\
+        unixpipe,\
+        ws\
+        |locator_text::tests::a_dial_without_its_address_reader_hands_every_host_to_the_resolver"
+    "wz-runtime-coop|hook|\
+        -default,\
+        alloc,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        host-lock,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        keyexpr-wildcard-double,\
+        keyexpr-wildcard-single,\
+        listen,\
+        reassembly,\
+        resource-snapshot,\
+        rx-in-place,\
+        scouting-static,\
+        serial,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        switchboard,\
+        transport-batching,\
+        transport-keepalive,\
+        transport-qos,\
+        udp-listen,\
+        unixpipe,\
+        ws\
+        |dial::tests::an_address_without_its_reader_is_the_resolvers_to_read"
     # Fixed-memory step S6 -- the same crate under the SESSION-SLOT profile, a row of
     # its own because the selector swaps the task pool, the join handles, the local
     # set and the timer queue for their static forms (and drops the tests that build

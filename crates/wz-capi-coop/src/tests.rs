@@ -3919,19 +3919,21 @@ fn an_endpoint_refusal_reads_as_its_endpoint_and_its_reason() {
 
 /// A dial refused before any link is made names its endpoint and its cause: a text that names no
 /// address the build reads, and no host either, is refused by the locator, a protocol the links do
-/// not carry by the links. Turned red by a refusal that names the other cause or loses the
-/// endpoint.
+/// not carry by the links. Without `dial-address-reader` an address is the host's resolver's to
+/// read, so the text refused is one that names no port, which no resolver is asked about. Turned
+/// red by a refusal that names the other cause or loses the endpoint.
 #[test]
 fn a_dial_refused_at_once_names_its_endpoint_and_its_cause() {
     use crate::{EndpointRefusal, OpenError, Refusal};
     use wz_runtime_coop::locator_text::DialRefused;
     use wz_runtime_coop::session_drive::LinkOpenError;
 
+    #[cfg(feature = "dial-address-reader")]
+    let unread = "tcp/127.0.0.256:7447";
+    #[cfg(not(feature = "dial-address-reader"))]
+    let unread = "tcp/127.0.0.1:0";
     for (endpoint, why) in [
-        (
-            "tcp/127.0.0.256:7447",
-            Refusal::Locator(DialRefused::BadAddress),
-        ),
+        (unread, Refusal::Locator(DialRefused::BadAddress)),
         (
             "tls/127.0.0.1:7447",
             Refusal::Link(LinkOpenError::Unsupported),

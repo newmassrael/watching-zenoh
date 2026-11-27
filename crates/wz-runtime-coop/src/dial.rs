@@ -24,7 +24,11 @@
 use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use crate::link_cells::CountKind;
-use crate::locator_text::{read_dial_target, DialTarget, NamedHost, NamedLink};
+#[cfg(feature = "dial-address-reader")]
+use crate::locator_text::read_dial_target;
+#[cfg(not(feature = "dial-address-reader"))]
+use crate::locator_text::{read_dial_address, read_dial_host, DialRefused};
+use crate::locator_text::{DialTarget, NamedHost, NamedLink};
 use crate::session_drive::{LinkOpenError, LinkProto, Locator, SessionLinks};
 use crate::transport::{EndpointRefusal, Refusal, TransportRefusal};
 
@@ -39,17 +43,36 @@ const UNRESOLVED: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPEC
 
 /// What a dial of one endpoint is planned from, values of no type of the stack's: the endpoint's
 /// text, as the open wrote it in the session's row of endpoints to dial, and whether the network
-/// the dial runs on answers a host name with its addresses (`SessionLinks::RESOLVES`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// the dial runs on answers a host name with its addresses (`SessionLinks::RESOLVES`). Without
+/// `dial-address-reader` the plan holds the reader of the text for that network in its place
+/// (`read_dial_host` where it resolves, `read_dial_address` where it does not), picked where
+/// the plan is made from the stack's constant, so a build links the readers its stacks read with
+/// and no other.
+#[derive(Debug, Clone, Copy)]
 pub struct LinkPlan<'a> {
     endpoint: &'a str,
+    #[cfg(feature = "dial-address-reader")]
     resolves: bool,
+    #[cfg(not(feature = "dial-address-reader"))]
+    read: fn(&'a str) -> Result<DialTarget<'a>, DialRefused>,
 }
 
 impl<'a> LinkPlan<'a> {
     /// The plan of a dial of `endpoint` over a network that `resolves` host names or not.
-    pub const fn new(endpoint: &'a str, resolves: bool) -> Self {
-        Self { endpoint, resolves }
+    // Always inlined, so the stack's constant picks the reader where the plan is made.
+    #[inline(always)]
+    pub fn new(endpoint: &'a str, resolves: bool) -> Self {
+        Self {
+            endpoint,
+            #[cfg(feature = "dial-address-reader")]
+            resolves,
+            #[cfg(not(feature = "dial-address-reader"))]
+            read: if resolves {
+                read_dial_host
+            } else {
+                read_dial_address
+            },
+        }
     }
 
     /// The endpoint dialled.
@@ -189,7 +212,11 @@ pub fn dial_step<'a>(
 ) -> DialAsk<'a> {
     if !at.read {
         at.read = true;
-        return match read_dial_target(plan.endpoint, plan.resolves) {
+        #[cfg(feature = "dial-address-reader")]
+        let target = read_dial_target(plan.endpoint, plan.resolves);
+        #[cfg(not(feature = "dial-address-reader"))]
+        let target = (plan.read)(plan.endpoint);
+        return match target {
             Ok(DialTarget::At(to)) => DialAsk::Begin(to),
             Ok(DialTarget::Named(name)) => {
                 at.walk.link = name.link();
@@ -298,11 +325,12 @@ mod tests {
     }
 
     /// An address is begun at the first step, with no resolver asked and no address to pass to;
-    /// its refusal is the dial's. Turned red by an address read as a name, or a refusal of the
-    /// address that asks for another one.
+    /// its refusal is the dial's. Read over a network without a resolver, whose dial reads an
+    /// address with or without `dial-address-reader`. Turned red by an address read as a name, or
+    /// a refusal of the address that asks for another one.
     #[test]
     fn an_address_is_begun_at_once_and_its_refusal_is_the_dials() {
-        let plan = LinkPlan::new("tcp/127.0.0.1:7447", true);
+        let plan = LinkPlan::new("tcp/127.0.0.1:7447", false);
         let mut at = DialCursor::START;
         assert_eq!(
             dial_step(&plan, &mut at, None),
@@ -382,6 +410,28 @@ mod tests {
             ),
             DialAsk::Refused(Refusal::Locator(DialRefused::PeerNamedByAddress))
         );
+    }
+
+    /// Without `dial-address-reader` an address over a network that resolves is its resolver's to
+    /// read: the first step asks for it, out of its brackets, and the address the resolver answers
+    /// is begun next, with none left to pass to. Turned red by an address read by the reader of
+    /// addresses over such a network (a `Begin` at the first step).
+    #[cfg(not(feature = "dial-address-reader"))]
+    #[test]
+    fn an_address_without_its_reader_is_the_resolvers_to_read() {
+        let found = SocketAddr::from(([0u16, 0, 0, 0, 0, 0, 0, 1], 7447));
+        let plan = LinkPlan::new("tcp/[::1]:7447", true);
+        let mut at = DialCursor::START;
+        let DialAsk::Resolve(name) = dial_step(&plan, &mut at, None) else {
+            panic!("the address is handed to the resolver");
+        };
+        assert_eq!((name.host(), name.port()), ("::1", 7447));
+        if let Some(place) = at.room().first_mut() {
+            *place = found;
+        }
+        at.resolved(1);
+        assert_eq!(dial_step(&plan, &mut at, None), tcp(found));
+        assert_eq!(at.walk().left(), 0, "the one address is begun");
     }
 
     /// A dial's refusal names its endpoint as one the session dials, never one it listens on.

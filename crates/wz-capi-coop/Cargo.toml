@@ -139,6 +139,7 @@ default = [
     "tx-held-wait",
     "tx-stream-owed",
     "dial-in-flight",
+    "dial-address-reader",
     "multicast-locator-keys",
     "query-replies-with-final",
     "accept-cookie",
@@ -308,6 +309,11 @@ tx-stream-owed = ["wz-runtime-coop/tx-stream-owed"]
 # and waits in the call that begins it, walking the host's addresses there, as zenoh-pico's open
 # does, so a connect the other end does not answer holds the open or the redial for as long.
 dial-in-flight = ["wz-runtime-coop/dial-in-flight"]
+# `dial-address-reader`: a dial reads the address its endpoint writes with the runtime's reader, held
+# to zenoh's grammar, and hands the host's resolver names alone. The runtime's feature of the same
+# name. Without it every host a dial names, an address as well as a name, is handed to the
+# resolver of a network that has one, as zenoh-pico hands it to `getaddrinfo`.
+dial-address-reader = ["wz-runtime-coop/dial-address-reader"]
 # `multicast-locator-keys`: a host group's `#ttl=`, `#bind=` and `#dscp=`, read by the session
 # core's feature of the same name and given to the group's sockets (`host_group`). Without it the
 # three are refused when the group's endpoint is read, and no send socket is marked.

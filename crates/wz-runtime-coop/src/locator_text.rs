@@ -15,7 +15,10 @@
 //! is one more this build does not carry; a build with unixpipe links (`unixpipe`) reads
 //! `unixpipe/` with its `#file_mask` the same way. Whether a stack carries the protocol or the family is
 //! the stack's to answer when it opens the link; a stack built without IPv6 reads its endpoints with
-//! [`parse_locator_for`], so its image holds the IPv4 reader alone.
+//! [`parse_locator_for`], so its image holds the IPv4 reader alone. A build without
+//! `dial-address-reader` hands a resolving network's resolver every host a dial names, an address
+//! as well as a name, as zenoh-pico does (`read_dial_host`), so its dials link no reader of
+//! addresses.
 //!
 //! Written once for every engine over this runtime: the session shell's dialler and connection
 //! manager, and a transport that dials and listens for a C ABI's session.
@@ -172,7 +175,15 @@ impl<'a> NamedHost<'a> {
 /// written: for a link that names or verifies its peer by the address it dials, whatever the
 /// network ([`DialRefused::PeerNamedByAddress`]), and over a network without a resolver
 /// ([`DialRefused::NoResolver`]).
+///
+/// Without `dial-address-reader` a network that resolves is handed every host the text names,
+/// as `read_dial_host` reads it, and the reader of addresses reads for a network without a
+/// resolver alone.
 pub fn read_dial_target(endpoint: &str, resolves: bool) -> Result<DialTarget<'_>, DialRefused> {
+    #[cfg(not(feature = "dial-address-reader"))]
+    if resolves {
+        return read_dial_host(endpoint);
+    }
     let (link, rest) = match scheme_of(endpoint) {
         Scheme::Read(read) => return read.map(DialTarget::At),
         Scheme::Ip(link, rest) => (link, rest),
@@ -187,6 +198,64 @@ pub fn read_dial_target(endpoint: &str, resolves: bool) -> Result<DialTarget<'_>
         },
         Err(refused) => Err(refused),
     }
+}
+
+/// A dial's endpoint text read for a network whose resolver reads every host a dial names, an
+/// address as well as a name (`dial-address-reader` off): the host is handed to the resolver as
+/// written, as zenoh-pico hands each endpoint's host to `getaddrinfo`
+/// (`vendor/zenoh-pico/src/link/endpoint.c` @ `char *_z_endpoint_parse_host(`), so an address is
+/// read by the resolver's grammar and no reader of addresses is linked for the dial. The host is
+/// the text before the last `:`, out of the brackets an IPv6 address is written in, and the port
+/// the text after it, read as every reader here reads one.
+///
+/// Refused before the resolver: a scheme no link here carries and a `?metadata` or `#config`
+/// part ([`DialRefused::Unsupported`]), as [`read_dial_target`] refuses them; no port, a port of
+/// 0 or past 65535, no host, and a host past [`HOST_NAME_MAX`] bytes or with a 0 byte, which the
+/// resolver's buffer would not hold or would read shorter ([`DialRefused::BadAddress`]); and a
+/// name over a link that names or verifies its peer by the address it dials
+/// ([`DialRefused::PeerNamedByAddress`]), a name being a host whose last label opens with a letter,
+/// as [`read_dial_target`] tells one. A host the resolver answers no address for is the dial's
+/// refusal of a link the other end did not take, as a name's is.
+#[cfg(not(feature = "dial-address-reader"))]
+pub fn read_dial_host(endpoint: &str) -> Result<DialTarget<'_>, DialRefused> {
+    let (link, rest) = match scheme_of(endpoint) {
+        Scheme::Read(read) => return read.map(DialTarget::At),
+        Scheme::Ip(link, rest) => (link, rest),
+    };
+    if rest.bytes().any(|b| b == b'?' || b == b'#') {
+        return Err(DialRefused::Unsupported);
+    }
+    let colon = rest
+        .bytes()
+        .rposition(|b| b == b':')
+        .ok_or(DialRefused::BadAddress)?;
+    let written = rest.get(..colon).ok_or(DialRefused::BadAddress)?;
+    let port = rest
+        .as_bytes()
+        .get(colon.wrapping_add(1)..)
+        .and_then(|port| Text(port).port())
+        .filter(|port| *port != 0)
+        .ok_or(DialRefused::BadAddress)?;
+    // A resolver reads an IPv6 address without the brackets a locator writes it in.
+    let host = written
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(written);
+    if host.is_empty() || host.len() > HOST_NAME_MAX || host.bytes().any(|b| b == 0) {
+        return Err(DialRefused::BadAddress);
+    }
+    if link.names_peer_by_address() && is_host_name(host.as_bytes()) {
+        return Err(DialRefused::PeerNamedByAddress);
+    }
+    Ok(DialTarget::Named(NamedHost { host, port, link }))
+}
+
+/// [`read_dial_target`] over a network without a resolver (`dial-address-reader` off, where a
+/// dial's plan names its reader): an address read by the reader of addresses, and a name refused
+/// as one no dial reaches ([`DialRefused::NoResolver`]).
+#[cfg(not(feature = "dial-address-reader"))]
+pub fn read_dial_address(endpoint: &str) -> Result<DialTarget<'_>, DialRefused> {
+    read_dial_target(endpoint, false)
 }
 
 /// The host and port of an IP scheme's text after its `<scheme>/`, or `None` for a text that
@@ -613,6 +682,7 @@ mod tests {
     /// is handed to it as written. Turned red by a name read as an address or refused here, by a
     /// numeric text a C resolver would read handed to it as a name, or by a name with a 0 byte or
     /// past the resolver's buffer handed on.
+    #[cfg(feature = "dial-address-reader")]
     #[test]
     fn a_dial_reads_a_host_name_where_no_address_is_written() {
         let at = SocketAddr::from(([127, 0, 0, 1], 7447));
@@ -676,6 +746,7 @@ mod tests {
     /// every link. Turned red by a `tls/` host read as a name, by a name refused over a network
     /// that resolves or read over one that does not, by the two reasons swapped, or by a numeric
     /// text refused by its link's reason.
+    #[cfg(feature = "dial-address-reader")]
     #[test]
     fn a_host_name_is_refused_where_no_dial_of_it_reaches_the_host() {
         for resolves in [true, false] {
@@ -712,7 +783,7 @@ mod tests {
     /// A WebSocket dial reads an address as the IP schemes do, and refuses a host name by the
     /// reason its request names the address it reached, as a `tls/` one is refused. Turned red
     /// by a `ws/` name handed to the resolver, or a `ws/` address opened as another link.
-    #[cfg(feature = "ws")]
+    #[cfg(all(feature = "ws", feature = "dial-address-reader"))]
     #[test]
     fn a_ws_dial_reads_an_address_and_refuses_a_host_name() {
         let at = SocketAddr::from(([127, 0, 0, 1], 7447));
@@ -723,6 +794,58 @@ mod tests {
         std::assert_eq!(
             read_dial_target("ws/localhost:7447", true),
             Err(DialRefused::PeerNamedByAddress)
+        );
+    }
+
+    /// Without `dial-address-reader` a dial over a network that resolves hands every host its text
+    /// names to the resolver as written, an address as a name is, out of the brackets an IPv6
+    /// address is written in, with its port read as every reader here reads one; a text that names
+    /// no host or port, or one the resolver's buffer cannot be handed, is refused before it, and so
+    /// is a name over a link that names its peer by its address. Over a network without a resolver
+    /// the reader of addresses reads as with it. Turned red by an address read here over a network
+    /// that resolves (`DialTarget::At`), by brackets handed to the resolver, or by a refused text
+    /// handed on.
+    #[cfg(not(feature = "dial-address-reader"))]
+    #[test]
+    fn a_dial_without_its_address_reader_hands_every_host_to_the_resolver() {
+        for (text, host, port) in [
+            ("tcp/127.0.0.1:7447", "127.0.0.1", 7447),
+            ("udp/127.1:7447", "127.1", 7447),
+            ("tcp/[::1]:7447", "::1", 7447),
+            ("tcp/[fe80::1%eth0]:7447", "fe80::1%eth0", 7447),
+            ("tcp/localhost:00080", "localhost", 80),
+            ("tls/127.0.0.1:7447", "127.0.0.1", 7447),
+        ] {
+            let Ok(DialTarget::Named(name)) = read_dial_target(text, true) else {
+                panic!("{text} is handed to the resolver");
+            };
+            std::assert_eq!((name.host(), name.port()), (host, port), "{text}");
+        }
+        for (text, why) in [
+            ("tcp/localhost:0", DialRefused::BadAddress),
+            ("tcp/localhost", DialRefused::BadAddress),
+            ("tcp/localhost:65536", DialRefused::BadAddress),
+            ("tcp/:7447", DialRefused::BadAddress),
+            ("tcp/[]:7447", DialRefused::BadAddress),
+            ("tcp/router\u{0}.example:7447", DialRefused::BadAddress),
+            ("tcp/127.0.0.1:7447?prio=1", DialRefused::Unsupported),
+            ("tcp/[::1]:7447#iface=eth0", DialRefused::Unsupported),
+            ("quic/127.0.0.1:7447", DialRefused::Unsupported),
+            ("tls/router.example:7447", DialRefused::PeerNamedByAddress),
+        ] {
+            std::assert_eq!(read_dial_target(text, true), Err(why), "{text}");
+        }
+        let past = std::format!("tcp/{}:7447", "a".repeat(HOST_NAME_MAX + 1));
+        std::assert_eq!(read_dial_target(&past, true), Err(DialRefused::BadAddress));
+        let at = SocketAddr::from(([127, 0, 0, 1], 7447));
+        std::assert_eq!(
+            read_dial_target("tcp/127.0.0.1:7447", false),
+            Ok(DialTarget::At(Locator::tcp(at))),
+            "CONTROL: a network without a resolver reads the address"
+        );
+        std::assert_eq!(
+            read_dial_address("tcp/router.example:7447"),
+            Err(DialRefused::NoResolver)
         );
     }
 

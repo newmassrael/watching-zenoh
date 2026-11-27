@@ -92,7 +92,7 @@ it up is not landed.
 | 1 | **W1** (landed with this file) | work: switch `tx-stream-owed` | off: a stream link writes each frame whole, the send waiting for its stream (`StreamSocket::write_all`), as `_z_link_send_wbuf` waits in `send`; no owed ring, no question of room asked of the stream | 2,429 + 179 | -1,100 to -1,500 | 0: the datagram receive reaches none of it; a stream link's `service` per turn drops a `RefCell` borrow | base-driver |
 | 2 | **W2** (landed, section 7) | work: switch `dial-in-flight` | off: a dial connects and waits in one call, walking the host's addresses there, as `_z_tcp_open` does; `Dial::answer_on`'s later answer and `HostWalk::pass_on` go | 2,215 (+ part of the dial row) | -800 to -1,200 | 0 (an open, never a message) | base-driver, with arch-l0-driver 6b-1 to 6b-3 (the life's `DialStage::Pending`) |
 | 3 | S2 | shape: over-generalization | whether the owner waits for every link becomes the stack's type, so a driver of such a stack has no wait of its own (`size.md` 3.4, first item) | 798 + about 120 of the stream's `service` | -800 to -1,000 | 0 or less (the `owner_waits` load goes) | base-driver; touches every heap link family |
-| 4 | S4 | shape: overlapping layers | on a stack that `RESOLVES`, a literal address goes to the host's resolver (one `getaddrinfo` asked for a numeric host) and wz's literal parser is not linked; a stack without a resolver keeps it | 994 | -600 to -850 | 0 | base-driver |
+| 4 | **S4** (changed into the switch `dial-address-reader`, section 8) | shape: overlapping layers | on a stack that `RESOLVES`, a literal address goes to the host's resolver (one `getaddrinfo` asked for a numeric host) and wz's literal parser is not linked; a stack without a resolver keeps it | 994 | -600 to -850 | 0 | base-driver |
 | 5 | S6 | shape: over-generalization | one table a link (the session's sends and the loop's pump through one `dyn` entry set), and `try_recv` out of the table of a build whose receive lends | 1,285 | -400 to -800 | must not rise: `recv_with` is reached through the table | base-driver |
 | 6 | S3 | shape: generic copy | one out-of-line drop path for the last holder of a kept value, the type's drop handed as a function | 909 | -300 to -450 | 0 (no kept value is let go on a message) | base-driver |
 | 7 | S5 | shape: moved by value | a link built where it lies: the driver's fields written once into the cell, not assembled and copied (273 B and 217 B of `MaybeUninit::write`) | 2,958 | -200 to -400 | 0 (an open) | base-driver |
@@ -221,3 +221,56 @@ if `answer_on` passes a later refusal on) and
 Measured by the main session on the case's explain report: the driver row and the
 `wz_runtime_coop::faces`, `wz_runtime_coop::dial`, `wz_runtime_coop::ip_stack` and
 `wz_runtime_posix::stream` owner lines; expected -1,000 to -1,300, the receive untouched (an open).
+
+## 8. Step S4: the reader of a dial's address, as a capability
+
+S4 was designed as a shape step: on a stack that resolves, hand a literal address to the host's
+resolver and leave wz's reader of addresses unlinked, both readers doing one job. The code says the
+two readers do not read one grammar: `read_dial_target` holds an address to zenoh's grammar
+(`core::net`'s, `the_ipv4_reader_reads_what_core_reads` and `the_ipv6_reader_reads_what_core_reads`)
+and keeps every text a C resolver would read as a number away from it (`127.1`, `0x7f.1`, the
+octal `010`), where zenoh-pico hands every endpoint's host to `getaddrinfo`
+(`vendor/zenoh-pico/src/link/endpoint.c` @ `char *_z_endpoint_parse_host(`) and reads an address
+by the C library's grammar. Handing the literal on in every build would change what a build that
+names nothing accepts, so under the owner's ruling of 2026-11-27 the step is a capability instead:
+`dial-address-reader`, `wz-runtime-coop`'s third default, forwarded by `wz-capi-coop` and named by
+the pico and core ABI manifests and `deploy/wz-config.toml` (`WZ_CAP_DIAL_ADDRESS_READER`, off in
+the zenoh-pico preset, on in the host profiles).
+
+| case | with `dial-address-reader` (as before) | without it (the zenoh-pico preset), network that resolves |
+|---|---|---|
+| `tcp/127.0.0.1:7447` | read by wz's reader, begun at once | handed to the resolver as `127.0.0.1`, begun at the address it answers |
+| `tcp/[::1]:7447`, `tcp/[fe80::1%eth0]:7447` | the first read, the second refused (`BadAddress`: a named scope) | handed without the brackets; the resolver reads both |
+| `tcp/127.1:7447`, `tcp/0x7f.1:7447` | refused (`BadAddress`): a text a C resolver reads as a number | handed to the resolver, which reads it as zenoh-pico's does |
+| `tcp/127.0.0.256:7447` | refused for good (`BadAddress`) | handed to the resolver, which answers no address: the refusal of a link the other end did not take, as a name of no address is |
+| `tcp/localhost:7447` | handed to the resolver | the same |
+| no port, port 0 or past 65535, no host, a host past `HOST_NAME_MAX` or with a 0 byte, `?` or `#` | refused before the resolver | the same |
+| `tls/` or `ws/` and a name | refused (`PeerNamedByAddress`) | the same, a name told by its last label as before |
+| a network without a resolver (lwIP, Zephyr, the MCU links) | wz's reader | the same |
+
+The choice is made where the dial's plan is made: `LinkPlan::new` (always inlined into
+`dial::begin`, generic over the stack) picks `read_dial_host` or `read_dial_address` from
+`SessionLinks::RESOLVES` and the plan carries it, so `dial_step` stays one body generic over
+nothing and a build links the readers of its stacks alone. `read_dial_target` keeps its form for
+the config door (`device_requires.rs`), which reads a text as the open's dial does in either form.
+
+Bodies that go in the case: `locator_text::ipv6_groups` (470), `locator_text::socket_addr_v4`
+(313) and the address reader's share of `dial_step`'s 1,298 bytes of `locator_text`
+(`socket_addr_v6`, `ipv6_address`, `ipv4_address`); `read_dial_host` comes in (the split at
+the last `:`, the brackets, the checks), and `Text::port` and `Text::number` stay, the port's
+reader.
+
+Tests: `locator_text::tests::a_dial_reads_a_host_name_where_no_address_is_written`,
+`a_host_name_is_refused_where_no_dial_of_it_reaches_the_host` and
+`a_ws_dial_reads_an_address_and_refuses_a_host_name` are gated on the feature; two run without it
+(`nondefault-tests-gate.sh`, beside W2's rows): `locator_text::tests::a_dial_without_its_address_reader_hands_every_host_to_the_resolver`
+(red if an address is read over a network that resolves, or handed in its brackets) and
+`dial::tests::an_address_without_its_reader_is_the_resolvers_to_read` (red if the plan reads the
+address itself). `dial::tests::an_address_is_begun_at_once_and_its_refusal_is_the_dials` reads over a
+network without a resolver, which reads an address in either form. `wz-capi-coop`'s
+`tests::a_dial_refused_at_once_names_its_endpoint_and_its_cause` refuses a text of no port without
+the feature, which no resolver is asked about.
+
+Measured by the main session on the case's explain report: the driver row and the
+`wz_runtime_coop::locator_text` and `wz_runtime_coop::dial` owner lines; expected -600 to -900,
+the receive untouched (an open).

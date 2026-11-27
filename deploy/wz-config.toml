@@ -1807,6 +1807,20 @@ implies = []
 help = "A dial that does not hold the session: a stream link's connect is begun without waiting and asked at each later step, and a connect refused once under way passes to the next address its host resolved to. Off, a dial connects and waits in the call that begins it, walking the host's addresses there, as zenoh-pico's open does, so a connect the other end does not answer holds the open or the redial for as long."
 
 [[capability]]
+id = "dial-address-reader"
+kconfig = "WZ_CAP_DIAL_ADDRESS_READER"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico hands every
+# endpoint's host to getaddrinfo, an address as well as a name, so an address is read by the C
+# library's grammar (which reads 127.1 and 0x7f.1 as numbers) and the open links no reader of its
+# own. A behaviour of the cooperative engine's dial (wz-runtime-coop's feature of the same name),
+# not a door; the tokio engine's dials read their locators with their own reader whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "A dial reads the address its endpoint writes with wz's own reader, held to zenoh's grammar of a socket address, and hands the host's resolver names alone, a name being a text whose last label opens with a letter. Off, every host a dial names over a network that resolves, an address as well as a name, is handed to the resolver, as zenoh-pico hands it to getaddrinfo, so an address is read by the C library's grammar and a text it reads no address in is refused as a host it answers none for."
+
+[[capability]]
 id = "config-limits"
 kconfig = "WZ_CAP_CONFIG_LIMITS"
 # On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's config is a map

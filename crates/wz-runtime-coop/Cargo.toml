@@ -97,10 +97,11 @@ feature-sets = [
 # wz-runtime-core dep is feature-gated so the no-alloc build stays
 # trait-skeleton-free.
 #
-# The defaults are two behaviours of the links (`tx-stream-owed` and `dial-in-flight`, below),
-# which pull no dependency, so a build with default features still pulls only the sync primitives.
+# The defaults are behaviours of the links (`tx-stream-owed`, `dial-in-flight` and
+# `dial-address-reader`, below), which pull no dependency, so a build with default features still
+# pulls only the sync primitives.
 [features]
-default = ["tx-stream-owed", "dial-in-flight"]
+default = ["tx-stream-owed", "dial-in-flight", "dial-address-reader"]
 # R311bb — alloc lane now pulls portable-atomic{,-util} so Arc /
 # AtomicBool / AtomicU64 stay available on thumbv6m (Cortex-M0+),
 # closing the M0+ alloc gap that R311av documented. Native-atomic
@@ -236,6 +237,17 @@ tx-stream-owed = []
 # keep no addresses to pass to later. A stack whose own dial is answered later still is: the face
 # asks it at each step, and its refusal is the dial's.
 dial-in-flight = []
+
+# `dial-address-reader`: a dial reads the address its endpoint's text writes with this crate's own
+# reader (`locator_text`), held to zenoh's grammar of a socket address, and hands the network's
+# resolver host names alone, a name being a text whose last label opens with a letter. A behaviour
+# zenoh-pico's link does not have: it hands every endpoint's host, an address as well as a name, to
+# `getaddrinfo` (`vendor/zenoh-pico/src/link/endpoint.c` @ `char *_z_endpoint_parse_host(`),
+# whose grammar of an address is the C library's. On in a build that names nothing; the pico ABI
+# turns it on through its capability of the same name (deploy/wz-config.toml), which the zenoh-pico
+# preset leaves off, so that preset's dial over a network that resolves links no reader of
+# addresses. A network without a resolver reads its addresses with the reader in either form.
+dial-address-reader = []
 
 # Links over a serial line (`serial/` locators): the locator of one, read and written with the
 # session core's grammar, and the session core's serial framing the link reads and writes with.
