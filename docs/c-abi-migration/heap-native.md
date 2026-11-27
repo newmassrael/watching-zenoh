@@ -148,7 +148,7 @@ cooperative engine links one in every form (`extern crate alloc`), and needs no 
 | `Text<N>` | `heapless::String<N>` | a working text is on the stack, as on `Lent` |
 | `Key`, `Keys` | `HeapKey`: one allocation holding the count of its holders, its length, the budget it is counted against and its bytes; `BudgetKeys`: the handle a table holds on the session's `KeyBudget` (the bytes its keys may take together, `KEY_ARENA_BYTES`, and the bound on a key's length, `MAX_KEYEXPR_BYTES`), a key counted as the block the key arena would give it (`key_arena::block_bytes`) | a key is never cut short; a key past the bound is `TooLong`, one past the budget or refused by the allocator `NoRoom`, nothing taken, as today; a clone is one more holder and never fails |
 | `KeyLen`, `Offset` | `caps::KeyLen`, `u32` | as `Lent` |
-| `Ids<V, N>` | `FixedIdMap<V, N>` | a scan of a few rows, inline in the state (3.4) |
+| `Ids<V, N>` | `CountedIdMap<V, N>` (7.15): `N` rows, or the count its owner states while it holds none (`PeerIds::recount`), taken at its first id; lent its owner's `BudgetKeys`, a NEW id takes a row of its kind from the session's `KeyBudget` too | a peer that never writes takes nothing, and the session's peers hold what they write to `SESSION_MAX_*` together, as the lent pools hold them (3.4) |
 | `Pooled<T, N>` | `BoundedVec<T, N, Static>` | as `Region` |
 | `Epoch`, `HeapForm` | `()`, `Infallible` | the AP side's forms are not compiled in |
 | `Compose` | `ComposeInline` | as `Region` |
@@ -300,6 +300,7 @@ session takes its row at its open, as every policy's does.
 | **R1b, step 3 (landed on the lane: `d269055bd4`)** | the listening and grouped forms' registry on `OnUse`: `Registry::counted` generic over `Holders` and over the plan's `GetTables` and `FacePeers`, `ManyHolders` of `RowPolicy` with `Holders::counted`, `SpareSets`' on-use form (a set built at a place's first face, counted in its row), the rooms' places at `MAX_FACE_SETS` in the state, the plan's rows of the held index and the owed tokens the lent form's alone; `build.rs` names `OnUse` whatever faces the session takes (7.12) | `crates/wz-capi-coop` (`build.rs`, `lib.rs`, `arena.rs`, `engine.rs`, `engine/registry.rs`, `registry/{counted,held,adding}.rs`, `tests/{arena,on_use}.rs`), `scripts/lib/nondefault-tests-gate.sh` | 0 for every D12 case (no D12 build names `tables-on-use`); no case builds the listening on-use form until N5 | 0 | the on-use listening session: its sets' rows from the allocator at the open instead of the arena |
 | **R2 (landed on the lane: `c4105747a2`, `657b23623c`)** | the admission in an allocation of its own (`OwnPlaced`, as the rooms are) and each read slot of a face past the dial role's made at its place's first face (`OnceRows`, `DirectFaces::made_at`), a refusal answered as a face past `max_faces`; the plan lays out neither, and `SessionArena::arena_mut` is the D12 forms' and the tests' again (7.13) | `crates/wz-capi-coop` (`arena.rs`, `engine.rs`, `engine/direct.rs`, `engine/direct/once_rows.rs` (new), `engine/faces_added.rs`, `engine/state_places.rs` (a test's name), the tests), `scripts/lib/nondefault-tests-gate.sh` | 0 for every D12 case (each predicate added reads `not(wz_on_use)` over the code it guarded) | 0 for D12; on use a walk of the faces reads one pointer a row | the on-use listening session: a face's slot, its Router among it, from the allocator at its place's first face; the admission at the open |
 | **R2, the rooms (landed on the lane: `e5ee0e0d5a`)** | the places of the faces' rooms on use as the faces' read slots are (`OnceRows`, moved to `engine`): rows counted to the plan's sets at the open, each face's place made at its first hold of a wait and kept; `FACE_SETS` the region form's alone (7.14) | `crates/wz-capi-coop` (`engine.rs`, `engine/once_rows.rs` (moved), `engine/direct.rs`, `engine/registry.rs`, `engine/state_places.rs`, `tests/{congestion,on_use}.rs`) | 0 for every D12 case | 0 | the on-use session: its rooms' places one row a set and one place a face it held, in place of `MAX_FACE_SETS` places in its state |
+| **R3's residues (landed on the lane: `17511020b8`, `92347c4f82`, `f59630b1bd`)** | the session's bounds of what its peers write held on use by the key budget (`KeyBudget::holding_peer_rows_to`, `take_peer_row`), a peer's ids a `CountedIdMap` taking its rows at its first id and a row of its kind from the budget for each NEW id, and a group's aliases counted to `GROUP_FACE_ALIASES` (`PeerIds::recount`) (7.15) | `crates/wz-session-core` (`on_use.rs`, `id_map.rs`, `bounded.rs`, `pubsub.rs`), `crates/wz-capi-coop` (`engine/state_places.rs`, `engine/registry/counted.rs`) | 0 for every D12 case; on use each face's set smaller by its peer's inline id rows | 0 | the on-use session: a peer's id rows from the allocator at its first write of each kind |
 | R3 and R4 | the zenoh-pico preset's own library (`peer`, `multicast-transport`, so `runtime-plan`) on use: the listening and grouped forms' holders, sets and owed tokens on use and `build.rs`'s `!takes_faces` dropped (R1b, landed), the admission and the direct faces' slots per face (R2, landed), the listening and grouped stacks' memory (R3), its arena out (R4) (11.1) | `crates/wz-capi-coop` (`lib.rs`, `engine.rs`, `engine/registry/counted.rs`, `engine/state_places.rs`, `engine/direct.rs`), `crates/wz-runtime-coop` (the stacks' ports and groups) | the preset's library, read once N5 resolves it so | 0 | section 5 |
 | N5, after R2 to R4 (11.2, 11.3) | the switch and its guards (section 9): the `table-memory` axis, the zenoh-pico defconfig's `on-use`, the release profiles' `at-open`, the size cases of both forms (section 10) and C1nh's second reading | `deploy/wz-config.toml` and what it generates, `configs/zenoh-pico_defconfig`, `configs/profiles/host-peer-ext.conf`, `host-peer.conf`, `scripts/lib/capability_cost_gate.py`, `deploy/size_ledger.json`, `deploy/pico_host_ceiling.json`, `scripts/run-ci.sh` (C1nh) | 0 for the release form; the on-use case reads N3 and N4's figures | 0 | 0 |
 
@@ -775,7 +776,7 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   `MAX_PEER_KEYEXPR_ALIASES`, so a group's face held to its members' aliases
   (`hold_member_aliases`, `multicast-declarations`) holds no more than that bound, where on
   `Lent` the session's pool holds them (R3's relation of a peer's declarations); the session's
-  `SESSION_MAX_REMOTE_DECLS` is not held across faces on `OnUse` (7.11); the admission, the direct
+  `SESSION_MAX_REMOTE_DECLS` is not held across faces on `OnUse` (7.11) (both repaid for a peer's ids by 7.15); the admission, the direct
   faces' slots, the transport's tables and the kept publishes are still lent from the arena
   (R2, landed: 7.13; R3, R4).
 - D12: no D12 build names `tables-on-use`, so no predicate of one moves but the plan's
@@ -887,7 +888,76 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
     and lent forms' alone.
 - Not tested: a hold the allocator refuses; only a refusing allocator reaches it.
 
+### 7.15 R3's residues: the session's bounds of what its peers write, and a group's aliases
+
+- What it does (`17511020b8`, `92347c4f82`, `f59630b1bd`): on `Lent` the rows a peer writes by
+  its own choice lie in pools the session's faces share, so `SESSION_MAX_PEER_KEYEXPR_ALIASES`
+  and `SESSION_MAX_REMOTE_DECLS` bind across faces; on `OnUse` each face's table was a
+  `FixedIdMap` at the build's bound, inline, which held neither, and could not hold a group's
+  face to `GROUP_FACE_ALIASES` above `MAX_PEER_KEYEXPR_ALIASES` (7.12's residues).
+  - `KeyBudget` is the one value every table of an on-use session reaches (through
+    `BudgetKeys`, its `Storage::Keys`, lent to every `PeerIds::lend`): it now keeps, beside the
+    key bytes, the rows of each `PeerSlot` kind the session's peers hold together and the
+    session's bound of each (`holding_peer_rows_to`, from `SessionLimits`: the aliases'
+    `SESSION_MAX_PEER_KEYEXPR_ALIASES`, the declarations' and their repeats'
+    `SESSION_MAX_REMOTE_DECLS`, the interests' `SESSION_MAX_INBOUND_SUB_INTERESTS`, as
+    `PeerPoolRows` sizes the lent pools). `take_peer_row` refuses past the bound, taking
+    nothing; `give_peer_rows` gives back. `OwnState::place` writes the budget so held.
+  - `OnUse::Ids` is `CountedIdMap<V, N>` (`id_map.rs`): a `FirstUse` column of `(id, value)`
+    rows counted to `N`, taken at the first id, a scan as `FixedIdMap`'s. It answers `IdMap`
+    only lent its owner's handle (`CountedIds`, so no path binds past the budget); a NEW id takes
+    a row of the slot's kind from the budget after the table's own count and quota admit it, and
+    gives it back if the allocator refuses the column; `unbind`, `reset` and `PeerIds::release`
+    (which every owner calls before it drops a table or changes its keys, as a pooled table's
+    owner does) give the rows back. A handle of no budget holds the table to its own count alone.
+  - `PeerIds::recount` (a provided method, `false` for every other backing): a counted table
+    that holds no id takes a new count, its rows given back. `SubscriberPeer::limit_aliases_to`
+    recounts the alias table to its quota, so `PeerTables::limit_to` counts it to the config's
+    `MAX_PEER_KEYEXPR_ALIASES`, `hold_member_aliases` to `GROUP_FACE_ALIASES` (the set is fresh)
+    and a set given back (`let_go`, `remove_accepted_faces`, after `forget_peer` reset the
+    aliases) to a peer's again.
+- Not covered, the next residue: the interests and the repeats of a peer's declarations are
+  `Storage::Pooled`, inline at the build's bound on `OnUse` (`BoundedVec<T, N, Static>`), and
+  reached through `PeerSeq`, not `PeerIds`: `SESSION_MAX_INBOUND_SUB_INTERESTS` and the repeats'
+  share of `SESSION_MAX_REMOTE_DECLS` are still per face there. The budget already counts their
+  kinds; a counted `PeerSeq` backing on `OnUse` is what would take them.
+- D12: `Lent` and `Region` keep their `Ids`; `PeerIds::recount` answers `false` on them, so
+  `limit_aliases_to` stores the quota alone, as before. C1cs's readings are not expected to move.
+- Size, on use: a peer's table is a `CountedIdMap` head (about 24 bytes) in place of
+  `N` inline rows (`MAX_PEER_KEYEXPR_ALIASES` rows of an alias, `MAX_REMOTE_DECLS` of each
+  declaration kind), so every face's set shrinks by those rows, and they are taken from the
+  allocator at the peer's first write of each kind; `KeyBudget` grows by seven counts.
+- Tests:
+  - `on_use::tests::a_budget_holds_the_rows_its_peers_write_together_to_the_sessions_bounds`:
+    red if a kind is counted against another's count or bound, if a refused row is counted, or
+    if a row given back stays held.
+  - `id_map::tests::an_on_use_table_holds_its_faces_ids_to_the_sessions_bound_together`: two
+    faces' tables held to a session bound of two together, a replaced id needing no row, an
+    unbind and a release giving rows back. Red if `bind_within` asks no row of the budget, or if
+    `unbind`, `reset` or `release` give none back, or if the table takes rows when made.
+  - `id_map::tests::an_on_use_table_is_recounted_only_while_it_holds_no_id`: red if a table that
+    holds ids is recounted, or if a recount keeps the rows taken.
+  - `pubsub::on_use_alias_tests::an_on_use_alias_table_is_counted_to_its_quota`: red if
+    `limit_aliases_to` stores the quota alone.
+  - `engine::state_places::tests::an_on_use_state_holds_the_sessions_key_budget_and_its_places`
+    now takes the session's `SESSION_MAX_REMOTE_DECLS` of tokens and is refused the next: red if
+    `OwnState::place` leaves `holding_peer_rows_to` out.
+  - `engine::registry::counted::tests::an_on_use_groups_face_counts_its_aliases_to_every_members`
+    (`multicast-declarations`): red if the group's face keeps a peer's rows, or if a set given
+    back keeps the group's count.
+
 ## 8. What the main session runs
+
+- R3's residues (`17511020b8`, `92347c4f82`, `f59630b1bd`), not built or run by this lane.
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib on_use::tests` one
+  more; `--lib id_map::tests` two more; `--lib pubsub::on_use_alias_tests` 1; the crate's whole
+  suite (every on-use test of `peer_tables`, `slot_observer`, `session_tables` and
+  `liveliness_subscriber` now runs a `CountedIdMap`). `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features app-transport,group,multicast-declarations,liveliness,tables-on-use --lib on_use`
+  one more (`engine::registry::counted`); the R2 legs as listed below, their counts as there.
+  `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --all-targets -- -D warnings`,
+  the same with `--no-default-features` (no `alloc`: no `CountedIdMap`, `recount` provided
+  alone), and wz-capi-coop's legs below.
 
 - R2, the rooms (`e5ee0e0d5a`), not built or run by this lane. `cargo test --manifest-path
   crates/Cargo.toml -p wz-capi-coop --features liveliness,listen,tables-on-use --lib on_use` 21
