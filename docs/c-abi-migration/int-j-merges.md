@@ -144,3 +144,7 @@ The lane states the tables' policy once, in the build script (`wz_lent`,
   (`engine/direct.rs`, `tell_facts`) passed a typed cell. It is generic
   over the link type as `ReadFacts::of_link` beside it is; the holders'
   reads go through `FaceWire::owes_write_if_free`, generic already.
+- `crates/wz-session-core/src/link_life.rs`: base-td's test of a look's
+  read of establishment lent its counting closure by reference; the closure
+  borrows its counter alone, so it is `Copy` and passed by value
+  (`clippy::needless_borrows_for_generic_args`).

@@ -1214,11 +1214,11 @@ mod tests {
             asked.set(asked.get() + 1);
             true
         };
-        assert_eq!(link.read_link(0, &established, || false), LinkRead::NOTHING);
+        assert_eq!(link.read_link(0, established, || false), LinkRead::NOTHING);
         bring_up(link, 0);
-        assert_eq!(link.read_link(5, &established, || false), LinkRead::NOTHING);
+        assert_eq!(link.read_link(5, established, || false), LinkRead::NOTHING);
         assert_eq!(
-            link.read_link(5, &established, || true),
+            link.read_link(5, established, || true),
             LinkRead {
                 input: LinkInput::Ended,
                 over: false,
