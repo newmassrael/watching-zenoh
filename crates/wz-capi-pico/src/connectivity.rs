@@ -907,10 +907,20 @@ pub(crate) struct Listener {
 }
 
 impl Listener {
-    fn wants(&self, transport: &z_loaned_transport_t) -> bool {
-        self.filter.is_none_or(|(zid, multicast)| {
-            zid == transport.zid.id && multicast == transport.is_multicast
-        })
+    /// Whether the listener is told of a change of `row`: unless it is filtered to another
+    /// transport.
+    fn wants(&self, row: &FaceLinkRow) -> bool {
+        self.filter
+            .is_none_or(|(zid, multicast)| zid == row.zid && multicast == row.is_multicast)
+    }
+
+    /// Whether the listener is told of `row` as it stands: a transport listener by its face's
+    /// first row, a link listener by each row it wants.
+    fn hears(&self, row: &FaceLinkRow) -> bool {
+        match self.delivery.plane {
+            ToldPlane::Transports => row.link == 0,
+            ToldPlane::Links => self.wants(row),
+        }
     }
 }
 
@@ -931,38 +941,63 @@ struct Entry {
 // its own locks; the entry is moved between threads only under the hub's lock.
 unsafe impl Send for Entry {}
 
-/// The hub's listeners of one plane: a row for each the session's limit of the plane admits, and
-/// the id the next one is given.
-struct Table<const N: usize> {
-    rows: [Option<Entry>; N],
-    /// The rows whose listener's history is being replayed. The engine notes what the listener
-    /// was told under its row (`wz_capi_port::told`), so the row is not given to another listener
-    /// until the replay forgot those notes, even when the listener was undeclared meanwhile (from
-    /// its own callback, say): a listener given the row then would find the notes as its own.
-    replaying: [bool; N],
+/// A row of a hub's listeners: the listener that holds it, if any, and whether a replay keeps it.
+#[derive(Default)]
+struct ListenerRow {
+    entry: Option<Entry>,
+    /// Whether the history of the row's listener is being replayed. The engine notes what the
+    /// listener was told under its row (`wz_capi_port::told`), so the row is not given to another
+    /// listener until the replay forgot those notes, even when the listener was undeclared
+    /// meanwhile (from its own callback, say): a listener given the row then would find the notes
+    /// as its own.
+    replaying: bool,
+}
+
+/// The first of `rows` no listener holds and no replay keeps.
+fn free_row(rows: &[ListenerRow]) -> Option<usize> {
+    rows.iter()
+        .position(|row| row.entry.is_none() && !row.replaying)
+}
+
+/// A hub's listeners: for each plane a row for each listener the session's limit of the plane
+/// admits, a row's place among its plane's being its listener's place in the plane's told notes
+/// (`wz_capi_port::told`), and the id the next listener of either plane is given.
+struct Table {
+    transports: [ListenerRow; wz_session_core::caps::MAX_TRANSPORT_EVENTS_LISTENERS],
+    links: [ListenerRow; wz_session_core::caps::MAX_LINK_EVENTS_LISTENERS],
     last_id: u64,
 }
 
-impl<const N: usize> Table<N> {
+impl Table {
     fn new() -> Self {
         Self {
-            rows: core::array::from_fn(|_| None),
-            replaying: [false; N],
+            transports: core::array::from_fn(|_| ListenerRow::default()),
+            links: core::array::from_fn(|_| ListenerRow::default()),
             last_id: 0,
         }
     }
 
-    /// The first row no listener holds and no replay keeps.
-    fn free_row(&self) -> Option<usize> {
-        self.rows
-            .iter()
-            .zip(&self.replaying)
-            .position(|(row, replaying)| row.is_none() && !replaying)
+    /// The rows of `plane`'s listeners.
+    fn rows(&self, plane: ToldPlane) -> &[ListenerRow] {
+        match plane {
+            ToldPlane::Transports => &self.transports,
+            ToldPlane::Links => &self.links,
+        }
+    }
+
+    /// The rows of `plane`'s listeners, to change.
+    fn rows_mut(&mut self, plane: ToldPlane) -> &mut [ListenerRow] {
+        match plane {
+            ToldPlane::Transports => &mut self.transports,
+            ToldPlane::Links => &mut self.links,
+        }
+    }
+
+    /// Every row, of either plane.
+    fn every_row(&mut self) -> impl Iterator<Item = &mut ListenerRow> {
+        self.transports.iter_mut().chain(self.links.iter_mut())
     }
 }
-
-type TransportTable = Table<{ wz_session_core::caps::MAX_TRANSPORT_EVENTS_LISTENERS }>;
-type LinkTable = Table<{ wz_session_core::caps::MAX_LINK_EVENTS_LISTENERS }>;
 
 /// What the listener whose state is at `object` keeps past its handle.
 ///
@@ -972,41 +1007,6 @@ unsafe fn listener_at<'a>(object: *const ListenerState) -> &'a Listener {
     // SAFETY: the caller's: the place holds a `ListenerPlace`, whose kept part is read only
     // through its locks.
     unsafe { &*kept_at::<ListenerState, Listener>(object) }
-}
-
-/// The listener of the first row of `table` from `at` on that holds one, and a hold of its place
-/// for the call, with `at` moved past its row; `None` past the last row. The table's lock is let
-/// go of before this returns, so a call made with the hold does not wait on it.
-fn next_in<const N: usize>(
-    table: &Mutex<Table<N>>,
-    at: &mut usize,
-) -> Option<(*mut ListenerState, HeldIn)> {
-    let table = lock(table);
-    while let Some(row) = table.rows.get(*at) {
-        *at = at.saturating_add(1);
-        if let Some(entry) = row {
-            // SAFETY: the entry's place stands while the entry holds it, which it does under the
-            // lock held here.
-            let hold = unsafe { hold_entity::<ListenerState, Listener>(entry.object) };
-            return Some((entry.object, hold));
-        }
-    }
-    None
-}
-
-/// The entry of listener `id`, taken off `table`; `None` when no listener has that id.
-fn take_in<const N: usize>(table: &Mutex<Table<N>>, id: u64) -> Option<Entry> {
-    let mut table = lock(table);
-    let row = table
-        .rows
-        .iter_mut()
-        .find(|row| row.as_ref().is_some_and(|entry| entry.id == id))?;
-    row.take()
-}
-
-/// Any entry left in `table`, taken off it.
-fn take_any_in<const N: usize>(table: &Mutex<Table<N>>) -> Option<Entry> {
-    lock(table).rows.iter_mut().find_map(Option::take)
 }
 
 /// Let go of a listener taken off the hub: its closure, once no call is running it, and the hub's
@@ -1020,50 +1020,6 @@ fn retire_entry(entry: Entry) {
         "a connectivity listener's place is let go of under a session's lock"
     );
     drop(entry.held);
-}
-
-/// Put the listener whose owner holds the place at `object` in a free row of `table`, holding its
-/// place for the hub, and tell `name` its id before the row can be read: the row, which the
-/// listener's told bits are noted under while it replays (`wz_capi_port::told`), and which a
-/// listener that `replays` holds until [`end_replay`] even past its undeclare. `None` when every
-/// row is held, the listener's closure let go of and its owner's place given back.
-///
-/// # Safety
-/// `object` is a place of a [`ListenerPlace`] its owner filled and holds, and lets go of here
-/// when this answers `None`.
-unsafe fn admit<const N: usize>(
-    table: &Mutex<Table<N>>,
-    object: *mut ListenerState,
-    name: impl FnOnce(u64),
-    replays: bool,
-) -> Option<usize> {
-    // SAFETY: the caller's: the owner holds the place.
-    let held = unsafe { hold_entity::<ListenerState, Listener>(object) };
-    let mut guard = lock(table);
-    let rows: &mut Table<N> = &mut guard;
-    let id = rows.last_id.wrapping_add(1);
-    if let Some(at) = rows.free_row() {
-        if let (Some(row), Some(replaying)) = (rows.rows.get_mut(at), rows.replaying.get_mut(at)) {
-            rows.last_id = id;
-            name(id);
-            *row = Some(Entry { id, object, held });
-            *replaying = replays;
-            return Some(at);
-        }
-    }
-    drop(guard);
-    retire_entry(Entry { id, object, held });
-    // SAFETY: the caller's: the owner lets go of the place once, here, with no other hold left.
-    unsafe { retire_entity::<ListenerState, Listener>(object) };
-    None
-}
-
-/// The replay of the listener of row `at` of `table` ended and the engine forgot what it was told
-/// (`SessionEngine::forget_told`): the row is free for another listener once its own went.
-fn end_replay<const N: usize>(table: &Mutex<Table<N>>, at: usize) {
-    if let Some(replaying) = lock(table).replaying.get_mut(at) {
-        *replaying = false;
-    }
 }
 
 /// Count the closure of the listener at `object` in its place: the place stands until its
@@ -1092,56 +1048,49 @@ fn told(engine: &Engine, plane: ToldPlane, listener: usize, came: bool, key: &To
     }
 }
 
-/// Bring the transport listener of row `listener`, whose queue ran out of rows while its history
-/// was replayed, to the faces as they stand: each row it was told came that has gone is told left,
-/// then each row that stands and it was not told is told came. A row that went and came back under
-/// its key is told neither, the one reconnect the contract says may be lost past the queue.
-fn converge_transports(engine: &Engine, listener: usize, delivery: &Delivery) {
-    let plane = ToldPlane::Transports;
-    while let Some(row) = SessionEngine::first_told_gone(engine, plane, listener) {
-        if !SessionEngine::tell_went(engine, plane, listener, &ToldKey::of_row(&row)) {
-            break;
-        }
-        delivery.call(ConnEvent::Transport(z_loaned_transport_event_t {
-            kind: Z_SAMPLE_KIND_DELETE,
-            transport: transport_of_row(&row),
-        }));
-    }
-    for row in rows(engine).filter(|row| row.link == 0) {
-        if SessionEngine::tell_came(engine, plane, listener, &ToldKey::of_row(&row)) {
-            delivery.call(ConnEvent::Transport(z_loaned_transport_event_t {
-                kind: Z_SAMPLE_KIND_PUT,
-                transport: transport_of_row(&row),
-            }));
-        }
+/// The key of the row an event of `plane` of `row` is of: a transport is its face's first row.
+fn key_of_row(plane: ToldPlane, row: &FaceLinkRow) -> ToldKey {
+    match plane {
+        ToldPlane::Transports => ToldKey {
+            link: 0,
+            ..ToldKey::of_row(row)
+        },
+        ToldPlane::Links => ToldKey::of_row(row),
     }
 }
 
-/// Bring the link listener of row `slot` to the links as they stand, as [`converge_transports`]
-/// does a transport listener, the links it is filtered to only.
-fn converge_links(engine: &Engine, slot: usize, listener: &Listener) {
-    let plane = ToldPlane::Links;
+/// The event of `plane` that tells `row` came (`PUT`) or left, as `kind` says: its face's
+/// transport, or its link.
+fn event_of_row(plane: ToldPlane, kind: z_sample_kind_t, row: &FaceLinkRow) -> ConnEvent {
+    match plane {
+        ToldPlane::Transports => ConnEvent::Transport(z_loaned_transport_event_t {
+            kind,
+            transport: transport_of_row(row),
+        }),
+        ToldPlane::Links => ConnEvent::Link(z_loaned_link_event_t {
+            kind,
+            link: link_of_row(row),
+        }),
+    }
+}
+
+/// Bring the listener of row `slot` of `plane`, whose queue ran out of rows while its history
+/// was replayed, to the rows as they stand: each row it was told came that has gone is told left,
+/// then each row that stands, that it hears and that it was not told is told came. A row that went
+/// and came back under its key is told neither, the one reconnect the contract says may be lost
+/// past the queue.
+fn converge(engine: &Engine, plane: ToldPlane, slot: usize, listener: &Listener) {
     while let Some(row) = SessionEngine::first_told_gone(engine, plane, slot) {
-        if !SessionEngine::tell_went(engine, plane, slot, &ToldKey::of_row(&row)) {
+        if !SessionEngine::tell_went(engine, plane, slot, &key_of_row(plane, &row)) {
             break;
         }
-        listener
-            .delivery
-            .call(ConnEvent::Link(z_loaned_link_event_t {
-                kind: Z_SAMPLE_KIND_DELETE,
-                link: link_of_row(&row),
-            }));
+        let event = event_of_row(plane, Z_SAMPLE_KIND_DELETE, &row);
+        listener.delivery.call(event);
     }
-    for row in rows(engine) {
-        if listener.wants(&transport_of_row(&row))
-            && SessionEngine::tell_came(engine, plane, slot, &ToldKey::of_row(&row))
-        {
-            listener
-                .delivery
-                .call(ConnEvent::Link(z_loaned_link_event_t {
-                    kind: Z_SAMPLE_KIND_PUT,
-                    link: link_of_row(&row),
-                }));
+    for row in rows(engine).filter(|row| listener.hears(row)) {
+        if SessionEngine::tell_came(engine, plane, slot, &key_of_row(plane, &row)) {
+            let event = event_of_row(plane, Z_SAMPLE_KIND_PUT, &row);
+            listener.delivery.call(event);
         }
     }
 }
@@ -1230,8 +1179,7 @@ fn stands_as_told(told: &FaceLinkRow, standing: &impl Fn(usize) -> Option<FaceLi
 /// The transport and link listeners of ONE session, the watcher that feeds
 /// them, and the rows it told them came; see the module doc for why there is one.
 pub(crate) struct Connectivity {
-    transports: Mutex<TransportTable>,
-    links: Mutex<LinkTable>,
+    listeners: Mutex<Table>,
     told: Mutex<Told>,
 }
 
@@ -1246,12 +1194,9 @@ impl Connectivity {
             // each lock is made once through a pointer to it, not null as it is inside the place.
             unsafe {
                 mutex_in(
-                    NonNull::new_unchecked(addr_of_mut!((*at).transports)),
+                    NonNull::new_unchecked(addr_of_mut!((*at).listeners)),
                     |table| table.write(Table::new()),
                 );
-                mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).links)), |table| {
-                    table.write(Table::new())
-                });
                 mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).told)), |told| {
                     told.write(Told::new())
                 });
@@ -1261,9 +1206,88 @@ impl Connectivity {
         unsafe { Strong::lodge_at(place, make) }
     }
 
-    /// The transport listener of the first row from `at` on, held for a call (`next_in`).
-    fn next_transport(&self, at: &mut usize) -> Option<(*mut ListenerState, HeldIn)> {
-        next_in(&self.transports, at)
+    /// The listener of `plane` of the first row from `at` on that holds one, and a hold of its
+    /// place for the call, with `at` moved past its row; `None` past the last row. The table's
+    /// lock is let go of before this returns, so a call made with the hold does not wait on it.
+    fn next_listener(
+        &self,
+        plane: ToldPlane,
+        at: &mut usize,
+    ) -> Option<(*mut ListenerState, HeldIn)> {
+        let table = lock(&self.listeners);
+        let rows = table.rows(plane);
+        while let Some(row) = rows.get(*at) {
+            *at = at.saturating_add(1);
+            if let Some(entry) = &row.entry {
+                // SAFETY: the entry's place stands while the entry holds it, which it does under
+                // the lock held here.
+                let hold = unsafe { hold_entity::<ListenerState, Listener>(entry.object) };
+                return Some((entry.object, hold));
+            }
+        }
+        None
+    }
+
+    /// The entry of listener `id`, of either plane, taken off the table; `None` when no listener
+    /// has that id.
+    fn take(&self, id: u64) -> Option<Entry> {
+        lock(&self.listeners)
+            .every_row()
+            .find_map(|row| row.entry.take_if(|entry| entry.id == id))
+    }
+
+    /// Any entry left in the table, taken off it.
+    fn take_any(&self) -> Option<Entry> {
+        lock(&self.listeners)
+            .every_row()
+            .find_map(|row| row.entry.take())
+    }
+
+    /// Put the listener whose owner holds the place at `object` in a free row of `plane`, holding
+    /// its place for the hub, and tell `name` its id before the row can be read: the row's place
+    /// among the plane's, which the listener's told bits are noted under while it replays
+    /// (`wz_capi_port::told`), and which a listener that `replays` holds until
+    /// [`Self::end_replay`] even past its undeclare. `None` when every row of the plane is held,
+    /// the listener's closure let go of and its owner's place given back.
+    ///
+    /// # Safety
+    /// `object` is a place of a [`ListenerPlace`] its owner filled and holds, and lets go of here
+    /// when this answers `None`.
+    unsafe fn admit(
+        &self,
+        plane: ToldPlane,
+        object: *mut ListenerState,
+        name: impl FnOnce(u64),
+        replays: bool,
+    ) -> Option<usize> {
+        // SAFETY: the caller's: the owner holds the place.
+        let held = unsafe { hold_entity::<ListenerState, Listener>(object) };
+        let mut table = lock(&self.listeners);
+        let id = table.last_id.wrapping_add(1);
+        let rows = table.rows_mut(plane);
+        if let Some(slot) = free_row(rows) {
+            if let Some(row) = rows.get_mut(slot) {
+                name(id);
+                row.entry = Some(Entry { id, object, held });
+                row.replaying = replays;
+                table.last_id = id;
+                return Some(slot);
+            }
+        }
+        drop(table);
+        retire_entry(Entry { id, object, held });
+        // SAFETY: the caller's: the owner lets go of the place once, here, with no other hold left.
+        unsafe { retire_entity::<ListenerState, Listener>(object) };
+        None
+    }
+
+    /// The replay of the listener of row `slot` of `plane` ended and the engine forgot what it
+    /// was told (`SessionEngine::forget_told`): the row is free for another listener once its own
+    /// went.
+    fn end_replay(&self, plane: ToldPlane, slot: usize) {
+        if let Some(row) = lock(&self.listeners).rows_mut(plane).get_mut(slot) {
+            row.replaying = false;
+        }
     }
 
     /// A row of a face that arrived or left: tell every listener, in pico's order.
@@ -1287,19 +1311,19 @@ impl Connectivity {
                 // A row a catch-up told came ahead of it, as it is, is not told again.
                 let news = lock(&self.told).came(row);
                 if news && row.link == 0 {
-                    self.fan_transport(Z_SAMPLE_KIND_PUT, row);
+                    self.fan(ToldPlane::Transports, Z_SAMPLE_KIND_PUT, row);
                 }
                 if news && has_link {
-                    self.fan_link(Z_SAMPLE_KIND_PUT, row);
+                    self.fan(ToldPlane::Links, Z_SAMPLE_KIND_PUT, row);
                 }
             }
             FaceEventKind::Down => {
                 lock(&self.told).went(&ToldKey::of_row(row));
                 if has_link {
-                    self.fan_link(Z_SAMPLE_KIND_DELETE, row);
+                    self.fan(ToldPlane::Links, Z_SAMPLE_KIND_DELETE, row);
                 }
                 if row.is_last_of_face() {
-                    self.fan_transport(Z_SAMPLE_KIND_DELETE, row);
+                    self.fan(ToldPlane::Transports, Z_SAMPLE_KIND_DELETE, row);
                 }
             }
         }
@@ -1334,10 +1358,10 @@ impl Connectivity {
                 !told.holds_face_of(&row)
             };
             if row.links > 0 {
-                self.fan_link(Z_SAMPLE_KIND_DELETE, &row);
+                self.fan(ToldPlane::Links, Z_SAMPLE_KIND_DELETE, &row);
             }
             if face_left {
-                self.fan_transport(Z_SAMPLE_KIND_DELETE, &row);
+                self.fan(ToldPlane::Transports, Z_SAMPLE_KIND_DELETE, &row);
             }
         }
         let mut at: usize = 0;
@@ -1353,49 +1377,27 @@ impl Connectivity {
                 face_told
             };
             if !face_told {
-                self.fan_transport(Z_SAMPLE_KIND_PUT, &row);
+                self.fan(ToldPlane::Transports, Z_SAMPLE_KIND_PUT, &row);
             }
             if row.links > 0 {
-                self.fan_link(Z_SAMPLE_KIND_PUT, &row);
+                self.fan(ToldPlane::Links, Z_SAMPLE_KIND_PUT, &row);
             }
         }
     }
 
-    fn fan_transport(&self, kind: z_sample_kind_t, row: &FaceLinkRow) {
-        let key = ToldKey {
-            zid: row.zid,
-            is_multicast: row.is_multicast,
-            link: 0,
-        };
+    /// Tell each listener of `plane` that `row` came or left, as `kind` says: a transport listener
+    /// its face's transport, a link listener its link when it is filtered to none or to its
+    /// transport.
+    fn fan(&self, plane: ToldPlane, kind: z_sample_kind_t, row: &FaceLinkRow) {
+        let key = key_of_row(plane, row);
         let mut at = 0;
-        while let Some((object, hold)) = self.next_transport(&mut at) {
-            // SAFETY: `hold` keeps the place, and so its delivery, standing for the call.
-            let delivery = &unsafe { listener_at(object) }.delivery;
-            delivery.deliver(
-                ConnEvent::Transport(z_loaned_transport_event_t {
-                    kind,
-                    transport: transport_of_row(row),
-                }),
-                key,
-            );
-            drop(hold);
-        }
-    }
-
-    fn fan_link(&self, kind: z_sample_kind_t, row: &FaceLinkRow) {
-        let transport = transport_of_row(row);
-        let mut at = 0;
-        while let Some((object, hold)) = next_in(&self.links, &mut at) {
+        while let Some((object, hold)) = self.next_listener(plane, &mut at) {
             // SAFETY: `hold` keeps the place, and so its listener, standing for the call.
             let listener = unsafe { listener_at(object) };
-            if listener.wants(&transport) {
-                listener.delivery.deliver(
-                    ConnEvent::Link(z_loaned_link_event_t {
-                        kind,
-                        link: link_of_row(row),
-                    }),
-                    ToldKey::of_row(row),
-                );
+            if listener.wants(row) {
+                listener
+                    .delivery
+                    .deliver(event_of_row(plane, kind, row), key);
             }
             drop(hold);
         }
@@ -1455,71 +1457,29 @@ impl Connectivity {
         Some(object)
     }
 
-    /// Declare a transport listener in a place of `engine`'s session, replaying the peers
-    /// connected now first when `history` is set: its object, which its owner lets go of with
-    /// [`release_transport_listener`]. `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when every place or every
-    /// row of the hub is held; the closure is let go of then, which runs its `drop(context)`.
-    fn declare_transport(
+    /// Declare a listener of `plane` in a place of `engine`'s session, replaying the rows that stand
+    /// first when `history` is set; `filter` narrows a link listener to one transport. Its object,
+    /// which its owner lets go of with [`release_listener`]. `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when
+    /// every place or every row of the plane is held (the session's
+    /// `MAX_TRANSPORT_EVENTS_LISTENERS` or `MAX_LINK_EVENTS_LISTENERS`); the closure is let go of
+    /// then, which runs its `drop(context)`.
+    fn declare(
         hub: &Strong<Self>,
         engine: &crate::session::EngineHold,
-        history: bool,
-        closure: CClosure<EventCall>,
-    ) -> Result<*mut ListenerState, ZResult> {
-        let Some(object) =
-            Self::place_listener(hub, engine, ToldPlane::Transports, history, None, closure)
-        else {
-            return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
-        };
-        // Registered BEFORE the peers are read, so a peer that arrives in
-        // between is queued rather than missed.
-        // SAFETY: the place was filled just above and its owner holds it; the id is written
-        // before the entry can be read.
-        let Some(slot) =
-            (unsafe { admit(&hub.transports, object, |id| (*object).id = id, history) })
-        else {
-            return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
-        };
-        if history {
-            // SAFETY: the owner holds the place for the length of the replay.
-            let delivery = &unsafe { listener_at(object) }.delivery;
-            let engine = crate::session::EngineHold::as_ref(engine);
-            let plane = ToldPlane::Transports;
-            for row in rows(engine).filter(|row| row.link == 0) {
-                if SessionEngine::tell_came(engine, plane, slot, &ToldKey::of_row(&row)) {
-                    delivery.call(ConnEvent::Transport(z_loaned_transport_event_t {
-                        kind: Z_SAMPLE_KIND_PUT,
-                        transport: transport_of_row(&row),
-                    }));
-                }
-            }
-            delivery.finish_replay(
-                |came, key| told(engine, plane, slot, came, key),
-                |delivery| converge_transports(engine, slot, delivery),
-            );
-            SessionEngine::forget_told(engine, plane, slot);
-            end_replay(&hub.transports, slot);
-        }
-        Ok(object)
-    }
-
-    /// Declare a link listener in a place of `engine`'s session, replaying the links connected
-    /// now first when `history` is set; `filter` narrows it to one transport. Its object, which
-    /// its owner lets go of with [`release_link_listener`]; refused as
-    /// [`Self::declare_transport`] is, by the session's `MAX_LINK_EVENTS_LISTENERS`.
-    fn declare_link(
-        hub: &Strong<Self>,
-        engine: &crate::session::EngineHold,
+        plane: ToldPlane,
         history: bool,
         filter: Option<([u8; 16], bool)>,
         closure: CClosure<EventCall>,
     ) -> Result<*mut ListenerState, ZResult> {
-        let Some(object) =
-            Self::place_listener(hub, engine, ToldPlane::Links, history, filter, closure)
+        let Some(object) = Self::place_listener(hub, engine, plane, history, filter, closure)
         else {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
-        // SAFETY: as in `declare_transport`.
-        let Some(slot) = (unsafe { admit(&hub.links, object, |id| (*object).id = id, history) })
+        // Registered BEFORE the rows are read, so a row that arrives in between is queued rather
+        // than missed.
+        // SAFETY: the place was filled by `place_listener` and its owner holds it; the id is
+        // written before the entry can be read.
+        let Some(slot) = (unsafe { hub.admit(plane, object, |id| (*object).id = id, history) })
         else {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
@@ -1527,47 +1487,33 @@ impl Connectivity {
             // SAFETY: the owner holds the place for the length of the replay.
             let listener = unsafe { listener_at(object) };
             let engine = crate::session::EngineHold::as_ref(engine);
-            let plane = ToldPlane::Links;
-            for row in rows(engine) {
-                if listener.wants(&transport_of_row(&row))
-                    && SessionEngine::tell_came(engine, plane, slot, &ToldKey::of_row(&row))
-                {
-                    listener
-                        .delivery
-                        .call(ConnEvent::Link(z_loaned_link_event_t {
-                            kind: Z_SAMPLE_KIND_PUT,
-                            link: link_of_row(&row),
-                        }));
+            for row in rows(engine).filter(|row| listener.hears(row)) {
+                if SessionEngine::tell_came(engine, plane, slot, &key_of_row(plane, &row)) {
+                    let event = event_of_row(plane, Z_SAMPLE_KIND_PUT, &row);
+                    listener.delivery.call(event);
                 }
             }
             listener.delivery.finish_replay(
                 |came, key| told(engine, plane, slot, came, key),
-                |_| converge_links(engine, slot, listener),
+                |_| converge(engine, plane, slot, listener),
             );
             SessionEngine::forget_told(engine, plane, slot);
-            end_replay(&hub.links, slot);
+            hub.end_replay(plane, slot);
         }
         Ok(object)
     }
 
-    fn undeclare_transport(&self, id: u64) {
-        if let Some(entry) = take_in(&self.transports, id) {
-            retire_entry(entry);
-        }
-    }
-
-    fn undeclare_link(&self, id: u64) {
-        if let Some(entry) = take_in(&self.links, id) {
+    /// Take listener `id`, of either plane, off the hub and let go of it; nothing when no listener
+    /// has that id.
+    fn undeclare(&self, id: u64) {
+        if let Some(entry) = self.take(id) {
             retire_entry(entry);
         }
     }
 
     /// Let go of every listener, which releases their C contexts.
     pub(crate) fn shutdown(&self) {
-        while let Some(entry) = take_any_in(&self.transports) {
-            retire_entry(entry);
-        }
-        while let Some(entry) = take_any_in(&self.links) {
+        while let Some(entry) = self.take_any() {
             retire_entry(entry);
         }
     }
@@ -2288,28 +2234,16 @@ pub unsafe extern "C" fn z_link_events_listener_options_default(
     }
 }
 
-/// Undeclare the transport events listener whose state is at `object` and let go of its handle:
+/// Undeclare the listener of either plane whose state is at `object` and let go of its handle:
 /// taken off its hub, its closure let go of once no call is running it (which runs its
 /// `drop(context)`), and its state dropped; the place goes back with the last of the handle and
 /// a dispatch in flight.
 ///
 /// # Safety
-/// `object` is a live handle [`Connectivity::declare_transport`] answered, let go of once, here.
-unsafe fn release_transport_listener(object: *mut ListenerState) {
+/// `object` is a live handle [`Connectivity::declare`] answered, let go of once, here.
+unsafe fn release_listener(object: *mut ListenerState) {
     // SAFETY: the caller's: the state stands until `retire_entity` below.
-    unsafe { (*object).hub.undeclare_transport((*object).id) };
-    // SAFETY: the caller's; the owner lets go of the place once, here.
-    unsafe { retire_entity::<ListenerState, Listener>(object) };
-}
-
-/// Undeclare the link events listener whose state is at `object` and let go of its handle, as
-/// [`release_transport_listener`] does a transport one.
-///
-/// # Safety
-/// `object` is a live handle [`Connectivity::declare_link`] answered, let go of once, here.
-unsafe fn release_link_listener(object: *mut ListenerState) {
-    // SAFETY: the caller's: the state stands until `retire_entity` below.
-    unsafe { (*object).hub.undeclare_link((*object).id) };
+    unsafe { (*object).hub.undeclare((*object).id) };
     // SAFETY: the caller's; the owner lets go of the place once, here.
     unsafe { retire_entity::<ListenerState, Listener>(object) };
 }
@@ -2454,7 +2388,8 @@ pub unsafe extern "C" fn z_declare_transport_events_listener(
             return Z_ERR_SESSION_CLOSED;
         }
         let history = !options.is_null() && (*options).history;
-        match Connectivity::declare_transport(hub, engine_held(handle), history, closure) {
+        let plane = ToldPlane::Transports;
+        match Connectivity::declare(hub, engine_held(handle), plane, history, None, closure) {
             Ok(object) => {
                 *listener = z_owned_transport_events_listener_t::of(object.cast());
                 Z_OK
@@ -2497,7 +2432,7 @@ pub unsafe extern "C" fn z_undeclare_transport_events_listener(
         }
         let object = core::mem::replace(&mut (*listener)._this.handle, core::ptr::null_mut());
         if !object.is_null() {
-            release_transport_listener(object.cast::<ListenerState>());
+            release_listener(object.cast::<ListenerState>());
         }
         Z_OK
     })
@@ -2553,7 +2488,8 @@ pub unsafe extern "C" fn z_declare_link_events_listener(
         if handle.drive.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        match Connectivity::declare_link(hub, engine_held(handle), history, filter, closure) {
+        let plane = ToldPlane::Links;
+        match Connectivity::declare(hub, engine_held(handle), plane, history, filter, closure) {
             Ok(object) => {
                 *listener = z_owned_link_events_listener_t::of(object.cast());
                 Z_OK
@@ -2595,7 +2531,7 @@ pub unsafe extern "C" fn z_undeclare_link_events_listener(
         }
         let object = core::mem::replace(&mut (*listener)._this.handle, core::ptr::null_mut());
         if !object.is_null() {
-            release_link_listener(object.cast::<ListenerState>());
+            release_listener(object.cast::<ListenerState>());
         }
         Z_OK
     })
@@ -2722,6 +2658,28 @@ pub(crate) mod tests {
     /// A session's hub in a box of its own.
     fn hub_in_heap() -> Strong<Connectivity> {
         Connectivity::new(Lent::try_boxed().expect("the test's heap"))
+    }
+
+    /// A transport listener of `hub`, as the door declares one.
+    fn declare_transport(
+        hub: &Strong<Connectivity>,
+        engine: &crate::session::EngineHold,
+        history: bool,
+        closure: CClosure<EventCall>,
+    ) -> Result<*mut ListenerState, ZResult> {
+        let plane = ToldPlane::Transports;
+        Connectivity::declare(hub, engine, plane, history, None, closure)
+    }
+
+    /// A link listener of `hub`, filtered to the transport `filter` names, as the door declares one.
+    fn declare_link(
+        hub: &Strong<Connectivity>,
+        engine: &crate::session::EngineHold,
+        history: bool,
+        filter: Option<([u8; 16], bool)>,
+        closure: CClosure<EventCall>,
+    ) -> Result<*mut ListenerState, ZResult> {
+        Connectivity::declare(hub, engine, ToldPlane::Links, history, filter, closure)
     }
 
     fn link_closure(log: &'static Log) -> CClosure<EventCall> {
@@ -2948,11 +2906,10 @@ pub(crate) mod tests {
         // Declared transport FIRST, so a registry that hands each watcher the
         // event in declaration order would put the transport ahead on a
         // departure too.
-        let transport =
-            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
-                .expect("a place is free");
-        let link = Connectivity::declare_link(&hub, &engine, false, None, link_closure(log))
+        let transport = declare_transport(&hub, &engine, false, transport_closure(log))
             .expect("a place is free");
+        let link =
+            declare_link(&hub, &engine, false, None, link_closure(log)).expect("a place is free");
 
         let peer = face(7, false, "tcp/127.0.0.1:7447");
         tell(&hub, FaceEventKind::Up, &peer);
@@ -2968,8 +2925,8 @@ pub(crate) mod tests {
         );
         // SAFETY: the listeners declared above, each let go of once.
         unsafe {
-            release_transport_listener(transport);
-            release_link_listener(link);
+            release_listener(transport);
+            release_listener(link);
         }
     }
 
@@ -3014,11 +2971,10 @@ pub(crate) mod tests {
         let hub = hub_in_heap();
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
-        let transport =
-            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
-                .expect("a place is free");
-        let link = Connectivity::declare_link(&hub, &engine, false, None, link_closure(log))
+        let transport = declare_transport(&hub, &engine, false, transport_closure(log))
             .expect("a place is free");
+        let link =
+            declare_link(&hub, &engine, false, None, link_closure(log)).expect("a place is free");
 
         tell(
             &hub,
@@ -3071,8 +3027,8 @@ pub(crate) mod tests {
         );
         // SAFETY: the listeners declared above, each let go of once.
         unsafe {
-            release_transport_listener(transport);
-            release_link_listener(link);
+            release_listener(transport);
+            release_listener(link);
         }
     }
 
@@ -3090,16 +3046,15 @@ pub(crate) mod tests {
         let log = log();
         let mut zid = [0u8; 16];
         zid[0] = 7;
-        let link =
-            Connectivity::declare_link(&hub, &engine, false, Some((zid, false)), link_closure(log))
-                .expect("a place is free");
+        let link = declare_link(&hub, &engine, false, Some((zid, false)), link_closure(log))
+            .expect("a place is free");
 
         tell(&hub, FaceEventKind::Up, &face(7, false, "tcp/a"));
         tell(&hub, FaceEventKind::Up, &face(8, false, "tcp/other-zid"));
         tell(&hub, FaceEventKind::Up, &face(7, true, "tcp/multicast"));
         assert_eq!(seen(log), ["link PUT tcp/a"]);
         // SAFETY: the listener declared above, let go of once.
-        unsafe { release_link_listener(link) };
+        unsafe { release_listener(link) };
     }
 
     /// An arrival that lands while the history is being replayed is delivered
@@ -3186,7 +3141,7 @@ pub(crate) mod tests {
 
     /// A queue that runs out of rows holds what fit, lets go of the rest, and once
     /// what it held was told hands the listener to the convergence, once, which is
-    /// what brings it to the faces as they stand (`converge_transports`). An
+    /// what brings it to the faces as they stand (`converge`). An
     /// event the engine says the listener is not to hear is not told.
     ///
     /// # Control
@@ -3249,30 +3204,74 @@ pub(crate) mod tests {
 
     /// A row whose listener's history is being replayed is given to no other listener until the
     /// replay ended, even once no listener holds it: what the engine noted under the row belongs
-    /// to the replay until it forgot it.
+    /// to the replay until it forgot it. The replay's end frees the row of its own plane alone.
     ///
     /// # Control
     ///
-    /// A free row read from `rows` alone (the replay's mark ignored) reds the first assertion.
+    /// A free row read from the entries alone (the replay's mark ignored) reds the first
+    /// assertion; an end of a replay that frees the row of the other plane reds the last.
     #[test]
     fn a_row_a_replay_keeps_is_given_to_no_other_listener_until_it_ended() {
-        let table = Mutex::new(Table::<2>::new());
-        lock(&table).replaying[0] = true;
-        assert_eq!(lock(&table).free_row(), Some(1), "the replay keeps row 0");
-        lock(&table).replaying[1] = true;
-        assert_eq!(lock(&table).free_row(), None, "both rows kept");
-        end_replay(&table, 0);
+        let mut rows: [ListenerRow; 2] = Default::default();
+        rows[0].replaying = true;
+        assert_eq!(free_row(&rows), Some(1), "the replay keeps row 0");
+        rows[1].replaying = true;
+        assert_eq!(free_row(&rows), None, "both rows kept");
+
+        let hub = hub_in_heap();
+        for plane in [ToldPlane::Transports, ToldPlane::Links] {
+            for row in lock(&hub.listeners).rows_mut(plane) {
+                row.replaying = true;
+            }
+        }
+        hub.end_replay(ToldPlane::Transports, 0);
         assert_eq!(
-            lock(&table).free_row(),
+            free_row(lock(&hub.listeners).rows(ToldPlane::Transports)),
             Some(0),
             "the replay that ended frees it"
         );
-        end_replay(&table, 9);
+        hub.end_replay(ToldPlane::Transports, usize::MAX);
         assert_eq!(
-            lock(&table).free_row(),
+            free_row(lock(&hub.listeners).rows(ToldPlane::Transports)),
             Some(0),
-            "a row past the table is no row"
+            "a row past the plane's is no row"
         );
+        assert_eq!(
+            free_row(lock(&hub.listeners).rows(ToldPlane::Links)),
+            None,
+            "the link plane's row 0 is still kept"
+        );
+    }
+
+    /// Ids are the hub's, not a plane's: undeclaring a link listener by its id takes no transport
+    /// listener, though each is the first of its plane.
+    ///
+    /// # Control
+    ///
+    /// A table that numbers each plane's listeners apart gives both the id 1, and the undeclare
+    /// of the link listener's takes the transport listener, which then hears nothing and reds the
+    /// list.
+    #[test]
+    fn undeclaring_a_listener_takes_no_listener_of_the_other_plane() {
+        let hub = hub_in_heap();
+        let engine: Arc<Engine> = Arc::new(shared());
+        let log = log();
+        let transport = declare_transport(&hub, &engine, false, transport_closure(log))
+            .expect("a transport row is free");
+        let link = declare_link(&hub, &engine, false, None, link_closure(log))
+            .expect("a link row is free");
+        // SAFETY: the listeners' owner holds them until the end of the test.
+        let (transport_id, link_id) = unsafe { ((*transport).id, (*link).id) };
+        assert_ne!(transport_id, link_id, "the hub numbers its listeners once");
+        hub.undeclare(link_id);
+        tell(&hub, FaceEventKind::Up, &face(5, false, "tcp/z"));
+        assert_eq!(seen(log), ["transport PUT 5"]);
+        // SAFETY: the listeners declared above, each let go of once.
+        unsafe {
+            release_listener(transport);
+            release_listener(link);
+        }
+        assert_eq!(log.released.load(Ordering::SeqCst), 2);
     }
 
     /// A delivery hands its closure the events of its own plane alone: a link event handed to a
@@ -3317,7 +3316,7 @@ pub(crate) mod tests {
         let hub = hub_in_heap();
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
-        let object = Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
+        let object = declare_transport(&hub, &engine, false, transport_closure(log))
             .expect("a place is free");
         // SAFETY: the listener's owner holds it until the end of the test.
         let id = unsafe { (*object).id };
@@ -3325,9 +3324,9 @@ pub(crate) mod tests {
         assert_eq!(log.released.load(Ordering::SeqCst), 0);
 
         let mut at = 0;
-        let in_flight = hub.next_transport(&mut at);
+        let in_flight = hub.next_listener(ToldPlane::Transports, &mut at);
         assert!(in_flight.is_some(), "the dispatcher holds the listener");
-        hub.undeclare_transport(id);
+        hub.undeclare(id);
         assert_eq!(
             log.released.load(Ordering::SeqCst),
             1,
@@ -3340,7 +3339,7 @@ pub(crate) mod tests {
             "an undeclared listener hears nothing"
         );
 
-        hub.undeclare_transport(id);
+        hub.undeclare(id);
         assert_eq!(
             log.released.load(Ordering::SeqCst),
             1,
@@ -3350,7 +3349,7 @@ pub(crate) mod tests {
         drop(in_flight);
         assert_eq!(log.released.load(Ordering::SeqCst), 1);
         // SAFETY: the listener declared above, let go of once.
-        unsafe { release_transport_listener(object) };
+        unsafe { release_listener(object) };
         assert_eq!(log.released.load(Ordering::SeqCst), 1);
     }
 
@@ -3361,11 +3360,10 @@ pub(crate) mod tests {
         let hub = hub_in_heap();
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
-        let transport =
-            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
-                .expect("a place is free");
-        let link = Connectivity::declare_link(&hub, &engine, false, None, link_closure(log))
+        let transport = declare_transport(&hub, &engine, false, transport_closure(log))
             .expect("a place is free");
+        let link =
+            declare_link(&hub, &engine, false, None, link_closure(log)).expect("a place is free");
         hub.shutdown();
         assert_eq!(log.released.load(Ordering::SeqCst), 2);
         hub.shutdown();
@@ -3377,8 +3375,8 @@ pub(crate) mod tests {
         // The handle let go of after the end finds its listener released already.
         // SAFETY: the listeners declared above, each let go of once.
         unsafe {
-            release_transport_listener(transport);
-            release_link_listener(link);
+            release_listener(transport);
+            release_listener(link);
         }
         assert_eq!(log.released.load(Ordering::SeqCst), 2);
     }
@@ -3393,13 +3391,12 @@ pub(crate) mod tests {
         let hub = Connectivity::new(PLACES.lend().expect("CONTROL: a fresh table lends"));
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
-        let transport =
-            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
-                .expect("a place is free");
+        let transport = declare_transport(&hub, &engine, false, transport_closure(log))
+            .expect("a place is free");
         drop(hub);
         assert_eq!(PLACES.lent(), 1, "the listener still holds the hub");
         // SAFETY: the listener declared above, let go of once.
-        unsafe { release_transport_listener(transport) };
+        unsafe { release_listener(transport) };
         assert_eq!(PLACES.lent(), 0, "the last count gave the place back");
     }
 
@@ -3414,12 +3411,12 @@ pub(crate) mod tests {
         let rows = wz_session_core::caps::MAX_TRANSPORT_EVENTS_LISTENERS;
         let held: Vec<*mut ListenerState> = (0..rows)
             .map(|_| {
-                Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
+                declare_transport(&hub, &engine, false, transport_closure(log))
                     .expect("a row is free")
             })
             .collect();
         assert_eq!(
-            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log)).err(),
+            declare_transport(&hub, &engine, false, transport_closure(log)).err(),
             Some(Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
         assert_eq!(
@@ -3430,12 +3427,12 @@ pub(crate) mod tests {
         let mut held = held.into_iter();
         let first = held.next().expect("at least one row");
         // SAFETY: each listener declared above, let go of once.
-        unsafe { release_transport_listener(first) };
-        let again = Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
+        unsafe { release_listener(first) };
+        let again = declare_transport(&hub, &engine, false, transport_closure(log))
             .expect("the row given back is taken again");
         for object in held.chain([again]) {
             // SAFETY: as above.
-            unsafe { release_transport_listener(object) };
+            unsafe { release_listener(object) };
         }
         assert_eq!(log.released.load(Ordering::SeqCst), rows + 2);
     }
@@ -3450,18 +3447,17 @@ pub(crate) mod tests {
         let hub = hub_in_heap();
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
-        let transport =
-            Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
-                .expect("a transport row is free");
+        let transport = declare_transport(&hub, &engine, false, transport_closure(log))
+            .expect("a transport row is free");
         let rows = wz_session_core::caps::MAX_LINK_EVENTS_LISTENERS;
         let held: Vec<*mut ListenerState> = (0..rows)
             .map(|_| {
-                Connectivity::declare_link(&hub, &engine, false, None, link_closure(log))
+                declare_link(&hub, &engine, false, None, link_closure(log))
                     .expect("a link row is free")
             })
             .collect();
         assert_eq!(
-            Connectivity::declare_link(&hub, &engine, false, None, link_closure(log)).err(),
+            declare_link(&hub, &engine, false, None, link_closure(log)).err(),
             Some(Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
         assert_eq!(
@@ -3472,7 +3468,7 @@ pub(crate) mod tests {
         let mut held = held.into_iter();
         let first = held.next().expect("at least one row");
         // SAFETY: each listener declared above, let go of once.
-        unsafe { release_link_listener(first) };
+        unsafe { release_listener(first) };
         assert_eq!(log.released.load(Ordering::SeqCst), 2);
         tell(&hub, FaceEventKind::Up, &face(4, false, "tcp/y"));
         assert_eq!(
@@ -3483,14 +3479,14 @@ pub(crate) mod tests {
             rows - 1,
             "the undeclared listener hears nothing"
         );
-        let again = Connectivity::declare_link(&hub, &engine, false, None, link_closure(log))
+        let again = declare_link(&hub, &engine, false, None, link_closure(log))
             .expect("the row given back is taken again");
         for object in held.chain([again]) {
             // SAFETY: as above.
-            unsafe { release_link_listener(object) };
+            unsafe { release_listener(object) };
         }
         // SAFETY: as above.
-        unsafe { release_transport_listener(transport) };
+        unsafe { release_listener(transport) };
         assert_eq!(log.released.load(Ordering::SeqCst), rows + 3);
     }
 
