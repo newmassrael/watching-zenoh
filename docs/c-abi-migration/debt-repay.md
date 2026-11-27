@@ -36,6 +36,22 @@ The debt names three sites, each read on main `df994d7913`:
    slot profile is `storage-profile` without `alloc`, so these named an unimported type and an
    absent crate. The main session's run of arm 21 after D3 found it; D3 alone did not make that
    arm green.
+5. Under arm 21's features, with D7 in, the test build of the lib: the record walk
+   (`try_for_each_record_while`, `walk_records`, `EachRecord`, `RecordForm`, the pull of
+   `network_message/pull.rs`, the readers `read_declare`, `read_interest`, `read_oam`, their
+   verdicts and `admit_lent`, and `is_transport_mid`), twenty items, compiled with no caller.
+   Each was gated on `any(test, session-unicast, all(session-multicast, not(alloc)))`, while
+   every test that walks records (`record_walk_tests`, `chain_saturation_tests`,
+   `repeated_extension_tests`) is `alloc`'s, as `try_for_each_record` already said
+   (`all(test, alloc)`). The compile errors of site 4 had hidden them, as errors hide lints.
+   The same gates are on main `728fc45ec8`.
+6. Arm 22's features with `--all-targets` (a test build of a slot node with a session and the
+   data codecs, which no arm builds): three test modules read only what the heap profile has and
+   were gated without it. `network_message::mandatory_extension_rule_tests` reads the owned
+   message and the owned builders, `lent_control::tests` holds each writer to the owned builder
+   it mirrors, and `reply::decode_isolation_tests` builds the heap registry
+   (`ReplyRegistry::new`) and an owned Response; the last was gated on `storage-profile`, the
+   slot profile's too. Eighty resolution errors, all in these three modules. On main as well.
 
 No leg built any of these: Layer C1h builds the heap's forms or no session, and the slot profile
 is clippied only in its largest set (every feature beside it).
@@ -72,6 +88,8 @@ of it twice.
 | D5 | `5e9b659c1c` | wz-runtime-coop's crate doc rewritten to link only what every build compiles; two module docs name a gated item as code; fourteen ledger lines dropped |
 | D6 | `aa4f7db8c5` | both release profiles say the advanced behaviours are on and why |
 | D7 | `e5c7de0d22` | `local_token`'s tests of the owned Interest parse carry its gate, `alloc`; the peer map's import comes with `alloc` (site 4) |
+| D8 | `4709f8e0ab` | the record walk and every item only it reads say `all(test, alloc)` where they said `test`; `is_transport_mid` and the `SceCursor` import drop `test`; `request_view_admission` is gated on its two readers (site 5) |
+| D9 | `bf9b5f6516` | the three test modules of site 6 are gated on `alloc` |
 
 ### 2.1 Why D1 is the structure and not a marker on the lifetime
 
@@ -155,7 +173,7 @@ in every build:
 The readers that call the combinators keep their own tests (`network_message`'s and its readers'),
 unchanged.
 
-### 4.3 D3 to D7
+### 4.3 D3 to D9
 
 D3 is a test file's gates; its tests are unchanged. D7 is a test module's gates: `alloc`
 implies `storage-profile`, so each moved test still compiles in every build that built it, and
@@ -163,6 +181,15 @@ leaves only the slot profile without `alloc`, which never could. That profile ke
 the no-heap staging (`respond_to_interest_borrowed`, the refused whole chain, the reply's
 keyexpr bound). Arm 21 is its check; no arm is added. D4 is the leg itself. D5 and D6 are docs and a
 profile's comments; D5's check is Layer C1bzr, whose ledger it lowers.
+
+D8 changes gates only, and only in a test build that has neither `alloc` nor a session: there
+every item it removes had no caller, and every other build compiles the same items as before
+(`all(test, alloc)` is `test` where `alloc` is on, and a session's terms are unchanged).
+`request_view_admission` keeps the reader tests of `request_read`, which build without `alloc`
+(`all(test, request-put-del)`). The `cfg_attr` conditions of `PushRead` and `PushExts` that
+name the walk narrow with it, which only widens where their `allow(dead_code)` applies. No test
+changes; arm 21 is the check, and the heap build's test count must not move. D9 removes three
+test modules from builds that could not compile them; every build that ran them still does.
 
 ## 5. What the main session runs
 
@@ -176,12 +203,20 @@ Per commit, each a single command from the workspace root:
   `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib network_message`.
 - D3: `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,liveliness-token --all-targets -- -D warnings`.
 - D4: `bash scripts/run-ci.sh --layer C1h` (24 arms).
-- D5: `cargo doc --manifest-path crates/Cargo.toml -p wz-runtime-coop --no-deps` with
-  `RUSTDOCFLAGS=-D warnings`; Layer C1bzr for the ledger.
+- D5: `cargo rustdoc --manifest-path crates/Cargo.toml -p wz-runtime-coop --lib -- -D warnings`
+  (one command: an environment assignment in front of `cargo` is not a program `bx` runs);
+  Layer C1bzr for the ledger.
 - D6: none (comments).
 - D7: `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,liveliness-token --all-targets -- -D warnings`;
   `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,liveliness-token --lib local_token::`;
   `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib local_token::` (the heap build keeps every test).
+- D8: `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,liveliness-token --all-targets -- -D warnings`;
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,liveliness-token --lib local_token::`;
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib` (the count before D8);
+  `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --all-features --all-targets -- -D warnings`.
+- D9: `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,session-unicast,liveliness-token,codec-push,rx-push,codec-response,codec-response-final,rx-response,codec-request --all-targets -- -D warnings`;
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib mandatory_extension_rule_tests`;
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib lent_control::`.
 
 ## 6. Left open
 
@@ -189,5 +224,9 @@ Per commit, each a single command from the workspace root:
   (link and group form) at the merge, which takes that lane's form; nothing here builds on D1's.
 - `docs/win-budget/codec-scale.md` records the step that introduced `local_token::token_reply_len`;
   D1 removed it. That record is the codec-scale lane's and is left as written.
+- Arm 22 stays `--lib`: its `--all-targets` form is site 6, and an arm is added after the
+  command it runs has been seen green.
+- `pubsub::decode_isolation_tests` has site 6's shape (gated on `storage-profile`, reads the
+  owned Push and the heap registry); no build of this lane reached it, so it is left as read.
 - The ledger keeps wz-runtime-coop's two `session_drive.rs` findings (a redundant explicit link
   target, `PoolStorage::owned`); they are not this class and not this debt.
