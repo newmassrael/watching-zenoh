@@ -953,8 +953,13 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         if let Some(ticker) = retention {
             ticker.detach();
         }
-        for held in [late_publishers, heartbeat].into_iter().flatten() {
-            let Held { mut entity, keeps } = held;
+        // One arm per entity and not a loop over an array of them: the array's iterator moves both
+        // entities into it and carries the drop of those it did not reach.
+        if let Some(Held { mut entity, keeps }) = late_publishers {
+            entity.retract = false;
+            retain(keeps);
+        }
+        if let Some(Held { mut entity, keeps }) = heartbeat {
             entity.retract = false;
             retain(keeps);
         }
