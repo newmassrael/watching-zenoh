@@ -8,26 +8,29 @@
 //! `wz-session-core`'s `lifecycle_query` and `wz-runtime-tokio`'s
 //! `session_close_query` witness the answerer and the order it places on a session
 //! bundle. What neither can say is that the verb is HOSTED: that a node started
-//! with `--session-lifecycle --session-close-permit` registers the two queryables,
-//! that a query from another process reaches them, that the verdict comes back
-//! over the session, and that the session it names actually goes down. This does.
+//! with `--session-lifecycle` registers the queryables, that a query from another
+//! process reaches them and that the verdict comes back over the session. This does.
 //!
 //! Topology (all `wz-ap-demo`, no foreign binary):
-//!   * peer A, `--peer`, zid pinned, hosting the lifecycle queries with the permit;
-//!   * peer D, `--peer --connect A`, zid pinned: the session A is asked to close;
+//!   * peer A, `--peer`, zid pinned, hosting the lifecycle queries with a grant to D;
+//!   * peer D, `--peer --connect A`, zid pinned: the session the verbs name;
 //!   * clients Q1, Q2, ... : one `--connect A --query <key>` each, whose reply log
 //!     is the answer.
 //!
-//! The zids are pinned because the close key names the peer by zid, and a random
-//! zid (R2883) could not be put in a key before the peer exists.
+//! The zids are pinned because the keys name the peer by zid, and a random zid
+//! (R2883) could not be put in a key before the peer exists.
 //!
-//! The effect is asserted, not only the verdict: A logs `face N DOWN` for the face
-//! D's session held. A verdict of `closing` over a session that stayed up would be
-//! the worst answer the verb could give.
+//! A verb is judged by its commander (decision D16 of
+//! `docs/session-lifecycle-intent.md`): the zid the key of the asking link proved.
+//! The clients reach A over plain TCP, which proves none, so the FIRST test asks the
+//! granted verbs as nobody shown and is refused. A permitted close over the wire
+//! needs a client whose TLS key names its zid; the heap witnesses of a proven
+//! commander are `wz-runtime-tokio`'s `session_close_query` and
+//! `passive_hold_over_mtls_e2e`.
 //!
-//! A SECOND test hosts the queries WITHOUT the permit and asks for a close: the
-//! answer is `refused` with a reason, and no session is needed for that, because
-//! the authority speaks before the directory is read.
+//! A SECOND test hosts the queries with no grant and asks for a close: the answer
+//! is `refused` with a reason, and no session is needed for that, because the
+//! monitor decides before the directory is read.
 
 use std::fs::File;
 use std::process::{Command, Stdio};
@@ -108,40 +111,27 @@ fn ask(node_addr: &str, key: &str, node: &mut Node) -> String {
     }
 }
 
-/// The face id the peer at `zid_hex` holds on `node`, read off its `face N UP`
-/// line (the line prints the peer's zid in wire order, so the match is on the role
-/// the line also prints: the peer D is the only `Peer` this node accepts).
-fn peer_face(log: &str) -> u64 {
-    log.lines()
-        .find(|l| l.contains(" UP (peer ") && l.contains("whatami Some(Peer)"))
-        .and_then(|l| {
-            l.split_once("face ")?
-                .1
-                .split_whitespace()
-                .next()?
-                .parse()
-                .ok()
-        })
-        .unwrap_or_else(|| panic!("no 'face N UP' line for a Peer in:\n{log}"))
-}
-
 #[test]
 #[ignore = "binary-dep e2e (wz-ap-demo --features routing-peer,session-close-ingress); Layer E6 runs via --ignored"]
-fn wz_peer_session_lifecycle_close_query_closes_the_session_and_answers() {
+fn wz_peer_session_lifecycle_query_refuses_a_commander_no_link_proved() {
     let port_res = PortReservation::pick();
     let port_d = port_res.next_port();
     let addr_a = format!("127.0.0.1:{}", port_res.port());
     let addr_d = format!("127.0.0.1:{port_d}");
 
+    // A grants the close and status verbs to D's zid. The querying clients reach A over plain
+    // TCP, which proves no zid, so whatever they claim they ask as nobody shown.
+    let grant = format!("{D_ZID}=close,status");
     let mut a = spawn(
-        "wz-ap-demo peer A (--peer --session-lifecycle --session-close-permit)",
+        "wz-ap-demo peer A (--peer --session-lifecycle --session-commander)",
         &[
             "--peer",
             &addr_a,
             "--zid",
             A_ZID,
             "--session-lifecycle",
-            "--session-close-permit",
+            "--session-commander",
+            &grant,
         ],
     );
     let verbs_key = format!("@/{A_ZID}/peer/session/verbs");
@@ -157,46 +147,30 @@ fn wz_peer_session_lifecycle_close_query_closes_the_session_and_answers() {
         "wz-ap-demo peer D (--peer --connect A)",
         &["--peer", &addr_d, "--zid", D_ZID, "--connect", &addr_a],
     );
-    let a_up = a
-        .wait_for(" UP (peer ", 10)
+    a.wait_for(" UP (peer ", 10)
         .unwrap_or_else(|c| panic!("A never accepted peer D\n--- A ---\n{c}"));
-    let face = peer_face(&a_up);
 
-    // CAPABILITY: the node says which verbs it has.
+    // CAPABILITY: the node says which verbs it has, whoever asks.
     let verbs = ask(&addr_a, &verbs_key, &mut a);
     assert!(
         verbs.contains(r#"\"verbs\":[\"close\",\"reset\",\"status\"]"#),
         "the capability query did not list the close, reset and status verbs:\n{verbs}"
     );
 
-    // STATUS (decision D6): the session with D read over the wire, one link and no
-    // close ordered; a peer holds nobody by a machine, so no machine is listed.
-    let status = ask(
-        &addr_a,
-        &format!("@/{A_ZID}/peer/session/status/{D_ZID}"),
-        &mut a,
-    );
-    assert!(
-        status.contains(r#"\"links\":{\"open\":1,\"closing\":0}"#)
-            && status.contains(r#"\"machines\":[]"#),
-        "the status of a held session must read one open link:\n{status}"
-    );
-
-    // CLOSE: the verdict, then the effect.
-    let close_key = format!("@/{A_ZID}/peer/session/close/{D_ZID}");
-    let closing = ask(&addr_a, &close_key, &mut a);
-    assert!(
-        closing.contains(r#"\"verdict\":\"closing\""#) && closing.contains(r#"\"links\":1"#),
-        "a permitted close of a held session must answer closing on 1 link:\n{closing}"
-    );
-    let down = a.wait_for(&format!("face {face} DOWN"), 10);
-    let d_log = d.stop();
-    let a_log = a.stop();
-    down.unwrap_or_else(|_| {
-        panic!(
-            "the verdict said closing and A's face {face} never went DOWN\n--- A ---\n{a_log}\n--- D ---\n{d_log}"
-        )
-    });
+    // STATUS and CLOSE (decision D16): granted verbs, asked by a commander no link proved, are
+    // refused with a reason, before any session is read.
+    for key in [
+        format!("@/{A_ZID}/peer/session/status/{D_ZID}"),
+        format!("@/{A_ZID}/peer/session/close/{D_ZID}"),
+    ] {
+        let refused = ask(&addr_a, &key, &mut a);
+        assert!(
+            refused.contains(r#"\"verdict\":\"refused\""#) && refused.contains(r#"\"reason\":\""#),
+            "a verb asked over a link that proved no zid must answer refused:\n{refused}"
+        );
+    }
+    let _ = d.stop();
+    let _ = a.stop();
 }
 
 #[test]
@@ -206,7 +180,7 @@ fn wz_peer_session_lifecycle_close_without_the_permit_is_refused_with_a_reason()
     let addr_a = format!("127.0.0.1:{}", port_res.port());
 
     let mut a = spawn(
-        "wz-ap-demo peer A (--peer --session-lifecycle, no permit)",
+        "wz-ap-demo peer A (--peer --session-lifecycle, no grant)",
         &["--peer", &addr_a, "--zid", A_ZID, "--session-lifecycle"],
     );
     let verbs_key = format!("@/{A_ZID}/peer/session/verbs");

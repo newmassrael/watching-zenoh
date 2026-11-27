@@ -4115,39 +4115,17 @@ pub(crate) struct ScoutAutoconnectArgs {
     pub strategy: wz::runtime_tokio::routing_policy::AutoConnectStrategies,
 }
 
-/// The authority of a node that hosts the lifecycle queries: one answer for every
-/// close, the node's `--session-close-permit`. Default-deny, as zenoh's own
-/// `permissions.write` is, and the same answer for every target: a policy that
-/// names which peers may be closed is a host's own authority to write, and the
-/// demo has no policy language to read one from.
+/// The policy of a node that hosts the lifecycle queries (decision D16): the grants of its
+/// `--session-commander <zid>=<verb>[,<verb>...][=<key expression>]` texts, the shape a node
+/// declaration's `commander` grant has, read when the node starts. None grants nothing, so every
+/// verb is refused to every commander, and a commander is a zid the key of the asking link proved,
+/// so a grant takes effect over a secure session only. `Err` names what is wrong with a text.
 #[cfg(feature = "session-close-ingress")]
-struct ClosePermit(bool);
-
-#[cfg(feature = "session-close-ingress")]
-impl wz::runtime_tokio::lifecycle_query::SessionLifecycleAuthority for ClosePermit {
-    fn admits_close(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
-        self.0
-    }
-
-    /// A reset closes the session too (once per generation), so the permit to
-    /// close is the permit to reset: the demo has no policy that tells them apart.
-    fn admits_reset(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
-        self.0
-    }
-
-    /// Reading what the node holds for a peer is under the same permit: the demo
-    /// has no policy that separates a reader of the lifecycle from a user of it.
-    fn admits_status(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
-        self.0
-    }
-
-    /// An open creates a session the node would not otherwise hold, which is a
-    /// stronger act than a close, and it is under the same permit: the demo has no
-    /// policy that tells the verbs apart, and a node that permits none of them
-    /// permits none.
-    fn admits_open(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
-        self.0
-    }
+pub(crate) fn session_commander_grants(
+    texts: &[String],
+) -> Result<wz::runtime_tokio::lifecycle_query::HeapGrants, String> {
+    wz::runtime_tokio::lifecycle_query::HeapGrants::parse(texts.iter().map(String::as_str))
+        .map_err(|e| format!("--session-commander: {}", e.words()))
 }
 
 /// What a host's loop gives the lifecycle queries beyond its sessions (decision
@@ -4162,17 +4140,19 @@ struct LoopLifecycle<I, M, P> {
     opener: P,
 }
 
-/// Say once what the session lifecycle verbs this host serves are permitted to do.
+/// Say once to whom the session lifecycle verbs this host serves are granted.
 #[cfg(feature = "session-close-ingress")]
-fn log_lifecycle_verbs(whatami: &str, permit: bool) {
-    log::info!(
-        "wz-ap-demo {whatami}: session lifecycle verbs {}",
-        if permit {
-            "PERMITTED (--session-close-permit)"
-        } else {
-            "refused until --session-close-permit"
-        }
-    );
+fn log_lifecycle_verbs(whatami: &str, grants: &wz::runtime_tokio::lifecycle_query::HeapGrants) {
+    match grants.grants().len() {
+        0 => log::info!(
+            "wz-ap-demo {whatami}: session lifecycle verbs refused to every commander until \
+             --session-commander"
+        ),
+        n => log::info!(
+            "wz-ap-demo {whatami}: session lifecycle verbs granted by {n} --session-commander \
+             grant(s), to the zid a secure link proves"
+        ),
+    }
 }
 
 /// Host the session lifecycle queries -- the close, reset, status, open and
@@ -4191,7 +4171,7 @@ fn log_lifecycle_verbs(whatami: &str, permit: bool) {
 fn host_session_lifecycle<D, I, M, P, E>(
     zid_hex: &str,
     whatami: &str,
-    permit: bool,
+    grants: wz::runtime_tokio::lifecycle_query::HeapGrants,
     directory: D,
     loop_side: LoopLifecycle<I, M, P>,
     mut register: impl FnMut(
@@ -4224,8 +4204,9 @@ fn host_session_lifecycle<D, I, M, P, E>(
             return;
         }
     };
+    log_lifecycle_verbs(whatami, &grants);
     let queries = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
-        LifecycleQueries::new(zid_hex, whatami, ClosePermit(permit), directory, reset_seed)
+        LifecycleQueries::new(zid_hex, whatami, grants, directory, reset_seed)
             .with_intent(loop_side.intent)
             .with_machines(loop_side.machines)
             .with_opener(loop_side.opener),
@@ -4247,7 +4228,6 @@ fn host_session_lifecycle<D, I, M, P, E>(
             ),
         }
     }
-    log_lifecycle_verbs(whatami, permit);
 }
 
 #[cfg(feature = "routing-peer")]
@@ -4317,16 +4297,17 @@ pub(crate) struct PeerOpts {
     /// `--session-lifecycle` -- host the session lifecycle queries on this peer:
     /// the close query `@/<zid>/peer/session/close/<peer-zid>` and the capability
     /// query `@/<zid>/peer/session/verbs` (`wz_session_core::lifecycle_query`).
-    /// HOSTS the surface; whether a close is carried out is
-    /// [`session_close_permit`](Self::session_close_permit). Inert, and said so,
+    /// HOSTS the surface; who may command its verbs is
+    /// [`session_commanders`](Self::session_commanders). Inert, and said so,
     /// without the `session-close-ingress` feature.
     pub session_lifecycle: bool,
-    /// `--session-close-permit` -- the node's authority ADMITS closing a session over
-    /// the lifecycle query. Default-deny: without it every close is answered
-    /// `refused`, and the capability query still lists the verb, because the node
-    /// knows it. Host vs permit, as [`config_writable`](Self::config_writable) is to
-    /// [`config_write_permit`](Self::config_write_permit).
-    pub session_close_permit: bool,
+    /// `--session-commander <zid>=<verb>[,<verb>...][=<key expression>]`, repeatable --
+    /// the commanders the node grants its lifecycle verbs to (decision D16), as the texts
+    /// were given (`session_commander_grants` reads them). Default deny: with none every
+    /// verb is answered `refused`, and the capability query still lists the verbs, because
+    /// the node knows them. Host vs grant, as [`config_writable`](Self::config_writable) is
+    /// to [`config_write_permit`](Self::config_write_permit).
+    pub session_commanders: Vec<String>,
     /// §5.23 `adminspace-core` — `--metadata <value>`, the node config's
     /// `metadata`, served as `local_data`'s field. `None` = unset, served `null`.
     pub metadata: Option<wz::runtime_tokio::json5::Json5Value>,
@@ -4531,7 +4512,7 @@ async fn run_peer_until(
     let config_write_permit = opts.config_write_permit;
     let no_admin_read = opts.no_admin_read;
     let session_lifecycle = opts.session_lifecycle;
-    let session_close_permit = opts.session_close_permit;
+    let session_commanders = opts.session_commanders.clone();
     let put_key = opts.put_key.as_deref();
     let put_payload = opts.put_payload.as_deref();
     #[cfg(feature = "pubsub-delete")]
@@ -5244,16 +5225,22 @@ async fn run_peer_until(
     // `--session-lifecycle`: host the session lifecycle queries -- close a session
     // by its peer's zid and be told what happened, and ask which verbs this node
     // has. Independent of `--config-queryable`: it is not an upstream admin leg but
-    // a wz-native one, and a node may serve either alone. The close is carried out
-    // only with `--session-close-permit`; without it every close is answered
-    // `refused`, and a build without `session-close-ingress` hosts nothing and says
-    // so.
+    // a wz-native one, and a node may serve either alone. A verb is carried out only
+    // for a commander a `--session-commander` grant names, as the key of the asking
+    // link proved it; every other is answered `refused`, and a build without
+    // `session-close-ingress` hosts nothing and says so.
     #[cfg(feature = "session-close-ingress")]
     if session_lifecycle {
+        // The texts were read when the arguments were, so a malformed one stopped the demo
+        // there; this is the same reading.
+        let grants = session_commander_grants(&session_commanders).unwrap_or_else(|e| {
+            log::warn!("wz-ap-demo peer: {e}; every lifecycle verb is refused");
+            wz::runtime_tokio::lifecycle_query::HeapGrants::default()
+        });
         host_session_lifecycle(
             &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
             params.whatami.to_str(),
-            session_close_permit,
+            grants,
             forwarder.lifecycle_directory(),
             // The peer's loop holds no intent it is told of at run time: it dials
             // its static connect list and the peers gossip names, by no machine,
@@ -5272,7 +5259,7 @@ async fn run_peer_until(
     }
     #[cfg(not(feature = "session-close-ingress"))]
     if session_lifecycle {
-        let _ = session_close_permit;
+        let _ = session_commanders;
         log::warn!(
             "wz-ap-demo peer: --session-lifecycle requires the `session-close-ingress` \
              feature; no lifecycle query is hosted"
@@ -6263,9 +6250,9 @@ pub(crate) struct RouterHatOpts {
     /// the peer twin (`PeerOpts::session_lifecycle`) has the reasoning. The same
     /// bare presence flag in both run-modes, so one spelling means one thing.
     pub session_lifecycle: bool,
-    /// `--session-close-permit` -- the router's authority admits a close over the
-    /// lifecycle query. Default-deny; see `PeerOpts::session_close_permit`.
-    pub session_close_permit: bool,
+    /// `--session-commander` -- the commanders the router grants its lifecycle verbs
+    /// to. Default deny; see `PeerOpts::session_commanders`.
+    pub session_commanders: Vec<String>,
     /// R311y232 (transport-qos ACTIVATION) — offer the per-priority multicast QoS
     /// conduit on the router's data-plane group (`--multicast-qos`). Consumed only
     /// by the `router-multicast-faces` spawns; a build without that face has no
@@ -6490,7 +6477,7 @@ async fn run_router_hat_until(
     // a build without those legs warning-clean.
     let no_admin_read = opts.no_admin_read;
     let session_lifecycle = opts.session_lifecycle;
-    let session_close_permit = opts.session_close_permit;
+    let session_commanders = opts.session_commanders.clone();
     // R2393 — the write-side twin, read into a local for the SAME reason: the field
     // is unconditional so the bundle stays feature-stable, and only the
     // `adminspace-router-linkstate` arm below consumes it.
@@ -7408,7 +7395,7 @@ async fn run_router_hat_until(
 
     // `--session-lifecycle` on the router host: the same two queries the peer
     // hosts, answered from this router's faces and the links joined to them. See the
-    // peer arm for what is hosted and what the permit decides.
+    // peer arm for what is hosted and what the grants decide.
     #[cfg(feature = "session-close-ingress")]
     if session_lifecycle {
         // Decision D6 — the router's loop holds its connect endpoints by their
@@ -7433,10 +7420,14 @@ async fn run_router_hat_until(
         );
         #[cfg(not(feature = "router-connect-reconcile"))]
         let opener = wz::runtime_tokio::lifecycle_query::NoOpener;
+        let grants = session_commander_grants(&session_commanders).unwrap_or_else(|e| {
+            log::warn!("wz-ap-demo router-hat: {e}; every lifecycle verb is refused");
+            wz::runtime_tokio::lifecycle_query::HeapGrants::default()
+        });
         host_session_lifecycle(
             &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
             params.whatami.to_str(),
-            session_close_permit,
+            grants,
             forwarder.lifecycle_directory(),
             LoopLifecycle {
                 intent,
@@ -7451,7 +7442,7 @@ async fn run_router_hat_until(
     }
     #[cfg(not(feature = "session-close-ingress"))]
     if session_lifecycle {
-        let _ = session_close_permit;
+        let _ = session_commanders;
         log::warn!(
             "wz-ap-demo router-hat: --session-lifecycle requires the \
              `session-close-ingress` feature; no lifecycle query is hosted"
@@ -10542,7 +10533,7 @@ mod peer_quic_cert_tests {
             config_write_permit: false,
             no_admin_read: false,
             session_lifecycle: false,
-            session_close_permit: false,
+            session_commanders: Vec::new(),
             metadata: None,
             put_key: None,
             put_payload: None,
@@ -10682,7 +10673,7 @@ mod peer_failfast_tests {
             config_write_permit: false,
             no_admin_read: false,
             session_lifecycle: false,
-            session_close_permit: false,
+            session_commanders: Vec::new(),
             metadata: None,
             put_key: None,
             put_payload: None,

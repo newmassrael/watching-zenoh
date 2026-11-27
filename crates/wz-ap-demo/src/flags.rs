@@ -194,7 +194,7 @@ pub(crate) const FLAGS: &[Flag] = &[
     value("--scout-timeout-ms"),
     value("--scout-ttl"),
     value("--scouting-delay"),
-    switch("--session-close-permit"),
+    value("--session-commander"),
     switch("--session-lifecycle"),
     value("--sessions"),
     switch("--shm").requires("session-extshm", cfg!(feature = "session-extshm")),

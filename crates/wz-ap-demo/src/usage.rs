@@ -474,9 +474,17 @@ pub(crate) fn print_usage() {
     eprintln!("                             (a second open changes nothing). A GET on");
     eprintln!("                             @/<zid>/<role>/session/verbs lists the verbs bound.");
     eprintln!("                             Requires --peer or --router-hat.");
-    eprintln!("    --session-close-permit   let a close, reset, open or status read run. Without");
-    eprintln!("                             it each is answered `refused`; the verbs query still");
-    eprintln!("                             lists them, because the node knows them. Requires");
+    eprintln!("    --session-commander <zid>=<verb>[,<verb>...][=<key expression>]");
+    eprintln!("                             grant the verbs (open, close, reset, status) to the");
+    eprintln!(
+        "                             commander whose zid the key of the asking link proves,"
+    );
+    eprintln!("                             narrowed to the keys the key expression matches when");
+    eprintln!(
+        "                             one is given. Repeatable. Without a grant each verb is"
+    );
+    eprintln!("                             answered `refused`; the verbs query still lists them,");
+    eprintln!("                             because the node knows them. Requires");
     eprintln!("                             --session-lifecycle.");
     eprintln!("    --router-link-weight <zid>=<weight>");
     eprintln!(

@@ -1015,7 +1015,7 @@ fn demo_main() -> ExitCode {
                     config_write_permit,
                     no_admin_read,
                     session_lifecycle: rest.iter().any(|a| a == "--session-lifecycle"),
-                    session_close_permit: rest.iter().any(|a| a == "--session-close-permit"),
+                    session_commanders: crate::args::parse_pairs(rest, "--session-commander"),
                     metadata: metadata.clone(),
                     put_key,
                     put_payload,
@@ -1347,7 +1347,7 @@ fn demo_main() -> ExitCode {
                     no_admin_read: rest.iter().any(|a| a == "--no-admin-read"),
                     // The lifecycle queries: the same two bare flags `--peer` parses.
                     session_lifecycle: rest.iter().any(|a| a == "--session-lifecycle"),
-                    session_close_permit: rest.iter().any(|a| a == "--session-close-permit"),
+                    session_commanders: crate::args::parse_pairs(rest, "--session-commander"),
                     // R2393 (§5.23 adminspace-write) — the write-side twin, the SAME
                     // bare presence flag `--peer` and `--storage-host` parse, so one
                     // spelling means one thing across every run-mode that hosts an
@@ -2380,8 +2380,20 @@ fn demo_main() -> ExitCode {
         print_usage();
         return ExitCode::from(2);
     }
-    if has_flag("--session-close-permit") && !has_flag("--session-lifecycle") {
-        eprintln!("wz-ap-demo: --session-close-permit requires --session-lifecycle");
+    if has_flag("--session-commander") && !has_flag("--session-lifecycle") {
+        eprintln!("wz-ap-demo: --session-commander requires --session-lifecycle");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    // A grant that does not read is refused here, before any node is up, rather than leaving a
+    // node that refuses every commander for a reason its operator never sees.
+    #[cfg(feature = "session-close-ingress")]
+    if let Err(e) = crate::runner::session_commander_grants(&crate::args::parse_pairs(
+        rest,
+        "--session-commander",
+    )) {
+        eprintln!("wz-ap-demo: {e}");
         eprintln!();
         print_usage();
         return ExitCode::from(2);
