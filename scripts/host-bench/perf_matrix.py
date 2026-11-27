@@ -1229,10 +1229,16 @@ def summarize(cells: list[dict]) -> list[dict]:
     groups: dict[tuple, dict[str, dict]] = {}
     for cell in cells:
         key = (cell["transport"], cell["batching"], cell["workload"], cell["size"])
-        arm = groups.setdefault(key, {}).setdefault(cell["arm"], {"figures": [], "lost": 0, "status": set()})
+        arm = groups.setdefault(key, {}).setdefault(cell["arm"], {"figures": [], "lost": 0, "status": set(),
+                                                                  "foreign": [], "irq": []})
         arm["status"].add(cell["status"])
         if cell["status"] == "measured":
             arm["figures"].append(numbers(cell["figures"]))
+            # How much of the pinned CPUs others took while the repetition was read (Windows also records the
+            # interrupts' and DPCs' share), so a row says how quiet the host was.
+            for share, said in (("foreign", "foreign_share"), ("irq", "irq_share")):
+                if isinstance(cell.get(said), (int, float)):
+                    arm[share].append(float(cell[said]))
         elif cell["status"] == "lost":
             arm["lost"] += 1
     rows = []
@@ -1243,7 +1249,9 @@ def summarize(cells: list[dict]) -> list[dict]:
             names = sorted({n for f in figs for n in f})
             arms[name] = {"measured": len(figs), "lost": arm["lost"],
                           "not_applicable": "not-applicable" in arm["status"],
-                          "median": {n: statistics.median([f[n] for f in figs if n in f]) for n in names}}
+                          "median": {n: statistics.median([f[n] for f in figs if n in f]) for n in names},
+                          "foreign_max": max(arm["foreign"], default=None),
+                          "irq_max": max(arm["irq"], default=None)}
         row = {"transport": key[0], "batching": key[1], "workload": key[2], "size": key[3], "arms": arms,
                "w_over_p": median_ratios(arms, "P")}
         if "X" in arms:
@@ -1275,6 +1283,10 @@ def report_lines(rows: list[dict]) -> list[str]:
             if arm in arms:
                 a = arms[arm]
                 state = "not applicable" if a["not_applicable"] else f"{a['measured']} measured, {a['lost']} lost"
+                if a.get("foreign_max") is not None:
+                    state += f", foreign share at most {a['foreign_max'] * 100:.2f}%"
+                if a.get("irq_max") is not None:
+                    state += f", interrupts and DPCs at most {a['irq_max'] * 100:.2f}%"
                 out.append(f"  {arm}: {state}")
         names = sorted({n for a in arms.values() for n in a["median"]})
         for n in names:
@@ -1877,6 +1889,15 @@ CEILING_WINDOWS = ROOT / "deploy" / "pico_perf_ceiling_windows.json"
 #: run or a table that names none is Linux's, as every one was before the field.
 PLATFORMS = {"linux": CEILING, "windows-x64": CEILING_WINDOWS}
 DEFAULT_PLATFORM = "linux"
+#: The most of the pinned CPUs something other than a cell's two processes may take while the cell is read
+#: (`foreign_limit` of a run's record), per platform; a cell over it is run again (`max_runs`). Linux's is
+#: nodrop's. Windows' is held far lower: on the Windows host a share of 0.2 to 1.1% split each arm's
+#: repetitions of a round trip's p99 between about 60 us and 150 to 180 us and let a run of three
+#: repetitions set ceilings of 1.5 to 3.0 that no library caused, where the readings of a quiet host share
+#: at most WINDOWS_FOREIGN_LIMIT: 94 of 96 cells of two quiet runs shared 0.17% or less, the other two
+#: 0.48 and 0.55% (docs/c-abi-migration/win-p99.md section 2).
+WINDOWS_FOREIGN_LIMIT = 0.002
+FOREIGN_LIMITS = {"linux": FOREIGN_LIMIT, "windows-x64": WINDOWS_FOREIGN_LIMIT}
 TABLE_SCHEMA = "wz-pico-perf-ceiling/1"
 #: The engines arm W is built on, as `wz_config.PICO_ENGINES` names them: a run records the one it measured
 #: and a table the one its rows were filled from, and the gate refuses a run against another engine's rows.
@@ -2213,6 +2234,17 @@ def platform_named(doc: object, what: str) -> str:
     return platform
 
 
+def limit_said(record: object, platform: str, what: str) -> None:
+    """Refuse a run whose cells were let share their CPUs more than its platform allows (FOREIGN_LIMITS): its
+    rows would be read off a host busier than the rows of a table may be. A record that states no limit was
+    run under its platform's, as every Linux run was before the field."""
+    limit = FOREIGN_LIMITS[platform]
+    said = record.get("foreign_limit", limit) if isinstance(record, dict) else limit
+    if isinstance(said, bool) or not isinstance(said, (int, float)) or said > limit:
+        raise Refused(f"{what} let a cell's pinned CPUs be shared up to {said!r}, and a run on {platform} is read "
+                      f"at a share of at most {limit}: run it again with a plan of this tree")
+
+
 def table_platform(text: str) -> str:
     """The platform a table's rows were filled on."""
     try:
@@ -2346,6 +2378,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
         if engine not in ENGINES:
             raise Refused(f"{args.result} does not say which engine arm W was built on")
         platform = platform_named(doc.get("record"), f"the record of {args.result}")
+        limit_said(doc.get("record"), platform, args.result)
         stdlib = stdlib_named(doc.get("record"), f"the record of {args.result}")
         preset = preset_named(doc.get("record"), f"the record of {args.result}")
         external = doc.get("record", {}).get("external") or {
@@ -2571,8 +2604,8 @@ def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
         "line_keys": {"ping": list(PING_KEYS), "pong": list(PONG_KEYS), "pub": list(PUB_KEYS),
                       "sub": list(SUB_KEYS), "sub_end": list(SUB_END_KEYS), "sub_mark": list(SUB_MARK_KEYS)},
         "stream_transports": list(STREAM_TRANSPORTS), "drain_s": DRAIN_S, "mark_wait_s": MARK_WAIT_S,
-        "foreign_limit": FOREIGN_LIMIT, "max_runs": MAX_RUNS, "settle_s": SETTLE_S, "pub_tail_s": PUB_TAIL_S,
-        "ready_s": READY_S, "group": GROUP, "schema_of_result": SCHEMA,
+        "foreign_limit": FOREIGN_LIMITS[WINDOWS_PLATFORM], "max_runs": MAX_RUNS, "settle_s": SETTLE_S,
+        "pub_tail_s": PUB_TAIL_S, "ready_s": READY_S, "group": GROUP, "schema_of_result": SCHEMA,
     }
     out.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     print(f"perf-matrix: the plan of a run on Windows: arm W {name} on the {plan['wz_engine']} engine, "
@@ -3400,6 +3433,12 @@ def cmd_selftest() -> int:
     expect("a run or a table that names no platform of the matrix is refused",
            gate(run_cells, dict(no_x, platform="windows-arm64"), locked, without=True) == 2
            and gate(run_cells, no_x, locked, without=True, table_platform_="plan9") == 2)
+    expect("a run on Windows read under a looser foreign-use limit than Windows' is refused, one under it judged",
+           gate(run_cells, dict(on_windows, foreign_limit=FOREIGN_LIMIT), locked, without=True,
+                table_engine_="coop", table_platform_=WINDOWS_PLATFORM) == 2
+           and gate(run_cells, dict(on_windows, foreign_limit=WINDOWS_FOREIGN_LIMIT), locked, without=True,
+                    table_engine_="coop", table_platform_=WINDOWS_PLATFORM) == 0
+           and gate(run_cells, dict(no_x, foreign_limit=FOREIGN_LIMIT), locked, without=True) == 0)
     expect("each platform's runs are judged by default against its own committed table",
            PLATFORMS[DEFAULT_PLATFORM] == CEILING and PLATFORMS[WINDOWS_PLATFORM] == CEILING_WINDOWS
            and set(PLATFORMS) == {DEFAULT_PLATFORM, WINDOWS_PLATFORM})

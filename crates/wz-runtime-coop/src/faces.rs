@@ -160,6 +160,14 @@ pub trait FaceWire: FaceSession {
     /// Whether the link owes its stack the rest of a frame it was handed.
     fn owes_write(&self) -> bool;
 
+    /// [`Self::owes_write`] as a holder of the face's place tells it as it lets go: `None`
+    /// while another holder has the link's send half, which tells its own write
+    /// ([`SessionDatagramLink::owes_write_if_free`]). The provided form answers
+    /// [`Self::owes_write`].
+    fn owes_write_if_free(&self) -> Option<bool> {
+        Some(self.owes_write())
+    }
+
     /// Whether the link has input in its stack it cannot read until another link gives a receive
     /// buffer back.
     fn waits_for_buffer(&self) -> bool;
@@ -364,6 +372,10 @@ impl<S: FaceSession, E: LinkEnd, N: CountKind> FaceWire for Wire<S, E, N> {
         self.link.owes_write()
     }
 
+    fn owes_write_if_free(&self) -> Option<bool> {
+        self.link.owes_write_if_free()
+    }
+
     fn waits_for_buffer(&self) -> bool {
         waits_for_buffer(&self.link)
     }
@@ -546,11 +558,14 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
 
     /// Tell the place's facts what a write through `held`, the parts lent from this site, begun
     /// at `mark` ([`SiteFacts::write_mark`]), left: whether the link owes its stack a write now
-    /// ([`SiteFacts::wrote`]). Every holder that may write the link tells it as it lets go.
+    /// ([`SiteFacts::wrote`]). Every holder that may write the link tells it as it lets go;
+    /// nothing is told while the read has the link's send half, as its step's tell follows
+    /// ([`told_owes`]).
     #[inline]
     pub fn tell_written(&self, mark: WriteMark, held: &mut FaceHeld<P>) {
-        let owes = held.lend(|parts| parts.wire().is_some_and(FaceWire::owes_write));
-        self.facts.wrote(mark, owes);
+        if let Some(owes) = held.lend(|parts| told_owes(parts)) {
+            self.facts.wrote(mark, owes);
+        }
     }
 
     /// [`Self::lend`] that waits for nothing ([`FacePlace::try_lend`]).
@@ -732,9 +747,21 @@ fn pay_held<P: WireParts>(held: &mut FaceHeld<P>, owed: u32, facts: &SiteFacts) 
     let mark = facts.write_mark();
     let owes = held.lend(move |parts| {
         pay_parts(parts, owed);
-        parts.wire().is_some_and(FaceWire::owes_write)
+        told_owes(parts)
     });
-    facts.wrote(mark, owes);
+    if let Some(owes) = owes {
+        facts.wrote(mark, owes);
+    }
+}
+
+/// What a holder of the parts `parts` tells the place's facts of the writes it made through them
+/// ([`SiteFacts::wrote`]): whether their link owes its stack a write, nothing owed where they hold
+/// no link, and `None`, nothing to tell, while another holder has the link's send half
+/// ([`FaceWire::owes_write_if_free`]): that holder tells what it left.
+fn told_owes<P: WireParts>(parts: &P) -> Option<bool> {
+    parts
+        .wire()
+        .map_or(Some(false), FaceWire::owes_write_if_free)
 }
 
 /// Pay `owed` to `parts`: their own debts, then the close, through their wire when they hold one
@@ -874,7 +901,8 @@ pub struct WriteMark(u32);
 ///   leaves bytes owed on the link (a send under the place, or the read's step outside it) moves
 ///   `written` on, and whoever leaves nothing owed sets `drained` to the count of `written` it
 ///   read before it wrote ([`Self::write_mark`], [`Self::wrote`]). The link owes a write while
-///   the two differ;
+///   the two differ. A writer that finds the link's send half held by the other tells nothing,
+///   that one telling as it lets go ([`Self::read_wrote`], [`FaceSite::tell_written`]);
 /// - the node the link reached: told once per link by the read ([`Self::tell_node`]), and read
 ///   whole or not at all, as a sequence count guards its words across the change of the place's
 ///   link.
@@ -979,6 +1007,23 @@ impl SiteFacts {
                 "a write's mark is a count its own site's writes reached"
             );
             self.drained.store(mark.0, Ordering::Release);
+        }
+    }
+
+    /// What the read's step of `link`, begun at `mark`, left owed on it ([`Self::wrote`]), as the
+    /// link answers with its send half free ([`SessionDatagramLink::owes_write_if_free`]). While a
+    /// send holds that half nothing is told: the send holds the face's place and tells what it
+    /// left as it lets go, draining to the mark it took as it began. A write counted here for it
+    /// would come after that mark, and the face would look owing after the send wrote every byte:
+    /// its read would then wait for room it has and step a link that brought nothing.
+    #[inline]
+    pub fn read_wrote<N: CountKind>(
+        &self,
+        mark: WriteMark,
+        link: &CellRc<dyn SessionDatagramLink, N>,
+    ) {
+        if let Some(owes) = link.owes_write_if_free() {
+            self.wrote(mark, owes);
         }
     }
 
@@ -4617,6 +4662,87 @@ mod tests {
         assert!(
             site.facts().owes_write(),
             "the debt paid at once left the link owing"
+        );
+    }
+
+    /// A link whose send half another holder has while `sending` holds it, owing nothing of its
+    /// own: answered as a stream link answers a half held elsewhere (`stream_link`).
+    struct Sending {
+        sending: Rc<Cell<bool>>,
+    }
+
+    impl SessionDatagramLink for Sending {
+        fn service(&self) {}
+
+        fn try_recv(&self) -> Option<RxFrame> {
+            None
+        }
+
+        fn owes_write(&self) -> bool {
+            self.sending.get()
+        }
+
+        fn owes_write_if_free(&self) -> Option<bool> {
+            (!self.sending.get()).then_some(false)
+        }
+    }
+
+    /// The read's tell of what its step left, made while a send under the place holds the link's
+    /// send half, counts no write: once the send lets go having left nothing owed, the place owes
+    /// nothing. CONTROL: the link's answer to a wait, told as a write left owed, outlives that
+    /// send's drain, which drains only to the mark it took as it began. Turned red by a read that
+    /// tells the answer a wait reads (`SiteFacts::read_wrote` telling `owes_write`): the face then
+    /// looks owing after every byte left, and its read waits for room it has and steps a link that
+    /// brought nothing, again at each step that finds a send under way, a blocking put made with
+    /// nothing of the session held being one each round trip.
+    #[test]
+    fn a_read_told_while_a_send_holds_the_link_leaves_nothing_owed() {
+        let sending = Rc::new(Cell::new(false));
+        let link = CellRc::try_boxed(Sending {
+            sending: Rc::clone(&sending),
+        })
+        .expect("the heap has room")
+        .into_link();
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        let parts = ApartParts(
+            Some(ApartWire {
+                holds: false,
+                owes: false,
+                finished: false,
+                aborted: Rc::new(Cell::new(0)),
+                ended: Ended::default(),
+            }),
+            Ended::default(),
+        );
+        // SAFETY: no handle on a cell of the parts lives outside them.
+        assert!(site.hold(unsafe { FaceHeld::gathered(parts) }).is_none());
+        let facts = site.facts();
+        // The read's step, begun while a send holds the place and writes the link, tells as the
+        // send writes, and the send lets go having written every byte.
+        let read_through = |tell: &dyn Fn(WriteMark)| {
+            // SAFETY: the test keeps no handle of the parts past the send.
+            let send = unsafe { site.hold_send() }.expect("a free place is held");
+            sending.set(true);
+            tell(facts.write_mark());
+            sending.set(false);
+            drop(send);
+        };
+        read_through(&|mark: WriteMark| facts.wrote(mark, link.owes_write()));
+        assert!(
+            facts.owes_write(),
+            "CONTROL: a held half told as a write left owed outlives the send"
+        );
+        facts.wrote(facts.write_mark(), false);
+        assert!(!facts.owes_write(), "CONTROL: a later drain clears it");
+        read_through(&|mark: WriteMark| facts.read_wrote(mark, &link));
+        assert!(
+            !facts.owes_write(),
+            "the read told nothing of a write the send made"
+        );
+        facts.read_wrote(facts.write_mark(), &link);
+        assert!(
+            !facts.owes_write(),
+            "CONTROL: a free half tells it owes none"
         );
     }
 

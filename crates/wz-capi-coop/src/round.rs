@@ -435,6 +435,10 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
         self.pump.owes_write()
     }
 
+    fn owes_write_if_free(&self) -> Option<bool> {
+        self.pump.owes_write_if_free()
+    }
+
     // What the session owes the stack is written whatever the round holds, as `owes_write` says.
     #[cfg(feature = "listen")]
     fn write_owed_now(&self) {

@@ -327,6 +327,10 @@ where
         either!(self, link => link.owes_write())
     }
 
+    fn owes_write_if_free(&self) -> Option<bool> {
+        either!(self, link => link.owes_write_if_free())
+    }
+
     #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self) {
         either!(self, link => link.write_owed_now())
