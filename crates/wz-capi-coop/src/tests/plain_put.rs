@@ -820,6 +820,45 @@ fn a_bare_put_reads_the_send_epoch_once() {
     });
 }
 
+/// How many links a put's plan asked how they name its key since the open.
+fn plan_links(engine: &Engine) -> usize {
+    engine.plan_links()
+}
+
+/// The first bare put at a send epoch plans its publisher's way asking the links how they name its
+/// key only where a link may name a key its own way (`shared-key-ids`): there each link up is
+/// asked once; without them every link names every key as the session does, and none is asked.
+/// CONTROL: the put after it is written from the plan either way. Turned red by a plan that walks
+/// the links in a build whose links all name a key the session's way, or by one that asks none
+/// where a link may name it its own way.
+#[test]
+fn a_plan_asks_the_links_only_where_they_name_keys_their_own_way() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let (_hold, filter, wire) = way_on(&engine, &router, "demo/x");
+
+    let (asked, plans_before) = (plan_links(&engine), plans(&engine));
+    for _ in 0..2 {
+        assert_eq!(
+            engine.publish_filtered(filter, "demo/x", &wire, b"v", None),
+            FilteredPut::Sent(Ok(0))
+        );
+    }
+    assert_eq!(
+        plan_links(&engine) - asked,
+        usize::from(cfg!(feature = "shared-key-ids")),
+        "the one link is asked only where it may name the key its own way"
+    );
+    assert_eq!(
+        plans(&engine) - plans_before,
+        1,
+        "CONTROL: the second put is written from the plan"
+    );
+    until(&engine, "the router to receive both puts", || {
+        router.seen(|s| s.pushes) == 2
+    });
+}
+
 /// A plan stands at its send epoch alone: once the router retracts the subscriber that opened the
 /// filter, the epoch has moved and the publisher's bare put is held back, not written from the
 /// plan. CONTROL: the put before the retraction is written from it. Turned red by an epoch that

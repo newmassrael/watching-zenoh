@@ -2966,6 +2966,10 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// How often the session's send epoch was read (`Core::send_epoch`), which the tests count.
     #[cfg(test)]
     epoch_reads: core::cell::Cell<usize>,
+    /// How many links a put's plan asked how they name its key (`CoopEngine::keep_plan`), which
+    /// the tests count.
+    #[cfg(all(test, feature = "std"))]
+    plan_links: core::cell::Cell<usize>,
     /// How many steps in a row read a group's datagram and moved nothing, up to
     /// the deploy `GROUP_READS_PER_MOVE` limit (`CoopEngine::step`).
     #[cfg(all(feature = "group", wz_round))]
@@ -7184,6 +7188,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             filter_rows: core::cell::Cell::new(0),
             #[cfg(test)]
             epoch_reads: core::cell::Cell::new(0),
+            #[cfg(all(test, feature = "std"))]
+            plan_links: core::cell::Cell::new(0),
             #[cfg(all(feature = "group", wz_round))]
             group_reads: 0,
             #[cfg(all(feature = "group", not(wz_round)))]
@@ -7818,6 +7824,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn epoch_reads(&self) -> usize {
         self.core.lock().0.epoch_reads.get()
+    }
+
+    /// How many links a put's plan asked how they name its key since the open
+    /// (`Self::keep_plan`): what a test of the cost of a plan counts. Read under the lock,
+    /// uncounted as a take.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn plan_links(&self) -> usize {
+        self.core.lock().0.plan_links.get()
     }
 
     /// How often the session moved its links on since the open (`Core::link_polls`): what a
@@ -9135,13 +9149,23 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if row.plane() != Plane::Subscribers {
             return;
         }
-        if core.up_wires_at().all(|(_, wire)| {
+        // Where a link names a key its own way, each link up is asked how it names this one, and
+        // the way is planned only when every one names it as the session does. Without the shared
+        // key ids every link names every key as the session does (`key_on_link`), so what is left
+        // to check is the row's own: no link is asked.
+        #[cfg(feature = "shared-key-ids")]
+        if !core.up_wires_at().all(|(_, wire)| {
+            #[cfg(all(test, feature = "std"))]
+            core.plan_links.set(core.plan_links.get() + 1);
             send_through(wire, tx, &|actions: &LinkActions<C>| {
                 key_on_link(actions, named).wire() == named.wire()
             }) == Some(true)
         }) {
-            row.keep_plan(epoch, named);
+            return;
         }
+        #[cfg(not(feature = "shared-key-ids"))]
+        let _ = tx;
+        row.keep_plan(epoch, named);
     }
 
     /// Send `put` on from the face whose link found every outbound slot of the session held, and
