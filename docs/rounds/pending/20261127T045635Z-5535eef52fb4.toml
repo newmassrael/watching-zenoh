@@ -1,0 +1,18 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Decide a Push's form once, in the link's send: the engine handed the
+session core a put that the core then wrote by one of three entry points;
+now one body writes a head, a plain put or a publication from its parts.
+'''
+changes = '''
+- session-core: PushParts and form(); send_push_at is the one body.
+- capi-coop: LinkLeg::send_to hands the parts in one call.
+- docs/c-abi-migration/arch-engine-own.md: steps E1 to E6.
+'''
+verification = '''
+- size ledger: total 211,296 B vs main 211,840 (-544); Ir W/P flat.
+- session-core lent_frame_refusal 7/8 and lib 1794; capi-coop 284 pass.
+'''
+carry = '''
+- none for this lane.
+'''
