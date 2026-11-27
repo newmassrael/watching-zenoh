@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The liveness bound of the capacity model (wz-session-core `capacity::liveness_bound`): the
+  sessions whose keepalive burst one thread serves within one keepalive interval at the
+  process share `share_ppm` (parts per million of a core), `s T / (3 b c_k)`.
+
+  `share_ppm * lease_ms` is `s T` in nanoseconds per million, and `expire_factor * b * c_k` the
+  burst's cost in nanoseconds per million too, so the quotient is the count. `expire_factor` is
+  the lease's keepalive divisor (`wz_session_core::lease::LEASE_EXPIRE_FACTOR`, zenoh-pico's
+  `Z_TRANSPORT_LEASE_EXPIRE_FACTOR`), given by the caller so that the number stays where it is
+  defined. A thread count of 0 counts as one thread. Every product saturates, in the order
+  written (saturation does not associate), and the division is capacity_quotient's, so a cost
+  of 0 bounds nothing. The predicate is total and cannot fail.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="capacity_liveness_bound"
+       version="1.0">
+  <sce:import kind="algorithm" src="capacity_quotient.scxml" as="capacity_quotient"/>
+  <sce:signature>
+    <sce:param name="share_ppm" type="uint32"/>
+    <sce:param name="lease_ms" type="uint64"/>
+    <sce:param name="expire_factor" type="uint64"/>
+    <sce:param name="busy_threads" type="uint32"/>
+    <sce:param name="emission_ns" type="uint64"/>
+    <sce:return type="uint64"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="share" type="uint64" init="share_ppm"/>
+    <sce:var name="threads" type="uint64" init="busy_threads"/>
+    <sce:if cond="threads === 0">
+      <sce:assign target="threads" expr="1"/>
+    </sce:if>
+    <sce:var name="work" type="uint64" init="saturatingMul(share, lease_ms)"/>
+    <sce:var name="burst" type="uint64" init="saturatingMul(expire_factor, threads)"/>
+    <sce:var name="cost" type="uint64" init="saturatingMul(burst, emission_ns)"/>
+    <sce:return expr="capacity_quotient(work, cost)"/>
+  </sce:body>
+</scxml>

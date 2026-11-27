@@ -479,7 +479,10 @@ fn regen_codec_deployment(
 ///                      replay_serving, unicast_link (statecharts);
 ///                      tick_elapsed, tick_until_due, key_facts, the keyexpr matcher,
 ///                      stream_deadline, declaration_stall_deadline,
-///                      take_generation (algorithms);
+///                      take_generation, capacity_quotient, capacity_liveness_bound,
+///                      capacity_service_bound, capacity_lateness_limit,
+///                      capacity_cost_with_margin, capacity_calibrated_emission
+///                      (algorithms);
 ///                      key_facts_schema, reset_peer_schema, take_generation_duplicate
 ///                      (event-schemas); take_generation_kind, put_outcome (enums);
 ///                      take_generation_result (union)
@@ -570,6 +573,15 @@ fn regen_statecharts_and_pools(root: &Path) {
         // The lifecycle reset's duplicate suppression (decision D6): a peer's reset
         // generation taken into the table of the latest ones, which the caller lends in place.
         "take_generation",
+        // The router's capacity model (`capacity`): its two bounds, the lateness a lease allows,
+        // and the costs they are computed from, each dividing by the model's one rule of division,
+        // `capacity_quotient`, which they name as a sibling.
+        "capacity_quotient",
+        "capacity_liveness_bound",
+        "capacity_service_bound",
+        "capacity_lateness_limit",
+        "capacity_cost_with_margin",
+        "capacity_calibrated_emission",
     ] {
         codegen.emit_algorithm(stem, &algorithms, &sc_out);
     }

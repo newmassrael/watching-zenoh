@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  One cost of the capacity model times a margin (wz-session-core `capacity::ControlModel::with_margin`),
+  saturating: what a bound is computed from, so that a host slower than the one the cost was read
+  on, or a cache that is cold, does not turn a promise into a guess. The predicate is total and
+  cannot fail.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="capacity_cost_with_margin"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="cost_ns" type="uint64"/>
+    <sce:param name="margin" type="uint64"/>
+    <sce:return type="uint64"/>
+  </sce:signature>
+  <sce:body>
+    <sce:return expr="saturatingMul(cost_ns, margin)"/>
+  </sce:body>
+</scxml>

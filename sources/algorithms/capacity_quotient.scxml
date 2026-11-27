@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The quotient of two counts of the capacity model (wz-session-core `capacity`), where a
+  denominator of 0 is a cost of no work and bounds nothing: the largest uint64, which no
+  population reaches. Otherwise the quotient, truncated as every integer division of a
+  document is.
+
+  It is the model's one rule of division, so every bound it computes (capacity_liveness_bound,
+  capacity_service_bound, capacity_lateness_limit) divides through it. The predicate is total:
+  the division is guarded by the denominator, so it cannot fail.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="capacity_quotient"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="numerator" type="uint64"/>
+    <sce:param name="denominator" type="uint64"/>
+    <sce:return type="uint64"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="denominator !== 0">
+      <sce:return expr="numerator / denominator"/>
+    </sce:if>
+    <sce:return expr="18446744073709551615"/>
+  </sce:body>
+</scxml>

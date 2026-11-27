@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The keepalive emission cost a node binds itself by (wz-session-core
+  `capacity::ControlModel::calibrated`): the recorded cost, or the cost the node measured on its
+  own host when that is dearer. The measurement can only tighten the bound, never loosen it.
+
+  `measured_floor_ns` is the lower decile of the node's emission durations, absent before the
+  node has one. It is given the same room the recorded cost carries over the lower decile it
+  stands for (`headroom_percent`, `wz_session_core::capacity::FLOOR_HEADROOM_PERCENT`) before the
+  two are compared: the product saturates, and the division by 100 truncates. The predicate is
+  total and cannot fail.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="capacity_calibrated_emission"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="recorded_ns" type="uint64"/>
+    <sce:param name="measured_floor_ns" type="optional&lt;uint64&gt;"/>
+    <sce:param name="headroom_percent" type="uint64"/>
+    <sce:return type="uint64"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="measured_floor_ns !== null">
+      <sce:var name="with_room" type="uint64" init="saturatingMul(measured_floor_ns.value, headroom_percent) / 100"/>
+      <sce:if cond="with_room &gt; recorded_ns">
+        <sce:return expr="with_room"/>
+      </sce:if>
+    </sce:if>
+    <sce:return expr="recorded_ns"/>
+  </sce:body>
+</scxml>

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The latest a keepalive may be served and still leave a peer its lease (wz-session-core
+  `capacity::keepalive_lateness_limit_ms`): the lease less one keepalive interval, `2T/3` for
+  the divisor 3. A keepalive is due every `lease_ms / expire_factor`, so one that is a further
+  `2T/3` late has spent the interval it was owed and the one before it.
+
+  `expire_factor` is the lease's keepalive divisor (`wz_session_core::lease::LEASE_EXPIRE_FACTOR`),
+  given by the caller. The interval is capacity_quotient's, the model's one rule of division, so a
+  divisor of 0 (no interval) leaves no lateness, and the subtraction saturates. The predicate is
+  total and cannot fail.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="capacity_lateness_limit"
+       version="1.0">
+  <sce:import kind="algorithm" src="capacity_quotient.scxml" as="capacity_quotient"/>
+  <sce:signature>
+    <sce:param name="lease_ms" type="uint64"/>
+    <sce:param name="expire_factor" type="uint64"/>
+    <sce:return type="uint64"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="interval" type="uint64" init="capacity_quotient(lease_ms, expire_factor)"/>
+    <sce:return expr="saturatingSub(lease_ms, interval)"/>
+  </sce:body>
+</scxml>

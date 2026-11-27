@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The service bound of the capacity model (wz-session-core `capacity::service_bound`): the
+  sessions for which the session loop returns to a face within `wait_ms` at the process share
+  `share_ppm`, with a turn of `quantum_units` units of `loop_unit_ns` each, `s L / (q c_u)`.
+
+  Every product saturates and the division is capacity_quotient's, so a cost of 0 bounds
+  nothing. The predicate is total and cannot fail.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="capacity_service_bound"
+       version="1.0">
+  <sce:import kind="algorithm" src="capacity_quotient.scxml" as="capacity_quotient"/>
+  <sce:signature>
+    <sce:param name="share_ppm" type="uint32"/>
+    <sce:param name="wait_ms" type="uint32"/>
+    <sce:param name="quantum_units" type="uint32"/>
+    <sce:param name="loop_unit_ns" type="uint64"/>
+    <sce:return type="uint64"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="share" type="uint64" init="share_ppm"/>
+    <sce:var name="wait" type="uint64" init="wait_ms"/>
+    <sce:var name="quantum" type="uint64" init="quantum_units"/>
+    <sce:var name="work" type="uint64" init="saturatingMul(share, wait)"/>
+    <sce:var name="cost" type="uint64" init="saturatingMul(quantum, loop_unit_ns)"/>
+    <sce:return expr="capacity_quotient(work, cost)"/>
+  </sce:body>
+</scxml>

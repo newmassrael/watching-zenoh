@@ -42,8 +42,42 @@
 //! is the same on every profile and an operator can reproduce a number with a pocket calculator.
 //! `ppm * ms / ns` is `s T / c` exactly: `s = ppm / 1e6` and `T` in nanoseconds is `ms * 1e6`. Every
 //! product saturates, and a cost of zero is "no work", which bounds nothing.
+//!
+//! The arithmetic is SCE `algorithm` documents (`sources/algorithms/capacity_*.scxml`), generated
+//! into `out/wz-session-core/` and included here, so the saturating products and the one rule of
+//! division (`capacity_quotient`) are the generator's for Rust and C11 alike and are not written a
+//! second time by hand. The types, their constructors and the recorded constants stay here: they
+//! are evaluated in `const` items, and a generated function is not a `const fn`.
 
 use crate::lease::LEASE_EXPIRE_FACTOR;
+
+mod generated {
+    // Emitted by the xtask (`regen_statecharts_and_pools`) into one directory, so each unit names
+    // the others it uses as `super::<unit>`: every bound divides through `capacity_quotient`.
+    macro_rules! generated {
+        ($($name:ident),* $(,)?) => {
+            $(
+                #[allow(dead_code, clippy::all)]
+                pub(super) mod $name {
+                    include!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../out/wz-session-core/",
+                        stringify!($name),
+                        ".rs"
+                    ));
+                }
+            )*
+        };
+    }
+    generated!(
+        capacity_quotient,
+        capacity_liveness_bound,
+        capacity_service_bound,
+        capacity_lateness_limit,
+        capacity_cost_with_margin,
+        capacity_calibrated_emission,
+    );
+}
 
 /// The units of work a session loop does in one turn before it yields the thread: the `q` of the
 /// service bound. ONE value, read by the loop (`wz-runtime-tokio`'s `session_glue`) and by every
@@ -75,11 +109,13 @@ impl ControlModel {
 
     /// This model with its costs times `margin`: what a bound is computed from, so that a host
     /// slower than the one the costs were read on, or a cache that is cold, does not turn a promise
-    /// into a guess. The thread count is a count and is not scaled.
-    pub const fn with_margin(self, margin: u64) -> Self {
+    /// into a guess. The thread count is a count and is not scaled. Each cost is
+    /// `sources/algorithms/capacity_cost_with_margin.scxml`.
+    pub fn with_margin(self, margin: u64) -> Self {
+        use generated::capacity_cost_with_margin::capacity_cost_with_margin as scaled;
         Self {
-            emission_ns: self.emission_ns.saturating_mul(margin),
-            loop_unit_ns: self.loop_unit_ns.saturating_mul(margin),
+            emission_ns: scaled(self.emission_ns, margin),
+            loop_unit_ns: scaled(self.loop_unit_ns, margin),
             busy_threads: self.busy_threads,
         }
     }
@@ -99,21 +135,14 @@ impl ControlModel {
     /// a floor either: it carries the room the bound keeps under the loss
     /// ([`FLOOR_HEADROOM_PERCENT`]), and the measurement gets the same room before the two are
     /// compared, so that a host four times dearer is bound four times tighter and not to the edge
-    /// of the loss.
-    pub const fn calibrated(self, measured_floor_ns: Option<u64>) -> Self {
-        let emission_ns = match measured_floor_ns {
-            Some(floor) => {
-                let with_room = floor.saturating_mul(FLOOR_HEADROOM_PERCENT) / 100;
-                if with_room > self.emission_ns {
-                    with_room
-                } else {
-                    self.emission_ns
-                }
-            }
-            None => self.emission_ns,
-        };
+    /// of the loss. The choice is `sources/algorithms/capacity_calibrated_emission.scxml`.
+    pub fn calibrated(self, measured_floor_ns: Option<u64>) -> Self {
         Self {
-            emission_ns,
+            emission_ns: generated::capacity_calibrated_emission::capacity_calibrated_emission(
+                self.emission_ns,
+                measured_floor_ns,
+                FLOOR_HEADROOM_PERCENT,
+            ),
             loop_unit_ns: self.loop_unit_ns,
             busy_threads: self.busy_threads,
         }
@@ -226,36 +255,37 @@ pub struct EffectiveBound {
     pub limiter: Limiter,
 }
 
-/// `numerator / denominator` over `u64`, where a zero denominator is no work and bounds nothing.
-fn quotient(numerator: u64, denominator: u64) -> u64 {
-    numerator.checked_div(denominator).unwrap_or(u64::MAX)
-}
-
 /// The sessions whose keepalive burst the keepalive thread serves within one keepalive interval at
-/// the process share `share_ppm`: `s T / (3 b c_k)`.
+/// the process share `share_ppm`: `s T / (3 b c_k)`,
+/// `sources/algorithms/capacity_liveness_bound.scxml`.
 pub fn liveness_bound(share_ppm: u32, lease_ms: u64, model: ControlModel) -> u64 {
-    quotient(
-        u64::from(share_ppm).saturating_mul(lease_ms),
-        LEASE_EXPIRE_FACTOR
-            .saturating_mul(u64::from(model.busy_threads.max(1)))
-            .saturating_mul(model.emission_ns),
+    generated::capacity_liveness_bound::capacity_liveness_bound(
+        share_ppm,
+        lease_ms,
+        LEASE_EXPIRE_FACTOR,
+        model.busy_threads,
+        model.emission_ns,
     )
 }
 
 /// The sessions for which the loop returns to a face within `wait_ms` at the process share
-/// `share_ppm`, with a turn of `quantum_units`: `s L / (q c_u)`.
+/// `share_ppm`, with a turn of `quantum_units`: `s L / (q c_u)`,
+/// `sources/algorithms/capacity_service_bound.scxml`.
 pub fn service_bound(share_ppm: u32, wait_ms: u32, quantum_units: u32, model: ControlModel) -> u64 {
-    quotient(
-        u64::from(share_ppm).saturating_mul(u64::from(wait_ms)),
-        u64::from(quantum_units).saturating_mul(model.loop_unit_ns),
+    generated::capacity_service_bound::capacity_service_bound(
+        share_ppm,
+        wait_ms,
+        quantum_units,
+        model.loop_unit_ns,
     )
 }
 
 /// The latest a keepalive may be served and still leave a peer its lease: `2T/3`. A keepalive is due
 /// every `T / LEASE_EXPIRE_FACTOR`, so one that is a further `2T/3` late has spent the interval it
 /// was owed and the one before it; the next is the last the peer will wait for.
-pub const fn keepalive_lateness_limit_ms(lease_ms: u64) -> u64 {
-    lease_ms.saturating_sub(lease_ms / LEASE_EXPIRE_FACTOR)
+/// `sources/algorithms/capacity_lateness_limit.scxml`.
+pub fn keepalive_lateness_limit_ms(lease_ms: u64) -> u64 {
+    generated::capacity_lateness_limit::capacity_lateness_limit(lease_ms, LEASE_EXPIRE_FACTOR)
 }
 
 /// The width of one lateness window, in milliseconds.
@@ -412,7 +442,7 @@ const CONTROL_SLOTS: usize = 16;
 /// is a few intervals away: the lateness of an overloaded node is not steady but grows, by the
 /// better part of a second each second, and a node that waits for a quarter of the limit has
 /// spent half of what it has by the time its first cut takes effect.
-pub const fn distress_lateness_ms(lease_ms: u64) -> u64 {
+pub fn distress_lateness_ms(lease_ms: u64) -> u64 {
     keepalive_lateness_limit_ms(lease_ms) / 8
 }
 
@@ -636,13 +666,13 @@ pub struct EgressCounts {
 
 impl CapacityReport {
     /// The latest a keepalive may be served and still leave a peer its lease, in milliseconds.
-    pub const fn lateness_limit_ms(&self) -> u64 {
+    pub fn lateness_limit_ms(&self) -> u64 {
         keepalive_lateness_limit_ms(self.lease_ms)
     }
 
     /// Whether a keepalive was served later than a lease allows in the last minute: the
     /// promise, if one was declared, is not being kept now.
-    pub const fn lease_at_risk(&self) -> bool {
+    pub fn lease_at_risk(&self) -> bool {
         self.lateness_last_minute_ms > self.lateness_limit_ms()
     }
 
@@ -860,6 +890,96 @@ mod tests {
                 limiter: Limiter::Service
             }
         );
+    }
+
+    /// Values at the edges of each operand's range: zero, one, the small counts the model reads,
+    /// the measured costs, the widest a narrower operand has, and the top of the range, where a
+    /// product saturates.
+    const EDGES: [u64; 11] = [
+        0,
+        1,
+        2,
+        3,
+        8,
+        10_000,
+        13_200,
+        u32::MAX as u64,
+        u64::MAX / 3,
+        u64::MAX - 1,
+        u64::MAX,
+    ];
+
+    /// The arithmetic the documents state, written as the plain functions of the standard library,
+    /// as the module wrote it before the documents: the generated bodies are held to it over the
+    /// edges of every operand, so a generator that changed what a saturating product, the order of
+    /// a chain of them, a truncating division or the zero denominator means would be seen here.
+    #[test]
+    fn the_generated_bounds_are_the_arithmetic_their_documents_name() {
+        let narrow = |v: u64| u32::try_from(v).unwrap_or(u32::MAX);
+        for share in EDGES.map(narrow) {
+            for lease in EDGES {
+                for threads in EDGES.map(narrow) {
+                    for cost in EDGES {
+                        let model = ControlModel::new(cost, cost, threads);
+                        let expected = u64::from(share)
+                            .saturating_mul(lease)
+                            .checked_div(
+                                LEASE_EXPIRE_FACTOR
+                                    .saturating_mul(u64::from(threads.max(1)))
+                                    .saturating_mul(cost),
+                            )
+                            .unwrap_or(u64::MAX);
+                        assert_eq!(
+                            liveness_bound(share, lease, model),
+                            expected,
+                            "liveness {share} {lease} {threads} {cost}"
+                        );
+                        let (wait, quantum) = (narrow(lease), threads);
+                        let expected = u64::from(share)
+                            .saturating_mul(u64::from(wait))
+                            .checked_div(u64::from(quantum).saturating_mul(cost))
+                            .unwrap_or(u64::MAX);
+                        assert_eq!(
+                            service_bound(share, wait, quantum, model),
+                            expected,
+                            "service {share} {wait} {quantum} {cost}"
+                        );
+                    }
+                }
+            }
+        }
+        for lease in EDGES {
+            assert_eq!(
+                keepalive_lateness_limit_ms(lease),
+                lease.saturating_sub(lease / LEASE_EXPIRE_FACTOR),
+                "lateness {lease}"
+            );
+        }
+    }
+
+    /// The margin and the calibration, held the same way to the plain functions the module wrote.
+    #[test]
+    fn the_generated_margin_and_calibration_are_the_arithmetic_their_documents_name() {
+        for recorded in EDGES {
+            for other in EDGES {
+                let model = ControlModel::new(recorded, other, 4);
+                let margined = model.with_margin(other);
+                assert_eq!(margined.emission_ns, recorded.saturating_mul(other));
+                assert_eq!(margined.loop_unit_ns, other.saturating_mul(other));
+                assert_eq!(margined.busy_threads, 4);
+                let with_room = other.saturating_mul(FLOOR_HEADROOM_PERCENT) / 100;
+                let expected = if with_room > recorded {
+                    with_room
+                } else {
+                    recorded
+                };
+                let calibrated = model.calibrated(Some(other));
+                assert_eq!(calibrated.emission_ns, expected, "{recorded} {other}");
+                assert_eq!(calibrated.loop_unit_ns, other);
+                assert_eq!(calibrated.busy_threads, 4);
+                assert_eq!(model.calibrated(None), model);
+            }
+        }
     }
 
     #[test]
