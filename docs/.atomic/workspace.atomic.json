@@ -9640,6 +9640,25 @@
         "zenoh-pico's reliable is the link's reliability only (no retransmission over UDP or serial); whether wz's preset promises more is the owner's decision.",
         "The module is not abstract in models.json yet: the judge refuses an abstract module nothing refines; it becomes abstract when SCE's generated system model (ADR 0115 D7) refines it."
       ]
+    },
+    "Round 4752": {
+      "decision_summary": "Land the faces-as-rows first step, the three peer switches and the census\nrepairs as one integration: each face lends its own Router cell; the\nacceptor cookie, link admission and per-face send places are switches.",
+      "changes_bullets": [
+        "R1a: each face pumps through its own Router cell (a data race fixed).",
+        "accept-cookie, link-admission, face-send-places: off in zenoh-pico.",
+        "census reds: pico Against cfg, coop group legs, two pico two-feature legs."
+      ],
+      "verification_bullets": [
+        "peer 1.0596 -> 0.9903 of zenoh-pico: WIN, locked; client 198,940 B.",
+        "receive W 3020.2 flat; ledger and cost rc 0; preflight 7 gates.",
+        "capi-coop, capi-pico 544, runtime-coop, session-core, census legs."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
