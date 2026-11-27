@@ -96,6 +96,7 @@ A JSON object. The values below are SYNTHETIC; a deployment states its own.
 | `wz.features` | wz-capi-pico features wz's party needs beyond the four above, a comma list |
 | `wz.build_env` | `WZ_POLICY_*` and `WZ_LIMIT_*` values wz's build states, as a deployment's node would be built; `WZ_POLICY_REPLAY_REPLY_SHAPE` is refused, the lane states it per check |
 | `session.connect_mode` | the mode of the side that dials: `client` (default) or `peer` |
+| `session.owned_address` | optional: the node's own IPv4 address, dotted, which wz's party states in every role as the document member `wz/owned-address` through `zext_config_document`, so a party that only dials derives its zid from it under `zid-derivation = address-ports` (`wz.build_env` `WZ_POLICY_ZID_DERIVATION`). It needs `config-document` in `wz.features`, and is refused without it, as is text that is no IPv4 address of a node |
 | `key_ids.dictionary` | optional: the key ids every node of the deployment shares, `[{id, key}]`; each id 1 to 65535 and named once, each key a canonical key expression named once. wz's party hands it to `zext_config_key_ids` before it opens, in every role, so its session reads a key named by one of these ids though nobody declared it. It needs `shared-key-ids` in `wz.features`, and is refused without it |
 | `key_ids.forms` | optional: the key-wire form (`declared`, `shared` or `literal`) of the `listen` side's endpoint and of the `connect` side's, which wz's party states with `zext_config_key_wire_form_for`; a side not named takes the session's form, the `key-wire-form` policy, which `wz.build_env` may state, or else the build declaration's default. The deployment's party is built with one form and plays both sides, so a lane file whose two sides come out in two forms is refused, and so is one whose form is `shared` with no dictionary |
 | `name` | lower-case letters, digits and dashes; the check directory's name |
@@ -127,7 +128,7 @@ The check directory holds:
 
 | File | Content |
 |---|---|
-| `params` | one `name value` per line: `kind`, `key`, `expect` (how many frames the receiving side is handed), `first_counter`, `frame_max`, `segmented` (0 or 1), with a segment `first_transfer` and `chunk_bytes`, for `replay` (and a segmented `e2e`) `suffix` and `depth`, and with `key_ids.forms` `key_form_listen` and `key_form_connect` |
+| `params` | one `name value` per line: `kind`, `key`, `expect` (how many frames the receiving side is handed), `first_counter`, `frame_max`, `segmented` (0 or 1), with a segment `first_transfer` and `chunk_bytes`, for `replay` (and a segmented `e2e`) `suffix` and `depth`, with `key_ids.forms` `key_form_listen` and `key_form_connect`, and with `session.owned_address` `owned_address` |
 | `key-ids` | with `key_ids`: one `<id> <key>` per line, the dictionary the session opens with |
 | `plan` | one `<action> <payload hex>` per frame, in the order the frames are built |
 | `profile.json`, `values.json` | wz's documents for the check |
@@ -142,9 +143,9 @@ XORed with 0x01, then the frame. Every frame of the plan is built, whatever its 
 
 What each role does:
 
-- every role opens its session with the dictionary in `key-ids`, when there is one, and the
+- every role opens its session with the dictionary in `key-ids`, when there is one, the
   form `params` states for its own side (`key_form_listen` or `key_form_connect`) on its
-  endpoint.
+  endpoint, and the node's own address `owned_address` names, when it names one.
 - `send`: build every frame, print each; dial; put a probe on `<key>/probe` every 50 ms until
   the file `go` exists; carry out the plan; keep the session until `stop` exists. Under
   `segmented` each put is the pieces of the frame, printed as they go out.

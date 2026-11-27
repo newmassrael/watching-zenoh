@@ -25,6 +25,7 @@ Exit status: 0 PASS (or prepared), 1 FAIL, 2 a lane file or the party's configur
 from __future__ import annotations
 
 import functools
+import ipaddress
 import json
 import re
 import shutil
@@ -193,6 +194,8 @@ def read_lane(text: str) -> dict:
     mode = session.get("connect_mode", "client")
     if mode not in ("client", "peer"):
         raise Refused(f"session.connect_mode {mode!r} is neither client nor peer")
+    if "owned_address" in session:
+        read_owned_address(session["owned_address"], features)
     if "key_ids" in lane:
         read_key_ids(lane["key_ids"], features)
     return lane
@@ -226,6 +229,27 @@ def key_problem(key: str) -> str | None:
         if "$*$*" in chunk:
             return f"chunk {chunk!r} repeats '$*'"
     return None
+
+
+def read_owned_address(text: object, features: str) -> str:
+    """The node's own IPv4 address wz's party states in every role, checked; refused by name.
+
+    The session's own door judges it again at open; this answers before anything is built.
+    """
+    if "config-document" not in features.split(","):
+        raise Refused("session.owned_address is given but wz.features does not name "
+                      "config-document, so wz's build would have no door to state it through")
+    if not isinstance(text, str):
+        raise Refused("session.owned_address is not a string")
+    try:
+        address = ipaddress.IPv4Address(text)
+    except ValueError as err:
+        raise Refused(f"session.owned_address {text!r} is not an IPv4 address: {err}") from err
+    if str(address) != text:
+        raise Refused(f"session.owned_address {text!r} is not written as {address}")
+    if address.is_unspecified or address.is_multicast or text == "255.255.255.255":
+        raise Refused(f"session.owned_address {text!r} names no node")
+    return text
 
 
 KEY_FORMS = ("declared", "shared", "literal")
@@ -303,6 +327,7 @@ def prepare(lane_path: Path, scratch: Path) -> list[str]:
     if "key_ids" in lane:
         dictionary, forms = read_key_ids(lane["key_ids"], lane.get("wz", {}).get("features", ""))
     party_form = party_key_wire(lane, dictionary, forms)
+    owned = lane.get("session", {}).get("owned_address")
     for check in lane["checks"]:
         name = check["name"]
         out = checks_dir / name
@@ -313,6 +338,8 @@ def prepare(lane_path: Path, scratch: Path) -> list[str]:
                   "frame_max": length + 256}
         for side, form in sorted(forms.items()):
             params[f"key_form_{side}"] = form
+        if owned is not None:
+            params["owned_address"] = owned
         if dictionary:
             (out / "key-ids").write_text("".join(f"{i} {k}\n" for i, k in dictionary), encoding="utf-8")
         (out / "profile.json").write_text(_text(check, "profile", base) or "", encoding="utf-8")
@@ -823,6 +850,17 @@ def selftest() -> int:
         refused(_lane(wz={"build_env": {KEY_WIRE_POLICY: "shared"}}), "the shared form with no dictionary")
         refused(_lane(wz={"features": "a b"}), "features not a comma list")
         refused(_lane(session={"connect_mode": "router"}), "an unknown connect mode")
+        documented = {"features": "config-document"}
+        refused(_lane(session={"owned_address": "127.0.0.1"}),
+                "an own address for a build without config-document")
+        for bad in ("127.0.0", "127.0.0.256", "127.000.0.1", "0.0.0.0", "239.1.2.3",
+                    "255.255.255.255", 2130706433):
+            refused(_lane(wz=documented, session={"owned_address": bad}), f"the own address {bad!r}")
+        lane_file.write_text(json.dumps(_lane(wz=documented, session={"owned_address": "127.0.0.1"})))
+        prepare(lane_file, root / "owned")
+        expect("the own address reaches every check's params", all(
+            _params(root / "owned" / "checks" / n).get("owned_address") == "127.0.0.1"
+            for n in ("small", "answers", "pieced")))
 
         lane_file.write_text(json.dumps(_lane(wz={"features": "message-catalog,shared-key-ids",
                                                     "build_env": {"WZ_POLICY_X": "on",
@@ -852,6 +890,7 @@ def selftest() -> int:
         lane_file.write_text(json.dumps(_lane()))
         prepare(lane_file, root / "plain")
         expect("no dictionary, no key-ids file", not (root / "plain" / "checks" / "small" / "key-ids").exists())
+        expect("no own address, no param", "owned_address" not in _params(root / "plain" / "checks" / "small"))
 
         # The deployment's party: its key wire and dictionary bound to the lane file's.
         values, default = key_wire_declared()
