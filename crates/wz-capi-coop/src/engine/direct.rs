@@ -481,6 +481,39 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
     // over it ends, as the sink's default does.
 }
 
+/// What a step of a group hands each record it read to (`super::group::GroupHand`): the record
+/// dispatched as a face's is (`DirectSink`), with the session's lock, which the step is made
+/// under where other threads reach the session, let go of while it is.
+#[cfg(feature = "group")]
+struct GroupHandOff<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
+    engine: &'a CoopEngine<L, C>,
+    #[cfg(feature = "threads")]
+    held: Option<super::CoreGuard<'a, L, C>>,
+}
+
+#[cfg(feature = "group")]
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> super::group::GroupHand
+    for GroupHandOff<'_, L, C>
+{
+    fn hand(
+        &mut self,
+        records: &mut FaceRecords<super::group::GroupReplies>,
+        event: IterationEvent<'_, '_>,
+    ) {
+        #[cfg(feature = "threads")]
+        drop(self.held.take());
+        DirectSink {
+            engine: self.engine,
+            records,
+        }
+        .event(event);
+        #[cfg(feature = "threads")]
+        {
+            self.held = Some(self.engine.core.lock());
+        }
+    }
+}
+
 /// A group's pump taken out of its place by a read that waits in the group's receive, stepped
 /// by the read's engine ([`super::group::read_awaited`]).
 #[cfg(feature = "group")]
@@ -2222,27 +2255,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // lock is let go of only while a record the step read is handed out, which takes it
         // again for the record's dispatch (`DirectSink`) and calls its callbacks with it let
         // go of. With no other thread nothing else reaches them meanwhile, and nothing is held.
-        #[cfg(feature = "threads")]
-        let mut held = Some(self.core.lock());
+        // The hand holds the lock where it is held, and lets it go at the end of this statement.
         let ended = pump.step(
-            &mut |records, event| {
+            &mut GroupHandOff {
+                engine: self,
                 #[cfg(feature = "threads")]
-                drop(held.take());
-                DirectSink {
-                    engine: self,
-                    records,
-                }
-                .event(event);
-                #[cfg(feature = "threads")]
-                {
-                    held = Some(self.core.lock());
-                }
+                held: Some(self.core.lock()),
             },
             most,
             now_us,
         );
-        #[cfg(feature = "threads")]
-        drop(held);
         DirectSink {
             engine: self,
             records: pump.records(),

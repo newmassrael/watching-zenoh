@@ -1846,6 +1846,38 @@ struct GroupTurn<'a, C: ClockSource + 'static> {
 }
 
 #[cfg(not(wz_round))]
+impl<'a, C: ClockSource + 'static> GroupTurn<'a, C> {
+    /// The turn of a step at `now_us` that reads up to `most` datagrams: on `runtime`'s clock
+    /// and the session's epoch `clock`, with the stage, the JOIN ask and the stop of `reads`.
+    fn of(
+        runtime: &'a CoopRuntime<C>,
+        clock: &'a CoopTime<C>,
+        reads: &'a GroupReads,
+        most: core::num::NonZeroUsize,
+        now_us: u64,
+    ) -> Self {
+        Self {
+            runtime,
+            clock,
+            stage: &reads.tx,
+            join_ask: &reads.join_ask,
+            stop: &reads.stop,
+            most,
+            now_us,
+        }
+    }
+}
+
+#[cfg(not(wz_round))]
+impl GroupReads {
+    /// Leave the session's `outcome` for the session to read, the session ended.
+    fn end_with(&self, outcome: MulticastOutcome) {
+        *self.end.outcome.borrow_mut() = Some(outcome);
+        self.end.finished.set(true);
+    }
+}
+
+#[cfg(not(wz_round))]
 impl<T> GroupPlace<T> {
     /// A place that holds no session yet.
     fn empty() -> alloc::boxed::Box<Self> {
@@ -2124,17 +2156,26 @@ impl<T: GroupTransport> GroupRun<T> {
     }
 }
 
-/// The one sink a group's walk hands its events to: each noted against the group (the asks of
-/// its members, its members) and handed out with the group's records.
+/// What a group's read hands each record it read to, with the group's records: the engine's
+/// dispatch of a face's records, which knows the session's lock the group's slot does not.
 #[cfg(not(wz_round))]
-struct GroupEvents<'a> {
+pub(super) trait GroupHand {
+    /// Hand `event`, read on the group, out with the group's `records`.
+    fn hand(&mut self, records: &mut FaceRecords<GroupReplies>, event: IterationEvent<'_, '_>);
+}
+
+/// The one sink a group's walk hands its events to: each noted against the group (the asks of
+/// its members, its members) and handed out with the group's records. Of the engine's hand's
+/// type, so a record crosses one dynamic call from the walk to the engine's dispatch.
+#[cfg(not(wz_round))]
+struct GroupEvents<'a, H> {
     reads: &'a GroupReads,
     records: &'a mut FaceRecords<GroupReplies>,
-    hand: &'a mut dyn FnMut(&mut FaceRecords<GroupReplies>, IterationEvent<'_, '_>),
+    hand: &'a mut H,
 }
 
 #[cfg(not(wz_round))]
-impl EventSink for GroupEvents<'_> {
+impl<H: GroupHand> EventSink for GroupEvents<'_, H> {
     fn event(&mut self, event: IterationEvent<'_, '_>) {
         let reads = self.reads;
         answer_asks(&event, &reads.keyexprs, &reads.join_ask, &reads.tx);
@@ -2144,7 +2185,7 @@ impl EventSink for GroupEvents<'_> {
             #[cfg(feature = "connectivity")]
             &reads.events,
         );
-        (self.hand)(&mut *self.records, event);
+        self.hand.hand(&mut *self.records, event);
     }
 }
 
@@ -2280,9 +2321,9 @@ impl<C: ClockSource + 'static> GroupPump<C> {
     /// ended on `most`, the socket then maybe holding more, and cleared where they ended on a
     /// receive that found none. Whether the session ended at this step, its end left for the
     /// session to read.
-    pub(super) fn step(
+    pub(super) fn step<H: GroupHand>(
         &mut self,
-        hand: &mut dyn FnMut(&mut FaceRecords<GroupReplies>, IterationEvent<'_, '_>),
+        hand: &mut H,
         most: core::num::NonZeroUsize,
         now_us: u64,
     ) -> bool {
@@ -2293,40 +2334,39 @@ impl<C: ClockSource + 'static> GroupPump<C> {
             hand,
         };
         let outcome = self.place.step(
-            GroupTurn {
-                runtime: &self.runtime,
-                clock: &self.clock,
-                stage: &reads.tx,
-                join_ask: &reads.join_ask,
-                stop: &reads.stop,
-                most,
-                now_us,
-            },
+            GroupTurn::of(&self.runtime, &self.clock, reads, most, now_us),
             &mut events,
         );
         let Some(outcome) = outcome else {
             reads.took.set(self.place.read_to_bound());
             return false;
         };
-        *reads.end.outcome.borrow_mut() = Some(outcome);
-        reads.end.finished.set(true);
+        reads.end_with(outcome);
         true
     }
 
     /// End the group's session: its stop asked, and its last step taken, which tells the group it
-    /// leaves; what that step reads is handed to no one, the session being closed. A slot whose
-    /// session ended already has nothing to tell.
+    /// leaves. A stopped session's step sends its Close and reads nothing, so it is handed no
+    /// sink of records. A slot whose session ended already has nothing to tell.
     pub(super) fn leave(mut self) {
         if !self.holds_session() {
             return;
         }
         self.reads.stop.set(true);
         let now_us = self.now_us();
-        let _ = self.step(
-            &mut |_records, _event| {},
+        let turn = GroupTurn::of(
+            &self.runtime,
+            &self.clock,
+            &self.reads,
             core::num::NonZeroUsize::MIN,
             now_us,
         );
+        if let Some(outcome) = self
+            .place
+            .step(turn, &mut |_event: IterationEvent<'_, '_>| {})
+        {
+            self.reads.end_with(outcome);
+        }
     }
 }
 
