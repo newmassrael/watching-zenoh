@@ -24,7 +24,8 @@ use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::ptr::NonNull;
 
-use crate::link::{LinkKind, LinkSubject};
+use crate::link::{LinkEnd, LinkEnds, LinkKind, LinkSubject};
+use crate::text_out::TextOut;
 #[cfg(feature = "session-unicast")]
 use {
     crate::link::SessionRuntime, crate::session_actions::SessionLinkActions,
@@ -109,8 +110,8 @@ impl LinkSnapshot {
             }
         });
         Some(Self {
-            src: String::from(row.src.as_str()),
-            dst: String::from(row.dst.as_str()),
+            src: row.src_text(),
+            dst: row.dst_text(),
             kind: row.kind,
             interfaces: None,
             mtu: row.mtu,
@@ -372,9 +373,88 @@ impl<const N: usize> core::ops::Deref for RowTextOf<N> {
     }
 }
 
-/// A locator as a [`FaceLinkRow`] holds it: in the row up to [`crate::caps::MAX_LOCATOR_LEN`]
-/// bytes.
+/// A locator, or the name of a link's end, as a [`FaceLinkRow`] holds it: in the row up to
+/// [`crate::caps::MAX_LOCATOR_LEN`] bytes.
 pub type RowText = RowTextOf<{ crate::caps::MAX_LOCATOR_LEN }>;
+
+/// One end of a link its driver lent ([`LinkEnd`]), owned by a [`FaceLinkRow`]: the fact the
+/// end's locator is written from, which outlives the link.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LentEnd {
+    /// The address of an IP socket.
+    Ip(core::net::SocketAddr),
+    /// The name of an end of another family, as its kind writes it after the scheme.
+    Named(RowText),
+}
+
+impl LentEnd {
+    /// `end`, owned: a name copied into its row, or onto the heap past it, as [`RowTextOf::of`]
+    /// keeps a text.
+    pub fn of(end: LinkEnd<'_>) -> Self {
+        match end {
+            LinkEnd::Ip(at) => Self::Ip(at),
+            LinkEnd::Named(name) => Self::Named(RowText::of(name)),
+        }
+    }
+
+    /// The end, lent as its driver lends it.
+    pub fn lent(&self) -> LinkEnd<'_> {
+        match self {
+            Self::Ip(at) => LinkEnd::Ip(*at),
+            Self::Named(name) => LinkEnd::Named(name.as_str()),
+        }
+    }
+}
+
+/// The two ends of a link as a [`FaceLinkRow`] holds them: the facts their locators are written
+/// from when the row is read ([`FaceLinkRow::write_src`], [`FaceLinkRow::write_dst`]), so an
+/// engine that tells its faces a row at a time writes no locator, and a reader writes each one
+/// once, where it hands it on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowEnds {
+    /// No ends: the row of a face alone, or of a link whose driver lends none.
+    None,
+    /// The ends a link's driver lent, on a link of `kind`, which names both locators' scheme.
+    Lent {
+        /// The kind of link the driver named with its ends.
+        kind: LinkKind,
+        /// This end.
+        src: LentEnd,
+        /// The peer's end.
+        dst: LentEnd,
+    },
+    /// The link to a member of a group: this node's end on the group, written whole, and the
+    /// address the member's datagrams come from, whose locator the kind of the group's members
+    /// names ([`FaceLinkRow::group_endpoint`]).
+    Member {
+        /// This node's end on the group.
+        src: RowText,
+        /// The address the member's datagrams come from.
+        at: core::net::SocketAddr,
+    },
+    /// Two locators held written whole, as an engine that reports its faces by their snapshots
+    /// keeps them.
+    Written {
+        /// This end's locator.
+        src: RowText,
+        /// The peer end's locator.
+        dst: RowText,
+    },
+}
+
+impl RowEnds {
+    /// The ends `link` lends, owned; none for a link whose driver lends none.
+    pub fn lent(link: Option<LinkEnds<'_>>) -> Self {
+        match link {
+            Some(link) => Self::Lent {
+                kind: link.kind,
+                src: LentEnd::of(link.src),
+                dst: LentEnd::of(link.dst),
+            },
+            None => Self::None,
+        }
+    }
+}
 
 /// A group's endpoint as a [`FaceLinkRow`] holds it, its socket keys included: in the row up to
 /// [`GROUP_ROW_LEN`] bytes.
@@ -418,10 +498,8 @@ pub struct FaceLinkRow {
     /// transport after the last ([`Self::is_last_of_face`]). `0` for the one row a face with no
     /// link is told by, which names the face alone: its ends are empty, with no kind and no MTU.
     pub links: usize,
-    /// This end's locator.
-    pub src: RowText,
-    /// The peer end's locator.
-    pub dst: RowText,
+    /// The link's two ends, from which its locators are written as the row is read.
+    pub ends: RowEnds,
     /// The kind of link, `None` when the driver cannot say.
     pub kind: Option<LinkKind>,
     /// The negotiated outbound frame budget, clamped into a `u16`.
@@ -439,8 +517,10 @@ impl FaceLinkRow {
     /// The `at`-th link of `face`, copied into a row; `None` past its last link.
     pub fn of_snapshot(face: &FaceSnapshot, at: usize) -> Option<Self> {
         let link = face.links.get(at)?;
-        let src = RowText::of(&link.src);
-        let dst = RowText::of(&link.dst);
+        let ends = RowEnds::Written {
+            src: RowText::of(&link.src),
+            dst: RowText::of(&link.dst),
+        };
         let group_endpoint = link
             .group
             .as_ref()
@@ -453,8 +533,7 @@ impl FaceLinkRow {
             is_shm: face.is_shm,
             link: at,
             links: face.links.len(),
-            src,
-            dst,
+            ends,
             kind: link.kind,
             mtu: link.mtu,
             group_endpoint,
@@ -473,8 +552,7 @@ impl FaceLinkRow {
             is_shm: face.is_shm,
             link: 0,
             links: 0,
-            src: RowText::of(""),
-            dst: RowText::of(""),
+            ends: RowEnds::None,
             kind: None,
             mtu: 0,
             group_endpoint: None,
@@ -501,6 +579,42 @@ impl FaceLinkRow {
     /// reader told a face's departure a row at a time tells the transport, after its last link.
     pub fn is_last_of_face(&self) -> bool {
         self.link.saturating_add(1) >= self.links
+    }
+
+    /// Write the locator of this end of the row's link into `out`: nothing for a row with no
+    /// ends ([`RowEnds::None`]).
+    pub fn write_src<W: TextOut + ?Sized>(&self, out: &mut W) {
+        match &self.ends {
+            RowEnds::None => {}
+            RowEnds::Lent { kind, src, .. } => crate::link::write_locator(*kind, src.lent(), out),
+            RowEnds::Member { src, .. } | RowEnds::Written { src, .. } => out.push_str(src),
+        }
+    }
+
+    /// Write the locator of the peer's end of the row's link into `out`: a group member's as
+    /// the kind of the group's members names it (a raweth group's by its MAC); nothing for a row
+    /// with no ends.
+    pub fn write_dst<W: TextOut + ?Sized>(&self, out: &mut W) {
+        match &self.ends {
+            RowEnds::None => {}
+            RowEnds::Lent { kind, dst, .. } => crate::link::write_locator(*kind, dst.lent(), out),
+            RowEnds::Member { at, .. } => member_end(*at, self.group_endpoint.as_deref(), out),
+            RowEnds::Written { dst, .. } => out.push_str(dst),
+        }
+    }
+
+    /// The locator of this end, written now ([`Self::write_src`]).
+    pub fn src_text(&self) -> String {
+        let mut text = String::new();
+        self.write_src(&mut text);
+        text
+    }
+
+    /// The locator of the peer's end, written now ([`Self::write_dst`]).
+    pub fn dst_text(&self) -> String {
+        let mut text = String::new();
+        self.write_dst(&mut text);
+        text
     }
 }
 
@@ -534,19 +648,18 @@ impl FaceLinkRow {
         let mut ends = None;
         actions.visit_link_ends(|link| {
             if links == at {
-                ends = Some(ends_row(link));
+                ends = Some(RowEnds::lent(link));
             }
             // A count of the links a face holds, each a link the session admitted: it cannot
             // reach the width of the count, and a saturated one would still be a bound.
             links = links.saturating_add(1);
             true
         });
-        let (src, dst) = ends?;
+        let ends = ends?;
         Some(Self {
             link: at,
             links,
-            src,
-            dst,
+            ends,
             ..face
         })
     }
@@ -573,12 +686,10 @@ impl FaceLinkRow {
         }
         let mut at: usize = 0;
         actions.visit_link_ends(|link| {
-            let (src, dst) = ends_row(link);
             tell(Self {
                 link: at,
                 links,
-                src,
-                dst,
+                ends: RowEnds::lent(link),
                 ..face.clone()
             });
             at = at.saturating_add(1);
@@ -617,8 +728,7 @@ impl FaceLinkRow {
             is_shm,
             link: 0,
             links: 0,
-            src: RowText::of(""),
-            dst: RowText::of(""),
+            ends: RowEnds::None,
             kind,
             mtu,
             group_endpoint: None,
@@ -631,8 +741,9 @@ impl FaceLinkRow {
 impl FaceLinkRow {
     /// `member` of a group as its row, the transport [`FaceSnapshot::of_group_member`] reports
     /// and its one link: from the group's locator `src` to the address the member's datagrams come
-    /// from, labelled by the `endpoint` the group was joined by. Every text that fits its row is
-    /// held there, so an engine that admits only those reads its members with nothing allocated.
+    /// from, held as the address, labelled by the `endpoint` the group was joined by. Every text
+    /// that fits its row is held there, so an engine that admits only those reads its members with
+    /// nothing allocated.
     /// `None` for a member whose JOIN named a role this node does not know.
     pub fn of_group_member(
         member: &crate::multicast_dispatch::MulticastMember,
@@ -653,8 +764,10 @@ impl FaceLinkRow {
             is_shm,
             link: 0,
             links: 1,
-            src: RowText::of(src),
-            dst: member_row(member.locator, endpoint),
+            ends: RowEnds::Member {
+                src: RowText::of(src),
+                at: member.locator,
+            },
             kind: member_link_kind(endpoint),
             mtu: 0,
             group_endpoint: Some(GroupRowText::of(endpoint)),
@@ -663,56 +776,20 @@ impl FaceLinkRow {
     }
 }
 
-/// The locators of the two ends of `link`, each in its row ([`end_row`]); both empty for a link
-/// whose driver lends no ends.
-#[cfg(feature = "session-unicast")]
-fn ends_row(link: Option<crate::link::LinkEnds<'_>>) -> (RowText, RowText) {
-    match link {
-        Some(link) => (
-            end_row(|out| link.write_src(out)),
-            end_row(|out| link.write_dst(out)),
-        ),
-        None => (RowText::of(""), RowText::of("")),
-    }
-}
-
-/// The locator of one end of a link, which `write` writes, in its row: there when it fits, on
-/// the heap past it, as [`RowTextOf::of`] keeps a text.
-#[cfg(any(feature = "session-unicast", feature = "session-multicast"))]
-fn end_row(write: impl Fn(&mut dyn crate::text_out::TextOut)) -> RowText {
-    let mut inline: crate::text_out::FixedText<{ crate::caps::MAX_LOCATOR_LEN }> =
-        crate::text_out::FixedText::new();
-    write(&mut inline);
-    match inline.finish() {
-        Ok(text) => RowText::of(text),
-        Err(_) => {
-            let mut spilled = String::new();
-            write(&mut spilled);
-            RowText::Spilled(spilled)
-        }
-    }
-}
-
-/// `udp/<at>`, the locator a group member's end is reported by, written into its row.
-#[cfg(feature = "session-multicast")]
-fn udp_row(at: core::net::SocketAddr) -> RowText {
-    end_row(|out| {
-        out.push_str("udp/");
-        out.push_socket_addr(at);
-    })
-}
-
-/// The end of a member of the group joined by `endpoint`, in its row: a raweth group's member is
-/// the `reth/` locator of its MAC ([`raweth_member_text`]), any other group's its address on UDP.
-#[cfg(feature = "session-multicast")]
-fn member_row(at: core::net::SocketAddr, endpoint: &str) -> RowText {
+/// The locator of the end of a member of the group joined by `endpoint` whose datagrams come
+/// from `at`, written into `out`: a raweth group's member is the `reth/` locator of its MAC
+/// (`raweth_member_text`), any other group's its address on UDP, as upstream records a member's
+/// locator. The one writer of a member's end, for its row and its snapshot alike.
+fn member_end<W: TextOut + ?Sized>(at: core::net::SocketAddr, endpoint: Option<&str>, out: &mut W) {
     #[cfg(feature = "transport-link-raweth")]
-    if endpoint.starts_with("reth/") {
-        return RowText::of(&raweth_member_text(at));
+    if endpoint.is_some_and(|endpoint| endpoint.starts_with("reth/")) {
+        out.push_str(&raweth_member_text(at));
+        return;
     }
     #[cfg(not(feature = "transport-link-raweth"))]
     let _ = endpoint;
-    udp_row(at)
+    out.push_str("udp/");
+    out.push_socket_addr(at);
 }
 
 /// The kind of a link to a member of the group joined by `endpoint`: none [`LinkKind`] names for
@@ -731,18 +808,9 @@ fn member_link_kind(endpoint: &str) -> Option<LinkKind> {
 /// The `reth/` locator of the MAC a raweth group keyed its member by `at` for
 /// ([`crate::raweth_link::member_locator`]), or `reth/<at>` for an address no raweth member is
 /// keyed by, which still names it.
-#[cfg(all(feature = "session-multicast", feature = "transport-link-raweth"))]
+#[cfg(feature = "transport-link-raweth")]
 fn raweth_member_text(at: core::net::SocketAddr) -> String {
     crate::raweth_link::member_locator(&at).unwrap_or_else(|| alloc::format!("reth/{at}"))
-}
-
-/// `udp/<at>`, as [`udp_row`] writes it, for a snapshot that keeps its text on the heap.
-#[cfg(feature = "session-multicast")]
-fn udp_text(at: core::net::SocketAddr) -> String {
-    use crate::text_out::TextOut as _;
-    let mut text = String::from("udp/");
-    text.push_socket_addr(at);
-    text
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -909,17 +977,15 @@ impl<'a> GroupMemberLink<'a> {
         group: &'a str,
         endpoint: &'a str,
     ) -> Self {
-        #[cfg(feature = "transport-link-raweth")]
-        if endpoint.starts_with("reth/") {
-            return Self {
-                src,
-                dst: raweth_member_text(member.locator),
-                kind: None,
-                group,
-                endpoint,
-            };
+        let mut dst = String::new();
+        member_end(member.locator, Some(endpoint), &mut dst);
+        Self {
+            src,
+            dst,
+            kind: member_link_kind(endpoint),
+            group,
+            endpoint,
         }
-        Self::udp(src, member, group, endpoint)
     }
 
     /// The link to `member` of a UDP group: its end is the address its datagrams come from, as
@@ -930,9 +996,11 @@ impl<'a> GroupMemberLink<'a> {
         group: &'a str,
         endpoint: &'a str,
     ) -> Self {
+        let mut dst = String::new();
+        member_end(member.locator, None, &mut dst);
         Self {
             src,
-            dst: udp_text(member.locator),
+            dst,
             kind: Some(LinkKind::Udp),
             group,
             endpoint,
@@ -1029,6 +1097,14 @@ mod tests {
         assert_eq!(link.mtu, 1024);
     }
 
+    /// The two locators a row of a face's snapshot holds written whole.
+    fn written(row: &FaceLinkRow) -> (&RowText, &RowText) {
+        match &row.ends {
+            RowEnds::Written { src, dst } => (src, dst),
+            other => panic!("a snapshot's row holds its locators written: {other:?}"),
+        }
+    }
+
     /// A face of one TCP link from `src` to `dst`, and a group member's link.
     fn face_of(src: &str, dst: &str) -> FaceSnapshot {
         let mut tcp = LinkSnapshot::unicast(src, dst, None, 2048);
@@ -1059,11 +1135,12 @@ mod tests {
             (first.zid, first.whatami, first.link, first.links),
             ([7; 16], 1, 0, 2)
         );
-        assert_eq!(first.src.as_str(), "tcp/127.0.0.1:1");
-        assert_eq!(first.dst.as_str(), "tcp/127.0.0.1:2");
+        assert_eq!(first.src_text(), "tcp/127.0.0.1:1");
+        assert_eq!(first.dst_text(), "tcp/127.0.0.1:2");
         assert_eq!((first.kind, first.mtu), (Some(LinkKind::Tcp), 2048));
         assert!(first.group_endpoint.is_none());
-        assert!(first.src.is_inline() && first.dst.is_inline());
+        let (src, dst) = written(&first);
+        assert!(src.is_inline() && dst.is_inline());
         let second = FaceLinkRow::of_snapshot(&face, 1).expect("the second link");
         assert_eq!(second.link, 1);
         assert_eq!(
@@ -1090,7 +1167,7 @@ mod tests {
             .map(|row| (row.link, row.links, row.is_last_of_face()))
             .collect();
         assert_eq!(read, [(0, 2, false), (1, 2, true)]);
-        assert_eq!(rows[1].src.as_str(), "udp/a", "the second link's row");
+        assert_eq!(rows[1].src_text(), "udp/a", "the second link's row");
 
         let alone = FaceSnapshot {
             links: Vec::new(),
@@ -1102,7 +1179,11 @@ mod tests {
         let row = &rows[0];
         assert_eq!((row.zid, row.link, row.links), ([7; 16], 0, 0));
         assert!(row.is_last_of_face());
-        assert_eq!((row.src.as_str(), row.dst.as_str()), ("", ""));
+        assert_eq!(row.ends, RowEnds::None);
+        assert_eq!(
+            (row.src_text(), row.dst_text()),
+            (String::new(), String::new())
+        );
         assert_eq!((row.kind, row.mtu), (None, 0));
         assert!(
             LinkSnapshot::of_row(row).is_none(),
@@ -1165,9 +1246,9 @@ mod tests {
             group.endpoint = endpoint.clone();
         }
         let row = FaceLinkRow::of_snapshot(&face, 0).expect("the link");
-        assert_eq!(row.src.as_str(), fits);
+        assert_eq!(row.src_text(), fits);
         assert!(
-            row.src.is_inline(),
+            written(&row).0.is_inline(),
             "a locator of the bound is held in the row"
         );
         let member = FaceLinkRow::of_snapshot(&face, 1).expect("the member's link");
@@ -1180,8 +1261,8 @@ mod tests {
 
         let long = "t".repeat(crate::caps::MAX_LOCATOR_LEN + 1);
         let row = FaceLinkRow::of_snapshot(&face_of(&long, "d"), 0).expect("the link");
-        assert_eq!(row.src.as_str(), long, "a longer locator reads whole");
-        assert!(!row.src.is_inline());
+        assert_eq!(row.src_text(), long, "a longer locator reads whole");
+        assert!(!written(&row).0.is_inline());
     }
 
     fn named_subject(kind: Option<LinkKind>) -> LinkSubject {
@@ -1260,9 +1341,10 @@ mod tests {
     /// A member of a UDP group is a multicast transport of its own, of its zid and role, with one
     /// UDP link to the address its datagrams come from, over the group; a member whose role this
     /// node does not know is no transport it can report.
-    /// A group member's row read in place is the row of its snapshot, every text held in the row,
-    /// the longest endpoint of its bound too. Turned red by a row that reports another end, kind or
-    /// label than the snapshot, or that spills a text that fits.
+    /// A group member's row read in place is the row of its snapshot: it holds the address the
+    /// member's datagrams come from, not its locator, and reads as the snapshot's text; the group's
+    /// locator and the longest endpoint of its bound are held in the row. Turned red by a row that
+    /// reports another end, kind or label than the snapshot, or that spills a text that fits.
     #[cfg(feature = "session-multicast")]
     #[test]
     fn a_group_members_row_is_the_row_of_its_snapshot_held_in_place() {
@@ -1294,12 +1376,19 @@ mod tests {
             )
         );
         assert_eq!((row.kind, row.mtu), (snapshot.kind, snapshot.mtu));
-        assert_eq!(row.src.as_str(), snapshot.src.as_str());
-        assert_eq!(row.dst.as_str(), "udp/192.0.2.9:7447");
-        assert_eq!(row.dst.as_str(), snapshot.dst.as_str());
-        let held = row.group_endpoint.expect("the group's endpoint");
+        assert_eq!(row.src_text(), snapshot.src_text());
+        assert_eq!(row.dst_text(), "udp/192.0.2.9:7447");
+        assert_eq!(row.dst_text(), snapshot.dst_text());
+        let RowEnds::Member { src, at } = &row.ends else {
+            panic!(
+                "a member's row holds its ends as a member's: {:?}",
+                row.ends
+            );
+        };
+        assert_eq!(*at, member.locator, "the member's address, not its text");
+        let held = row.group_endpoint.as_ref().expect("the group's endpoint");
         assert_eq!(held.as_str(), endpoint);
-        assert!(row.src.is_inline() && row.dst.is_inline() && held.is_inline());
+        assert!(src.is_inline() && held.is_inline());
         let unknown = MulticastMember {
             whatami: None,
             ..member
@@ -1333,7 +1422,7 @@ mod tests {
         );
         let row = FaceLinkRow::of_group_member(&member, group, endpoint, false).expect("its row");
         assert_eq!(
-            (row.dst.as_str(), row.kind),
+            (row.dst_text().as_str(), row.kind),
             ("reth/30:03:8c:c8:00:a1", None)
         );
 
@@ -1354,12 +1443,10 @@ mod tests {
         );
     }
 
-    /// A group member's end is `udp/` and the address as `Display` writes it, held in the row
-    /// when it fits and on the heap past it. Turned red by a text that differs from the
-    /// formatter's or is cut at the row's bound.
-    #[cfg(feature = "session-multicast")]
+    /// A group member's end is `udp/` and the address as `Display` writes it, whole, the widest
+    /// address too. Turned red by a text that differs from the formatter's or is cut short.
     #[test]
-    fn a_member_end_is_written_whole_in_or_past_its_row() {
+    fn a_member_end_is_written_whole() {
         let widest = core::net::SocketAddr::V6(core::net::SocketAddrV6::new(
             core::net::Ipv6Addr::new(
                 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
@@ -1369,10 +1456,56 @@ mod tests {
             u32::MAX,
         ));
         for at in [core::net::SocketAddr::from(([10, 0, 0, 1], 7447)), widest] {
-            let row = udp_row(at);
-            assert_eq!(row.as_str(), alloc::format!("udp/{at}"));
-            assert_eq!(row.is_inline(), row.len() <= crate::caps::MAX_LOCATOR_LEN);
+            let mut text = String::new();
+            member_end(at, None, &mut text);
+            assert_eq!(text, alloc::format!("udp/{at}"));
+            let mut joined = String::new();
+            member_end(at, Some("udp/224.0.0.224:7447#iface=lo"), &mut joined);
+            assert_eq!(joined, text, "a UDP group's member is its address on UDP");
         }
+    }
+
+    /// A row holds the ends its link's driver lent as facts, an IP end's address and another
+    /// family's name, and reads as the locators the driver's ends write, a name past the row's
+    /// bound whole too. Turned red by a row that writes another scheme, suffix or address than the
+    /// driver's ends, or that keeps the text of an end rather than its address.
+    #[test]
+    fn a_row_holds_the_ends_its_driver_lent_and_reads_as_their_locators() {
+        let local = core::net::SocketAddr::from(([10, 0, 0, 2], 40000));
+        let peer = core::net::SocketAddr::from(([10, 0, 0, 1], 7447));
+        let long = "p".repeat(crate::caps::MAX_LOCATOR_LEN + 1);
+        let lent = [
+            LinkEnds::ip(LinkKind::Tcp, local, peer),
+            LinkEnds::ip(LinkKind::UdpReliable, local, peer),
+            LinkEnds::named(LinkKind::Unixpipe, "/tmp/a", &long),
+        ];
+        for ends in lent {
+            let row = FaceLinkRow {
+                ends: RowEnds::lent(Some(ends)),
+                ..FaceLinkRow::of_face_alone(&face_of("a", "b"))
+            };
+            let (mut src, mut dst) = (String::new(), String::new());
+            ends.write_src(&mut src);
+            ends.write_dst(&mut dst);
+            assert_eq!((row.src_text(), row.dst_text()), (src, dst), "{ends:?}");
+            let RowEnds::Lent {
+                kind,
+                src: held_src,
+                dst: held_dst,
+            } = &row.ends
+            else {
+                panic!("a lent link's row holds its ends as lent: {:?}", row.ends);
+            };
+            assert_eq!(
+                (*kind, held_src.lent(), held_dst.lent()),
+                (ends.kind, ends.src, ends.dst)
+            );
+        }
+        assert_eq!(
+            RowEnds::lent(None),
+            RowEnds::None,
+            "a driver that lends no ends"
+        );
     }
 
     #[cfg(feature = "session-multicast")]

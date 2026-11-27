@@ -232,7 +232,7 @@ impl ToldLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wz_session_core::face::RowText;
+    use wz_session_core::face::RowEnds;
 
     fn row(first: u8, link: usize) -> FaceLinkRow {
         FaceLinkRow {
@@ -243,8 +243,7 @@ mod tests {
             is_shm: false,
             link,
             links: link.saturating_add(1),
-            src: RowText::of(""),
-            dst: RowText::of(""),
+            ends: RowEnds::None,
             kind: None,
             mtu: 0,
             group_endpoint: None,

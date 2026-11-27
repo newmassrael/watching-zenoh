@@ -99,7 +99,7 @@ use wz_capi_port::os::{mutex_in, Mutex, MutexGuard};
 use wz_capi_port::told::{ToldKey, ToldPlane};
 use wz_capi_port::SessionEngine;
 use wz_session_core::face::{FaceEventKind, FaceLinkRow};
-use wz_session_core::link::LinkKind;
+use wz_session_core::text_out::{FixedText, TextOut};
 
 use crate::abi::z_owned_string_t;
 use crate::bytes::store_owned_string;
@@ -176,7 +176,24 @@ impl ConnText {
     };
 
     fn new(bytes: &[u8]) -> Self {
-        let boxed: Box<[u8]> = bytes.into();
+        Self::of_boxed(bytes.into())
+    }
+
+    /// The text `write` writes, in an allocation of its own of the text's length: a link's end
+    /// written once, where it is handed out, from the facts its row holds. Written on the stack,
+    /// and again on the heap only past a row's bound, which only a heap engine's link reaches.
+    fn written(write: impl Fn(&mut dyn TextOut)) -> Self {
+        let mut inline: FixedText<{ wz_session_core::caps::MAX_LOCATOR_LEN }> = FixedText::new();
+        write(&mut inline);
+        if let Ok(text) = inline.finish() {
+            return Self::new(text.as_bytes());
+        }
+        let mut text = String::new();
+        write(&mut text);
+        Self::of_boxed(text.into_bytes().into_boxed_slice())
+    }
+
+    fn of_boxed(boxed: Box<[u8]>) -> Self {
         let len = boxed.len();
         Self {
             len,
@@ -501,40 +518,30 @@ fn pico_group_endpoint_text(endpoint: &str) -> String {
 /// `} else if (remote_addr->len == 16 + sizeof(uint16_t)) {`), and a raweth receive gives four
 /// bytes of the source MAC (`vendor/zenoh-pico/src/link/transport/udp/raweth_unix.c` @
 /// `addr->len = sizeof(ETH_ALEN);`). MEASURED against the real library: `dst=` and `mtu=1514`.
+///
+/// Each end is written here, once, into the string handed out, from the facts the row holds of
+/// it ([`FaceLinkRow::write_src`], [`FaceLinkRow::write_dst`]).
 fn link_of_row(row: &FaceLinkRow) -> z_loaned_link_t {
-    pico_link(
-        row.zid,
-        &row.src,
-        &row.dst,
-        (row.kind, row.mtu),
-        row.group_endpoint.as_deref(),
-    )
-}
-
-/// The link pico reports from `src` to `dst` of a link of `kind` and `mtu`, a group member's
-/// starting at the endpoint the group was joined by.
-fn pico_link(
-    zid: [u8; 16],
-    src: &str,
-    dst: &str,
-    (kind, mtu): (Option<LinkKind>, u16),
-    group_endpoint: Option<&str>,
-) -> z_loaned_link_t {
+    let group_endpoint = row.group_endpoint.as_deref();
     let raweth = group_endpoint.is_some_and(|endpoint| endpoint.starts_with("reth/"));
     let (mtu, is_streamed, is_reliable) = if raweth {
         (1514, false, false)
     } else {
-        pico_link_properties(kind, mtu)
+        pico_link_properties(row.kind, row.mtu)
     };
     let src = match group_endpoint {
         Some(endpoint) => ConnText::new(pico_group_endpoint_text(endpoint).as_bytes()),
-        None => ConnText::new(src.as_bytes()),
+        None => ConnText::written(|text| row.write_src(text)),
     };
-    let dst = if raweth { "" } else { dst };
+    let dst = if raweth {
+        ConnText::new(&[])
+    } else {
+        ConnText::written(|text| row.write_dst(text))
+    };
     z_loaned_link_t {
-        zid: z_id_t { id: zid },
+        zid: z_id_t { id: row.zid },
         src,
-        dst: ConnText::new(dst.as_bytes()),
+        dst,
         mtu,
         is_streamed,
         is_reliable,
@@ -1158,7 +1165,7 @@ impl Told {
 /// Whether `a` and `b`, rows of one key, are of one link: a link that went and came back under
 /// its key has other ends.
 fn same_ends(a: &FaceLinkRow, b: &FaceLinkRow) -> bool {
-    a.src == b.src && a.dst == b.dst && a.group_endpoint == b.group_endpoint
+    a.ends == b.ends && a.group_endpoint == b.group_endpoint
 }
 
 /// Whether the row of `told`'s key stands, as `standing` reads the rows one at a time, with the
@@ -3693,7 +3700,47 @@ pub(crate) mod tests {
 #[cfg(test)]
 mod told_tests {
     use super::*;
-    use wz_session_core::face::RowText;
+    use wz_session_core::face::{LentEnd, RowEnds, RowText};
+    use wz_session_core::link::{LinkEnds, LinkKind};
+
+    /// A link's two ends are written into the strings handed out from the facts its row holds,
+    /// as the driver's ends write them, an end past a row's bound whole too.
+    ///
+    /// # Control
+    ///
+    /// A door that writes the row's ends with another scheme, or writes none, reds the TCP
+    /// link's assertion; one that writes into the row's bound alone cuts the long name and reds
+    /// the pipe's.
+    #[test]
+    fn a_links_ends_are_written_where_they_are_handed_out() {
+        let local = core::net::SocketAddr::from(([10, 0, 0, 2], 40000));
+        let peer = core::net::SocketAddr::from(([10, 0, 0, 1], 7447));
+        let long = "p".repeat(wz_session_core::caps::MAX_LOCATOR_LEN + 1);
+        for lent in [
+            LinkEnds::ip(LinkKind::Tcp, local, peer),
+            LinkEnds::named(LinkKind::Unixpipe, "/tmp/a", &long),
+        ] {
+            let mut told = row(1, "");
+            told.ends = RowEnds::lent(Some(lent));
+            let held = HeldLink(link_of_row(&told));
+            let (mut src, mut dst) = (String::new(), String::new());
+            lent.write_src(&mut src);
+            lent.write_dst(&mut dst);
+            assert_eq!(
+                (held.0.src.as_bytes(), held.0.dst.as_bytes()),
+                (src.as_bytes(), dst.as_bytes()),
+                "{lent:?}"
+            );
+        }
+        let mut told = row(1, "");
+        told.ends = RowEnds::Lent {
+            kind: LinkKind::Tcp,
+            src: LentEnd::Ip(local),
+            dst: LentEnd::Ip(peer),
+        };
+        let held = HeldLink(link_of_row(&told));
+        assert_eq!(held.0.dst.as_bytes(), b"tcp/10.0.0.1:7447");
+    }
 
     /// The row of a peer whose zid starts with `n`'s bytes, from `src`.
     fn row(n: usize, src: &str) -> FaceLinkRow {
@@ -3707,8 +3754,10 @@ mod told_tests {
             is_shm: false,
             link: 0,
             links: 1,
-            src: RowText::of(src),
-            dst: RowText::of("tcp/127.0.0.1:1"),
+            ends: RowEnds::Written {
+                src: RowText::of(src),
+                dst: RowText::of("tcp/127.0.0.1:1"),
+            },
             kind: None,
             mtu: 0,
             group_endpoint: None,
@@ -3742,11 +3791,7 @@ mod told_tests {
         );
         assert_eq!(kept(&told), 1, "one row per key");
         assert_eq!(
-            told.rows
-                .iter()
-                .flatten()
-                .next()
-                .map(|row| row.src.as_str().to_owned()),
+            told.rows.iter().flatten().next().map(FaceLinkRow::src_text),
             Some("tcp/127.0.0.1:7011".to_owned()),
             "the row last told stands in for the earlier one"
         );

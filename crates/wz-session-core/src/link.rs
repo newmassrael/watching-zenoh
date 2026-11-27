@@ -1625,8 +1625,8 @@ impl<'a> LinkEnds<'a> {
 }
 
 /// `<scheme>/<address><suffix>` of one end of a link of `kind`: the one writer of a link's
-/// locator.
-fn write_locator<W: TextOut + ?Sized>(kind: LinkKind, end: LinkEnd<'_>, out: &mut W) {
+/// locator, for the ends a driver lends and for the ends a face's row keeps of them.
+pub fn write_locator<W: TextOut + ?Sized>(kind: LinkKind, end: LinkEnd<'_>, out: &mut W) {
     out.push_str(kind.scheme());
     out.push_str("/");
     match end {

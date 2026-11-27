@@ -390,7 +390,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wz_session_core::face::RowText;
+    use wz_session_core::face::{LentEnd, RowEnds};
 
     fn row(first: u8) -> FaceLinkRow {
         FaceLinkRow {
@@ -401,8 +401,11 @@ mod tests {
             is_shm: false,
             link: 0,
             links: 1,
-            src: RowText::of("udp/127.0.0.1:1"),
-            dst: RowText::of("udp/127.0.0.1:2"),
+            ends: RowEnds::Lent {
+                kind: wz_session_core::link::LinkKind::Udp,
+                src: LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 1))),
+                dst: LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 2))),
+            },
             kind: None,
             mtu: 0,
             group_endpoint: None,
