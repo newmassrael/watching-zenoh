@@ -523,8 +523,8 @@ impl<T> Drop for OwnPlaced<T> {
     fn drop(&mut self) {
         let at = NonNull::from(&**self.value).cast::<u8>();
         // SAFETY: the value is dropped once, here, where it lies, and nothing reaches it after
-        // (`Placed::share`'s contract); its allocation is the one `written` took with this layout,
-        // given back once, after it.
+        // (`Placed::share`'s contract); its allocation is the one `OwnPlaced::vacant` took with
+        // this layout and `OwnVacant::fill` handed on, given back once, after it.
         unsafe {
             ManuallyDrop::drop(&mut self.value);
             alloc::alloc::dealloc(at.as_ptr(), Layout::new::<T>());
