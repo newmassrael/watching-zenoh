@@ -3103,7 +3103,7 @@ mod link_stamps {
     /// The watch of the peer's initial declarations counts from the establishment stamp the lease
     /// read, so a running watch adds no hold of the stamps. Turned red by a watch that reads the
     /// stamps again.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "declaration-sync-watch")]
     #[test]
     fn the_declaration_watch_reads_the_stamps_the_lease_read() {
         let (actions, _link) = bundle();
@@ -3459,6 +3459,7 @@ mod link_stamps {
     /// The first event of the peer's declarations begins their watch, which gives the lease a
     /// deadline it did not have, and counts a move; a later one moves the watch only later and
     /// counts nothing. Turned red by a first event that counts no move, or a later one that does.
+    #[cfg(feature = "declaration-sync-watch")]
     #[test]
     fn the_first_event_of_the_peers_declarations_counts_a_move() {
         use crate::driver_loop::IterationEvent;
@@ -3472,6 +3473,35 @@ mod link_stamps {
             actions.link.deadlines_moved(),
             begun,
             "a later event moves the watch only later"
+        );
+    }
+
+    /// A build without the watch of the peer's initial declarations (`declaration-sync-watch`,
+    /// which only the tokio runtime names) wakes for the lease alone: an event noted begins no
+    /// watch and counts no move, and the wake is the lease's expiry. Turned red by a watch that a
+    /// build without the feature still begins on the first event noted.
+    #[cfg(not(feature = "declaration-sync-watch"))]
+    #[test]
+    fn a_build_without_the_declaration_watch_wakes_for_the_lease_alone() {
+        use crate::driver_loop::IterationEvent;
+        let (actions, _link) = bundle();
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        let before = actions.link.deadlines_moved();
+        actions.note_declare_finals_in(IterationEvent::AppWake);
+        actions.note_declare_finals_in(IterationEvent::AppWake);
+        assert_eq!(
+            actions.link.deadlines_moved(),
+            before,
+            "no watch begun, so no deadline moved"
+        );
+        assert_eq!(
+            crate::drive::lease_wake_deadline(&*actions),
+            Some(100 + 1 + actions.adopted_lease_ms()),
+            "the wake is the lease's own expiry"
         );
     }
 

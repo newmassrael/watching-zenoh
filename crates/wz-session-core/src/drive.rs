@@ -3516,7 +3516,7 @@ pub(crate) fn judge_lease<R: SessionRuntime, T: TimeSource>(
     // taken as lost ends the link however long the lease still has.
     // A window that ends a link's sync as empty (an accepted link whose peer began none, under
     // `until-declarations-synced-when-begun`) ends the watch and nothing else.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "declaration-sync-watch")]
     if deadlines
         .watch
         .is_some_and(|deadline_ms| now_ms >= deadline_ms)
@@ -3526,7 +3526,7 @@ pub(crate) fn judge_lease<R: SessionRuntime, T: TimeSource>(
         return LeaseCheckOutcome::DeclarationsStalled;
     }
     // Only the watch asks the actions anything here.
-    #[cfg(not(feature = "alloc"))]
+    #[cfg(not(feature = "declaration-sync-watch"))]
     let _ = actions;
     if now_ms >= deadlines.expiry {
         engine.process_event(E::LeaseExpired);
@@ -4071,15 +4071,16 @@ pub(crate) struct LeaseDeadlines {
     /// The end of the millisecond of the later of the establishment and the last receipt, plus
     /// the adopted lease.
     expiry: u64,
-    /// When the watch of the peer's initial declarations ends, while it runs.
-    #[cfg(feature = "alloc")]
+    /// When the watch of the peer's initial declarations ends, while it runs, in a build that keeps
+    /// one (`declaration-sync-watch`).
+    #[cfg(feature = "declaration-sync-watch")]
     watch: Option<u64>,
 }
 
 impl LeaseDeadlines {
     /// The earlier of the two: when a driver wakes for the lease.
     pub(crate) fn wake(self) -> u64 {
-        #[cfg(feature = "alloc")]
+        #[cfg(feature = "declaration-sync-watch")]
         if let Some(watch) = self.watch {
             return self.expiry.min(watch);
         }
@@ -4112,7 +4113,7 @@ pub(crate) fn lease_deadlines<R: SessionRuntime, T: TimeSource>(
         .saturating_add(actions.adopted_lease_ms());
     Some(LeaseDeadlines {
         expiry,
-        #[cfg(feature = "alloc")]
+        #[cfg(feature = "declaration-sync-watch")]
         watch: actions.declaration_watch_deadline_after(stamps.established_at),
     })
 }

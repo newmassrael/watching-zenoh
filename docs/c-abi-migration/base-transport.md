@@ -100,7 +100,7 @@ too: the preset's contract is zenoh-pico's.
 | B4 | T4 | form | for a session of one peer, the rejoin of a fragment chain into one lent chain per reliability, with the slot machine kept (P8) and the router's ingest folded into it. Split into B4a and B4b (section 5.3) | -350 to -650 | none per sample (a fragment is the cold path) | a line reading of the case's own Router, which the build read in section 5 cannot give (section 5.2) |
 | B1 | T5 (and T7's `emit_on_link`) | form | the four write facts of a link driver (whether it reports its writes, its last write, a class carried apart, that carriage's last write) compiled only with `link-wire-reports`, which only the tokio runtime names | -350 to -500 | lower: no clock read and four indirect calls fewer at each keep-alive deadline read; two fewer at each frame handed over | **built, `248c36d42d`** |
 | W1 | T3, T9 | work | the handshake's regions: the peer's region name and remote bound read and refused when malformed, the bound the session decides and stages on its Open | -250 to -450 | none | **built** (section 6.1) |
-| W5 | T5 | work | the watch of the peer's initial declarations (its deadline in the lease, its expiry in `judge_lease`) | -250 to -400 | none | as W1 |
+| W5 | T5 | work | the watch of the peer's initial declarations (its deadline in the lease, its expiry in `judge_lease`) | -250 to -400 | none | **built, changed** (section 6.2): form, not work; a feature only the tokio runtime names |
 | W2 | T3 | work | the node's admission of a link (`LinkAdmission`, `LinkLease`) and the `MaxLinks` close | -200 to -400 | none | as W1 |
 | B2 | T5 | form | the lease's deadlines read once, out of line, for `fire_due` and `next_due_ms` | -150 to -300 | must not rise: a call per turn is added, so only with a per-turn Ir reading | the perf matrix arm W |
 | W4 | T3 | work | the stray-message policy's replay of a held answer | -100 to -200 | none | as W1 |
@@ -272,3 +272,28 @@ hot path is untouched: every line removed reads a handshake message. The tests t
 readers' (`inbound::control_read_tests`) and the lent Open's
 (`session_actions::bundle_tests::lent_handshake`), each stating what both builds read and write,
 run without the feature by two legs of `scripts/lib/nondefault-tests-gate.sh`.
+
+### 6.2 W5, the watch of the peer's initial declarations (`declaration-sync-watch`)
+
+**Changed from the table.** The watch begins on the first event an engine notes of a session
+(`SessionLinkActions::note_declare_finals_in`), and only the tokio runtime notes them
+(`crates/wz-runtime-tokio/src/session_glue.rs` and `src/session/mod.rs`); the cooperative engine,
+and so every build of the case and of the release libraries over it, never does, so its progress
+stays at the "no engine notes" mark and the watch never runs there, whatever the policy and the
+limit say (`DECLARATION_SYNC_RX_NO_PROGRESS_MS` already reads "Only the tokio engine reads it").
+The row's bytes are code no driver of those builds can reach, which is B1's kind and not a
+behaviour a capability would switch: a capability turned on in a release profile would compile a
+watch that still never runs. So it takes B1's shape: the session core's feature, a default, named
+by the tokio runtime alone.
+
+Without it the session keeps no progress word, an event noted begins nothing, the lease's
+deadlines are its expiry alone (`drive::LeaseDeadlines`), `judge_lease` judges no watch, and no
+quiet window settles an accepted link's sync under `until-declarations-synced-when-begun`, as
+with the window at 0. The test that holds it is
+`session_actions::bundle_tests::link_stamps::a_build_without_the_declaration_watch_wakes_for_the_lease_alone`,
+run without the feature beside the line-mark row of `scripts/lib/nondefault-tests-gate.sh`; the
+watch's own tests are compiled with the feature only.
+
+What is left: a statement of `DECLARATION_SYNC_RX_NO_PROGRESS_MS` is still taken by a build that
+reads it nowhere. Its refusal by name is the limit's `read_by`, which names a capability, and this
+is not one; it waits for an engine of the C library that notes the peer's declarations.

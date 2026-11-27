@@ -1900,6 +1900,35 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         transport-keepalive,\
         tx-lend-only\
         |session_actions::bundle_tests::link_stamps::every_frame_handed_to_a_link_that_writes_inline_marks_its_line"
+    # The same build has no `declaration-sync-watch` either (a default no engine of the C library
+    # names: only the tokio runtime notes the events a watch begins on), so the lease wakes for its
+    # own expiry alone and an event noted moves nothing. NOT YET MEASURED.
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_actions::bundle_tests::link_stamps::a_build_without_the_declaration_watch_wakes_for_the_lease_alone"
     # The query plane's reply hold left out (`query-replies-with-final`, a default of the crate), as
     # the zenoh-pico preset builds the session core: the rows' features above with the batching
     # window the hold lives in. The hold raises nothing, so each reply leaves as it is made.
@@ -1956,6 +1985,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         multicast-locator-keys,\
         link-wire-reports,\
         query-replies-with-final,\
+        declaration-sync-watch,\
         codec-close,\
         codec-frame,\
         codec-init-body,\
@@ -1987,6 +2017,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         multicast-locator-keys,\
         link-wire-reports,\
         query-replies-with-final,\
+        declaration-sync-watch,\
         codec-close,\
         codec-frame,\
         codec-init-body,\

@@ -2164,7 +2164,9 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 # every value a build does not leave out of a policy's domain stays selectable.
 # `link-wire-reports`: this runtime's drivers queue their writes (the writer queues) and a QUIC
 # link carries best-effort frames on a companion, which they report through the link trait.
-wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend", "action-trace", "south-subregions", "handshake-regions", "interest-answer", "policy-selection", "link-wire-reports"] }
+# `declaration-sync-watch`: this runtime notes every inbound event of a session
+# (`note_declare_finals_in`), so it watches the peer's initial declarations for progress.
+wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend", "action-trace", "south-subregions", "handshake-regions", "interest-answer", "policy-selection", "link-wire-reports", "declaration-sync-watch"] }
 # The admin space a node answers from (§5.23): the `local_data` view, every admin leg and the
 # config-write decoder, the server layer's (server-layer split, step 7). Pulled by
 # `adminspace-core`, which every admin feature here composes.

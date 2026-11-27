@@ -2252,8 +2252,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// initial declarations (`DECLARATION_SYNC_RX_NO_PROGRESS_MS`): `0` while it has sent none,
     /// and `u64::MAX` while no engine has noted the session's inbound events
     /// ([`SessionLinkActions::note_declare_finals_in`]), so an engine that cannot see the peer's
-    /// final never runs a watch that only the final could end. Reset with the flag above.
-    #[cfg(feature = "alloc")]
+    /// final never runs a watch that only the final could end. Reset with the flag above. Only a
+    /// build with the watch (`declaration-sync-watch`) keeps it.
+    #[cfg(feature = "declaration-sync-watch")]
     peer_declaration_progress_ms: AtomicU64,
     /// The facts `until-declarations-synced-when-begun` reads of this link's sync, as bits:
     /// [`SYNC_ACCEPTED`] this node answered the link's InitSyn (it accepted the link, where a
@@ -5818,7 +5819,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 shm_auth: R::new_mutex(crate::extshm::ShmAuthDispatch::empty()),
                 outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "alloc")]
+                #[cfg(feature = "declaration-sync-watch")]
                 peer_declaration_progress_ms: AtomicU64::new(u64::MAX),
                 #[cfg(feature = "alloc")]
                 peer_sync_bits: AtomicU8::new(0),
@@ -19626,7 +19627,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // The next peer has sent none of its initial declarations yet.
             self.peer_declarations_final
                 .store(false, core::sync::atomic::Ordering::Release);
-            #[cfg(feature = "alloc")]
+            #[cfg(feature = "declaration-sync-watch")]
             self.peer_declaration_progress_ms
                 .store(u64::MAX, core::sync::atomic::Ordering::Release);
             #[cfg(feature = "alloc")]
@@ -19702,7 +19703,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R311g1 — signature-stability: a no-op without `codec-declare` and `alloc`, and without
     /// `session-reconnect` the interest bookkeeping is skipped.
     pub fn note_declare_finals_in(&self, event: crate::driver_loop::IterationEvent<'_, '_>) {
-        #[cfg(feature = "alloc")]
+        #[cfg(feature = "declaration-sync-watch")]
         self.note_declaration_progress(event);
         #[cfg(all(feature = "alloc", feature = "codec-declare"))]
         crate::declaration_sync::finals_in_event(event, |interest_id| {
@@ -19721,7 +19722,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The progress of the peer's declaration sync that `event` shows: a declaration from the peer
     /// restarts the no-progress watch, and the first event an engine notes arms it, since the
     /// engine that notes events is the one that notes the peer's final too.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "declaration-sync-watch")]
     fn note_declaration_progress(&self, event: crate::driver_loop::IterationEvent<'_, '_>) {
         use core::sync::atomic::Ordering;
         #[cfg(feature = "codec-declare")]
@@ -19755,8 +19756,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `DECLARATION_SYNC_RX_NO_PROGRESS_MS` stretch, as the session's snapshot holds it, after the
     /// later of the establishment and the peer's last declaration, while `reliable-gap-reconnect`
     /// reacts and the peer's final has not arrived. `None` before the establishment, while no
-    /// engine notes the session's events, and whenever the watch is off.
-    #[cfg(feature = "alloc")]
+    /// engine notes the session's events, and whenever the watch is off. A build without
+    /// `declaration-sync-watch` keeps no watch and has none of these.
+    #[cfg(feature = "declaration-sync-watch")]
     pub fn declaration_watch_deadline(&self) -> Option<u64> {
         self.declaration_watch_deadline_for(
             self.params.limits.declaration_sync_rx_no_progress_ms() as u64
@@ -19765,14 +19767,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// [`Self::declaration_watch_deadline`] for a window of `window_ms`, the form a test names
     /// a window to where the snapshot holds another.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "declaration-sync-watch")]
     pub fn declaration_watch_deadline_for(&self, window_ms: u64) -> Option<u64> {
         self.watch_deadline(self.link.stamps().established_at, window_ms)
     }
 
     /// [`Self::declaration_watch_deadline`] of a link established at `established`, for a reader
     /// that holds the link's stamps already: the lease reads them once for both its deadlines.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "declaration-sync-watch")]
     pub(crate) fn declaration_watch_deadline_after(&self, established: Option<u64>) -> Option<u64> {
         self.watch_deadline(
             established,
@@ -19780,7 +19782,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "declaration-sync-watch")]
     fn watch_deadline(&self, established: Option<u64>, window_ms: u64) -> Option<u64> {
         let progress = self
             .peer_declaration_progress_ms
@@ -19801,7 +19803,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// ([`crate::declaration_sync::watch_expiry`]): the link is lost, or (an accepted link under
     /// `until-declarations-synced-when-begun` whose peer began nothing) the sync is settled as
     /// empty, which this records so the watch and the gap rule stop.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "declaration-sync-watch")]
     pub fn expire_declaration_watch(&self) -> crate::declaration_sync::WatchExpiry {
         use core::sync::atomic::Ordering;
         let bits = self.peer_sync_bits.load(Ordering::Acquire);
@@ -19854,8 +19856,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Whether the peer's initial declarations are settled: their end arrived, or a quiet window
-    /// settled an accepted link's sync as empty ([`Self::expire_declaration_watch`]). What the
-    /// `reliable-gap-reconnect` policy and the no-progress watch wait for.
+    /// settled an accepted link's sync as empty (`Self::expire_declaration_watch`, in a build with
+    /// `declaration-sync-watch`). What the `reliable-gap-reconnect` policy and the no-progress
+    /// watch wait for.
     pub fn peer_declarations_settled(&self) -> bool {
         #[cfg(feature = "alloc")]
         if self

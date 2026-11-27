@@ -103,6 +103,7 @@ default = [
     "multicast-locator-keys",
     "link-wire-reports",
     "query-replies-with-final",
+    "declaration-sync-watch",
 ]
 
 # `log`: the session core's diagnostics (`diag`), the warnings an operator reads when a peer sends
@@ -1393,6 +1394,16 @@ multicast-locator-keys = []
 # every frame handed over marks the line, as zenoh-pico's transmitted flag is set by every write,
 # and the keepalive reads no clock and asks the driver nothing. On by default.
 link-wire-reports = []
+
+# `declaration-sync-watch`: the no-progress watch of the peer's initial declarations
+# (`DECLARATION_SYNC_RX_NO_PROGRESS_MS` under a reacting `reliable-gap-reconnect`): the progress
+# each event the engine notes shows (`SessionLinkActions::note_declare_finals_in`), the deadline it
+# gives the lease, and its expiry in the lease's judgement, which ends the link or settles an
+# accepted link's empty sync. A watch begins only on the events an engine notes, and only the
+# tokio runtime notes them, so it names the feature; without it the lease has its expiry alone,
+# nothing noted moves it, and no quiet window settles an accepted link's sync, as with the window
+# at 0. On by default.
+declaration-sync-watch = ["alloc"]
 
 # session-slot — fixed-memory step S5: a session's per-session state lives in
 # storage of fixed size, and nothing it holds is behind a pointer to the heap.
