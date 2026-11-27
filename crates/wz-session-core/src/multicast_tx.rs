@@ -807,13 +807,24 @@ impl MulticastTxReply<'_> {
     }
 
     /// The most bytes the reply's network message encodes to, as [`multicast_tx_bytes`] counts
-    /// the owned item.
+    /// the owned item: in a lend-only build its one writer run into a count, as the item's is.
     pub fn bytes(self) -> usize {
-        match self {
-            #[cfg(feature = "codec-response")]
-            Self::Response(response) => wz_codecs::response::ResponseWire::measure(response).len(),
-            #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
-            Self::DeclareReply(declare) => wz_codecs::declare::DeclareWire::measure(declare).len(),
+        #[cfg(all(feature = "tx-lend-only", feature = "codec-push"))]
+        {
+            crate::tx_buf::encoded_len(&ReplyBody(self))
+        }
+        #[cfg(not(all(feature = "tx-lend-only", feature = "codec-push")))]
+        {
+            match self {
+                #[cfg(feature = "codec-response")]
+                Self::Response(response) => {
+                    wz_codecs::response::ResponseWire::measure(response).len()
+                }
+                #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+                Self::DeclareReply(declare) => {
+                    wz_codecs::declare::DeclareWire::measure(declare).len()
+                }
+            }
         }
     }
 
@@ -835,18 +846,47 @@ impl MulticastTxReply<'_> {
         }
     }
 
-    /// `f` handed the encoder of the reply's network message.
+    /// `f` handed the encoder of the reply's network message: `ReplyBody`, so a crate that
+    /// instantiates this for its own `f` hands on this crate's one writer, as
+    /// [`multicast_tx_item_body`] does for an item.
     #[cfg(feature = "codec-push")]
     pub fn with_body<R>(self, f: impl FnOnce(&crate::frame_encode::BodyEncoder<'_>) -> R) -> R {
-        match self {
+        f(&ReplyBody(self))
+    }
+}
+
+/// The writer of a reply's network message, whatever its kind: one body, not generic, compiled
+/// here, for the reason [`ItemBody`] is.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-push",
+    any(
+        feature = "codec-response",
+        feature = "liveliness-token",
+        feature = "declare-subscriber"
+    )
+))]
+struct ReplyBody<'a>(MulticastTxReply<'a>);
+
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-push",
+    any(
+        feature = "codec-response",
+        feature = "liveliness-token",
+        feature = "declare-subscriber"
+    )
+))]
+impl crate::tx_buf::WireWrite for ReplyBody<'_> {
+    fn write_wire(
+        &self,
+        sink: &mut crate::tx_buf::TxSink<'_>,
+    ) -> Result<(), sce_forge_runtime::codec::CodecError> {
+        match self.0 {
             #[cfg(feature = "codec-response")]
-            Self::Response(response) => {
-                f(&|sink: &mut crate::tx_buf::TxSink<'_>| response.encode(sink))
-            }
+            MulticastTxReply::Response(response) => response.encode(sink),
             #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
-            Self::DeclareReply(declare) => {
-                f(&|sink: &mut crate::tx_buf::TxSink<'_>| declare.encode(sink))
-            }
+            MulticastTxReply::DeclareReply(declare) => declare.encode(sink),
         }
     }
 }
@@ -1840,6 +1880,11 @@ pub fn multicast_tx_droppable(
 
 /// The most bytes `item`'s network message encodes to: what its frame is reserved by when it is
 /// pushed, and what it counts for on a lane that bounds a group's queue ([`MulticastTxLanes`]).
+///
+/// In a lend-only build every kind but a Push is counted by its one writer (`ItemBody`) run into a
+/// count, as a link counts what it sends: each encoder is then compiled once, over the sink the
+/// frame is written through, where the codec's `measure` would compile the same walk again over a
+/// sink of its own. A Push is counted as every send counts it (`push_capacity_hint`).
 #[cfg(all(
     feature = "alloc",
     any(
@@ -1853,29 +1898,48 @@ pub fn multicast_tx_bytes(item: &MulticastTxItem) -> usize {
     match item {
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Push { push, .. } => crate::frame_encode::push_capacity_hint(push),
-        #[cfg(all(feature = "codec-push", feature = "codec-request"))]
+        #[cfg(all(feature = "tx-lend-only", feature = "codec-push"))]
+        _ => crate::tx_buf::encoded_len(&ItemBody(item)),
+        #[cfg(all(
+            not(feature = "tx-lend-only"),
+            feature = "codec-push",
+            feature = "codec-request"
+        ))]
         MulticastTxItem::Request { request } => {
             wz_codecs::request::RequestWire::measure(&**request).len()
         }
-        #[cfg(feature = "codec-response")]
+        #[cfg(all(
+            feature = "codec-response",
+            not(all(feature = "tx-lend-only", feature = "codec-push"))
+        ))]
         MulticastTxItem::Response { response } => {
             wz_codecs::response::ResponseWire::measure(&**response).len()
         }
-        #[cfg(feature = "codec-response-final")]
+        #[cfg(all(
+            feature = "codec-response-final",
+            not(all(feature = "tx-lend-only", feature = "codec-push"))
+        ))]
         MulticastTxItem::ResponseFinal { request_id, qos } => {
             let response_final =
                 crate::response_final_build::build_response_final(*request_id, *qos);
             wz_codecs::response_final::ResponseFinalWire::measure(&response_final).len()
         }
-        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+        #[cfg(all(
+            any(feature = "liveliness-token", feature = "declare-subscriber"),
+            not(all(feature = "tx-lend-only", feature = "codec-push"))
+        ))]
         MulticastTxItem::DeclareReply { declare } => {
             wz_codecs::declare::DeclareWire::measure(&**declare).len()
         }
-        #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
+        #[cfg(all(
+            feature = "codec-declare",
+            feature = "codec-push",
+            not(feature = "tx-lend-only")
+        ))]
         MulticastTxItem::Declare { declare } => {
             wz_codecs::declare::DeclareWire::measure(&**declare).len()
         }
-        #[cfg(feature = "codec-push")]
+        #[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
         MulticastTxItem::Interest { interest } => {
             wz_codecs::interest::InterestWire::measure(&**interest).len()
         }
@@ -3319,6 +3383,62 @@ mod push_tests {
                 .encode(&mut crate::tx_buf::TxSink::new(&mut own))
                 .expect("the message encodes");
             assert_eq!(written(&terminal), own);
+        }
+    }
+
+    /// A group's item and reply count for the bytes the codec measures their own message to: in a
+    /// lend-only build that count is the item's one writer run into a count, so a frame is
+    /// reserved by what it writes. Turned red by a count of another message than the item's (an
+    /// arm of `ItemBody` or `ReplyBody` that writes another kind), or by `multicast_tx_bytes`
+    /// counting a body its writer does not write.
+    #[test]
+    fn an_item_and_a_reply_count_for_what_the_codec_measures() {
+        #[cfg(feature = "codec-declare")]
+        {
+            let declare = crate::declare_build::build_declare_kexpr(7, "demo/test").unwrap();
+            let measured = wz_codecs::declare::DeclareWire::measure(&declare).len();
+            assert!(measured > 0, "CONTROL: the Declare has bytes");
+            let item = MulticastTxItem::Declare {
+                declare: Box::new(declare),
+            };
+            assert_eq!(multicast_tx_bytes(&item), measured);
+            #[cfg(feature = "transport-tx-lend")]
+            assert_eq!(crate::tx_buf::encoded_len(&ItemBody(&item)), measured);
+        }
+        #[cfg(feature = "codec-response")]
+        {
+            let response = crate::response_build::build_response_reply(
+                42,
+                crate::wire_key::WireKey::literal("k").expect("a literal key"),
+                b"v",
+            )
+            .unwrap();
+            let measured = wz_codecs::response::ResponseWire::measure(&response).len();
+            assert!(measured > 0, "CONTROL: the Response has bytes");
+            assert_eq!(MulticastTxReply::Response(&response).bytes(), measured);
+            #[cfg(feature = "transport-tx-lend")]
+            assert_eq!(
+                crate::tx_buf::encoded_len(&ReplyBody(MulticastTxReply::Response(&response))),
+                measured
+            );
+            let item = MulticastTxItem::Response {
+                response: Box::new(response),
+            };
+            assert_eq!(multicast_tx_bytes(&item), measured);
+            #[cfg(feature = "transport-tx-lend")]
+            assert_eq!(crate::tx_buf::encoded_len(&ItemBody(&item)), measured);
+        }
+        #[cfg(feature = "codec-response-final")]
+        {
+            let qos = crate::sample::QosLevel::DEFAULT;
+            let measured = wz_codecs::response_final::ResponseFinalWire::measure(
+                &crate::response_final_build::build_response_final(7, qos),
+            )
+            .len();
+            assert_eq!(
+                multicast_tx_bytes(&MulticastTxItem::ResponseFinal { request_id: 7, qos }),
+                measured
+            );
         }
     }
 
