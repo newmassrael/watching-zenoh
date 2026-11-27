@@ -29,6 +29,7 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> TransportFaces for Face<C
     type Places = wz_runtime_coop::faces::OneFace<Self, L::Dial>;
     #[cfg(feature = "group")]
     type Group = GroupFace<L::Waits>;
+    type Peers = RouterPeers;
     type RouterPlace = super::RouterPlace;
     #[cfg(wz_round)]
     type Router = SessionReassembly;

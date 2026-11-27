@@ -53,11 +53,9 @@
 use wz_session_core::caps;
 use wz_session_core::chain_staging::LentStaging;
 use wz_session_core::policy::SessionPolicy;
-#[cfg(feature = "listen")]
-use wz_session_core::reassembly_dispatch::ManyPeers;
-#[cfg(not(feature = "listen"))]
-use wz_session_core::reassembly_dispatch::OnePeer;
-use wz_session_core::reassembly_dispatch::{PoolOverflow, ReassemblyConfig, ReassemblyDispatcher};
+use wz_session_core::reassembly_dispatch::{
+    ChainPeers, PoolOverflow, ReassemblyConfig, ReassemblyDispatcher,
+};
 
 // Re-export the types the MCU loop needs to drive the dispatcher, so a
 // consumer reaches them through the seam without naming wz-session-core
@@ -165,38 +163,29 @@ pub const SESSION_REASSEMBLY_SLOTS: usize = LENT_CHAINS;
 /// The staging of a session's one Router: the session's chain table.
 pub type SessionChains = LentStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }>;
 
-/// Whose chains a session's one Router holds where the session listens (`listen`): the peers of
-/// the faces it takes besides its dial's, each chain keyed by its peer.
-#[cfg(feature = "listen")]
-pub type SessionPeers = ManyPeers;
-
-/// Whose chains a session's one Router holds where it does not listen: its dial's one peer, as
-/// such a session holds no face besides the dial's. A chain is keyed by its channel alone, and a
-/// link that is lost ends every chain (`TransportState::end_peer_chains`).
-#[cfg(not(feature = "listen"))]
-pub type SessionPeers = OnePeer;
-
-// The Router of one peer answers that peer's fragments as the Router of several does while the
-// quota leaves the pool no fuller than its slots (`ChainPeers`), which the session's slots, one for
-// each chain the quota admits, make so.
-#[cfg(not(feature = "listen"))]
+// A Router of one link's peer (`OnePeer`) answers that peer's fragments as a Router of several
+// peers does while the quota leaves the pool no fuller than its slots (`ChainPeers`): a full pool
+// is then the peer at its quota, refused on the quota first under every overflow policy, so no
+// policy's choice of a chain to end is ever asked. The session's slots, one for each chain the
+// quota admits, make it so for every Router a session builds, whoever chooses its peers.
 const _: () =
     assert!(crate::reassembly_pool_mcu::PER_PEER_QUOTA as usize <= SESSION_REASSEMBLY_SLOTS);
 
-/// A session's one Router, which every link of the session stages its chains in, each keyed by
-/// its peer where the session has more than one ([`SessionPeers`], [`session_reassembly`]).
-pub type SessionReassembly = ReassemblyDispatcher<
-    SESSION_REASSEMBLY_SLOTS,
-    { caps::PICO_FRAG_MAX_BYTES },
-    SessionChains,
-    SessionPeers,
->;
+/// A Router of a session's links, staging in the session's chain table, whose chains are those of
+/// the peers `P` says (`ChainPeers`): the peers of the several links that share it, each chain
+/// keyed by its peer, or the one peer of the one link it serves, keyed by its channel alone. Which
+/// it is follows from how the engine composes its links, so the engine names it.
+pub type SessionReassembly<P> =
+    ReassemblyDispatcher<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }, SessionChains, P>;
 
-/// The Router of a session whose snapshot is `policy`, staging into `chains`: one table of slots
-/// for the session and not one for each link. The session owns it and lends it to its links'
-/// receives for the length of each step (`wz_session_core::unicast_rx::RouterLend`).
-pub fn session_reassembly(policy: &SessionPolicy, chains: SessionChains) -> SessionReassembly {
-    SessionReassembly::with_staging(mcu_reassembly_config(policy), chains)
+/// The Router of a session whose snapshot is `policy`, staging into `chains`, holding the chains
+/// of the peers `P` says. Its owner lends it to the receives of the links it serves for the length
+/// of each step (`wz_session_core::unicast_rx::RouterLend`).
+pub fn session_reassembly<P: ChainPeers>(
+    policy: &SessionPolicy,
+    chains: SessionChains,
+) -> SessionReassembly<P> {
+    SessionReassembly::<P>::with_staging(mcu_reassembly_config(policy), chains)
 }
 
 /// [`lent_reassembly`] built in `place` and lent back: the Router a session's pump holds, made in
@@ -785,6 +774,7 @@ mod in_place_tests {
 mod tests {
     use super::*;
     use wz_session_core::qos::Priority;
+    use wz_session_core::reassembly_dispatch::OnePeer;
 
     const ZID: &[u8] = &[0x11; 16];
 
@@ -870,16 +860,17 @@ mod tests {
         assert_eq!(reasm.active_chains(), 0);
     }
 
-    /// Two links' receives reach the session's one Router through its lend: two peers' chains,
-    /// their fragments interleaved, each rejoin whole in the one table, and the second handle
-    /// sees the first's chain. Once the lend ends the session holds the Router again: a link that
-    /// goes ends its peer's chains there, which frees their buffers for the next, and the other
-    /// peer's chain is untouched.
-    #[cfg(all(feature = "alloc", feature = "session-unicast", feature = "listen"))]
+    /// Two links' receives reach a Router they share, its chains keyed by peer (`ManyPeers`),
+    /// through its lend: two peers' chains, their fragments interleaved, each rejoin whole in the
+    /// one table, and the second handle sees the first's chain. Once the lend ends the owner holds
+    /// the Router again: a link that goes ends its peer's chains there, which frees their buffers
+    /// for the next, and the other peer's chain is untouched.
+    #[cfg(all(feature = "alloc", feature = "session-unicast"))]
     #[test]
     fn the_links_of_a_session_share_one_router_keyed_by_peer() {
         use core::ptr::NonNull;
         use wz_session_core::bounded::Arena;
+        use wz_session_core::reassembly_dispatch::ManyPeers;
         use wz_session_core::unicast_rx::RouterLend;
 
         #[repr(C, align(16))]
@@ -892,18 +883,18 @@ mod tests {
         let cells = arena
             .lend_byte_cells(32, LENT_CHAINS)
             .expect("the memory holds the table");
-        let mut router = session_reassembly(
+        let mut router = session_reassembly::<ManyPeers>(
             &SessionPolicy::defaults(),
             SessionChains::over(&cells, LENT_CHAINS),
         );
-        let first = RouterLend::<SessionReassembly>::new();
+        let first = RouterLend::<SessionReassembly<ManyPeers>>::new();
         let second = first.clone();
         const OTHER: &[u8] = &[0x22; 16];
         let of = |peer: &'static [u8], sn: u64, more: u8, payload: &'static [u8]| Fragment {
             peer_key: peer,
             ..frag(sn, more, payload)
         };
-        let ingest = |handle: &RouterLend<SessionReassembly>, fragment: Fragment<'_>| {
+        let ingest = |handle: &RouterLend<SessionReassembly<ManyPeers>>, fragment: Fragment<'_>| {
             let mut got = None;
             let outcome = handle
                 .with(|router| {
@@ -947,17 +938,13 @@ mod tests {
         assert_eq!(router.staging_available(), LENT_CHAINS);
     }
 
-    /// A session that does not listen holds its dial's link alone, and its one Router keeps no
-    /// peer: the link's receive reaches it through the lend, a chain is keyed by its channel, so a
-    /// fragment naming another peer continues the chain open there, and the lost link ends every
-    /// chain open, which gives every buffer back.
-    #[cfg(all(
-        feature = "alloc",
-        feature = "session-unicast",
-        not(feature = "listen")
-    ))]
+    /// A Router that serves one link keeps no peer (`OnePeer`): the link's receive reaches it
+    /// through the lend, a chain is keyed by its channel, so a fragment naming another peer
+    /// continues the chain open there, and the lost link ends every chain open, which gives every
+    /// buffer back.
+    #[cfg(all(feature = "alloc", feature = "session-unicast"))]
     #[test]
-    fn the_link_of_a_session_that_does_not_listen_keys_its_chains_by_channel() {
+    fn the_router_of_one_link_keys_its_chains_by_channel() {
         use core::ptr::NonNull;
         use wz_session_core::bounded::Arena;
         use wz_session_core::unicast_rx::RouterLend;
@@ -972,13 +959,13 @@ mod tests {
         let cells = arena
             .lend_byte_cells(32, LENT_CHAINS)
             .expect("the memory holds the table");
-        let mut router = session_reassembly(
+        let mut router = session_reassembly::<OnePeer>(
             &SessionPolicy::defaults(),
             SessionChains::over(&cells, LENT_CHAINS),
         );
-        let link = RouterLend::<SessionReassembly>::new();
+        let link = RouterLend::<SessionReassembly<OnePeer>>::new();
         const OTHER: &[u8] = &[0x22; 16];
-        let ingest = |handle: &RouterLend<SessionReassembly>, fragment: Fragment<'_>| {
+        let ingest = |handle: &RouterLend<SessionReassembly<OnePeer>>, fragment: Fragment<'_>| {
             let mut got = None;
             let outcome = handle
                 .with(|router| {
@@ -1046,7 +1033,7 @@ mod tests {
             /// The table the chains claimed their buffers from.
             cells: LentByteCells,
             /// The Router, chains A and B open in it.
-            router: SessionReassembly,
+            router: SessionReassembly<OnePeer>,
         }
 
         /// Chain A best-effort and chain C reliable open, C completes, kept or borrowed, and chain
@@ -1059,7 +1046,7 @@ mod tests {
             let cells = arena
                 .lend_byte_cells(16, buffers)
                 .expect("the memory holds the table");
-            let mut router = session_reassembly(
+            let mut router = session_reassembly::<OnePeer>(
                 &SessionPolicy::defaults(),
                 SessionChains::over(&cells, LENT_CHAINS),
             );

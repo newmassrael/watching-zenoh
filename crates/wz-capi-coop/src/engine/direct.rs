@@ -1499,7 +1499,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     ) -> Result<TakenFaces<L, C>, LendRefused> {
         let mut taken = arena.lend::<DirectFace<L, C>, { usize::MAX }>(rows)?;
         for at in 1..=rows {
-            let router = session_reassembly(policy, SessionChains::over(chains, open));
+            let router: SessionReassembly =
+                session_reassembly(policy, SessionChains::over(chains, open));
             let write = move |row: &mut MaybeUninit<DirectFace<L, C>>| {
                 // SAFETY: the row is aligned and valid for writes of a face, holds none, and is
                 // kept where it lies by the table for as long as the face is.
@@ -3768,6 +3769,24 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         let mut held = <CoopForm as LockForm>::lock(&self.direct.dial.slot);
         f(&mut held.0.router, now_ms)
+    }
+
+    /// Run `f` on the reassembly Router of the face at row `row` of the face table, with the time
+    /// now on the epoch its chains are staged on, as `Self::with_chain_router` does on the dial
+    /// role's: uncounted as a take and as a reading of the session's clock. `None` past the table.
+    #[cfg(all(test, feature = "std", feature = "listen"))]
+    pub(crate) fn with_face_chain_router<T>(
+        &self,
+        row: usize,
+        f: impl FnOnce(&mut SessionReassembly, u64) -> T,
+    ) -> Option<T> {
+        let face = self.direct.iter().nth(row)?;
+        let now_ms = {
+            let core = self.core.lock();
+            core.0.session_time.ms_at(core.0.clock.now_us())
+        };
+        let mut held = <CoopForm as LockForm>::lock(&face.slot);
+        Some(f(&mut held.0.router, now_ms))
     }
 
     /// How many faces of the face table, but the one at row `row`, find a Router lent where

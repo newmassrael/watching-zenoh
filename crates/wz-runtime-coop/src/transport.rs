@@ -36,7 +36,7 @@ use crate::ClockSource;
 mod state;
 #[cfg(feature = "reassembly")]
 pub use state::{
-    FaceStep, LinkPump, OpenedAs, PlacedWire, PumpPlace, TransportFaces, TransportRouter,
+    FaceStep, LinkPump, OpenedAs, PlacedWire, PumpPlace, RouterOf, TransportFaces, TransportRouter,
     TransportState, WireMaking,
 };
 

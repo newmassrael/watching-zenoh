@@ -47,3 +47,78 @@ fn a_faces_router_is_lent_where_its_own_pump_alone_looks() {
         "a row past the table lends nothing"
     );
 }
+
+/// Each face's Router holds that face's chains alone, keyed by their channel: a fragment that
+/// names another peer continues the chain open on its channel in the face's Router, while the chain
+/// of the same channel in another face's Router stands apart; and a face's lost link ends every
+/// chain of the face's Router, whatever peer it names, and none of another face's. Turned red by a
+/// Router keyed by peer where each face holds its own (`RouterPeers` chosen by `listen` again),
+/// or by Routers the faces share.
+#[test]
+fn each_faces_router_keys_its_chains_by_channel_and_ends_them_alone() {
+    use wz_session_core::extfragment::FragmentMarkers;
+    use wz_session_core::qos::Priority;
+    use wz_session_core::reassembly_dispatch::{Fragment, IngestOutcome};
+
+    const DIAL_PEER: &[u8] = &[0x5a; 16];
+    const TAKEN_PEER: &[u8] = &[0x5b; 16];
+    let engine = listening();
+    assert!(
+        engine.direct_faces().0 >= 2,
+        "CONTROL: the face table holds a row beside the dial role's"
+    );
+    // One fragment of the reliable channel's chain at `sn`, the last of it where `more` is 0,
+    // naming `peer`, rejoined by the Router of the face at `row`.
+    let ingest = |row: usize, peer: &'static [u8], sn: u64, more: u8, payload: &'static [u8]| {
+        engine
+            .with_face_chain_router(row, |router, now_ms| {
+                let mut got = None;
+                let outcome = router.ingest(
+                    Fragment {
+                        peer_key: peer,
+                        reliable: true,
+                        sn,
+                        more,
+                        payload,
+                        priority: Priority::DEFAULT,
+                        markers: FragmentMarkers::NONE,
+                    },
+                    wz_session_core::sn::mask_from_res(0x02),
+                    now_ms,
+                    |message| got = Some(message.to_vec()),
+                );
+                (outcome, got)
+            })
+            .expect("the row holds a face")
+    };
+    assert_eq!(ingest(0, DIAL_PEER, 1, 1, b"dial ").0, IngestOutcome::Begun);
+    assert_eq!(
+        ingest(1, TAKEN_PEER, 1, 1, b"taken ").0,
+        IngestOutcome::Begun,
+        "the same channel's chain begins in the other face's Router"
+    );
+    assert_eq!(
+        ingest(1, DIAL_PEER, 2, 0, b"whole"),
+        (IngestOutcome::Reassembled, Some(b"taken whole".to_vec())),
+        "a fragment naming another peer continues the face's chain on its channel"
+    );
+    assert_eq!(
+        ingest(1, TAKEN_PEER, 3, 1, b"again").0,
+        IngestOutcome::Begun
+    );
+    assert_eq!(
+        engine.with_face_chain_router(0, |router, _| router.abort_peer(DIAL_PEER)),
+        Some(1),
+        "the dial role's lost link ends its face's one chain"
+    );
+    assert_eq!(
+        engine.with_face_chain_router(1, |router, _| router.active_chains()),
+        Some(1),
+        "the other face's chain stands"
+    );
+    assert_eq!(
+        engine.with_face_chain_router(1, |router, _| router.abort_peer(DIAL_PEER)),
+        Some(1),
+        "a lost link ends every chain of its face's Router, whatever peer it names"
+    );
+}

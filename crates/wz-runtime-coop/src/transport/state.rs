@@ -64,6 +64,7 @@ use crate::session_runtime::{EntropyCount, SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
 use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::link_life::{Effects, LinkPhase, LinkRole};
+use wz_session_core::reassembly_dispatch::ChainPeers;
 
 /// The runtime of a link's session over the transport of `T`, read under the lock type of the
 /// values it lends the session.
@@ -71,15 +72,19 @@ type LinkRuntime<T> =
     CoopRuntime<<T as TransportFaces>::Clock, dyn BoxedLinkDriver, <T as TransportFaces>::Lock>;
 
 /// The session of a link over the transport of `T` whose pump its owner holds and steps itself
-/// ([`TransportState::place_link`]): it stages its fragments in the session's one Router, lent
-/// through the place the link holds, as a task's pump does.
+/// ([`TransportState::place_link`]): it stages its fragments in the Router of the face it serves,
+/// lent through the place the link holds, as a task's pump does.
 pub type LinkPump<T, P> = SessionPump<
     <T as TransportFaces>::Clock,
     P,
     dyn BoxedLinkDriver,
-    RouterLend<SessionReassembly, <T as TransportFaces>::RouterPlace>,
+    RouterLend<RouterOf<T>, <T as TransportFaces>::RouterPlace>,
     <T as TransportFaces>::Lock,
 >;
+
+/// A reassembly Router of the transport of `T`, holding the chains of the peers its links compose
+/// it for ([`TransportFaces::Peers`]).
+pub type RouterOf<T> = SessionReassembly<<T as TransportFaces>::Peers>;
 
 /// The handle on the actions of a link's session over the transport of `T`.
 type LinkHandle<T> =
@@ -141,9 +146,14 @@ pub trait TransportFaces {
     /// The engine's record of one group the session joined.
     #[cfg(feature = "group")]
     type Group: GroupRecord;
+    /// Whose chains a reassembly Router of the session holds: the peers of the several links that
+    /// share one Router, each chain keyed by its peer, or the one peer of the one link a Router
+    /// serves, each chain keyed by its channel alone. The engine composes the links with their
+    /// Routers, so it says which.
+    type Peers: ChainPeers;
     /// The handle on the place the session lends its Router in ([`TransportState::lend`]): a
     /// counted cell, or one the session's arena holds.
-    type RouterPlace: Deref<Target = LendCell<SessionReassembly>> + Clone + 'static;
+    type RouterPlace: Deref<Target = LendCell<SessionReassembly<Self::Peers>>> + Clone + 'static;
     /// The Router as the transport holds it ([`TransportState::router`]): the session's one
     /// Router, or nothing where the session keeps its Router apart from its state, beside the
     /// pump of the one link it steps itself, so that a receive that lends the Router does so with
@@ -158,7 +168,7 @@ pub trait TransportRouter {
     fn abort_peer_chains(&mut self, zid: &[u8]);
 }
 
-impl TransportRouter for SessionReassembly {
+impl<P: ChainPeers> TransportRouter for SessionReassembly<P> {
     fn abort_peer_chains(&mut self, zid: &[u8]) {
         // The count of the chains ended is the Router's own record, read by no caller here.
         let _ended = self.abort_peer(zid);
@@ -228,18 +238,18 @@ pub struct TransportState<T: TransportFaces> {
     #[cfg(feature = "shared-key-ids")]
     pub key_forms: LinkKeyForms,
     /// The one reassembly Router of the session, which its links share: its chains are keyed by
-    /// their peers where the session has several (`SessionPeers`), and staged in the session's
-    /// buffers for them, each claimed by a chain while it is open, lent from the arena
-    /// (`ArenaPlan::reassembly`). The session sweeps it and ends a
-    /// lost peer's chains; its links' receives reach it only while the session's pass of its tasks
-    /// lends it ([`RouterLend::lend_for`]). None where the session keeps it apart
+    /// their peers where its links are several peers' (`TransportFaces::Peers`), and staged in
+    /// the session's buffers for them, each claimed by a chain while it is open, lent from the
+    /// arena (`ArenaPlan::reassembly`). The session sweeps it and ends a lost peer's chains; its
+    /// links' receives reach it only while the session's pass of its tasks lends it
+    /// ([`RouterLend::lend_for`]). None where the session keeps it apart
     /// ([`TransportFaces::Router`]).
     pub router: T::Router,
     /// Where the session lends its Router to its links' receives, each link's task holding the
     /// place: lent for the length of a pass of the tasks and at no other time. A link whose owner
     /// steps it itself looks for its Router in a place of its own face's instead
     /// ([`PumpPlace::lend`]).
-    pub lend: RouterLend<SessionReassembly, T::RouterPlace>,
+    pub lend: RouterLend<RouterOf<T>, T::RouterPlace>,
 }
 
 /// What a step reads of a face and what its life makes of it ([`TransportState::face_step`]): the
@@ -290,7 +300,7 @@ pub struct PumpPlace<'p, T: TransportFaces, E> {
     /// Where the pump's receive looks for the Router its owner lends it for each step: a place of
     /// the face the link serves, which no other face's pump looks in, so a pump reaches its own
     /// face's Router alone while another thread steps another face's.
-    pub lend: RouterLend<SessionReassembly, T::RouterPlace>,
+    pub lend: RouterLend<RouterOf<T>, T::RouterPlace>,
 }
 
 /// A link whose session its owner steps itself, made ([`TransportState::place_wire`]): the
@@ -506,7 +516,7 @@ impl<T: TransportFaces> TransportState<T> {
         place: &'p mut MaybeUninit<LinkPump<T, P>>,
         runtime: CoopRuntime<T::Clock, dyn BoxedLinkDriver, T::Lock>,
         fields: PumpFields<T::Clock, P, dyn BoxedLinkDriver, T::Lock>,
-        lend: RouterLend<SessionReassembly, T::RouterPlace>,
+        lend: RouterLend<RouterOf<T>, T::RouterPlace>,
     ) -> Option<&'p mut LinkPump<T, P>>
     where
         P: SessionDatagramLink + 'static,

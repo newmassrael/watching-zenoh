@@ -87,6 +87,12 @@ use wz_session_core::key_arena::KeyRef;
 #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
 use wz_session_core::key_arena::{KeySpace, KeysLocked};
 use wz_session_core::placed::{Placed, PlacedRef};
+#[cfg(not(wz_round))]
+use wz_session_core::reassembly_dispatch::ChainPeers;
+#[cfg(all(wz_round, feature = "listen"))]
+use wz_session_core::reassembly_dispatch::ManyPeers;
+#[cfg(not(all(wz_round, feature = "listen")))]
+use wz_session_core::reassembly_dispatch::OnePeer;
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::round::RowReleases;
@@ -140,7 +146,7 @@ use wz_runtime_coop::faces::{
     LinkSupervisor, WaitRoom, DIAL_LOOK_MS,
 };
 use wz_runtime_coop::link_cells::CellRc;
-use wz_runtime_coop::reassembly_rx::{session_reassembly, SessionChains, SessionReassembly};
+use wz_runtime_coop::reassembly_rx::{session_reassembly, SessionChains};
 #[cfg(wz_round)]
 use wz_runtime_coop::session_drive::router_session_task_bytes;
 #[cfg(feature = "time-base")]
@@ -1134,7 +1140,7 @@ fn lend_session(
     let ClaimedPlaces {
         handle: handle_place,
     } = claimed;
-    let router = session_reassembly(
+    let router: SessionReassembly = session_reassembly(
         policy,
         SessionChains::over(&transport.reassembly, transport.face_chains),
     );
@@ -2794,6 +2800,24 @@ fn tables_mut(registry: &mut Registry) -> &mut CoopTables {
 /// a publish), and the session state's own value between, read and written by `&` and `&mut`.
 #[cfg(wz_round)]
 type RegistryLend = StepLend<Registry, PlacedRef<LendCell<Registry>>>;
+
+/// Whose chains a reassembly Router of the session holds. Where the read steps each face's pump
+/// itself (no `wz_round`), each face has a Router of its own, lent to that face's pump alone
+/// (`direct::RouterCell`), so every chain in it is the one peer's of the face's link, keyed by its
+/// channel alone. Where the faces' links run as tasks of one set (`wz_round`), they share the
+/// session's one Router, which keys each chain by its peer once the session takes faces beside
+/// the dial role's (`listen`). A group's chains lie in the group's own Router, never in these.
+#[cfg(all(wz_round, feature = "listen"))]
+type RouterPeers = ManyPeers;
+#[cfg(not(all(wz_round, feature = "listen")))]
+type RouterPeers = OnePeer;
+
+// A Router each face holds alone keys no chain by its peer: only links that share one do.
+#[cfg(not(wz_round))]
+const _: () = assert!(!<RouterPeers as ChainPeers>::KEYED);
+
+/// A reassembly Router of the session, holding the chains of the peers `RouterPeers` says.
+pub(crate) type SessionReassembly = wz_runtime_coop::reassembly_rx::SessionReassembly<RouterPeers>;
 
 /// The handle on the place the session lends its reassembly Router in to its links' receives for
 /// the length of each pass of its tasks: a cell in the session's arena (`StepPlaces`).
