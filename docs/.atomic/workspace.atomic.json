@@ -8770,6 +8770,23 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4705": {
+      "decision_summary": "Keep the shared sink forms behind shared-sinks, so a build in which no\nRust closure is handed to the doors links only the plain closure form\nand its parts go when they drop.",
+      "changes_bullets": [
+        "capi-port: plain closure parts drop; shared sink forms gated.",
+        "build: shared-sinks declared where a Rust closure is handed."
+      ],
+      "verification_bullets": [
+        "size ledger: total 209,981 B vs main 211,840 (-1,859); Ir W 3,064.4.",
+        "capi-port 95 and capi-pico 546 lib tests pass; clippy; nondefault clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
