@@ -4954,12 +4954,22 @@ mod pool_provider_tests {
         drop_provider(p);
     }
 
-    /// The pools the real library makes and refuses: 1000 bytes or fewer, and zero, are
-    /// refused; 4096 and 5000 are made.
+    /// The pools the real library makes and refuses. Zero is refused everywhere, and 4096 and 5000
+    /// are made everywhere. A pool of 1 to 1000 bytes depends on the platform's segment: the
+    /// allocator claims the whole segment, and on Windows a segment is the requested length
+    /// rounded up to a page (the region `VirtualQuery` reports,
+    /// `crates/wz-zenoh-shm/src/shm/windows.rs` @ `info.RegionSize`), which it can claim, so the
+    /// pool is made; elsewhere the segment is the requested length, too small to claim, and the
+    /// pool is refused (`crates/wz-zenoh-shm/src/posix_shm/segment.rs` @ `at least windows`).
     #[test]
     fn a_pool_is_made_or_refused_as_the_real_library_does() {
-        for size in [0usize, 1, 64, 300, 1000] {
-            assert!(provider(size).is_none(), "{size} bytes is refused");
+        assert!(provider(0).is_none(), "0 bytes is refused");
+        for size in [1usize, 64, 300, 1000] {
+            if cfg!(windows) {
+                drop_provider(provider(size).unwrap_or_else(|| panic!("{size} bytes is made")));
+            } else {
+                assert!(provider(size).is_none(), "{size} bytes is refused");
+            }
         }
         for size in [4096usize, 5000] {
             drop_provider(provider(size).unwrap_or_else(|| panic!("{size} bytes is made")));
