@@ -34,12 +34,13 @@ use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
 
-use crate::liveliness::TokenState;
+use crate::keyexpr::DeclaredKeyexpr;
 use crate::prelude::*;
 use crate::pubsub::{PlainPublisher, PublisherQos};
 use crate::query::PlainQueryable;
 use crate::result::{ZResult, Z_ERR_TRANSPORT_TX_FAILED, Z_OK};
-use crate::write_filter::PicoSession;
+use crate::session::EngineHold;
+use crate::write_filter::{FilterOn, PicoSession};
 
 /// The plane of one pico session.
 pub(crate) struct PicoPlane {
@@ -75,6 +76,71 @@ impl PicoPlane {
     }
 }
 
+/// A plain publisher the plane keeps by value, and the count of its session's engine it is used
+/// and retracted on. The composite holds it on no place of the session's, so it has no lender to
+/// reach the engine through, and lets go of it by dropping it, which retracts it.
+pub(crate) struct KeptPublisher {
+    engine: EngineHold,
+    publisher: PlainPublisher,
+}
+
+impl KeptPublisher {
+    /// Declare a publisher on `keyexpr` of `session` that sends with `declared`.
+    fn declare(
+        session: &PicoSession,
+        keyexpr: &str,
+        declared: PublisherQos,
+    ) -> Result<Self, ZResult> {
+        Ok(Self {
+            publisher: PlainPublisher::declare(session, keyexpr, declared)?,
+            engine: session.engine.clone(),
+        })
+    }
+
+    /// The loan of the publisher's key ([`PlainPublisher::lend`]), naming the engine this keeps:
+    /// valid while this and `record` stay at their address.
+    pub(crate) fn lend(
+        &self,
+        record: &mut crate::keyexpr::RecordKey,
+    ) -> crate::abi::z_loaned_keyexpr_t {
+        self.publisher.lend(&self.engine, record)
+    }
+
+    /// The publisher's write filter on its session ([`PlainPublisher::filter_on`]).
+    pub(crate) fn filter_on(&self) -> FilterOn<'_> {
+        self.publisher.filter_on(&self.engine)
+    }
+
+    /// A key of its own made of the publisher's ([`PlainPublisher::key_copy`]).
+    fn key_copy(&self) -> Result<DeclaredKeyexpr, ZResult> {
+        self.publisher.key_copy(&self.engine)
+    }
+
+    /// Publish on the publisher's key ([`PlainPublisher::publish`]).
+    fn publish<'a>(&'a self, payload: &[u8], opts: Option<&mut PublishOptions<'a>>) -> ZResult {
+        self.publisher.publish(&self.engine, payload, opts)
+    }
+}
+
+impl Drop for KeptPublisher {
+    fn drop(&mut self) {
+        self.publisher.retract(&self.engine);
+    }
+}
+
+/// The `@adv` liveliness token the plane keeps by value, and the count of its session's engine it
+/// is retracted on when the composite drops it.
+pub(crate) struct KeptToken {
+    engine: EngineHold,
+    id: wz_capi_port::TokenId,
+}
+
+impl Drop for KeptToken {
+    fn drop(&mut self) {
+        self.engine.undeclare_liveliness_token(self.id);
+    }
+}
+
 /// The ring a session's caches keep their samples in, holding the session's engine so the ring
 /// stands for as long as a cache in it does.
 struct SessionCacheBytes(crate::session::EngineHold);
@@ -106,10 +172,10 @@ fn pico_publish(options: &mut PublishOptions<'_>) {
 }
 
 impl AdvancedPublisherPlane for PicoPlane {
-    type Publisher = PlainPublisher;
+    type Publisher = KeptPublisher;
     type Queryable = PlainQueryable;
-    type Token = TokenState;
-    type Beacon = PlainPublisher;
+    type Token = KeptToken;
+    type Beacon = KeptPublisher;
     /// The engine's periodic job, which is its own to run: a task of the runtime on the tokio
     /// engine, a step of the session on the cooperative one. `None` from an engine with no
     /// periodic jobs, whose publisher then declares and sends no heartbeat. The job names the
@@ -154,7 +220,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         &self,
         keyexpr: &str,
         _options: PublishOptions,
-    ) -> Result<DeclaredPublisher<PlainPublisher>, AdvancedPublisherError> {
+    ) -> Result<DeclaredPublisher<KeptPublisher>, AdvancedPublisherError> {
         // The QoS the program declared the composite with, and not the
         // `PublishOptions` the composite folds its own knobs into: those reach the
         // publisher as the options of each put, and the publisher's declared QoS
@@ -165,10 +231,10 @@ impl AdvancedPublisherPlane for PicoPlane {
             .declared
             .try_clone()
             .ok_or_else(|| Self::refusal("publisher", crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY))?;
-        let publisher = PlainPublisher::declare(&self.session, keyexpr, declared)
+        let publisher = KeptPublisher::declare(&self.session, keyexpr, declared)
             .map_err(|code| Self::refusal("publisher", code))?;
         Ok(DeclaredPublisher {
-            eid: publisher.entity_id(),
+            eid: publisher.publisher.entity_id(),
             handle: publisher,
         })
     }
@@ -208,23 +274,27 @@ impl AdvancedPublisherPlane for PicoPlane {
         .ok_or(AdvancedPublisherError::CacheRingUnavailable)
     }
 
-    fn declare_token(&self, keyexpr: &str) -> Result<TokenState, AdvancedPublisherError> {
-        TokenState::declare(&self.session, keyexpr, None)
-            .map_err(|code| Self::refusal("liveliness token", code))
+    fn declare_token(&self, keyexpr: &str) -> Result<KeptToken, AdvancedPublisherError> {
+        let id = crate::liveliness::declare_token(&self.session, keyexpr, None)
+            .map_err(|code| Self::refusal("liveliness token", code))?;
+        Ok(KeptToken {
+            engine: self.session.engine.clone(),
+            id,
+        })
     }
 
     fn declare_beacon(
         &self,
         keyexpr: &str,
         _sporadic: bool,
-    ) -> Result<PlainPublisher, AdvancedPublisherError> {
-        PlainPublisher::declare(&self.session, keyexpr, PublisherQos::pico_default())
+    ) -> Result<KeptPublisher, AdvancedPublisherError> {
+        KeptPublisher::declare(&self.session, keyexpr, PublisherQos::pico_default())
             .map_err(|code| Self::refusal("beacon publisher", code))
     }
 
     fn publish(
         &self,
-        publisher: &PlainPublisher,
+        publisher: &KeptPublisher,
         _keyexpr: &str,
         payload: &[u8],
         options: PublishOptions,
@@ -248,7 +318,7 @@ impl AdvancedPublisherPlane for PicoPlane {
 
     fn publish_beacon(
         &self,
-        beacon: Option<&PlainPublisher>,
+        beacon: Option<&KeptPublisher>,
         keyexpr: &str,
         payload: &[u8],
         _sporadic: bool,
@@ -275,7 +345,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         }
     }
 
-    fn retained_key(&self, publisher: &PlainPublisher) -> Option<Retained> {
+    fn retained_key(&self, publisher: &KeptPublisher) -> Option<Retained> {
         // The cached sample holds a reference to the key it was published on, as
         // pico's does (`_z_declared_keyexpr_copy` in `_z_sample_copy_data`), so
         // the key stays declared until the ring lets the sample go. A key whose declaration's

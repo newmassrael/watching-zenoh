@@ -1373,6 +1373,9 @@ pub unsafe extern "C" fn z_query_reply_err_options_default(
 /// (→ the C `drop(context)`). It lies in its place ([`QueryablePlace`]) beside the C
 /// closure the row calls, which outlives it until the row lets go of it.
 pub(crate) struct QueryableState {
+    /// The session's engine on the tokio engine, whose places are its pools' and hold none. On the
+    /// cooperative engine the place's lender holds it (`crate::object_slot::entity_engine`).
+    #[cfg(feature = "engine-tokio")]
     engine: crate::session::EngineHold,
     /// The declaration, once made: the place is filled before the queryable is declared, as the
     /// closure its row calls lies in it, and one whose declaration was refused is let go of with
@@ -1395,22 +1398,45 @@ struct DeclaredQueryable {
     record: crate::keyexpr::RecordKey,
 }
 
-impl QueryableState {
-    /// Point the cached loan at `lent`, the key the session's record of the queryable keeps as its
-    /// declaration answered it, once declared and placed.
-    ///
-    /// A queryable already gone when its declaration returned answers no key: no loan is bound,
-    /// and `z_queryable_keyexpr` lends the empty loan it was filled with.
-    fn bind(&mut self, lent: wz_capi_port::KeyView) {
-        let Some(declared) = self.declared.as_mut() else {
-            return;
-        };
-        if lent.is_absent() {
-            return;
-        }
-        declared.record = crate::keyexpr::RecordKey::lent(&self.engine, lent.own);
-        self.loaned_keyexpr = crate::keyexpr::record_loan(lent, &declared.record);
+/// A queryable reaches its session's engine through its place, whose lender keeps the one count.
+impl crate::object_slot::SessionEntity for QueryableState {
+    #[cfg(not(feature = "engine-tokio"))]
+    type Placed = QueryablePlace;
+
+    #[cfg(feature = "engine-tokio")]
+    fn kept_engine(&self) -> &crate::session::EngineHold {
+        &self.engine
     }
+}
+
+/// Point the cached loan of the queryable at `state` at `lent`, the key the session's record of
+/// the queryable keeps as its declaration answered it, once declared and placed, naming the engine
+/// where the queryable reaches it.
+///
+/// A queryable already gone when its declaration returned answers no key: no loan is bound,
+/// and `z_queryable_keyexpr` lends the empty loan it was filled with.
+///
+/// # Safety
+/// `state` is a live queryable filled in a place
+/// [`Slot::take_entity`](crate::object_slot::Slot::take_entity) took, read through the pointer it
+/// was filled at, and its owner holds it.
+unsafe fn bind_queryable(state: *mut QueryableState, lent: wz_capi_port::KeyView) {
+    if lent.is_absent() {
+        return;
+    }
+    // The record names the engine where the queryable reaches it, standing while the state does.
+    // SAFETY: the caller's.
+    let record = crate::keyexpr::RecordKey::lent(
+        unsafe { crate::object_slot::entity_engine(state) },
+        lent.own,
+    );
+    // SAFETY: the caller's: the state is live and its owner holds it.
+    let state = unsafe { &mut *state };
+    let Some(declared) = state.declared.as_mut() else {
+        return;
+    };
+    declared.record = record;
+    state.loaned_keyexpr = crate::keyexpr::record_loan(lent, &declared.record);
 }
 
 /// What a queryable's place keeps for its row past the queryable's handle: the C closure the row
@@ -1470,8 +1496,11 @@ impl z_owned_queryable_t {
 /// `h` must be a live `QueryableState` handle, let go of once.
 unsafe fn free_queryable(h: *mut c_void) {
     let state = h as *mut QueryableState;
-    if let Some(declared) = &(*state).declared {
-        wz_capi_port::SessionEngine::undeclare_queryable(&*(*state).engine, declared.id);
+    if let Some(id) = (*state).declared.as_ref().map(|declared| declared.id) {
+        wz_capi_port::SessionEngine::undeclare_queryable(
+            crate::session::EngineHold::as_ref(crate::object_slot::entity_engine(state)),
+            id,
+        );
     }
     crate::object_slot::closures_of::<QueryableState, QueryableKept>(state).wait_none();
     crate::object_slot::retire_entity::<QueryableState, QueryableKept>(state);
@@ -1533,6 +1562,7 @@ unsafe fn declare_queryable_in(
     let state = slot
         .fill_answering(
             QueryableState {
+                #[cfg(feature = "engine-tokio")]
                 engine: crate::session::EngineHold::clone(&session.engine),
                 declared: None,
                 loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
@@ -1568,7 +1598,7 @@ unsafe fn declare_queryable_in(
             // The loan names the state where it lies, which is where it stays; a background
             // queryable has no handle to lend it through.
             if !background {
-                (*state).bind(declared.key);
+                bind_queryable(state, declared.key);
             }
             Ok(state)
         }
@@ -2130,10 +2160,12 @@ pub unsafe extern "C" fn z_query_encoding(
 pub(crate) unsafe fn queryable_identity(
     queryable: *const z_loaned_queryable_t,
 ) -> Option<([u8; 16], QblId)> {
-    handle_ref::<z_loaned_queryable_t, QueryableState>(queryable).and_then(|state| {
-        let declared = state.declared.as_ref()?;
+    crate::abi::handle_at::<z_loaned_queryable_t, QueryableState>(queryable).and_then(|state| {
+        // A live loaned queryable names a live state in its place, whose lender holds the engine.
+        let engine = crate::object_slot::entity_engine(state);
+        let declared = (*state).declared.as_ref()?;
         Some((
-            wz_capi_port::SessionEngine::zid(&*state.engine),
+            wz_capi_port::SessionEngine::zid(crate::session::EngineHold::as_ref(engine)),
             declared.id,
         ))
     })
@@ -3133,7 +3165,6 @@ mod tests {
             .expect("a queryable's place")
             .fill(Answering::keeping(
                 QueryableState {
-                    engine: crate::session::EngineHold::clone(&engine),
                     declared: None,
                     loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                 },

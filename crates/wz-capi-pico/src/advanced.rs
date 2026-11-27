@@ -2076,12 +2076,10 @@ pub unsafe extern "C" fn ze_advanced_publisher_get_matching_status(
         if matching_status.is_null() {
             return Z_ERR_NULL;
         }
-        let Some(state) =
-            crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(publisher)
-        else {
+        let Some(filter) = advanced_publisher_filter(publisher) else {
             return Z_ERR_NULL;
         };
-        (*matching_status).matching = state.publisher.publisher().filter_matches();
+        (*matching_status).matching = filter.matches();
         Z_OK
     })
 }
@@ -2137,9 +2135,9 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_background_matching_liste
 /// `pub_` must be null or a live loaned advanced publisher.
 unsafe fn advanced_publisher_filter<'a>(
     pub_: *const ze_loaned_advanced_publisher_t,
-) -> Option<&'a crate::write_filter::WriteFilter> {
+) -> Option<crate::write_filter::FilterOn<'a>> {
     crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
-        .map(|state| state.publisher.publisher().filter())
+        .map(|state| state.publisher.publisher().filter_on())
 }
 
 /// Declare a miss listener that lives as long as its subscriber (pico
