@@ -18,6 +18,12 @@
 # tolerance: 64
 # measured-with: arm-none-eabi-gcc (Arm GNU Toolchain 13.2.rel1 (Build arm-13.7)) 13.2.1 20231009
 app_link_sm	4692	955	0	4
+capacity_calibrated_emission	7338	102	0	0
+capacity_cost_with_margin	6104	102	0	0
+capacity_lateness_limit	6102	102	0	0
+capacity_liveness_bound	6284	102	0	0
+capacity_quotient	22	0	0	0
+capacity_service_bound	6132	102	0	0
 close	3086	21	0	0
 cobs_decode	116	0	0	0
 cobs_encode	152	0	0	0
