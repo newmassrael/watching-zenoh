@@ -9798,6 +9798,11 @@
       "source": "open-debt register",
       "reason": "CLOSED (fixed): decision taken: the seam owns the session's idle flush (reconnect.rs IdleFlushHold), answers true, offers the hook to the live link and to every link a swap installs, and runs the hook itself on tx_staged while the live link refuses it, on the sender's thread where such a link writes anyway. Both seams share the rule. Tests idle_flush_hold_tests (2), both_swap_seams_keep_the_idle_flush_for_every_link_they_install and a_session_over_the_swap_seam_batches_on_every_link_it_is_swapped_to; the two lent_slot_send seam tests now measure the lend a batching session takes (a batch-sized slot)."
     },
+    "debt-tcp-send-bursts-real-capture": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN, NOT READ ON A REAL CAPTURE: wz-capture's per-direction send_bursts (fields revision 87, row_facts 27, tcp_facts.rs Burst and Flight) counts the new data segments and bytes of each round trip of a burst that begins after an idle of at least IDLE_RESTART_NS (200 ms) or at a seen SYN, a flight ending when the peer acknowledges the flight's first segment. It is held only by unit tests that drive the state with synthetic segments (a 300 ms idle then 10, 20 and 1 segments; a capture that joined the connection; the bounds) and by the every_word fixture; no capture of a real restart after an idle has been read through it, so the flight boundary under delayed ACKs, TSO segments and SACK recovery, and the 200 ms floor against a real RTO, are unmeasured. What closes it: read a capture holding a TCP connection that idles past its RTO and sends again (one from captures/validation, or one recorded for it), check each listed burst's flights against the segments and ACKs read by hand from the same packets, and record the result; a mismatch is fixed in tcp_facts.rs with a test built from that capture. A consumer reading send_bursts on real captures and reporting what it saw also closes it."
+    },
     "debt-undeclared-network-exts-forwarded": {
       "status": "deprecated",
       "source": "open-debt register",
