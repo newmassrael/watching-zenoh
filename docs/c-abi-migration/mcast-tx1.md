@@ -626,3 +626,81 @@ is bounded before the limits are settled, or the settle records another shape th
 parameters give the link's queue).
 
 Next: the transmit types into `transport_tx`, regated for a group; then T3b with D2.
+
+## 16. The transmit types in `transport_tx`, and the write, as landed
+
+- **The types are the module's.** What the transmit state is made of is defined beside it: the
+  conduits (`TxConduits`, `BatchTx`, `BatchStage`), the windows over them (`WINDOW_*`, the
+  window word's `set_window`, `close_and_drain` and the drain count), the sender's mark
+  (`SenderInside`), the frame numbers (`ConduitTxSn`, `FrameTxConduits`), the counts of where
+  frames were written (`BatchLendCounts`, `FragmentLendCounts`, `FrameLendCounts`,
+  `TxRefusalCounts`) and the values the walk hands between its steps (`FrameEmit`,
+  `UnicastPush`, `FrameLend`, `HeapStage`, `Lend`, `LentWrite`). Moved, bodies and
+  `#[inline]` decisions unchanged. What the session no longer names is the module's own again
+  (`TxConduits::new`, its reopen `reset`, `control_taken`, the heap count, the sums' adds);
+  what the session's prelude still reads is `pub(crate)` (the window bits it opens and closes,
+  the conduit accessors). The three lend sums are `TxConduits`' (`batch_lend_counts`,
+  `fragment_lend_counts`, `frame_lend_counts`), and the session's public accessors of the
+  same names answer them, their signatures as they were. The public counts are reached at
+  `wz_session_core::transport_tx::` (`wz-capi-coop`, `wz-runtime-tokio`'s `lent_slot_send`,
+  `wz-session-lwip`'s `tx_allocations` follow), and `sn.rs`' links to `FrameTxConduits`
+  with them (the reduced-docs ledger line of `sn.rs` names the new path).
+- **The write is the module's.** What the session's dispatch did from its conduit's lock on is
+  `TxRoute::write` (`#[inline]`): the sender's mark, the one load of the windows that decides
+  whether the message joins the open frame (a held reply does) and whether a frame it does not
+  join may be open, that frame's flush, then `write_n_msg`. The session's closure hands it the
+  conduit it locked, whether the message is a held reply, and the frame's facts; everything
+  before the lock (the deadline, the barrier of a control message, the fence) and after it (the
+  link's writer told, the congestion decision) is the session's, as section 9.1 has it. The mark,
+  `window_joins`, `window_may_hold_open`, the windows' load and `BatchStage::is_open` are
+  private to the module again.
+
+Expected: 0 bytes on every case (a move, and the session's closure calls one `#[inline]` body
+where it held the same lines); receive Ir none; arm W's send Ir unchanged.
+
+Held by the tests that moved with their subjects, unchanged: `transport_tx`'s
+`conduit_tx_sn_tests`, `sender_inside_tests`, `window_word_tests`, `window_join_tests`;
+`session_actions`' `bundle_tests` (every send goes through `write`); the lend counts, which
+they read through the sums, by `wz-runtime-tokio`'s `lent_slot_send` and `wz-capi-coop`'s
+`arena` tests, the refusals by `wz-session-lwip`'s `tx_allocations`.
+
+### 16.1 The gate for a group, read: not a move
+
+The module stays gated as `session_actions` (`storage-profile` and `session-unicast`). The
+types moved compile without a unicast session, but the module does not: `TxRoute` (`own`,
+`links`), `TransportTx::emit_on_link` and `record_on_link` name `LinkState`, and the lent
+batch's holder names `LentRecord`, both `session_actions`'. A build with `session-multicast`
+and no `session-unicast` exists (`wz-session-core`'s own `alloc,session-multicast,...` and
+`session-slot,session-multicast,...` subsets, and `wz-runtime-tokio`'s `transport-multicast`
+without its defaults), and the module would not compile there.
+
+That gate does not hold T3b: its group is `wz-session-mcu`'s, which takes `session-unicast`
+unconditionally (its dependency on `wz-session-core`), and every build of it that compiles has a
+storage profile (`wz-runtime-coop` refuses `session-unicast` without `alloc` or
+`session-slot`). It holds T3c, whose host builds can link a group without a unicast session.
+
+What the walk reads of a link is its transmit half: the driver, the lent batch records
+(`batch_slots`), the speech bit (`spoke`), the send gate (`transport_available`), the
+compression flag and the registry slot (`stats_slot`); the multilink choice reads the set's
+reliability and band besides. The structure that frees the module of the unicast link is that
+half as a type of this module (`LinkTx<R>`), which `LinkState` holds and `TxRoute::own`
+borrows; the set of an aggregate stays `LinkState`'s, `transport-multilink` being a unicast
+feature, and a group's set is empty there. With it the module is gated on the storage profile and
+either transport.
+
+### 16.2 What T3b reads before its first commit
+
+- **A group cannot make a `LinkState`.** It is made only with the session it belongs to
+  (`SessionLinkActions::new_generic`, `HalvesMaking`), and most of it is a unicast link's (the
+  stamps, the lease and keepalive duties, the close reason, the shared-memory handoffs, the
+  admission place). With `LinkTx` the group makes the transmit half of its datagram driver (its
+  `R::LinkSink`) and nothing of a unicast link. So the split of 16.1 is T3b's first step.
+- **Where a group's message enters the walk.** It enters `wz-session-core`'s multicast layer
+  through `MulticastTxQueue` (`wait_for_room`, `enqueue`, `enqueue_lent`, `push_frame`),
+  which the stage implements over its lanes. T3b's stage implements it as a link's dispatch does
+  from the lock on: the group's conduit locked, `TxRoute::write` with a `FrameEmit` of the
+  group's limits (`MulticastParams::frame_budget`, its ring, its queue's waits), so the group's
+  frame numbers are `TransportTx::frame_sn` and its JOIN advertises them.
+
+Next, in order: `LinkTx` out of `LinkState` (`transport_tx`, every reader of the six fields),
+the module's gate widened to a group, then T3b with D2.
