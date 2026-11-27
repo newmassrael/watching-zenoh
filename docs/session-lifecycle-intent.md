@@ -1727,6 +1727,52 @@ status and closes its session, whose face goes down. A key on no row of the decl
 refused the same close over the same listener, and the refusal over plain TCP and the refusal
 with no declaration stand beside it.
 
+**D17 wired.** The shipped hosts of both profiles verify a sealed command, and the end-to-end
+case is witnessed over the wire through a stock zenohd whose own key no grant names.
+
+The heap profile's verifier is `HeapSeal`, `SealedCommands<RingEs256, HEAP_SEALED_COMMANDERS>`
+(`crates/wz-runtime-tokio/src/lifecycle_seal.rs` @ `pub fn lifecycle_seal_from_os_entropy(`):
+the node's zid, ES256 by `ring`, which the TLS links the verbs need already link, and an echo of
+sixteen bytes drawn from the OS when the node starts. It comes with `session-close-ingress`,
+which now turns on `wz-session-core/sealed-commands` and `wz-command-seal`, so a heap node that
+hosts the verbs always verifies. The window holds 64 commanders: it evicts none, so it must hold
+every commander the declaration grants, and a declaration that grants more is refused when the
+node starts, by name, rather than found out when a granted commander is refused for room; the
+demo then hosts no lifecycle query, as it does when it has no entropy
+(`crates/wz-ap-demo/src/runner.rs` @ `.with_seal(seal),`).
+
+The fixed profile's declared node holds `static SEAL: FixedSeal<PsaEs256, SEALED_COMMANDERS>`,
+where `SEALED_COMMANDERS` is computed when the node is built: the zids its declaration's
+commander lists name, each once, so the window is exactly the commanders it may permit. It is
+started with the node's zid and an echo from the TLS library's generator once the identity is
+made, and handed to the verbs before their queryable is registered
+(`deploy/host-slot-node/src/bin/declared_node.rs` @ `fn start_seal(zid: [u8; 16])`). The
+node's `verbs` feature brings `wz-session-mcu/sealed-commands` and, beside the channel a
+commander needs, `wz-tls-mbedtls/es256`; it links no `ring`. The node now says its record:
+every decision of the verbs' monitor is a console line, `HOST-WZ-DECISION made=<n>
+subject=<who> verb=<verb> decision=<decision>`, the subject `sealed:<zid>` for a sealed command.
+
+The Zephyr admin image (`deploy/zephyr-admin-node`, `fixed_admin.rs`) does not verify one yet:
+its in-band verbs are the admin node's `Verbs`, which take no verifier
+(`crates/wz-session-mcu/src/admin_fixed.rs` @ `impl<N: wz_session_core::lifecycle_node::LifecycleNode + Sync + 'static> InBand for Verbs<N>`),
+so it needs `Verbs` to carry one as `VerbLegs` does, a change of `wz-session-mcu`. Its PSA
+configuration already states what `PsaEs256` needs (`overlays/qemu_admin_fixed_tls.conf` and
+`overlays/t2g_client_tls.conf`: `CONFIG_PSA_WANT_ALG_ECDSA`, `CONFIG_PSA_WANT_ECC_SECP_R1_256`,
+`CONFIG_PSA_WANT_ALG_SHA_256`, `CONFIG_PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY`).
+
+The witness is `crates/wz-integration-tests/tests/it/files/wz_sealed_commander_zenohd_interop.rs`.
+The router dials the node over mutual TLS with a key of its own, so its own query is refused,
+and the commander is a wz client of the router, since stock zenoh's `z_get` sends no attachment:
+it seals each command with `wz_command_seal::seal` and a `RingSigner` over a key the test makes
+and sends it as the attachment of the lifecycle GET. On the declared node (`zenohd_lane_fixed_`):
+a listed commander's sealed `status` and `close` are permitted after the echo, and the record
+says `sealed:<zid>`; the same object again is a replay; an unlisted key's object is refused by
+the lists and takes no counter; and after the node restarts with the same provisioned identity, a
+command sealed before and one carrying the old echo are refused with a new echo, and the repeat
+carrying it is permitted. On the demo's peer (`zenohd_lane_heap_`), the first three, the record
+read off its log. What remains: the admin image above, and whether a node with storage should
+persist its window (`docs/command-seal.md`, decisions for the owner).
+
 ## 6. The contract for every verb (step 8; A, B and D built, C in part)
 
 Step 7e held the transports to one table for `open`. The other verbs of D6
