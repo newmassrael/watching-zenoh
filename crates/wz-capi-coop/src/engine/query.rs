@@ -310,6 +310,9 @@ pub(super) enum Release {
 /// alone, so none of them reads a row of its held Finals after the arena that lent them went.
 pub(super) type QueryPlane = wz_session_core::query_plane::QueryPlane<CoopCalls>;
 
+// The rows a form that lays its state out at the open lends the Finals and refusals; the on-use
+// form counts them in its own tables and names neither.
+#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
 pub(crate) use wz_session_core::query_plane::{FinalHold, RefusedFinal};
 pub(super) use wz_session_core::query_plane::{FinalHolds, HeldFinals, RefusedFinals};
 
