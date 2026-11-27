@@ -2,7 +2,7 @@
 
 Status: the reading of the put's path against zenoh-pico's, line by line, the steps that walk its
 bytes without raising the put's or the receive's instructions, and the first step (S1) carried
-in beside it; S2 to S5 and W-P1 carried after it (section 6), F1 left unwritten (section 7). Nothing here was built, run or measured by this lane: every byte figure is either
+in beside it; S2 to S5 and W-P1 carried after it (section 6), the plan's key with them (section 6.1), F1 left unwritten (section 7). Nothing here was built, run or measured by this lane: every byte figure is either
 **read** from the size ledger's explain document named below or an **estimate** from the code, to
 be read on that document after the merge.
 
@@ -159,8 +159,9 @@ The tests, and the line whose change turns each red:
 
 - S2: `tests::plain_put::a_put_plans_its_way_by_the_key_its_leg_named` (new): two bare puts of a
   publisher whose filter is on `demo/x`, made on `demo/z` under the declaration of `demo/x`, plan
-  nothing and reach the router on `demo/z`; the CONTROL puts on `demo/x` are planned after the
-  first. Red when `keep_plan` names `row.key()` again in place of the leg's `named`.
+  nothing and reach the router on `demo/z`; the first put on `demo/x` after them is named and
+  plans, the second is planned. Red when `keep_plan` names `row.key()` again in place of the leg's
+  `named`: the first put on `demo/x` is then written from a plan a put on `demo/z` made.
 - S3: `tests::plain_put::a_bare_put_reads_the_send_epoch_once` (new): one read of the epoch for the
   first bare put at an epoch and one for a planned put; none for a put with options or a given way.
   Red when `put_leg` reads `send_epoch` again for `plan_at`.
@@ -180,6 +181,58 @@ The tests, and the line whose change turns each red:
 - Kept for every step: the module's plan tests (`the_puts_of_a_publisher_at_one_send_epoch_are_written_from_its_plan`,
   `a_put_looks_its_write_filters_row_up_once`, `a_plan_is_not_taken_once_a_peer_retracts_what_opened_its_filter`,
   `a_plan_is_made_again_over_a_link_dialled_again`), `tests::shared_key_ids`, `tests::group`, `tests::local`.
+
+### 6.1 The plan's key
+
+The plan stood at a send epoch for the row, not for a key: `WriteFilterRow::planned_put` read the
+epoch alone, so once a publisher's way was planned, a bare put through the same filter on another
+key at that epoch was written from the plan, on the filter's key. The engine's entry takes any key
+(`SessionEngine::publish_filtered`); the C ABI's publisher puts on its own alone
+(`FilteredKey::keyexpr`), so no program reached it there. S2 kept a plan from being made of a put
+on another key; nothing kept one from being taken by it.
+
+- `WriteFilterRow::planned_put(epoch, key)` answers the plan only for a put on the row's key,
+  compared by its place first and by its bytes only where the places differ; `decide_put` hands it
+  the put's key.
+- `WriteFilterRow::keep_plan` leaves a standing plan as it is for a put on another key, which says
+  nothing of the row's way, and still drops it for the row's key named otherwise. Before, such a put
+  dropped the plan, and the next put on the row's key was named and planned again.
+
+The planned put's instructions (the 8 B put of the opprofile line, `z_publisher_put` with NULL
+options): an **estimate** of +2 to +4 Ir, nothing measured. The grounds:
+
+- the key that put hands the engine is the text the engine lent the publisher at its declaration
+  from the filter's row itself (`CoopEngine::declare_write_filter` lends
+  `RowKey::of(row.key(), row.own())`, and the door hands it back, `FilteredKey::keyexpr`), so the
+  compare of the place, an address and a length, decides it, and the bytes are never compared on
+  that path;
+- the row's text was read on the planned path already, for the planned key
+  (`NamedKey::by_head`); it is read once, before the compare, and that reading is reused;
+- the epoch is compared first, so a put that is not planned (the first at an epoch, one with
+  options, a given way) returns where it did and pays nothing;
+- the change on the keep side moves no instruction of a put on the row's key: the same text compare,
+  ahead of the head's.
+
+Bytes: an **estimate** of +16 to +48 in `put_on_links`, where `decide_put` is inlined whole: the
+two compares and their branch, and behind them the bytes compare (a length compare and a call of
+`memcmp`), which only a key held elsewhere reaches.
+
+The tests, and the line whose change turns each red:
+
+- `tests::plain_put::a_plan_is_taken_for_its_filters_key_alone` (new): with the plan of `demo/x`
+  standing, a bare put on `demo/z` is named, not planned, and reaches the router on `demo/z`; the
+  put on `demo/x` after it is written from the plan. Red when `planned_put` loses its key compare
+  (the put on `demo/z` is planned and reaches the router on `demo/x`), or when `keep_plan` drops
+  the plan for a put on another key.
+- `session_tables::tests::a_plain_way_is_planned_at_one_epoch_for_its_heads_key_alone` (extended):
+  the plan is answered for the row's own text and for the same bytes held elsewhere, not for
+  another key, and stands after `keep_plan` of another key. Red when the key is compared by its
+  place alone, when the compare goes, or when `keep_plan` drops the plan for another key.
+- `tests::plain_put::a_put_plans_its_way_by_the_key_its_leg_named` (S2, its assertion moved): with
+  the key compare in place, a plan made of the filter's key at a put on `demo/z` is not taken by
+  the next put on `demo/z` but by the first put on `demo/x`, so the test reads that put named and
+  planning (`namings`, `plans`). Still red when `keep_plan` names `row.key()` in place of the
+  leg's `named`.
 
 ## 7. F1 not written
 
@@ -201,8 +254,8 @@ declaration is read.
   for S2 to S5, the sum of their rows in section 4, and W-P1's -60 to -150 where `StatementNotHonoured::of_publish` and
   `plain_put_params`' statement checks leave the case); `decide_alone` unchanged; the peer and api
   cases of C1cs lower or equal.
-- The 8 B put on the opprofile line (the planned path) not up, the put side of the perf matrix not
-  up, the receive at arm W unchanged: no receive or delivery body changed, and no step adds a call
+- The 8 B put on the opprofile line (the planned path) up by no more than the key compare of
+  section 6.1 (estimated +2 to +4 Ir), the put side of the perf matrix not up, the receive at arm W unchanged: no receive or delivery body changed, and no step adds a call
   to the put (`fan_out_leg` is inlined whole).
 - The put's `cfg` forms compile: the default (`threads`), `listen`, `group`, `local-subscriber`,
   `shared-key-ids`, `transport-stats`, the `wz_round` form (`WZ_COOP_VALUE_LOCKS=off`, with

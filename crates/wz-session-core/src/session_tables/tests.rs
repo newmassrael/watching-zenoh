@@ -3862,10 +3862,12 @@ fn a_plain_way_carries_the_head_of_its_declaration() {
 }
 
 /// A plain way is planned at an epoch only for its key named by its head's declaration alone, and
-/// its put is read back at that epoch alone, named by that declaration and written from the way's
-/// head. A way stated again is planned again. Turned red by a plan kept for a key the head does not
-/// name (the literal, or a key past the declaration), by a plan read at another epoch, or by a way
-/// stated again that keeps its plan.
+/// its put is read back at that epoch alone and for that key alone, its bytes wherever they lie,
+/// named by that declaration and written from the way's head. A put on another key leaves the plan
+/// standing. A way stated again is planned again. Turned red by a plan kept for a key the head does
+/// not name (the literal, or a key past the declaration), by a plan read at another epoch or for
+/// another key, by a key told apart by its place, by a put on another key that drops the plan, or
+/// by a way stated again that keeps its plan.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 #[test]
 fn a_plain_way_is_planned_at_one_epoch_for_its_heads_key_alone() {
@@ -3888,12 +3890,12 @@ fn a_plain_way_is_planned_at_one_epoch_for_its_heads_key_alone() {
     let at = KeyexprRef::by_id(declared.id);
     tables.keep_write_filter_plain(filter, Some((params, at)));
     let row = tables.write_filters().get(filter).unwrap();
-    assert!(row.planned_put(7).is_none(), "no plan yet");
+    assert!(row.planned_put(7, "demo/x").is_none(), "no plan yet");
     assert!(
         !row.keep_plan(7, NamedKey::literal("demo/x").unwrap()),
         "the literal is not the key the head names"
     );
-    assert!(row.planned_put(7).is_none());
+    assert!(row.planned_put(7, "demo/x").is_none());
     let past = tables.named_at("demo/x/y", at).expect("a key");
     assert!(
         !row.keep_plan(7, past),
@@ -3901,18 +3903,33 @@ fn a_plain_way_is_planned_at_one_epoch_for_its_heads_key_alone() {
     );
     let named = tables.named_at("demo/x", at).expect("a key");
     assert!(row.keep_plan(7, named));
-    let planned = row.planned_put(7).expect("planned at 7");
+    let planned = row.planned_put(7, row.key()).expect("planned at 7");
     assert_eq!(planned.key().text(), "demo/x");
     assert_eq!(
         planned.key().wire(),
         WireKey::Id(MappedId::new(declared.id).unwrap())
     );
     assert_eq!(Some(planned.head()), row.plain().and_then(|way| way.head));
-    assert!(row.planned_put(8).is_none(), "another epoch");
+    assert!(row.planned_put(8, "demo/x").is_none(), "another epoch");
+    assert!(row.planned_put(7, "demo/x/y").is_none(), "another key");
+    let elsewhere = *b"demo/x";
+    let elsewhere = core::str::from_utf8(&elsewhere).unwrap();
+    assert!(
+        row.planned_put(7, elsewhere).is_some(),
+        "the key's bytes, wherever they lie"
+    );
+    assert!(
+        !row.keep_plan(7, past),
+        "a put on another key plans nothing"
+    );
+    assert!(
+        row.planned_put(7, "demo/x").is_some(),
+        "and leaves the plan standing"
+    );
     tables.keep_write_filter_plain(filter, Some((params, at)));
     let row = tables.write_filters().get(filter).unwrap();
     assert!(
-        row.planned_put(7).is_none(),
+        row.planned_put(7, "demo/x").is_none(),
         "a way stated again is planned again"
     );
 }

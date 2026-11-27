@@ -1282,34 +1282,46 @@ impl<Key: KeyBacking> WriteFilterRow<Key> {
         self.matching.get()
     }
 
-    /// The put of the plain way as planned at `epoch`, while the plan stands there: `None` for a
-    /// row planned at another epoch or never, which the sender plans again.
+    /// The put of the plain way on `key` as planned at `epoch`, while the plan stands there:
+    /// `None` for a row planned at another epoch or never, which the sender plans again, and for a
+    /// put on a key other than the row's, whose way the plan says nothing of.
     #[cfg(all(feature = "alloc", feature = "codec-push"))]
-    pub fn planned_put(&self, epoch: u64) -> Option<PlannedPut<'_>> {
+    pub fn planned_put(&self, epoch: u64, key: &str) -> Option<PlannedPut<'_>> {
         if self.planned.get() != Some(epoch) {
+            return None;
+        }
+        // By its place first: a publisher puts on the text its row lent it at its declaration,
+        // so its bytes are compared only for a key the caller holds elsewhere.
+        let own = self.key.as_str();
+        let same = core::ptr::eq(key, own) || key == own;
+        if !same {
             return None;
         }
         let way = self.plain.get()?;
         let head = way.head?;
         Some(PlannedPut {
-            key: crate::named_key::NamedKey::by_head(self.key.as_str(), &head)?,
+            key: crate::named_key::NamedKey::by_head(own, &head)?,
             head,
             params: way.params,
         })
     }
 
-    /// Plan the plain way at the sender's `epoch`, `named` being the filter's key as the session
-    /// names it: kept when that is the way's head's declaration alone, and dropped otherwise.
+    /// Plan the plain way at the sender's `epoch`, `named` being the key a put of the way was
+    /// sent on as the session names it: kept when that is the filter's key named by the way's
+    /// head's declaration alone, and dropped when it is the filter's key named otherwise. A put on
+    /// another key says nothing of the way, so a plan standing for the filter's key stands on.
     /// The sender answers for the rest its epoch stands for (its links, and what the filter's
     /// answer and the put's way are read from). Whether the plan was kept.
     #[cfg(all(feature = "alloc", feature = "codec-push"))]
     pub fn keep_plan(&self, epoch: u64, named: crate::named_key::NamedKey<'_>) -> bool {
-        let holds = named.text() == self.key.as_str()
-            && self
-                .plain
-                .get()
-                .and_then(|way| way.head)
-                .is_some_and(|head| head.names(named.wire()));
+        if named.text() != self.key.as_str() {
+            return false;
+        }
+        let holds = self
+            .plain
+            .get()
+            .and_then(|way| way.head)
+            .is_some_and(|head| head.names(named.wire()));
         self.planned.set(holds.then_some(epoch));
         holds
     }

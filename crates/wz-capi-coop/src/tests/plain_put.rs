@@ -714,10 +714,10 @@ fn a_put_looks_its_write_filters_row_up_once() {
 
 /// A bare put plans its publisher's way by the key its leg named, the one it is sent on: a
 /// publisher whose filter is on `demo/x` that puts on `demo/z`, under the declaration of
-/// `demo/x`, plans nothing, and each of those puts reaches the router on `demo/z`, as the
-/// router's catch-all records them. CONTROL: its puts on its own key are written from the plan
-/// after the first. Turned red by a plan made of the filter's key in place of the key the put's
-/// leg named, whose planned put is written on the filter's key.
+/// `demo/x`, plans nothing, so the first of its puts on `demo/x` after them is named and plans,
+/// and each put reaches the router on the key it was made on, as the router's catch-all records
+/// them. Turned red by a plan made of the filter's key in place of the key the put's leg named,
+/// which a put on `demo/z` would make and the first put on `demo/x` would be written from.
 #[test]
 fn a_put_plans_its_way_by_the_key_its_leg_named() {
     let router = Router::start(CatchAll::Held);
@@ -736,6 +736,7 @@ fn a_put_plans_its_way_by_the_key_its_leg_named() {
         before,
         "a put on a key other than its filter's plans nothing"
     );
+    let named_before = namings(&engine);
     for _ in 0..2 {
         assert_eq!(
             engine.publish_filtered(filter, "demo/x", &wire, b"x", None),
@@ -743,9 +744,9 @@ fn a_put_plans_its_way_by_the_key_its_leg_named() {
         );
     }
     assert_eq!(
-        plans(&engine) - before,
-        1,
-        "CONTROL: a put on its filter's key is written from the plan after the first"
+        (namings(&engine) - named_before, plans(&engine) - before),
+        (1, 1),
+        "the first put on its filter's key is named and plans, the second is planned"
     );
     until(&engine, "the router to receive every put", || {
         router.seen(|s| s.samples.len()) == 4
@@ -755,6 +756,61 @@ fn a_put_plans_its_way_by_the_key_its_leg_named() {
         (on("demo/z"), on("demo/x")),
         (2, 2),
         "each put reaches the router on the key it was made on"
+    );
+}
+
+/// A plan is its filter's key's alone: once a publisher's way on `demo/x` is planned, a bare put
+/// through its filter on `demo/z` at the same send epoch is sent with its own key named and
+/// reaches the router on `demo/z`, and the plan stands for the put on `demo/x` after it. CONTROL:
+/// the second put on `demo/x` before it is written from the plan. Turned red by a plan taken by
+/// its epoch alone (`WriteFilterRow::planned_put` comparing no key), whose put on `demo/z` is
+/// written on the filter's key, or by a put on another key that drops the plan.
+#[test]
+fn a_plan_is_taken_for_its_filters_key_alone() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let (_hold, filter, wire) = way_on(&engine, &router, "demo/x");
+
+    let before = plans(&engine);
+    for _ in 0..2 {
+        assert_eq!(
+            engine.publish_filtered(filter, "demo/x", &wire, b"x", None),
+            FilteredPut::Sent(Ok(0))
+        );
+    }
+    assert_eq!(
+        plans(&engine) - before,
+        1,
+        "CONTROL: the second put on its filter's key is written from the plan"
+    );
+
+    let (before, named_before) = (plans(&engine), namings(&engine));
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/z", &wire, b"z", None),
+        FilteredPut::Sent(Ok(0))
+    );
+    assert_eq!(
+        (plans(&engine) - before, namings(&engine) - named_before),
+        (0, 1),
+        "a put on another key is sent with its key named, not from the plan"
+    );
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &wire, b"x", None),
+        FilteredPut::Sent(Ok(0))
+    );
+    assert_eq!(
+        plans(&engine) - before,
+        1,
+        "and the plan stands for the put on its filter's key after it"
+    );
+    until(&engine, "the router to receive every put", || {
+        router.seen(|s| s.samples.len()) == 4
+    });
+    let on = |key: &str| router.seen(|s| s.samples.iter().filter(|(k, _)| k == key).count());
+    assert_eq!(
+        (on("demo/z"), on("demo/x")),
+        (1, 3),
+        "the put on another key reaches the router on its own key"
     );
 }
 

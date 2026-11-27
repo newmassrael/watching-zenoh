@@ -8693,7 +8693,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// How the leg of `put` that holds `core` sends it, `first` when no leg of the put answered it
     /// before (`Asked`). The filter's row is looked up once, for its plan, its answer and the plain
     /// way it keeps, whose head the leg's send writes a plain Put from (`Publication::head`). A
-    /// plain put of the row's way at the send epoch its way was planned at is
+    /// plain put of the row's way on the row's key at the send epoch its way was planned at is
     /// written from the plan, as what the filter's answer, the key's naming and each link's form
     /// of it are read from is as it was then; a group the session joined since is sent it the
     /// general way, which no epoch counts. The first leg asks the filter, which holds the put
@@ -8720,7 +8720,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 let groups_left = true;
                 if groups_left {
                     let epoch = core.send_epoch();
-                    if let Some(planned) = row.planned_put(epoch) {
+                    if let Some(planned) = row.planned_put(epoch, put.keyexpr) {
                         return PutGoes::Plain(planned.params(), PlainBy::Planned(planned));
                     }
                     first.then_some(epoch)
