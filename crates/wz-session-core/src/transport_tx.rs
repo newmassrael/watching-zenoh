@@ -2787,8 +2787,8 @@ impl<R: SessionRuntime> GroupTx<R> {
         match pushed {
             Ok(UnicastPush::Pushed) => Ok(PushOutcome::Pushed),
             Ok(UnicastPush::Congested) => Ok(PushOutcome::Congested),
-            // A chain is refused so only to a sender that may not wait, which a group's is not.
-            #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
+            // A chain is refused so only to a probe, which a group's sender is not.
+            #[cfg(all(feature = "transport-fragmentation", feature = "tx-probe"))]
             Ok(UnicastPush::Chain) => Ok(PushOutcome::Congested),
             Err(crate::send_wire_error::SendWireError::Codec(error)) => {
                 Ok(PushOutcome::Refused(error))
@@ -4182,9 +4182,9 @@ pub(crate) enum UnicastPush {
     /// every try gets as far as the lane is deep and no further. Such a message is the caller's
     /// to send with a wait; a chain the lane can hold whole is probed like a frame.
     ///
-    /// Only a build that fragments has a chain to refuse, and only one with `alloc` has a
-    /// sender that may not wait (`DispatchStage::Probe`).
-    #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
+    /// Only a build that fragments has a chain to refuse, and only one with `tx-probe` has a
+    /// sender that may not wait (`PushDeadline::probe`).
+    #[cfg(all(feature = "transport-fragmentation", feature = "tx-probe"))]
     Chain,
 }
 

@@ -2505,7 +2505,7 @@ enum Dispatched {
     NoRoom,
     /// A probe met a message that is a chain of fragments the lane cannot hold, and sent
     /// nothing: a sender that may not wait cannot send one (`UnicastPush::Chain`).
-    #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
+    #[cfg(all(feature = "transport-fragmentation", feature = "tx-probe"))]
     Chain,
 }
 
@@ -10445,7 +10445,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             // A probe met a chain of fragments and sent nothing (see `UnicastPush::Chain`): not
             // counted as a message sent and not a congestion drop, the message is the caller's.
-            #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
+            #[cfg(all(feature = "transport-fragmentation", feature = "tx-probe"))]
             Ok(crate::transport_tx::UnicastPush::Chain) => Ok(Dispatched::Chain),
             // Fixed-memory step S4 — a send the link lent no slot for was never
             // pushed: it is not an `n_msgs` message, as a congestion drop is not,
