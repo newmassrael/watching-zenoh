@@ -2379,8 +2379,9 @@ impl LinkLeg<'_> {
 
 /// Send `leg` to the peer of the face whose record holds `wire`, as `how` says: through the
 /// held face's wire in `tx` where `wire` lies in the face whose place the caller holds, taken
-/// before the session's lock (`CoopEngine::on_faces`), and by a try of the face's place
-/// otherwise ([`publish_on`]). `None` while the face's place holds no wire, or is not lent.
+/// before the session's lock (`CoopEngine::on_faces`, `CoopEngine::on_publish_legs`), and by a
+/// try of the face's place otherwise ([`publish_on`]). `None` while the face's place holds no
+/// wire, or is not lent.
 #[cfg(not(wz_round))]
 #[inline(always)]
 fn publish_through<L: CoopLinks + 'static, C: ClockSource + 'static>(

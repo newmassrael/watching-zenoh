@@ -57,7 +57,9 @@ the explain document of 2026-11-27 places them (read by the arch-engine-own lane
   `wait_for_slots`. Gone: `put_through_filter`, `put_through_filter_in`, `put_plain_in`,
   `plain_off_the_wire`, `put_plain_on_groups` (now `put_plain_groups_leg`), `put_planned`,
   `send_plain`, `publish_to_link`, `publish_to_link_on`, `publish_everywhere`, `Holding`,
-  `fold_filtered` and its tests (replaced by `asked_tests`).
+  `fold_filtered` and its tests (replaced by `asked_tests`). In `engine/direct.rs`,
+  `FaceTx::is_groups_leg` and the groups' arm of `on_faces` are gone: a build that joins groups
+  walks a put's legs by `on_publish_legs` alone, as do its tests' counts of the legs.
 
 `crates/wz-session-core/src/session_tables.rs`: `PlainWay` is `{ params, head }`;
 `keep_write_filter_plain` reads only the declaration's id, for the head.

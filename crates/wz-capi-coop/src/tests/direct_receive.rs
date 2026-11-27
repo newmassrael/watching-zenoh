@@ -1011,7 +1011,7 @@ fn an_operation_on_a_closed_session_runs_nothing_and_holds_nothing() {
 /// reaching its own face alone: the session open on the dial role's face, and joined to no group,
 /// is handed one leg, which reaches that face, in every build. Turned red by a walk that skips the
 /// dial role's row (`DirectFaces::iter`), a leg that reaches no face (`FaceTx::reaches`), or a
-/// groups' leg handed to a session that joined none (`CoopEngine::on_faces`).
+/// groups' leg handed to a session that joined none (`CoopEngine::on_groups_leg`).
 #[cfg(not(wz_round))]
 #[test]
 fn a_publish_hands_each_face_a_leg_of_its_own() {
@@ -1033,8 +1033,8 @@ fn a_publish_hands_each_face_a_leg_of_its_own() {
 /// session for nothing: its dial role's leg reaches its face and no group. The member that joined
 /// one is handed one leg for it
 /// (`one_thread::group::a_publish_of_a_member_of_one_thread_reaches_the_group_by_one_leg`).
-/// Turned red by a groups' leg handed whatever the session joined (`CoopEngine::on_faces`), or a
-/// face's leg that reaches the groups (`FaceTx::reaches_groups`).
+/// Turned red by a groups' leg handed whatever the session joined (`CoopEngine::on_groups_leg`),
+/// or a face's leg that reaches the groups (`FaceTx::reaches_groups`).
 #[cfg(all(feature = "group", not(wz_round)))]
 #[test]
 fn a_session_that_joined_no_group_hands_the_groups_no_leg() {

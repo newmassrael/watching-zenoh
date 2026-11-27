@@ -577,7 +577,7 @@ mod group {
     /// A publish of a member of one thread that joined the group hands the group one leg of its
     /// own, beside the faces', so a put is sent to the group once. Turned red by a walk that hands
     /// a session's groups no leg, as it hands none to a session that joined no group
-    /// (`CoopEngine::on_faces`), or by a face's leg that reaches the groups too
+    /// (`CoopEngine::on_groups_leg`), or by a face's leg that reaches the groups too
     /// (`FaceTx::reaches_groups`). Twin of
     /// `direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg`.
     #[test]

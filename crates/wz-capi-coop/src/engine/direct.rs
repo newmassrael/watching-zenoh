@@ -616,16 +616,17 @@ where
 }
 
 /// What an operation holds of the faces' send places, taken before the session's lock
-/// (`CoopEngine::live_on_link`, `CoopEngine::on_faces`): a send to a held face writes the
-/// wire its hold holds; a send to any other face is lent that face's link by a try of its place,
-/// which waits for nothing under the session's lock (`super::send_through`). A build that takes
-/// no face beside the dial role's holds that face's place alone, and every face's record names
-/// that face, so what it holds is the face's wire: no walk finds it and no try reaches past it.
+/// (`CoopEngine::live_on_link`, `CoopEngine::on_faces`, `CoopEngine::on_publish_legs`): a send
+/// to a held face writes the wire its hold holds; a send to any other face is lent that face's
+/// link by a try of its place, which waits for nothing under the session's lock
+/// (`super::send_through`). A build that takes no face beside the dial role's holds that face's
+/// place alone, and every face's record names that face, so what it holds is the face's wire: no
+/// walk finds it and no try reaches past it.
 pub(super) struct FaceTx<'a, C: ClockSource + 'static> {
     #[cfg(any(feature = "listen", feature = "group"))]
     held: Option<&'a HeldSend<'a, C>>,
-    /// The place of the face a publish's leg through it holds alone (`CoopEngine::on_faces`);
-    /// `None` for an operation's hold, which reaches every face.
+    /// The place of the face a publish's leg through it holds alone (`CoopEngine::on_faces`,
+    /// `CoopEngine::on_publish_legs`); `None` for an operation's hold, which reaches every face.
     #[cfg(any(feature = "listen", feature = "group"))]
     alone: Option<usize>,
     /// The dial role's wire while its place holds one; a place that holds none is not held, and
@@ -705,20 +706,12 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
 
     /// Whether a publish's leg sent through this hold goes to the session's groups: an
     /// operation's hold reaches every face and every group, and a publish reaches the groups by
-    /// the one leg of its own that holds no face's place (`CoopEngine::on_faces`, at
+    /// the one leg of its own that holds no face's place (`CoopEngine::on_publish_legs`, at
     /// [`GROUPS_LEG`]), so each group is sent a publish once, whatever the faces it is sent on.
     #[cfg(feature = "group")]
     #[inline(always)]
     pub(super) fn reaches_groups(&self) -> bool {
         self.alone.is_none() || self.held.is_none()
-    }
-
-    /// Whether this is a publish's own leg to the groups ([`GROUPS_LEG`]), which reaches the
-    /// groups and no face: an operation's hold reaches both.
-    #[cfg(feature = "group")]
-    #[inline(always)]
-    pub(super) fn is_groups_leg(&self) -> bool {
-        self.alone == Some(GROUPS_LEG)
     }
 
     /// Every leg reaches the dial role's face where it is the only face: a publish hands a leg
@@ -3134,9 +3127,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// now (never for a read's step, which does not hold it): a send to any face under both
     /// neither waits nor is owed, and the session's lock is never held while a place is waited
     /// for. Faces are taken in one order by every operation, and a publish holds one at a time
-    /// (`Self::on_faces`), so no two holders wait on each other. A place that holds no link is
-    /// not held, and its face is reached by a try, as no send is owed a face with no link. `None`
-    /// once the session is closed.
+    /// (`Self::on_faces`, `Self::on_publish_legs`), so no two holders wait on each other. A
+    /// place that holds no link is not held, and its face is reached by a try, as no send is owed
+    /// a face with no link. `None` once the session is closed.
     #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(always)]
     pub(super) fn live_on_link<U>(
@@ -3192,32 +3185,25 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// and let go of before the next face's is taken, so no thread holds two faces' places and a
     /// face that waits holds up no other. `leg` takes the session's lock its own way inside each
     /// hold (one that may be dropped tries it) and reaches the held face alone
-    /// ([`FaceTx::reaches`]). A face whose place holds no parts is not handed to `leg`. The
-    /// groups of a session that joined any are one leg after the faces', which reaches them alone
-    /// ([`FaceTx::reaches_groups`]). What the last leg that failed came to, else `Ok(0)`, as a
-    /// leg's own faces answer.
+    /// ([`FaceTx::reaches`]). A face whose place holds no parts is not handed to `leg`. What the
+    /// last leg that failed came to, else `Ok(0)`, as a leg's own faces answer. A build that joins
+    /// groups walks the faces by `Self::on_publish_legs`, whose groups' leg is a body of its own.
     // Inlined whole: a publish's path is the one a message takes each time.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(feature = "listen", not(feature = "group")))]
     #[inline(always)]
     pub(super) fn on_faces(
         &self,
         droppable: bool,
         mut leg: impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
     ) -> Result<usize, FanoutError> {
-        #[cfg(feature = "group")]
-        {
-            let outcome = self.on_face_legs(droppable, &mut leg);
-            self.on_groups_leg(outcome, leg)
-        }
-        #[cfg(not(feature = "group"))]
-        {
-            self.on_face_legs(droppable, &mut leg)
-        }
+        self.on_face_legs(droppable, &mut leg)
     }
 
-    /// [`Self::on_faces`] for a publish whose groups' leg is a body of its own, `groups`: one
-    /// that reads only what a group is sent, and none of what a face's leg reads to send on a
-    /// face's link.
+    /// A publish's legs in a build that joins groups: `leg` on each face, as `Self::on_faces`
+    /// hands them out in a build that joins none, then the groups of a session that joined any
+    /// by one leg of their own, `groups`, which reaches them alone ([`FaceTx::reaches_groups`])
+    /// and reads only what a group is sent, none of what a face's leg reads to send on a face's
+    /// link. What the last leg that failed came to, else `Ok(0)`, as a leg's own faces answer.
     #[cfg(feature = "group")]
     #[inline(always)]
     pub(super) fn on_publish_legs(
@@ -3230,10 +3216,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.on_groups_leg(outcome, groups)
     }
 
-    /// The faces' legs of [`Self::on_faces`]: `leg` on each face that may hold a link. A face at
-    /// rest (`DirectFace::rests`) holds no link that is up, so a leg would send it nothing, and
-    /// its place is not tried; nor is a row past the last that holds a face
-    /// (`DirectFaces::walked`).
+    /// The faces' legs of a publish (`Self::on_faces`, `Self::on_publish_legs`): `leg` on each
+    /// face that may hold a link. A face at rest (`DirectFace::rests`) holds no link that is up,
+    /// so a leg would send it nothing, and its place is not tried; nor is a row past the last that
+    /// holds a face (`DirectFaces::walked`).
     #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(always)]
     fn on_face_legs(
@@ -3551,34 +3537,43 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .count()
     }
 
-    /// How many legs a publish's walk of the faces hands out (`Self::on_faces`), and how many
-    /// faces that are up those legs reach between them.
+    /// How many legs a publish's walk of the faces hands out, and how many faces that are up
+    /// those legs reach between them: the walk `Self::on_faces` makes, or in a build that joins
+    /// groups the one `Self::on_publish_legs` makes, its groups' leg counted as a face's is.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn legs_of_a_publish(&self) -> (usize, usize) {
-        let (mut legs, mut reached) = (0, 0);
-        let _ = self.on_faces(false, |tx| {
-            legs += 1;
+        // Counted in cells: one leg is handed to the faces and to the groups' leg alike.
+        let (legs, reached) = (core::cell::Cell::new(0), core::cell::Cell::new(0));
+        let leg = |tx: LinkTx<'_, C>| -> Result<usize, FanoutError> {
+            legs.set(legs.get() + 1);
             if let Some(core) = self.live() {
-                reached += core
+                let up = core
                     .0
                     .up_wires_at()
                     .filter(|(_, wire)| tx.reaches(wire))
                     .count();
+                reached.set(reached.get() + up);
             }
             Ok(0)
-        });
-        (legs, reached)
+        };
+        #[cfg(feature = "group")]
+        let _ = self.on_publish_legs(false, leg, leg);
+        #[cfg(not(feature = "group"))]
+        let _ = self.on_faces(false, leg);
+        (legs.get(), reached.get())
     }
 
-    /// How many of a publish's legs reach the session's groups (`FaceTx::reaches_groups`).
+    /// How many of a publish's legs reach the session's groups (`FaceTx::reaches_groups`), the
+    /// faces' legs and the groups' own of the walk a publish makes (`Self::on_publish_legs`).
     #[cfg(all(test, feature = "std", feature = "group"))]
     pub(crate) fn group_legs_of_a_publish(&self) -> usize {
-        let mut legs = 0;
-        let _ = self.on_faces(false, |tx| {
-            legs += usize::from(tx.reaches_groups());
+        let legs = core::cell::Cell::new(0);
+        let leg = |tx: LinkTx<'_, C>| -> Result<usize, FanoutError> {
+            legs.set(legs.get() + usize::from(tx.reaches_groups()));
             Ok(0)
-        });
-        legs
+        };
+        let _ = self.on_publish_legs(false, leg, leg);
+        legs.get()
     }
 
     /// Whether the one link's send place is free now: a try of it finds no holder.
