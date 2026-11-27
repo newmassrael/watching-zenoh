@@ -1,0 +1,19 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"]
+decision = '''
+Show a program that steps its own session on its own cycle and time base,
+as the periodic-run contract promises, and have the package tests run it on
+Linux and Windows and hold the lines it prints, not only its exit code.
+'''
+changes = '''
+- capi-pico example periodic_step.c: zext_session_step on a program time base.
+- pico-c-program.sh and pico_windows_package.py --test hold expect-line output.
+- platform.yml capi-examples gains the step; verify_plan lists the program.
+'''
+verification = '''
+- periodic_step and periodic PASS on Linux, coop engine, nostd form.
+- pico_windows_package --selftest, release_proof_ledger_gate --check/--selftest pass.
+- python floor lint clean; Windows run is read from the hosted capi-examples job.
+'''
+carry = '''
+- none for this lane.
+'''
