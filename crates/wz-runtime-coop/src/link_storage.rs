@@ -821,14 +821,12 @@ impl<T: TxStore> TxLender<T> {
         if self.store.slot_len() <= headroom {
             return None;
         }
-        let slots = self.slots();
-        let lent = self.lent.get();
-        let free = (0..slots).find(|slot| lent & (1 << slot) == 0)?;
+        let free = self.first_free()?;
         // A slot of a pool the session's links share is there only while the pool has one free.
         if !self.store.claim(free) {
             return None;
         }
-        self.lent.set(lent | (1 << free));
+        self.lent.set(self.lent.get() | (1 << free));
         Some(TxSlotGrant {
             slot: TxSlot(free as u32),
             headroom,
@@ -853,9 +851,22 @@ impl<T: TxStore> TxLender<T> {
         self.store.spare()
     }
 
-    /// Whether a grant would find a slot of the store now ([`TxStore::claimable`]).
+    /// Whether the store has the memory for a slot now ([`TxStore::claimable`]): a fact of a pool
+    /// alone, which storage of the link's own answers yes to whichever of its slots are out.
     pub fn claimable(&self) -> bool {
         self.store.claimable()
+    }
+
+    /// Whether a slot would be lent now: one of the link's slots is not out, and its store has the
+    /// memory for it ([`Self::claimable`]), the two things [`Self::acquire`] asks.
+    pub fn has_free_slot(&self) -> bool {
+        self.first_free().is_some() && self.claimable()
+    }
+
+    /// The first of the link's slots that is not out, by the book alone.
+    fn first_free(&self) -> Option<usize> {
+        let lent = self.lent.get();
+        (0..self.slots()).find(|slot| lent & (1 << slot) == 0)
     }
 
     /// Take `slot` back for its send, and the bytes `start .. start + len` of it, which the session
@@ -1204,6 +1215,43 @@ mod tests {
             lender.acquire(8).is_none(),
             "a slot with no byte past its headroom is no slot"
         );
+    }
+
+    /// A link has a free slot while one of its own is not out, though its store, storage of its
+    /// own, says it may be asked whatever is out. Turned red by `has_free_slot` reading the store
+    /// alone (`claimable`), which answers yes with every slot out.
+    #[test]
+    fn a_link_has_a_free_slot_only_while_one_of_its_own_is_not_out() {
+        let lent = tables(1, 16, 1, 2, 8);
+        let (_rx, tx) = lent.claim().expect("the link's buffers");
+        let lender = TxLender::new(tx);
+        assert!(lender.has_free_slot(), "nothing is out");
+        let first = lender.acquire(2).expect("a first slot");
+        assert!(lender.has_free_slot(), "the second slot is not out");
+        let second = lender.acquire(2).expect("a second slot");
+        assert!(
+            lender.claimable(),
+            "CONTROL: storage of its own may be asked whatever is out"
+        );
+        assert!(!lender.has_free_slot(), "every slot is out");
+        lender.release(first.slot);
+        assert!(lender.has_free_slot(), "a slot back is free");
+        lender.release(second.slot);
+    }
+
+    /// A link of a pool has no free slot while the pool has none, though none of its own is out.
+    /// Turned red by `has_free_slot` reading the book alone, without the store's `claimable`.
+    #[cfg(feature = "session-unicast-accept")]
+    #[test]
+    fn a_link_of_a_pool_with_no_slot_left_has_no_free_slot() {
+        let tables = pooled(2, 1, 8);
+        let one = TxLender::new(tables.claim().expect("a place").1);
+        let other = TxLender::new(tables.claim().expect("a place").1);
+        assert!(other.has_free_slot(), "the pool's one slot is free");
+        let grant = one.acquire(2).expect("the pool's one slot");
+        assert!(!other.has_free_slot(), "the pool's one slot is out");
+        one.release(grant.slot);
+        assert!(other.has_free_slot(), "the slot is back in the pool");
     }
 
     /// The heap profile's forms read the buffers they hold, whichever the link took.

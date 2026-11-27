@@ -920,8 +920,9 @@ mod tx_half {
     /// send, a question of room and a service's write reach it, and a receive reaches it to write
     /// what is owed before the peer's end. A session whose read steps its link on one thread while
     /// another sends on it reaches it from both, so each reach holds it first: the read only by a
-    /// try, which leaves what is owed to the send that holds it, and a send by waiting for a holder
-    /// that never waits inside its hold.
+    /// try, which leaves what is owed to the send that holds it, and a send by waiting for the
+    /// holder. With `tx-stream-owed` no holder waits inside its hold; without it a send holds it
+    /// while it writes its frame whole, as zenoh-pico's send holds its transmit lock.
     pub(super) struct TxHalf<T: TxStore> {
         /// Whether a [`TxHold`] of the half stands.
         held: AtomicBool,
@@ -962,9 +963,10 @@ mod tx_half {
                 .map(|_| TxHold { half: self })
         }
 
-        /// The half, held, once a holder that has it now lets go: no holder waits for its stream
-        /// while it holds the half, so this waits for writes that do not wait. No reach of the
-        /// half is made from inside another's hold on the same thread: each step under a hold is
+        /// The half, held, once a holder that has it now lets go: with `tx-stream-owed` no holder
+        /// waits for its stream while it holds the half, so this waits for writes that do not
+        /// wait; without it this waits for a send to write its frame whole. No reach of the half
+        /// is made from inside another's hold on the same thread: each step under a hold is
         /// handed that hold.
         pub(super) fn hold(&self) -> TxHold<'_, T> {
             loop {
@@ -1001,7 +1003,9 @@ mod tx_half {
             self.lender.spare()
         }
 
-        /// Whether a grant would find a slot of the store now.
+        /// Whether the store has the memory for a slot now, as far as a pool goes: which slots
+        /// are out is the book's, read under a hold ([`TxLender::has_free_slot`]).
+        #[cfg(any(feature = "tx-stream-owed", feature = "session-unicast-accept"))]
         pub(super) fn claimable(&self) -> bool {
             self.lender.claimable()
         }
@@ -1683,15 +1687,33 @@ where
 
     // A link whose send writes each frame whole waits for its stream inside the send, as
     // zenoh-pico's does, so the stream is not asked here: the link has room while a slot is free
-    // for the frame, and one whose every slot is out with frames under way is congested at once.
+    // for the frame, and is congested at once while every slot is out, with the session or with a
+    // send under way, as zenoh-pico's one write buffer is not there for a message while another
+    // send holds its transmit lock. Which slots are out is the book of the send half, read under
+    // its hold; the store's `claimable` speaks for a pool alone. A send under way holds the half
+    // while it writes, so a droppable message only tries it, and is congested at once while it
+    // is held, as zenoh-pico's try of the lock drops one
+    // (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
+    // `return _z_mutex_try_lock(&ztc->_mutex_tx);`); one that may not be dropped waits for it,
+    // as zenoh-pico's lock does (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
+    // `_z_mutex_lock(&ztc->_mutex_tx);`).
     // A link that has ended answers room, so the send that follows reports the end.
     #[cfg(not(feature = "tx-stream-owed"))]
     #[cfg_attr(all(feature = "alloc", not(feature = "session-slot")), inline(never))]
-    fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
-        if self.lost.get().is_none() && !self.tx.claimable() {
-            return RoomAnswer::at_once(LinkRoom::Congested);
+    fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
+        if self.lost.get().is_some() {
+            return RoomAnswer::at_once(LinkRoom::Free);
         }
-        RoomAnswer::at_once(LinkRoom::Free)
+        let tx = if wait.is_droppable() {
+            self.tx.try_hold()
+        } else {
+            Some(self.tx.hold())
+        };
+        if tx.is_some_and(|held| held.lender().has_free_slot()) {
+            RoomAnswer::at_once(LinkRoom::Free)
+        } else {
+            RoomAnswer::at_once(LinkRoom::Congested)
+        }
     }
 
     // The link keeps no slot past the send that wrote its frame, so one that finds none free has
@@ -3655,6 +3677,33 @@ mod tests {
         );
         link.tx_slot_abort(one.slot);
         link.tx_slot_abort(two.slot);
+    }
+
+    /// Without `tx-stream-owed` a droppable message does not wait for a send that holds the send
+    /// half while it writes its frame whole: it is congested at once, the stream not asked, and
+    /// has room once that send lets go. Turned red by a question that answers without trying the
+    /// half (the store's `claimable` alone answers room here); one that waits for the half
+    /// whatever its message (`hold` in place of `try_hold`) never returns here.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    #[test]
+    fn a_droppable_question_without_owed_frames_does_not_wait_for_a_send_under_way() {
+        let link = trying();
+        let under_way = link.tx.hold();
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer::at_once(LinkRoom::Congested),
+            "a send holds the half"
+        );
+        drop(under_way);
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer::at_once(LinkRoom::Free),
+            "the send let go and no slot is out"
+        );
+        assert!(
+            link.socket.room_waits.borrow().is_empty(),
+            "the stream was never asked"
+        );
     }
 
     /// Without `tx-stream-owed` a write the stream fails ends the link with the failure kept, and
