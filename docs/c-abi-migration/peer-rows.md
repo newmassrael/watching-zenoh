@@ -589,6 +589,13 @@ another thread finds is what it finds today. Each decision is written before its
   form's (`Confined`), and its halves have the same one holder, so it places too: a count there
   separates nothing, and a form for the round alone would be a type that only names the build.
 
+- **R4's form per lock kind, confirmed (main, 2026-11-28).** The lock kind chooses whether a
+  link's halves are placed or counted: `Confined` and `ManyThreads` place them beside the
+  actions, the heap profile's `sync::Shared` counts them; the round, of the `Confined` kind,
+  places them as the read does. The pair's cell that held two halves counted apart
+  (`CellRc::halves`, `halves_in`, `halves_in_of`) has no holder once the halves lie in the
+  actions' cell, and goes with its tests: no code is kept for a test alone.
+
 ### 7.4 R2, landed
 
 - **One table of the faces' records** (`crates/wz-runtime-coop/src/faces.rs` @
@@ -683,6 +690,12 @@ another thread finds is what it finds today. Each decision is written before its
   `the_cells_of_each_kind_held_are_lent_past_the_kinds_with_none` over three tables; and the
   handshake, lease and close tests over several faces (`tests::listen`), every link's session
   now made so.
+- **The pair's cell, gone** (main's decision of 2026-11-28, section 7.3): `CellRc::halves`,
+  `halves_in`, `halves_in_of` and the split `into_halves` left `link_cells` with their two
+  tests (`halves_share_one_cell_until_the_last_handle_on_either`,
+  `halves_written_in_place_lie_where_they_were_written`); the heap's refusal test
+  (`a_cell_the_heap_refuses_hands_its_value_back`) holds a value and a claim, the pair no more.
+  A part of a value written in place (`CellRc::part_in_of`, R4's one maker) keeps its test.
 - **Not added: the cost gate's entry.** The step's guard would forbid a kernel behind a counted
   handle of its own in every coop case (`REMOVED`); its pattern is to be read off an explain
   report of the case before the step (the drop and the give-back of the pair's handles), which
@@ -693,6 +706,104 @@ another thread finds is what it finds today. Each decision is written before its
   flag and their padding fewer), and `SessionLinkActions`
   two words smaller (a `PlacedRef` is one word, a `CellRc` two). Receive Ir: unchanged, a
   half being reached through one load either way.
+
+### 7.6 R3 and R5, read against the code (2026-11-28)
+
+**What R3 finds in place.**
+
+- The rows of what the peers declare already lie in the session's shared pools, one pool a kind
+  (`crates/wz-session-core/src/row_pool.rs` @
+  `//! The rows the faces of a session keep what their peers write in: for a session of many faces one`),
+  each face's table a head of two `u16`s that chains its rows: the relation section 5.4 asks
+  for, and the per-face chain it keeps as the relation's index. What R3 can still take out is the
+  composition: a set of tables a place, lent per place, and the index of which face holds which.
+- A face's set holds besides what is owed to the face: the replies staged, the `Final`s, the
+  answers to its interests, the judge of its queries, its pending gets and their due
+  (`crates/wz-session-core/src/peer_tables.rs` @ `pub replies: ReplyStage<P>,`,
+  `pub finals: FinalStage<P>,`, `pub queries: QueryPeer,`;
+  `crates/wz-capi-coop/src/engine/registry.rs` @ `pub(super) gets: Gets,`). That is the row's
+  own state (section 5.1, section 6), which no relation replaces. "The registry's sets go" holds
+  for the sets as a second table beside the face table, not for what they hold, which becomes a
+  part of the face's row.
+
+**What R3's premise does not hold, and why R5 comes first.**
+
+1. heap-native's relation of owed tokens (`FaceToken`, `OwedTokens`) lies on the branch
+   `heap-native-1128` (`crates/wz-session-core/src/declare/liveliness_subscriber.rs` @
+   `pub struct FaceToken<P: Storage> {` there), which this branch does not hold. Generalising it is
+   a step on a tree that holds it, which a merge of that branch makes: the merge conflicts in one
+   place (`crates/wz-capi-coop/src/arena.rs`, `ENTITY_ROWS` under heap-native's `wz_lent` beside
+   this lane's six cell tables), and the `runtime-plan` gates this lane wrote since `99c88e8372`
+   (R2's lent face table, R4's cells) are to be read again against `wz_lent` and `wz_on_use`. The
+   merge is the main session's to order; it is not made here.
+2. The index of held sets says what the face table does not: a place that a departed face keeps
+   for a replaying listener (`crates/wz-capi-coop/src/engine/registry.rs` @
+   `const KEPT: FaceId = FaceId::MAX - 1;`), and the groups' places, which hold a set each
+   (`Core::join_groups` takes one by `add_face`, `hold_member_aliases` marks it) but no row of
+   the read slots' table. The holders become a mark of the face table's rows only once every place
+   is a row, the groups' among them: R5 before R3.
+3. Every entry of the session core's dispatch takes one peer's tables by their type
+   (`crates/wz-session-core/src/slot_observer.rs` @ `peers: &mut PeerTables<T>,`, twenty entries),
+   as the forms of one peer hold them (`session_slot`, `wz-session-mcu`'s `slot_group`). Rows
+   with the face as a column reach the dispatch as one face's view of the relations: a trait of the
+   session core over the peer's side, which those forms implement with their one peer's tables.
+
+**The order, decided.** R5a (below); then R3a, the holders as the face table's mark (a row's face
+id and its kept state; `ManyHolders`, `OneHolder` and the `Holders` trait go, and the other faces
+of a matching verdict are the table's rows but the caller's); then R3b on a tree that holds
+heap-native's relation: `FaceToken` generalised to the row of every kind a peer declares (face,
+id, key and the kind's own fields), the peer's side a trait of the session core, a face's chains
+the relations' index.
+
+**R5a, a group's read slot in the row of its place: what the code shows.**
+
+- A group's face already takes a place of the face table: its set in the registry and its room at
+  that place (`crates/wz-capi-coop/src/engine.rs` @ `self.rooms.hold(face.at(), on);`), and where
+  the session listens the plan lays a read slot's row for every place
+  (`ArenaPlan::lay_direct_faces` over `read_faces(self.session.peers.sets())`, the sets bounded
+  by `MAX_FACE_SETS`, which counts `GROUP_FACES`), a group's among them, left unused. The
+  group's read slot lies apart (`crates/wz-capi-coop/src/engine.rs` @
+  `group_pumps: Vec<Option<group::GroupPump<C>>>,`), by the group's index and not its place, grown
+  by a push at its first join (`Core::seat_group`), and taken out of the session and put back
+  around each step (`CoopEngine::step_groups`).
+- A join is the session state's (`Core::join_groups` at the open, `Core::poll_groups` again),
+  under the session's lock, and the session's state does not reach the read slots' table, which
+  lies in the engine beside it. A seat cannot be written into its row by the join.
+- A group's session is of one thread's types shared with its face in the session's state (F9's
+  `GroupShared`), stepped with the session's lock held and let go of around each record handed
+  out (`crates/wz-capi-coop/src/engine/direct.rs` @ `held: Some(self.core.lock()),`); the dial
+  role's slot, held across the steps (`CoopEngine::read_groups`), keeps a second read from
+  stepping the groups meanwhile.
+
+**R5a, decided.**
+
+- The read slots' table is lent wherever the session has a place past the dial role's, `listen`
+  or `group`; R2's inline row of one stays the build that has neither. A row's slot holds a
+  unicast pump or a group's session (`GroupPump`), built in the row at the group's first join and
+  rebuilt there at each join (`GroupPump::rejoin`), never moved.
+- A join owes its seat to the row, as a change of a row's site is owed (section 8.6): the
+  session's state keeps the seat in the group's face, and the holder of the row's slot takes it
+  and builds or rebuilds the session in the row before the row's next step. `group_pumps`, its
+  index by group, its growth and the take-out and put-back go; `seat_group` becomes the row's
+  payment of its owed seat.
+- A group row is stepped where it lies, its slot taken by a try after the dial role's as now, the
+  session's lock held as now; `DirectFaces::turned` reads the unicast rows alone (a group row is
+  never marked holding a face), and the session's end leaves each group row's session in its row.
+- Tests to land with it: `a_groups_session_lies_in_the_row_of_its_place` (a session of one
+  group steps the group from the row at its registry set's place, and a join again builds the
+  session in that row: red if the slot lies apart or moves); the plan's
+  `each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own` over a group build
+  without `listen` (a lent table counting the group's place); `tests::one_thread`'s count of
+  the places made (`group_places_made`: one a group across its joins); `tests::group` over the
+  row.
+- Bytes, expected: out, `seat_group`'s push and its `RawVec` growth, `step_groups`'s take and
+  put back and the vector's drop glue (api -1,000 to -2,000); in, for a group build without
+  `listen`, a lent table where an inline row was (a row of arena a place, a load of the table's
+  base a read). Receive Ir: a group's datagram is read as now; the client case is untouched.
+
+R5a is not landed here: it crosses the session's lock order, the arena plan and every
+`listen` gate of the read slots' table, a step of R2's and R4's size, which is left to a context
+that starts with it.
 
 ## 8. Where the cases end
 
