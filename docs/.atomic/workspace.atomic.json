@@ -8787,6 +8787,24 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4706": {
+      "decision_summary": "Decide a Push's form once, in the link's send: the engine handed the\nsession core a put that the core then wrote by one of three entry points;\nnow one body writes a head, a plain put or a publication from its parts.",
+      "changes_bullets": [
+        "session-core: PushParts and form(); send_push_at is the one body.",
+        "capi-coop: LinkLeg::send_to hands the parts in one call.",
+        "docs/c-abi-migration/arch-engine-own.md: steps E1 to E6."
+      ],
+      "verification_bullets": [
+        "size ledger: total 211,296 B vs main 211,840 (-544); Ir W/P flat.",
+        "session-core lent_frame_refusal 7/8 and lib 1794; capi-coop 284 pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
