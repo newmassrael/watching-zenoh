@@ -4404,7 +4404,7 @@ pub struct SendAs {
 }
 
 /// What a send that does not wait for a slot did
-/// ([`SessionLinkActions::try_send_plain_put_qos`]).
+/// ([`SessionLinkActions::try_send_push_qos`]).
 #[cfg(all(feature = "codec-push", feature = "alloc"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Probed {
@@ -4426,6 +4426,85 @@ impl Probed {
             #[cfg(feature = "transport-fragmentation")]
             Dispatched::Chain => Self::Chain,
         }
+    }
+}
+
+/// What a Push is written from ([`SessionLinkActions::send_push_qos`]): its kind, its payload,
+/// the metadata its publisher gave it, and the Put's head its publisher's plain way wrote at its
+/// declare ([`crate::lent_push::PutHead`]), if it has one. Which form the link writes the Push
+/// in is read from these parts here alone, so its sender hands them over and decides nothing of
+/// the wire.
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[derive(Clone, Copy)]
+pub struct PushParts<'a> {
+    /// A Put or a Del.
+    pub kind: crate::sample::SampleKind,
+    /// The payload; a Del carries none.
+    pub value: &'a [u8],
+    /// What the publisher gave the publication beside its payload.
+    pub meta: &'a crate::metadata::PushMetadata<'a>,
+    /// The Put's head its publisher's plain way wrote, which a plain Put on the key it names is
+    /// written from.
+    pub head: Option<crate::lent_push::PutHead>,
+}
+
+/// The form a Push is written in ([`PushParts::form`]).
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[derive(Clone, Copy)]
+enum PushForm<'a> {
+    /// A plain Put written from its publisher's head.
+    Head(&'a crate::lent_push::PutHead),
+    /// A plain Put written from its key, its QoS and its payload.
+    Plain,
+    /// A Put or a Del written with its metadata's fields.
+    #[cfg(feature = "transport-tx-lend")]
+    Publication(
+        crate::sample::SampleKind,
+        &'a crate::metadata::PushMetadata<'a>,
+    ),
+}
+
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+impl PushParts<'_> {
+    /// The form the Push is written in on `key`: from its publisher's head where the head names
+    /// `key` by its declaration alone and carries the Put's QoS byte, from its key and its QoS for
+    /// any other plain Put, and with its metadata's fields for the rest. `None` where the build
+    /// writes no publication from its parts (no `transport-tx-lend`), which its sender then sends
+    /// as the owned message.
+    fn form(&self, key: crate::named_key::NamedKey<'_>) -> Option<PushForm<'_>> {
+        if self.kind != crate::sample::SampleKind::Put || !self.meta.is_plain_apart_from_qos() {
+            #[cfg(feature = "transport-tx-lend")]
+            return Some(PushForm::Publication(self.kind, self.meta));
+            #[cfg(not(feature = "transport-tx-lend"))]
+            return None;
+        }
+        Some(match &self.head {
+            Some(head) if head.names(key.wire()) && head.qos() == push_qos(self.meta.qos) => {
+                PushForm::Head(head)
+            }
+            _ => PushForm::Plain,
+        })
+    }
+
+    /// Whether the Push is written from its publisher's head on `key`
+    /// ([`SessionLinkActions::send_push_qos`]).
+    pub fn takes_head(&self, key: crate::named_key::NamedKey<'_>) -> bool {
+        matches!(self.form(key), Some(PushForm::Head(_)))
+    }
+}
+
+/// The QoS byte a Push is sent with: the one its sender gave, and the default one where it gave
+/// none or the build carries none (`pubsub-qos`).
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+fn push_qos(qos: Option<crate::sample::QosLevel>) -> crate::sample::QosLevel {
+    #[cfg(feature = "pubsub-qos")]
+    {
+        qos.unwrap_or(crate::sample::QosLevel::DEFAULT)
+    }
+    #[cfg(not(feature = "pubsub-qos"))]
+    {
+        let _ = qos;
+        crate::sample::QosLevel::DEFAULT
     }
 }
 
@@ -16048,20 +16127,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.send_push_literal_qos(keyexpr_suffix, value, reliable, Priority::DEFAULT)
     }
 
-    /// A plain `Put` (no timestamp, encoding, source info or attachment), with the QoS the
-    /// publisher set, encoded from the caller's own text and bytes, on `key`: named on the wire
-    /// as the caller's table names it, its whole text what the counters and filters read. The wire of
-    /// [`crate::push_build::build_push_literal_with_meta`] with none of what that builder
-    /// makes to be encoded once and dropped (an owned keyexpr, an owned payload, the
-    /// extension chain, and the `Box` the network message travels in), which was the larger
-    /// part of what a publish cost before the frame reached a buffer.
+    /// The one send of a Push its sender writes from its own key, bytes and metadata, in the form
+    /// `form` names ([`PushParts`] reads it from a publication's parts), into the slot its link
+    /// lends: a plain Put from the head its publisher's plain way wrote at its declare
+    /// ([`crate::lent_push::PutHead`]), the head, the payload's length and the payload; any other
+    /// plain Put from its parts ([`crate::lent_push::write_plain_put`]); and a Put or a Del with
+    /// the metadata its publisher gave it from those fields
+    /// ([`crate::lent_push::write_publication`]). Each is the wire of the owned builders
+    /// ([`crate::push_build::build_push_literal_with_meta`] and its twins) with none of what they
+    /// make to be encoded once and dropped.
     ///
     /// The send is `Self::dispatch_network_message_at`'s, so the congestion control, the
-    /// batching window, the express flush and the fragmentation of an oversize payload are
-    /// the owned message's. `qos` is what [`crate::declare_ext_qos::read_push_qos`] reads off
-    /// the owned message's extension; a build without `pubsub-qos` writes none and reads the
-    /// DEFAULT, here too. The network counters (`transport-stats`) count it as they count the
-    /// owned message of the same parts (`crate::network_message::plain_put_stats_class`).
+    /// batching window, the express flush and the fragmentation of an oversize payload are the
+    /// owned message's. `qos` is what [`crate::declare_ext_qos::read_push_qos`] reads off the
+    /// owned message's extension; a build without `pubsub-qos` writes none and reads the DEFAULT,
+    /// here too. The network counters (`transport-stats`) count a plain Put as they count the
+    /// owned message of the same parts (`crate::network_message::plain_put_stats_class`), and
+    /// classify a publication by its owned message, so they leave that one to the owned send.
     ///
     /// `None`, with nothing sent, when this session rewrites what it originates: a session with
     /// a routing namespace prefixes the key of each message on its way out, which the caller's
@@ -16070,18 +16152,17 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::plain_put_lane_open`] is: a build that can carry a namespace keeps this send for
     /// every session that has none.
     ///
-    /// `head` is the Put's head its publisher's plain way wrote at its declare
-    /// ([`crate::lent_push::PutHead`]): the Put is written from it when it is the head of this
-    /// Put, the key's declaration alone with the same QoS byte, and from its parts otherwise.
+    /// One body for every form, so a sender that may hand any of them compiles one dispatch
+    /// around its writers and not one per form.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
-    fn send_plain_put_at(
+    fn send_push_at(
         &self,
         stage: DispatchStage,
         key: crate::named_key::NamedKey<'_>,
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
+        form: PushForm<'_>,
         send: SendAs,
-        head: Option<&crate::lent_push::PutHead>,
     ) -> Option<Result<Dispatched, SendWireError>> {
         let SendAs {
             reliable,
@@ -16091,29 +16172,39 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if self.rewrites_originated_keys() {
             return None;
         }
-        #[cfg(feature = "pubsub-qos")]
-        let qos = qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
-        #[cfg(not(feature = "pubsub-qos"))]
-        let qos = {
-            let _ = qos;
-            crate::sample::QosLevel::DEFAULT
-        };
+        let qos = push_qos(qos);
         let (mapping_id, suffix) = (key.wire().id(), key.wire().suffix());
-        let head = head.filter(|head| head.names(key.wire()) && head.qos() == qos);
         #[cfg(feature = "transport-stats")]
-        let class = self.stats_keys_of(
-            crate::network_message::named_put_stats_class(key.text(), value.len()),
-            || Some(key.text()),
-        );
+        let class = match form {
+            #[cfg(feature = "transport-tx-lend")]
+            PushForm::Publication(..) => return None,
+            PushForm::Head(_) | PushForm::Plain => self.stats_keys_of(
+                crate::network_message::named_put_stats_class(key.text(), value.len()),
+                || Some(key.text()),
+            ),
+        };
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
-        // The Put's own size, worked out from its parts: a Push has no size constant (its
-        // payload's bound is a u32 length), and the link lends a slot of this size, which the
-        // writer below fills in its one pass. A Put the writer refuses is zero, and the encoder
-        // below refuses it with the same error, which the dispatch reports.
-        let size = size_hint(|| match head {
-            Some(head) => head.len_with(value),
-            None => crate::lent_push::plain_put_len(mapping_id, suffix, value, qos),
+        let write = |sink: &mut crate::tx_buf::TxSink<'_>| match form {
+            PushForm::Head(head) => head.write(sink, value),
+            PushForm::Plain => {
+                crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos)
+            }
+            #[cfg(feature = "transport-tx-lend")]
+            PushForm::Publication(kind, meta) => {
+                crate::lent_push::write_publication(sink, mapping_id, suffix, kind, value, meta)
+            }
+        };
+        let encode = as_encoder(&write);
+        // The Push's own size, worked out from its parts where they say it: a Push has no size
+        // constant (its payload's bound is a u32 length), and the link lends a slot of this size,
+        // which the writer above fills in its one pass. A Push the writer refuses is zero, and the
+        // dispatch's own run of the writer refuses it with the same error, which it reports.
+        let size = size_hint(|| match form {
+            PushForm::Head(head) => head.len_with(value),
+            PushForm::Plain => crate::lent_push::plain_put_len(mapping_id, suffix, value, qos),
+            #[cfg(feature = "transport-tx-lend")]
+            PushForm::Publication(..) => crate::tx_buf::encoded_len(encode),
         });
         let sent = self.dispatch_network_message_at(
             stage,
@@ -16121,10 +16212,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             qos,
             size,
             class,
-            as_encoder(&|sink| match head {
-                Some(head) => head.write(sink, value),
-                None => crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos),
-            }),
+            encode,
         );
         let sent = match sent {
             Ok(sent) => sent,
@@ -16139,8 +16227,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         Some(Ok(sent))
     }
 
-    /// The caller's own send of a plain `Put` (`send_plain_put_at`, above, says what it writes):
-    /// the congestion control waits for room as the session's queue profile says.
+    /// The caller's own send of a plain `Put` (no timestamp, encoding, source info or
+    /// attachment) with the QoS the publisher set, on `key`: named on the wire as the caller's
+    /// table names it, its whole text what the counters and filters read, written from its parts
+    /// as `Self::send_push_at` says. The congestion control waits for room as the session's
+    /// queue profile says.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
     pub fn send_plain_put_qos(
         &self,
@@ -16149,171 +16240,65 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         qos: Option<crate::sample::QosLevel>,
         send: SendAs,
     ) -> Option<Result<(), SendWireError>> {
-        self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send, None)
+        self.send_push_at(DispatchStage::Fresh, key, value, qos, PushForm::Plain, send)
             .map(|sent| sent.map(|_| ()))
     }
 
-    /// [`Self::send_plain_put_qos`] of a Put whose head its publisher's plain way wrote at its
-    /// declare ([`crate::lent_push::PutHead`]), with the QoS byte the head carries: the Put is the
-    /// head, the payload's length and the payload, with nothing of it written again. A key the
-    /// head does not name is written from its parts, so the bytes on the wire are the same either
-    /// way.
+    /// The caller's own send of the Put or the Del `parts` hold, on `key`, in the one form its
+    /// parts are written in ([`PushParts::takes_head`] says when that is its publisher's head),
+    /// as `Self::send_push_at` says; the congestion control waits for room as the session's
+    /// queue profile says. `None`, with nothing sent, where the owned message is what goes out
+    /// ([`crate::lent_push::LENT_PUBLICATION_MAY_DECLINE`]), which the caller then sends.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
-    pub fn send_put_with_head(
+    pub fn send_push_qos(
         &self,
         key: crate::named_key::NamedKey<'_>,
-        value: &[u8],
-        head: &crate::lent_push::PutHead,
+        parts: PushParts<'_>,
         send: SendAs,
     ) -> Option<Result<(), SendWireError>> {
-        self.send_plain_put_at(
+        let form = parts.form(key)?;
+        self.send_push_at(
             DispatchStage::Fresh,
             key,
-            value,
-            Some(head.qos()),
+            parts.value,
+            parts.meta.qos,
+            form,
             send,
-            Some(head),
         )
         .map(|sent| sent.map(|_| ()))
     }
 
-    /// [`Self::send_plain_put_qos`] that does not wait for a slot: a link whose pool has none for
-    /// it now leaves it unsent and the caller's ([`Probed::NoRoom`]), to be sent again once one
-    /// is free, with nothing counted as dropped and nothing closed. A want of room the link's own
+    /// [`Self::send_push_qos`] that does not wait for a slot: a link whose pool has none for it
+    /// now leaves it unsent and the caller's ([`Probed::NoRoom`]), to be sent again once one is
+    /// free, with nothing counted as dropped and nothing closed. A want of room the link's own
     /// stack answers is waited for as the caller's own send waits.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
-    pub fn try_send_plain_put_qos(
+    pub fn try_send_push_qos(
         &self,
         key: crate::named_key::NamedKey<'_>,
-        value: &[u8],
-        qos: Option<crate::sample::QosLevel>,
+        parts: PushParts<'_>,
         send: SendAs,
     ) -> Option<Result<Probed, SendWireError>> {
-        let probed = self.send_plain_put_at(DispatchStage::Probe, key, value, qos, send, None);
+        let form = parts.form(key)?;
+        let probed = self.send_push_at(
+            DispatchStage::Probe,
+            key,
+            parts.value,
+            parts.meta.qos,
+            form,
+            send,
+        );
         // No room for a reason the link's own stack answers is the caller's own send, which waits
         // for that stack as the queue profile says; only a pool with no slot is left the caller's.
         let probed = match probed {
-            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => {
-                self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send, None)
-            }
-            other => other,
-        };
-        probed.map(|sent| sent.map(Probed::of))
-    }
-
-    /// A Put or a Del with the metadata its publisher gave it, written from the caller's own key,
-    /// bytes and metadata into the slot its link lends ([`crate::lent_push::write_publication`]):
-    /// the wire of [`crate::push_build::build_push_literal_with_meta`] and its aliased and Del
-    /// twins, with none of the owned message, its copies and the `Box` it travels in. The send is
-    /// [`Self::send_plain_put_qos`]'s, and the slot's length is the writer's own count
-    /// ([`crate::tx_buf::encoded_len`]), so the writer is compiled once.
-    ///
-    /// `None`, with nothing sent, where the owned message is what goes out
-    /// ([`crate::lent_push::LENT_PUBLICATION_MAY_DECLINE`]): a session that rewrites the keys it
-    /// originates, and a build whose network counters classify a message by its owned form.
-    #[cfg(all(
-        feature = "codec-push",
-        feature = "alloc",
-        feature = "transport-tx-lend"
-    ))]
-    fn send_publication_at(
-        &self,
-        stage: DispatchStage,
-        key: crate::named_key::NamedKey<'_>,
-        kind: crate::sample::SampleKind,
-        value: &[u8],
-        meta: &crate::metadata::PushMetadata,
-        send: SendAs,
-    ) -> Option<Result<Dispatched, SendWireError>> {
-        #[cfg(feature = "transport-stats")]
-        {
-            let _ = (stage, key, kind, value, meta, send);
-            None
-        }
-        #[cfg(not(feature = "transport-stats"))]
-        {
-            let SendAs {
-                reliable,
-                express,
-                priority,
-            } = send;
-            if self.rewrites_originated_keys() {
-                return None;
-            }
-            let (mapping_id, suffix) = (key.wire().id(), key.wire().suffix());
-            #[cfg(feature = "pubsub-qos")]
-            let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
-            #[cfg(not(feature = "pubsub-qos"))]
-            let qos = crate::sample::QosLevel::DEFAULT;
-            let write = |sink: &mut crate::tx_buf::TxSink<'_>| {
-                crate::lent_push::write_publication(sink, mapping_id, suffix, kind, value, meta)
-            };
-            let encode = as_encoder(&write);
-            // A publication the writer refuses counts as zero, and the dispatch's own run of the
-            // writer refuses it with the same error, which it reports.
-            let size = size_hint(|| crate::tx_buf::encoded_len(encode));
-            let sent = self.dispatch_network_message_at(
-                stage,
-                Conduit::new(priority, reliable),
-                qos,
-                size,
-                crate::stats::NetworkStatsClass::unread(),
-                encode,
-            );
-            let sent = match sent {
-                Ok(sent) => sent,
-                Err(error) => return Some(Err(error)),
-            };
-            #[cfg(feature = "transport-batching")]
-            if express {
-                self.flush_express(priority);
-            }
-            #[cfg(not(feature = "transport-batching"))]
-            let _ = express;
-            Some(Ok(sent))
-        }
-    }
-
-    /// The caller's own send of a publication (`send_publication_at`, above, says what it
-    /// writes).
-    #[cfg(all(
-        feature = "codec-push",
-        feature = "alloc",
-        feature = "transport-tx-lend"
-    ))]
-    pub fn send_publication_qos(
-        &self,
-        key: crate::named_key::NamedKey<'_>,
-        kind: crate::sample::SampleKind,
-        value: &[u8],
-        meta: &crate::metadata::PushMetadata,
-        send: SendAs,
-    ) -> Option<Result<(), SendWireError>> {
-        self.send_publication_at(DispatchStage::Fresh, key, kind, value, meta, send)
-            .map(|sent| sent.map(|_| ()))
-    }
-
-    /// [`Self::send_publication_qos`] that waits for nothing, as
-    /// [`Self::try_send_plain_put_qos`] is.
-    #[cfg(all(
-        feature = "codec-push",
-        feature = "alloc",
-        feature = "transport-tx-lend"
-    ))]
-    pub fn try_send_publication_qos(
-        &self,
-        key: crate::named_key::NamedKey<'_>,
-        kind: crate::sample::SampleKind,
-        value: &[u8],
-        meta: &crate::metadata::PushMetadata,
-        send: SendAs,
-    ) -> Option<Result<Probed, SendWireError>> {
-        let probed = self.send_publication_at(DispatchStage::Probe, key, kind, value, meta, send);
-        // As `try_send_plain_put_qos`: only a pool with no slot is left the caller's.
-        let probed = match probed {
-            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => {
-                self.send_publication_at(DispatchStage::Fresh, key, kind, value, meta, send)
-            }
+            Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => self.send_push_at(
+                DispatchStage::Fresh,
+                key,
+                parts.value,
+                parts.meta.qos,
+                form,
+                send,
+            ),
             other => other,
         };
         probed.map(|sent| sent.map(Probed::of))

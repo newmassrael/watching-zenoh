@@ -2116,54 +2116,31 @@ impl LinkLeg<'_> {
             head,
             planned,
         } = *self;
-        let wz_session_core::session_actions::SendAs {
-            reliable,
-            express,
-            priority,
-        } = send;
         #[cfg(not(feature = "listen"))]
         let _ = how;
         let mut outcome = Ok(0);
-        // Each link names the key as its own key-wire form says. A publication is written from
-        // the borrowed key, bytes and metadata into the slot its link lends, a plain Put by its
-        // own shorter writer, unless the session or the build leaves it to the owned send below.
-        // A planned put's key was named on every link when it was planned.
+        // Each link names the key as its own key-wire form says; a planned put's key was named on
+        // every link when it was planned. Which form the link writes the Push in (from the head,
+        // as a plain Put, as a publication with its fields) is its session's to read from the
+        // parts, into the slot its link lends, unless the session or the build leaves it to the
+        // owned send below.
         let key = if planned {
             named
         } else {
             key_on_link(actions, named)
         };
-        let plain = kind == SampleKind::Put && meta.is_plain_apart_from_qos();
+        let parts = wz_session_core::session_actions::PushParts {
+            kind,
+            value: payload,
+            meta,
+            head,
+        };
         // A send that may not wait is told apart from one whose link has room: one with none
         // ends the fan-out at this face, and a chain of fragments, which such a send does not
         // begin, is sent as the caller's own send.
         #[cfg(feature = "listen")]
         if how == FaceSend::Probe {
-            let probed = if plain {
-                actions.try_send_plain_put_qos(
-                    key,
-                    payload,
-                    meta.qos,
-                    wz_session_core::session_actions::SendAs {
-                        reliable,
-                        express,
-                        priority,
-                    },
-                )
-            } else {
-                actions.try_send_publication_qos(
-                    key,
-                    kind,
-                    payload,
-                    meta,
-                    wz_session_core::session_actions::SendAs {
-                        reliable,
-                        express,
-                        priority,
-                    },
-                )
-            };
-            let answer = match probed {
+            let answer = match actions.try_send_push_qos(key, parts, send) {
                 Some(Ok(Probed::NoRoom)) => ProbeAnswer::NoRoom,
                 Some(Ok(Probed::Sent)) => ProbeAnswer::Sent,
                 Some(Err(error)) => {
@@ -2181,38 +2158,17 @@ impl LinkLeg<'_> {
                 AfterProbe::SendAsOwn => {}
             }
         }
-        // A link that names the key by the declaration the head was written for is sent the head,
-        // the payload's length and the payload; any other is sent the Put's parts.
-        let head = head.filter(|head| plain && (planned || head.names(key.wire())));
-        let lent = if plain {
-            let send = wz_session_core::session_actions::SendAs {
-                reliable,
-                express,
-                priority,
-            };
-            match head {
-                Some(head) => actions.send_put_with_head(key, payload, &head, send),
-                None => actions.send_plain_put_qos(key, payload, meta.qos, send),
-            }
-        } else {
-            actions.send_publication_qos(
-                key,
-                kind,
-                payload,
-                meta,
-                wz_session_core::session_actions::SendAs {
-                    reliable,
-                    express,
-                    priority,
-                },
-            )
-        };
-        let sent = if let Some(lent) = lent {
+        let sent = if let Some(lent) = actions.send_push_qos(key, parts, send) {
             leg_outcome(lent)
         } else if !lent_push::LENT_PUBLICATION_MAY_DECLINE {
             // No send of this build declines one, so the owned builders are not linked.
             Err(FanoutError::ExceedsCapacity)
         } else {
+            let wz_session_core::session_actions::SendAs {
+                reliable,
+                express,
+                priority,
+            } = send;
             let suffix = key.wire().suffix();
             let push = match (kind, key.wire().id()) {
                 (SampleKind::Put, 0) => {
@@ -2245,7 +2201,7 @@ impl LinkLeg<'_> {
             outcome,
             stop: false,
             #[cfg(test)]
-            planned: head.is_some(),
+            planned: parts.takes_head(key),
         }
     }
 }

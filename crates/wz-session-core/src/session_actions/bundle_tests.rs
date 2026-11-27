@@ -1214,10 +1214,30 @@ mod lent_frame_refusal {
         );
     }
 
+    /// The one frame a fresh session sends for `put`.
+    fn one_frame(
+        put: &dyn Fn(
+            &SessionLinkActions<PlainRuntime, StillClock>,
+        ) -> Option<Result<(), SendWireError>>,
+    ) -> Vec<u8> {
+        let link = DryLink::of_width(512, true);
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
+        actions.enter_established();
+        assert_eq!(put(&actions), Some(Ok(())));
+        let mut sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 1, "one frame");
+        sent.remove(0)
+    }
+
     /// A put written from the head its publisher's plain way made leaves as the frame its parts
-    /// make, for a QoS byte that rides and the one that does not; and a head that does not name the
-    /// key (another declaration) is not written, so the frame is still the key's own. Turned red by
-    /// a head written for a key it does not name, or by a head whose bytes differ from the writer's.
+    /// make, for a QoS byte that rides and the one that does not, and its parts' writer does not
+    /// run; a head that does not name the key (another declaration) is not written, so the frame
+    /// is still the key's own, written from its parts. Turned red by a head written for a key it
+    /// does not name, by a head whose bytes differ from the writer's, or by a head the send is
+    /// handed and does not write.
     #[test]
     fn a_put_written_from_its_head_is_the_frame_its_parts_make() {
         let send = super::super::SendAs {
@@ -1231,44 +1251,126 @@ mod lent_frame_refusal {
             crate::named_key::Prefix::of(id, "home/head"),
         )
         .expect("a key under its declaration");
-        // The one frame a fresh session sends for `put`.
-        let frame = |put: &dyn Fn(
-            &SessionLinkActions<PlainRuntime, StillClock>,
-        ) -> Option<Result<(), SendWireError>>| {
-            let link = DryLink::of_width(512, true);
-            let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
-            let actions = SessionLinkActions::<PlainRuntime, StillClock>::new_generic(
-                sink,
-                params(),
-                StillClock,
-            )
-            .expect("the heap has room");
-            actions.enter_established();
-            assert_eq!(put(&actions), Some(Ok(())));
-            let mut sent = link.sent.lock().expect("the sends");
-            assert_eq!(sent.len(), 1, "one frame");
-            sent.remove(0)
-        };
+        let runs = crate::lent_push::plain_writer_runs;
         for qos in [
             crate::sample::QosLevel::DEFAULT,
             crate::sample::QosLevel::from_raw(0x1a),
         ] {
-            let parts = frame(&|actions| actions.send_plain_put_qos(key, b"v", Some(qos), send));
+            let meta = crate::metadata::PushMetadata {
+                qos: Some(qos),
+                ..Default::default()
+            };
+            let with_head = |head| super::super::PushParts {
+                kind: crate::sample::SampleKind::Put,
+                value: b"v",
+                meta: &meta,
+                head,
+            };
+            let parts =
+                one_frame(&|actions| actions.send_plain_put_qos(key, b"v", Some(qos), send));
             let own = crate::lent_push::PutHead::new(7, qos).expect("a declared id");
+            assert!(with_head(Some(own)).takes_head(key), "qos {:#04x}", qos.raw);
+            let before = runs();
             assert_eq!(
-                frame(&|actions| actions.send_put_with_head(key, b"v", &own, send)),
+                one_frame(&|actions| actions.send_push_qos(key, with_head(Some(own)), send)),
                 parts,
                 "the head of the key, qos {:#04x}",
                 qos.raw
             );
+            assert_eq!(runs(), before, "the head is written, not the parts");
             let other = crate::lent_push::PutHead::new(8, qos).expect("a declared id");
+            assert!(
+                !with_head(Some(other)).takes_head(key),
+                "qos {:#04x}",
+                qos.raw
+            );
+            let before = runs();
             assert_eq!(
-                frame(&|actions| actions.send_put_with_head(key, b"v", &other, send)),
+                one_frame(&|actions| actions.send_push_qos(key, with_head(Some(other)), send)),
                 parts,
                 "the head of another declaration is not written, qos {:#04x}",
                 qos.raw
             );
+            assert!(runs() > before, "the parts are written in its place");
         }
+    }
+
+    /// A head whose QoS byte is not the put's is not written: the put leaves with its own QoS, as
+    /// its parts make it. Turned red by a send that writes the head of the key whatever QoS the
+    /// put carries.
+    #[cfg(feature = "pubsub-qos")]
+    #[test]
+    fn a_head_of_another_qos_is_not_written() {
+        let send = super::super::SendAs {
+            reliable: true,
+            express: false,
+            priority: Priority::DEFAULT,
+        };
+        let id = crate::wire_key::MappedId::new(7).expect("not zero");
+        let key = crate::named_key::NamedKey::under(
+            "home/head",
+            crate::named_key::Prefix::of(id, "home/head"),
+        )
+        .expect("a key under its declaration");
+        let qos = crate::sample::QosLevel::from_raw(0x1a);
+        let meta = crate::metadata::PushMetadata {
+            qos: Some(qos),
+            ..Default::default()
+        };
+        let default_head = crate::lent_push::PutHead::new(7, crate::sample::QosLevel::DEFAULT)
+            .expect("a declared id");
+        let push = super::super::PushParts {
+            kind: crate::sample::SampleKind::Put,
+            value: b"v",
+            meta: &meta,
+            head: Some(default_head),
+        };
+        assert!(!push.takes_head(key), "the head carries the default QoS");
+        assert_eq!(
+            one_frame(&|actions| actions.send_push_qos(key, push, send)),
+            one_frame(&|actions| actions.send_plain_put_qos(key, b"v", Some(qos), send)),
+            "the put carries its own QoS"
+        );
+    }
+
+    /// A Del handed its publisher's head is written as a Del from its parts, not as the Put the
+    /// head begins. Turned red by a send that takes the head for a Push that is no plain Put. The
+    /// network counters leave a publication to the owned send, which this link does not take.
+    #[cfg(not(feature = "transport-stats"))]
+    #[test]
+    fn a_del_is_not_written_from_a_puts_head() {
+        let send = super::super::SendAs {
+            reliable: true,
+            express: false,
+            priority: Priority::DEFAULT,
+        };
+        let id = crate::wire_key::MappedId::new(7).expect("not zero");
+        let key = crate::named_key::NamedKey::under(
+            "home/head",
+            crate::named_key::Prefix::of(id, "home/head"),
+        )
+        .expect("a key under its declaration");
+        let none = crate::metadata::PushMetadata::default();
+        let head = crate::lent_push::PutHead::new(7, crate::sample::QosLevel::DEFAULT)
+            .expect("a declared id");
+        let push = |kind| super::super::PushParts {
+            kind,
+            value: b"",
+            meta: &none,
+            head: Some(head),
+        };
+        let del = push(crate::sample::SampleKind::Del);
+        assert!(!del.takes_head(key), "a Del is no plain Put");
+        assert!(push(crate::sample::SampleKind::Put).takes_head(key));
+        assert_ne!(
+            one_frame(&|actions| actions.send_push_qos(key, del, send)),
+            one_frame(&|actions| actions.send_push_qos(
+                key,
+                push(crate::sample::SampleKind::Put),
+                send
+            )),
+            "the Del is not the Put its head begins"
+        );
     }
 
     /// A frame sent whole asks its link for the whole batch budget, as a window does: nothing

@@ -602,6 +602,13 @@ std::thread_local! {
     static WRITER_RUNS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
+/// How many times [`write_plain_put`] ran on this thread, for a test of a send outside this
+/// module.
+#[cfg(all(test, feature = "storage-profile", feature = "alloc"))]
+pub(crate) fn plain_writer_runs() -> usize {
+    WRITER_RUNS.with(core::cell::Cell::get)
+}
+
 /// The fixed fields of a Push [`write_push`] gathers before it hands them to its sink in one
 /// write: a sink of its own, so a field is written by the codec's own writer (`write_vle_u64`
 /// byte for byte), and of a room past the longest head and tail (19 and 13 bytes), which it
