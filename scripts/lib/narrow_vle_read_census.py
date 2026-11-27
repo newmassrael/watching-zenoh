@@ -310,9 +310,9 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
     # declared extension's body to judge that the body holds it, as upstream's codec reads it.
     "crates/wz-session-core/src/ext_admit.rs::read_wire_expr::": (
         "REFUSE",
-        "an undeclaration's scope, `Zenoh080Bounded::<ExprId>` upstream "
-        "(`commons/zenoh-codec/src/core/wire_expr.rs` @ "
-        "`let scope: ExprId = zodec.read(&mut *reader)?;`), as `walk_wireexpr`'s.",
+        "an undeclaration's scope, `Zenoh080Bounded::<ExprId>` upstream, as "
+        "`walk_wireexpr`'s "
+        "(`commons/zenoh-codec/src/core/wire_expr.rs` @ `let scope: ExprId = zodec.read(&mut *reader)?;`).",
     ),
     "crates/wz-session-core/src/ext_admit.rs::read_encoding::": (
         "REFUSE",
@@ -328,8 +328,7 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
     "crates/wz-session-core/src/network_message/push_read.rs::read_key::": (
         "REFUSE",
         "a Push key's scope, `Zenoh080Bounded::<ExprId>` upstream "
-        "(`commons/zenoh-codec/src/core/wire_expr.rs` @ "
-        "`let scope: ExprId = zodec.read(&mut *reader)?;`).",
+        "(`commons/zenoh-codec/src/core/wire_expr.rs` @ `let scope: ExprId = zodec.read(&mut *reader)?;`).",
     ),
     "crates/wz-session-core/src/network_message/push_read.rs::read_put::": (
         "REFUSE",
