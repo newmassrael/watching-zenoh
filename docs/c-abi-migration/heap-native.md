@@ -6,11 +6,17 @@ memory are facts of `Storage`), N2 (the policy `OnUse`, its column `FirstUse` an
 `HeapKey` over a `KeyBudget`, held to the same contract) and N3a (the session's tables made
 counted on `OnUse`), then N3b (every other table a face and the application hold, counted on
 `OnUse`, and the two places where a table of that policy is asked for room before the push that
-takes its memory). The owner's ruling of 2026-11-27 chose the form of section 6 (c), per
-preset: the cooperative engine's on-use form (N3c to N3e), the doors' (N4) and the switch with its
-guards (section 9) are designed here and not written yet, because the engine has no form on
-`OnUse` to select and a switch that cannot be built is not declared; section 11 reads what N3c has
-to give a home to, and why it is the next step and not a part of N3b. Nothing here was built or
+takes its memory), then the first step of N3c (section 11, 1): the cooperative engine on `OnUse`
+under its feature `tables-on-use`, its registry made by value and its keys counted against a
+`KeyBudget`, guarded by the session's lock as the key arena is; then its second step (section
+11, 2): the places of the state's own values and the key budget in a state of the session's own,
+one allocation the open takes from the allocator apart from its arena, `region.rs` no longer in
+the form; and that step's second half: the state's plain tables and the round's tables counted on
+`OnUse`, their policy the one the engine's calls name, each refusal of a first row answered as a
+value (section 11, the audit). The owner's ruling of 2026-11-27 chose the form of section 6 (c),
+per preset: the rest of the cooperative engine's on-use form (N3c's step 3, N3d, N3e), the doors' (N4) and the switch with its guards (section 9) are designed here and not
+written yet, because a switch that cannot be built is not declared; section 11 reads what N3c has to give a home to, and why it is the next step and not
+a part of N3b. Nothing here was built or
 measured by this lane: a byte figure is either **read** from the size ledger's explain document or
 from `nm -S` of the case's library named below, or an **estimate** read off the code; a count of
 instructions is a reading of the code, not a run. Line references are to the tree this lane
@@ -440,9 +446,174 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   (`stage_parts`, `make_room`); only a refusing allocator reaches them, and the crate's tests run
   on the process's.
 
+### 7.5 N3c, step 1
+
+- `on_use::tests` in the session core, four more, two of them in a build with debug assertions
+  alone: `a_value_written_in_place_takes_the_rows_and_holds_the_count` (red if
+  `FirstUse::push_in_place` writes before it makes its room, `room_for`);
+  `a_key_let_go_of_outside_its_budgets_lock_fails` and
+  `a_key_let_go_of_beside_the_thread_that_holds_its_budgets_lock_fails` (red if `HeapKey`'s drop
+  does not ask its budget's guard, or the guard reads the owner's mark and not its answer for the
+  calling thread); `keys_under_their_budgets_lock_or_with_the_owner_alone_pass`, their control (red
+  if the guard fails a key touched under the lock, or a budget its owner holds alone is checked).
+- With `tables-on-use`, every test whose path names `on_use`:
+  `region::tests::an_on_use_region_holds_the_sessions_key_budget` (red if `StateRegion::place`
+  writes a budget of other bytes than the limits' `KEY_ARENA_BYTES`, or hands back a handle of no
+  budget; step 2 moves it with the budget, 7.6); `engine::registry::counted::tests::an_on_use_registry_holds_the_plans_rows_and_has_taken_none`
+  (red if an application's table is made of the build's bound, `SlotMap::new` for `counted`, or
+  takes its rows when made, if the registry holds no set, or, without `queryable`, if the set's
+  peer tables are not counted); `tests::on_use::`, three: a declaration's key counted against the
+  budget as its arena block and given back with its last hold (red if the budget's bytes are not
+  the limits', or a key is not counted or not given back); an object's key a copy of its own, held,
+  shared and let go of through the engine's `SessionKeys` and refused past the session's
+  `MAX_KEYEXPR_BYTES` (red if a hold is counted against the budget, is not a copy, or is kept past
+  the bound); and a subscriber declared after the open told to the router and handed what it pushes
+  (red if the subscribers' table refuses its first row).
+- At the build: `crates/wz-capi-coop/src/lib.rs` asserts `RowPolicy::TAKEN` is `AtOpen` outside
+  the on-use form and `AtFirstUse` in it (9.2, 1). Beside `runtime-plan` the feature yields (9.1):
+  every item of the on-use form outside `region.rs` (which a build with `runtime-plan` does not
+  compile) reads the feature beside `not(feature = "runtime-plan")`, and its twin the negation of
+  both, so a build of both, `--all-features` among them, is the form that plans at the open, item
+  for item. `form_precedence_tests::a_build_of_both_forms_lays_its_tables_out_at_the_open`, in that
+  build alone, holds it (red if a build of both names `OnUse`, or any policy but `Lent`, as its
+  `RowPolicy`, the `runtime-plan` arm of `lib.rs` read only without `tables-on-use`).
+  What holds the key budget asserts it has no drop, which that holder's drop would leave undone
+  (`region.rs` at this step, `engine/state_places.rs` from step 2).
+- Not tested: the open refused when the allocator has no room for the dial face's set
+  (`ArenaRefused::NoMemory`); only a refusing allocator reaches it.
+
+### 7.6 N3c, step 2
+
+- With `tables-on-use`, the tests whose path names `on_use` are six, one of step 1's replaced and
+  one added: `engine::state_places::tests::an_on_use_state_holds_the_sessions_key_budget_and_its_places`,
+  in place of the region's (red if `OwnState::place` writes a budget of other bytes than the
+  limits' `KEY_ARENA_BYTES` or hands back a handle of no budget, or if `OwnState::places_at`
+  projects anywhere but the state); and
+  `tests::on_use::an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart`
+  (red if `lend_session` lays the state at the head of the arena's block again,
+  `SessionArena::reserve_after`, which asks the session's memory for the state's span too, or, in
+  a build with `query`, `queryable` or `connectivity`, if a plane is written anywhere but the
+  state).
+- `tests::arena::a_sessions_planes_lie_in_its_own_arena` reads `CoopEngine::state_holds`
+  (`region_holds` before) in both forms without `runtime-plan`: the region's in the crate's
+  default suite, the state's in an on-use build.
+- At the build: `region.rs`, `tests/region.rs`, `SessionArena::reserve_after` and its test
+  compile only without both features; `SessionArena::reserve` is the on-use form's too. The
+  engine names the state by `StateLayout` and its holder by `StateHold` (`StateRegion` in a
+  `RegionBlock`, or `OwnState` in an `OwnBlock`), so the region's form calls the bodies it
+  called before.
+- Not tested: the open refused when the allocator has no room for the state
+  (`OwnBlock::take`, `ArenaRefused::NoMemory`); only a refusing allocator reaches it.
+
+### 7.7 N3c, step 2, second half
+
+- The policy: the session core's planes and round read the policy of their tables from the
+  engine's calls, `RoundCalls::TablePolicy` (`crates/wz-session-core/src/round.rs`).
+  `EndedLegs<P>` and `FinalHolds<P>` (`HeldFinals<P>`, `RefusedFinals<P>`) take it as a parameter;
+  `LegRows`, the get plane's `HeldReplies<u64, _>` and `RoundRows` (whose records are
+  `RecordForm::Records<T, P>`) read it. The engine names it once, `StatePolicy`
+  (`crates/wz-capi-coop/src/lib.rs`): `Lent` in every form but the on-use one, where the open
+  lends or the region places those rows as before, and `OnUse` there; its note of each pending
+  leg (`Rows`, `engine.rs`) follows it. In the on-use form the state's places keep none of those
+  rows: `PlacedTables::counted` and `RoundRows::counted` count each table from what the plan
+  resolved, and each takes its rows at its first row.
+- The two defects. `EndedLegs::note` pushes where nothing can answer a refusal (the drop of the
+  leg's entry), and on `OnUse` its first push asked the allocator there: the end was lost and the
+  leg's callback never let go of. `GetPlane::open_leg` now has the ends take their rows before it
+  keeps a leg, and a refusal is `None`, which the engine answers as a get no row holds
+  (`hold_leg`'s `LegHeld::NoRoom`, a liveliness snapshot's `LegTurn::Skipped`); the push left in
+  `note` can no longer be refused (its rows taken at the open and never given back, the ends never
+  more than the legs' rows, which `GetPlane::init_at` checks in a debug build), and its debug
+  assertion states that. `FinalHolds::admit` dropped a refusal its list could not note
+  (`let _ =`): it now answers `Admitted` (`Held`, `Refused`, `Unnoted`), and on a first-use
+  policy has the list take its rows before it asks the first hold (`rows_for_refusals`), so a
+  refusal after one request was held is always noted; `Unnoted` (the allocator refused the list's
+  rows, or the list is past its count) is counted and begins no call (`QueryPlane::admit_call`),
+  and with nothing noted its dispatch owes its Final as one that reached no queryable.
+- The round: an offer that found room by count has its records' and its callbacks' rows taken
+  (`Round::take_rows`) before it writes, and a refusal of the allocator is counted as a record with
+  a part that found no place (`RoundCounts::unplaced`), not as a record the gate let through past
+  its room. Each arm added reads `Storage::TAKEN` as a constant and folds away on `Lent` and
+  `Region`.
+- Tests, in the session core's unit tests, which run on an allocator that refuses every
+  allocation of a thread that asks it to (`crates/wz-session-core/src/test_heap.rs`, `refused`):
+  - `get_plane::tests::a_leg_whose_ends_rows_the_heap_refuses_is_refused_at_its_open` (red if
+    `open_leg` keeps a leg before the ends took their rows, `EndedLegs::make_room` left out) and
+    `a_legs_end_finds_the_row_its_open_had_taken_whatever_the_heap_holds` (red the same way: the
+    end then asks the heap at the entry's drop); `an_end_past_the_rows_is_a_defect` reads the
+    assertion's new words.
+  - `query_plane::tests::a_refusal_with_no_row_to_be_noted_in_is_unnoted_and_owes_its_final`
+    (count 0; red if `admit` answers a refusal it could not note as noted),
+    `a_refusal_finds_the_row_the_first_hold_had_taken_whatever_the_heap_holds` (red if
+    `rows_for_refusals` is left out of `admit`),
+    `a_request_whose_refusals_rows_the_heap_refuses_is_refused_unnoted` (red if a request is held
+    while its refusal could not be noted, or the heap's refusal is answered as noted) and
+    `a_query_refused_unnoted_begins_no_call_and_is_counted` (red if `admit_call` begins a call for
+    `Unnoted` or counts none); the three tests that read `admit` read `Admitted`.
+  - `round::tests::a_round_counted_on_use_takes_its_rows_at_its_first_record` (red if
+    `RoundRows::counted` makes tables that take their rows when made, or holds the build's bound in
+    place of the count) and `a_record_whose_rows_the_heap_refuses_is_counted_unplaced` (red if an
+    offer writes before `Round::take_rows`: the record is then lost uncounted, or a debug build
+    stops at the round's check of its room).
+  - `on_use::tests::what_the_heap_has_no_room_for_is_handed_back_and_takes_nothing` (red if a
+    refused `take_memory` is answered as rows taken, or a refused key's bytes stay counted).
+  - In the engine's on-use form with `query` or `queryable`,
+    `engine::state_places::tests::the_plain_tables_on_use_hold_the_plans_counts_and_no_row` (red
+    if a table is counted with the build's bound in place of the plan's count, or takes its rows
+    when made); the region's test of its places compiles in the region's form alone.
+- Not tested: the engine's answers to a leg refused at its open and to an unnoted query on
+  `OnUse` end to end (the session core's tests reach both values; the engine's arms are the ones a
+  full table takes); and the round in the engine's on-use form, which only a build with
+  `WZ_COOP_VALUE_LOCKS=off` or an image without host locks compiles (`wz_round`).
+- D12: every arm added reads the policy's `TAKEN` as a constant or is a type the D12 forms name
+  as `Lent`, as before; `admit`'s answer is an enum whose two refusals take one arm in
+  `admit_call`. The D12 cases' bytes are not expected to move: C1cs's reading of them is the check,
+  and a move there is a finding.
+
 ## 8. What the main session runs
 
-Nothing of N1, N2, N3a or N3b was built or run by this lane.
+Nothing of N1, N2, N3a, N3b or N3c's first two steps was built or run by this lane.
+
+- N3c, step 2, second half (7.7). The session core with its default features: `cargo test -p
+  wz-session-core --lib get_plane::tests` 16 (14 before), `--lib query_plane::tests` 16 (12
+  before), `--lib round::tests` two more than before (31 in a debug build), `--lib on_use::tests`
+  15 in a debug build (13 without debug assertions); `cargo clippy -p wz-session-core --all-targets
+  -- -D warnings`, and the same with `--no-default-features`, which compiles neither the planes nor
+  `test_heap`. The engine's on-use legs: `cargo test -p wz-capi-coop --features tables-on-use --lib
+  on_use` 6 (the test added needs `query` or `queryable`), the same with `--features
+  liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use` 7, and `cargo clippy` of
+  both legs with `--all-targets -- -D warnings`; the round of that form, `WZ_COOP_VALUE_LOCKS=off
+  cargo clippy -p wz-capi-coop --features query,queryable,tables-on-use --all-targets -- -D
+  warnings`. The D12 forms as for step 2's first half below (`StatePolicy` is `Lent` there,
+  `--all-features` among them), and `python3 scripts/lib/logic_census_coverage_gate.py`
+  (`test_heap.rs` has its row in `files.md`).
+
+- N3c, step 2, the D12 form, whose behaviour and bytes it does not change (the region's form
+  calls the same bodies through `StateLayout` and `StateHold`): the crate's suites of
+  `wz-capi-coop` and `wz-capi-pico` as before, `tests::arena::a_sessions_planes_lie_in_its_own_arena`
+  reading `state_holds`. The on-use form: `cargo test -p wz-capi-coop --features tables-on-use
+  --lib on_use` 6, the same with `--features
+  liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use` 6 (7.6); `cargo clippy
+  -p wz-capi-coop --features tables-on-use --all-targets -- -D warnings` and the same with the
+  second leg's features; the client library in that form, `cargo build -p wz-capi-pico
+  --no-default-features --features os-host,link-udp,wz-capi-coop/tables-on-use`, whose `nm` should
+  name no `wz_capi_coop::region` body. The precedence leg and `--all-features` as for step 1 below.
+
+- N3c, step 1, the D12 form, whose behaviour and bytes it does not change:
+  `cargo test -p wz-session-core --lib on_use::tests` 14 in a debug build (10 before, four added;
+  12 in a build without debug assertions), and the crate's suites of `wz-capi-coop` and
+  `wz-capi-pico` as before. The on-use form: `cargo test -p wz-capi-coop --features tables-on-use
+  --lib on_use` 5, the same with `--features
+  liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use` 5 (the two legs of
+  `scripts/lib/nondefault-tests-gate.sh`); `cargo clippy -p wz-capi-coop --features tables-on-use
+  --all-targets -- -D warnings`; the client library in that form, `cargo build -p wz-capi-pico
+  --no-default-features --features os-host,link-udp,wz-capi-coop/tables-on-use`. The precedence of
+  the two forms (9.1): `cargo test -p wz-capi-coop --features runtime-plan,tables-on-use --lib
+  form_precedence_tests` 1 (a leg of that gate beside the two above), and the two gates that
+  build the crate with `--all-features` again: `cargo clippy -p wz-capi-coop --all-features
+  --all-targets -- -D warnings` (pre-push gate 7, `scripts/lib/nondefault-features-gate.sh`)
+  and the census of `nondefault-tests-gate.sh --census` (Layer C1cn), whose only new test of the
+  crate is that one. The client library beside `peer` builds, as the peer's D12 form.
 
 - N3b, with the crate's default features: `cargo test -p wz-session-core --lib reply_stage::tests`
   51 (32 before: fifteen `on_first_use` bodies and four tests of the counted stages added);
@@ -520,15 +691,23 @@ features = ["tables-on-use"]
   (`wz_config.py` `engine_features`), and `wz_config.pico_reference` leaves `tables-on-use` out of
   the reference's switches as it leaves `os-host` out.
 - Cargo: `wz-capi-pico` `tables-on-use = ["wz-capi-coop?/tables-on-use"]`, `wz-capi-coop`
-  `tables-on-use = []`, which makes `RowPolicy` `OnUse` and compiles the on-use open (N3c). Unified
-  into a graph it changes the moment of every session there, so the C library, a cdylib built by
-  itself, is the only graph that names it, and the guards below read what it resolved to.
+  `tables-on-use = []`, which makes `RowPolicy` `OnUse` and compiles the on-use open (N3c) where
+  `runtime-plan` is off. Features add (The Cargo Book, Features: a feature turns code on and never
+  off), so two forms are not written to exclude each other; where both are named, one wins:
+  `runtime-plan`, the session laid out at the open from its config. A build of both,
+  `--all-features` and a graph that unifies `peer`, `listen` or `group` with `tables-on-use`
+  among them, is the `runtime-plan` form whole, its policy `Lent` and its moment the open's
+  (`crates/wz-capi-coop/src/lib.rs`, where `RowPolicy` is named, and the feature's note in its
+  `Cargo.toml`). Unified into a graph without `runtime-plan` it changes the moment of every session
+  there, so the C library, a cdylib built by itself, is the only graph that names it, and the guards
+  below read what it resolved to.
 
 ### 9.2 What keeps the release at D12
 
 1. At the build: `crates/wz-capi-coop/src/lib.rs` asserts `RowPolicy::TAKEN` is `AtOpen` (N1,
-   landed); N3c puts it under `#[cfg(not(feature = "tables-on-use"))]` beside its `AtFirstUse`
-   twin, so no form builds whose policy disagrees with its moment.
+   landed); N3c compiles it outside the on-use form (`tables-on-use` without `runtime-plan`)
+   beside its `AtFirstUse` twin, so no form builds whose policy disagrees with its moment. A build
+   that names both features is outside the on-use form (9.1) and asserts `AtOpen`.
 2. At the resolution: `layer_c1nh_no_heap_after_open` (`scripts/run-ci.sh`) resolves
    `configs/profiles/host-peer-ext.conf` and, before it builds, fails by name when the resolved
    arguments name `tables-on-use` ("the release form resolved to on-use"), so a profile that lost
@@ -602,9 +781,10 @@ Every pico case is the D12 form, and so is every case of the size ledger (C1cs:
   "pico-api-coop-nostd"}`) and moves with it.
 - The statement: a library states the form it is, so `wz_config.conformance_statement` includes
   the axis's value, and the statement case of the pico ABI gains its on-use twin.
-- A peer twin (`pico-peer-coop-on-use`) waits for N3c to cover `runtime-plan`, where a listening
-  session's faces come and go: on `OnUse` each face's tables are counted at its attach (N3b's
-  constructors), with no pool lent at open.
+- A peer twin (`pico-peer-coop-on-use`) waits for N3c to cover `runtime-plan` (until then a build
+  of `peer` beside `tables-on-use` is the D12 peer, 9.1), where a listening session's faces come
+  and go: on `OnUse` each face's tables are counted at its attach (N3b's constructors), with no
+  pool lent at open.
 
 ## 11. What N3c has to give a home to
 
@@ -630,11 +810,63 @@ The order that builds at each step:
    registry is made by value and whose keys are a `KeyBudget`, every other tenant still the
    arena's; `RowPolicy` is `OnUse` under `tables-on-use` and its moment assertion `AtFirstUse`
    (9.2, 1). The size case of section 10 is not read yet: the region's other places and the arena
-   are still linked.
-2. The region's other places into the boxed state; `region.rs` leaves the form.
+   are still linked. Written (7.5): the twin is `StateRegion` under the feature, its key budget a
+   field where the key arena lay; the registry is `engine/registry/counted.rs`; the session's
+   state names its key store with its policy (`SessionParts::Keys`), and the budget takes the key
+   arena's marks of the session's lock, so every reader of `session.keys` reads it unchanged but
+   the C ABI's held keys (`SessionKeys`, `KeysLocked`): on the on-use form each is a copy of its
+   own the engine makes, refused past the session's `MAX_KEYEXPR_BYTES` as the arena refuses it,
+   and not counted against the budget until N3e makes it a holder of the row's `HeapKey`.
+2. The region's other places into the boxed state; `region.rs` leaves the form. Written (7.6):
+   the state is `OwnState` (`engine/state_places.rs`), the places of the state's own values
+   (`StatePlaces`) and the key budget, taken zeroed from the allocator by `OwnBlock` at the open,
+   apart from the arena, which is reserved alone (`SessionArena::reserve`); the engine names the
+   state by `StateLayout` and its holder by `StateHold`. Its places keep the rows of the plain
+   tables and of the round at the build's bound, taken with the state at the open. Counting them on
+   `OnUse` is the second half of this step, a commit of its own, because those tables are the
+   session core's lent ones and each push into them was written for rows the open lent:
+   `EndedLegs` and `LegRows` (`crates/wz-session-core/src/get_plane.rs:213`, `:143`), the get
+   plane's `HeldReplies<u64, Lent>` (`:288`), `HeldFinals` and `RefusedFinals`
+   (`query_plane.rs:118`, `:121`) and the round's `RoundRows` (`round.rs:775`). Each needs the
+   policy as a parameter, and each push a first row the allocator may refuse:
+   `EndedLegs::note` asserts its push is kept (`get_plane.rs:224`), `FinalHolds::admit` lets a
+   refused request's push go (`query_plane.rs:223`), and the round pushes on the receive. Each is
+   given its room before the push, as `FinalStaging::make_room` is (below), or a refusal its
+   caller answers.
+   Written (7.7): the policy is the engine's calls' (`RoundCalls::TablePolicy`, the engine's
+   `StatePolicy`), the state's places keep none of those rows in the on-use form
+   (`PlacedTables::counted`, `RoundRows::counted`), the ends take their rows at the leg's open,
+   `FinalHolds::admit` answers `Admitted`, and an offer to the round takes its rows before it
+   writes. Every push of those tables is read in the audit below.
 3. N3d, then the runtime, the engine and the rooms boxed; `arena.rs` leaves the form and the
    size case reads group A's figure.
 4. N4, then N5: the switch is declared once the form it selects builds.
+
+The pushes of the tables step 2's second half counts, and of the tables beside them in the same
+planes, each with what a refusal reaches (read at the step's own commits):
+
+| table | push | a refusal | answered |
+|-------|------|-----------|----------|
+| `EndedLegs` | `GetPlane::open_leg` asks `EndedLegs::make_room` on a first-use policy | `None`: the get is refused as one no row holds (`LegHeld::NoRoom`, `LegTurn::Skipped`), nothing minted | yes, added |
+| `EndedLegs` | `EndedLegs::note`, from the drop of the leg's entry | none can come: its rows were taken at the open and are kept, and the ends waiting, each holding a leg's row, are never more than the legs' rows (`GetPlane::init_at` checks it in a debug build); the debug assertion states that | yes; before, on `OnUse` the first end asked the heap here and a refusal lost the end and the callback |
+| `LegRows` | `LegRows::open` | `None`, as the row above | yes |
+| `HeldReplies<u64, _>` (the get plane's) | `HeldReplies::hold` | `HoldRefused::Full`, counted; `consolidate` hands the reply on at once | yes |
+| `HeldFinals` | `FinalHolds::take` | `false`: `admit` notes the refusal (`Admitted::Refused`); `OwnFinalHold::take` is `None` and the session's own get is refused before a leg is issued | yes |
+| `RefusedFinals` | `FinalHolds::rows_for_refusals` on a first-use policy, before the first hold | `Admitted::Unnoted`: counted, no call begun, its Final owed as one that reached no queryable | yes, added |
+| `RefusedFinals` | `FinalHolds::admit`'s note of a refusal | `Admitted::Unnoted` past the list's count | yes; before, `let _ =` dropped it |
+| `RoundRows`, records and callbacks | the first write of a record, in each of the five offers | `Round::take_rows` is `false`: `refuse_unplaced` counts it (`unplaced`, and `dropped` or `held_over`) and ends its call | yes, added; before, a debug build stopped and a release build lost the record uncounted |
+| `RoundRows`, callbacks | a later call joining a record | the rows were taken by the record's first write; past the count, `refuse` and the call settled | yes |
+| `RoundRows`, keys | `Table::place_key` | `None`: counted unplaced | yes |
+| the engine's pending legs (`Rows<PendingGet>`) | `SessionState::note_pending` | the leg is unregistered, which says its end, and counted (`unheld`) | yes; on `OnUse` the first row is asked after the Request went out, so that get ends with no reply |
+| `GetPlane::held` (a `VecDeque`, every policy) | `GetPlane::keep_held`, `push_back` | the infallible push: the allocator's refusal ends the process | **no**: outside this step's tables, an owned reply's path; a debt of its own |
+| `LocalAsking::asked` (`Static`) | `QueryPlane::arrive`, `arrive_own` | no allocator: `arrive` hands a call past the list to the round; `arrive_own` reads the room first under the session's lock | yes |
+| the round's captured calls (`Static`) | `Round::offer_sample_ref` under a capture | no allocator: past the session's subscribers the call is ended uncounted, and a debug build stops | by the table's bound |
+
+One window stays open on a first-use policy: a request whose refusal found no row (`Unnoted`) is
+not remembered, so if the allocator refuses the list's rows at one queryable's admission and gives
+them at the next queryable of the same request in the same dispatch, that queryable is answered
+where the first was not. It is reachable only before the session's first held request, after
+which the list keeps its rows.
 
 A table that answers whether it has room before the push that would take its memory cannot take
 the memory when it answers (`FinalStaging::has_room`, `&self`): the query dispatch asks before the

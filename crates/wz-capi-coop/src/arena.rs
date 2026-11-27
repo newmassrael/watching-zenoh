@@ -133,7 +133,7 @@ use wz_runtime_coop::RuntimePlace;
     all(feature = "liveliness", any(feature = "listen", feature = "group"))
 ))]
 use wz_session_core::bounded::Lent;
-#[cfg(not(feature = "runtime-plan"))]
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 use wz_session_core::bounded::ZeroEmpty;
 use wz_session_core::bounded::{Arena, LendRefused, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
@@ -3842,7 +3842,7 @@ unsafe fn give_arena_back(kept: NonNull<Kept>) {
 impl SessionArena {
     /// Reserve the arena `plan` lays out from `memory`. Refused, having taken nothing, when the
     /// arena is past the address space or the memory has none to give.
-    #[cfg(any(feature = "runtime-plan", test))]
+    #[cfg(any(feature = "runtime-plan", feature = "tables-on-use", test))]
     pub(crate) fn reserve<const ROWS: usize>(
         plan: &ArenaPlan<ROWS>,
         memory: &'static dyn ArenaMemory,
@@ -3855,7 +3855,7 @@ impl SessionArena {
     /// session's open sizes at run time take one reservation, given back whole by the arena's last
     /// holder (`Self::keep`), so the region's owner drops the `T` in place and gives back nothing.
     /// Refused as an arena alone is, having taken nothing.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     pub(crate) fn reserve_after<T: ZeroEmpty>(
         plan: &ArenaPlan,
         memory: &'static dyn ArenaMemory,
@@ -3867,7 +3867,7 @@ impl SessionArena {
 
     /// Reserve an arena of `bytes` from `memory`. Refused, having taken nothing, when the memory has
     /// none to give.
-    #[cfg(any(feature = "runtime-plan", test))]
+    #[cfg(any(feature = "runtime-plan", feature = "tables-on-use", test))]
     pub(crate) fn of_bytes(
         bytes: usize,
         memory: &'static dyn ArenaMemory,
@@ -4022,14 +4022,14 @@ mod tests {
     }
 
     /// The allocator, its reservations written over with a byte that is not zero.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     struct Dirty;
 
     /// The byte [`Dirty`] writes over what it reserves.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     const DIRTY: u8 = 0xa5;
 
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     impl ArenaMemory for Dirty {
         fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
             let base = AllocatorMemory.reserve(layout)?;
@@ -4570,7 +4570,7 @@ mod tests {
     /// What `a_region_and_its_arena_are_one_reservation_given_back_whole` reserves from: the
     /// allocator, its reservations written over as [`Dirty`]'s are, counting what it gives and
     /// what it is given back.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     struct OneBlock {
         reserves: core::sync::atomic::AtomicUsize,
         reserved: core::sync::atomic::AtomicUsize,
@@ -4578,7 +4578,7 @@ mod tests {
         released: core::sync::atomic::AtomicUsize,
     }
 
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     impl ArenaMemory for OneBlock {
         fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
             let base = Dirty.reserve(layout)?;
@@ -4604,7 +4604,7 @@ mod tests {
     /// plan's bytes, and the block given back once, whole, when the arena is let go. Turned red by
     /// a region reserved apart from its arena, by a head left as the memory wrote it, or by a
     /// release of a layout other than the one reserved.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     #[test]
     fn a_region_and_its_arena_are_one_reservation_given_back_whole() {
         use core::sync::atomic::{AtomicUsize, Ordering};

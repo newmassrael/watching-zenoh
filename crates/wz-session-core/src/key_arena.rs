@@ -132,13 +132,14 @@ pub const fn block_bytes(len: usize) -> Option<usize> {
     }
 }
 
-/// The lock an arena's owner keeps it behind, as the debug check of the arena reads it: where the
-/// lock lies, and the owner's answer to whether the calling thread holds the lock that lies there.
+/// The lock an arena's owner keeps it behind, as the debug check of the arena reads it, and of a key
+/// budget of the on-use policy (`crate::on_use::KeyBudget`): where the lock lies, and the owner's
+/// answer to whether the calling thread holds the lock that lies there.
 #[cfg(debug_assertions)]
 #[derive(Clone, Copy)]
-struct OwnerLock {
-    at: *const (),
-    held_here: fn(*const ()) -> bool,
+pub(crate) struct OwnerLock {
+    pub(crate) at: *const (),
+    pub(crate) held_here: fn(*const ()) -> bool,
 }
 
 /// The state of a key arena, kept at the start of the span it was lent.

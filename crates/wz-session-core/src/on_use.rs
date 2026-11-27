@@ -25,7 +25,10 @@
 //! # One thread
 //!
 //! As the key arena's, the counts are cells: a [`HeapKey`] and the [`BudgetKeys`] a table holds are
-//! neither `Send` nor `Sync`, and are reached by the one thread that holds the session's state.
+//! neither `Send` nor `Sync`, and are reached by the one thread that holds the session's state. A
+//! budget its owner keeps behind a lock is checked as the arena is, in a build with debug
+//! assertions: a key counted against it made, shared or let go of with that lock not held fails at
+//! once ([`KeyBudget::guard_by_owner_lock`]).
 //!
 //! # Lifetime
 //!
@@ -36,12 +39,17 @@ use core::alloc::Layout;
 use core::cell::Cell;
 use core::fmt;
 use core::marker::PhantomData;
+use core::mem::MaybeUninit;
 use core::ops::Deref;
 use core::ptr::NonNull;
+#[cfg(debug_assertions)]
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::bounded::{
     drop_row, drop_rows, CapacityFull, KeyBacking, KeyMaker, KeyUnkept, SeqBacking,
 };
+#[cfg(debug_assertions)]
+use crate::key_arena::OwnerLock;
 use crate::key_arena::{block_bytes, KeyCounts};
 use crate::limits::MaxKeyexprBytesHeld;
 
@@ -168,6 +176,35 @@ impl<T, const N: usize> FirstUse<T, N> {
             }
             None => false,
         }
+    }
+
+    /// The next row, for `write` to build a value in where the column keeps it, counted as held
+    /// once `write` returns, and the value built: the column's rows taken now where none were, as a
+    /// push takes them. `None`, `write` not called, past the count or where the allocator refuses
+    /// the rows. For a value too large to be one of its own in a frame.
+    ///
+    /// # Safety
+    /// `write` leaves a whole `T` in the row it is handed, and does not unwind.
+    pub unsafe fn push_in_place(
+        &mut self,
+        write: impl FnOnce(&mut MaybeUninit<T>),
+    ) -> Option<&mut T> {
+        if !self.room_for(1) {
+            return None;
+        }
+        // SAFETY: `len < count` and the rows are taken (`room_for`), so the row at `len` is the
+        // column's and holds no value; a `MaybeUninit<T>` has the layout of `T`.
+        let row = unsafe {
+            &mut *self
+                .base()
+                .as_ptr()
+                .add(self.len())
+                .cast::<MaybeUninit<T>>()
+        };
+        write(&mut *row);
+        self.len = self.len.wrapping_add(1);
+        // SAFETY: the caller's contract: `write` left a whole value in the row.
+        Some(unsafe { row.assume_init_mut() })
     }
 
     /// Drop the values from `len` on. The length is shortened first, so a value whose drop panics
@@ -449,6 +486,14 @@ pub struct KeyBudget {
     refused: Cell<u32>,
     /// The longest key kept: the session's `MAX_KEYEXPR_BYTES`.
     longest: MaxKeyexprBytesHeld,
+    /// The lock the budget's owner keeps it behind ([`Self::guard_by_owner_lock`]), `None` for a
+    /// budget no lock guards. Written before a second thread reaches the budget, or by its owner
+    /// alone.
+    #[cfg(debug_assertions)]
+    guard: Cell<Option<OwnerLock>>,
+    /// Whether that lock is held now, by any thread.
+    #[cfg(debug_assertions)]
+    held: AtomicBool,
 }
 
 impl KeyBudget {
@@ -460,6 +505,10 @@ impl KeyBudget {
             peak: Cell::new(0),
             refused: Cell::new(0),
             longest,
+            #[cfg(debug_assertions)]
+            guard: Cell::new(None),
+            #[cfg(debug_assertions)]
+            held: AtomicBool::new(false),
         }
     }
 
@@ -489,8 +538,58 @@ impl KeyBudget {
         }
     }
 
+    /// Keep the budget behind its owner's one lock from now on, the lock that lies at `at`, as the
+    /// key arena is kept ([`KeySpace::guard_by_owner_lock`](crate::key_arena::KeySpace::guard_by_owner_lock)):
+    /// in a build with debug assertions a key counted against it made, shared or let go of while
+    /// the owner has not marked the lock held ([`Self::owner_lock_taken`]), or on a thread for
+    /// which `held_here` answers that it does not hold the lock at `at`, fails at once. Nothing is
+    /// kept or checked in a build without debug assertions.
+    pub fn guard_by_owner_lock(&self, at: *const (), held_here: fn(*const ()) -> bool) {
+        #[cfg(debug_assertions)]
+        self.guard.set(Some(OwnerLock { at, held_here }));
+        #[cfg(not(debug_assertions))]
+        let _ = (at, held_here);
+    }
+
+    /// The owner holds the budget alone from here on, with no lock (its state is being let go of,
+    /// through an exclusive borrow): no other thread reaches it, so nothing is checked.
+    pub fn owner_alone(&self) {
+        #[cfg(debug_assertions)]
+        self.guard.set(None);
+    }
+
+    /// The owner took the lock that guards the budget.
+    #[inline]
+    pub fn owner_lock_taken(&self) {
+        #[cfg(debug_assertions)]
+        self.held.store(true, Ordering::Relaxed);
+    }
+
+    /// The owner is letting go of the lock that guards the budget.
+    #[inline]
+    pub fn owner_lock_released(&self) {
+        #[cfg(debug_assertions)]
+        self.held.store(false, Ordering::Relaxed);
+    }
+
+    /// Fail at once, in a build with debug assertions, when a key counted against a budget its
+    /// owner's lock guards is made, shared or let go of by a thread that does not hold that lock:
+    /// the counts are cells, and a thread that touches them outside the lock races the one that
+    /// holds it.
+    #[inline]
+    fn assert_owner_lock(&self) {
+        #[cfg(debug_assertions)]
+        if let Some(lock) = self.guard.get() {
+            assert!(
+                self.held.load(Ordering::Relaxed) && (lock.held_here)(lock.at),
+                "a key of a budget its owner's lock guards was touched with that lock not held"
+            );
+        }
+    }
+
     /// Count `cost` bytes more, or `false`, counting nothing, past the budget.
     fn charge(&self, cost: usize) -> bool {
+        self.assert_owner_lock();
         let Some(used) = self
             .used
             .get()
@@ -506,11 +605,13 @@ impl KeyBudget {
 
     /// Count `cost` bytes fewer: a key counted for them was let go of, or not made.
     fn refund(&self, cost: usize) {
+        self.assert_owner_lock();
         self.used.set(self.used.get().saturating_sub(cost));
     }
 
     /// Count a key refused for want of room, and say so.
     fn refuse(&self) -> KeyUnkept {
+        self.assert_owner_lock();
         self.refused.set(self.refused.get().wrapping_add(1));
         KeyUnkept::NoRoom
     }
@@ -628,6 +729,8 @@ impl HeapKey {
 impl Clone for HeapKey {
     fn clone(&self) -> Self {
         if let Some(head) = self.head() {
+            // SAFETY: the budget outlives every key counted against it (`KeyBudget::keys`).
+            unsafe { head.budget.as_ref() }.assert_owner_lock();
             head.holders.set(head.holders.get().saturating_add(1));
         }
         Self { head: self.head }
@@ -642,6 +745,9 @@ impl Drop for HeapKey {
         let at = head.as_ptr();
         // SAFETY: this key is one of the allocation's holders, so the header is there.
         let (holders, len, budget) = unsafe { ((*at).holders.get(), (*at).len, (*at).budget) };
+        // SAFETY: the budget outlives every key counted against it (`KeyBudget::keys`).
+        let budget = unsafe { budget.as_ref() };
+        budget.assert_owner_lock();
         // A count held at its largest keeps the allocation for good.
         if holders == u32::MAX {
             return;
@@ -652,8 +758,7 @@ impl Drop for HeapKey {
             return;
         }
         let len = len as usize;
-        // SAFETY: the budget outlives every key counted against it (`KeyBudget::keys`).
-        unsafe { budget.as_ref() }.refund(block_bytes(len).unwrap_or(0));
+        budget.refund(block_bytes(len).unwrap_or(0));
         if let Some(layout) = key_layout(len) {
             // SAFETY: the last holder gives back the allocation `make` took with this layout, once.
             unsafe { alloc::alloc::dealloc(at.cast::<u8>(), layout) };
@@ -724,6 +829,44 @@ impl BudgetKeys {
     pub fn budget(&self) -> Option<&KeyBudget> {
         // SAFETY: `KeyBudget::keys`'s contract: the budget lives, unmoved, while this handle does.
         self.0.map(|budget| unsafe { &*budget.as_ptr() })
+    }
+
+    /// What the keys counted against the budget take now ([`KeyBudget::counts`]), as the key
+    /// arena's handle answers for its arena: nothing for a handle of no budget.
+    pub fn counts(&self) -> KeyCounts {
+        self.budget().map(KeyBudget::counts).unwrap_or_default()
+    }
+
+    /// Keep the budget behind its owner's one lock ([`KeyBudget::guard_by_owner_lock`]); a handle
+    /// of no budget has nothing to keep.
+    pub fn guard_by_owner_lock(&self, at: *const (), held_here: fn(*const ()) -> bool) {
+        if let Some(budget) = self.budget() {
+            budget.guard_by_owner_lock(at, held_here);
+        }
+    }
+
+    /// The owner holds the budget alone from here on ([`KeyBudget::owner_alone`]).
+    pub fn owner_alone(&self) {
+        if let Some(budget) = self.budget() {
+            budget.owner_alone();
+        }
+    }
+
+    /// The owner took the lock that guards the budget ([`KeyBudget::owner_lock_taken`]).
+    #[inline]
+    pub fn owner_lock_taken(&self) {
+        if let Some(budget) = self.budget() {
+            budget.owner_lock_taken();
+        }
+    }
+
+    /// The owner is letting go of the lock that guards the budget
+    /// ([`KeyBudget::owner_lock_released`]).
+    #[inline]
+    pub fn owner_lock_released(&self) {
+        if let Some(budget) = self.budget() {
+            budget.owner_lock_released();
+        }
     }
 }
 
@@ -974,5 +1117,141 @@ mod tests {
         assert!(none.budget().is_none());
         assert_eq!(none.key("a").err(), Some(KeyUnkept::NoRoom));
         assert_eq!(none.key("").err(), Some(KeyUnkept::NoRoom));
+    }
+
+    /// A value written where the column keeps it takes the column's rows at the first, as a push
+    /// does, and one past the count is refused with its write not called. Turned red by a write in
+    /// place that does not make the column's room first (`room_for`), which writes a row before the
+    /// rows are taken or past the count.
+    #[test]
+    fn a_value_written_in_place_takes_the_rows_and_holds_the_count() {
+        let mut column = FirstUse::<u64, 4>::counted(2);
+        // SAFETY: the write leaves a whole value in its row and cannot unwind.
+        let first = unsafe {
+            column.push_in_place(|row| {
+                row.write(7);
+            })
+        };
+        assert_eq!(first.copied(), Some(7));
+        assert!(column.holds_rows());
+        let mut called = false;
+        // SAFETY: as above, for each write.
+        unsafe {
+            assert!(column
+                .push_in_place(|row| {
+                    row.write(8);
+                })
+                .is_some());
+            assert!(
+                column
+                    .push_in_place(|row| {
+                        called = true;
+                        row.write(9);
+                    })
+                    .is_none(),
+                "one past the count"
+            );
+        }
+        assert!(!called, "a refused write is not called");
+        assert_eq!(column.as_slice(), &[7, 8]);
+    }
+
+    /// A column whose first value the heap has no room for hands the value back and takes nothing,
+    /// and its next value, the heap having room again, takes the rows; a key the heap has no room
+    /// for is no room, counted, with none of its bytes kept against the budget. Turned red by a
+    /// column that answers a refused `take_memory` as rows taken, or by a key whose refused
+    /// allocation leaves its bytes counted (`HeapKey::make` without its `refund`).
+    #[test]
+    fn what_the_heap_has_no_room_for_is_handed_back_and_takes_nothing() {
+        let mut column = FirstUse::<u64, 4>::counted(2);
+        let back = crate::test_heap::refused(|| column.push(7));
+        assert!(matches!(back, Err(CapacityFull(7))));
+        assert!(!column.holds_rows(), "a refused first value takes nothing");
+        assert!(column.as_slice().is_empty());
+        assert!(column.push(8).is_ok(), "the heap has room again");
+        assert_eq!(column.as_slice(), &[8]);
+
+        let budget = budget_of(256);
+        // SAFETY: as in the tests above.
+        let keys = unsafe { budget.keys() };
+        let unkept = crate::test_heap::refused(|| keys.key("demo/full").err());
+        assert_eq!(unkept, Some(KeyUnkept::NoRoom));
+        assert_eq!(budget.counts().used, 0, "nothing kept against the budget");
+        assert_eq!(budget.counts().refused, 1);
+    }
+
+    /// An owner whose answer is that every thread holds its lock, which leaves its mark to say
+    /// whether the lock is held.
+    fn held_by_every_thread(_: *const ()) -> bool {
+        true
+    }
+
+    /// An owner whose answer is that the calling thread does not hold its lock: the thread runs
+    /// beside the one that holds it.
+    fn held_by_another_thread(_: *const ()) -> bool {
+        false
+    }
+
+    /// A budget its owner's lock guards makes, shares and lets go of keys while the owner marks the
+    /// lock held; a key let go of after the lock is let go of fails a debug build at once. Turned red
+    /// by a key's drop that does not ask its budget's guard (`assert_owner_lock` in `HeapKey`'s
+    /// drop).
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "that lock not held")]
+    fn a_key_let_go_of_outside_its_budgets_lock_fails() {
+        let budget = budget_of(256);
+        // SAFETY: as in the tests above.
+        let keys = unsafe { budget.keys() };
+        keys.guard_by_owner_lock(core::ptr::null(), held_by_every_thread);
+        keys.owner_lock_taken();
+        let key = keys.key("demo/guarded").expect("room");
+        drop(key.clone());
+        keys.owner_lock_released();
+        drop(key);
+    }
+
+    /// A key let go of by a thread that does not hold its budget's lock fails a debug build at
+    /// once, though the mark says another thread holds the lock: the race the mark alone misses.
+    /// Turned red by a guard that reads the owner's mark and not its answer for the calling thread.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "that lock not held")]
+    fn a_key_let_go_of_beside_the_thread_that_holds_its_budgets_lock_fails() {
+        let budget = budget_of(256);
+        // SAFETY: as in the tests above.
+        let keys = unsafe { budget.keys() };
+        let key = keys.key("demo/beside").expect("room");
+        keys.guard_by_owner_lock(core::ptr::null(), held_by_another_thread);
+        keys.owner_lock_taken();
+        drop(key);
+    }
+
+    /// The CONTROL: keys made, shared and let go of while the lock is marked held, and one let go of
+    /// once the owner holds the budget alone, pass, and every byte goes back; the handle reads its
+    /// budget's counts, and one of no budget counts nothing. Turned red by a guard that fails a key
+    /// touched under the lock, or by an owner alone still checked.
+    #[test]
+    fn keys_under_their_budgets_lock_or_with_the_owner_alone_pass() {
+        let budget = budget_of(256);
+        // SAFETY: as in the tests above.
+        let keys = unsafe { budget.keys() };
+        keys.guard_by_owner_lock(core::ptr::null(), held_by_every_thread);
+        keys.owner_lock_taken();
+        let key = keys.key("demo/guarded").expect("room");
+        let alone = keys.key("demo/alone").expect("room");
+        drop(key.clone());
+        drop(key);
+        keys.owner_lock_released();
+        keys.guard_by_owner_lock(core::ptr::null(), held_by_another_thread);
+        keys.owner_alone();
+        drop(alone);
+        assert_eq!(keys.counts().used, 0);
+        assert_eq!(
+            keys.counts(),
+            budget.counts(),
+            "the handle reads its budget"
+        );
+        assert_eq!(BudgetKeys::default().counts(), KeyCounts::default());
     }
 }

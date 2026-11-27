@@ -463,7 +463,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`SessionRows::held_replies`, the replies the consolidating gets hold, which the open "
         "lends and `tests::arena` holds to the lent rows; "
         "`resource-snapshot` gates `CoopEngine::message_reading`, what the receive paths of the "
-        "session's links and groups counted, which `tests::congestion` and `tests::group` read",
+        "session's links and groups counted, which `tests::congestion` and `tests::group` read; "
+        "`tables-on-use` gates off `region`, the state of a session whose shape the build fixes, "
+        "which a session whose tables take their memory on use holds apart instead "
+        "(`engine::state_places::OwnState`), and the crate's own tests run both forms: "
+        "`tests::region` the region and `tests::on_use` the on-use form, through the leg "
+        "`nondefault-tests-gate.sh` gives `tables-on-use`",
         frozenset(
             {
                 "advanced-cache",
@@ -477,6 +482,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "scout",
                 "scout-datagram",
                 "shared-key-ids",
+                "tables-on-use",
                 "time-base",
                 "tls-mbedtls",
                 "transport-stats",

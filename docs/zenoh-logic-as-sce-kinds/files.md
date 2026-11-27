@@ -184,6 +184,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/reach.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/adding.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/registry/counted.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/held.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/placed.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/replay.rs` | S7 | |
@@ -230,6 +231,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/liveliness.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/local.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/local_query.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/on_use.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/one_face.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/one_thread.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/plain_put.rs` | excluded: test | Test-only file by its name. |
@@ -1026,6 +1028,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/stream_window.rs` | S1 | |
 | `crates/wz-session-core/src/supervisor.rs` | S1 | |
 | `crates/wz-session-core/src/switchboard.rs` | S3 | |
+| `crates/wz-session-core/src/test_heap.rs` | excluded: test | The allocator of the unit tests, which refuses every allocation of a thread that asks it to; compiled only under `#[cfg(all(test, feature = "alloc"))]` (`lib.rs`). |
 | `crates/wz-session-core/src/text_out.rs` | S3 | |
 | `crates/wz-session-core/src/time_range.rs` | S10 | |
 | `crates/wz-session-core/src/timestamp_visibility.rs` | S2 | |

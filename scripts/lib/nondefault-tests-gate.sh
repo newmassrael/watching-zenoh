@@ -963,6 +963,19 @@ files::decl_watch_doors::"
     # `rx-lent-only` with `tx-lend-only`): the router stand-in lends its links send slots, so a
     # lend-only session answers it; 130 passed on a build host (2026-11-23).
     "wz-capi-coop|hook|wz-session-core/rx-lent-only,tx-lend-only|"
+    # The engine whose tables take their memory at their first row (`tables-on-use`): the region
+    # that holds the session's key budget, the registry counted at the open with no row taken, and a
+    # session that counts a declaration's key against its budget and receives what its subscriber is
+    # pushed (`on_use` in every module path of them). Once with the crate's defaults, whose build
+    # answers no query, so the face's Finals are counted none; once with the planes of a query and
+    # of the liveliness, whose counted tables the registry and the session's own gets make. Not
+    # measured on a build host yet.
+    "wz-capi-coop|hook|tables-on-use|on_use"
+    "wz-capi-coop|hook|liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use|on_use"
+    # A build that names both `tables-on-use` and `runtime-plan`, as `--all-features` does, is the
+    # form laid out at the open (`runtime-plan` wins, `src/lib.rs`): the one test of that build,
+    # which reads its row policy and its moment. Not measured on a build host yet.
+    "wz-capi-coop|hook|runtime-plan,tables-on-use|form_precedence_tests::"
     # The crate's whole suite in the build form the C library ships: a domain of
     # `declaration-sync-pacing` without `on`, where a link is told the session's declarations in
     # one lap when it comes up and the engine holds no code of paced turns
@@ -1621,10 +1634,6 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
     # the cooperative engine queues its writes or carries a class apart), so the line mark and the
     # keepalive's deadline are the inline driver's alone, which this filter holds. NOT YET
     # MEASURED.
-    # The query plane's reply hold left out (`query-replies-with-final`, a default of the crate), as
-    # the zenoh-pico preset builds the session core: the rows' features above with the batching
-    # window the hold lives in. The hold raises nothing, so each reply leaves as it is made.
-    # NOT YET MEASURED.
     "wz-session-core|hook|\
         -default,\
         alloc,\
@@ -1651,7 +1660,36 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         transport-keepalive,\
         tx-lend-only\
         |session_actions::bundle_tests::link_stamps::every_frame_handed_to_a_link_that_writes_inline_marks_its_line"
+    # The query plane's reply hold left out (`query-replies-with-final`, a default of the crate), as
+    # the zenoh-pico preset builds the session core: the rows' features above with the batching
+    # window the hold lives in. The hold raises nothing, so each reply leaves as it is made.
+    # NOT YET MEASURED.
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
         transport-batching,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
         |session_actions::bundle_tests::the_reply_hold_is_raised_only_with_its_switch"
     # The COMPACT initial-sequence-number derivation, a row of its own because
     # `initial-sn-compact` is a selector, not an addition: it swaps the SHAKE

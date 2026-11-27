@@ -33,14 +33,11 @@ use super::held::OneHolder;
 use super::DeclWatches;
 #[cfg(feature = "local-queryable")]
 use super::Gets;
-use super::{App, CoopSinks, FaceTables, Registry, RegistryOf};
+use super::{App, CoopSinks, FaceTables, Registry, RegistryOf, FACE_SETS};
 use crate::engine::{CoopRows, RoundDelivery};
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
 use crate::region::RegionField;
-
-/// The sets of face tables a region holds: the dial role's face's alone.
-pub(in crate::engine) const FACE_SETS: usize = 1;
 
 /// The requesters' rows of one face, or of the session's own gets.
 #[cfg(feature = "query")]

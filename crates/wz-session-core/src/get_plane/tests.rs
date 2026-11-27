@@ -5,7 +5,7 @@
 //! arena, and the sink and the hold a leg's entry owns.
 
 use super::*;
-use crate::bounded::{Arena, ARENA_ALIGN};
+use crate::bounded::{Arena, Lent, OnUse, ARENA_ALIGN};
 use crate::caps;
 use crate::placed::Placed;
 use crate::plane_lock::StdLocks;
@@ -62,6 +62,7 @@ impl RoundCalls for Asking {
     type Locks = StdLocks;
     type Tally = ();
     type Form = crate::row_callback::Threads;
+    type TablePolicy = Lent;
 }
 
 impl PlaneCalls for Asking {
@@ -99,6 +100,7 @@ impl RoundCalls for Remote {
     type Locks = StdLocks;
     type Tally = ();
     type Form = crate::row_callback::Threads;
+    type TablePolicy = Lent;
 }
 
 impl PlaneCalls for Remote {
@@ -137,6 +139,7 @@ impl RoundCalls for Stepped {
     type Locks = StdLocks;
     type Tally = ();
     type Form = crate::row_callback::Threads;
+    type TablePolicy = Lent;
 }
 
 impl PlaneCalls for Stepped {
@@ -146,6 +149,44 @@ impl PlaneCalls for Stepped {
 }
 
 impl GetCalls for Stepped {
+    fn call(callback: &Counted, _reply: &dyn ReplyView) {
+        callback.0.calls.fetch_add(1, SeqCst);
+    }
+
+    fn holds_a_session() -> bool {
+        false
+    }
+}
+
+/// [`Remote`] in a session whose tables take their rows at their first value.
+enum RemoteOnUse {}
+
+impl RoundCalls for RemoteOnUse {
+    type Subscriber = Infallible;
+    type Liveliness = Infallible;
+    type Queryable = Infallible;
+    type Watch = core::convert::Infallible;
+    type Leg = LegId;
+    type ReplyCallback = Counted;
+    type Tokens = Absent;
+    type Replies = Present;
+    type Queries = Absent;
+    type Watches = Absent;
+    type Capture = Absent;
+    type Group = Absent;
+    type Locks = StdLocks;
+    type Tally = ();
+    type Form = crate::row_callback::Threads;
+    type TablePolicy = OnUse;
+}
+
+impl PlaneCalls for RemoteOnUse {
+    type LocalAnswers = Absent;
+    type Captures = Absent;
+    type Queues = StdLocks;
+}
+
+impl GetCalls for RemoteOnUse {
     fn call(callback: &Counted, _reply: &dyn ReplyView) {
         callback.0.calls.fetch_add(1, SeqCst);
     }
@@ -171,7 +212,7 @@ fn arena(bytes: usize) -> Arena {
 }
 
 /// A plane whose legs' callbacks and ends have `rows` rows and whose gets hold `held` replies.
-fn plane<C: GetCalls>(rows: usize, held: usize) -> Placed<GetPlane<C>> {
+fn plane<C: GetCalls<TablePolicy = Lent>>(rows: usize, held: usize) -> Placed<GetPlane<C>> {
     let mut arena = arena(1 << 17);
     let ends = arena.lend(rows).expect("the arena has the rows");
     let legs = arena.lend(rows).expect("the arena has the rows");
@@ -191,8 +232,28 @@ fn plane<C: GetCalls>(rows: usize, held: usize) -> Placed<GetPlane<C>> {
     .expect("the arena has the plane's place")
 }
 
+/// A plane of a session whose tables take their rows at their first value: its legs' callbacks and
+/// ends counted `rows` rows, its gets `held` replies, none of them taken yet. The plane itself is
+/// placed in an arena over leaked memory.
+fn plane_on_use<C: GetCalls<TablePolicy = OnUse>>(rows: usize, held: usize) -> Placed<GetPlane<C>> {
+    let mut arena = arena(1 << 14);
+    // SAFETY: the arena hands a place aligned for the plane and valid for writes of one, where it
+    // stays.
+    unsafe {
+        arena.place_with(|at| {
+            GetPlane::init_at(
+                NonNull::new_unchecked(at),
+                EndedLegs::over(BoundedVec::counted(rows)),
+                HeldReplies::counted(held),
+                LegRows::over(BoundedVec::counted(rows)),
+            )
+        })
+    }
+    .expect("the arena has the plane's place")
+}
+
 /// A round of a few records, placed with its tables in an arena over leaked memory.
-fn round<C: RoundCalls>() -> Placed<Round<C>> {
+fn round<C: RoundCalls<TablePolicy = Lent>>() -> Placed<Round<C>> {
     let counts = RoundRowCounts {
         records: caps::DELIVERY_LANE_EVENTS.min(4),
         callbacks: caps::DELIVERY_LANE_CALLBACKS.min(4),
@@ -268,7 +329,7 @@ fn said(ended: Option<Ended>) -> Option<(u64, Option<RequestId>)> {
 }
 
 /// A table of `rows` ends over an arena of its own.
-fn ends(rows: usize) -> EndedLegs {
+fn ends(rows: usize) -> EndedLegs<Lent> {
     EndedLegs::over(arena(1 << 12).lend(rows).expect("the arena has the rows"))
 }
 
@@ -632,13 +693,71 @@ fn an_end_keeps_the_timeout_that_ended_its_leg() {
     );
 }
 
-/// A table lent no rows is the defect the plan rules out: the end is not kept, and a debug build
-/// stops there.
+/// A leg of a plane whose tables take their rows on use is refused at its open, its callback not
+/// minted, while the heap has no room for the rows its end will be written in, though the legs'
+/// rows are had already; with room, the next open keeps it. The refusal is a value its caller
+/// answers (a get with no row), where the end, written by the drop of its leg's entry, could
+/// answer none. Turned red by an open that keeps a leg before the ends took their rows
+/// (`EndedLegs::make_room` left out of `GetPlane::open_leg`).
 #[test]
-#[cfg_attr(
-    debug_assertions,
-    should_panic(expected = "the ends waiting outnumber")
-)]
+fn a_leg_whose_ends_rows_the_heap_refuses_is_refused_at_its_open() {
+    let plane = plane_on_use::<RemoteOnUse>(2, 1);
+    assert!(
+        StdLocks::with(&plane.legs, |legs| legs.rows.make_room()),
+        "the legs' rows are had: a refusal is the ends' alone"
+    );
+    let seen = Arc::new(Seen::default());
+    let mut minted = 0;
+    let refused = crate::test_heap::refused(|| {
+        plane.open_leg(
+            &mut || {
+                minted += 1;
+                Counted(seen.clone())
+            },
+            true,
+        )
+    });
+    assert_eq!(
+        refused, None,
+        "no row for the leg's end: the leg is refused"
+    );
+    assert_eq!(minted, 0, "refused before its callback is minted");
+    let row = plane
+        .open_leg(&mut || Counted(seen.clone()), true)
+        .expect("the heap has room again");
+    drop(plane.release(row));
+    assert_eq!(seen.drops(), 1);
+}
+
+/// The end of a leg of a plane whose tables take their rows on use is written in a row its open had
+/// the ends take, whatever the heap holds when the leg's entry goes, and handed out once. Turned red
+/// by an open that does not have the ends take their rows (`EndedLegs::make_room` left out of
+/// `GetPlane::open_leg`): the end then asks the heap at the entry's drop, which answers no one.
+#[test]
+fn a_legs_end_finds_the_row_its_open_had_taken_whatever_the_heap_holds() {
+    let plane = plane_on_use::<RemoteOnUse>(2, 1);
+    let seen = Arc::new(Seen::default());
+    let row = plane
+        .open_leg(&mut || Counted(seen.clone()), true)
+        .expect("a row");
+    // SAFETY: the test hands the sink nothing, and the sink, made after the plane, is dropped
+    // before it.
+    let sink = unsafe { LegSink::new(3, row, plane.share(), EveryReplyCaptured) };
+    crate::test_heap::refused(|| drop(sink));
+    let end = plane
+        .take_end()
+        .expect("the end was written with the heap full");
+    assert_eq!((end.leg(), end.row()), (3, row));
+    assert!(plane.take_end().is_none(), "one end");
+    drop(plane.release(end.row()));
+    assert_eq!(seen.drops(), 1);
+}
+
+/// A table lent no rows is the defect the plane's making rules out (a row of the ends for each row
+/// of the legs, the rows had at each leg's open): the end is not kept, and a debug build stops
+/// there.
+#[test]
+#[cfg_attr(debug_assertions, should_panic(expected = "an end finds the row"))]
 fn an_end_past_the_rows_is_a_defect() {
     let mut ends = ends(0);
     ends.note(ended_by(1, None));

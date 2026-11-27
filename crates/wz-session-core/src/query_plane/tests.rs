@@ -5,7 +5,7 @@
 //! does with them: held, refused, or noted for the session's own get.
 
 use super::*;
-use crate::bounded::{Arena, ARENA_ALIGN};
+use crate::bounded::{Arena, Lent, OnUse, ARENA_ALIGN};
 use crate::plane_lock::StdLocks;
 use crate::round::RoundCall;
 use crate::session_tables::{Absent, Present};
@@ -22,7 +22,7 @@ struct Block([u8; ARENA_ALIGN]);
 
 /// Room for the Finals of `rows` queries, in rows lent from an arena over memory the test
 /// process leaks, so it outlives the rows.
-fn holds(rows: usize) -> FinalHolds {
+fn holds(rows: usize) -> FinalHolds<Lent> {
     let held = Arena::table_bytes::<FinalHold>(rows).expect("rows the address space holds");
     let refused = Arena::table_bytes::<RefusedFinal>(rows).expect("rows the address space holds");
     let blocks = (held + refused).div_ceil(ARENA_ALIGN) + 2;
@@ -38,7 +38,7 @@ fn holds(rows: usize) -> FinalHolds {
 }
 
 /// A plane over `holds`, made in a box of its own.
-fn plane<C: PlaneCalls>(holds: FinalHolds) -> alloc::boxed::Box<QueryPlane<C>> {
+fn plane<C: PlaneCalls>(holds: FinalHolds<C::TablePolicy>) -> alloc::boxed::Box<QueryPlane<C>> {
     // SAFETY: the box's place is valid for writes of the plane, which stays there.
     crate::plane_lock::boxed_at(|at| unsafe { QueryPlane::init_at(at, holds) })
 }
@@ -72,6 +72,7 @@ impl RoundCalls for Local {
     type Locks = StdLocks;
     type Tally = ();
     type Form = crate::row_callback::Threads;
+    type TablePolicy = Lent;
 }
 
 impl PlaneCalls for Local {
@@ -99,9 +100,38 @@ impl RoundCalls for Linked {
     type Locks = StdLocks;
     type Tally = ();
     type Form = crate::row_callback::Threads;
+    type TablePolicy = Lent;
 }
 
 impl PlaneCalls for Linked {
+    type LocalAnswers = Absent;
+    type Captures = Absent;
+    type Queues = StdLocks;
+}
+
+/// [`Linked`] in a session whose tables take their rows at their first value.
+enum LinkedOnUse {}
+
+impl RoundCalls for LinkedOnUse {
+    type Subscriber = Infallible;
+    type Liveliness = Infallible;
+    type Queryable = Begun;
+    type Watch = core::convert::Infallible;
+    type Leg = u32;
+    type ReplyCallback = ();
+    type Tokens = Absent;
+    type Replies = Absent;
+    type Queries = Absent;
+    type Watches = Absent;
+    type Capture = Absent;
+    type Group = Absent;
+    type Locks = StdLocks;
+    type Tally = ();
+    type Form = crate::row_callback::Threads;
+    type TablePolicy = OnUse;
+}
+
+impl PlaneCalls for LinkedOnUse {
     type LocalAnswers = Absent;
     type Captures = Absent;
     type Queues = StdLocks;
@@ -199,11 +229,12 @@ fn a_full_table_refuses_the_row_and_keeps_the_one_held() {
 #[test]
 fn a_request_no_row_holds_is_refused_with_its_final() {
     let mut holds = holds(1);
-    assert!(
+    assert_eq!(
         holds.admit(1, 7),
+        Admitted::Held,
         "CONTROL: the one row holds the first request"
     );
-    assert!(!holds.admit(1, 8), "every row taken: refused");
+    assert_eq!(holds.admit(1, 8), Admitted::Refused, "every row taken");
     assert!(
         !holds.owe(1, 7, QosLevel::DEFAULT),
         "CONTROL: the held request's Final waits for its hold"
@@ -212,16 +243,18 @@ fn a_request_no_row_holds_is_refused_with_its_final() {
         holds.release(1, 7).is_some(),
         "CONTROL: the last hold let go sends the Final owed"
     );
-    assert!(
-        !holds.admit(1, 8),
+    assert_eq!(
+        holds.admit(1, 8),
+        Admitted::Refused,
         "refused for the rest of its dispatch, though a row is free"
     );
     assert!(
         !holds.owe(1, 8, QosLevel::DEFAULT),
         "the refused request's Final is not sent"
     );
-    assert!(
+    assert_eq!(
         holds.admit(1, 8),
+        Admitted::Held,
         "the refusal spent, the free row holds it"
     );
     assert!(
@@ -263,7 +296,7 @@ fn a_hold_past_the_counts_bound_is_refused_and_the_final_stays_held() {
 #[test]
 fn a_kept_query_holds_its_final_until_its_last_keep() {
     let mut holds = holds(1);
-    assert!(holds.admit(1, 7), "the callback's hold");
+    assert_eq!(holds.admit(1, 7), Admitted::Held, "the callback's hold");
     assert_eq!(holds.keep_again(1, 7), None, "not kept yet");
     let answer = (ReplyKeyExpr::Any, QosLevel::DEFAULT);
     assert!(holds.keep(1, 7, answer), "the first keep");
@@ -291,7 +324,11 @@ fn a_keep_no_row_holds_is_refused_and_a_query_not_kept_releases_nothing() {
     let mut holds = holds(1);
     let answer = (ReplyKeyExpr::MatchingQuery, QosLevel::DEFAULT);
     assert!(!holds.keep(1, 7, answer), "no row holds the query");
-    assert!(holds.admit(1, 7), "CONTROL: the callback's hold");
+    assert_eq!(
+        holds.admit(1, 7),
+        Admitted::Held,
+        "CONTROL: the callback's hold"
+    );
     assert_eq!(holds.release_kept(1, 7), None);
     assert!(
         !holds.owe(1, 7, QosLevel::DEFAULT),
@@ -487,4 +524,88 @@ fn a_read_that_takes_its_links_queries_notes_only_its_own_gets_calls() {
         "a plane that answers no get of its own begins no call"
     );
     assert!(linked.take_asked().is_empty());
+}
+
+/// A request refused with no row left to note its refusal in is answered as such: it runs no
+/// callback, and with nothing noted its Final goes out as one no queryable was reached by, where a
+/// noted refusal withholds it. The CONTROL is the first request, held. Turned red by an `admit`
+/// that answers a refusal it could not note as noted (`Admitted::Refused` for the push's `Err`),
+/// which would leave the dispatch withholding a Final no row remembers.
+#[test]
+fn a_refusal_with_no_row_to_be_noted_in_is_unnoted_and_owes_its_final() {
+    let mut holds = FinalHolds::<OnUse>::over(BoundedVec::counted(1), BoundedVec::counted(0));
+    assert_eq!(
+        holds.admit(1, 7),
+        Admitted::Held,
+        "CONTROL: the one row holds the first request"
+    );
+    assert_eq!(
+        holds.admit(1, 8),
+        Admitted::Unnoted,
+        "no row for the refusal"
+    );
+    assert!(
+        holds.owe(1, 8, QosLevel::DEFAULT),
+        "nothing noted: the Final goes out"
+    );
+    assert!(
+        !holds.owe(1, 7, QosLevel::DEFAULT),
+        "CONTROL: the held request's Final waits for its hold"
+    );
+}
+
+/// On a policy that takes a table's rows at its first value, the first request held has the list
+/// of refusals take its rows too, so a later refusal is noted with the heap full and its Final
+/// withheld. Turned red by an `admit` that asks no row for its refusals before a hold
+/// (`FinalHolds::rows_for_refusals` left out): the refusal then asks the heap, which refuses it.
+#[test]
+fn a_refusal_finds_the_row_the_first_hold_had_taken_whatever_the_heap_holds() {
+    let mut holds = FinalHolds::<OnUse>::over(BoundedVec::counted(1), BoundedVec::counted(1));
+    assert_eq!(holds.admit(1, 7), Admitted::Held);
+    assert!(
+        holds.refused.holds_rows(),
+        "the first hold had the refusals' rows taken"
+    );
+    let second = crate::test_heap::refused(|| holds.admit(1, 8));
+    assert_eq!(second, Admitted::Refused, "noted with the heap full");
+    assert!(
+        !holds.owe(1, 8, QosLevel::DEFAULT),
+        "the noted refusal's Final is withheld"
+    );
+}
+
+/// A request whose refusals' rows the heap refuses at the session's first query is refused before
+/// any hold is asked, its Final owed as one no queryable was reached by; with room, it is held.
+/// Turned red by an `admit` that holds a request while no refusal of it could be noted, or that
+/// answers the heap's refusal as noted.
+#[test]
+fn a_request_whose_refusals_rows_the_heap_refuses_is_refused_unnoted() {
+    let mut holds = FinalHolds::<OnUse>::over(BoundedVec::counted(1), BoundedVec::counted(1));
+    let first = crate::test_heap::refused(|| holds.admit(1, 7));
+    assert_eq!(first, Admitted::Unnoted);
+    assert!(!holds.holds.holds_rows(), "no hold was asked");
+    assert!(
+        holds.owe(1, 7, QosLevel::DEFAULT),
+        "nothing noted or held: the Final goes out"
+    );
+    assert_eq!(holds.admit(1, 9), Admitted::Held, "the heap has room again");
+}
+
+/// A query the plane refuses with no row to note the refusal in begins no call and is counted as a
+/// refusal, and its dispatch owes its Final. Turned red by an `admit_call` that begins a call for
+/// an unnoted refusal, or counts none.
+#[test]
+fn a_query_refused_unnoted_begins_no_call_and_is_counted() {
+    let plane = plane::<LinkedOnUse>(FinalHolds::over(
+        BoundedVec::counted(0),
+        BoundedVec::counted(0),
+    ));
+    let calls = Calls::default();
+    assert!(plane.admit_call(5, 7, || calls.begin()).is_none());
+    assert_eq!(calls.begun(), 0, "no call is begun");
+    assert_eq!(plane.refused(), 1, "the refusal is counted");
+    assert!(
+        plane.with_holds(|holds| holds.owe(5, 7, QosLevel::DEFAULT)),
+        "nothing noted: the Final goes out"
+    );
 }

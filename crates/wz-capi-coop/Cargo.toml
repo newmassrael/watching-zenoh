@@ -445,6 +445,19 @@ tx-lend-only = ["wz-session-core/tx-lend-only"]
 # `group` do, whose faces come and go from pools the arena lends. The crate's own tests open by
 # config whatever this says; without it their registry is the region's.
 runtime-plan = []
+# The session's tables take their memory from the allocator at each table's first row, and a key at
+# its making, rather than at the open (`wz_session_core::bounded::OnUse`,
+# docs/c-abi-migration/heap-native.md section 11): the registry is made by value, each table counted
+# from the limits the open resolved and holding no row, and the session's keys are counted against a
+# budget of its `KEY_ARENA_BYTES`. The budget and the places of the state's own values (its round,
+# its planes, the cells it lends for a step, the rows of its plain tables) lie in a state of the
+# session's own, one allocation the open takes from the allocator apart from its arena, and no
+# region is laid out; the arena is still the open's. Beside `runtime-plan` (which `listen` and `group`
+# turn on, and `--all-features` names) it yields, as features add: a session laid out at the open
+# from its config takes its tables' memory there, so a build of both is the `runtime-plan` form
+# (`src/lib.rs`, where `RowPolicy` is named). Off, every table takes its memory at the open and
+# none after (docs/upstream-parity.md, D12).
+tables-on-use = []
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
 # its links. Off, which is pico's build, no program moves the clock, the config's field holds no

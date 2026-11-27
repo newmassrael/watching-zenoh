@@ -17,17 +17,23 @@
 //! every reply held before it and the held table every reply held, as the drop of the leg's
 //! callback, which is how a program learns its get is over.
 //!
-//! The ends wait in a table the session's arena lent ([`EndedLegs`]), a row for each get the
-//! session's tables of pending gets can hold. A leg ends when its row in those tables goes, and the
+//! The ends wait in a table of the plane's ([`EndedLegs`]), a row for each get the session's
+//! tables of pending gets can hold. A leg ends when its row in those tables goes, and the
 //! deliveries that follow every step take every end out, so the ends waiting never outnumber the
 //! rows; a leg the session ends itself (cancelled, or never sent) drops its callback where it ends
-//! it and leaves no end waiting ([`GetPlane::forget_end`]).
+//! it and leaves no end waiting ([`GetPlane::forget_end`]). An end is written where nothing can be
+//! answered (the drop of its leg's entry), so the row it is written in is asked for where a
+//! refusal is answered: at the leg's open ([`GetPlane::open_leg`]), which a session refuses as a
+//! get with no row.
 //!
-//! A leg's callback lies in a row of the plane's ([`LegRows`]), lent by the arena too, held by
-//! count: by the leg's entry, then by its end, by each record of the round that owes it a reply,
-//! and by a thread that captured it. Each is a copy of the row's place ([`LegId`]), so no holder
-//! shares the callback by allocation, and the last count given back hands the callback out of the
-//! row, to be dropped where no lock is held.
+//! A leg's callback lies in a row of the plane's ([`LegRows`]), held by count: by the leg's entry,
+//! then by its end, by each record of the round that owes it a reply, and by a thread that
+//! captured it. Each is a copy of the row's place ([`LegId`]), so no holder shares the callback by
+//! allocation, and the last count given back hands the callback out of the row, to be dropped where
+//! no lock is held.
+//!
+//! The plane's tables are of the policy its engine names ([`RoundCalls::TablePolicy`]): rows the
+//! session's arena lent or its region placed, or rows each table takes at its first value.
 //!
 //! [`LegSink`]: crate::get_plane::LegSink
 //! [`EveryReplyCaptured`]: crate::get_plane::EveryReplyCaptured
@@ -37,6 +43,8 @@
 //! [`GetPlane::forget_end`]: crate::get_plane::GetPlane::forget_end
 //! [`LegRows`]: crate::get_plane::LegRows
 //! [`LegId`]: crate::get_plane::LegId
+//! [`GetPlane::open_leg`]: crate::get_plane::GetPlane::open_leg
+//! [`RoundCalls::TablePolicy`]: crate::round::RoundCalls::TablePolicy
 
 use alloc::collections::VecDeque;
 use core::ptr::{addr_of_mut, NonNull};
@@ -48,7 +56,7 @@ use core::sync::atomic::AtomicU32;
 #[cfg(feature = "no_std")]
 use portable_atomic::AtomicU32;
 
-use crate::bounded::{BoundedVec, Lent};
+use crate::bounded::{BoundedVec, Storage, Taken};
 use crate::placed::PlacedRef;
 use crate::plane_lock::{LockFamily, Pending, Queued};
 use crate::reply::InboundReply;
@@ -139,9 +147,9 @@ impl<C: GetCalls> LegRow<C> {
 }
 
 /// The rows of the legs' callbacks, a row for each get the session's tables of pending gets hold at
-/// once, lent by the session's arena; a row is reused once its last count is given back.
+/// once, of the plane's policy; a row is reused once its last count is given back.
 pub struct LegRows<C: GetCalls> {
-    rows: BoundedVec<Option<LegRow<C>>, { usize::MAX }, Lent>,
+    rows: BoundedVec<Option<LegRow<C>>, { usize::MAX }, C::TablePolicy>,
 }
 
 impl<C: GetCalls> Default for LegRows<C> {
@@ -153,8 +161,9 @@ impl<C: GetCalls> Default for LegRows<C> {
 }
 
 impl<C: GetCalls> LegRows<C> {
-    /// A table over the rows `rows` an arena lent.
-    pub fn over(rows: BoundedVec<Option<LegRow<C>>, { usize::MAX }, Lent>) -> Self {
+    /// A table over `rows`: rows an arena lent or a region placed, or a count of them the table
+    /// takes at its first leg.
+    pub fn over(rows: BoundedVec<Option<LegRow<C>>, { usize::MAX }, C::TablePolicy>) -> Self {
         Self { rows }
     }
 
@@ -209,23 +218,32 @@ impl<C: GetCalls> LegRows<C> {
 }
 
 /// The legs whose entries went and whose callbacks are still to be dropped, a row for each get the
-/// session's tables of pending gets hold (see the module).
-pub struct EndedLegs {
-    legs: BoundedVec<Ended, { usize::MAX }, Lent>,
+/// session's tables of pending gets hold (see the module), of the policy `P`.
+pub struct EndedLegs<P: Storage> {
+    legs: BoundedVec<Ended, { usize::MAX }, P>,
 }
 
-impl EndedLegs {
-    /// A table over the rows `legs` an arena lent.
-    pub fn over(legs: BoundedVec<Ended, { usize::MAX }, Lent>) -> Self {
+impl<P: Storage> EndedLegs<P> {
+    /// A table over `legs`: rows an arena lent or a region placed, or a count of them the table
+    /// takes at the first leg's open.
+    pub fn over(legs: BoundedVec<Ended, { usize::MAX }, P>) -> Self {
         Self { legs }
     }
 
-    /// A leg ended: its callback is to be dropped.
+    /// Room for one more end, its rows taken now where the policy takes a table's rows at its
+    /// first value: what a leg's open asks, where a refusal is answered ([`GetPlane::open_leg`]).
+    fn make_room(&mut self) -> bool {
+        self.legs.make_room()
+    }
+
+    /// A leg ended: its callback is to be dropped. Its row is there: its leg's open had the table
+    /// take its rows, which it keeps, and the ends waiting, each holding one of the legs' rows,
+    /// never outnumber the table's rows, which are at least as many ([`GetPlane::init_at`]).
     fn note(&mut self, ended: Ended) {
         let kept = self.legs.push(ended);
         debug_assert!(
             kept.is_ok(),
-            "the ends waiting outnumber the rows of the tables of pending gets"
+            "an end finds the row its leg had the table take at its open"
         );
     }
 
@@ -242,7 +260,7 @@ impl EndedLegs {
     }
 }
 
-impl Pending for EndedLegs {
+impl<P: Storage> Pending for EndedLegs<P> {
     fn is_pending(&self) -> bool {
         !self.legs.is_empty()
     }
@@ -278,14 +296,14 @@ impl<C: GetCalls> Capturing<C> {
 /// deliveries.
 pub struct GetPlane<C: GetCalls> {
     /// The legs that ended, handed out after the replies queued before them.
-    ended: Queued<C::Queues, EndedLegs>,
+    ended: Queued<C::Queues, EndedLegs<C::TablePolicy>>,
     /// The replies the entries of legs held to their ends, each with its leg, in the order they
     /// gave them up: handed to the leg's callback before its end, and before its timeout.
     held: Queued<C::Queues, VecDeque<(u64, InboundReply)>>,
     /// The replies the gets that consolidate hold to their Finals, each tagged with its leg
-    /// ([`LegHold`]): rows the session's arena lent, shared by every get of the session and
-    /// reached only from the sinks, under the session's lock.
-    replies: <C::Locks as LockFamily>::Lock<HeldReplies<u64, Lent>>,
+    /// ([`LegHold`]): rows of the plane's policy, shared by every get of the session and reached
+    /// only from the sinks, under the session's lock.
+    replies: <C::Locks as LockFamily>::Lock<HeldReplies<u64, C::TablePolicy>>,
     /// The legs' callbacks, each held by count (see the module).
     legs: <C::Locks as LockFamily>::Lock<LegRows<C>>,
     /// Whether a thread that holds the session's lock takes the callback the reply it hands the
@@ -295,17 +313,29 @@ pub struct GetPlane<C: GetCalls> {
 
 impl<C: GetCalls> GetPlane<C> {
     /// A plane with nothing ended, its ends waiting in `ended`, the replies its gets hold in
-    /// `replies` and its legs' callbacks in `legs`, made in `at` with its locks.
+    /// `replies` and its legs' callbacks in `legs`, made in `at` with its locks. `ended` holds at
+    /// least as many rows as `legs`: each end waiting holds one of the legs' rows, so an end always
+    /// finds a row of its own.
     ///
     /// # Safety
     /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
     /// without being dropped. The plane is not moved from `at` until it is dropped there.
     pub unsafe fn init_at(
         at: NonNull<Self>,
-        ended: EndedLegs,
-        replies: HeldReplies<u64, Lent>,
+        ended: EndedLegs<C::TablePolicy>,
+        replies: HeldReplies<u64, C::TablePolicy>,
         legs: LegRows<C>,
     ) {
+        const {
+            assert!(
+                <C::TablePolicy as Storage>::ROWS_STAY_APART,
+                "a leg's callback is called where its row lies, the rows' lock let go of"
+            )
+        };
+        debug_assert!(
+            ended.legs.free_slots() >= legs.rows.free_slots(),
+            "a row for the end of every leg the legs' rows hold"
+        );
         let at = at.as_ptr();
         // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
         // so each field is too, and each is written once.
@@ -375,14 +405,22 @@ impl<C: GetCalls> GetPlane<C> {
     }
 
     /// Keep the callback `mint` makes in a row of the plane's, held once, for the leg's entry:
-    /// its place, or `None`, with nothing minted, when every row is held, which a session refuses
-    /// as a table of pending gets with no row. Asked under the session's lock, so the callback is
-    /// minted there as it was before it had a row.
+    /// its place, or `None`, with nothing minted, when every row is held or a table the leg needs
+    /// cannot take its rows, which a session refuses as a table of pending gets with no row. Asked
+    /// under the session's lock, so the callback is minted there as it was before it had a row.
     pub fn open_leg(
         &self,
         mint: &mut dyn FnMut() -> C::ReplyCallback,
         shows_timestamp: bool,
     ) -> Option<LegId> {
+        // The leg's end is written by the drop of its entry, which can answer no refusal, so the
+        // ends take their rows here, before the leg is kept. Only a policy that takes a table's
+        // rows at its first value has a room to make; on every other the rows are there already.
+        if matches!(<C::TablePolicy as Storage>::TAKEN, Taken::AtFirstUse)
+            && !self.ended.with(EndedLegs::make_room)
+        {
+            return None;
+        }
         C::Locks::with(&self.legs, |legs| legs.open(mint, shows_timestamp))
     }
 
@@ -441,7 +479,7 @@ impl<C: GetCalls> GetPlane<C> {
     /// The next reply leg `leg`'s consolidation made due at its end, taken out of its row for the
     /// caller to hand to the leg's callback with no lock held ([`LegHold`]); `None` once there is
     /// none.
-    pub fn take_due(&self, leg: u64) -> Option<HeldReply<u64, Lent>> {
+    pub fn take_due(&self, leg: u64) -> Option<HeldReply<u64, C::TablePolicy>> {
         C::Locks::with(&self.replies, |replies| replies.take(leg))
     }
 
@@ -478,8 +516,9 @@ where
         let row = C::Locks::with(&self.legs, |legs| legs.row(leg).map(NonNull::from));
         if let Some(row) = row {
             // SAFETY: the caller holds a count of the row, so it is not taken out of its place,
-            // and a lent table never moves its rows: it lies there until that count is given
-            // back. The callback is read through a shared borrow and called with no lock held,
+            // and the rows lie apart from the table and never move (`Storage::ROWS_STAY_APART`,
+            // asserted of the plane's policy where it is made): it lies there until that count is
+            // given back. The callback is read through a shared borrow and called with no lock held,
             // and the one word of the row the lock's holders write is atomic.
             unsafe { row.as_ref() }.call(reply);
         }

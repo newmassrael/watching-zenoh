@@ -4172,8 +4172,9 @@ mod congestion;
 mod decl_watch;
 mod dial_in_flight;
 mod direct_receive;
-// The runtime of a build whose read steps its one link itself, which runs no task.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+// The runtime of a build whose read steps every face itself and that joins no group, which runs
+// no task.
+#[cfg(not(any(wz_round, feature = "group")))]
 mod direct_runtime;
 mod entity_tables;
 // The mark the session's lock makes against a wait on a face is kept only in a debug build, and
@@ -4199,6 +4200,9 @@ mod group;
 mod group_congested;
 #[cfg(all(feature = "group", feature = "app-transport"))]
 mod group_stack;
+// The keys the program's objects hold in the session's key arena, counted as its blocks: a session
+// whose tables take their memory on use keeps none and hands copies of their own (`on_use`).
+#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
 mod held_keys;
 #[cfg(feature = "group-host")]
 mod host_group;
@@ -4218,6 +4222,9 @@ mod liveliness;
 mod local;
 #[cfg(feature = "local-queryable")]
 mod local_query;
+// A session whose tables take their memory at their first row.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+mod on_use;
 #[cfg(all(
     feature = "listen",
     feature = "query",
@@ -4241,8 +4248,9 @@ mod program_clock;
 mod queryable;
 pub(crate) mod redial_heap;
 mod redial_wait;
-// The state of a session whose shape the build fixes: a build that plans at the open has none.
-#[cfg(not(feature = "runtime-plan"))]
+// The state of a session whose shape the build fixes: a build that plans at the open has none,
+// and one whose tables take their memory on use holds a state of its own instead (`on_use`).
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 mod region;
 mod replay;
 #[cfg(wz_round)]

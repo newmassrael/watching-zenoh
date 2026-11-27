@@ -11,8 +11,9 @@
 //! its build leaves out, so a build without a plane keeps no field of it and no `cfg` of a
 //! feature reaches the struct: this crate's features are unified across the workspace and the
 //! engine's are not, so a field that followed either could be there for one and not the other.
-//! What every engine keeps alike (the key arena, the count of the session's own requests, where the
-//! matching listeners were last read) is this crate's.
+//! What every engine keeps alike (the count of the session's own requests, where the matching
+//! listeners were last read) is this crate's; where the session's keys are kept follows the policy
+//! of its tables, which the engine names with them ([`SessionParts::Keys`]).
 //!
 //! [`SessionParts`]: crate::session_state::SessionParts
 
@@ -25,7 +26,6 @@ use crate::bounded::Storage;
 use crate::face::{FaceEventKind, FaceLinkRow};
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 use crate::face_plane::FaceReports;
-use crate::key_arena::KeySpace;
 use crate::pending_get::{PendingGet, PendingLegs, SessionFaces};
 use crate::replay_pacing::ReplayPacing;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -47,6 +47,11 @@ pub trait SessionParts {
     type Callbacks: RowCallbacks;
     /// Where the session's tables keep their rows.
     type Storage: Storage;
+    /// The handle of the store the rows of those tables keep their keys in, as their policy keeps
+    /// them: the session's key arena where the tables take their memory at the open
+    /// ([`KeySpace`](crate::key_arena::KeySpace)), its key budget where they take it at their
+    /// first row.
+    type Keys;
     /// Where a face coming up or going is reported.
     type Watchers;
     /// How many rows each table of the session's own declarations was lent: what a write filter of
@@ -120,8 +125,8 @@ pub struct SessionState<P: SessionParts> {
     pub watchers: P::Watchers,
     /// How many rows each table of the session's own declarations was lent.
     pub entities: P::Entities,
-    /// The key arena the rows of those tables keep their keys in, lent with them.
-    pub keys: KeySpace,
+    /// The store the rows of those tables keep their keys in ([`SessionParts::Keys`]).
+    pub keys: P::Keys,
     /// The key ids every node of the deployment shares, which the session was opened with: each
     /// link it opens is handed them, its key expressions are declared under ids past theirs, and a
     /// key goes on the wire as the session's key-wire form says.
@@ -262,6 +267,7 @@ impl MatchingRead {
 mod tests {
     use super::*;
     use crate::bounded::{Arena, Profile, ARENA_ALIGN};
+    use crate::key_arena::KeySpace;
     use crate::limits::SessionLimits;
     use crate::pending_get::GetKind;
     use crate::session_tables::Absent;
@@ -355,6 +361,7 @@ mod tests {
                 type Faces = Registry;
                 type Callbacks = NoCallbacks;
                 type Storage = Profile;
+                type Keys = KeySpace;
                 type Watchers = $watchers;
                 type Entities = ();
                 type Queryables = ();
@@ -459,6 +466,7 @@ mod tests {
             Queryables = (),
             Gets = (),
             KeyIds = (),
+            Keys = KeySpace,
             LocalRequests = LocalRequests,
         >,
         P::Watchers: Default,
@@ -477,6 +485,7 @@ mod tests {
             Queryables = (),
             Gets = (),
             KeyIds = (),
+            Keys = KeySpace,
             LocalRequests = LocalRequests,
         >,
         P::Watchers: Default,

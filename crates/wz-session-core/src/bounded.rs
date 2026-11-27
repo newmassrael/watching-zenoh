@@ -1278,6 +1278,22 @@ impl<T, const N: usize> BoundedVec<T, N, OnUse> {
     pub fn holds_rows(&self) -> bool {
         self.inner.holds_rows()
     }
+
+    /// The next row, for `write` to build a value in where the table keeps it, counted as held
+    /// once `write` returns, and the value built: the table's rows taken now where none were, all of
+    /// its count at once, as its first push takes them. `None`, `write` not called, when the table
+    /// holds its count or the allocator refuses the rows. For a value too large to be one of its own
+    /// in a frame, as the lent policy's table builds one in place.
+    ///
+    /// # Safety
+    /// `write` leaves a whole `T` in the row it is handed, and does not unwind.
+    pub unsafe fn push_in_place(
+        &mut self,
+        write: impl FnOnce(&mut core::mem::MaybeUninit<T>),
+    ) -> Option<&mut T> {
+        // SAFETY: the caller's contract, which is the column's.
+        unsafe { self.inner.push_in_place(write) }
+    }
 }
 
 #[cfg(feature = "alloc")]

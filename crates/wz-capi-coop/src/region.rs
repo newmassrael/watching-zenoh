@@ -12,6 +12,10 @@
 //! A region is reached through a pointer to it, never by a reference to the whole: the tables'
 //! rows and the key arena lie in it beside the tables, reached through the tables, and a unique
 //! reference to the whole would cover them too. Each field is projected from the pointer alone.
+//!
+//! A session whose tables take their memory at their first row (`tables-on-use`) has no region:
+//! its registry is its state's own value, and the places of its own values and its key budget lie
+//! in a state of its own the allocator gives (`OwnState`, beside `StatePlaces`).
 
 use core::ops::{Deref, DerefMut};
 use core::ptr::{addr_of_mut, NonNull};
@@ -21,7 +25,8 @@ use wz_session_core::caps;
 use wz_session_core::key_arena::{place_region, KeyArena, KeySpace};
 use wz_session_core::limits::SessionLimits;
 
-use crate::engine::{RegistryRegion, StatePlaces, REGISTRY_REGION_LINES};
+use crate::engine::StatePlaces;
+use crate::engine::{RegistryRegion, REGISTRY_REGION_LINES};
 
 /// The zeroed `T` at the head of the one block an open reserves for its arena as well
 /// (`SessionArena::reserve_after`), every field of it empty (`ZeroEmpty`) until its owner binds
@@ -114,11 +119,11 @@ unsafe impl<T: Send> Send for RegionField<T> {}
 unsafe impl<T: Sync> Sync for RegionField<T> {}
 
 /// The lines of a [`StateRegion`]'s description, at most: its registry's.
-pub const STATE_REGION_LINES: usize = REGISTRY_REGION_LINES;
+pub(crate) const STATE_REGION_LINES: usize = REGISTRY_REGION_LINES;
 
-/// The state of a session of the build's shape: see the module documentation. The key arena is the
-/// last field, so a region dropped in place lets go of its keys after the registry, whose handle
-/// drops it first.
+/// The state of a session of the build's shape: see the module documentation. The key arena is
+/// the last field, so a region dropped in place lets go of its keys after the registry, whose
+/// handle drops it first.
 pub struct StateRegion {
     registry: RegistryRegion,
     /// The values the state owns and its tasks reach by handles: its round, its planes and its
@@ -133,7 +138,7 @@ unsafe impl ZeroEmpty for StateRegion {}
 impl StateRegion {
     /// The region's description: the lines that place each table of the registry over its rows
     /// and hand each the key arena, read as the region is placed.
-    pub const DESCRIPTION: RegionLines<STATE_REGION_LINES> =
+    pub(crate) const DESCRIPTION: RegionLines<STATE_REGION_LINES> =
         RegistryRegion::places(core::mem::offset_of!(Self, registry));
 
     /// Place each table of the zeroed region at `region` over its rows and hand it the key arena,
@@ -178,7 +183,8 @@ impl StateRegion {
     /// # Safety
     /// `region` points at a `StateRegion`.
     pub(crate) unsafe fn places_at(region: NonNull<Self>) -> NonNull<StatePlaces> {
-        // SAFETY: as `registry_at`.
+        // SAFETY: the caller's contract: a field of a region that lies at a pointer that is not
+        // null is not null either.
         unsafe { NonNull::new_unchecked(addr_of_mut!((*region.as_ptr()).places)) }
     }
 }

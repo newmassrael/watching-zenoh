@@ -112,6 +112,7 @@ impl RoundCalls for CoopCalls {
     #[cfg(not(all(test, feature = "std", wz_round)))]
     type Tally = ();
     type Form = CoopForm;
+    type TablePolicy = crate::StatePolicy;
 }
 
 impl PlaneCalls for CoopCalls {

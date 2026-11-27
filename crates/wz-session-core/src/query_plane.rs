@@ -22,7 +22,10 @@
 //!
 //! The holds are rows of a fixed table, as many as the session's `MAX_PENDING_FINALS`. A query
 //! that arrives when every row is taken is refused and counted: it is not handed to a callback,
-//! and nothing answers it, not even a Final, as zenoh-pico refuses a query it cannot build.
+//! and nothing answers it, not even a Final, as zenoh-pico refuses a query it cannot build. The
+//! table is of the policy the engine names ([`RoundCalls::TablePolicy`]); where it takes its rows
+//! at its first value, a query whose refusal finds no row to be noted in is refused all the same
+//! and owes its Final as one that reached no queryable ([`Admitted::Unnoted`]).
 //!
 //! The session's own get is the exception to the round, where the engine's own queryables answer
 //! its gets ([`PlaneCalls::LocalAnswers`]): the calls begun on the queryables it matched are
@@ -41,6 +44,8 @@
 //! [`PlaneCalls::LocalAnswers`]: crate::round::PlaneCalls::LocalAnswers
 //! [`QueryPlane::take_asked`]: crate::query_plane::QueryPlane::take_asked
 //! [`QueryPlane::next_generation`]: crate::query_plane::QueryPlane::next_generation
+//! [`RoundCalls::TablePolicy`]: crate::round::RoundCalls::TablePolicy
+//! [`Admitted::Unnoted`]: crate::query_plane::Admitted::Unnoted
 
 use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -51,7 +56,7 @@ use core::sync::atomic::AtomicU64;
 #[cfg(feature = "no_std")]
 use portable_atomic::AtomicU64;
 
-use crate::bounded::{BoundedVec, Lent, Static};
+use crate::bounded::{BoundedVec, Static, Storage, Taken};
 use crate::caps;
 use crate::plane_lock::LockFamily;
 use crate::query_sink::QueryView;
@@ -97,33 +102,58 @@ pub struct HoldsFull;
 /// answers it and no Final is sent for it, as zenoh-pico refuses a query it cannot build
 /// (`vendor/zenoh-pico/src/session/queryable.c` @ `z_result_t _z_trigger_queryables(`, which
 /// returns before any callback and sends no Final) and as the session's own stage refuses a
-/// request it cannot owe a Final for ([`caps::MAX_PENDING_FINALS`]). The table is lent from the
-/// session's arena at its open, and let go of before the arena is given back
-/// ([`QueryPlane::let_go`]).
-#[derive(Default)]
-pub struct FinalHolds {
-    holds: HeldFinals,
+/// request it cannot owe a Final for ([`caps::MAX_PENDING_FINALS`]). The table is of the policy
+/// `P`: lent from the session's arena at its open, or placed in its region, and let go of before
+/// the arena is given back ([`QueryPlane::let_go`]); or taking its rows at its first value.
+pub struct FinalHolds<P: Storage> {
+    holds: HeldFinals<P>,
     /// The requests refused for want of a row in the dispatch now running, whose Final that
     /// dispatch owes and must not send. A request that reached a queryable owes its Final in the
     /// same dispatch, so [`Self::owe`] takes each out before the dispatch ends; a dispatch owes no
     /// more Finals than the session's `MAX_PENDING_FINALS`, which sizes this list as it does the
     /// rows.
-    refused: RefusedFinals,
+    refused: RefusedFinals<P>,
+}
+
+impl<P: Storage> Default for FinalHolds<P> {
+    fn default() -> Self {
+        Self {
+            holds: BoundedVec::default(),
+            refused: BoundedVec::default(),
+        }
+    }
+}
+
+/// What a request of the dispatch now running that reached a queryable is told
+/// ([`FinalHolds::admit`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Admitted {
+    /// One hold more on its Final: the queryable's call is begun.
+    Held,
+    /// Refused for want of a row to hold its Final, and noted: the rest of its dispatch refuses it
+    /// too, and its Final is never sent ([`FinalHolds::owe`]).
+    Refused,
+    /// Refused with no row to note the refusal in: before any hold was asked, where the allocator
+    /// refused the refusals' rows (on a policy that takes a table's rows at its first value), or
+    /// after the holds refused it, where the list is past its count. No call is begun, and with
+    /// nothing noted the dispatch owes its Final as one that reached no queryable.
+    Unnoted,
 }
 
 /// A request refused for want of a row: the link generation and the request id it came with.
 pub type RefusedFinal = (u64, RequestId);
 
-/// The rows the Finals held lie in, lent from the session's arena.
-pub type HeldFinals = BoundedVec<FinalHold, { caps::MAX_PENDING_FINALS }, Lent>;
+/// The rows the Finals held lie in, of the policy `P`.
+pub type HeldFinals<P> = BoundedVec<FinalHold, { caps::MAX_PENDING_FINALS }, P>;
 
-/// The rows the requests refused in the running dispatch lie in, lent from the session's arena.
-pub type RefusedFinals = BoundedVec<RefusedFinal, { caps::MAX_PENDING_FINALS }, Lent>;
+/// The rows the requests refused in the running dispatch lie in, of the policy `P`.
+pub type RefusedFinals<P> = BoundedVec<RefusedFinal, { caps::MAX_PENDING_FINALS }, P>;
 
-impl FinalHolds {
-    /// No Final held, in `holds` and `refused`, rows the session's arena lent, as many of each
-    /// as the queries whose Finals it holds at once.
-    pub fn over(holds: HeldFinals, refused: RefusedFinals) -> Self {
+impl<P: Storage> FinalHolds<P> {
+    /// No Final held, in `holds` and `refused`, as many rows of each as the queries whose Finals
+    /// it holds at once: rows the session's arena lent or its region placed, or a count of them
+    /// each table takes at its first value.
+    pub fn over(holds: HeldFinals<P>, refused: RefusedFinals<P>) -> Self {
         Self { holds, refused }
     }
 
@@ -217,22 +247,42 @@ impl FinalHolds {
         self.holds.remove(at).due
     }
 
-    /// A query of the dispatch now running reaches a queryable: one hold more on its Final, or
-    /// `false` when the request was refused already or no row is left for it, which refuses it
-    /// for the rest of the dispatch so its Final is never sent ([`Self::owe`]).
-    pub fn admit(&mut self, generation: u64, rid: RequestId) -> bool {
+    /// A query of the dispatch now running reaches a queryable: one hold more on its Final
+    /// ([`Admitted::Held`]); or refused, when the request was refused already or no row is left
+    /// for it, noted so the rest of the dispatch refuses it and its Final is never sent
+    /// ([`Admitted::Refused`], [`Self::owe`]); or refused with no row to note that in
+    /// ([`Admitted::Unnoted`]).
+    pub fn admit(&mut self, generation: u64, rid: RequestId) -> Admitted {
         // A request refused once stays refused for the rest of its dispatch, so a second
         // queryable it matches does not answer what the first could not.
         if self.refused.contains(&(generation, rid)) {
-            return false;
+            return Admitted::Refused;
+        }
+        // A refusal is noted where it is decided, so its row is had before any hold is asked: a
+        // request the holds then refuse always finds it, and the list, which keeps its rows once
+        // it took them, is asked the allocator once, before the first hold of the session.
+        if !self.rows_for_refusals() {
+            return Admitted::Unnoted;
         }
         if self.take(generation, rid) {
-            return true;
+            return Admitted::Held;
         }
-        // The list cannot be full while every refusal it holds is owed by the running dispatch;
-        // were it, the request would still run no callback, and its Final would go out at once.
-        let _ = self.refused.push((generation, rid));
-        false
+        // The list is not full while every refusal it holds is owed by the running dispatch, which
+        // owes no more Finals than it has rows; were it, the request runs no callback all the same.
+        match self.refused.push((generation, rid)) {
+            Ok(()) => Admitted::Refused,
+            Err(_) => Admitted::Unnoted,
+        }
+    }
+
+    /// Whether the rows a refusal is noted in are had: taken now where the policy takes a table's
+    /// rows at its first value, `false` only where the allocator refused them. A list held to its
+    /// count already holds its rows or has none to take, and on every other policy the rows are
+    /// there already.
+    fn rows_for_refusals(&mut self) -> bool {
+        !matches!(P::TAKEN, Taken::AtFirstUse)
+            || self.refused.free_slots() == 0
+            || self.refused.make_room()
     }
 
     /// The dispatch owes the Final of `rid`: `true` when nothing holds it, so it goes out now,
@@ -372,7 +422,7 @@ pub struct QueryPlane<C: PlaneCalls> {
     /// meanwhile belong to. A session with several faces has several links, each dispatching in its
     /// own turn, so a query cannot be told its link by the last one dialled.
     arriving: AtomicU64,
-    holds: <C::Queues as LockFamily>::Lock<FinalHolds>,
+    holds: <C::Queues as LockFamily>::Lock<FinalHolds<C::TablePolicy>>,
     /// The arrivals refused for want of a row to hold their Final: one for each queryable a
     /// refused query reached, none of whose callbacks ran.
     refused: AtomicU64,
@@ -381,13 +431,13 @@ pub struct QueryPlane<C: PlaneCalls> {
 }
 
 impl<C: PlaneCalls> QueryPlane<C> {
-    /// A plane that holds the Finals of its queries in `holds` ([`FinalHolds`]), rows the
-    /// session's arena lent, made in `at` with its locks.
+    /// A plane that holds the Finals of its queries in `holds` ([`FinalHolds`]), rows of the
+    /// policy its engine names, made in `at` with its locks.
     ///
     /// # Safety
     /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
     /// without being dropped. The plane is not moved from `at` until it is dropped there.
-    pub unsafe fn init_at(at: NonNull<Self>, holds: FinalHolds) {
+    pub unsafe fn init_at(at: NonNull<Self>, holds: FinalHolds<C::TablePolicy>) {
         let at = at.as_ptr();
         // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
         // so each field is too, and each is written once.
@@ -427,7 +477,7 @@ impl<C: PlaneCalls> QueryPlane<C> {
     }
 
     /// `f` on the Finals held, with their lock held for the length of the call.
-    pub fn with_holds<R>(&self, f: impl FnOnce(&mut FinalHolds) -> R) -> R {
+    pub fn with_holds<R>(&self, f: impl FnOnce(&mut FinalHolds<C::TablePolicy>) -> R) -> R {
         C::Queues::with(&self.holds, f)
     }
 
@@ -515,18 +565,22 @@ impl<C: PlaneCalls> QueryPlane<C> {
     /// What a query of link `generation` that reaches a queryable does first: hold its Final and
     /// begin a call on the queryable's row (`begin`, which a row past the most calls its latch
     /// counts answers with none). `None` when no row is left for its Final, which refuses the
-    /// query ([`FinalHolds::admit`]) before any call is begun and counts it, and when `begin`
-    /// began none: that row's hold is given back, and the query owes its Final as one that reached
-    /// no queryable.
+    /// query ([`FinalHolds::admit`]) before any call is begun and counts it: its Final is never
+    /// sent where the refusal was noted, and owed as one that reached no queryable where no row was
+    /// had to note it in ([`Admitted::Unnoted`]). `None` too when `begin` began none: that row's
+    /// hold is given back, and the query owes its Final as one that reached no queryable.
     pub fn admit_call(
         &self,
         generation: u64,
         rid: RequestId,
         begin: impl FnOnce() -> Option<C::Queryable>,
     ) -> Option<C::Queryable> {
-        if !self.with_holds(|holds| holds.admit(generation, rid)) {
-            self.refused.fetch_add(1, Ordering::Relaxed);
-            return None;
+        match self.with_holds(|holds| holds.admit(generation, rid)) {
+            Admitted::Held => {}
+            Admitted::Refused | Admitted::Unnoted => {
+                self.refused.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
         }
         let call = begin();
         if call.is_none() {

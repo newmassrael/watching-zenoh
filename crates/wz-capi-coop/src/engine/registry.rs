@@ -202,10 +202,10 @@ impl FaceTables {
 
     /// A set for no face yet, written field by field into `place`, which is overwritten without
     /// dropping what it held: tables of no rows, each refusing what is asked of it until
-    /// `Self::lend` lends it rows, the peer's held to `limits`. Not inlined: the peer's tables,
-    /// nearly all of the set, are written where they lie by `init_in`, and of the set only its
-    /// gets are a value in this frame.
-    #[cfg(feature = "runtime-plan")]
+    /// `Self::lend` lends it rows, or until the on-use form counts them (`counted`), the peer's
+    /// held to `limits`. Not inlined: the peer's tables, nearly all of the set, are written where
+    /// they lie by `init_in`, and of the set only its gets are a value in this frame.
+    #[cfg(any(feature = "runtime-plan", feature = "tables-on-use"))]
     #[inline(never)]
     fn rowless_in<'p>(place: &'p mut MaybeUninit<Self>, limits: &SessionLimits) -> &'p mut Self {
         let at = place.as_mut_ptr();
@@ -228,7 +228,7 @@ impl FaceTables {
     ///
     /// # Safety
     /// `place` holds all zero bytes, and nothing else reaches it.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     #[inline(never)]
     unsafe fn rowless_over_zero<'p>(
         place: &'p mut MaybeUninit<Self>,
@@ -319,8 +319,17 @@ fn names_face(holder: FaceId) -> bool {
 mod adding;
 mod held;
 use held::Holders;
-#[cfg(not(feature = "runtime-plan"))]
+// The registry made by value, its tables counted at the open, where they take their memory at
+// their first row.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+mod counted;
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(crate) mod placed;
+
+/// The sets of face tables a session whose shape the build fixes holds: the dial role's face's
+/// alone, a build of that form taking no face beside it.
+#[cfg(not(feature = "runtime-plan"))]
+pub(in crate::engine) const FACE_SETS: usize = 1;
 
 /// Where the set face `id` holds lies, `holders` naming the face of each set by the set's
 /// place: never a free set, whose row names no face.
