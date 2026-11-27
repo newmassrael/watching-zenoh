@@ -13,7 +13,7 @@ use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicPtr;
-#[cfg(any(feature = "listen", test))]
+#[cfg(any(all(feature = "listen", not(wz_round)), all(test, feature = "std")))]
 use core::sync::atomic::Ordering;
 
 use wz_session_core::bounded::{BoundedVec, OnUse};
@@ -38,7 +38,7 @@ impl<T> OnceRow<T> {
     }
 
     /// The row's value, once it was made.
-    #[cfg(any(feature = "listen", test))]
+    #[cfg(any(all(feature = "listen", not(wz_round)), all(test, feature = "std")))]
     fn get(&self) -> Option<&T> {
         // SAFETY: a pointer is stored once, after the whole value was written in its allocation
         // (`OnceRows::made`, whose release this acquire reads), and the value is dropped only by
@@ -118,13 +118,13 @@ impl<T> OnceRows<T> {
     }
 
     /// The value of row `row`, once it was made; `None` past the rows or before.
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", not(wz_round)))]
     pub(in crate::engine) fn get(&self, row: usize) -> Option<&T> {
         self.rows.get(row).and_then(OnceRow::get)
     }
 
     /// Every row in order, each its value once it was made.
-    #[cfg(any(feature = "listen", test))]
+    #[cfg(any(all(feature = "listen", not(wz_round)), all(test, feature = "std")))]
     pub(in crate::engine) fn rows(
         &self,
     ) -> impl DoubleEndedIterator<Item = Option<&T>> + ExactSizeIterator {
@@ -132,7 +132,7 @@ impl<T> OnceRows<T> {
     }
 
     /// The values made, in the order of their rows.
-    #[cfg(any(feature = "listen", test))]
+    #[cfg(any(all(feature = "listen", not(wz_round)), all(test, feature = "std")))]
     pub(in crate::engine) fn iter(&self) -> impl Iterator<Item = &T> {
         self.rows().flatten()
     }
@@ -179,7 +179,7 @@ impl<T> OnceRows<T> {
     /// # Safety
     /// `write` leaves a whole `T` at the pointer it is handed, which is aligned for `T` and valid
     /// for writes of one, and does not unwind; the value is not moved from there.
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", not(wz_round)))]
     pub(in crate::engine) unsafe fn made(
         &self,
         row: usize,
@@ -232,7 +232,7 @@ mod tests {
     }
 
     /// Write `Counted { drops, id }` at `at`.
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", not(wz_round)))]
     fn write_at<'d>(at: NonNull<Counted<'d>>, drops: &'d Cell<usize>, id: usize) {
         // SAFETY: the pointer the table hands is aligned and valid for writes of one value.
         unsafe { at.as_ptr().write(Counted { drops, id }) };
@@ -244,7 +244,7 @@ mod tests {
     /// `counted` that makes its rows' values (a made value in place of `OnceRow::empty`), by a
     /// `made` that makes a second value for a row that holds one, or by `OnceRow`'s drop skipping
     /// a made value or dropping an empty row's.
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", not(wz_round)))]
     #[test]
     fn an_on_use_rows_value_is_made_at_its_first_use_and_kept_there() {
         let drops = Cell::new(0);
@@ -289,7 +289,7 @@ mod tests {
     /// write, the one order in which two makes of a row meet on one thread. Turned red by `made`
     /// storing its value over one another make published (a plain store in place of the exchange),
     /// or by the losing value kept or dropped twice.
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", not(wz_round)))]
     #[test]
     fn an_on_use_row_made_twice_at_once_keeps_the_first_value_published() {
         let drops = Cell::new(0);
