@@ -624,6 +624,79 @@ fn the_puts_of_a_publisher_at_one_send_epoch_are_written_from_its_plan() {
     });
 }
 
+/// How often a put looked its write filter's row up since the open.
+fn filter_rows(engine: &Engine) -> usize {
+    engine.filter_rows()
+}
+
+/// A put through a publisher's write filter looks the filter's row up once, for its plan, its
+/// filter's answer and the head its plain way wrote, which the leg's send writes it from: a planned
+/// bare put and a put with options once each, and the first bare put at a send epoch once more,
+/// to plan its way. The put with options is still written from that head where its build names
+/// the key by the head's declaration. CONTROL: a publish no publisher made has no row to look up.
+/// Turned red by a leg that looks the row up again to find the head, or by a put with options
+/// handed no head by its decision.
+#[test]
+fn a_put_looks_its_write_filters_row_up_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let (_hold, filter, wire) = way_on(&engine, &router, "demo/x");
+
+    let before = filter_rows(&engine);
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &wire, b"v", None),
+        FilteredPut::Sent(Ok(0))
+    );
+    assert_eq!(
+        filter_rows(&engine) - before,
+        2,
+        "the first bare put looks it up to send, and again to plan its way"
+    );
+
+    let before = filter_rows(&engine);
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &wire, b"v", None),
+        FilteredPut::Sent(Ok(0))
+    );
+    assert_eq!(
+        filter_rows(&engine) - before,
+        1,
+        "a planned put looks it up once"
+    );
+
+    let options = PublishOptions::put();
+    let (before, heads) = (filter_rows(&engine), planned(&engine));
+    assert!(matches!(
+        engine.publish_filtered(filter, "demo/x", &wire, b"v", Some(&options)),
+        FilteredPut::Sent(Ok(_))
+    ));
+    assert_eq!(
+        filter_rows(&engine) - before,
+        1,
+        "a put with options looks it up once"
+    );
+    if cfg!(not(feature = "shared-key-ids")) {
+        assert_eq!(
+            planned(&engine) - heads,
+            1,
+            "and is written from the head its decision read"
+        );
+    }
+
+    let before = filter_rows(&engine);
+    assert!(engine
+        .publish_on_wire_all("demo/x", &wire, b"v", &options)
+        .is_ok());
+    assert_eq!(
+        filter_rows(&engine),
+        before,
+        "CONTROL: a publish no publisher made looks up no row"
+    );
+    until(&engine, "the router to receive every put", || {
+        router.seen(|s| s.pushes) == 4
+    });
+}
+
 /// A plan stands at its send epoch alone: once the router retracts the subscriber that opened the
 /// filter, the epoch has moved and the publisher's bare put is held back, not written from the
 /// plan. CONTROL: the put before the retraction is written from it. Turned red by an epoch that
