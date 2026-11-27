@@ -86,17 +86,26 @@ impl MulticastSocket for WindowsUdpSocket {
         WindowsUdpSocket::wait_writable(self, timeout_us)
     }
 
-    #[cfg(feature = "host-multicast")]
-    fn wait_readable_any(sockets: &[&Self], timeout_ms: core::ffi::c_int) {
-        WindowsUdpSocket::wait_readable_any(sockets, timeout_ms)
-    }
-
     wz_runtime_coop::with_heap_link_seams! {
         #[cfg(feature = "host-multicast")]
         fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
             WindowsUdpSocket::room_wait(self)
         }
 
+    }
+}
+
+/// Winsock's socket in a scouting window's wait: a `WSAPOLLFD` of the set `WSAPoll` is handed.
+#[cfg(feature = "host-multicast")]
+impl crate::scouting::ReadableAmong for WindowsUdpSocket {
+    type Entry = ws::WSAPOLLFD;
+
+    fn readable_entry(&self) -> ws::WSAPOLLFD {
+        WindowsUdpSocket::readable_entry(self)
+    }
+
+    fn wait_readable_among(set: &mut [ws::WSAPOLLFD], timeout_ms: core::ffi::c_int) {
+        WindowsUdpSocket::wait_readable_among(set, timeout_ms)
     }
 }
 

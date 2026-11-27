@@ -51,17 +51,33 @@ impl<S> ScoutMember<S> {
     }
 }
 
+/// A host socket a window waits on among its other members for a datagram: an entry of a set made
+/// once with the window's members, so a wait collects nothing.
+pub trait ReadableAmong: DatagramSocket {
+    /// The socket as an entry of the set: the system's poll entry for it.
+    type Entry;
+    /// The socket's entry, made when it joins the set.
+    fn readable_entry(&self) -> Self::Entry;
+    /// Wait up to `timeout_ms` milliseconds for any socket of `set` to have a datagram, returning
+    /// at once when one has; with none to wait on, the time passes. A failed wait returns early:
+    /// the read that follows finds what there is.
+    fn wait_readable_among(set: &mut [Self::Entry], timeout_ms: c_int);
+}
+
 /// The sockets a window holds. A member that fails a read is dropped, as a link that is lost is,
 /// and the window goes on with the rest: one interface going down does not end a window the others
 /// can still answer on.
-pub struct ScoutMembers<S> {
+pub struct ScoutMembers<S: ReadableAmong> {
     members: Vec<ScoutMember<S>>,
+    /// What the window waits on, one entry for each member and in the members' order: made with
+    /// them and dropped with each, so a wait hands the set as it stands.
+    readable: Vec<S::Entry>,
     /// Where the next read starts, so one socket that is always ready cannot starve the others (a
     /// group socket is one anybody can send to).
     cursor: usize,
 }
 
-impl<S: MulticastSocket> ScoutMembers<S> {
+impl<S: MulticastSocket + ReadableAmong> ScoutMembers<S> {
     /// Open the group socket on `group:port` and one ask socket for each address of `locals`
     /// ([`Self::from_parts`] says what is kept when they fail). An ask socket is bound to its
     /// address and leaves by it; the address is handed to the socket layer as it was read from the
@@ -81,7 +97,7 @@ impl<S: MulticastSocket> ScoutMembers<S> {
     }
 }
 
-impl<S: DatagramSocket> ScoutMembers<S> {
+impl<S: ReadableAmong> ScoutMembers<S> {
     /// The group member and the ask members as one window. With no ask member the group socket
     /// asks, which is the floor a host that lists no interface still scouts on; with neither,
     /// there is no window.
@@ -93,7 +109,15 @@ impl<S: DatagramSocket> ScoutMembers<S> {
             members.push(group);
         }
         members.extend(ask);
-        let this = Self { members, cursor: 0 };
+        let readable = members
+            .iter()
+            .map(|member| member.socket.readable_entry())
+            .collect();
+        let this = Self {
+            members,
+            readable,
+            cursor: 0,
+        };
         wz_session_core::diag_debug!(
             "scout: asking on {} socket(s); fell back to the group socket: {fell_back_to_group}",
             this.askers()
@@ -155,18 +179,26 @@ impl<S: DatagramSocket> ScoutMembers<S> {
         }
         // Each lost member is marked where it lies, so one pass in order drops them all, with no
         // list of their places to sort first: the reads began at the cursor, not at the front.
-        self.members.retain(|member| !member.lost);
+        // Each member kept moves forward past the lost ones before it, its entry with it, so the
+        // members and the set keep one order.
+        let mut kept = 0;
+        for at in 0..self.members.len() {
+            if !self.members[at].lost {
+                self.members.swap(kept, at);
+                self.readable.swap(kept, at);
+                kept += 1;
+            }
+        }
+        self.members.truncate(kept);
+        self.readable.truncate(kept);
         any
     }
-}
 
-impl<S: MulticastSocket> ScoutMembers<S> {
     /// Wait up to `timeout_ms` milliseconds for any member to have a datagram, returning at once
     /// when one has: a window that found nothing waits here rather than spin, and a Hello ends the
-    /// wait as it arrives.
-    pub fn wait(&self, timeout_ms: c_int) {
-        let sockets: Vec<&S> = self.members.iter().map(|member| &member.socket).collect();
-        S::wait_readable_any(&sockets, timeout_ms);
+    /// wait as it arrives. The set waited on is the one made with the members.
+    pub fn wait(&mut self, timeout_ms: c_int) {
+        S::wait_readable_among(&mut self.readable, timeout_ms);
     }
 }
 
@@ -283,6 +315,19 @@ mod tests {
     struct Scripted {
         queued: core::cell::RefCell<Vec<&'static str>>,
         broken: core::cell::Cell<bool>,
+        /// What the socket is in the window's set: the port of its member, so the set's order can
+        /// be read against the members'.
+        id: u16,
+    }
+
+    impl ReadableAmong for Scripted {
+        type Entry = u16;
+
+        fn readable_entry(&self) -> u16 {
+            self.id
+        }
+
+        fn wait_readable_among(_set: &mut [u16], _timeout_ms: c_int) {}
     }
 
     impl DatagramSocket for Scripted {
@@ -330,8 +375,9 @@ mod tests {
 
     /// A member whose read fails is dropped as the drain ends and the others stay in their order,
     /// whichever member the drain began at, every datagram of a live member still handed on; a
-    /// window whose every member was lost is empty. Turned red by a drain that keeps a lost
-    /// member, drops a live one or moves one, as removing by swap does.
+    /// window whose every member was lost is empty. The set the window waits on is made with the
+    /// members and follows each drop. Turned red by a drain that keeps a lost member, drops a live
+    /// one or moves one, as removing by swap does, or by a set that leaves its members' order.
     #[test]
     fn a_member_whose_read_fails_is_dropped_and_the_rest_keep_their_order() {
         let at = |port: u16| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
@@ -339,11 +385,18 @@ mod tests {
             let socket = Scripted {
                 queued: core::cell::RefCell::new(queued.to_vec()),
                 broken: core::cell::Cell::new(broken),
+                id: port,
             };
             ScoutMember::new(socket, at(port), true)
         };
         let peers = |members: &ScoutMembers<Scripted>| -> Vec<SocketAddr> {
-            members.members.iter().map(|member| member.peer).collect()
+            let peers: Vec<SocketAddr> = members.members.iter().map(|member| member.peer).collect();
+            let set: Vec<SocketAddr> = members.readable.iter().map(|id| at(*id)).collect();
+            assert_eq!(
+                set, peers,
+                "the set waited on is the members', in their order"
+            );
+            peers
         };
         let mut members = ScoutMembers::from_parts(
             None,
@@ -356,6 +409,7 @@ mod tests {
                 member(6, false, &[]),
             ],
         );
+        assert_eq!(peers(&members), (1..=6).map(at).collect::<Vec<_>>());
         let mut buffer = [0u8; 16];
         let mut seen = Vec::new();
         assert!(members.drain(&mut buffer, |datagram| seen.push(datagram.to_vec())));
@@ -375,6 +429,7 @@ mod tests {
         members.members[0].socket.broken.set(true);
         assert!(!members.drain(&mut buffer, |_| panic!("no member reads")));
         assert!(members.is_empty(), "every member was lost");
+        assert!(members.readable.is_empty(), "and nothing is waited on");
     }
 
     /// A window asks from a socket bound to each address it is handed, and from none of an
