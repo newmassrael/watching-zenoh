@@ -820,6 +820,38 @@ engine). Receive: 0. Test:
 `end_leg` or `time_out_get` leaves an end uncounted, or `retire_get` takes a standing get off
 the count or leaves an ended one on it).
 
+**Three parts of the switch, landed ahead of it.**
+
+- A group's leg owes a Final of each member it holds when the get is asked
+  (`QueryOptions::remote_finals` over the group's members), so "a leg keeps no count of Finals: on
+  this engine a face's entry owes one" (above) holds for a link and for the session's own
+  queryables, not for a group. The count is the face's, as the table of facts says (each face's
+  count of the Finals it owes): `GetLegs` keeps for each leg the Finals still owed
+  (`hold_owing`; `hold` owes one), `end_leg` ends the leg at the last and hands the get back
+  then, a Final past the last finds nothing, and the row counts legs, not Finals. Size: a leg's
+  row grows from 8 to 12 bytes in every form (a `u32`, the row's alignment), against the plane's
+  rows and a face's entry of sink, key and deadline it replaces. Receive: 0. Test:
+  `get_legs::tests::a_leg_owing_several_finals_ends_at_its_last` (red if `end_leg` ends a leg at
+  its first Final, or a leg owing none is held).
+- The legs' table in the other forms: `GetLegs::counted` (on use, taking its rows at its first
+  leg) and `GetLegs<_, Region>::places` over `GetLegsRows` (`GET_LEGS_LINES`, one line, no
+  handle to the key arena: a leg keeps no key). The table states no quota, so a face's legs need
+  nothing of `limit_to`: the gets' table bounds them. Size: 0 until the engine holds them.
+  Tests: `a_table_counted_one_row_refuses_a_second_leg_until_the_first_ends` (red if a counted
+  table holds past its count) and `region_legs_describe_their_rows_inside_their_rows` (red if
+  the line has the wrong bound or rows lie outside `GetLegsRows`).
+- A cancellation's and the close's walk (`SessionTables::retire_next_get_of`): the next get the
+  pick names, marked (the cancellation's mark, under the same hold) and retired, handed back with
+  how its row left, `Removal` and not an `Option`; the cursor moves past every get it reads, so
+  a walk the engine carries across its holds of the session ends whatever a retirement answers.
+  A retirement is never refused for a live get: a get's slot is pinned by its retirement alone
+  (the gets' table is lent out of the tables only as `&`: `kept_pending_gets_mut` is private),
+  and a retired get is found by no lookup, so the one pin a running call needs is taken over a
+  count of none. The deliveries' walk of the ended gets carries its cursor alike. Size: 0 until
+  the engine walks it. Receive: 0. Test:
+  `session_tables::tests::a_walk_retires_each_get_its_pick_names_once_and_marks_it_first` (red
+  if the walk reads a get twice, leaves one unmarked, or refuses one a call of which runs).
+
 ## 7. The receive
 
 None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message
