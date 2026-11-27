@@ -3,39 +3,37 @@
 
 //! Which face holds each set of a session's face tables, by the set's place, in the two forms a
 //! build may take: a session that adds faces beside its dial role's (`listen`, `group`) keeps an
-//! index lent from its arena ([`ManyHolders`]); one of its dial role's face alone knows that face
-//! holds the first set and no other face is held ([`OneHolder`]), and lends no index. The registry
-//! is written once over [`Holders`], so its tests build either form whatever the build.
+//! index of its own ([`ManyHolders`]), lent from its arena or taking its rows at its first, as the
+//! session's tables take theirs; one of its dial role's face alone knows that face holds the first
+//! set and no other face is held ([`OneHolder`]), and keeps no index. The registry is written once
+//! over [`Holders`], so its tests build either form whatever the build.
 
-#[cfg(any(feature = "runtime-plan", not(feature = "tables-on-use")))]
+#[cfg(not(wz_on_use))]
 use super::described::HELD_LINES;
 use super::{FaceId, FaceTables, DIAL_FACE};
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_on_use)]
+use crate::arena::ArenaRefused;
+#[cfg(wz_lent)]
 use wz_session_core::bounded::LendRefused;
-#[cfg(any(feature = "runtime-plan", not(feature = "tables-on-use")))]
+#[cfg(not(wz_on_use))]
 use wz_session_core::bounded::RegionLines;
 use wz_session_core::slot_observer::OtherPeers;
 
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
-))]
+#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 use super::{Others, NO_FACE};
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
-))]
+#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 use crate::arena::MAX_FACE_SETS;
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
+#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+use crate::RowPolicy;
+#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+use wz_session_core::bounded::BoundedVec;
+#[cfg(all(
+    not(wz_on_use),
+    any(feature = "listen", feature = "group", all(test, wz_lent))
 ))]
-use wz_session_core::bounded::{BoundedVec, Lent, RowCount, SeqPlace};
+use wz_session_core::bounded::{RowCount, SeqPlace};
 
-#[cfg(any(not(any(feature = "listen", feature = "group")), test))]
+#[cfg(any(not(any(feature = "listen", feature = "group")), all(test, wz_lent)))]
 use wz_session_core::slot_observer::NoOtherPeers;
 
 /// The index of held sets: a row for each set, naming the face that holds it, `NO_FACE` for a
@@ -50,18 +48,24 @@ pub(in crate::engine) trait Holders: Sized {
     /// The index's lines in the registry's description, from where the registry keeps the index: a
     /// row for each set, lent `RowCount::HeldSets`, where the form keeps an index, and none where
     /// the one set's holder is known when compiled.
-    #[cfg(any(feature = "runtime-plan", not(feature = "tables-on-use")))]
+    #[cfg(not(wz_on_use))]
     const LINES: RegionLines<HELD_LINES>;
 
     /// The index before the registry's walk lends it its rows (`RegistryOf::new`): of no row.
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     fn rowless() -> Self;
 
     /// Name the holder of each of `sets` sets in the rows the walk lent the index, where the form
     /// keeps one: the dial role's face holds the first set, and every other is free. Refused when
     /// the index was lent fewer rows, which the walk has refused first.
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     fn hold_sets(&mut self, sets: usize) -> Result<(), LendRefused>;
+
+    /// The index of `sets` sets where the session's tables take their memory at their first row:
+    /// the dial role's face holds the first set, and every other is free. Refused when the
+    /// allocator has no room for its rows, which it takes here, at the open.
+    #[cfg(wz_on_use)]
+    fn counted(sets: usize) -> Result<Self, ArenaRefused>;
 
     /// The face of each set, by the set's place.
     fn rows(&self) -> &[FaceId];
@@ -78,38 +82,31 @@ pub(in crate::engine) trait Holders: Sized {
 }
 
 /// The index of a session that adds faces beside its dial role's: a row for each set the open
-/// lent, lent from the arena with them (`crate::arena::ArenaPart::HeldFaces`), so a face coming
-/// or going writes its set's row and moves none.
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
-))]
-pub(in crate::engine) struct ManyHolders(BoundedVec<FaceId, MAX_FACE_SETS, Lent>);
+/// counted, of the policy of the session's tables, lent from the arena with them
+/// (`crate::arena::ArenaPart::HeldFaces`) or taken at the open where the tables take their memory
+/// on use, so a face coming or going writes its set's row and moves none.
+#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+pub(in crate::engine) struct ManyHolders(BoundedVec<FaceId, MAX_FACE_SETS, RowPolicy>);
 
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
-))]
+#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 impl Holders for ManyHolders {
     type Others<'a>
         = Others<'a>
     where
         Self: 'a;
 
-    #[cfg(any(feature = "runtime-plan", not(feature = "tables-on-use")))]
+    #[cfg(not(wz_on_use))]
     const LINES: RegionLines<HELD_LINES> = RegionLines::EMPTY.seq(
         SeqPlace::of::<FaceId>(core::mem::offset_of!(Self, 0), 0, MAX_FACE_SETS)
             .counted(RowCount::HeldSets),
     );
 
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     fn rowless() -> Self {
         Self(BoundedVec::default())
     }
 
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     fn hold_sets(&mut self, sets: usize) -> Result<(), LendRefused> {
         let faces = core::iter::once(DIAL_FACE).chain(core::iter::repeat(NO_FACE));
         for holder in faces.take(sets) {
@@ -119,6 +116,20 @@ impl Holders for ManyHolders {
             })?;
         }
         Ok(())
+    }
+
+    #[cfg(wz_on_use)]
+    fn counted(sets: usize) -> Result<Self, ArenaRefused> {
+        // Its rows are taken whole at the first push, the dial role's: every row is written at
+        // the open, so a face coming or going takes nothing.
+        let mut rows = BoundedVec::<FaceId, MAX_FACE_SETS, RowPolicy>::counted(sets);
+        let faces = core::iter::once(DIAL_FACE).chain(core::iter::repeat(NO_FACE));
+        for holder in faces.take(sets) {
+            rows.push(holder).map_err(|_| ArenaRefused::NoMemory {
+                bytes: core::mem::size_of::<FaceId>().saturating_mul(sets),
+            })?;
+        }
+        Ok(Self(rows))
     }
 
     fn rows(&self) -> &[FaceId] {
@@ -150,29 +161,36 @@ impl Holders for ManyHolders {
 /// The index of a session of its dial role's face alone: that face holds the first set, which the
 /// open lends whether the session dials or not, and no other face is ever held, so the index is
 /// known when compiled and the arena lends none. Its one row is never written, so a call that
-/// would free or keep a set finds none to write.
-#[cfg(any(not(any(feature = "listen", feature = "group")), test))]
+/// would free or keep a set finds none to write. The lent form's tests build it beside the index
+/// of many faces whatever the build.
+#[cfg(any(not(any(feature = "listen", feature = "group")), all(test, wz_lent)))]
 pub(in crate::engine) struct OneHolder;
 
-#[cfg(any(not(any(feature = "listen", feature = "group")), test))]
+#[cfg(any(not(any(feature = "listen", feature = "group")), all(test, wz_lent)))]
 impl Holders for OneHolder {
     type Others<'a>
         = NoOtherPeers
     where
         Self: 'a;
 
-    #[cfg(any(feature = "runtime-plan", not(feature = "tables-on-use")))]
+    #[cfg(not(wz_on_use))]
     const LINES: RegionLines<HELD_LINES> = RegionLines::EMPTY;
 
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     fn rowless() -> Self {
         Self
     }
 
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     fn hold_sets(&mut self, sets: usize) -> Result<(), LendRefused> {
         debug_assert_eq!(sets, 1, "a session of one face is lent one set");
         Ok(())
+    }
+
+    #[cfg(wz_on_use)]
+    fn counted(sets: usize) -> Result<Self, ArenaRefused> {
+        debug_assert_eq!(sets, 1, "a session of one face counts one set");
+        Ok(Self)
     }
 
     fn rows(&self) -> &[FaceId] {

@@ -73,8 +73,6 @@ use crate::reassembly_rx::{in_place_reassembly, InPlaceReassembly, PoolStorage, 
 #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
 use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 
-#[cfg(not(feature = "session-slot"))]
-use crate::link_storage::LinkTables;
 use crate::session_runtime::{EntropyOf, SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
@@ -1285,14 +1283,16 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
     /// [`LinkOpenError::Unsupported`].
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump, N>, LinkOpenError>;
 
-    /// The buffers of every link the stack opens from now on, for the session the links serve:
-    /// tables the session laid out in the memory it reserved when it opened, a receive buffer and
-    /// outbound storage for each link it may hold. A stack that takes them opens each link over a
-    /// buffer of each, and a link the tables have no buffer left for is
-    /// [`LinkOpenError::Exhausted`], never one that allocates; told before the session listens, so
-    /// a listener it opens after takes them too. The default ignores them: a stack whose links
-    /// bring buffers of their own (an lwIP pool, a test network) keeps them.
-    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
+    /// Where the buffers of every link the stack opens from now on are taken, for the session the
+    /// links serve ([`CountKind::Buffers`](crate::link_cells::CountKind::Buffers)): tables the
+    /// session laid out in the memory it reserved when it opened, a receive buffer and outbound
+    /// storage for each link it may hold, or the heap, where it lent none or where the kind's
+    /// buffers are the heap's alone. A stack lent tables opens each link over a buffer of each,
+    /// and a link the tables have no buffer left for is [`LinkOpenError::Exhausted`], never one
+    /// that allocates; told before the session listens, so a listener it opens after takes them
+    /// too. The default ignores them: a stack whose links bring buffers of their own (an lwIP
+    /// pool, a test network) keeps them.
+    fn lend_buffers(&mut self, tables: N::Buffers) {
         let _ = tables;
     }
 
@@ -1309,25 +1309,41 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
         Self::LINK_CELL_BYTES
     }
 
-    /// The cells every link the stack opens from now on is placed in, for the session the links
-    /// serve: a link that finds none free is [`LinkOpenError::Exhausted`], and none is placed on
-    /// the heap. The default ignores them, as a stack whose `link_cell_bytes` is `0` does.
-    fn lend_cells(&mut self, cells: wz_session_core::byte_cells::LentByteCells<N::Flag>) {
+    /// Where every link the stack opens from now on is placed, for the session the links serve
+    /// ([`CountKind::Cells`](crate::link_cells::CountKind::Cells)): in a cell of a table the
+    /// session lent, where a link that finds none free is [`LinkOpenError::Exhausted`] and none is
+    /// placed on the heap; on the heap where it lent none, or where the kind's cells are the
+    /// heap's alone. The default ignores it, as a stack whose `link_cell_bytes` is `0` does.
+    fn lend_cells(&mut self, cells: N::Cells) {
         let _ = cells;
     }
 
     /// The rows every udp port the stack opens from now on keeps its peers and the datagrams it
-    /// sorted for them in, for the session the ports serve: a peer or a datagram the rows have no
-    /// room for is dropped and counted, and none is kept on the heap. The bytes the heap refused
-    /// when the stack cannot hold the rows, which refuses the session's open. The default ignores
-    /// them, as a stack that opens no udp port does.
+    /// sorted for them in, and the slots it reads those datagrams into and holds them in until the
+    /// links of their peers take them, for the session the ports serve: a peer or a datagram the
+    /// rows have no room for is dropped and counted, and none is kept on the heap; a port that
+    /// finds no slot free to read into is not opened. `slots` is `None` for a session that lent
+    /// none, whose ports read into memory of their own. The bytes the heap refused when the stack
+    /// cannot hold the rows, which refuses the session's open. The default ignores them, as a
+    /// stack that opens no udp port does.
     #[cfg(feature = "udp-listen")]
     fn lend_port_rows(
         &mut self,
         rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
+        slots: Option<wz_session_core::byte_cells::LentByteCells<N::Flag>>,
     ) -> Result<(), usize> {
-        let _ = rows;
+        let _ = (rows, slots);
         Ok(())
+    }
+
+    /// The receive buffers of the multicast groups the stack joins from now on, for the session
+    /// the groups serve, one for each group it may join: a group joined claims one and gives it
+    /// back when it is left, and a group that finds every one held is
+    /// [`LinkOpenError::Exhausted`]. Flagged as cells whatever `N` is: a group is held by the one
+    /// task that drives it. The default ignores them, as a stack that joins no group does; a
+    /// stack never lent them gives a joined group a buffer of its own.
+    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
+        let _ = buffers;
     }
 
     /// [`Self::open_initiator`], begun without waiting for the link's connection to be made: the

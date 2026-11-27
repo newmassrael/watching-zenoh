@@ -40,24 +40,24 @@ use super::decl_watch::WatchObserver;
 use wz_session_core::bounded::BoundedVec;
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::bounded::{Arena, LendRefused, RowCount, TableLender};
 #[cfg(not(wz_round))]
 use wz_session_core::driver_loop::InPlaceRecord;
 
 use crate::RowPolicy;
 use wz_session_core::driver_loop::IterationEvent;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::key_arena::{lend_region, KeySpace, LentKeys};
 #[cfg(feature = "multicast-declarations")]
 use wz_session_core::limit_binding::Quota;
 #[cfg(feature = "multicast-declarations")]
 use wz_session_core::limits::MaxPeerKeyexprAliasesHeld;
 use wz_session_core::limits::SessionLimits;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::peer_tables::PeerPools;
 use wz_session_core::peer_tables::PeerTables;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::peer_tables::{PeerRows, SHARES_ROWS};
 #[cfg(not(wz_round))]
 use wz_session_core::pubsub::LentPush;
@@ -73,25 +73,21 @@ use wz_session_core::slot_observer::NoRequesters;
     feature = "declarations-synced-event"
 )))]
 use wz_session_core::slot_observer::NoSink;
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
-))]
+#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 use wz_session_core::slot_observer::OtherPeers;
 #[cfg(feature = "query")]
 use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf, TakenAhead};
 
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use super::CoopTables;
 #[cfg(feature = "query")]
 use super::{LegHold, LegId, LegSink};
 use super::{RoundDelivery, SubscriberRow};
 use crate::arena::MAX_FACE_SETS;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use crate::arena::{FacePeers, GetTables};
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::MatchingSink;
@@ -103,7 +99,7 @@ use wz_session_core::session_tables::{PeerDeclarations, Plane};
 #[allow(unused_imports)]
 use crate::prelude::*;
 use core::mem::{ManuallyDrop, MaybeUninit};
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use core::ptr::NonNull;
 use core::ptr::{self, addr_of_mut};
 
@@ -119,11 +115,6 @@ pub(super) type FaceId = u64;
 /// The dial role's face, as `wz-capi-core`'s registry names it: accepted faces take the ids
 /// beneath it.
 pub(super) const DIAL_FACE: FaceId = 1 << 62;
-
-/// The tokens a face that went still owes the liveliness subscribers, held apart from the set it
-/// gave back, their rows in the session's pool (`Registry::owed`).
-#[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-type OwedTokens = wz_session_core::declare::liveliness_subscriber::PeerTokens<RowPolicy>;
 
 /// The session's own pending gets on one face: a query's sink consolidates what its leg is
 /// handed. The rows are lent from the session's arena at its open, one table for each face the
@@ -285,34 +276,35 @@ fn names_face(holder: FaceId) -> bool {
     holder < NAMES_NO_FACE
 }
 
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
-))]
+#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 mod adding;
 // The registry's and each set's descriptions, read by the forms that lay their tables out at the
 // open: the region's and the plan's.
-#[cfg(any(feature = "runtime-plan", not(feature = "tables-on-use")))]
+#[cfg(not(wz_on_use))]
 mod described;
 // What the arena's plan counts of the registry and of a set, by the part of its report: the lines
 // of the same descriptions the open walks.
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
+#[cfg(all(feature = "query", wz_lent))]
 pub(crate) use described::set_get_bytes;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 pub(crate) use described::{registry_bytes, registry_row_bytes, set_peer_bytes};
 mod held;
 use held::Holders;
+// What the faces that went owe the liveliness subscribers, kept by a build that adds faces.
+#[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+mod owed;
 // The registry made by value, its tables counted at the open, where they take their memory at
-// their first row.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+// their first row, and the sets of the faces that come counted as each comes.
+#[cfg(wz_on_use)]
 mod counted;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(crate) mod placed;
 
 /// The sets of face tables a session whose shape the build fixes holds: the dial role's face's
-/// alone, a build of that form taking no face beside it.
-#[cfg(not(feature = "runtime-plan"))]
+/// alone, a build of that form taking no face beside it (`listen` and `group` each name
+/// `runtime-plan`). What its region keeps the sets and a place of each face's room for
+/// (`RegistryRegion`, `StatePlaces`).
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(in crate::engine) const FACE_SETS: usize = 1;
 
 /// Where the set face `id` holds lies, `holders` naming the face of each set by the set's
@@ -341,18 +333,14 @@ impl HeldFace {
         feature = "listen",
         feature = "group",
         wz_interest_answer,
-        all(test, feature = "runtime-plan")
+        all(test, wz_lent)
     ))]
     pub(super) const fn new(at: usize, id: FaceId) -> Self {
         Self { at, id }
     }
 
     /// The place of the face's set, which its link and its room keep too.
-    #[cfg(any(
-        feature = "listen",
-        feature = "group",
-        all(test, feature = "runtime-plan")
-    ))]
+    #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
     pub(super) const fn at(&self) -> usize {
         self.at
     }
@@ -376,11 +364,7 @@ pub(super) struct HistoryCursor {
 /// The faces other than the one a call acts on, which the matching verdicts of that call count:
 /// the sets before the call's own and after it, and the rows of the index of held sets that
 /// name their faces.
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
-))]
+#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 pub(super) struct Others<'a> {
     before: &'a [FaceTables],
     after: &'a [FaceTables],
@@ -388,11 +372,7 @@ pub(super) struct Others<'a> {
     held_after: &'a [FaceId],
 }
 
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
-))]
+#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 impl Others<'_> {
     fn faces(&self) -> impl Iterator<Item = &FaceTables> {
         let before = self.before.iter().zip(self.held_before);
@@ -404,11 +384,7 @@ impl Others<'_> {
     }
 }
 
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
-))]
+#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 impl OtherPeers for Others<'_> {
     fn subscribes(
         &self,
@@ -580,20 +556,18 @@ pub(super) struct RegistryOf<H: Holders> {
     /// Where a sample the application's subscribers match goes: the session's round of
     /// deliveries, handed to each dispatch of the application's tables.
     delivery: RoundDelivery,
-    /// What builds the set of each place no face has taken yet, from the span the open reserved for
-    /// it, the session's pools of what its peers write by their own choice among it: a session of
-    /// its dial role's face alone builds its one set at the open and keeps none.
-    #[cfg(any(
-        feature = "listen",
-        feature = "group",
-        all(test, feature = "runtime-plan")
-    ))]
+    /// What builds the set of each place no face has taken yet: from the span the open reserved for
+    /// it, the session's pools of what its peers write by their own choice among it, where the open
+    /// lends the tables, or counted as the dial face's set is where they take their memory on use.
+    /// A session of its dial role's face alone builds its one set at the open and keeps none.
+    #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
     spares: adding::SpareSets,
     /// Every set of face tables built so far, each where it was built and never moved from, in a
-    /// table the arena lent at the open with a row for each face the config admits: the dial role's
-    /// face's first and always held by it, then a set for each place a face has taken, built as the
-    /// first face takes it. A face past them is refused (`FacesFull`), so the session's memory is
-    /// the arena alone. A set no face holds is kept, emptied, for the next face.
+    /// table with a row for each face the config admits, lent by the arena at the open or, where the
+    /// tables take their memory on use, taking every row at the open with its first set: the dial
+    /// role's face's first and always held by it, then a set for each place a face has taken, built
+    /// as the first face takes it. A face past them is refused (`FacesFull`), so no face takes
+    /// memory for its set as it comes. A set no face holds is kept, emptied, for the next face.
     sets: ManuallyDrop<BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>>,
     /// The face that holds each set, by the set's place among `sets`, [`NO_FACE`] for a set no
     /// face holds, and `KEPT` for one a departed face's tomb keeps: the dial role's face holds
@@ -602,14 +576,11 @@ pub(super) struct RegistryOf<H: Holders> {
     /// open lends a row for each face the config admits, most of them free at any time, and every
     /// row past the sets built is free or kept.
     holders: H,
-    /// The tokens of faces that went before each was retracted, in the order the faces went: each
-    /// the token table the face's set held, its rows still in the session's pool, the set given
-    /// back as the face went. Lent at the open, a row for each row of the session's token pool,
-    /// as a table owed holds one of them at least (`FacePeers::owed_tokens`); none for a session
-    /// of one face, whose one face never goes. A session of no face besides the dial role's (a
-    /// build without `listen` and `group`) removes none, and keeps no table of them.
+    /// The tokens of faces that went before each was retracted, in the order the faces went, the
+    /// set each face held given back as it went (`owed::Owed`). A session of no face besides the
+    /// dial role's (a build without `listen` and `group`) removes none, and keeps none of them.
     #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-    owed: BoundedVec<OwedTokens, { wz_session_core::caps::SESSION_MAX_REMOTE_DECLS }, RowPolicy>,
+    owed: owed::Owed,
     /// The aliases one face's peer may hold (`MAX_PEER_KEYEXPR_ALIASES`), which a set a group's face
     /// held, at the group's own quota (`Self::hold_member_aliases`), is held to again when it is
     /// given back for the next face.
@@ -797,7 +768,7 @@ impl<H: Holders> RegistryOf<H> {
     /// declarations do. What the application's subscribers match goes to `delivery`. Refused when
     /// the arena has not the rows, which one reserved by the plan that counts them always has, or
     /// when `limits` admit more declaration watchers or watches than the build.
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     pub(super) fn new(
         limits: &SessionLimits,
         arena: &mut Arena,
@@ -845,23 +816,11 @@ impl<H: Holders> RegistryOf<H> {
         // written by nothing until then: on a host the pages of the places no face took stay
         // unresident. Every span an arena lends starts on one alignment, so the order the open
         // lends them in moves none of the bytes the plan counts.
-        #[cfg(any(
-            feature = "listen",
-            feature = "group",
-            all(test, feature = "runtime-plan")
-        ))]
+        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
         let built = usize::from(peers.dial).min(peers.tables);
-        #[cfg(not(any(
-            feature = "listen",
-            feature = "group",
-            all(test, feature = "runtime-plan")
-        )))]
+        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
         let built = peers.tables;
-        #[cfg(any(
-            feature = "listen",
-            feature = "group",
-            all(test, feature = "runtime-plan")
-        ))]
+        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
         let spares = adding::SpareSets::reserved(
             arena,
             keys,
@@ -877,14 +836,10 @@ impl<H: Holders> RegistryOf<H> {
             sets: ManuallyDrop::new(BoundedVec::default()),
             holders: H::rowless(),
             #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-            owed: BoundedVec::default(),
+            owed: owed::Owed::rowless(),
             #[cfg(feature = "multicast-declarations")]
             peer_aliases: limits.max_peer_keyexpr_aliases_held(),
-            #[cfg(any(
-                feature = "listen",
-                feature = "group",
-                all(test, feature = "runtime-plan")
-            ))]
+            #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
             spares,
             #[cfg(feature = "local-queryable")]
             local: Gets::default(),
@@ -943,23 +898,11 @@ impl<H: Holders> RegistryOf<H> {
                 ceiling: 0,
             })?;
         }
-        #[cfg(any(
-            feature = "listen",
-            feature = "group",
-            all(test, feature = "runtime-plan")
-        ))]
+        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
         let pools = &mut registry.spares.pools;
-        #[cfg(not(any(
-            feature = "listen",
-            feature = "group",
-            all(test, feature = "runtime-plan")
-        )))]
+        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
         let mut own_pools = pools;
-        #[cfg(not(any(
-            feature = "listen",
-            feature = "group",
-            all(test, feature = "runtime-plan")
-        )))]
+        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
         let pools = &mut own_pools;
         for _ in 0..built {
             lend_set(
@@ -985,11 +928,7 @@ impl<H: Holders> RegistryOf<H> {
 
     /// Index the gets of every set and the session's own again, each leaf keyed by the deadline its
     /// table holds: what a set built after the open owes the index, whose leaves are the sets built.
-    #[cfg(any(
-        feature = "listen",
-        feature = "group",
-        all(test, feature = "runtime-plan")
-    ))]
+    #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
     fn reindex_dues(&mut self) {
         #[cfg(feature = "query")]
         self.dues().rebuild();
@@ -1086,7 +1025,7 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// The faces the session holds, in the order of their sets.
-    #[cfg(any(feature = "liveliness", all(test, feature = "runtime-plan")))]
+    #[cfg(any(feature = "liveliness", all(test, wz_lent)))]
     fn held_ids(&self) -> impl Iterator<Item = FaceId> + '_ {
         self.holders
             .rows()
@@ -1125,10 +1064,7 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// The pending gets of every face and, where the session answers its own gets, its own.
-    #[cfg(all(
-        feature = "query",
-        any(feature = "liveliness-get", all(test, feature = "runtime-plan"))
-    ))]
+    #[cfg(all(feature = "query", any(feature = "liveliness-get", all(test, wz_lent))))]
     pub(super) fn all_gets(&self) -> impl Iterator<Item = &Gets> {
         let gets = self.faces().map(|face| &face.gets);
         #[cfg(feature = "local-queryable")]
@@ -1284,11 +1220,7 @@ impl<H: Holders> RegistryOf<H> {
     /// The tables of `face`, gone with the face and left, emptied, where they lie for the next
     /// face: its place is free. The dial role's face is never removed, and the key of a face that
     /// is not held removes nothing.
-    #[cfg(any(
-        feature = "listen",
-        feature = "group",
-        all(test, feature = "runtime-plan")
-    ))]
+    #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
     pub(super) fn remove_face(&mut self, face: HeldFace) {
         self.let_go(face, NO_FACE);
     }
@@ -1329,11 +1261,7 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// Empty the set `face` holds, its row then reading `row`.
-    #[cfg(any(
-        feature = "listen",
-        feature = "group",
-        all(test, feature = "runtime-plan")
-    ))]
+    #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
     fn let_go(&mut self, face: HeldFace, row: FaceId) {
         if face.id == DIAL_FACE {
             return;
@@ -1347,7 +1275,7 @@ impl<H: Holders> RegistryOf<H> {
         }
         // Only a build that adds faces removes one, and only its sets keep tokens owed apart.
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-        self.owe_tokens_of(at);
+        self.owe_tokens_of(at, face.id);
         if let Some(set) = self.sets.get_mut(at) {
             set.give_back();
             #[cfg(feature = "multicast-declarations")]
@@ -1359,24 +1287,17 @@ impl<H: Holders> RegistryOf<H> {
     /// each member's own keyexprs for every member the group admits (`GROUP_FACE_ALIASES`), which
     /// the open reserved in the session's pool. A face whose quota admits them already, one bound
     /// by the pool alone among them, keeps it, as does a build whose limits keep the build's value
-    /// alone.
+    /// alone; a table whose rows are counted when it is made is counted up to them where it is
+    /// counted fewer, whatever its quota admits (`SubscriberPeer::hold_aliases_at_least`).
     #[cfg(feature = "multicast-declarations")]
     pub(super) fn hold_member_aliases(&mut self, face: HeldFace) {
         let Some(set) = self.place(face).and_then(|at| self.sets.get_mut(at)) else {
             return;
         };
-        let aliases = &mut set.peer.subscribers;
-        if aliases
-            .alias_quota()
-            .get()
-            .admits(crate::arena::GROUP_FACE_ALIASES)
-        {
-            return;
-        }
         if let Ok(quota) =
             MaxPeerKeyexprAliasesHeld::select(Quota::at_most(crate::arena::GROUP_FACE_ALIASES))
         {
-            aliases.limit_aliases_to(quota);
+            set.peer.subscribers.hold_aliases_at_least(quota);
         }
     }
 
@@ -2142,11 +2063,8 @@ impl<H: Holders> RegistryOf<H> {
         }
         // The faces that went, in the order they went.
         #[cfg(any(feature = "listen", feature = "group"))]
-        while let Some(tokens) = owed.first_mut() {
-            if !app.flush_tokens_on_link_loss_while(delivery, tokens, room) {
-                return false;
-            }
-            owed.remove(0);
+        if !owed.retract_while(app, delivery, room) {
+            return false;
         }
         true
     }
@@ -2184,14 +2102,8 @@ impl<H: Holders> RegistryOf<H> {
             set.retracting = false;
         }
         #[cfg(any(feature = "listen", feature = "group"))]
-        while !taken {
-            let Some(tokens) = self.owed.first_mut() else {
-                break;
-            };
-            taken = tokens.take_lost(news);
-            if !taken {
-                self.owed.remove(0);
-            }
+        if !taken {
+            taken = self.owed.take_lost(news);
         }
         if taken {
             self.writing();
@@ -2262,26 +2174,18 @@ impl<H: Holders> RegistryOf<H> {
             .take_token(&declare.body, spaces, declare.interest_id.is_some(), news)
     }
 
-    /// Keep apart what the set at `at` still owes the liveliness subscribers as its face goes:
-    /// the tokens of a lost link not retracted yet, which [`Self::retract_owed`] hands after those
-    /// owed before them. The set is given back all the same, its token table left empty and taking
-    /// rows of the session's pool.
+    /// Keep apart what the set at `at` still owes the liveliness subscribers as its face `face`
+    /// goes: the tokens of a lost link not retracted yet, which [`Self::retract_owed`] hands after
+    /// those owed before them. The set is given back all the same, its token table left empty.
     #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-    fn owe_tokens_of(&mut self, at: usize) {
+    fn owe_tokens_of(&mut self, at: usize, face: FaceId) {
         let Some(set) = self.sets.get_mut(at) else {
             return;
         };
         if !core::mem::take(&mut set.retracting) {
             return;
         }
-        if let Some(tokens) = set.peer.tokens.split_off() {
-            if tokens.count() > 0 {
-                // A table owed holds a row of the session's token pool at least, and the open lent
-                // a row of this table for each row of the pool.
-                let kept = self.owed.push(tokens).is_ok();
-                debug_assert!(kept, "the tokens owed fit the rows of the pool they hold");
-            }
-        }
+        self.owed.owe(face, &mut set.peer.tokens);
     }
 
     /// The token liveliness subscriber `id` is owed next by its history, from where `cursor`
@@ -2335,7 +2239,7 @@ fn reconcile_face(app: &App, face: &mut FaceTables) {
 /// `keys`, the session's key arena, and what its peer writes in the rows `pools`, the session's,
 /// hands it, and hand it back: a set is never a value of its own in this frame. `None` when
 /// `sets` holds every row it was lent.
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 fn push_rowless<'s>(
     sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     keys: KeySpace,
@@ -2351,7 +2255,7 @@ fn push_rowless<'s>(
 /// dial face's of a session that dials nothing, which never has a peer to write into them. With one
 /// face's own spans, taking them here would leave the one face that comes none. `None` when
 /// `sets` holds every row it was lent.
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 fn push_unpeered<'s>(
     sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     keys: KeySpace,
@@ -2373,7 +2277,7 @@ fn push_unpeered<'s>(
 ///
 /// Never inlined: the open calls it in a loop, and a loop whose first turn the compiler peels
 /// would carry the set's writing and lending twice.
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 #[inline(never)]
 fn lend_set(
     sets: &mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
@@ -2431,7 +2335,7 @@ unsafe fn let_go(
 
 // The registry's own tests build it from an arena, as a build that lays its arena out at the open
 // does; a build of the region's form is held by the region's tests (`crate::tests::region`).
-#[cfg(all(test, feature = "runtime-plan"))]
+#[cfg(all(test, wz_lent))]
 mod tests {
     //! Each face's tables are lent from the session's arena: the dial face's at the open, an
     //! accepted face's from the spares the open lent, and past those tables of no rows that refuse
@@ -3347,7 +3251,9 @@ mod tests {
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
         assert_eq!(
             registry_row_bytes(RowCount::OwedTokens),
-            Some(core::mem::size_of::<OwedTokens>())
+            Some(core::mem::size_of::<
+                wz_session_core::declare::liveliness_subscriber::PeerTokens<RowPolicy>,
+            >())
         );
         #[cfg(not(all(feature = "liveliness", any(feature = "listen", feature = "group"))))]
         assert_eq!(registry_row_bytes(RowCount::OwedTokens), None);

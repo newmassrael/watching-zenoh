@@ -68,13 +68,13 @@ use wz_session_core::app_link_table::{
     SendStep, StreamRead, DATAGRAM_MAX,
 };
 use wz_session_core::app_transport::{AppTransport, SessionTransport};
-use wz_session_core::byte_cells::{ByteBuf, CellFlag, LentByteCells};
+use wz_session_core::byte_cells::ByteBuf;
 use wz_session_core::group_locator::{GroupLocator, UdpGroup};
 
 use crate::group_transport::{GroupRx, GroupSend, GroupTransport};
 use crate::ip_stack::{heap_link, HeapLink};
-use crate::link_cells::{CellRc, CountKind, OneTask};
-use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
+use crate::link_cells::{CellRc, CellSource, CountKind, OneTask};
+use crate::link_storage::{BufferSource, LinkBuffers, RxOf, RxStore, TxOf, TxStore};
 use crate::session_drive::{
     Dialled, LinkListener, LinkOpenError, LinkProto, LinkWait, LinkWaits, Locator, NoWaits,
     OpenedLink, PendingDial, SessionLinks, StackWake, WaitOn,
@@ -864,14 +864,14 @@ impl<N: CountKind> From<OpenedLink<HeapLink<N>, N>> for AppDial<N> {
 /// program is told to close.
 struct PendingAppLink<N: CountKind> {
     held: Option<Held>,
-    buffers: Option<LinkBuffers<N::Flag>>,
+    buffers: Option<LinkBuffers<N>>,
     to: SocketAddr,
     /// A `udp/` link once up, else a `tcp/` one.
     datagram: bool,
     /// Whether the link is waited on by its owner once it is up, as its links' are.
     owner_waits: OwnerWaits,
-    /// The cells the link is placed in once it is up, as its links' are.
-    cells: Option<LentByteCells<N::Flag>>,
+    /// Where the link is placed once it is up, as its links' are.
+    cells: N::Cells,
 }
 
 impl<N: CountKind> PendingDial<HeapLink<N>, N> for PendingAppLink<N> {
@@ -895,13 +895,8 @@ impl<N: CountKind> PendingDial<HeapLink<N>, N> for PendingAppLink<N> {
                         peer: self.to,
                         reads_sources: true,
                     };
-                    self.owner_waits.place_datagram::<N>(
-                        self.cells.as_ref(),
-                        socket,
-                        self.to,
-                        rx,
-                        tx,
-                    )
+                    self.owner_waits
+                        .place_datagram::<N>(&self.cells, socket, self.to, rx, tx)
                 } else {
                     let stream = AppStreamSocket {
                         held,
@@ -909,7 +904,7 @@ impl<N: CountKind> PendingDial<HeapLink<N>, N> for PendingAppLink<N> {
                         peer: self.to,
                     };
                     self.owner_waits
-                        .place_stream::<N>(self.cells.as_ref(), stream, rx, tx)
+                        .place_stream::<N>(&self.cells, stream, rx, tx)
                 })
             }
         }
@@ -1107,7 +1102,7 @@ impl AppGroupTransport {
 
     /// [`Self::join`] whose open waits on `bound`, a sleep of the session's clock, when there is
     /// one ([`AppLinks::with_open_bound`]), receiving into `rx` when the session lent a buffer
-    /// (`LinkTables::group_rx`).
+    /// (`SessionLinks::lend_group_rx`).
     pub fn join_bounded(
         transport: &SessionTransport,
         waits: &AppWaits,
@@ -1299,14 +1294,18 @@ pub struct AppLinks<N: CountKind = OneTask> {
     dial: AppStreamDial,
     datagram_rx: usize,
     open_bound: Option<OpenBound>,
-    /// The tables of the session the links serve, when it lent some
-    /// ([`SessionLinks::lend_buffers`]): every link claims its buffers there, and none allocates.
-    lent: Option<LinkTables<N::Flag>>,
+    /// Where every link's buffers are taken ([`SessionLinks::lend_buffers`]): the tables of the
+    /// session the links serve when it lent some, where every link claims its buffers and none
+    /// allocates; the link's own otherwise, or always where the kind's buffers are the heap's.
+    lent: N::Buffers,
     /// Whether each link is waited on by its owner ([`Self::waited_by_owner`]).
     owner_waits: OwnerWaits,
-    /// The cells of the session the links serve, when it lent some
-    /// ([`SessionLinks::lend_cells`]): every link is placed in one, and none on the heap.
-    cells: Option<LentByteCells<N::Flag>>,
+    /// Where every link is placed ([`SessionLinks::lend_cells`]): in a cell of the session's
+    /// table when it lent the links one, and none on the heap; on the heap otherwise.
+    cells: N::Cells,
+    /// The receive buffers of the groups the links join, when the session lent some
+    /// ([`SessionLinks::lend_group_rx`]); a group of links lent none has a buffer of its own.
+    group_rx: Option<wz_session_core::byte_cells::LentByteCells>,
 }
 
 /// Whether the links of an [`AppLinks`] are waited on by their owner
@@ -1316,10 +1315,10 @@ struct OwnerWaits(bool);
 
 impl OwnerWaits {
     /// A stream link as the links open it, set where it lies.
-    fn stream<F: CellFlag>(
+    fn stream<B: RxStore, X: TxStore>(
         self,
-        link: &mut StreamDriver<AppStreamSocket, RxBuffer<F>, TxBuffer<F>>,
-    ) -> &mut StreamDriver<AppStreamSocket, RxBuffer<F>, TxBuffer<F>> {
+        link: &mut StreamDriver<AppStreamSocket, B, X>,
+    ) -> &mut StreamDriver<AppStreamSocket, B, X> {
         if self.0 {
             link.wait_by_owner();
         }
@@ -1327,27 +1326,27 @@ impl OwnerWaits {
     }
 
     /// A datagram link as the links open it, set where it lies.
-    fn datagram<F: CellFlag>(
+    fn datagram<B: RxStore, X: TxStore>(
         self,
-        link: &mut UdpDriver<AppDatagramSocket, RxBuffer<F>, TxBuffer<F>>,
-    ) -> &mut UdpDriver<AppDatagramSocket, RxBuffer<F>, TxBuffer<F>> {
+        link: &mut UdpDriver<AppDatagramSocket, B, X>,
+    ) -> &mut UdpDriver<AppDatagramSocket, B, X> {
         if self.0 {
             link.wait_by_owner();
         }
         link
     }
 
-    /// The datagram link over `socket` to `peer`, placed in `cells` when the session lent them.
+    /// The datagram link over `socket` to `peer`, placed through `cells`.
     /// Every datagram link these links dial, finish dialling or accept is placed here: out of
     /// line, since the placement and the driver it builds were a copy at each of the three.
     #[inline(never)]
     fn place_datagram<N: CountKind>(
         self,
-        cells: Option<&LentByteCells<N::Flag>>,
+        cells: &N::Cells,
         socket: AppDatagramSocket,
         peer: SocketAddr,
-        rx: RxBuffer<N::Flag>,
-        tx: TxBuffer<N::Flag>,
+        rx: RxOf<N>,
+        tx: TxOf<N>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         let link =
             heap_link::<_, N>(cells, datagram_ends_fit(&socket, Some(peer)))?.made(|place| {
@@ -1361,10 +1360,10 @@ impl OwnerWaits {
     #[inline(never)]
     fn place_stream<N: CountKind>(
         self,
-        cells: Option<&LentByteCells<N::Flag>>,
+        cells: &N::Cells,
         stream: AppStreamSocket,
-        rx: RxBuffer<N::Flag>,
-        tx: TxBuffer<N::Flag>,
+        rx: RxOf<N>,
+        tx: TxOf<N>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         let link = heap_link::<_, N>(cells, stream_ends_fit(&stream))?
             .made(|place| self.stream(StreamDriver::over_in(place, stream, rx, tx)))?;
@@ -1389,6 +1388,7 @@ impl AppLinks {
             lent: None,
             owner_waits: OwnerWaits(false),
             cells: None,
+            group_rx: None,
         }
     }
 }
@@ -1398,7 +1398,7 @@ impl<N: CountKind> AppLinks<N> {
     /// session is opened over them, which is when it lends them its cells.
     pub fn counted_by<M: CountKind>(self) -> AppLinks<M> {
         debug_assert!(
-            self.cells.is_none() && self.lent.is_none(),
+            self.cells.table().is_none() && self.lent.tables().is_none(),
             "cells and buffers are lent after the links are made"
         );
         AppLinks {
@@ -1407,9 +1407,10 @@ impl<N: CountKind> AppLinks<N> {
             dial: self.dial,
             datagram_rx: self.datagram_rx,
             open_bound: self.open_bound,
-            lent: None,
+            lent: Default::default(),
             owner_waits: self.owner_waits,
-            cells: None,
+            cells: Default::default(),
+            group_rx: self.group_rx,
         }
     }
 
@@ -1470,7 +1471,7 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
         };
         match ip.proto {
             LinkProto::Udp => {
-                let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
+                let (rx, tx) = self.lent.buffers(self.datagram_rx, 0, 0)?;
                 let socket = AppDatagramSocket::dial_bounded(
                     &self.transport,
                     &self.waits,
@@ -1478,13 +1479,13 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
                     self.open_bound.as_ref(),
                 )?;
                 self.owner_waits
-                    .place_datagram::<N>(self.cells.as_ref(), socket, ip.at, rx, tx)
+                    .place_datagram::<N>(&self.cells, socket, ip.at, rx, tx)
             }
             LinkProto::Tcp => {
-                let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
+                let (rx, tx) = self.lent.buffers(STREAM_RX_CAPACITY, 0, 0)?;
                 let stream = self.dial.dial(ip.at)?;
                 self.owner_waits
-                    .place_stream::<N>(self.cells.as_ref(), stream, rx, tx)
+                    .place_stream::<N>(&self.cells, stream, rx, tx)
             }
             LinkProto::Tls => Err(LinkOpenError::Unsupported),
         }
@@ -1505,7 +1506,7 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
             LinkProto::Tcp => (AppLinkKind::StreamDial, STREAM_RX_CAPACITY, false),
             LinkProto::Tls => return Err(LinkOpenError::Unsupported),
         };
-        let buffers = heap_link_buffers(self.lent.as_ref(), rx, 0, 0)?;
+        let buffers = self.lent.buffers(rx, 0, 0)?;
         let handle = self.transport.begin_open(kind, &to.to_string());
         Ok(AppDial(AppDialing::Pending(PendingAppLink {
             held: Some(Held {
@@ -1563,21 +1564,28 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
     /// Every link opened from now on, and every one a listener opened after this takes, claims its
     /// buffers from `tables`, and its row of the program's transport is taken now, one for each
     /// link the tables hold.
-    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
-        self.transport.provision(tables.links());
-        self.lent = Some(tables);
+    fn lend_buffers(&mut self, tables: N::Buffers) {
+        if let Some(lent) = tables.tables() {
+            self.transport.provision(lent.links());
+        }
+        self.lent = tables;
     }
 
     /// The larger cell of these links' two: a datagram link's and a stream link's.
     const LINK_CELL_BYTES: usize = crate::link_cells::larger_cell(
-        CellRc::<UdpDriver<AppDatagramSocket, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
-        CellRc::<StreamDriver<AppStreamSocket, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
+        CellRc::<UdpDriver<AppDatagramSocket, RxOf<N>, TxOf<N>>>::cell_bytes(),
+        CellRc::<StreamDriver<AppStreamSocket, RxOf<N>, TxOf<N>>>::cell_bytes(),
     );
 
     /// Every link opened from now on, and every one a listener opened after this takes, is placed
-    /// in a cell of `cells`.
-    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
-        self.cells = Some(cells);
+    /// through `cells`.
+    fn lend_cells(&mut self, cells: N::Cells) {
+        self.cells = cells;
+    }
+
+    /// Every group the links join from now on claims its receive buffer from `buffers`.
+    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
+        self.group_rx = Some(buffers);
     }
 
     // A group the program joins names the interface it is joined on, as a listen on a group's
@@ -1592,7 +1600,7 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
         }
         // A session that lent a table of group buffers gives the group one of them, and a group
         // that finds every one held is not joined; without the table the group makes its own.
-        let rx = match self.lent.and_then(|tables| tables.group_rx()) {
+        let rx = match self.group_rx {
             Some(table) => Some(table.claim().ok_or(LinkOpenError::Exhausted)?),
             None => None,
         };
@@ -1612,12 +1620,12 @@ struct AppDatagramListener<N: CountKind> {
     at: SocketAddr,
     /// The receive buffer each accepted link reads into, as [`AppLinks::with_rx_capacity`] set it.
     datagram_rx: usize,
-    /// The session's tables, which each accepted link claims its buffers from ([`AppLinks`]).
-    lent: Option<LinkTables<N::Flag>>,
+    /// Where each accepted link's buffers are taken, as its links' are ([`AppLinks`]).
+    lent: N::Buffers,
     /// Whether each accepted link is waited on by its owner, as its links' are.
     owner_waits: OwnerWaits,
-    /// The cells each accepted link is placed in, as its links' are.
-    cells: Option<LentByteCells<N::Flag>>,
+    /// Where each accepted link is placed, as its links' are.
+    cells: N::Cells,
 }
 
 impl<N: CountKind> LinkListener<HeapLink<N>, N> for AppDatagramListener<N> {
@@ -1643,9 +1651,9 @@ impl<N: CountKind> LinkListener<HeapLink<N>, N> for AppDatagramListener<N> {
         let peer = socket.peer;
         // Claimed once the source is taken, as an IP listener claims: one the session's tables
         // have no buffers left for is let go of, not left waiting.
-        let (rx, tx) = heap_link_buffers(self.lent.as_ref(), self.datagram_rx, 0, 0)?;
+        let (rx, tx) = self.lent.buffers(self.datagram_rx, 0, 0)?;
         self.owner_waits
-            .place_datagram::<N>(self.cells.as_ref(), socket, peer, rx, tx)
+            .place_datagram::<N>(&self.cells, socket, peer, rx, tx)
             .map(Some)
     }
 
@@ -1659,12 +1667,12 @@ impl<N: CountKind> LinkListener<HeapLink<N>, N> for AppDatagramListener<N> {
 /// A `tcp/` listener of [`AppLinks`]: each stream the program accepts is a link.
 struct AppLinkListener<N: CountKind> {
     listener: Box<dyn StreamListen<Stream = AppStreamSocket>>,
-    /// The session's tables, which each accepted link claims its buffers from ([`AppLinks`]).
-    lent: Option<LinkTables<N::Flag>>,
+    /// Where each accepted link's buffers are taken, as its links' are ([`AppLinks`]).
+    lent: N::Buffers,
     /// Whether each accepted link is waited on by its owner, as its links' are.
     owner_waits: OwnerWaits,
-    /// The cells each accepted link is placed in, as its links' are.
-    cells: Option<LentByteCells<N::Flag>>,
+    /// Where each accepted link is placed, as its links' are.
+    cells: N::Cells,
 }
 
 impl<N: CountKind> LinkListener<HeapLink<N>, N> for AppLinkListener<N> {
@@ -1676,9 +1684,9 @@ impl<N: CountKind> LinkListener<HeapLink<N>, N> for AppLinkListener<N> {
         let Some(stream) = self.listener.accept()? else {
             return Ok(None);
         };
-        let (rx, tx) = heap_link_buffers(self.lent.as_ref(), STREAM_RX_CAPACITY, 0, 0)?;
+        let (rx, tx) = self.lent.buffers(STREAM_RX_CAPACITY, 0, 0)?;
         self.owner_waits
-            .place_stream::<N>(self.cells.as_ref(), stream, rx, tx)
+            .place_stream::<N>(&self.cells, stream, rx, tx)
             .map(Some)
     }
 
@@ -2509,28 +2517,21 @@ mod tests {
         #[repr(C, align(16))]
         struct Block([u8; ARENA_ALIGN]);
 
-        let (rx_len, slot_len, group_len) = (66, 34, 48);
-        let bytes = Arena::byte_cells_bytes(rx_len, 1)
-            .and_then(|rx| Arena::byte_cells_bytes(2 * slot_len, 1).map(|tx| rx + tx))
-            .and_then(|both| Arena::byte_cells_bytes(group_len, 1).map(|group| both + group))
-            .expect("within the address space");
+        let group_len = 48;
+        let bytes = Arena::byte_cells_bytes(group_len, 1).expect("within the address space");
         let region: &'static mut [Block] =
             alloc::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
         // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
         // leaked, so nothing else uses it and it outlives every buffer claimed from it.
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
-        let rx = arena.lend_byte_cells(rx_len, 1).expect("the receive table");
-        let tx = arena
-            .lend_byte_cells(2 * slot_len, 1)
-            .expect("the outbound table");
         let groups = arena
             .lend_byte_cells(group_len, 1)
             .expect("the group table");
 
         let (script, transport) = transport();
         let mut links = AppLinks::new(session(&transport, 64));
-        links.lend_buffers(LinkTables::new(rx, tx, slot_len).with_group_rx(groups));
+        links.lend_group_rx(groups);
         let group = group_of(GROUP);
         let mut first = links
             .open_group(GROUP, &group)

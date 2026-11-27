@@ -13,7 +13,6 @@
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 
-use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkEnds, LinkSendOutcome, LinkSubject, LostCause, RoomAnswer, RoomWait,
@@ -24,7 +23,7 @@ use wz_session_core::reliability::Reliability;
 
 use crate::ip_stack::heap_link;
 use crate::link_cells::{CellRc, CountKind};
-use crate::link_storage::{RxBuffer, TxBuffer};
+use crate::link_storage::{RxOf, TxOf};
 use crate::session_drive::{
     InputWaiter, LinkOpenError, OpenedLink, SessionDatagramLink, SharedPump, WaitOn,
 };
@@ -42,28 +41,18 @@ const TLS: u8 = 2;
 
 /// A `udp/` link of [`IpLink`]: a dial's or an acceptor's over a socket of its own.
 #[cfg(not(feature = "udp-listen"))]
-pub type UdpOf<U, N, W> =
-    UdpDriver<U, RxBuffer<<N as CountKind>::Flag>, TxBuffer<<N as CountKind>::Flag>, W>;
+pub type UdpOf<U, N, W> = UdpDriver<U, RxOf<N>, TxOf<N>, W>;
 
 /// A `udp/` link of [`IpLink`] in a build that listens on `udp/`: a dial's or an acceptor's
 /// over a socket of its own, or a port's peer's over its share of the port, each held as a
 /// [`LinkSocket`], so the driver is one body for both kinds and a port's peer is no variant of its
 /// own.
 #[cfg(feature = "udp-listen")]
-pub type UdpOf<U, N, W> = UdpDriver<
-    LinkSocket<U, <N as CountKind>::Shared>,
-    RxBuffer<<N as CountKind>::Flag>,
-    TxBuffer<<N as CountKind>::Flag>,
-    W,
->;
+pub type UdpOf<U, N, W> = UdpDriver<LinkSocket<U, <N as CountKind>::Shared>, RxOf<N>, TxOf<N>, W>;
 
 /// A stream link over `S` of [`IpLink`]: a `tcp/` link over the plain streams, a `tls/` one over
 /// the secure channels.
-pub type StreamOf<S, N, W> = <S as StreamSocket>::Link<
-    RxBuffer<<N as CountKind>::Flag>,
-    TxBuffer<<N as CountKind>::Flag>,
-    W,
->;
+pub type StreamOf<S, N, W> = <S as StreamSocket>::Link<RxOf<N>, TxOf<N>, W>;
 
 /// A link of an IP stack over the datagram sockets `U`, the plain streams `S` and the secure
 /// channels `T`, counted as `N` counts a session's handles and waited for by `W`: the variant is
@@ -120,7 +109,7 @@ where
     /// rows of the build do not name both its ends, [`LinkOpenError::Exhausted`] past the cells.
     #[inline]
     pub(crate) fn open_udp<F: LinkSet<Self, N>>(
-        cells: Option<&LentByteCells<N::Flag>>,
+        cells: &N::Cells,
         fits: bool,
         make: impl FnOnce(&mut MaybeUninit<UdpOf<U, N, W>>) -> &mut UdpOf<U, N, W>,
     ) -> Result<OpenedLink<F::Pump, N>, LinkOpenError> {
@@ -131,7 +120,7 @@ where
     /// [`Self::open_udp`] for a `tcp/` link.
     #[inline]
     pub(crate) fn open_tcp<F: LinkSet<Self, N>>(
-        cells: Option<&LentByteCells<N::Flag>>,
+        cells: &N::Cells,
         fits: bool,
         make: impl FnOnce(&mut MaybeUninit<StreamOf<S, N, W>>) -> &mut StreamOf<S, N, W>,
     ) -> Result<OpenedLink<F::Pump, N>, LinkOpenError> {
@@ -142,7 +131,7 @@ where
     /// [`Self::open_udp`] for a `tls/` link.
     #[inline]
     pub(crate) fn open_tls<F: LinkSet<Self, N>>(
-        cells: Option<&LentByteCells<N::Flag>>,
+        cells: &N::Cells,
         fits: bool,
         make: impl FnOnce(&mut MaybeUninit<StreamOf<T, N, W>>) -> &mut StreamOf<T, N, W>,
     ) -> Result<OpenedLink<F::Pump, N>, LinkOpenError> {
@@ -160,7 +149,7 @@ where
     /// at the place it is handed, which is what the makers of a driver in place do.
     #[inline]
     unsafe fn open_as<V, F>(
-        cells: Option<&LentByteCells<N::Flag>>,
+        cells: &N::Cells,
         fits: bool,
         tag: u8,
         make: impl FnOnce(&mut MaybeUninit<V>) -> &mut V,

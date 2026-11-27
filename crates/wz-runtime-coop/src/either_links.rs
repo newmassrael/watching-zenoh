@@ -13,13 +13,11 @@
 
 use alloc::boxed::Box;
 
-use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::link::{BoxedLinkDriver, LostCause, RxFrame};
 
 use crate::group_transport::GroupTransport;
 use crate::link_cells::{CellRc, CountKind};
-use crate::link_storage::LinkTables;
 use crate::session_drive::{
     Dialled, DynLink, DynSink, LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator,
     OpenedLink, PendingDial, SessionDatagramLink, SessionLinks, SharedPump, StackWake, WaitOn,
@@ -307,7 +305,7 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
         }
     }
 
-    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
+    fn lend_buffers(&mut self, tables: N::Buffers) {
         on_side!(EitherLinks, self, links => links.lend_buffers(tables))
     }
 
@@ -315,7 +313,7 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
         on_side!(EitherLinks, self, links => links.link_cell_bytes())
     }
 
-    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
+    fn lend_cells(&mut self, cells: N::Cells) {
         on_side!(EitherLinks, self, links => links.lend_cells(cells))
     }
 
@@ -323,8 +321,13 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
     fn lend_port_rows(
         &mut self,
         rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
+        slots: Option<wz_session_core::byte_cells::LentByteCells<N::Flag>>,
     ) -> Result<(), usize> {
-        on_side!(EitherLinks, self, links => links.lend_port_rows(rows))
+        on_side!(EitherLinks, self, links => links.lend_port_rows(rows, slots))
+    }
+
+    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
+        on_side!(EitherLinks, self, links => links.lend_group_rx(buffers))
     }
 
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {

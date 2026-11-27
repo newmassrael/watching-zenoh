@@ -17,14 +17,18 @@ const SEED: u64 = 0xa6;
 /// A peer that dials the router stand-in, opened in the simulated world and not stepped past its
 /// open: a build that takes faces beside the dial role's lays its face table out for the faces
 /// its config allows, so the table holds the dial role's row and one row for each face it may
-/// take beside it.
+/// take beside it, each row's read slot made, as where the tables take their memory on use each
+/// is at its first face.
 fn peer(sim: &Sim) -> EngineHold<SimEngine> {
-    sim.open(CoopConfig {
+    let engine = sim.open(CoopConfig {
         whatami: WhatAmI::Peer,
         zid: config_zid(0xa6),
         max_faces: 2,
         ..sim.config()
-    })
+    });
+    #[cfg(wz_on_use)]
+    engine.make_every_face();
+    engine
 }
 
 /// While a face lends its Router for a step, no other face's pump finds a Router lent where it

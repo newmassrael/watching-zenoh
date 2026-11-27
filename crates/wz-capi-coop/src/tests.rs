@@ -4351,7 +4351,7 @@ mod group_congested;
 mod group_stack;
 // The keys the program's objects hold in the session's key arena, counted as its blocks: a session
 // whose tables take their memory on use keeps none and hands copies of their own (`on_use`).
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 mod held_keys;
 #[cfg(feature = "group-host")]
 mod host_group;
@@ -4372,7 +4372,7 @@ mod local;
 #[cfg(feature = "local-queryable")]
 mod local_query;
 // A session whose tables take their memory at their first row.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 mod on_use;
 // One face to a node is the link admission's (`link-admission`); without it each link is a face.
 #[cfg(all(

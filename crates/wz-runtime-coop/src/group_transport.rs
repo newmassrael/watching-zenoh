@@ -291,8 +291,8 @@ pub enum GroupSend {
 }
 
 /// The buffer a group transport receives into: one of its own, or one its session lent from the
-/// memory it reserved when it opened (`LinkTables::group_rx`), which goes back to the session as
-/// the group is left ([`GroupTransport::give_back_rx`]). The transport reads and writes it whole,
+/// memory it reserved when it opened (`SessionLinks::lend_group_rx`), which goes back to the
+/// session as the group is left ([`GroupTransport::give_back_rx`]). The transport reads and writes it whole,
 /// whichever it is, and says what a datagram longer than it comes to: a host's socket cuts it, as
 /// it cut one past a buffer of the transport's own.
 ///
@@ -441,8 +441,8 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
 ))]
 pub trait GroupJoiner {
     /// The group `group` names, joined: the transport a group session runs over. `rx` is the
-    /// buffer the transport receives into when its session lent one (`LinkTables::group_rx`);
-    /// `None` and the transport makes its own.
+    /// buffer the transport receives into when its session lent one
+    /// (`SessionLinks::lend_group_rx`); `None` and the transport makes its own.
     fn join(
         &self,
         group: &wz_session_core::group_locator::GroupLocator,

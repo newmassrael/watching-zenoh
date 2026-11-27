@@ -28,6 +28,10 @@ use wz_session_core::link::{
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::link_cells::CountKind;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::LinkOpenError;
 #[cfg(feature = "alloc")]
 use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "alloc")]
@@ -243,6 +247,11 @@ impl HeapTx {
     /// [`Self::for_link`], or `None` when the heap has no room for the slots.
     pub fn try_for_link(slots: usize, slot_len: usize, rx_len: usize) -> Option<Self> {
         let (slots, slot_len) = Self::link_shape(slots, slot_len, rx_len);
+        Self::try_new(slots, slot_len)
+    }
+
+    /// [`Self::new`], or `None` when the heap has no room for the slots.
+    pub fn try_new(slots: usize, slot_len: usize) -> Option<Self> {
         let len = slots.saturating_mul(slot_len);
         let bytes = zeroed_bytes(len)?;
         let mut bytes = core::mem::ManuallyDrop::new(bytes);
@@ -465,9 +474,7 @@ impl<F: CellFlag> TxStore for PooledTx<F> {
 /// arena, which is given back once every link of the session is gone.
 ///
 /// `F` is the form of the flags of the links' tables, the one the session counts its links'
-/// handles by: a link's buffers then move with the link to whichever thread holds it. A group's
-/// receive buffers are flagged as cells whatever `F` is: a group is held by the one task that
-/// drives it.
+/// handles by: a link's buffers then move with the link to whichever thread holds it.
 #[derive(Debug)]
 pub struct LinkTables<F: CellFlag = Cell<bool>> {
     rx: LentByteCells<F>,
@@ -476,15 +483,6 @@ pub struct LinkTables<F: CellFlag = Cell<bool>> {
     /// buffer for each link.
     places: Option<LentByteCells<F>>,
     slot_len: usize,
-    /// The receive buffers of the multicast groups the session may join, one for each, which a
-    /// group claims when it is joined; `None` when the session lent none, and a group's stack
-    /// then gives it a buffer of its own.
-    group_rx: Option<LentByteCells>,
-    /// The slots the session's udp ports read their datagrams into and hold them in until the
-    /// links of their peers take them, which the ports share; `None` when the session lent none,
-    /// and a port's stack then gives it memory of its own. Flagged as the links' tables are: a
-    /// datagram a port holds moves with the link of its peer.
-    port_rx: Option<LentByteCells<F>>,
 }
 
 // Not derived: a derive would ask `F: Copy`, and an atomic flag is not; the tables hold handles
@@ -506,8 +504,6 @@ impl<F: CellFlag> LinkTables<F> {
             tx,
             places: None,
             slot_len,
-            group_rx: None,
-            port_rx: None,
         }
     }
 
@@ -523,44 +519,7 @@ impl<F: CellFlag> LinkTables<F> {
             tx,
             places: Some(places),
             slot_len: tx.size(),
-            group_rx: None,
-            port_rx: None,
         }
-    }
-
-    /// These tables with `group_rx`, a receive buffer for each multicast group the session may
-    /// join: a group joined claims one, and gives it back when it is left.
-    #[must_use]
-    pub const fn with_group_rx(self, group_rx: LentByteCells) -> Self {
-        Self {
-            group_rx: Some(group_rx),
-            ..self
-        }
-    }
-
-    /// These tables with `port_rx`, the slots the session's udp ports share for their datagrams:
-    /// a port claims one to read a datagram into, holds it while the datagram waits for its peer's
-    /// link, and gives it back once the link took it.
-    #[must_use]
-    pub const fn with_port_rx(self, port_rx: LentByteCells<F>) -> Self {
-        Self {
-            port_rx: Some(port_rx),
-            ..self
-        }
-    }
-
-    /// The table the session's udp ports claim their datagrams' slots from: `None` when the
-    /// session lent none, and a port's stack gives it memory of its own. A datagram that finds
-    /// every slot of a lent table held is dropped and counted, as a full socket buffer drops one.
-    pub const fn port_rx(&self) -> Option<LentByteCells<F>> {
-        self.port_rx
-    }
-
-    /// The table a group the session joins claims its receive buffer from: `None` when the
-    /// session lent none, and a joined group's stack gives it a buffer of its own. A group that
-    /// finds every buffer of a lent table held is refused, as a link that finds no storage is.
-    pub const fn group_rx(&self) -> Option<LentByteCells> {
-        self.group_rx
     }
 
     /// The receive and the outbound storage of one link ([`LinkRx`], [`LinkTxStore`]), or `None`
@@ -723,37 +682,158 @@ impl<F: CellFlag> TxStore for TxBuffer<F> {
     }
 }
 
-/// The receive and the send buffer of one heap profile's link, of tables whose flags take the
-/// form `F`.
+/// Where the buffers of a heap profile's link come from ([`CountKind::Buffers`]), as what opens
+/// a link holds it: the tables a session lent, claimed a link at a time, or the heap. A type, not
+/// only a value, so a kind whose sessions never lend their links tables opens each over buffers
+/// of its own ([`HeapBuffers`]), and its links' drivers hold those and name no store of a table.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub(crate) type LinkBuffers<F> = (RxBuffer<F>, TxBuffer<F>);
+pub trait BufferSource<F: CellFlag>: Copy + Default {
+    /// What a link opened through this source receives into.
+    type Rx: RxStore + 'static;
+
+    /// What a link opened through this source encodes its frames into.
+    type Tx: TxStore + 'static;
+
+    /// The tables a link's buffers are claimed of now: `None` for buffers of the heap.
+    fn tables(&self) -> Option<&LinkTables<F>>;
+
+    /// The buffers of a link that opens now, a receive buffer of `rx` bytes and outbound storage
+    /// of `tx_slots` slots of `tx_len` bytes where the link's own ([`HeapTx::for_link`]), or a
+    /// claim of the tables; [`LinkOpenError::Exhausted`] when there are none to give.
+    fn buffers(
+        &self,
+        rx: usize,
+        tx_slots: usize,
+        tx_len: usize,
+    ) -> Result<(Self::Rx, Self::Tx), LinkOpenError>;
+}
+
+/// The tables a session lent, while it lent some: a link claims its buffers there, and one they
+/// have none left for is refused, none allocated; a link's own buffers on the heap while none are
+/// lent (a host's links outside a session's arena). What a stack holds before its session lends it
+/// tables, and after.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<F: CellFlag> BufferSource<F> for Option<LinkTables<F>> {
+    type Rx = RxBuffer<F>;
+    type Tx = TxBuffer<F>;
+
+    #[inline(always)]
+    fn tables(&self) -> Option<&LinkTables<F>> {
+        self.as_ref()
+    }
+
+    #[inline(always)]
+    fn buffers(
+        &self,
+        rx: usize,
+        tx_slots: usize,
+        tx_len: usize,
+    ) -> Result<(RxBuffer<F>, TxBuffer<F>), LinkOpenError> {
+        heap_link_buffers(self.as_ref(), rx, tx_slots, tx_len)
+    }
+}
+
+/// Every link's buffers its own, allocated as it opens and given back with it: the source of a
+/// kind whose sessions take their links' memory as each link opens
+/// ([`OnHeap`](crate::link_cells::OnHeap)). Sized by the session that lends it
+/// ([`Self::sized`]), each link holds what that session's tables would lend it, whatever the stack
+/// asks: the batch the session advertises bounds every frame either way, so a link pays its batch
+/// and not the largest a stack could take. Unsized, as a stack holds it before a session lends it
+/// one, each link holds the stack's own shape ([`HeapTx::for_link`]).
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeapBuffers {
+    /// The bytes of a link's receive buffer and of each of its slots, and how many slots it holds.
+    sized: Option<(usize, usize)>,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl HeapBuffers {
+    /// Every link a receive buffer of `bytes` and `slots` slots of `bytes` to encode its frames
+    /// into, as a session's tables lend each link buffers of their length.
+    pub const fn sized(bytes: usize, slots: usize) -> Self {
+        Self {
+            sized: Some((bytes, slots)),
+        }
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<F: CellFlag> BufferSource<F> for HeapBuffers {
+    type Rx = Vec<u8>;
+    type Tx = HeapTx;
+
+    #[inline(always)]
+    fn tables(&self) -> Option<&LinkTables<F>> {
+        None
+    }
+
+    #[inline(always)]
+    fn buffers(
+        &self,
+        rx: usize,
+        tx_slots: usize,
+        tx_len: usize,
+    ) -> Result<(Vec<u8>, HeapTx), LinkOpenError> {
+        match self.sized {
+            Some((bytes, slots)) => {
+                let exhausted = LinkOpenError::Exhausted;
+                let rx = zeroed_bytes(bytes).ok_or(exhausted)?;
+                let tx = HeapTx::try_new(slots, bytes).ok_or(exhausted)?;
+                Ok((rx, tx))
+            }
+            None => own_link_buffers(rx, tx_slots, tx_len),
+        }
+    }
+}
+
+/// What a link of the kind `N` receives into: its kind's source's ([`BufferSource::Rx`]).
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub type RxOf<N> = <<N as CountKind>::Buffers as BufferSource<<N as CountKind>::Flag>>::Rx;
+
+/// What a link of the kind `N` encodes its frames into: its kind's source's
+/// ([`BufferSource::Tx`]).
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub type TxOf<N> = <<N as CountKind>::Buffers as BufferSource<<N as CountKind>::Flag>>::Tx;
+
+/// The receive and the send buffer of one heap profile's link of the kind `N`, as its kind's
+/// source makes them.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub(crate) type LinkBuffers<N> = (RxOf<N>, TxOf<N>);
 
 /// The buffers of a heap profile's link that opens now: claimed from its session's tables when the
 /// session lent some, and refused as exhausted when they have none left, so a session whose tables
-/// are full opens no link; otherwise allocated, a receive buffer of `rx` bytes and the slots
-/// [`HeapTx::for_link`] makes of `tx_slots` and `tx_len`.
+/// are full opens no link; otherwise the link's own (`own_link_buffers`).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub(crate) fn heap_link_buffers<F: CellFlag>(
+fn heap_link_buffers<F: CellFlag>(
     lent: Option<&LinkTables<F>>,
     rx: usize,
     tx_slots: usize,
     tx_len: usize,
-) -> Result<LinkBuffers<F>, crate::session_drive::LinkOpenError> {
+) -> Result<(RxBuffer<F>, TxBuffer<F>), LinkOpenError> {
     match lent {
         Some(tables) => {
-            let (rx, tx) = tables
-                .claim()
-                .ok_or(crate::session_drive::LinkOpenError::Exhausted)?;
+            let (rx, tx) = tables.claim().ok_or(LinkOpenError::Exhausted)?;
             Ok((RxBuffer::Lent(rx), TxBuffer::Lent(tx)))
         }
-        // Buffers the heap has no room for are a stack with no buffer left to give.
-        None => {
-            let exhausted = crate::session_drive::LinkOpenError::Exhausted;
-            let rx_bytes = zeroed_bytes(rx).ok_or(exhausted)?;
-            let tx = HeapTx::try_for_link(tx_slots, tx_len, rx).ok_or(exhausted)?;
-            Ok((RxBuffer::Owned(rx_bytes), TxBuffer::Owned(tx)))
-        }
+        None => own_link_buffers(rx, tx_slots, tx_len)
+            .map(|(rx, tx)| (RxBuffer::Owned(rx), TxBuffer::Owned(tx))),
     }
+}
+
+/// A link's own buffers, allocated as it opens: a receive buffer of `rx` zero bytes and the slots
+/// [`HeapTx::for_link`] makes of `tx_slots` and `tx_len`. Buffers the heap has no room for are
+/// a stack with no buffer left to give, [`LinkOpenError::Exhausted`].
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+fn own_link_buffers(
+    rx: usize,
+    tx_slots: usize,
+    tx_len: usize,
+) -> Result<(Vec<u8>, HeapTx), LinkOpenError> {
+    let exhausted = LinkOpenError::Exhausted;
+    let rx_bytes = zeroed_bytes(rx).ok_or(exhausted)?;
+    let tx = HeapTx::try_for_link(tx_slots, tx_len, rx).ok_or(exhausted)?;
+    Ok((rx_bytes, tx))
 }
 
 /// `len` zero bytes on the heap, or `None` when the heap has no room for them: `vec![0; len]`
@@ -1294,25 +1374,59 @@ mod tests {
         assert!(crate::table_tests::refused(|| HeapTx::try_for_link(0, 8, 0)).is_none());
     }
 
-    /// Tables lent a group receive table hand it on, each buffer claimed once until given back,
-    /// and tables lent none have none. Turned red by a table the tables lose, or one they hand
-    /// out to a group past its buffers.
+    /// Each source of a link's buffers opens a link where it says: of the tables a session lent
+    /// while it lent some, none past them; of the link's own while it lent none; of the link's own
+    /// always for the heap's source, whose links hold a store that names no table, of the
+    /// stack's shape until a session sizes the source and of the session's batch and slots after,
+    /// whatever the stack asks. Turned red by a lent source that allocates past its tables, or a
+    /// heap source that claims a table or hands buffers of another length than its size says.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
-    fn the_group_receive_table_is_the_one_the_tables_were_lent() {
-        let plain = tables(1, 16, 1, 1, 16);
-        assert!(plain.group_rx().is_none(), "tables lent no group table");
-        let mut arena = arena_of(Arena::byte_cells_bytes(32, 1).expect("fits"));
-        let groups = arena.lend_byte_cells(32, 1).expect("the group table");
-        let lent = plain.with_group_rx(groups);
-        let table = lent.group_rx().expect("the group table");
-        assert_eq!(table.size(), 32);
-        let held = table.claim().expect("the one buffer");
-        assert!(table.claim().is_none(), "a second group finds none");
-        drop(held);
+    fn each_buffer_source_opens_a_link_where_it_says() {
+        let lent = Some(tables(1, 16, 1, 2, 8));
+        let (rx, _tx) = lent.buffers(48, 0, 0).expect("the tables' buffers");
+        assert!(matches!(rx, RxBuffer::Lent(_)), "claimed of the tables");
         assert!(
-            table.claim().is_some(),
-            "the buffer given back is claimed again"
+            matches!(
+                lent.buffers(48, 0, 0),
+                Err(crate::session_drive::LinkOpenError::Exhausted)
+            ),
+            "none past the tables, and none allocated"
         );
+        let none: Option<LinkTables> = None;
+        let (rx, _tx) = none.buffers(48, 0, 0).expect("the link's own");
+        assert!(
+            matches!(rx, RxBuffer::Owned(_)),
+            "CONTROL: lent no tables, a link's buffers are its own"
+        );
+
+        let heap = HeapBuffers::default();
+        assert!(<HeapBuffers as BufferSource<Cell<bool>>>::tables(&heap).is_none());
+        // The heap's links hold a buffer and slots of their own, typed so: no store of a table.
+        let (rx, tx): (Vec<u8>, HeapTx) =
+            <HeapBuffers as BufferSource<Cell<bool>>>::buffers(&heap, 48, 0, 0)
+                .expect("the link's own");
+        assert_eq!(rx.len(), 48);
+        assert_eq!((tx.slots(), tx.slot_len()), (SESSION_TX_SLOTS, 48));
+        assert!(matches!(
+            crate::table_tests::refused(|| {
+                <HeapBuffers as BufferSource<Cell<bool>>>::buffers(&heap, 48, 0, 0)
+            }),
+            Err(crate::session_drive::LinkOpenError::Exhausted)
+        ));
+
+        // Sized by a session, a link holds its batch and its slots, not the stack's ask.
+        let sized = HeapBuffers::sized(32, 1);
+        let (rx, tx) = <HeapBuffers as BufferSource<Cell<bool>>>::buffers(&sized, 48, 4, 64)
+            .expect("the link's own, of the session's size");
+        assert_eq!(rx.len(), 32);
+        assert_eq!((tx.slots(), tx.slot_len()), (1, 32));
+        assert!(matches!(
+            crate::table_tests::refused(|| {
+                <HeapBuffers as BufferSource<Cell<bool>>>::buffers(&sized, 48, 4, 64)
+            }),
+            Err(crate::session_drive::LinkOpenError::Exhausted)
+        ));
     }
 
     /// Tables whose flags are atomics lend a link storage that moves with the link to another

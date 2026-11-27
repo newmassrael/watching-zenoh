@@ -72,8 +72,13 @@ use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::link_life::{carry, LinkInput, LinkIo, LinkPhase, Refused, SessionEnded};
 
 use super::registry::Planes;
-#[cfg(feature = "listen")]
+#[cfg(all(feature = "listen", not(wz_on_use)))]
 use wz_session_core::bounded::{BoundedVec, Lent};
+
+// The faces past the dial role's of a session whose tables take their memory on use, each made at
+// its place's first face.
+#[cfg(all(feature = "listen", wz_on_use))]
+use super::once_rows::OnceRows;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 
 /// The pump of the session's one link, which the read steps itself, reading the link as the type
@@ -549,7 +554,7 @@ type DirectLock = SessionLock;
 // Such a read reaches a face's values with no session's lock held, which only a lock of each
 // value's own keeps to one thread at a time: a form with none keeps the round (`build.rs`).
 #[cfg(feature = "threads")]
-const _: fn(PhantomData<SessionLock>) -> PhantomData<wz_runtime_coop::sync::ManyThreads> =
+const _: fn(PhantomData<crate::form::FormLock>) -> PhantomData<wz_runtime_coop::sync::ManyThreads> =
     core::convert::identity;
 
 /// The link the session's record of the face holds while it is up or in its handshake: a handle
@@ -918,7 +923,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> WireParts for DirectParts
 /// parts' handles go too.
 #[cfg(feature = "resource-snapshot")]
 pub(super) struct KernelCount<C: ClockSource + 'static, D: ?Sized + DynSink>(
-    CellRc<SessionCore<LinkRuntime<C, D>, CoopTime<C>>, LinkCount>,
+    CellRc<
+        wz_session_core::session_actions::SessionCore<LinkRuntime<C, D>, CoopTime<C>>,
+        LinkCount,
+    >,
 );
 
 #[cfg(feature = "resource-snapshot")]
@@ -1452,8 +1460,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
 /// after its first, made at the open and kept where they lie for the session's life. Only a port's
 /// connection or an attach takes such a face (`listen`): a group's place is read through the
 /// group's own session (`CoopEngine::read_groups`), so a build that listens on none has no row.
-#[cfg(feature = "listen")]
+#[cfg(all(feature = "listen", not(wz_on_use)))]
 pub(super) type TakenFaces<L, C> = BoundedVec<DirectFace<L, C>, { usize::MAX }, Lent>;
+
+/// The faces past the dial role's where the session's tables take their memory on use: a row for
+/// each place of the face table after its first, counted at the open, and each face made in an
+/// allocation of its own at its place's first face (`DirectFaces::made_at`), kept where it lies
+/// for the session's life and for the next face of its place, as the place's set of tables is.
+#[cfg(all(feature = "listen", wz_on_use))]
+pub(super) type TakenFaces<L, C> = OnceRows<DirectFace<L, C>>;
 
 /// Every face the read steps itself: the dial role's, at the face table's first place, in the
 /// engine's place, and, where the session listens, one for each place after it in a table of the
@@ -1475,7 +1490,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     /// table's place `n` in the table's row `n - 1`, each with a Router of its own under
     /// `policy`, staging at most `open` chains at once in `chains`, lent through a cell of its
     /// own. Refused past what the arena has left.
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", not(wz_on_use)))]
     pub(super) fn taken_in(
         arena: &mut Arena,
         rows: usize,
@@ -1498,6 +1513,37 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
             }
         }
         Ok(taken)
+    }
+
+    /// The rows of the faces past the dial role's where the tables take their memory on use,
+    /// `rows` of them and none holding a face: each face is made at its place's first face
+    /// (`Self::made_at`). Refused when the allocator has no room for the rows.
+    #[cfg(all(feature = "listen", wz_on_use))]
+    pub(super) fn taken(rows: usize) -> Result<TakenFaces<L, C>, ArenaRefused> {
+        OnceRows::counted(rows)
+    }
+
+    /// The face of the face table's row `at`, made where the tables take their memory on use and
+    /// the row holds none yet: in an allocation of its own, with the Router `router` makes, kept
+    /// where it lies for every face of its place after. `None` past the rows the open counted,
+    /// or when the allocator has no room for the face, which the caller answers as a face past
+    /// `max_faces`. Asked under the session's lock, where a face is given its row.
+    #[cfg(all(feature = "listen", wz_on_use))]
+    pub(super) fn made_at(
+        &self,
+        at: usize,
+        router: impl FnOnce() -> SessionReassembly,
+    ) -> Option<&DirectFace<L, C>> {
+        let Some(row) = at.checked_sub(1) else {
+            return Some(&self.dial);
+        };
+        // SAFETY: `init_at` leaves a whole face in the allocation the row hands it, which the row
+        // keeps where it lies until the table is dropped.
+        unsafe {
+            self.taken.made(row, |place| {
+                DirectFace::<L, C>::init_at(place, at, router());
+            })
+        }
     }
 
     /// The faces, the dial role's made in `at` with `router`, and those past it `taken`.
@@ -1580,9 +1626,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     #[cfg(feature = "listen")]
     #[inline(always)]
     fn taken_walked(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
-        self.taken
-            .iter()
-            .take(self.held_rows.load(Ordering::Acquire))
+        #[cfg(not(wz_on_use))]
+        {
+            self.taken
+                .iter()
+                .take(self.held_rows.load(Ordering::Acquire))
+        }
+        // A row holds no face until its place's first face made it, so the bound counts rows.
+        #[cfg(wz_on_use)]
+        {
+            self.taken
+                .rows()
+                .take(self.held_rows.load(Ordering::Acquire))
+                .flatten()
+        }
     }
 
     /// Mark whether the face table's row `at`, past the dial role's, holds a face, and move the
@@ -1602,10 +1659,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
         let rows = if holds {
             self.held_rows.load(Ordering::Relaxed).max(at)
         } else {
-            self.taken
+            #[cfg(not(wz_on_use))]
+            let last = self
+                .taken
                 .iter()
-                .rposition(|face| face.holds_face.load(Ordering::Relaxed))
-                .map_or(0, |row| row.saturating_add(1))
+                .rposition(|face| face.holds_face.load(Ordering::Relaxed));
+            #[cfg(wz_on_use)]
+            let last = self
+                .taken
+                .rows()
+                .rposition(|face| face.is_some_and(|face| face.holds_face.load(Ordering::Relaxed)));
+            last.map_or(0, |row| row.saturating_add(1))
         };
         self.held_rows.store(rows, Ordering::Release);
     }
@@ -1753,8 +1817,31 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> LinkIo for Direct
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// The bytes of the read slot and send place of one face past the dial role's, a row of which
-    /// the open lays out for each (`crate::arena::ArenaPlan::lay_direct_faces`).
+    /// the open lays out for each (`crate::arena::ArenaPlan::lay_direct_faces`) where the arena
+    /// holds them.
+    #[cfg(not(wz_on_use))]
     pub(crate) const DIRECT_FACE_BYTES: usize = core::mem::size_of::<DirectFace<L, C>>();
+
+    /// How many faces past the dial role's hold a read slot now: each is made at its place's first
+    /// face where the tables take their memory on use.
+    #[cfg(all(test, feature = "std", feature = "listen", wz_on_use))]
+    pub(crate) fn faces_made(&self) -> usize {
+        self.direct.taken.iter().count()
+    }
+
+    /// Make the read slot of every row of the face table past the dial role's, as each row's
+    /// first face would where the tables take their memory on use: for a test that reads every
+    /// row's slot with no face taken.
+    #[cfg(all(test, feature = "std", feature = "listen", wz_on_use))]
+    pub(crate) fn make_every_face(&self) {
+        let core = self.core.lock();
+        for at in 1..=self.direct.taken.rows().len() {
+            assert!(
+                self.direct.made_at(at, || core.0.face_router()).is_some(),
+                "the test allocator answers"
+            );
+        }
+    }
 
     /// Open the session's one link: the first endpoint dialled, and the link stepped on this thread
     /// until it is up, or the life ends the session with why the last endpoint came to no link. A
@@ -3131,6 +3218,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 let Some(at) = core.take_face() else {
                     continue;
                 };
+                // Where the tables take their memory on use, the face's read slot is made at its
+                // place's first face: a link the allocator has no room for is closed unread, as
+                // one past `max_faces` is.
+                #[cfg(wz_on_use)]
+                if self.direct.made_at(at, || core.face_router()).is_none() {
+                    core.remove_face(at);
+                    continue;
+                }
                 (opened, endpoint, at)
             };
             self.take_link(at, opened, endpoint);
@@ -3629,7 +3724,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// role's and each past it whose row holds a face (`DirectFaces::turned`).
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn direct_faces(&self) -> (usize, usize) {
+        #[cfg(not(all(feature = "listen", wz_on_use)))]
         let rows = self.direct.iter().count();
+        // Where the tables take their memory on use a row holds no face until its place's first
+        // face made it: the table's rows are counted, made or not.
+        #[cfg(all(feature = "listen", wz_on_use))]
+        let rows = 1 + self.direct.taken.rows().len();
         #[cfg(any(feature = "listen", feature = "group"))]
         let turned = self.direct.turned().count();
         #[cfg(not(any(feature = "listen", feature = "group")))]

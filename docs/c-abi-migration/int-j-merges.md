@@ -88,3 +88,31 @@ kept: the description walk is the lend, and it walks l3-queryable's layout.
   enum has no `Peer` variant and the driver is one body. `IpLink` and
   `ClosedLink` forward `owes_write_if_free`, which an earlier lane added to
   `SessionDatagramLink`.
+
+## heap-native (ce7e699b2c)
+
+The lane states the tables' policy once, in the build script (`wz_lent`,
+`wz_on_use`), and renames every item that differs by the policy from
+`runtime-plan` to the policy's cfg; the config's plan keeps `runtime-plan`.
+
+- `crates/wz-capi-coop` (`arena.rs`, `engine.rs`, `engine/registry.rs`,
+  `registry/held.rs`, `registry/described.rs`, `registry/adding.rs`,
+  `engine/state_places.rs`, `tests/arena.rs`, `tests/sim.rs`): the items
+  the earlier lanes added under `runtime-plan` (peer-prop's description
+  walk of the registry and the sets, the plan's parts read off it,
+  l3-queryable's leg rows) take the policy's cfg the same way: the lent form
+  `wz_lent`, "not the on-use form" `not(wz_on_use)`, the on-use form
+  `wz_on_use`.
+- `crates/wz-capi-coop/src/engine/registry/owed.rs`, `described.rs`: the
+  lane holds the tokens owed by the faces that went in one type
+  (`owed::Owed`); peer-prop lends that table through the registry's
+  description. Both are kept: the lent form is described by
+  `Owed::place` and starts rowless (`Owed::rowless`), so `Owed::lent`
+  goes, and the on-use form is the lane's relation. `counted.rs` counts the
+  application's tables with l3-queryable's `App::counted(keys, tables, ..)`.
+- `crates/wz-runtime-coop` (`ip_stack.rs`, `ip_link.rs`,
+  `unixpipe_link.rs`, `ws_link/links.rs`, `transport.rs`): the lane takes a
+  link's cells and buffers through its kind's sources (`N::Cells`,
+  `RxOf<N>`, `TxOf<N>`); base-td's closed link type and its in-place
+  makers take them the same way, and the gate takes the cells as the lane
+  states them. Both lanes' stack tests are kept.

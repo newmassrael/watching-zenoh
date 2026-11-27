@@ -28,8 +28,6 @@ use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use wz_session_core::byte_cells::LentByteCells;
-#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkEnds, LinkSendOutcome, LostCause, RoomAnswer, RoomWait, TxSlot,
@@ -47,10 +45,10 @@ use crate::group_transport::{GroupJoiner, GroupTransport, NoGroups};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::ip_link::{ClosedSet, IpLink, LinkSet, OpenSet};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::link_cells::{CellClaim, CellRc, CountKind, OneTask};
+use crate::link_cells::{CellClaim, CellRc, CellSource, CountKind, OneTask};
 use crate::link_storage::TxStore;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
+use crate::link_storage::{BufferSource, LinkBuffers, RxOf, TxOf};
 #[cfg(all(
     feature = "alloc",
     not(feature = "session-slot"),
@@ -158,7 +156,7 @@ pub type IpLinkOf<U, D, L, N, W> =
 /// buffers) is let go of where it lies.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub(crate) fn heap_link<K, N: CountKind>(
-    cells: Option<&LentByteCells<N::Flag>>,
+    cells: &N::Cells,
     fits: bool,
 ) -> Result<LinkCell<K, N>, LinkOpenError> {
     if !fits {
@@ -416,6 +414,14 @@ pub struct IpLinks<
     /// ([`SessionLinks::lend_port_rows`]); a port of links lent none keeps rows of its own.
     #[cfg(feature = "udp-listen")]
     ports: Option<crate::udp_link::SharedBook<N::Shared>>,
+    /// The slots every udp port of these links reads its datagrams into and holds them in, when
+    /// the session lent some ([`SessionLinks::lend_port_rows`]); a port of links lent none reads
+    /// into memory of its own.
+    #[cfg(feature = "udp-listen")]
+    port_slots: Option<wz_session_core::byte_cells::LentByteCells<N::Flag>>,
+    /// The receive buffers of the groups these links join, when the session lent some
+    /// ([`SessionLinks::lend_group_rx`]); a group of links lent none has a buffer of its own.
+    group_rx: Option<wz_session_core::byte_cells::LentByteCells>,
     datagrams: core::marker::PhantomData<fn() -> U>,
     waiter: core::marker::PhantomData<fn() -> W>,
     set: core::marker::PhantomData<fn() -> F>,
@@ -431,9 +437,11 @@ struct LinkShape<N: CountKind> {
     /// The receive buffer of a datagram link: the largest datagram until the stack is told the
     /// largest batch its sessions receive ([`IpLinks::with_rx_capacity`]).
     datagram_rx: usize,
-    /// The tables of the session the links serve, when it lent the stack some
-    /// ([`SessionLinks::lend_buffers`]): every link claims its buffers there, and none allocates.
-    lent: Option<LinkTables<N::Flag>>,
+    /// Where every link's buffers are taken ([`SessionLinks::lend_buffers`]): the tables of the
+    /// session the links serve when it lent the stack some, where every link claims its buffers
+    /// and none allocates; the link's own otherwise, or always where the kind's buffers are the
+    /// heap's.
+    lent: N::Buffers,
     place: LinkPlace<N>,
 }
 
@@ -455,7 +463,7 @@ impl<N: CountKind> Default for LinkShape<N> {
             tx_slots: 0,
             tx_capacity: 0,
             datagram_rx: UDP_RX_CAPACITY,
-            lent: None,
+            lent: Default::default(),
             place: LinkPlace::default(),
         }
     }
@@ -468,17 +476,17 @@ impl<N: CountKind> LinkShape<N> {
     /// ([`SessionLinks::lend_cells`]), so the shape is changed before that and has none.
     fn counted_by<M: CountKind>(self) -> LinkShape<M> {
         debug_assert!(
-            self.place.cells.is_none() && self.lent.is_none(),
+            self.place.cells.table().is_none() && self.lent.tables().is_none(),
             "cells and buffers are lent after the links are made"
         );
         LinkShape {
             tx_slots: self.tx_slots,
             tx_capacity: self.tx_capacity,
             datagram_rx: self.datagram_rx,
-            lent: None,
+            lent: Default::default(),
             place: LinkPlace {
                 owner_waits: self.place.owner_waits,
-                cells: None,
+                cells: Default::default(),
             },
         }
     }
@@ -490,9 +498,9 @@ impl<N: CountKind> LinkShape<N> {
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 struct LinkPlace<N: CountKind> {
     owner_waits: bool,
-    /// The cells of the session the links serve, when it lent the stack some
-    /// ([`SessionLinks::lend_cells`]): every link is placed in one, and none on the heap.
-    cells: Option<LentByteCells<N::Flag>>,
+    /// Where every link is placed ([`SessionLinks::lend_cells`]): in a cell of the session's
+    /// table when it lent the stack one, and none on the heap; on the heap otherwise.
+    cells: N::Cells,
 }
 
 // Not derived, as `LinkShape`'s are not.
@@ -511,7 +519,7 @@ impl<N: CountKind> Default for LinkPlace<N> {
     fn default() -> Self {
         Self {
             owner_waits: false,
-            cells: None,
+            cells: Default::default(),
         }
     }
 }
@@ -525,12 +533,7 @@ impl<N: CountKind> LinkPlace<N> {
     /// input (`W`, the stack's), and waited on by its owner when the stack says so. Out of line: a
     /// dial, a dial made later and a port's accept each open one, and one body serves them.
     #[inline(never)]
-    fn tcp<U, S, T, W, F>(
-        &self,
-        socket: S,
-        rx: RxBuffer<N::Flag>,
-        tx: TxBuffer<N::Flag>,
-    ) -> SetOpened<U, S, T, N, W, F>
+    fn tcp<U, S, T, W, F>(&self, socket: S, rx: RxOf<N>, tx: TxOf<N>) -> SetOpened<U, S, T, N, W, F>
     where
         U: DatagramSocket + 'static,
         S: StreamSocket + 'static,
@@ -539,7 +542,7 @@ impl<N: CountKind> LinkPlace<N> {
         F: LinkSet<IpLink<U, S, T, N, W>, N>,
     {
         let fits = stream_ends_fit(&socket);
-        IpLink::<U, S, T, N, W>::open_tcp::<F>(self.cells.as_ref(), fits, |place| {
+        IpLink::<U, S, T, N, W>::open_tcp::<F>(&self.cells, fits, |place| {
             let link = link_over_in::<S, _, _, W>(place, socket, rx, tx);
             if self.owner_waits {
                 link.wait_by_owner();
@@ -553,8 +556,8 @@ impl<N: CountKind> LinkPlace<N> {
     fn tls<U, S, T, W, F>(
         &self,
         channel: T,
-        rx: RxBuffer<N::Flag>,
-        tx: TxBuffer<N::Flag>,
+        rx: RxOf<N>,
+        tx: TxOf<N>,
     ) -> SetOpened<U, S, T, N, W, F>
     where
         U: DatagramSocket + 'static,
@@ -564,7 +567,7 @@ impl<N: CountKind> LinkPlace<N> {
         F: LinkSet<IpLink<U, S, T, N, W>, N>,
     {
         let fits = stream_ends_fit(&channel);
-        IpLink::<U, S, T, N, W>::open_tls::<F>(self.cells.as_ref(), fits, |place| {
+        IpLink::<U, S, T, N, W>::open_tls::<F>(&self.cells, fits, |place| {
             let link = link_over_in::<T, _, _, W>(place, channel, rx, tx);
             if self.owner_waits {
                 link.wait_by_owner();
@@ -583,8 +586,8 @@ impl<N: CountKind> LinkPlace<N> {
         &self,
         socket: U,
         peer: Option<SocketAddr>,
-        rx: RxBuffer<N::Flag>,
-        tx: TxBuffer<N::Flag>,
+        rx: RxOf<N>,
+        tx: TxOf<N>,
     ) -> SetOpened<U, S, T, N, W, F>
     where
         U: DatagramSocket + 'static,
@@ -596,7 +599,7 @@ impl<N: CountKind> LinkPlace<N> {
         #[cfg(feature = "udp-listen")]
         let socket = LinkSocket::<U, N::Shared>::Own(socket);
         let fits = datagram_ends_fit(&socket, peer);
-        IpLink::<U, S, T, N, W>::open_udp::<F>(self.cells.as_ref(), fits, |place| {
+        IpLink::<U, S, T, N, W>::open_udp::<F>(&self.cells, fits, |place| {
             let link = UdpDriver::<_, _, _, W>::with_peer_in(place, socket, peer, rx, tx);
             if self.owner_waits {
                 link.wait_by_owner();
@@ -612,8 +615,8 @@ impl<N: CountKind> LinkPlace<N> {
         &self,
         share: PortPeer<U, N::Shared>,
         peer: SocketAddr,
-        rx: RxBuffer<N::Flag>,
-        tx: TxBuffer<N::Flag>,
+        rx: RxOf<N>,
+        tx: TxOf<N>,
     ) -> SetOpened<U, S, T, N, W, F>
     where
         U: DatagramSocket + 'static,
@@ -624,7 +627,7 @@ impl<N: CountKind> LinkPlace<N> {
     {
         let share = LinkSocket::<U, N::Shared>::Port(share);
         let fits = datagram_ends_fit(&share, Some(peer));
-        IpLink::<U, S, T, N, W>::open_udp::<F>(self.cells.as_ref(), fits, |place| {
+        IpLink::<U, S, T, N, W>::open_udp::<F>(&self.cells, fits, |place| {
             let link = UdpDriver::<_, _, _, W>::with_peer_in(place, share, Some(peer), rx, tx);
             if self.owner_waits {
                 link.wait_by_owner();
@@ -639,8 +642,8 @@ impl<N: CountKind> LinkShape<N> {
     /// The buffers of a link that opens now, its own receive buffer `rx` bytes long: claimed from
     /// the session's tables when it lent some, and [`LinkOpenError::Exhausted`] when they have none
     /// left, so a session whose tables are full opens no link; allocated otherwise.
-    fn buffers(&self, rx: usize) -> Result<LinkBuffers<N::Flag>, LinkOpenError> {
-        heap_link_buffers(self.lent.as_ref(), rx, self.tx_slots, self.tx_capacity)
+    fn buffers(&self, rx: usize) -> Result<LinkBuffers<N>, LinkOpenError> {
+        self.lent.buffers(rx, self.tx_slots, self.tx_capacity)
     }
 }
 
@@ -664,6 +667,9 @@ where
             shape: LinkShape::default(),
             #[cfg(feature = "udp-listen")]
             ports: None,
+            #[cfg(feature = "udp-listen")]
+            port_slots: None,
+            group_rx: None,
             datagrams: core::marker::PhantomData,
             waiter: core::marker::PhantomData,
             set: core::marker::PhantomData,
@@ -688,8 +694,8 @@ where
     pub fn counted_by<M: CountKind>(self) -> IpLinks<U, D, L, G, M, W, F> {
         #[cfg(feature = "udp-listen")]
         debug_assert!(
-            self.ports.is_none(),
-            "a port's rows are lent after the links are made"
+            self.ports.is_none() && self.port_slots.is_none(),
+            "a port's rows and slots are lent after the links are made"
         );
         IpLinks {
             local: self.local,
@@ -699,6 +705,9 @@ where
             shape: self.shape.counted_by(),
             #[cfg(feature = "udp-listen")]
             ports: None,
+            #[cfg(feature = "udp-listen")]
+            port_slots: None,
+            group_rx: self.group_rx,
             datagrams: self.datagrams,
             waiter: self.waiter,
             set: self.set,
@@ -715,6 +724,9 @@ where
             shape: self.shape,
             #[cfg(feature = "udp-listen")]
             ports: self.ports,
+            #[cfg(feature = "udp-listen")]
+            port_slots: self.port_slots,
+            group_rx: self.group_rx,
             datagrams: self.datagrams,
             waiter: self.waiter,
             set: self.set,
@@ -732,6 +744,9 @@ where
             shape: self.shape,
             #[cfg(feature = "udp-listen")]
             ports: self.ports,
+            #[cfg(feature = "udp-listen")]
+            port_slots: self.port_slots,
+            group_rx: self.group_rx,
             datagrams: self.datagrams,
             waiter: self.waiter,
             set: self.set,
@@ -755,6 +770,9 @@ where
             shape,
             #[cfg(feature = "udp-listen")]
             ports: self.ports,
+            #[cfg(feature = "udp-listen")]
+            port_slots: self.port_slots,
+            group_rx: self.group_rx,
             datagrams: self.datagrams,
             waiter: core::marker::PhantomData,
             set: self.set,
@@ -912,9 +930,9 @@ where
     }
 
     /// Every link these links open from now on, dialled or taken off a port that is listened on
-    /// after this, claims its buffers from `tables`.
-    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
-        self.shape.lent = Some(tables);
+    /// after this, takes its buffers through `tables`.
+    fn lend_buffers(&mut self, tables: N::Buffers) {
+        self.shape.lent = tables;
     }
 
     /// The cell every link of these takes: one link of the stack's one type, whose variant is a
@@ -922,9 +940,9 @@ where
     const LINK_CELL_BYTES: usize = CellRc::<IpLinkOf<U, D, L, N, W>>::cell_bytes();
 
     /// Every link these links open from now on, dialled or taken off a port that is listened on
-    /// after this, is placed in a cell of `cells`.
-    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
-        self.shape.place.cells = Some(cells);
+    /// after this, is placed through `cells`.
+    fn lend_cells(&mut self, cells: N::Cells) {
+        self.shape.place.cells = cells;
     }
 
     /// Every udp port these links listen on from now on keeps its peers and their datagrams in
@@ -934,9 +952,16 @@ where
     fn lend_port_rows(
         &mut self,
         rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
+        slots: Option<wz_session_core::byte_cells::LentByteCells<N::Flag>>,
     ) -> Result<(), usize> {
         self.ports = Some(crate::udp_link::shared_book::<N::Shared>(Some(rows))?);
+        self.port_slots = slots;
         Ok(())
+    }
+
+    /// Every group these links join from now on claims its receive buffer from `buffers`.
+    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
+        self.group_rx = Some(buffers);
     }
 
     /// A `tcp/` dial begins its connection and a `tls/` one its channel's (the connection under
@@ -1022,7 +1047,7 @@ where
                     #[cfg(feature = "udp-port-lent-only")]
                     None => return Err(LinkOpenError::Exhausted),
                 };
-                let port = match self.shape.lent.and_then(|tables| tables.port_rx()) {
+                let port = match self.port_slots {
                     Some(table) => UdpPort::lent_in_book(socket, table, &book)
                         .ok_or(LinkOpenError::Exhausted)?,
                     #[cfg(not(feature = "udp-port-lent-only"))]
@@ -1062,15 +1087,15 @@ where
 
     /// The group `group` names, joined by the host's joiner the links were given
     /// ([`IpLinks::with_groups`]); links given none refuse it as unsupported. A group of links
-    /// whose session lent a table of group buffers ([`LinkTables::group_rx`]) receives into one of
-    /// them, and finding every one held is [`LinkOpenError::Exhausted`]; without the table the
-    /// transport makes its own.
+    /// whose session lent a table of group buffers ([`SessionLinks::lend_group_rx`]) receives into
+    /// one of them, and finding every one held is [`LinkOpenError::Exhausted`]; without the table
+    /// the transport makes its own.
     fn open_group(
         &self,
         _endpoint: &str,
         group: &GroupLocator,
     ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
-        let rx = match self.shape.lent.and_then(|tables| tables.group_rx()) {
+        let rx = match self.group_rx {
             Some(table) => Some(table.claim().ok_or(LinkOpenError::Exhausted)?),
             None => None,
         };
@@ -1186,7 +1211,7 @@ where
 ))]
 struct PendingStream<P: StreamSocket + 'static, N: CountKind> {
     socket: Option<P>,
-    buffers: Option<LinkBuffers<N::Flag>>,
+    buffers: Option<LinkBuffers<N>>,
     place: LinkPlace<N>,
 }
 
@@ -1196,7 +1221,7 @@ struct PendingStream<P: StreamSocket + 'static, N: CountKind> {
     not(feature = "session-slot"),
     feature = "dial-in-flight"
 ))]
-type StreamMade<P, N> = (P, LinkBuffers<<N as CountKind>::Flag>);
+type StreamMade<P, N> = (P, LinkBuffers<N>);
 
 #[cfg(all(
     feature = "alloc",
@@ -1744,6 +1769,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    use crate::link_storage::LinkTables;
     use crate::stream_link::StreamEnds;
     use core::ffi::c_int;
     #[cfg(feature = "session-slot")]
@@ -2468,27 +2495,20 @@ mod tests {
         #[repr(C, align(16))]
         struct Block([u8; ARENA_ALIGN]);
 
-        let (rx_len, slot_len, group_len) = (66, 34, 48);
-        let bytes = Arena::byte_cells_bytes(rx_len, 1)
-            .and_then(|rx| Arena::byte_cells_bytes(2 * slot_len, 1).map(|tx| rx + tx))
-            .and_then(|both| Arena::byte_cells_bytes(group_len, 1).map(|group| both + group))
-            .expect("within the address space");
+        let group_len = 48;
+        let bytes = Arena::byte_cells_bytes(group_len, 1).expect("within the address space");
         let region: &'static mut [Block] =
             alloc::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
         // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
         // leaked, so nothing else uses it and it outlives every buffer claimed from it.
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
-        let rx = arena.lend_byte_cells(rx_len, 1).expect("the receive table");
-        let tx = arena
-            .lend_byte_cells(2 * slot_len, 1)
-            .expect("the outbound table");
         let groups = arena
             .lend_byte_cells(group_len, 1)
             .expect("the group table");
 
         let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial).with_groups(joiner());
-        links.lend_buffers(LinkTables::new(rx, tx, slot_len).with_group_rx(groups));
+        links.lend_group_rx(groups);
         let mut first = links
             .open_group(GROUP, &group)
             .expect("a group in the table's buffer");
@@ -2758,7 +2778,7 @@ mod tests {
             answer: answer.clone(),
             waited: waited.clone(),
         });
-        links.lend_buffers(tables);
+        links.lend_buffers(Some(tables));
 
         let mut pending = links
             .begin_initiator(Locator::tls(ROUTER))
@@ -2895,7 +2915,7 @@ mod tests {
         );
 
         let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
-        links.lend_buffers(tables);
+        links.lend_buffers(Some(tables));
         let stream = links
             .open_initiator(Locator::tcp(ROUTER))
             .expect("a stream link over the tables' buffers")
@@ -3009,7 +3029,7 @@ mod tests {
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
         let cells = arena.lend_byte_cells(size, 1).expect("one cell");
-        links.lend_cells(cells);
+        links.lend_cells(Some(cells));
 
         let stream = links
             .open_initiator(Locator::tcp(ROUTER))
@@ -3130,6 +3150,47 @@ mod tests {
         }
     }
 
+    /// Links counted by a kind whose cells and buffers are the heap's hold sources that name no
+    /// table and open each link in a block of the heap of its own over buffers of its own, none
+    /// refused for want of a cell or a buffer, of the stack's shape until a session sizes the
+    /// source and of the session's batch after. Turned red by a stack whose links' cells or buffers
+    /// are made otherwise than its kind's sources say.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn links_whose_cells_are_the_heaps_open_each_link_on_the_heap() {
+        use crate::link_cells::{HeapCells, OnHeap};
+        use crate::link_storage::HeapBuffers;
+
+        let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial).counted_by::<OnHeap<OneTask>>();
+        // The kind's sources are the heap's: no table could be lent to these links.
+        links.lend_cells(HeapCells);
+        links.lend_buffers(HeapBuffers::default());
+        let stream = links
+            .open_initiator(Locator::tcp(ROUTER))
+            .expect("a stream link on the heap");
+        let datagram = links
+            .open_initiator(Locator::udp(ROUTER))
+            .expect("a datagram link on the heap beside it");
+        assert_eq!(
+            CellRc::handles(&datagram.pump),
+            2,
+            "a link's sink and pump are two handles on its one cell"
+        );
+        assert_eq!(
+            datagram.sink.link_rx_capacity(),
+            UDP_RX_CAPACITY,
+            "a datagram link receives into a buffer of its own of the largest datagram"
+        );
+        drop((stream, datagram));
+
+        // Sized by its session, a link receives into a buffer of the session's batch.
+        links.lend_buffers(HeapBuffers::sized(512, 1));
+        let sized = links
+            .open_initiator(Locator::udp(ROUTER))
+            .expect("a datagram link of the session's batch");
+        assert_eq!(sized.sink.link_rx_capacity(), 512);
+    }
+
     /// Links counted as several threads count a link's handles place each link in a cell of a
     /// table of atomic flags, and its sink and pump are two handles so counted: the cell goes back
     /// when the last of them goes, and a link past the cells is refused as exhausted.
@@ -3161,7 +3222,7 @@ mod tests {
         let cells = arena
             .lend_byte_cells_of::<AtomicBool>(size, 1)
             .expect("one cell");
-        links.lend_cells(cells);
+        links.lend_cells(Some(cells));
 
         let link = links
             .open_initiator(Locator::udp(ROUTER))
@@ -3214,7 +3275,7 @@ mod tests {
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
         let cells = arena.lend_byte_cells(size, 1).expect("one cell");
-        links.lend_cells(cells);
+        links.lend_cells(Some(cells));
 
         let mut first = links
             .begin_initiator(Locator::tcp(ROUTER))
@@ -3298,7 +3359,7 @@ mod tests {
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
         let cells = arena.lend_byte_cells(size, 1).expect("one cell");
-        links.lend_cells(cells);
+        links.lend_cells(Some(cells));
 
         let mut made = links
             .begin_initiator(Locator::tcp(ROUTER))
@@ -3382,7 +3443,7 @@ mod tests {
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
         let cells = arena.lend_byte_cells(size, 1).expect("one cell");
-        links.lend_cells(cells);
+        links.lend_cells(Some(cells));
 
         let accepting = links
             .open_acceptor(7447)
@@ -3667,24 +3728,22 @@ mod tests {
                 assert!(own.open_listener(at).is_ok(), "CONTROL: a port of its own");
             }
 
-            let (rx_len, slot_len, port_len) = (66, 34, 64);
-            let bytes = Arena::byte_cells_bytes(rx_len, 1)
-                .and_then(|rx| Arena::byte_cells_bytes(2 * slot_len, 1).map(|tx| rx + tx))
-                .and_then(|both| Arena::byte_cells_bytes(port_len, 1).map(|port| both + port))
-                .expect("within the address space");
+            let port_len = 64;
+            let bytes = Arena::byte_cells_bytes(port_len, 1).expect("within the address space");
             let region: &'static mut [Block] =
                 vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
             // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
             // leaked, so nothing else uses it and it outlives every slot claimed from it.
             let mut arena =
                 unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
-            let rx = arena.lend_byte_cells(rx_len, 1).expect("the receive table");
-            let tx = arena
-                .lend_byte_cells(2 * slot_len, 1)
-                .expect("the outbound table");
             let ports = arena.lend_byte_cells(port_len, 1).expect("the port table");
             let mut lent = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
-            lent.lend_buffers(LinkTables::new(rx, tx, slot_len).with_port_rx(ports));
+            // Rows of no peer: the port opens over its slot whether or not one comes.
+            assert!(
+                lent.lend_port_rows(crate::udp_link::PortRows::default(), Some(ports))
+                    .is_ok(),
+                "the heap has room for the book"
+            );
             let first = lent.open_listener(at);
             assert!(first.is_ok(), "a port over the table");
             assert_eq!(ports.in_use(), 1, "the port took a slot to read into");
@@ -3742,10 +3801,8 @@ mod tests {
             "links lent nothing keep no port"
         );
 
-        let (rx_len, slot_len, port_len) = (66, 34, 64);
-        let bytes = Arena::byte_cells_bytes(rx_len, 1)
-            .and_then(|rx| Arena::byte_cells_bytes(2 * slot_len, 1).map(|tx| rx + tx))
-            .and_then(|both| Arena::byte_cells_bytes(port_len, 2).map(|port| both + port))
+        let port_len = 64;
+        let bytes = Arena::byte_cells_bytes(port_len, 2)
             .and_then(|cells| Arena::table_bytes::<PortPeerRow>(1).map(|peers| cells + peers))
             .and_then(|lent| Arena::table_bytes::<QueuedDatagram>(2).map(|queue| lent + queue))
             .expect("within the address space");
@@ -3755,25 +3812,23 @@ mod tests {
         // leaked, so nothing else uses it and it outlives every slot and row lent from it.
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
-        let rx = arena.lend_byte_cells(rx_len, 1).expect("the receive table");
-        let tx = arena
-            .lend_byte_cells(2 * slot_len, 1)
-            .expect("the outbound table");
         let ports = arena.lend_byte_cells(port_len, 2).expect("the port table");
         let mut lent = IpLinks::<Datagrams<true>, Dial>::new(NODE, Dial);
-        lent.lend_buffers(LinkTables::new(rx, tx, slot_len).with_port_rx(ports));
+        assert!(
+            lent.lend_port_rows(PortRows::default(), None).is_ok(),
+            "the heap has room for the book"
+        );
         assert!(
             matches!(lent.open_listener(at), Err(LinkOpenError::Exhausted)),
-            "slots and no rows for the peers: no port"
+            "rows and no slots to read into: no port"
         );
-        assert_eq!(ports.in_use(), 0, "the refused port took no slot");
 
         let rows = PortRows::over(
             arena.lend(1).expect("the peers' rows"),
             arena.lend(2).expect("the queue's rows"),
         );
         assert!(
-            lent.lend_port_rows(rows).is_ok(),
+            lent.lend_port_rows(rows, Some(ports)).is_ok(),
             "the heap has room for the book"
         );
         let listener = lent.open_listener(at);

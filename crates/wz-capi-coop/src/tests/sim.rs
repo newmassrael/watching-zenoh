@@ -626,7 +626,7 @@ impl Sim {
 
     /// [`Self::open`] in the memory and by the plan `storage` names (`CoopEngine::open_made_in`):
     /// the open whose reservations a test counts.
-    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[cfg(wz_on_use)]
     pub(super) fn open_made_in(
         &self,
         config: CoopConfig,

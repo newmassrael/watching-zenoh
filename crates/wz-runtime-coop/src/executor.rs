@@ -1249,6 +1249,14 @@ impl ExecutorState {
         Self::over(Cells::Store(store), cell_bytes, &ONE_CELL)
     }
 
+    /// [`Self::taskless_in`] over a table of no cell the heap holds, laid as one cell of
+    /// `task_bytes` that holds none, as a placed one is. `None`, having kept nothing of the heap,
+    /// when the heap has no room for the table.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn try_taskless(task_bytes: usize) -> Option<Self> {
+        TaskStore::try_new::<true>(0, Some(task_bytes), None).map(Self::taskless_in)
+    }
+
     /// A table of no cell over `store`, which holds none, for a runtime that hosts no task: its
     /// owner steps its links itself (`RuntimeForm::Taskless`). A spawn is refused, counted, as a
     /// table of one cell that holds none refuses it, and a pass or a sweep walks nothing.

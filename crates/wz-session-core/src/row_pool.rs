@@ -109,6 +109,8 @@ use core::marker::PhantomData;
 use core::mem::{align_of, needs_drop, offset_of, size_of};
 use core::ptr::{self, addr_of, addr_of_mut, NonNull};
 
+#[cfg(feature = "alloc")]
+use crate::bounded::SeqBacking;
 use crate::bounded::{Arena, BoundedVec, CapacityFull, LendRefused, Storage, ARENA_ALIGN};
 
 /// No row: the end of a list and of the free list, and the first row of an empty shared table.
@@ -1982,6 +1984,14 @@ pub trait RowList<T> {
 
     /// Drop every value.
     fn clear(&mut self);
+
+    /// Take the memory of the table's rows now, where the table takes it at its first value:
+    /// `false` where the allocator refuses it. What lets a caller learn that a value would find no
+    /// memory before it changes anything else for that value. A table whose rows were laid out when
+    /// it was made has its memory: `true`, whether or not a row is free.
+    fn take_rows(&mut self) -> bool {
+        true
+    }
 }
 
 impl<T, const N: usize, P: Storage> RowList<T> for BoundedVec<T, N, P> {
@@ -2054,6 +2064,10 @@ impl<T, L: RowList<T> + ?Sized> RowList<T> for &mut L {
 
     fn clear(&mut self) {
         L::clear(self);
+    }
+
+    fn take_rows(&mut self) -> bool {
+        L::take_rows(self)
     }
 }
 
@@ -2243,6 +2257,195 @@ impl<T, const N: usize> RowList<T> for LentRows<'_, Seq<T>, N> {
 
     fn clear(&mut self) {
         LentRows::clear(self);
+    }
+}
+
+/// The on-use sequence of a peer's rows (the `Pooled` of [`OnUse`](crate::bounded::OnUse)): at
+/// most `N` values, in rows all taken from the allocator at its first value
+/// ([`FirstUse`](crate::on_use::FirstUse)), so a face whose peer never writes the kind takes
+/// nothing for it.
+///
+/// It answers [`RowList`] only lent its owner's handle ([`PeerSeq::lend`], [`CountedSeqMut`]):
+/// a value then takes a row of its slot's kind from the session's
+/// [`KeyBudget`](crate::on_use::KeyBudget) as well, so the peers of every face hold their rows of
+/// each kind to the session's bound together, as a lent session's pool holds them; each value taken
+/// out gives its row back. Its owner gives every row back through the handle before it drops the
+/// sequence or changes the handle ([`PeerSeq::release`]), as a pooled sequence's owner does.
+#[cfg(feature = "alloc")]
+pub struct CountedSeq<T, const N: usize> {
+    rows: crate::on_use::FirstUse<T, N>,
+}
+
+#[cfg(feature = "alloc")]
+impl<T, const N: usize> CountedSeq<T, N> {
+    /// An empty sequence of `N` rows that has taken no memory.
+    pub const fn new() -> Self {
+        Self {
+            rows: crate::on_use::FirstUse::counted(N),
+        }
+    }
+
+    /// Whether the sequence took its rows.
+    pub fn holds_rows(&self) -> bool {
+        self.rows.holds_rows()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T, const N: usize> Default for CountedSeq<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A [`CountedSeq`] lent its owner's handle, to write: a value takes a row of the slot's kind
+/// from the session's budget the handle names, and each value taken out gives one back. A handle
+/// of no budget holds the sequence to its own count alone.
+#[cfg(feature = "alloc")]
+pub struct CountedSeqMut<'a, T, const N: usize> {
+    seq: &'a mut CountedSeq<T, N>,
+    budget: Option<&'a crate::on_use::KeyBudget>,
+    slot: PeerSlot,
+}
+
+#[cfg(feature = "alloc")]
+impl<T, const N: usize> CountedSeqMut<'_, T, N> {
+    /// How many values the sequence holds.
+    fn held(&self) -> usize {
+        self.seq.rows.as_slice().len()
+    }
+
+    /// Give `count` rows of the slot's kind back to the session's budget.
+    fn give_back(&self, count: usize) {
+        if let Some(budget) = self.budget {
+            budget.give_peer_rows(self.slot, count);
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T, const N: usize> RowList<T> for CountedSeqMut<'_, T, N> {
+    fn len(&self) -> usize {
+        self.held()
+    }
+
+    fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
+        if self.seq.rows.free_slots() == 0 {
+            return Err(CapacityFull(value));
+        }
+        if let Some(budget) = self.budget {
+            if !budget.take_peer_row(self.slot) {
+                return Err(CapacityFull(value));
+            }
+        }
+        let kept = self.seq.rows.push(value);
+        // The allocator has no room for the sequence's rows: the session's row goes back.
+        if kept.is_err() {
+            self.give_back(1);
+        }
+        kept
+    }
+
+    fn iter<'b>(&'b self) -> impl Iterator<Item = &'b T>
+    where
+        T: 'b,
+    {
+        self.seq.rows.as_slice().iter()
+    }
+
+    fn iter_mut<'b>(&'b mut self) -> impl Iterator<Item = &'b mut T>
+    where
+        T: 'b,
+    {
+        self.seq.rows.as_mut_slice().iter_mut()
+    }
+
+    fn retain<F: FnMut(&T) -> bool>(&mut self, keep: F) {
+        let held = self.held();
+        self.seq.rows.retain(keep);
+        self.give_back(held.saturating_sub(self.held()));
+    }
+
+    fn remove_first<F: FnMut(&T) -> bool>(&mut self, which: F) -> Option<T> {
+        let at = self.seq.rows.as_slice().iter().position(which)?;
+        let value = self.seq.rows.remove(at);
+        self.give_back(1);
+        Some(value)
+    }
+
+    fn clear(&mut self) {
+        let held = self.held();
+        self.seq.rows.clear();
+        self.give_back(held);
+    }
+
+    fn take_rows(&mut self) -> bool {
+        self.seq.rows.holds_rows() || self.seq.rows.make_room()
+    }
+}
+
+/// A [`CountedSeq`] lent its owner's handle, to read: a read takes nothing of the budget.
+#[cfg(feature = "alloc")]
+pub struct CountedSeqRef<'a, T, const N: usize>(&'a CountedSeq<T, N>);
+
+#[cfg(feature = "alloc")]
+impl<T, const N: usize> Clone for CountedSeqRef<'_, T, N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T, const N: usize> Copy for CountedSeqRef<'_, T, N> {}
+
+#[cfg(feature = "alloc")]
+impl<'a, T: 'a, const N: usize> RowRead<'a, T> for CountedSeqRef<'a, T, N> {
+    fn len(&self) -> usize {
+        self.0.rows.as_slice().len()
+    }
+
+    fn into_rows(self) -> impl Iterator<Item = &'a T> + 'a {
+        let seq = self.0;
+        seq.rows.as_slice().iter()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T, const N: usize> PeerSeq<T, crate::on_use::BudgetKeys> for CountedSeq<T, N> {
+    type Mut<'a>
+        = CountedSeqMut<'a, T, N>
+    where
+        Self: 'a,
+        T: 'a;
+    type Ref<'a>
+        = CountedSeqRef<'a, T, N>
+    where
+        Self: 'a,
+        T: 'a;
+
+    unsafe fn lend<'a>(
+        &'a mut self,
+        keys: &'a crate::on_use::BudgetKeys,
+        slot: PeerSlot,
+    ) -> CountedSeqMut<'a, T, N> {
+        CountedSeqMut {
+            seq: self,
+            budget: keys.budget(),
+            slot,
+        }
+    }
+
+    unsafe fn lend_ref<'a>(
+        &'a self,
+        _: &'a crate::on_use::BudgetKeys,
+        _: PeerSlot,
+    ) -> CountedSeqRef<'a, T, N> {
+        CountedSeqRef(self)
+    }
+
+    unsafe fn release(&mut self, keys: &crate::on_use::BudgetKeys, slot: PeerSlot) {
+        // SAFETY: as `lend`'s: the owner's handle, for the slot the sequence's rows are counted in.
+        unsafe { <Self as PeerSeq<T, crate::on_use::BudgetKeys>>::lend(self, keys, slot) }.clear();
     }
 }
 
@@ -3018,5 +3221,145 @@ mod tests {
         assert_eq!(expected, [10, 30]);
         assert_eq!(exercise(lent(&mut pooled, &pool)), expected);
         assert_eq!(exercise(lent(&mut owned, &own)), expected);
+        #[cfg(feature = "alloc")]
+        {
+            let none = crate::on_use::BudgetKeys::default();
+            let mut counted = CountedSeq::<u32, 8>::new();
+            // SAFETY: a handle of no budget names no space; the sequence is lent it alone.
+            let on_use = unsafe {
+                PeerSeq::<u32, crate::on_use::BudgetKeys>::lend(
+                    &mut counted,
+                    &none,
+                    PeerSlot::Interests,
+                )
+            };
+            assert_eq!(exercise(on_use), expected);
+        }
+    }
+
+    /// The on-use sequence of a peer's rows takes its rows at its first value, and lent its
+    /// owner's handle a value takes a row of the slot's kind from the session's budget: two faces'
+    /// sequences hold the session's bound together, a refused value is handed back and takes
+    /// nothing, and a value taken out (by `remove_first`, `retain` or a release) gives its row
+    /// back. Turned red by a push that asks no row of the budget, by a removal, a retain or a
+    /// release that gives none back, or by a sequence that takes its rows when made.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_on_use_sequence_holds_its_faces_rows_to_the_sessions_bound_together() {
+        use crate::limit_binding::{LimitSpec, Quota};
+        use crate::limits::SessionLimits;
+        use crate::on_use::{BudgetKeys, KeyBudget};
+
+        let mut limits = SessionLimits::defaults();
+        if limits
+            .select_session_max_inbound_sub_interests(Quota::at_most(2))
+            .is_err()
+        {
+            assert!(
+                <crate::limits::SessionMaxInboundSubInterests as LimitSpec>::DOMAIN.is_singleton(),
+                "only a domain of one value refuses a lower bound"
+            );
+            return;
+        }
+        let budget =
+            KeyBudget::new(0, limits.max_keyexpr_bytes_held()).holding_peer_rows_to(&limits);
+        // SAFETY: the budget outlives the handle and every sequence lent it, all of this test's.
+        let keys = unsafe { budget.keys() };
+        let slot = PeerSlot::Interests;
+        let mut first = CountedSeq::<u32, 4>::new();
+        let mut second = CountedSeq::<u32, 4>::new();
+        assert!(
+            !first.holds_rows(),
+            "CONTROL: a sequence made takes nothing"
+        );
+        // SAFETY: each sequence is lent the one handle and slot it is counted in.
+        unsafe {
+            let mut lent = PeerSeq::<u32, BudgetKeys>::lend(&mut first, &keys, slot);
+            assert!(lent.push(1).is_ok() && lent.push(2).is_ok());
+        }
+        assert!(first.holds_rows());
+        assert_eq!(budget.peer_rows(slot), 2);
+        // SAFETY: as above.
+        unsafe {
+            let mut lent = PeerSeq::<u32, BudgetKeys>::lend(&mut second, &keys, slot);
+            assert_eq!(
+                lent.push(7).err().map(|CapacityFull(value)| value),
+                Some(7),
+                "the second face's first value is past the session's two, and handed back"
+            );
+        }
+        assert!(!second.holds_rows(), "the refusal took nothing");
+        assert_eq!(budget.peer_rows(slot), 2, "nor counted a row");
+        // SAFETY: as above.
+        unsafe {
+            let mut lent = PeerSeq::<u32, BudgetKeys>::lend(&mut first, &keys, slot);
+            assert_eq!(lent.remove_first(|value| *value == 2), Some(2));
+        }
+        assert_eq!(
+            budget.peer_rows(slot),
+            1,
+            "a value taken out gave its row back"
+        );
+        // SAFETY: as above.
+        unsafe {
+            let mut lent = PeerSeq::<u32, BudgetKeys>::lend(&mut second, &keys, slot);
+            assert!(lent.push(7).is_ok());
+            assert!(lent.push(8).is_err(), "the session's two are held again");
+            lent.retain(|value| *value != 7);
+        }
+        assert_eq!(
+            budget.peer_rows(slot),
+            1,
+            "a value the retain dropped gave its row back"
+        );
+        // SAFETY: as above.
+        unsafe { PeerSeq::<u32, BudgetKeys>::release(&mut first, &keys, slot) };
+        assert_eq!(
+            budget.peer_rows(slot),
+            0,
+            "the released sequence gave its row back"
+        );
+        // SAFETY: as above.
+        let read = unsafe { PeerSeq::<u32, BudgetKeys>::lend_ref(&first, &keys, slot) };
+        assert!(read.is_empty());
+    }
+
+    /// The on-use sequence takes its rows when asked before its first value, and where the
+    /// allocator refuses them it says so, takes nothing, and a value pushed then is handed back
+    /// with the budget's row given back. Turned red by a `take_rows` that answers `true` with no
+    /// rows taken (the inline answer), or by a push the allocator refused that keeps its row of the
+    /// session's budget.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_on_use_sequence_the_allocator_refuses_takes_nothing() {
+        use crate::limits::SessionLimits;
+        use crate::on_use::{BudgetKeys, KeyBudget};
+
+        let limits = SessionLimits::defaults();
+        let budget =
+            KeyBudget::new(0, limits.max_keyexpr_bytes_held()).holding_peer_rows_to(&limits);
+        // SAFETY: the budget outlives the handle and every sequence lent it, all of this test's.
+        let keys = unsafe { budget.keys() };
+        let slot = PeerSlot::SubRepeats;
+        let mut seq = CountedSeq::<(u64, u64), 4>::new();
+        // SAFETY: the sequence is lent the one handle and slot it is counted in.
+        let (taken, pushed) = crate::test_heap::refused(|| unsafe {
+            let mut lent = PeerSeq::<(u64, u64), BudgetKeys>::lend(&mut seq, &keys, slot);
+            (lent.take_rows(), lent.push((1, 2)).is_ok())
+        });
+        assert!(!taken, "the allocator refused the rows");
+        assert!(!pushed, "and the value");
+        assert!(!seq.holds_rows());
+        assert_eq!(budget.peer_rows(slot), 0, "the refused value holds no row");
+        // SAFETY: as above.
+        unsafe {
+            let mut lent = PeerSeq::<(u64, u64), BudgetKeys>::lend(&mut seq, &keys, slot);
+            assert!(lent.take_rows(), "CONTROL: the allocator gives them now");
+            assert!(lent.push((1, 2)).is_ok());
+        }
+        assert!(seq.holds_rows());
+        assert_eq!(budget.peer_rows(slot), 1);
+        // SAFETY: as above.
+        unsafe { PeerSeq::<(u64, u64), BudgetKeys>::release(&mut seq, &keys, slot) };
     }
 }

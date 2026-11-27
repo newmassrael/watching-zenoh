@@ -850,8 +850,13 @@ impl Storage for Region {
 /// ([`KeyBudget`](crate::on_use::KeyBudget)), so a key past the budget is refused as one past the
 /// key arena is. A table never used takes nothing.
 ///
-/// A table a peer writes keeps its rows inline at its build capacity, and a key composed while a
-/// peer's message is delivered is composed in a row inline in the table, as on [`Region`].
+/// What a peer writes by its own choice is counted as every other table is and takes its rows at
+/// its first value: a table of its ids ([`CountedIdMap`](crate::id_map::CountedIdMap)) and a
+/// sequence of its rows, its interests and its repeats
+/// ([`CountedSeq`](crate::row_pool::CountedSeq)), each NEW row a row of its kind of the session's
+/// budget too, so the session's peers hold what they write to the session's bounds together as a
+/// lent session's pools hold them. A key composed while a peer's message is delivered is composed
+/// in a row inline in the table, as on [`Region`].
 #[cfg(feature = "alloc")]
 pub struct OnUse;
 
@@ -869,8 +874,8 @@ impl Storage for OnUse {
     type KeyLen = crate::caps::KeyLen;
     type Keys = crate::on_use::BudgetKeys;
     type Offset = u32;
-    type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
-    type Pooled<T, const N: usize> = BoundedVec<T, N, Static>;
+    type Ids<V, const N: usize> = crate::id_map::CountedIdMap<V, N>;
+    type Pooled<T, const N: usize> = crate::row_pool::CountedSeq<T, N>;
     type Epoch = ();
     type HeapForm = core::convert::Infallible;
     #[cfg(feature = "storage-profile")]

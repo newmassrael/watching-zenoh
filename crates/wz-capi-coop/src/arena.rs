@@ -45,14 +45,18 @@
 //!   [`LINK_TX_SLOTS`] at a time from its grant to its send; and a place for each link; each table
 //!   with the flags that say which buffers are lent (`TransportRows::links_from`). The batch is
 //!   the config's, held to the session's `PICO_UNICAST_BATCH_BYTES` under the build's; these are
-//!   the rows lent when the session opens, first;
+//!   the rows lent when the session opens, first. Where the tables take their memory on use none
+//!   of them is laid out: each link holds a receive buffer and [`LINK_TX_SLOTS`] slots of the
+//!   batch of its own, made of the allocator as it opens and given back with it, as zenoh-pico's
+//!   transport takes its buffers (`TransportRows::lent_from`);
 //! - with `group`, a receive buffer for each group the session may join, of the largest batch a
 //!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
-//!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
+//!   when it is joined, lent after the links' tables (`TransportRows::group_rx_from`);
 //! - with `udp-listen`, for a session that listens on a `udp/` endpoint, the slots its udp ports
 //!   read their datagrams into and hold them in until the links of their peers take them
 //!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
-//!   with the links' tables; one that listens on `tcp/` alone binds no port and holds none;
+//!   with the ports' rows (`TransportRows::port_slots_from`); one that listens on `tcp/` alone
+//!   binds no port and holds none;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
 //!   table for the session, as many as its `REASSEMBLY_CHAINS` for each face read where it lies
 //!   (under the build's; by default one for each reliability a peer has a chain open in and one for
@@ -123,24 +127,26 @@ use core::ptr::NonNull;
 
 use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::kept::Kept;
+use wz_runtime_coop::link_cells::CountKind;
+#[cfg(wz_on_use)]
+use wz_runtime_coop::link_storage::HeapBuffers;
+#[cfg(not(wz_on_use))]
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 #[cfg(feature = "udp-listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
+#[cfg(not(wz_on_use))]
 use wz_runtime_coop::RuntimePlace;
-#[cfg(any(
-    all(feature = "query", feature = "runtime-plan"),
-    feature = "udp-listen"
-))]
+#[cfg(any(all(feature = "query", wz_lent), feature = "udp-listen"))]
 use wz_session_core::bounded::Lent;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 use wz_session_core::bounded::ZeroEmpty;
 use wz_session_core::bounded::{Arena, LendRefused, TableLender, ARENA_ALIGN};
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::bounded::{RowCount, RowCounts};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
@@ -152,25 +158,26 @@ use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::RequesterRows;
 
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
+#[cfg(all(feature = "query", wz_lent))]
 use crate::engine::set_get_bytes;
-#[cfg(all(feature = "runtime-plan", wz_round))]
+#[cfg(all(wz_lent, wz_round))]
 use crate::engine::REGISTRY_LEND_BYTES;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use crate::engine::ROOM_PLACE_BYTES;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use crate::engine::{registry_bytes, registry_row_bytes, set_peer_bytes, ROUTER_LEND_BYTES};
-#[cfg(all(wz_round, feature = "runtime-plan"))]
+#[cfg(all(wz_round, wz_lent))]
 use crate::form::CoopForm;
+#[cfg(any(not(wz_on_use), feature = "udp-listen"))]
 use crate::form::SessionLock;
 use crate::lodging::{LodgingRows, LodgingSpan};
 use crate::open_source::EndpointList;
-#[cfg(all(wz_round, feature = "runtime-plan"))]
+#[cfg(all(wz_round, wz_lent))]
 use crate::round::CALLBACK_BYTES;
 #[cfg(wz_round)]
 use crate::round::{RoundRowCounts, RECORD_BYTES};
 use crate::CoopConfig;
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
+#[cfg(all(feature = "query", wz_lent))]
 use wz_session_core::reply_hold::HeldReply;
 
 /// `?` where a const fn reads a result: the value of an `Ok`, or the `Err` handed back as it is.
@@ -488,22 +495,22 @@ const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
 /// the round keeps no area, since every record is read where it lies, and a round of one thread
 /// keeps its records in itself.
 #[cfg(wz_round)]
-const LANE_ROWS: usize =
-    ((RECORD_BYTES != 0) as usize + 3) * cfg!(feature = "runtime-plan") as usize;
+const LANE_ROWS: usize = ((RECORD_BYTES != 0) as usize + 3) * cfg!(wz_lent) as usize;
 /// A build that puts nothing in the round (`wz_round`) places none, nor any of its tables.
 #[cfg(not(wz_round))]
 const LANE_ROWS: usize = 0;
 /// The places the session lends its Router and, where its links run as tasks, its registry in for
 /// a step, where the open places them in the arena (`runtime-plan`); a region holds them otherwise.
-const STEP_LEND_ROWS: usize =
-    cfg!(feature = "runtime-plan") as usize * (1 + cfg!(wz_round) as usize);
+const STEP_LEND_ROWS: usize = cfg!(wz_lent) as usize * (1 + cfg!(wz_round) as usize);
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The read slots and send places of the faces past the dial role's, where each face is read where
 /// it lies (`crate::engine::direct`): a build whose links run as tasks (`wz_round`) has none, nor
 /// does one that listens on no port (`listen`), the one role that reads a face past the dial
-/// role's where it lies (`read_faces`).
-const DIRECT_FACE_ROWS: usize = (!cfg!(wz_round) && cfg!(feature = "listen")) as usize;
+/// role's where it lies (`read_faces`). A session whose tables take their memory on use makes each
+/// such face at its place's first face, in an allocation of its own.
+const DIRECT_FACE_ROWS: usize =
+    (!cfg!(wz_round) && cfg!(feature = "listen") && !cfg!(wz_on_use)) as usize;
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the
@@ -516,34 +523,37 @@ const HANDED_ROWS: usize =
     3 * cfg!(all(wz_round, any(feature = "listen", feature = "group"))) as usize;
 /// The application's tables apart from the session's one table set: the declaration watchers,
 /// where the arena lends them (`runtime-plan`).
-const OBSERVER_ROWS: usize = cfg!(feature = "runtime-plan") as usize;
+const OBSERVER_ROWS: usize = cfg!(wz_lent) as usize;
 /// The pending gets, the ends of the legs, the legs' callbacks and the replies the gets that
-/// consolidate hold, of a build that asks (`query`), where the arena lends them (`runtime-plan`):
+/// consolidate hold, of a build that asks (`query`), where the arena lends them (`wz_lent`):
 /// one that asks nothing holds no table of gets, and a region holds them otherwise
 /// (`crate::engine::StatePlaces`).
-const GET_ROWS: usize = 4 * cfg!(all(feature = "query", feature = "runtime-plan")) as usize;
-/// The faces' sets where the arena lends them (`runtime-plan`), and the index of the held ones
-/// where the build takes faces beside its dial role's (`TAKES_FACES`): a session of that face
-/// alone knows it holds the first set.
-const FACE_ROWS: usize = cfg!(feature = "runtime-plan") as usize + TAKES_FACES as usize;
+const GET_ROWS: usize = 4 * cfg!(all(feature = "query", wz_lent)) as usize;
+/// The faces' sets where the arena lends them (`wz_lent`), and the index of the held ones where
+/// the build takes faces beside its dial role's (`TAKES_FACES`): a session of that face alone knows
+/// it holds the first set, and one whose tables take their memory on use counts both.
+const FACE_ROWS: usize = cfg!(wz_lent) as usize * (1 + TAKES_FACES as usize);
 /// The faces' rooms, laid out at the open ([`ArenaPlan::holding_rooms`]), and their places, one
 /// for each set of face tables, where the arena lends them (`runtime-plan`); a region holds its
 /// one set's place otherwise.
-const ROOM_ROWS: usize = 1 + cfg!(feature = "runtime-plan") as usize;
+const ROOM_ROWS: usize = 1 + cfg!(wz_lent) as usize;
 /// The peers' tables, and the pools their rows lie in where the faces share them with the one span
 /// naming where those rows lie, where the arena lends them (`runtime-plan`): the aliases' and the
 /// declarations' pools, and the interests' where the build keeps a peer's (`KEEPS_INTEREST_ROWS`).
-const PEER_ROWS: usize = cfg!(feature = "runtime-plan") as usize
-    * (1 + (3 + KEEPS_INTEREST_ROWS as usize) * SHARES_ROWS as usize);
-/// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
-/// session whose faces share their pools, so counted where a build shares them at all.
+const PEER_ROWS: usize =
+    cfg!(wz_lent) as usize * (1 + (3 + KEEPS_INTEREST_ROWS as usize) * SHARES_ROWS as usize);
+/// The tokens the faces that went still owe (`liveliness` with `listen` or `group`), where the
+/// arena lends them: put only for a session whose faces share their pools, so counted where a build
+/// shares them at all. A session whose tables take their memory on use counts its relation of
+/// them instead.
 const OWED_ROWS: usize = (cfg!(all(
+    wz_lent,
     feature = "liveliness",
     any(feature = "listen", feature = "group")
 )) && SHARES_ROWS) as usize;
 /// The session's declarations, the session's one table set and the key arena, where the arena
 /// lends them (`runtime-plan`; `ArenaPlan::put_entities`).
-const ENTITY_ROWS: usize = 2 * cfg!(feature = "runtime-plan") as usize;
+const ENTITY_ROWS: usize = 2 * cfg!(wz_lent) as usize;
 /// The links' cells, their gates', their sessions' actions' and the halves those hold, each a
 /// table of flags and cells ([`ArenaPlan::holding_cells`]).
 const CELL_ROWS: usize = 8;
@@ -605,7 +615,7 @@ const LODGING_ROWS: usize = 1;
 const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
 /// The Finals the queryables' plane holds and the requests a dispatch refused (`queryable`), where
 /// the arena lends them (`runtime-plan`); a region holds them otherwise.
-const FINAL_ROWS: usize = 2 * cfg!(all(feature = "queryable", feature = "runtime-plan")) as usize;
+const FINAL_ROWS: usize = 2 * cfg!(all(feature = "queryable", wz_lent)) as usize;
 /// The count the arena is kept by and the span the session's runtime is placed in
 /// ([`ArenaPlan::holding_runtime`]).
 const RUNTIME_ROWS: usize = 2;
@@ -613,13 +623,14 @@ const RUNTIME_ROWS: usize = 2;
 const ENGINE_STATE_ROWS: usize = 1;
 /// The planes the session's queryables, gets and watchers of its faces share, each where its
 /// feature is ([`ArenaPlan::lay_planes`]), where the arena holds them (`runtime-plan`).
-const PLANE_ROWS: usize = cfg!(feature = "runtime-plan") as usize
+const PLANE_ROWS: usize = cfg!(wz_lent) as usize
     * (cfg!(feature = "queryable") as usize
         + cfg!(feature = "query") as usize
         + cfg!(feature = "connectivity") as usize);
 /// The admission the links of a session that listens ask while their handshakes run
-/// (`ArenaPlan::lay_admission`, `link-admission`): a build without it lays none out.
-const ADMISSION_ROWS: usize = cfg!(feature = "link-admission") as usize;
+/// (`ArenaPlan::lay_admission`, `link-admission`): a build without it lays none out, nor does a
+/// session whose tables take their memory on use, whose admission lies in an allocation of its own.
+const ADMISSION_ROWS: usize = cfg!(all(feature = "link-admission", not(wz_on_use))) as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -837,9 +848,11 @@ pub struct OpenRegion {
 }
 
 /// The bytes of the two places an open lends by their size after its tables: the span its
-/// runtime is placed in and the place its engine lies in.
+/// runtime is placed in, where the arena holds it (a session whose tables take their memory on use
+/// makes its runtime of the allocator), and the place its engine lies in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct OpenPlaces {
+    #[cfg(not(wz_on_use))]
     pub(crate) runtime: usize,
     pub(crate) engine: usize,
 }
@@ -855,6 +868,7 @@ impl OpenRegion {
             Ok(()) => Ok(Self {
                 rows,
                 places: OpenPlaces {
+                    #[cfg(not(wz_on_use))]
                     runtime: holds.runtime,
                     engine: holds.engine,
                 },
@@ -896,6 +910,7 @@ impl OpenRegion {
     }
 
     /// The bytes of each link's cells the region laid out, `0` for a table it holds none of.
+    #[cfg(not(wz_on_use))]
     pub(crate) const fn cell_bytes(&self) -> LinkCells<usize> {
         self.rows.plan.transport.cell_bytes
     }
@@ -1306,10 +1321,12 @@ pub struct TransportRows {
     /// The links whose buffers the arena holds.
     links: usize,
     /// The receive buffers of the pool those links share (`RX_POOL_BUFFERS`, at most one for each
-    /// link).
+    /// link). None where the tables take their memory on use, whose links hold their own.
+    #[cfg(not(wz_on_use))]
     rx_buffers: usize,
     /// The outbound slots of the pool those links share (`TX_POOL_SLOTS`, at most one for each
-    /// link).
+    /// link). None where the tables take their memory on use, whose links hold their own.
+    #[cfg(not(wz_on_use))]
     tx_slots: usize,
     /// The length of a link's receive buffer and of each of its slots.
     link_bytes: usize,
@@ -1344,15 +1361,35 @@ pub struct TransportRows {
 
 /// The flag of a cell of the links' tables: the session's lock kind's
 /// (`wz_runtime_coop::sync::LockKind::Flag`), which the handles placed in it are counted by.
+#[cfg(any(not(wz_on_use), feature = "udp-listen"))]
 type LinkCellFlag = <SessionLock as wz_runtime_coop::sync::LockKind>::Flag;
+
+/// What the session's links take their buffers through: the source their kind names
+/// (`wz_runtime_coop::link_cells::CountKind::Buffers`), the tables the arena lends, or the heap
+/// where the tables take their memory on use.
+type LinkSource = <crate::LinkCount as CountKind>::Buffers;
 
 /// The tables a session's transport is lent ([`TransportRows::lent_from`]).
 pub(crate) struct TransportTables {
-    /// The links' buffers and, where the links share pools, their places.
-    pub(crate) links: LinkTables<LinkCellFlag>,
+    /// Where the links take their buffers (`SessionLinks::lend_buffers`): the tables of their
+    /// buffers and, where the links share pools, their places; where the tables take their memory
+    /// on use, the heap, each link a buffer and slots of the session's batch of its own.
+    pub(crate) links: LinkSource,
+    /// The receive buffers of the groups the session may join, one for each; none for a plan
+    /// that counts no group.
+    #[cfg(feature = "group")]
+    pub(crate) group_rx: Option<LentByteCells>,
+    /// The slots the session's udp ports read their datagrams into and hold them in until the
+    /// links of their peers take them, which the ports share; none for a plan that listens on no
+    /// `udp/` endpoint. Flagged as the links' tables are: a datagram a port holds moves with the
+    /// link of its peer.
+    #[cfg(feature = "udp-listen")]
+    pub(crate) port_slots: Option<LentByteCells<LinkCellFlag>>,
     /// The cells of the links' drivers, their gates and their actions, each `None` for a plan
     /// with no such table: each cell's flag the one the session's lock kind counts a link's
-    /// handles by, so a handle let go of on any thread that may hold it gives its cell back.
+    /// handles by, so a handle let go of on any thread that may hold it gives its cell back. None
+    /// where the tables take their memory on use, whose links' parts are made on the heap.
+    #[cfg(not(wz_on_use))]
     pub(crate) cells: LinkCells<Option<LentByteCells<LinkCellFlag>>>,
     /// The reassembly buffers the links share.
     pub(crate) reassembly: LentByteCells,
@@ -1372,7 +1409,9 @@ impl TransportRows {
     /// The rows of no transport: a vacant plan's.
     const NONE: Self = Self {
         links: 0,
+        #[cfg(not(wz_on_use))]
         rx_buffers: 0,
+        #[cfg(not(wz_on_use))]
         tx_slots: 0,
         link_bytes: 0,
         reassembly_bytes: 0,
@@ -1396,7 +1435,16 @@ impl TransportRows {
     pub(crate) fn lent_from(&self, lend: &mut TableLender<'_>) -> TransportTables {
         let (dials, listens) = self.endpoint_rows;
         TransportTables {
-            links: self.links_from(lend),
+            #[cfg(not(wz_on_use))]
+            links: Some(self.links_from(lend)),
+            // Laid out in no row: each link takes its own as it opens.
+            #[cfg(wz_on_use)]
+            links: HeapBuffers::sized(self.link_bytes, LINK_TX_SLOTS),
+            #[cfg(feature = "group")]
+            group_rx: self.group_rx_from(lend),
+            #[cfg(feature = "udp-listen")]
+            port_slots: self.port_slots_from(lend),
+            #[cfg(not(wz_on_use))]
             cells: self.cells_from(lend),
             // A chain's buffer is claimed when its first fragment arrives and given back when it
             // ends; the session holds the table for its life.
@@ -1414,7 +1462,9 @@ impl TransportRows {
     }
 
     /// The cells of the links' drivers, their gates, their actions and their halves, lent by
-    /// `lend` after the links' buffers: `None` for a table the plan holds no cells for.
+    /// `lend` after the links' buffers, the groups' and the ports' slots: `None` for a table the
+    /// plan holds no cells for.
+    #[cfg(not(wz_on_use))]
     fn cells_from(
         &self,
         lend: &mut TableLender<'_>,
@@ -1434,70 +1484,41 @@ impl TransportRows {
     /// outbound slots they share, each held by a link from its grant to its send
     /// ([`LINK_TX_SLOTS`] at a time), and a place for each link the session may hold, which the
     /// session's links claim as they open and give back as they go.
+    #[cfg(not(wz_on_use))]
     pub(crate) fn links_from(&self, lend: &mut TableLender<'_>) -> LinkTables<LinkCellFlag> {
         let rx = lend.byte_cells_of::<LinkCellFlag>(self.link_bytes, self.rx_buffers);
         let tx = lend.byte_cells_of::<LinkCellFlag>(self.link_bytes, self.tx_slots);
         #[cfg(feature = "listen")]
-        let tables = LinkTables::pooled(rx, tx, lend.byte_cells_of(0, self.links));
+        {
+            LinkTables::pooled(rx, tx, lend.byte_cells_of(0, self.links))
+        }
         #[cfg(not(feature = "listen"))]
-        let tables = LinkTables::new(rx, tx, self.link_bytes);
-        let tables = self.group_rx_from(tables, lend);
-        self.port_rx_from(tables, lend)
-    }
-
-    /// `tables` with the slots the session's udp ports read their datagrams into and hold them in
-    /// until the links of their peers take them, lent by `lend` after the groups' buffers: the
-    /// ports share them, a slot of the links' batch each.
-    #[cfg(feature = "udp-listen")]
-    fn port_rx_from(
-        &self,
-        tables: LinkTables<LinkCellFlag>,
-        lend: &mut TableLender<'_>,
-    ) -> LinkTables<LinkCellFlag> {
-        let (slots, bytes) = self.port_rx;
-        // A plan that listens on nothing laid no table of them out.
-        if slots == 0 {
-            return tables;
+        {
+            LinkTables::new(rx, tx, self.link_bytes)
         }
-        tables.with_port_rx(lend.byte_cells_of(bytes, slots))
     }
 
-    /// A build that binds no udp port lends no port a slot.
-    #[cfg(not(feature = "udp-listen"))]
-    fn port_rx_from(
-        &self,
-        tables: LinkTables<LinkCellFlag>,
-        _lend: &mut TableLender<'_>,
-    ) -> LinkTables<LinkCellFlag> {
-        tables
-    }
-
-    /// `tables` with the receive buffers of the groups the session may join, lent by `lend`
-    /// after the links' own: a buffer of the groups' batch for each group the plan counts, which a
-    /// group claims when it is joined, so a joined group's datagram is read where the session's
-    /// memory holds it.
+    /// The receive buffers of the groups the session may join, lent by `lend` after the links'
+    /// tables: a buffer of the groups' batch for each group the plan counts, which a group claims
+    /// when it is joined, so a joined group's datagram is read where the session's memory holds
+    /// it. `None` for a plan that counts no group, which laid no table of them out.
     #[cfg(feature = "group")]
-    fn group_rx_from(
-        &self,
-        tables: LinkTables<LinkCellFlag>,
-        lend: &mut TableLender<'_>,
-    ) -> LinkTables<LinkCellFlag> {
+    pub(crate) fn group_rx_from(&self, lend: &mut TableLender<'_>) -> Option<LentByteCells> {
         let (buffers, bytes) = self.group_rx;
-        // A plan that counts no group laid no table of them out.
-        if buffers == 0 {
-            return tables;
-        }
-        tables.with_group_rx(lend.byte_cells(bytes, buffers))
+        (buffers > 0).then(|| lend.byte_cells(bytes, buffers))
     }
 
-    /// A build that joins no group lends no group a buffer.
-    #[cfg(not(feature = "group"))]
-    fn group_rx_from(
+    /// The slots the session's udp ports read their datagrams into and hold them in until the
+    /// links of their peers take them, lent by `lend` after the groups' buffers: the ports share
+    /// them, a slot of the links' batch each. `None` for a plan that listens on no `udp/`
+    /// endpoint, which laid no table of them out.
+    #[cfg(feature = "udp-listen")]
+    pub(crate) fn port_slots_from(
         &self,
-        tables: LinkTables<LinkCellFlag>,
-        _lend: &mut TableLender<'_>,
-    ) -> LinkTables<LinkCellFlag> {
-        tables
+        lend: &mut TableLender<'_>,
+    ) -> Option<LentByteCells<LinkCellFlag>> {
+        let (slots, bytes) = self.port_rx;
+        (slots > 0).then(|| lend.byte_cells_of(bytes, slots))
     }
 }
 
@@ -1903,7 +1924,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         let link_bytes = tried!(link_batch(shape.batch, limits));
         self.transport = TransportRows {
             links,
+            #[cfg(not(wz_on_use))]
             rx_buffers: links,
+            #[cfg(not(wz_on_use))]
             tx_slots: links,
             link_bytes,
             reassembly_bytes: 0,
@@ -1938,6 +1961,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         };
         self.transport.face_chains = face_chains(share);
         // The links' receive buffers and outbound slots, as a report reads them (`link_buffers`).
+        #[cfg(not(wz_on_use))]
         match pooled_buffers(links, limits) {
             Ok((rx_buffers, tx_slots)) => {
                 self.transport.rx_buffers = rx_buffers;
@@ -1987,23 +2011,27 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         );
         self.put(ArenaPart::EndpointTexts, 1, texts);
         // The links' rows are lent when the session opens, in this order
-        // (`TransportRows::links_from`).
-        self.put_table(
-            [ArenaPart::LinkReceiveFlags, ArenaPart::LinkReceiveBuffers],
-            self.transport.rx_buffers,
-            link_bytes,
-        );
-        self.put_table(
-            [ArenaPart::LinkTransmitFlags, ArenaPart::LinkTransmitSlots],
-            self.transport.tx_slots,
-            link_bytes,
-        );
-        // A place for each link, which bounds the links that open where the slots are a pool:
-        // the flags of a table of buffers of no bytes.
-        #[cfg(feature = "listen")]
-        self.put(ArenaPart::LinkPlaces, links, LentByteCells::FLAG_BYTES);
-        // A receive buffer for each group the session may join, lent with the links' tables
-        // (`TransportRows::links_from`): as many as the plan counts groups, each of the largest
+        // (`TransportRows::links_from`). Where the tables take their memory on use each link
+        // takes its own as it opens, and none is laid out.
+        #[cfg(not(wz_on_use))]
+        {
+            self.put_table(
+                [ArenaPart::LinkReceiveFlags, ArenaPart::LinkReceiveBuffers],
+                self.transport.rx_buffers,
+                link_bytes,
+            );
+            self.put_table(
+                [ArenaPart::LinkTransmitFlags, ArenaPart::LinkTransmitSlots],
+                self.transport.tx_slots,
+                link_bytes,
+            );
+            // A place for each link, which bounds the links that open where the slots are a
+            // pool: the flags of a table of buffers of no bytes.
+            #[cfg(feature = "listen")]
+            self.put(ArenaPart::LinkPlaces, links, LentByteCells::FLAG_BYTES);
+        }
+        // A receive buffer for each group the session may join, lent after the links' tables
+        // (`TransportRows::group_rx_from`): as many as the plan counts groups, each of the largest
         // batch a group the config names sends, held to the build's multicast batch. A group's
         // datagram longer than it is dropped and counted by its transport. A config that names no
         // group has no table of them in its plan.
@@ -2022,8 +2050,8 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             );
         }
         // The slots the udp ports of a session that listens read their datagrams into and hold
-        // them in until the links of their peers take them, lent with the links' tables
-        // (`TransportRows::links_from`): the ports share them, each a link's batch long. A
+        // them in until the links of their peers take them, lent after the groups' buffers
+        // (`TransportRows::port_slots_from`): the ports share them, each a link's batch long. A
         // session that listens on no `udp/` endpoint binds no port and holds none, nor does a
         // build without the udp listener (`udp-listen`), whose links refuse such an endpoint.
         #[cfg(feature = "udp-listen")]
@@ -2034,7 +2062,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             );
             // A plan of a session with no udp port lays none of the ports' rows out, as one that
             // names no group lays out no group's: their tables are lent no rows and take no byte
-            // of the arena (`TransportRows::links_from`, `TransportRows::lent_from`).
+            // of the arena (`TransportRows::port_slots_from`, `TransportRows::lent_from`).
             if shape.udp_listens > 0 {
                 self.transport.port_rx = (slots, link_bytes);
                 self.put_table(
@@ -2060,7 +2088,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // A build that puts nothing in the round (`wz_round`) lays out none of them, and where the
         // build fixes the session's shape the tables and the round lie in the session's region
         // instead (`StatePlaces::round`).
-        #[cfg(all(wz_round, feature = "runtime-plan"))]
+        #[cfg(all(wz_round, wz_lent))]
         {
             if RECORD_BYTES != 0 {
                 self.put(
@@ -2090,9 +2118,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // The places the session lends its registry and its Router in for a step, a place each
         // (`crate::engine::StepPlaces`); a read that steps its one link itself dispatches under the
         // session's lock and lends no registry.
-        #[cfg(all(feature = "runtime-plan", wz_round))]
+        #[cfg(all(wz_lent, wz_round))]
         self.put(ArenaPart::RegistryLend, 1, REGISTRY_LEND_BYTES);
-        #[cfg(feature = "runtime-plan")]
+        #[cfg(wz_lent)]
         self.put(ArenaPart::RouterLend, 1, ROUTER_LEND_BYTES);
         // The session's reassembly buffers, which its links share (`TransportRows::lent_from`).
         self.put_table(
@@ -2140,7 +2168,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         );
         // A build of the region's form lays the lists out in its region, at the build's bound; the
         // limit is still held, so a config over the build's is refused under its name either way.
-        #[cfg(feature = "runtime-plan")]
+        #[cfg(wz_lent)]
         {
             // The registry's lines of the lists' count: the engine's own observer's, whose sinks
             // are the watches' rows, and whose own tokens are rows of the session's table set.
@@ -2149,7 +2177,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             ));
             self.put(ArenaPart::DeclarationWatchers, 1, watcher_bytes);
         }
-        #[cfg(not(feature = "runtime-plan"))]
+        #[cfg(not(wz_lent))]
         let _laid_out_in_the_region = watchers;
         // A build that asks no query registers no get, so its tables of them hold no row.
         let queries = if cfg!(feature = "query") {
@@ -2179,7 +2207,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // A row of tables, each the spans of one face's registries: a face takes one whole. A build
         // that asks no query holds no table of gets (`NoRequesters`), and its plan no row of them.
         // A build of the region's form holds its face's gets in its region (`RegistryRegion`).
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
+        #[cfg(all(feature = "query", wz_lent))]
         {
             let get_bytes = self.sized(set_get_bytes(self.session.gets.rows));
             self.put(ArenaPart::PendingGets, self.session.gets.tables, get_bytes);
@@ -2187,7 +2215,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // The ends of the legs and the rows of their callbacks, a row of each for each get every
         // table holds (`GetTables::legs`). A build of the region's form holds them in its region,
         // at the build's bound (`crate::engine::StatePlaces`).
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
+        #[cfg(all(feature = "query", wz_lent))]
         {
             let legs = self.sized(self.session.gets.legs());
             self.put(
@@ -2210,7 +2238,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
                 ArenaLimit::MaxPendingReplies,
                 limits.max_pending_replies(),
             );
-            #[cfg(feature = "runtime-plan")]
+            #[cfg(wz_lent)]
             self.put(
                 ArenaPart::HeldReplies,
                 self.session.held_replies,
@@ -2242,13 +2270,13 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // The sets of face tables themselves, one for each face, in one table
         // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it. A
         // build of the region's form holds its one set, its tables and their rows in its region.
-        #[cfg(feature = "runtime-plan")]
+        #[cfg(wz_lent)]
         if let Some(set_bytes) = registry_row_bytes(RowCount::FaceSets) {
             self.put(ArenaPart::FaceTables, self.session.peers.sets(), set_bytes);
         }
         // Which face holds which set, a row for each set, where the registry describes the index:
         // a build that takes faces beside its dial role's.
-        #[cfg(feature = "runtime-plan")]
+        #[cfg(wz_lent)]
         if let Some(holder_bytes) = registry_row_bytes(RowCount::HeldSets) {
             self.put(
                 ArenaPart::HeldFaces,
@@ -2259,13 +2287,13 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // What the face holding each set names for a wait for its room, a place for each set
         // (`crate::engine::LinkRooms`); a build of the region's form holds its one set's place in
         // its region (`crate::engine::StatePlaces`).
-        #[cfg(feature = "runtime-plan")]
+        #[cfg(wz_lent)]
         self.put(
             ArenaPart::RoomPlaces,
             self.session.peers.sets(),
             ROOM_PLACE_BYTES,
         );
-        #[cfg(feature = "runtime-plan")]
+        #[cfg(wz_lent)]
         {
             let peer_bytes = self.sized(set_peer_bytes(self.session.peers.rows));
             self.put(ArenaPart::PeerTables, self.session.peers.tables, peer_bytes);
@@ -2273,7 +2301,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
         // tables' own (`pool_rows`); none in a build whose faces keep those rows inline, as a
         // build of the region's form does.
-        #[cfg(feature = "runtime-plan")]
+        #[cfg(wz_lent)]
         if SHARES_ROWS {
             let pools = self.session.peers.pools;
             let aliases = self.sized(pools.alias_bytes());
@@ -2296,7 +2324,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // The tokens the faces that went still owe, a table of the registry where it describes one
         // (a build whose faces go and whose peers declare tokens), lent a row for each row of the
         // session's pool of its peers' tokens.
-        #[cfg(feature = "runtime-plan")]
+        #[cfg(wz_lent)]
         if let Some(owed_bytes) = registry_row_bytes(RowCount::OwedTokens) {
             let owed = self.session.peers.owed_tokens();
             if owed > 0 {
@@ -2314,7 +2342,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // The Finals held for those queries and the requests a dispatch refused for want of a
         // row, a row of each for each query held (`wz_session_core::query_plane::FinalHolds`),
         // where the arena lends them; a build of the region's form holds them in its region.
-        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+        #[cfg(all(feature = "queryable", wz_lent))]
         {
             let held = self.session.held_queries;
             self.put(
@@ -2345,7 +2373,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         }
         // A build of the region's form holds the session's tables and its key arena in its region
         // (`crate::region::StateRegion`).
-        #[cfg(feature = "runtime-plan")]
+        #[cfg(wz_lent)]
         self.put_entities();
         self.settled()
     }
@@ -2387,7 +2415,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     }
 
     /// The rows of the session's declarations ([`EntityRows`]).
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     const fn put_entities(&mut self) {
         // The session's one table set, holding the kinds moved onto it so far: the write filters,
         // the matching listeners and the Interests they hold among them.
@@ -2413,11 +2441,24 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         self.transport.links
     }
 
+    /// The bytes of each link's receive buffer and of each of its slots: the batch the session
+    /// advertises, whether the arena lends the links their buffers or each link takes its own of
+    /// the heap as it opens.
+    pub const fn link_bytes(&self) -> usize {
+        self.transport.link_bytes
+    }
+
     /// Whether the outbound slots the links share are fewer than the links (`TX_POOL_SLOTS`), so
     /// that a link may find every slot held.
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", not(wz_on_use)))]
     pub fn tx_pool_short(&self) -> bool {
         self.transport.tx_slots < self.transport.links
+    }
+
+    /// Never, where the tables take their memory on use: each link holds slots of its own.
+    #[cfg(all(feature = "listen", wz_on_use))]
+    pub fn tx_pool_short(&self) -> bool {
+        false
     }
 
     /// How many rows each table of the engine's record of the session's declarations is lent.
@@ -2723,6 +2764,15 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         }
     }
 
+    /// Lay out the count the arena is kept by alone (`SessionArena::keep`), for an open whose
+    /// runtime and engine are made of the allocator: the engine keeps the arena by it for what of
+    /// the arena it holds (the lodgings, the handle's place). Laid out after every other row, once,
+    /// at the open; the plan not settled.
+    #[cfg(wz_on_use)]
+    pub(crate) const fn lay_keep(&mut self) {
+        self.put(ArenaPart::ArenaKeep, 1, core::mem::size_of::<ArenaKept>());
+    }
+
     /// Lay out the place of `bytes` the session's engine lies in, counted by its holders, which
     /// keeps the arena's memory until the last of them lets go (`SessionArena::engine_place`).
     /// Laid out after every other row, once, at the open. The plan is laid out where it lies; a
@@ -2744,11 +2794,11 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     pub(crate) const fn lay_planes(&mut self, planes: crate::engine::SessionPlanes) {
         // Where the build fixes the session's shape these lie in its region
         // (`crate::engine::StatePlaces`).
-        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+        #[cfg(all(feature = "queryable", wz_lent))]
         self.put(ArenaPart::QueryPlaneState, 1, planes.queries);
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
+        #[cfg(all(feature = "query", wz_lent))]
         self.put(ArenaPart::GetPlaneState, 1, planes.gets);
-        #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
+        #[cfg(all(feature = "connectivity", wz_lent))]
         self.put(ArenaPart::FacePlaneState, 1, planes.faces);
         let _ = planes;
     }
@@ -2756,7 +2806,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// Lay out the read slots and send places of the faces past the dial role's, a row of `bytes`
     /// for each face read where it lies after the first (`read_faces`): the dial role's lies in
     /// the engine's place. Laid out once, at the open, the plan not settled.
-    #[cfg(not(wz_round))]
+    #[cfg(all(not(wz_round), not(wz_on_use)))]
     pub(crate) const fn lay_direct_faces(&mut self, bytes: usize) {
         let rows = read_faces(self.session.peers.sets()).saturating_sub(1);
         if rows != 0 {
@@ -2767,7 +2817,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// Lay out the place of `bytes` the admission of a session that listens lies in, which the
     /// session's state owns and its links' leases reach by handles that count nothing. Laid out
     /// once, at the open, the plan not settled: a refusal is kept for `Self::settled`.
-    #[cfg(feature = "link-admission")]
+    #[cfg(all(feature = "link-admission", not(wz_on_use)))]
     pub(crate) const fn lay_admission(&mut self, bytes: usize) {
         self.put(ArenaPart::LinkAdmissionState, 1, bytes);
     }
@@ -2826,8 +2876,8 @@ const fn lent_under(
 
 /// Whether a session's links share a pool of receive buffers and one of outbound slots, as a build
 /// that listens lends them (`RX_POOL_BUFFERS`, `TX_POOL_SLOTS`), rather than each link holding a
-/// buffer and a slot of its own.
-pub const LINKS_SHARE_POOLS: bool = cfg!(feature = "listen");
+/// buffer and a slot of its own, as a link does where the tables take their memory on use.
+pub const LINKS_SHARE_POOLS: bool = cfg!(all(feature = "listen", not(wz_on_use)));
 
 /// The buffers a session's links read their batches into and encode their frames into, and the
 /// buffers they stage the chains of fragmented messages in, as the session's plan lays them out
@@ -3784,7 +3834,7 @@ pub(crate) struct SessionArena {
 /// Where a session's engine is written at its open ([`SessionArena::engine_place`]): a place of
 /// the arena lent to the engine alone, and the count of the arena's memory it takes one of. An
 /// engine whose tables take their memory on use lies in an allocation of its own instead.
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 #[derive(Clone, Copy)]
 pub(crate) struct EnginePlace {
     pub(crate) at: NonNull<u8>,
@@ -3922,6 +3972,7 @@ impl SessionArena {
     /// the arena's alignment, and the count that keeps the arena's memory for it: the memory goes
     /// back once the session lets the arena go and the runtime's last holder lets go, whichever
     /// is last. Refused past what the arena has left.
+    #[cfg(not(wz_on_use))]
     pub(crate) fn runtime_place(&mut self, bytes: usize) -> Result<RuntimePlace, LendRefused> {
         let (at, memory) = self.kept_span(bytes)?;
         // SAFETY: the span is `bytes` of the arena's memory, lent to the runtime alone, and the
@@ -3934,7 +3985,7 @@ impl SessionArena {
     /// arena's alignment, and the count that keeps the arena's memory: the engine takes one of
     /// its own when it is written there, so the memory goes back once the engine's last holder
     /// lets go, whichever of them is last. Refused past what the arena has left.
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     pub(crate) fn engine_place(&mut self, bytes: usize) -> Result<EnginePlace, LendRefused> {
         let (at, memory) = self.kept_span(bytes)?;
         Ok(EnginePlace { at, memory })
@@ -3944,6 +3995,7 @@ impl SessionArena {
     /// memory for what is placed there. Refused past what the arena has left. Out of line: the
     /// runtime's place and the engine's are both lent by it, and a copy in each would carry the
     /// placing of the count twice.
+    #[cfg(not(wz_on_use))]
     #[inline(never)]
     fn kept_span(&mut self, bytes: usize) -> Result<(NonNull<u8>, NonNull<Kept>), LendRefused> {
         let memory = self.keep()?;
@@ -3964,12 +4016,9 @@ impl SessionArena {
     }
 
     /// The arena, to lend from: by the open, where it lends the arena more than its lender's
-    /// tables (a session whose tables take their memory on use lends it none of those), and by
-    /// the tests that lend its rows.
-    #[cfg(any(
-        not(all(feature = "tables-on-use", not(feature = "runtime-plan"))),
-        test
-    ))]
+    /// tables, and by the tests that lend its rows. A session whose tables take their memory on use
+    /// lends it none of those.
+    #[cfg(any(not(wz_on_use), test))]
     pub(crate) fn arena_mut(&mut self) -> &mut Arena {
         &mut self.arena
     }
@@ -4406,6 +4455,7 @@ mod tests {
     /// The tables of cells are lent for each kind of cell the plan holds and for no other, past a
     /// kind with none and up to the last, a cell of its size for each link. Turned red by a walk
     /// of the kinds that stops at the first with none, or never reaches the halves'.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn the_cells_of_each_kind_held_are_lent_past_the_kinds_with_none() {
         let mut plan = empty_plan();
@@ -4637,10 +4687,13 @@ mod tests {
 
     /// What the arena of `an_arena_a_runtime_is_placed_in_goes_back_after_its_last_holder` is
     /// reserved from: the allocator, counting what it is given back.
+    #[cfg(not(wz_on_use))]
     struct CountedReleases;
 
+    #[cfg(not(wz_on_use))]
     static RELEASES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
+    #[cfg(not(wz_on_use))]
     impl ArenaMemory for CountedReleases {
         fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
             AllocatorMemory.reserve(layout)
@@ -4654,8 +4707,10 @@ mod tests {
     }
 
     /// A clock that does not move.
+    #[cfg(not(wz_on_use))]
     struct Still;
 
+    #[cfg(not(wz_on_use))]
     impl wz_runtime_coop::ClockSource for Still {
         fn now_us(&self) -> u64 {
             0
@@ -4666,7 +4721,9 @@ mod tests {
     /// in is given back once, after both the session and the runtime's last holder let go: the
     /// session letting go first gives nothing back. Turned red by a session that gives the arena
     /// back while the runtime still lies in it, by a runtime that never gives its count back, or by
-    /// a plan that lays the rows out twice.
+    /// a plan that lays the rows out twice. A session whose tables take their memory on use makes
+    /// its runtime of the allocator, and its arena lends no span for it.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn an_arena_a_runtime_is_placed_in_goes_back_after_its_last_holder() {
         use wz_runtime_coop::{CoopRuntime, RuntimeForm, RuntimeRows};

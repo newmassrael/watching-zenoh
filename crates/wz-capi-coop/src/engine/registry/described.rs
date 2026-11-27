@@ -19,25 +19,25 @@
 
 use core::mem::offset_of;
 
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use core::ptr::NonNull;
 
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::bounded::{seq_bytes, Arena, LendRefused, RowCounts, TableLender};
 use wz_session_core::bounded::{RegionLines, RowCount, SeqPlace};
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::key_arena::{lend_region, KeySpace};
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::limits::SessionLimits;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::peer_tables::PeerRows;
 use wz_session_core::peer_tables::{PeerTableRows, PEER_TABLE_LINES};
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::pubsub::SubscriberPeer;
 #[cfg(feature = "query")]
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::session_tables::SESSION_TABLE_LINES;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::slot_observer::RequesterRows;
 use wz_session_core::slot_observer::SLOT_OBSERVER_LINES;
 #[cfg(feature = "query")]
@@ -46,13 +46,13 @@ use wz_session_core::slot_observer::{RequesterRegionRows, REQUESTER_LINES};
 use super::held::Holders;
 #[cfg(feature = "query")]
 use super::Gets;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use super::Registry;
 use super::{App, FaceTables, Peer, RegistryOf};
 use crate::engine::CoopTables;
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use crate::RowPolicy;
 
 /// The rows a region keeps for one set's requesters, or for the session's own gets.
@@ -106,7 +106,7 @@ impl FaceTables {
     }
 }
 
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 impl FaceTables {
     /// The description of a set from its start: the lines `Self::lend` lends and
     /// `Self::arena_bytes` counts.
@@ -176,7 +176,7 @@ impl FaceTables {
 /// the gets' counts, each other line lent none under them. What a plan reports as a table of gets
 /// (`crate::arena::ArenaPart::PendingGets`), the session's own gets' table being of the same
 /// description (`Gets::places`). `None` past the address space.
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
+#[cfg(all(feature = "query", wz_lent))]
 pub(crate) const fn set_get_bytes(gets: RequesterRows) -> Option<usize> {
     seq_bytes(FaceTables::LINES.seq_lines(), &gets.counts())
 }
@@ -185,7 +185,7 @@ pub(crate) const fn set_get_bytes(gets: RequesterRows) -> Option<usize> {
 /// lines of the peer's counts, each other line lent none under them, and the row the peer's side
 /// composes keys in, which no line names. What a plan reports as a face's peer tables
 /// (`crate::arena::ArenaPart::PeerTables`). `None` past the address space.
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 pub(crate) const fn set_peer_bytes(peer: PeerRows) -> Option<usize> {
     match (
         seq_bytes(FaceTables::LINES.seq_lines(), &peer.counts()),
@@ -198,16 +198,16 @@ pub(crate) const fn set_peer_bytes(peer: PeerRows) -> Option<usize> {
 
 /// The sets the registry's table of them has room for: the build's bound, under which a plan lends
 /// a set for each face its config admits, or the one set a region of the build's shape lays out.
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 const SET_ROOM: usize = crate::arena::MAX_FACE_SETS;
-#[cfg(not(feature = "runtime-plan"))]
+#[cfg(not(wz_lent))]
 const SET_ROOM: usize = super::FACE_SETS;
 
 /// The lines of the index of which face holds each set (`Holders::LINES`): one where the form may
 /// keep an index, none in a region's, whose one set its dial role's face holds.
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 pub(super) const HELD_LINES: usize = 1;
-#[cfg(not(feature = "runtime-plan"))]
+#[cfg(not(wz_lent))]
 pub(super) const HELD_LINES: usize = 0;
 
 /// The line of the tokens the faces that went still owe, in a build whose faces go.
@@ -243,7 +243,7 @@ pub(super) struct RegistryRowsAt {
     pub(super) local: usize,
 }
 
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 impl RegistryRowsAt {
     /// A plan's: no rows kept beside the registry.
     const LENT: Self = Self {
@@ -261,8 +261,8 @@ impl<H: Holders> RegistryOf<H> {
     /// sets' table's, a set for each face a plan counts (`RowCount::FaceSets`), the index of which
     /// face holds each where the form keeps one (`RowCount::HeldSets`), the tokens owed by the
     /// faces that went where faces go, and the session's own gets' where it answers its own; and
-    /// the handle each keeps to the key arena. A set's own lines are the set's description (`FaceTables::places`), walked
-    /// where the set lies.
+    /// the handle each keeps to the key arena. A set's own lines are the set's description
+    /// (`FaceTables::places`), walked where the set lies.
     pub(super) const fn places(at: usize, rows: RegistryRowsAt) -> RegionLines<REGISTRY_LINES> {
         let app = at.wrapping_add(offset_of!(Self, app));
         let lines = RegionLines::EMPTY
@@ -281,14 +281,9 @@ impl<H: Holders> RegistryOf<H> {
             )
             .with(&H::LINES, at.wrapping_add(offset_of!(Self, holders)));
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-        let lines = lines.seq(
-            SeqPlace::of::<super::OwedTokens>(
-                at.wrapping_add(offset_of!(Self, owed)),
-                0,
-                wz_session_core::caps::SESSION_MAX_REMOTE_DECLS,
-            )
-            .counted(RowCount::OwedTokens),
-        );
+        let lines = lines.seq(super::owed::Owed::place(
+            at.wrapping_add(offset_of!(Self, owed)),
+        ));
         #[cfg(feature = "local-queryable")]
         let lines = lines.with(
             &Gets::places(at.wrapping_add(offset_of!(Self, local)), rows.local),
@@ -298,7 +293,7 @@ impl<H: Holders> RegistryOf<H> {
     }
 }
 
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 impl<H: Holders> RegistryOf<H> {
     /// The registry's own description from its start: the lines `RegistryOf::new` lends.
     pub(super) const LINES: RegionLines<REGISTRY_LINES> = Self::places(0, RegistryRowsAt::LENT);
@@ -308,7 +303,7 @@ impl<H: Holders> RegistryOf<H> {
 /// line of a count `counts` leaves at none lent no row: a part of what a plan reports of the
 /// registry (`crate::arena::ArenaPart`), the lines of the counts the part names, so the parts add
 /// up to what the open's walk lends (`RegistryOf::new`). `None` past the address space.
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 pub(crate) const fn registry_bytes(counts: &RowCounts) -> Option<usize> {
     seq_bytes(Registry::LINES.seq_lines(), counts)
 }
@@ -316,13 +311,13 @@ pub(crate) const fn registry_bytes(counts: &RowCounts) -> Option<usize> {
 /// The bytes of one row of the table of the registry's own description that `count` lends (the
 /// sets', the index of their holders', the tokens owed): what a plan reports as that table's row.
 /// None where the build describes no table of that count.
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 pub(crate) const fn registry_row_bytes(count: RowCount) -> Option<usize> {
     stride_of(Registry::LINES.seq_lines(), count)
 }
 
 /// The bytes of one row of the first of `lines` lent by `count`, none where no line is.
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 const fn stride_of(lines: &[SeqPlace], count: RowCount) -> Option<usize> {
     let mut rest = lines;
     while let [line, tail @ ..] = rest {

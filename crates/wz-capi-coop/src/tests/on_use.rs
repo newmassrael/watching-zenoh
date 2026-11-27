@@ -157,14 +157,166 @@ fn an_on_use_engine_and_its_rooms_lie_apart_from_its_arena() {
     );
 }
 
-/// The plan of a session whose tables take their memory on use lays out no place for its engine or
-/// its faces' rooms, which lie in allocations of their own, while the CONTROL rows, the runtime's
-/// span and the count the arena is kept by, are laid out as the D12 plan lays them. Turned red by
-/// `lay_out_open` laying the engine's place (`ArenaPlan::lay_engine`) or a place of the rooms
-/// (`ArenaPlan::lay_rooms`, of any bytes) in the on-use form, whose holds name no rooms' bytes.
+/// A session whose tables take their memory on use makes the read slot of a face past its dial
+/// role's at the place's first face: none at the open, one once a face is attached, which then
+/// comes up. Turned red by an open that makes every place's slot (`DirectFaces::taken` making its
+/// rows' faces), or by an attach that makes none (`DirectFaces::made_at` left out of
+/// `CoopEngine::attach_face`): the attached face then has no slot a read turns and never comes
+/// up.
+#[cfg(all(feature = "listen", not(wz_round)))]
 #[test]
-fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
-    use crate::arena::{ArenaPart, ArenaPlan, HeldPlaces, LinkCells, PlanShape};
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_on_use_face_takes_its_read_slot_at_its_places_first_face() {
+    let first = Router::start(CatchAll::None);
+    let second = Router::start_as(0xc5, CatchAll::None);
+    let engine = open(&first);
+    assert_eq!(
+        engine.faces_made(),
+        0,
+        "no face past the dial role's holds a read slot at the open"
+    );
+    engine
+        .attach_face(&second.endpoint())
+        .expect("the second router is dialled");
+    assert_eq!(engine.faces_made(), 1, "the attached face's slot is made");
+    until(&engine, "both faces to be up", || engine.faces_up() == 2);
+}
+
+/// A session whose tables take their memory on use and that listens holds the links it takes to
+/// the faces it may hold, though no table of buffers refuses a link any more (each link's buffers
+/// are its own, of the heap): a connection that arrives when it holds as many faces as `max_faces`
+/// admits is closed unread, the buffers its accept took let go of with it. The first connection is
+/// that face, from its take on, in its handshake; the handshakes admitted are two, so only the
+/// count of faces refuses the second. CONTROL: the first connection is kept, and with room for
+/// another face the second is too. The bound is the face table's count, which
+/// `Core::takes_a_face` asks before a link is given a face (`Core::faces_full`), and behind it
+/// the index of the held faces, counted at the open to the sets the plan counts
+/// (`RegistryOf::add_face`). Turned red by a take of a face that asks neither, which gives the
+/// second connection a face and keeps it open.
+#[cfg(feature = "listen")]
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_on_use_listener_closes_a_link_past_its_faces_unread() {
+    use std::io::Read;
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+    use wz_capi_port::SessionDrive;
+
+    // A listener of `max_faces` faces besides its dial role's, stepped on the test's thread, and
+    // a raw connection to its port, which never speaks.
+    let listening = |max_faces: usize| {
+        let mut config = crate::CoopConfig {
+            whatami: wz_session_core::WhatAmI::Peer,
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            max_faces,
+            accept_pending: 2,
+            ..super::client_config()
+        };
+        // Past the test: a connection that never speaks is not let go of for its silence here.
+        config.timeouts.accepting_inactivity_ms = 10_000;
+        let engine = super::open_with(config);
+        let endpoint = engine.listening().pop().expect("one port is bound");
+        let port = endpoint
+            .rsplit(':')
+            .next()
+            .expect("an endpoint with a port")
+            .to_owned();
+        (engine, port)
+    };
+    let connect = |port: &str| {
+        let stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("the port accepts");
+        stream
+            .set_nonblocking(true)
+            .expect("a stream whose read does not wait");
+        stream
+    };
+    // Whether the listener closes `stream` while it is stepped for `within`: a read of the end
+    // of the stream. One still open answers that the read would wait.
+    let closed_within = |engine: &Engine, stream: &mut TcpStream, within: Duration| {
+        let deadline = Instant::now() + within;
+        let mut byte = [0u8; 1];
+        while Instant::now() < deadline {
+            SessionDrive::step_once(engine, 5).expect("a session without its read task steps");
+            if matches!(stream.read(&mut byte), Ok(0)) {
+                return true;
+            }
+        }
+        false
+    };
+
+    let (full, port) = listening(1);
+    let mut first = connect(&port);
+    assert!(
+        !closed_within(&full, &mut first, Duration::from_millis(200)),
+        "CONTROL: the first connection is taken as the one face"
+    );
+    let mut over = connect(&port);
+    assert!(
+        closed_within(&full, &mut over, Duration::from_secs(3)),
+        "the listener holds as many faces as it may, so it closes the second connection"
+    );
+    assert!(
+        !closed_within(&full, &mut first, Duration::from_millis(100)),
+        "and the face it holds stands"
+    );
+
+    let (roomy, port) = listening(2);
+    let mut first = connect(&port);
+    let mut kept = connect(&port);
+    assert!(
+        !closed_within(&roomy, &mut first, Duration::from_millis(200))
+            && !closed_within(&roomy, &mut kept, Duration::from_millis(300)),
+        "CONTROL: with room for another face both connections are kept"
+    );
+}
+
+/// A session whose tables take their memory on use makes no place of its faces' rooms at its open,
+/// and none for a face whose link names no wait for room: with its one face up over a datagram
+/// link, which names none (`UdpDriver` answers no `room_wait`), it holds no place of the rows its
+/// plan counts. That a face's first hold of a wait makes its place, and that one alone, is
+/// `congestion::an_on_use_rooms_place_is_made_at_its_faces_first_hold`'s to hold. Turned red by
+/// an open that makes every row's place (`RoomTable::over` making a place for each row, as the
+/// forms that lay the places out write one), or by a face that comes up and makes a place for a
+/// wait its link does not name.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_on_use_session_makes_no_room_place_its_faces_do_not_hold() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    until(&engine, "the face to be up", || engine.faces_up() == 1);
+    let (made, rows) = engine.room_places_made();
+    assert!(rows >= 1, "CONTROL: a row for the dial role's face");
+    assert_eq!(made, 0, "a datagram link names no wait for room: no place");
+}
+
+/// A session whose tables take their memory on use holds the admission its links ask while their
+/// handshakes run in an allocation of its own, apart from its arena. Turned red by an open that
+/// places the admission in the arena (`Arena::place` in `CoopEngine::assemble`).
+#[cfg(feature = "link-admission")]
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_on_use_sessions_link_admission_lies_apart_from_its_arena() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let admission = engine.link_admission();
+    let at: *const dyn wz_session_core::link_admission::LinkAdmission = &*admission;
+    assert!(
+        !engine.arena_holds(at.cast()),
+        "the admission lies apart from the arena"
+    );
+}
+
+/// The plan of a session whose tables take their memory on use lays out no place for its engine,
+/// its faces' rooms or its runtime, which lie in allocations of their own, and no table of its
+/// links' cells, whose parts are made on the heap as each link opens, while the CONTROL row,
+/// the count the arena is kept by, is laid out as the D12 plan lays it beside the runtime's span.
+/// Turned red by `lay_out_open` laying the engine's place (`ArenaPlan::lay_engine`), a place of
+/// the rooms (`ArenaPlan::lay_rooms`, of any bytes) or the runtime's span
+/// (`ArenaPlan::lay_runtime`) in the on-use form, whose holds name none of their bytes, or by one
+/// that leaves the count out with the span (`ArenaPlan::lay_keep`).
+#[test]
+fn an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime() {
+    use crate::arena::{ArenaPart, ArenaPlan, HeldPlaces, PlanShape};
     let mut plan = ArenaPlan::planned(
         PlanShape::dial_only(1, 1024, &wz_session_core::policy::SessionPolicy::defaults()),
         &SessionLimits::BUILD,
@@ -173,32 +325,153 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
     crate::engine::lay_out_open(
         &mut plan,
         &crate::engine::OpenHolds {
-            cells: LinkCells {
-                driver: 64,
-                gate: 64,
-                actions: 64,
-                halves: 64,
-            },
             held: &HeldPlaces::NONE,
-            runtime: 64,
             engine: 64,
             planes: crate::engine::SessionPlanes::OF_BUILD,
-            #[cfg(not(wz_round))]
-            direct_face: SimEngine::DIRECT_FACE_BYTES,
         },
     )
     .expect("the holds lay out");
     let laid = |part: ArenaPart| plan.rows().any(|row| row.part() == part.part());
     assert!(
-        laid(ArenaPart::RuntimeState),
-        "CONTROL: the runtime's span is laid out"
-    );
-    assert!(
         laid(ArenaPart::ArenaKeep),
-        "CONTROL: so is the count the arena is kept by"
+        "CONTROL: the count the arena is kept by is laid out"
     );
+    assert!(!laid(ArenaPart::RuntimeState), "the runtime lies apart");
     assert!(!laid(ArenaPart::EngineState), "the engine lies apart");
     assert!(!laid(ArenaPart::LinkRooms), "the rooms lie apart");
+    for cells in [
+        ArenaPart::LinkCells,
+        ArenaPart::LinkGates,
+        ArenaPart::LinkActions,
+        ArenaPart::LinkHalves,
+    ] {
+        assert!(!laid(cells), "a link's parts lie on the heap");
+    }
+}
+
+/// A session whose tables take their memory on use makes each part of a link on the heap as the
+/// link opens: with its link up, neither its gates nor its actions' halves lie in a cell of a
+/// table; the CONTROL is the face, up. Turned red by an open that lends its transport a table of
+/// cells on use (`cells` in `CoopEngine::assemble`), which its links' kind would then have to
+/// name.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_on_use_sessions_link_parts_lie_on_the_heap() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    until(&engine, "CONTROL: the face to be up", || {
+        engine.faces_up() == 1
+    });
+    assert_eq!(
+        engine.link_halves_in_use(),
+        None,
+        "the actions' halves lie on the heap"
+    );
+    assert_eq!(
+        engine.link_gates_in_use(),
+        None,
+        "no table of gates is lent"
+    );
+}
+
+/// A session whose tables take their memory on use lays out no row of the tables it counts in the
+/// plan an open lays out from its config, whether the build's plans are laid out at the open
+/// (`runtime-plan`) or not, and whether it takes faces beside its dial role's or not: none of the
+/// session's one table set, the key arena, the faces' sets and the index of the held ones, a peer's
+/// tables, the tokens the faces that went owe, the places of the rooms or of a step, the
+/// declaration watchers, the gets' tables, the held Finals or the round's tables, each counted from
+/// the plan and taking its memory at its first row, nor the links' buffers and places, which each
+/// link takes of the heap as it opens; the CONTROL row, the endpoints' texts, is laid out.
+/// Turned red by a row of those tables put where the build lays its plans out at the open
+/// (`feature = "runtime-plan"`) rather than where the policy lends them (`wz_lent`), as
+/// `ArenaPlan::put_entities` was put, in a build of both features.
+#[test]
+fn an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts() {
+    use crate::arena::ArenaPlan;
+    let config = crate::CoopConfig {
+        endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
+        ..super::client_config()
+    };
+    let plan = ArenaPlan::of(&config, &config.limits).expect("the client's limits lay a plan out");
+    let laid = |part: &str| plan.rows().any(|row| row.part() == part);
+    assert!(
+        laid("endpoint texts"),
+        "CONTROL: the transport's texts are laid out"
+    );
+    for part in [
+        "link receive flags",
+        "link receive buffers",
+        "link transmit flags",
+        "link transmit slots",
+        "link places",
+    ] {
+        assert!(!laid(part), "{part} lies on the heap, each link's own");
+    }
+    for part in [
+        "session tables",
+        "key arena",
+        "face tables",
+        "held faces",
+        "peer tables",
+        "owed tokens",
+        "room places",
+        "router lend",
+        "registry lend",
+        "declaration watchers",
+        "pending gets",
+        "ended legs",
+        "leg callbacks",
+        "pending legs",
+        "held replies",
+        "held finals",
+        "refused finals",
+        "delivery records",
+        "delivery callbacks",
+        "delivery keys",
+        "delivery round",
+    ] {
+        assert!(!laid(part), "{part} is counted, not laid out");
+    }
+}
+
+/// A session whose tables take their memory on use lends its links the heap as where their
+/// buffers are taken, each link a receive buffer of the batch the session advertises and
+/// `LINK_TX_SLOTS` slots of it, as its tables would lend each link and as zenoh-pico's transport
+/// takes one buffer of each; a report of its memory reads that for each link it may hold, as no
+/// link shares a pool. Turned red by a transport lent tables on use (`TransportRows::lent_from`),
+/// by a source of another size than the plan's batch, or by a report that reads pools a session on
+/// use holds none of (`LINKS_SHARE_POOLS`).
+#[test]
+fn an_on_use_sessions_links_take_their_batch_of_the_heap() {
+    use crate::arena::{
+        link_buffers, links_of, AllocatorMemory, ArenaPlan, SessionArena, LINK_TX_SLOTS,
+    };
+    use wz_runtime_coop::link_storage::HeapBuffers;
+
+    let config = crate::CoopConfig {
+        endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
+        ..super::client_config()
+    };
+    let plan = ArenaPlan::of(&config, &config.limits).expect("the client's limits lay a plan out");
+    let batch = usize::from(config.batch_size);
+    let mut session =
+        SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
+    let mut lend = session.lender();
+    let transport = plan.transport().lent_from(&mut lend);
+    lend.finish().expect("the plan lays the transport out");
+    assert_eq!(
+        transport.links,
+        HeapBuffers::sized(batch, LINK_TX_SLOTS),
+        "each link takes a buffer and its slots of the session's batch"
+    );
+    let links = links_of(&config).expect("within the address space");
+    let report = link_buffers(links, config.max_faces, config.batch_size, &config.limits)
+        .expect("the plan's batch");
+    assert_eq!(
+        (report.receive, report.transmit, report.bytes),
+        (links, links, batch),
+        "a buffer and a slot of the batch for each link"
+    );
 }
 
 /// A session whose tables take their memory on use takes the state its own values and its key

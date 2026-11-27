@@ -589,7 +589,8 @@ struct InterestSide<P: Storage = Profile> {
     /// At most `MAX_INBOUND_SUB_INTERESTS` rows, in the policy's sequence of a peer's rows
     /// (`Storage::Pooled`): on the lent policy each row lies in a pool every face of the session
     /// shares (`InterestRows`), so a face holds the interests its peer asked and not the most it
-    /// could.
+    /// could; on the on-use one the rows are taken at the first interest, each a row of the
+    /// session's `SESSION_MAX_INBOUND_SUB_INTERESTS` its key budget holds.
     #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     rows: InterestTable<P>,
     /// R311y530 — the staged interest-response chain, drained by
@@ -3194,6 +3195,14 @@ impl SubscriberPeer<crate::bounded::OnUse> {
         side
     }
 
+    /// The rows the peer's alias table is counted to, which its first alias takes: the quota it is
+    /// held to ([`Self::limit_aliases_to`]) when it was stated with no alias held, the build's
+    /// `MAX_PEER_KEYEXPR_ALIASES` before.
+    #[cfg(feature = "storage-profile")]
+    pub fn alias_rows(&self) -> usize {
+        self.naming.aliases.capacity()
+    }
+
     /// Count an empty side's staging (`staged` rows) where it lies: what [`Self::counted`]
     /// makes, without the side being a value of its own.
     #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
@@ -3205,6 +3214,43 @@ impl SubscriberPeer<crate::bounded::OnUse> {
     #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
     pub fn count_rows(&mut self, staged: usize) {
         let _ = staged;
+    }
+}
+
+/// The alias table of a peer's side on use.
+#[cfg(all(test, feature = "alloc", feature = "storage-profile"))]
+mod on_use_alias_tests {
+    use super::SubscriberPeer;
+    use crate::bounded::OnUse;
+    use crate::limit_binding::Quota;
+    use crate::limits::MaxPeerKeyexprAliasesHeld;
+
+    /// A side whose alias table holds no alias is counted to the quota it is held to, above the
+    /// build's `MAX_PEER_KEYEXPR_ALIASES` (a group's face) or under it, so its first alias takes
+    /// that many rows. Turned red by a `limit_aliases_to` that stores the quota alone
+    /// (`PeerIds::recount` left out), whose table keeps the build's rows.
+    #[test]
+    fn an_on_use_alias_table_is_counted_to_its_quota() {
+        let mut side = SubscriberPeer::<OnUse>::counted(0);
+        let build = crate::caps::MAX_PEER_KEYEXPR_ALIASES;
+        assert_eq!(
+            side.alias_rows(),
+            build,
+            "CONTROL: the build's rows before a quota"
+        );
+        let Some(quota) = [build.saturating_mul(2), 1]
+            .into_iter()
+            .find_map(|rows| MaxPeerKeyexprAliasesHeld::select(Quota::at_most(rows)).ok())
+        else {
+            // A domain of the build's value alone states no other quota.
+            return;
+        };
+        side.limit_aliases_to(quota);
+        assert_eq!(
+            Some(side.alias_rows()),
+            quota.get().most(),
+            "the table is counted to its quota"
+        );
     }
 }
 
@@ -3579,10 +3625,39 @@ impl<P: Storage> SubscriberPeer<P> {
     /// session's tables resolved: a `DeclKexpr` for a NEW id that would leave more aliases than
     /// `quota` admits is refused and counted as a full table refuses it
     /// ([`Self::alias_refusals`]), and the aliases already held are kept, as a lowered soft
-    /// limit keeps what it holds.
+    /// limit keeps what it holds. A table that holds no alias and whose rows are counted when it is
+    /// made is counted to `quota` too ([`PeerIds::recount`]), so a quota above the build's
+    /// (a group's face, which holds every member's) has the rows to hold it, and to the rows it
+    /// was made with for a quota of no most ([`PeerIds::recount_as_made`]), so a place a group's
+    /// face held is counted as a peer's again for its next face whatever the quota bounds.
     #[cfg(feature = "storage-profile")]
     pub fn limit_aliases_to(&mut self, quota: crate::limits::MaxPeerKeyexprAliasesHeld) {
         self.naming.alias_quota = quota;
+        let aliases = &mut self.naming.aliases;
+        match quota.get().most() {
+            Some(rows) => PeerIds::<KeyText<P>, P::Keys>::recount(aliases, rows),
+            None => PeerIds::<KeyText<P>, P::Keys>::recount_as_made(aliases),
+        };
+    }
+
+    /// Hold the peer's alias table to admit at least the most `quota` states: its quota raised to
+    /// `quota` where it admits fewer, and a table whose rows are counted when it is made counted
+    /// up to it where it is counted fewer and holds no alias ([`PeerIds::recount`]). A quota that
+    /// admits as many is kept, and so is a count of as many rows: a table counted when made holds
+    /// no more ids than its count, whatever its quota admits, so both are asked. A quota of no most
+    /// is no bound to hold the table to.
+    #[cfg(feature = "storage-profile")]
+    pub fn hold_aliases_at_least(&mut self, quota: crate::limits::MaxPeerKeyexprAliasesHeld) {
+        let Some(rows) = quota.get().most() else {
+            return;
+        };
+        if !self.naming.alias_quota.get().admits(rows) {
+            self.naming.alias_quota = quota;
+        }
+        let counted = PeerIds::<KeyText<P>, P::Keys>::counted_rows(&self.naming.aliases);
+        if counted.is_some_and(|held| held < rows) {
+            PeerIds::<KeyText<P>, P::Keys>::recount(&mut self.naming.aliases, rows);
+        }
     }
 
     /// Hold the peer's alias table to the `MAX_KEYEXPR_BYTES` the creator of the session's

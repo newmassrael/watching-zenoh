@@ -265,7 +265,7 @@ fn a_dial_holds_a_cell_of_the_table_its_link_is_made_in() {
     // leaked, so nothing else uses it and it outlives every value placed in it.
     let mut arena = unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
     let cells = arena.lend_byte_cells(size, 1).expect("one cell");
-    links.lend_cells(cells);
+    links.lend_cells(Some(cells));
 
     let mut pending = links
         .begin_initiator(Locator::ws(SERVER))
