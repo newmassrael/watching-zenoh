@@ -47,12 +47,13 @@
 //! - a passive intent (decision D10) on the fixed-memory profile, run with a peer connecting in: the
 //!   node is built from the same declaration with room for one node held by its zid, its pipe asks
 //!   `open passive <peer>`, and a stock `z_queryable` opens a mutual-TLS session to the listener
-//!   with the peer's key. The status read lists that session as the peer's one link
-//!   (`established`, cause `passive`), and a `close` ends it through the node and takes the peer
-//!   out of the intent. The CONTROL is a client that claims the peer's zid with another key: its
-//!   session is admitted and the peer is still waited for, so what holds a session is the key's
-//!   proof and not the claim. A passive `open` asked after the peer's session is up holds that
-//!   session at once, with no session of its own;
+//!   with the peer's key. The status read lists that session as the peer's one link (`established`,
+//!   cause `passive`), and a `close` ends it through the node and takes the peer out of the intent.
+//!   The CONTROL is a client that claims the peer's zid with another key: its session is admitted
+//!   and the peer is still waited for, so what holds a session is the key's proof and not the claim.
+//!   Those steps are the scenario of `wz_declared_commander_zenohd_target_matrix`, which runs them
+//!   against this node and against the Zephyr image that ships the profile. A passive `open` asked
+//!   after the peer's session is up holds that session at once, with no session of its own;
 //! - the dialling side of decision D9: a stock zenohd that dials the listener with name verification
 //!   off and the node's own printed certificate as its root is admitted and read as verified, and
 //!   the same router pinning another device's certificate opens no session, so name verification
@@ -79,6 +80,9 @@ use wz_integration_tests::common::{
 };
 use wz_runtime_tokio_test_support::{free_port, key_named_identity, KeyNamedIdentity};
 use wz_session_core::credential_identity::zid_from_spki_der;
+
+use super::wz_declared_commander_zenohd_target_matrix as matrix;
+use matrix::{read_status, Status, HELD};
 
 // The node says it listens once its port is bound, and says who it is when it is built.
 // barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-LISTEN {}" for "HOST-WZ-LISTEN tls/127.0.0.1:17477"
@@ -123,23 +127,36 @@ fn config_id(zid: &[u8; 16]) -> String {
 }
 
 /// The key of one party and the zid it names.
-struct Party {
+pub(super) struct Party {
     cert_pem: String,
     key_pem: String,
-    zid: String,
+    pub(super) zid: String,
     /// The files a client made its identity into with the library's door, which it presents as
     /// they are; `None` for a key the test made.
     made: Option<(PathBuf, PathBuf)>,
 }
 
 impl Party {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let key: KeyNamedIdentity = key_named_identity();
         let zid = config_id(&zid_from_spki_der(&key.spki_der));
         Self {
             cert_pem: key.cert_pem,
             key_pem: key.key_pem,
             zid,
+            made: None,
+        }
+    }
+
+    /// A key made before the test ran, read from `cert` and `key`: the commander an image was built
+    /// to list. Its zid is the one the consumer's tool prints for the certificate.
+    pub(super) fn from_files(cert: &Path, key: &Path) -> Self {
+        Self {
+            cert_pem: std::fs::read_to_string(cert)
+                .unwrap_or_else(|why| panic!("read {}: {why}", cert.display())),
+            key_pem: std::fs::read_to_string(key)
+                .unwrap_or_else(|why| panic!("read {}: {why}", key.display())),
+            zid: zid_by_the_tool(cert),
             made: None,
         }
     }
@@ -358,7 +375,7 @@ fn package(dir: &Path, id: &str, text: &str) -> PathBuf {
 }
 
 /// The PEM block the node printed, once it has printed all of it.
-fn printed_certificate(captured: &str) -> Option<String> {
+pub(super) fn printed_certificate(captured: &str) -> Option<String> {
     let begin = captured.find("-----BEGIN CERTIFICATE-----")?;
     let end = captured[begin..].find("-----END CERTIFICATE-----")? + begin;
     let end = end + "-----END CERTIFICATE-----".len();
@@ -448,13 +465,18 @@ fn key_files(dir: &Path, party: &Party) -> (PathBuf, PathBuf) {
 /// Ask `key` with a stock `z_get` configured by `config` (JSON5), and hand back the payloads of
 /// the replies and everything it printed.
 fn ask(config: &str, key: &str) -> (Vec<String>, String) {
+    ask_within(config, key, QUERY_TIMEOUT_MS)
+}
+
+/// `ask`, with the query waiting `timeout_ms` for its replies.
+pub(super) fn ask_within(config: &str, key: &str, timeout_ms: &str) -> (Vec<String>, String) {
     let files = tempfile::tempdir().expect("a directory for the asker's configuration");
     let path = files.path().join("z_get.json5");
     std::fs::write(&path, config).expect("write the asker's configuration");
     let output = Command::new(zenoh_core_example_binary("z_get"))
         .arg("-c")
         .arg(&path)
-        .args(["-s", key, "-o", QUERY_TIMEOUT_MS])
+        .args(["-s", key, "-o", timeout_ms])
         .output_bounded()
         .expect("run z_get");
     let text = format!(
@@ -947,7 +969,7 @@ fn make_identity(node: &Path, dir: &Path, name: &str) -> (PathBuf, PathBuf) {
 }
 
 /// The zid the tool a consumer is given (`wz_node.py --zid-of`) prints for `certificate`.
-fn zid_by_the_tool(certificate: &Path) -> String {
+pub(super) fn zid_by_the_tool(certificate: &Path) -> String {
     let printed = Command::new("python3")
         .arg(repo_root().join("scripts/lib/wz_node.py"))
         .arg("--zid-of")
@@ -1146,15 +1168,8 @@ const ESTABLISHED: &str = "slot-commander: session established, peer ";
 const NOT_VERIFIED: &str = "slot-commander: session established, peer not verified";
 /// What the node prints when it holds no established session any more.
 const LOST: &str = "slot-commander: session lost";
-/// The machine of the status read of a peer waited for under a passive intent, with no session.
-const WAITING: &str = "\"machines\":[{\"state\":\"passive\"}]";
-/// The machine of the status read of a peer held by the session it opened under a passive intent.
-const HELD: &str = "\"machines\":[{\"state\":\"established\",\"cause\":\"passive\"}]";
 /// The key the stock client declares a queryable on. Any key: what the node holds is the session.
 const CLIENT_KEY: &str = "lab/passive/client";
-/// How long the node runs with a session that only claims the peer's zid before its status is
-/// read: many ticks, each of which tells the connect manager the node's proven sessions.
-const CLAIM_WINDOW: Duration = Duration::from_secs(2);
 /// How long the node is watched for a session that must not come.
 const REFUSAL_WINDOW: Duration = Duration::from_secs(10);
 
@@ -1177,16 +1192,6 @@ fn room_node() -> &'static Path {
         })
         .0
         .as_path()
-}
-
-/// What the pipe answered `status <zid>` with, read by the reader of every answer a node writes:
-/// the links the node counts for the peer, whether the peer is in its intent, and the document,
-/// whose machines the reader leaves out.
-struct Status {
-    open: u32,
-    closing: u32,
-    intent: bool,
-    document: String,
 }
 
 /// A node driven on its pipe (`control = "pipe"`): a line written to its standard input is
@@ -1255,21 +1260,8 @@ impl PipedNode {
 
     /// Ask `status <zid>` on the pipe.
     fn status(&mut self, zid: &str) -> Status {
-        use wz_session_core::lifecycle_wire::Answer;
         let document = self.ask(&format!("status {zid}"));
-        let read = match Answer::read(document.as_bytes()) {
-            Some(Answer::Verdict(read)) => read,
-            _ => panic!("the answer to `status {zid}` is no verdict: {document}"),
-        };
-        match (read.verdict, read.held, read.intent) {
-            ("status", Some(links), Some(intent)) => Status {
-                open: links.open,
-                closing: links.closing,
-                intent,
-                document,
-            },
-            _ => panic!("the answer to `status {zid}` is no status read: {document}"),
-        }
+        read_status(zid, document)
     }
 
     /// Ask `status <zid>` until `done` holds of the answer or `BUDGET` runs out, and hand back the
@@ -1318,25 +1310,25 @@ impl Drop for PipedNode {
     }
 }
 
-/// Upstream's `z_queryable` as a client that opens a mutual-TLS session to the node's listener and
+/// Upstream's `z_queryable` as a client that opens a mutual-TLS session to a node's listener and
 /// keeps it until it is stopped.
-struct Client {
+pub(super) struct Client {
     child: ChildGuard,
     out: File,
     _files: tempfile::TempDir,
 }
 
 impl Client {
-    /// Connect to the listener of the node whose certificate is `certificate`, presenting `key`'s
+    /// Connect to the node's `listener`, whose certificate is `certificate`, presenting `key`'s
     /// certificate and claiming the zid `claims`.
-    fn connect(certificate: &Path, key: &Party, claims: &str) -> Self {
+    pub(super) fn connect(listener: &str, certificate: &Path, key: &Party, claims: &str) -> Self {
         let files = tempfile::tempdir().expect("a directory for the client's configuration");
         let (cert_file, key_file) = key_files(files.path(), key);
         let config = files.path().join("z_queryable.json5");
         std::fs::write(
             &config,
             format!(
-                "{{ id: {claims:?}, mode: \"client\", connect: {{ endpoints: [{LISTENER:?}] }}, \
+                "{{ id: {claims:?}, mode: \"client\", connect: {{ endpoints: [{listener:?}] }}, \
                  scouting: {{ multicast: {{ enabled: false }} }}, \
                  transport: {{ link: {{ tls: {{ root_ca_certificate: {root:?}, enable_mtls: true, \
                  connect_certificate: {cert:?}, connect_private_key: {private:?}, \
@@ -1367,7 +1359,7 @@ impl Client {
     }
 
     /// What the client has printed so far.
-    fn printed(&mut self) -> String {
+    pub(super) fn printed(&mut self) -> String {
         read_captured(&mut self.out)
     }
 }
@@ -1378,91 +1370,53 @@ impl Drop for Client {
     }
 }
 
+/// The host process of the profile as a target of the passive-hold scenario
+/// (`wz_declared_commander_zenohd_target_matrix`): the node on its pipe, with no session but the
+/// ones the scenario's clients open, so its console's session lines are theirs.
+struct HostTarget(PipedNode);
+
+impl matrix::PassiveTarget for HostTarget {
+    fn name(&self) -> &'static str {
+        "the host process"
+    }
+
+    fn listener(&self) -> &str {
+        LISTENER
+    }
+
+    fn certificate(&self) -> &Path {
+        &self.0.certificate
+    }
+
+    fn budget(&self) -> Duration {
+        BUDGET
+    }
+
+    fn ask(&mut self, verb: matrix::Verb<'_>) -> String {
+        self.0.ask(&verb.pipe_line())
+    }
+
+    /// The node's lines name no zid: a session is up or lost on the node, and on its pipe the
+    /// only sessions are the scenario's, one at a time.
+    fn sessions(&mut self, _claims: &str) -> matrix::Sessions {
+        matrix::Sessions {
+            verified: self.0.said(VERIFIED),
+            not_verified: self.0.said(NOT_VERIFIED),
+            lost: self.0.said(LOST),
+        }
+    }
+
+    fn console(&mut self) -> String {
+        self.0.console()
+    }
+}
+
 // wz-proves: none -- the hold of a session a peer opens under a passive intent is decision D10 on the fixed-memory profile's listener, which no catalog atom names; the lifecycle verbs are read on the node's own pipe
 #[test]
 #[ignore = "binary-dep e2e (the node is built from deploy/nodes/slot-commander.toml with room for one node, + zenohd's examples); runs via --ignored"]
 fn zenohd_lane_a_passive_intent_holds_the_session_a_stock_client_opens_and_not_a_claim_of_its_zid()
 {
-    let mut node = PipedNode::start(room_node());
-    let (peer, other) = (Party::new(), Party::new());
-
-    // The intent: the node waits for the peer, and holds no session with it.
-    let opened = node.ask(&format!("open passive {}", peer.zid));
-    assert_eq!(
-        opened, "{\"verdict\":\"opening\"}",
-        "a passive open of a node there is room for"
-    );
-    let waiting = node.status(&peer.zid);
-    assert!(
-        waiting.intent
-            && waiting.open == 0
-            && waiting.closing == 0
-            && waiting.document.contains(WAITING),
-        "the peer is waited for and has no link yet: {}",
-        waiting.document
-    );
-
-    // CONTROL: a client that claims the peer's zid with another key opens the same kind of session
-    // over the same channel. It is admitted, and the peer is still waited for.
-    let mut claimant = Client::connect(&node.certificate, &other, &peer.zid);
-    assert!(
-        node.has_said(NOT_VERIFIED, 1),
-        "the node admitted no session from the client that claims the peer's zid, so this control \
-         says nothing\n--- node ---\n{}\n--- client ---\n{}",
-        node.console(),
-        claimant.printed()
-    );
-    std::thread::sleep(CLAIM_WINDOW);
-    let claimed = node.status(&peer.zid);
-    assert!(
-        claimed.intent && claimed.open == 0 && claimed.document.contains(WAITING),
-        "a session whose key does not name the zid it claims was held as the peer's: {}",
-        claimed.document
-    );
-    drop(claimant);
-    assert!(
-        node.has_said(LOST, 1),
-        "the claimant's session did not end when the claimant stopped\n--- node ---\n{}",
-        node.console()
-    );
-
-    // THE HOLD: the peer opens its session with its own key, and the node holds it as the peer's
-    // one link under the passive intent.
-    let mut client = Client::connect(&node.certificate, &peer, &peer.zid);
-    assert!(
-        node.has_said(VERIFIED, 1),
-        "the peer's own session did not come up verified\n--- node ---\n{}\n--- client ---\n{}",
-        node.console(),
-        client.printed()
-    );
-    let held = node.status_until(&peer.zid, |status| status.open == 1);
-    assert!(
-        held.intent && held.open == 1 && held.closing == 0 && held.document.contains(HELD),
-        "the session the peer opened is not held as its link under the passive intent: {}\n\
-         --- node ---\n{}",
-        held.document,
-        node.console()
-    );
-
-    // CLOSE: the node ends that session itself and takes the peer out of the intent.
-    let closed = node.ask(&format!("close {}", peer.zid));
-    assert_eq!(
-        closed, "{\"verdict\":\"closing\",\"links\":1}",
-        "a close of the held peer orders its one link closed"
-    );
-    assert!(
-        node.has_said(LOST, 2),
-        "the session the peer opened was still up after the close\n--- node ---\n{}\n\
-         --- client ---\n{}",
-        node.console(),
-        client.printed()
-    );
-    let after = node.status(&peer.zid);
-    assert!(
-        !after.intent && after.open == 0 && after.closing == 0,
-        "the closed peer is still in the intent or still counted: {}",
-        after.document
-    );
+    matrix::passive_hold(&mut HostTarget(PipedNode::start(room_node())));
 }
 
 // wz-proves: none -- the same node and the same decision as the leg above, for the same reason: no catalog atom names the fixed-memory profile's listener
@@ -1473,7 +1427,7 @@ fn zenohd_lane_a_passive_intent_asked_after_the_peers_session_is_up_holds_that_s
     let peer = Party::new();
 
     // The peer's session first, which no intent waits for: it is admitted, and it is no node's link.
-    let mut client = Client::connect(&node.certificate, &peer, &peer.zid);
+    let mut client = Client::connect(LISTENER, &node.certificate, &peer, &peer.zid);
     assert!(
         node.has_said(VERIFIED, 1),
         "the peer's own session did not come up verified\n--- node ---\n{}\n--- client ---\n{}",
@@ -1509,12 +1463,17 @@ fn zenohd_lane_a_passive_intent_asked_after_the_peers_session_is_up_holds_that_s
     );
 }
 
-/// Start the reference zenohd as a router that DIALS the node's listener over mutual TLS with
+/// Start the reference zenohd as a router that DIALS a node's `listener` over mutual TLS with
 /// `router`'s key, the certificate `pinned` as its root and name verification off: how a router's
 /// operator configures it to reach a device whose certificate is self-signed (decision D9). Its
-/// own listener is a TCP port of its own, so it takes no port another leg holds. Its files go in
-/// `dir`.
-fn dialling_router(dir: &Path, router: &Party, pinned: &str) -> (ChildGuard, File) {
+/// own listener is a TCP port of its own, so it takes no port another leg holds, and its clients
+/// reach it there: the port is handed back with the router and its output. Its files go in `dir`.
+pub(super) fn dialling_router(
+    dir: &Path,
+    listener: &str,
+    router: &Party,
+    pinned: &str,
+) -> (ChildGuard, File, u16) {
     let (cert_file, key_file) = key_files(dir, router);
     let root = dir.join("pinned.pem");
     std::fs::write(&root, pinned).expect("write the pinned certificate");
@@ -1522,7 +1481,7 @@ fn dialling_router(dir: &Path, router: &Party, pinned: &str) -> (ChildGuard, Fil
     std::fs::write(
         &config,
         format!(
-            "{{ id: {id:?}, mode: \"router\", connect: {{ endpoints: [{LISTENER:?}] }}, \
+            "{{ id: {id:?}, mode: \"router\", connect: {{ endpoints: [{listener:?}] }}, \
              transport: {{ link: {{ tls: {{ root_ca_certificate: {root:?}, enable_mtls: true, \
              connect_certificate: {cert:?}, connect_private_key: {private:?}, \
              verify_name_on_connect: false }} }} }} }}",
@@ -1534,13 +1493,14 @@ fn dialling_router(dir: &Path, router: &Party, pinned: &str) -> (ChildGuard, Fil
     )
     .expect("write the router's configuration");
     let out = tempfile::tempfile().expect("a capture for the router");
+    let port = free_port();
     let child = ChildGuard::wrap(
         "zenohd (reference router, dialling over mutual tls)",
         Command::new(zenohd_binary())
             .arg("--config")
             .arg(&config)
             .arg("-l")
-            .arg(format!("tcp/127.0.0.1:{}", free_port()))
+            .arg(format!("tcp/127.0.0.1:{port}"))
             .arg("--no-multicast-scouting")
             .args(["--rest-http-port", "none"])
             .stdout(Stdio::from(out.try_clone().expect("dup capture")))
@@ -1548,7 +1508,7 @@ fn dialling_router(dir: &Path, router: &Party, pinned: &str) -> (ChildGuard, Fil
             .spawn()
             .expect("spawn zenohd"),
     );
-    (child, out)
+    (child, out, port)
 }
 
 // wz-proves: none -- what is measured is upstream's TLS link on its dialling side admitting the pinned self-signed certificate of decision D9, against the fixed-memory profile's listener, which no catalog atom names
@@ -1562,7 +1522,8 @@ fn zenohd_dialling_the_listener_with_name_verification_off_admits_the_node_it_pi
 
     // THE PIN: the router's root is the certificate the node printed.
     let pinning = tempfile::tempdir().expect("a directory for the router");
-    let (mut zenohd, mut zenohd_out) = dialling_router(pinning.path(), &router, &device);
+    let (mut zenohd, mut zenohd_out, _) =
+        dialling_router(pinning.path(), LISTENER, &router, &device);
     assert!(
         node.has_said(VERIFIED, 1),
         "zenohd dialled with name verification off and the node's certificate pinned, and no \
@@ -1580,8 +1541,8 @@ fn zenohd_dialling_the_listener_with_name_verification_off_admits_the_node_it_pi
     // CONTROL: the same router, key and zid pinning another device's certificate. The node admitted
     // the router above, so a session that does not come now is the router's pin refusing it.
     let elsewhere = tempfile::tempdir().expect("a directory for the control router");
-    let (mut control, mut control_out) =
-        dialling_router(elsewhere.path(), &router, &Party::new().cert_pem);
+    let (mut control, mut control_out, _) =
+        dialling_router(elsewhere.path(), LISTENER, &router, &Party::new().cert_pem);
     std::thread::sleep(REFUSAL_WINDOW);
     assert_eq!(
         node.said(ESTABLISHED),

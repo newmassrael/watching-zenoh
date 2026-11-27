@@ -76,6 +76,7 @@ mod wz_compose_zenohd_interop;
 mod wz_compression_zenohd_interop;
 mod wz_datagram_carrier_loss_netns;
 mod wz_declared_commander_zenohd_interop;
+mod wz_declared_commander_zenohd_target_matrix;
 mod wz_declared_group_pico_interop;
 mod wz_declared_node_zenohd_interop;
 mod wz_declared_publisher_zenohd_interop;
