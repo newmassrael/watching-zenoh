@@ -531,6 +531,51 @@ enum StandInEnd {
     Dials(std::net::SocketAddr),
 }
 
+/// Answer each CURRENT Interest in tokens that `event` carries with the tokens `observer` holds:
+/// one `DeclToken` for each that matches, then the `DeclareFinal`, staged and drained as the
+/// session core does where it answers a peer's Interest (`interest-answer`), through the same
+/// `LocalTokenRegistry::answer_iteration_event`. The router stand-in's session is built with the
+/// session core of the engine under test, and a build without `interest-answer` (the zenoh-pico
+/// preset's peer) answers none; a router answers every one, so the stand-in answers here.
+#[cfg(all(feature = "liveliness", not(feature = "interest-answer")))]
+fn answer_token_interests<S>(
+    observer: &ApplicationLayerObserver,
+    event: IterationEvent<'_, '_>,
+    sink: &S,
+) where
+    S: wz_session_core::response_sink::DeclareReplySink + ?Sized,
+{
+    use wz_session_core::declare::local_token::DeclResponseItem;
+    observer.read_parts(|app, face| {
+        let mut owed: wz_session_core::bounded::BoundedVec<
+            DeclResponseItem,
+            { wz_session_core::caps::MAX_PENDING_DECLARES },
+        > = Default::default();
+        let refused = app.local_tokens.answer_iteration_event(
+            app.local_tokens,
+            event,
+            face.subscribers.mapping_spaces(),
+            &mut owed,
+        );
+        assert_eq!(refused, 0, "the stand-in stages every answer it owes");
+        for item in owed {
+            match item {
+                DeclResponseItem::Token {
+                    token_id,
+                    interest_id,
+                } => {
+                    if let Some(keyexpr) = app.local_tokens.keyexpr_for(token_id) {
+                        sink.send_declare_token_reply(token_id, keyexpr, interest_id);
+                    }
+                }
+                DeclResponseItem::Final { interest_id } => {
+                    sink.send_declare_final_reply(interest_id);
+                }
+            }
+        }
+    });
+}
+
 fn run_router(
     end: StandInEnd,
     (zid, whatami): (u8, WhatAmI),
@@ -618,6 +663,10 @@ fn run_router(
     let silenced = silent.clone();
     #[cfg(feature = "query")]
     let counted_queries = seen.clone();
+    // What the stand-in answers itself where its session core answers no Interest
+    // (`answer_token_interests`).
+    #[cfg(all(feature = "liveliness", not(feature = "interest-answer")))]
+    let (token_answers, token_answer_sink) = (observer.clone(), actions.clone());
     let mut dispatch = dispatch_to(observer, actions.clone());
     let counted = seen;
     let _task = spawn_session(
@@ -811,6 +860,8 @@ fn run_router(
                     return;
                 }
             }
+            #[cfg(all(feature = "liveliness", not(feature = "interest-answer")))]
+            answer_token_interests(&token_answers.borrow(), event, &*token_answer_sink);
             dispatch(event);
         },
     );
