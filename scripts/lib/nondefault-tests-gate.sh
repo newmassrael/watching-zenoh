@@ -1035,6 +1035,12 @@ tests::direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg"
     # crate's all-features build compiles and no other on-use leg does. Not measured on a build
     # host yet.
     "wz-capi-coop|hook|link-admission,tables-on-use|on_use"
+    # The same tables on use in the form that keeps the round (`WZ_COOP_VALUE_LOCKS=off`, rows
+    # below): the one build of a session that listens and keeps the publishes a held session
+    # dropped for its other faces, whose table is then its own, counted at the open and taken as
+    # publishes are kept, with no row of the arena. No other leg compiles that table on use; the
+    # plan's tests read it (`tests::arena::`). Scope `lane`: not measured on a build host yet.
+    "wz-capi-coop|lane|@env:WZ_COOP_VALUE_LOCKS=off,listen,tables-on-use|tests::arena::"
     # The crate's whole suite in the build form the C library ships: a domain of
     # `declaration-sync-pacing` without `on`, where a link is told the session's declarations in
     # one lap when it comes up and the engine holds no code of paced turns
