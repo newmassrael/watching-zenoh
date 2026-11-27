@@ -1,7 +1,7 @@
 # Structural lane sz-open: the session's open, line by line
 
 Status: the reading and the design of the lane, with its steps carried in beside it as section 5
-onwards records them (O1, O2, O4, O5, O6; O3 held, section 7).
+onwards records them (O1, O2, O4, O5, O6; O3 and O7 held, sections 7 and 11).
 Nothing here was built or measured by this lane: every byte figure is either **read** (from the
 size ledger's explain document of the case, from the case's shipped library, or from a line table
 named below) or an **estimate** from the code, to be read on the explain document after the merge.
@@ -256,3 +256,31 @@ twice before. The config's place is given back where it was, once the engine has
 The test `the_endpoint_keys_are_read_where_the_config_holds_them_connect_first` holds the order
 and that the texts are the config's own. What the main session reads: `z_open` in the explain
 document (2,876 before).
+
+## 11. O7 held: the engine's write has no refusal of the door's reading
+
+The two readings, side by side:
+
+- The door (`open_request`, `crate::endpoint::checked_endpoint`) reads each unicast endpoint, the
+  scout's answers among them, before the open: a scheme the build has no link for is
+  `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN` (`link_built`), a malformed config
+  `_Z_ERR_CONFIG_INVALID_VALUE`, and a kept text past `MAX_LOCATOR_LEN` `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
+  (`kept_text`, into a locator text let go of there). `zext_config_device_requires` reads an
+  endpoint by the same check, without an open.
+- The engine (`OpenEndpoints::write_into`, `write_text`) reads each again by the reading the door
+  hands it (`engine_text`, the same `kept_text`), which answers the text as written where the
+  reading refuses, since the door judged it; it refuses only a text its row cannot hold
+  (`EndpointTextRefused::TooLong`, as `OpenError::Unreachable` or `Listen` with `TextTooLong`, which
+  `coop_open_refusal` answers `_Z_ERR_TRANSPORT_OPEN_FAILED`) and a text past the rows
+  (`ArenaRefused::TooLarge`).
+
+So one reading needs what the code does not have: `EndpointReading` refusing (it is
+`fn(&str, &mut LocatorText) -> &str`, and the host's `as_written` never refuses), and a refusal
+of the engine's open that carries the reading's class (a scheme not built, a malformed config, a
+kept text too long) for the ABI to answer with the door's code, which is the engine's public
+surface (`OpenError`, `Refusal`). And the refusal moves: `open_on_coop` refuses before the engine's
+write for the TLS channel (`HostTls::from_config`, `_Z_ERR_INVALID`), the faces and handshakes over
+the build's limits, the clock's word and the program's transport, so a config with two faults would
+be answered by another code than today's. That order is the owner's to set, with the refusal's
+form; the step is written once both are. `checked_endpoint` stays for
+`zext_config_device_requires` either way.
