@@ -557,14 +557,16 @@ impl GroupSide {
     }
 }
 
-/// Whether a read may wait in the receive of `rx` (`GroupReceive::await_input`) for what it
-/// would wait on as `wait`: the half's own input, on a half whose receive waits.
+/// What a read may wait for in the receive of `rx` itself (`GroupReceive::await_input`): the
+/// half's own input, on a half whose receive waits; `None` for a half whose receive returns at
+/// once, which a read waits on beside the session's links instead.
 #[cfg(not(wz_round))]
-fn awaits_on(rx: &dyn GroupReceive, wait: &LinkWait) -> bool {
-    rx.awaits_input()
-        && rx
-            .input_wait()
-            .is_some_and(|on| LinkWait::input(on) == *wait)
+fn awaited_input(rx: &(dyn GroupReceive + 'static)) -> Option<WaitOn> {
+    if rx.awaits_input() {
+        rx.input_wait()
+    } else {
+        None
+    }
 }
 
 /// The receive of a transport whose halves are one: through the cell the face shares.
@@ -786,9 +788,15 @@ pub(super) struct GroupFace<W> {
     /// ([`Self::take_outcome`]), the transport then dropped with what it holds of the session's
     /// (its receive buffer, one of the groups' table), so a join of the group again finds it free.
     link: Option<GroupLink<Watched>>,
-    /// The receive half of this join, until the join's read slot takes it (`GroupSeat`).
+    /// What this join owes the group's read slot, the row of the group's place in the read
+    /// slots' table, until the holder of that slot takes it and builds the session there
+    /// (`CoopEngine::step_groups`).
     #[cfg(not(wz_round))]
-    rx: Option<ReceiveHalf>,
+    seat: Option<GroupSeat>,
+    /// What a read may wait for in the group's receive itself while the session runs
+    /// (`awaited_input`), read off the receive half as the join split it.
+    #[cfg(not(wz_round))]
+    awaited: Option<WaitOn>,
     /// What a message of the session waits with on a full lane ([`Self::push_lent`]).
     pace: Rc<dyn Pace>,
     /// The waits of the session's stack, which the group's socket is waited on with.
@@ -897,19 +905,22 @@ impl<W: LinkWaits> GroupFace<W> {
         Ok(face)
     }
 
-    /// Join the group `joining` names, whose tables the registry holds already: the face, and
-    /// what the group's read slot takes of this join (`GroupSeat`), a member's query held in
-    /// `plane` (`queryable`). The session is built in the slot's place when the seat is taken
-    /// (`GroupPump::new`, `GroupPump::rejoin`), and opens the transport as its link then; one
-    /// that does not open is told by the first step. The group's socket is waited on with
-    /// `waits`, those of the session's stack.
+    /// Join the group `joining` names, whose tables the registry holds already: the face, which
+    /// owes the group's read slot what it takes of this join (`GroupSeat`, `Self::take_seat`), a
+    /// member's query held in `plane` (`queryable`). The session is built in the slot's place when
+    /// the seat is taken (`GroupPump::new`, `GroupPump::rejoin`), and opens the transport as its
+    /// link then; one that does not open is told by the first step. The group's socket is waited
+    /// on with `waits`, those of the session's stack.
     #[cfg(not(wz_round))]
     pub(super) fn join(
         joining: GroupJoining,
         #[cfg(feature = "queryable")] plane: PlacedRef<super::query::QueryPlane>,
         waits: W,
-    ) -> (Self, GroupSeat) {
+    ) -> Self {
         let (mut face, parts) = Self::made(joining, waits);
+        // The receive half is the session's, which its read slot waits in, shared with the
+        // session's side of the transport.
+        let rx = Rc::clone(&parts.link.rx);
         // A read that hands each record out as it is read needs no room for it: no input gate.
         let seed = GroupSessionSeed {
             config: parts.config,
@@ -936,13 +947,13 @@ impl<W: LinkWaits> GroupFace<W> {
             generation: face.generation,
             after_pushes: false,
         };
-        let seat = GroupSeat {
+        face.seat = Some(GroupSeat {
             seed,
             reads,
             records,
-            rx: face.rx.take(),
-        };
-        (face, seat)
+            rx,
+        });
+        face
     }
 
     /// The face of the group `joining` names, and the parts its session is built of: the one body
@@ -1007,6 +1018,8 @@ impl<W: LinkWaits> GroupFace<W> {
             let rx = transport.split_receive();
             (transport, rx)
         };
+        #[cfg(not(wz_round))]
+        let awaited = rx.as_deref().and_then(awaited_input);
         // Shared by the session, which opens it as its link, and the face, which writes on it
         // what the session pushes.
         let link = GroupLink::new(Watched {
@@ -1018,8 +1031,6 @@ impl<W: LinkWaits> GroupFace<W> {
         });
         #[cfg(not(wz_round))]
         let session_link = GroupSide::new(&link, rx);
-        #[cfg(not(wz_round))]
-        let half = Rc::clone(&session_link.rx);
         #[cfg(wz_round)]
         let session_link = link.clone();
         let parts = GroupParts {
@@ -1049,7 +1060,9 @@ impl<W: LinkWaits> GroupFace<W> {
             tx,
             link: Some(link),
             #[cfg(not(wz_round))]
-            rx: Some(half),
+            seat: None,
+            #[cfg(not(wz_round))]
+            awaited,
             pace,
             waits,
             room,
@@ -1368,6 +1381,21 @@ impl<W: LinkWaits> GroupFace<W> {
             return None;
         }
         self.input.map(LinkWait::input)
+    }
+
+    /// Whether a read may wait in the group's receive itself for what it would wait on as `wait`
+    /// (`GroupPump::await_input`): the session runs, and `wait` is its receive half's own input,
+    /// on a half whose receive waits.
+    #[cfg(not(wz_round))]
+    pub(super) fn awaits(&self, wait: &LinkWait) -> bool {
+        !self.has_ended() && self.awaited.is_some_and(|on| LinkWait::input(on) == *wait)
+    }
+
+    /// What this join owes the group's read slot, taken once by the holder of that slot, which
+    /// builds the join's session in its row (`CoopEngine::step_groups`).
+    #[cfg(not(wz_round))]
+    pub(super) fn take_seat(&mut self) -> Option<GroupSeat> {
+        self.seat.take()
     }
 
     /// Whether the group's session runs over a stack that gives no wait for its input, so that it
@@ -1800,7 +1828,7 @@ pub(super) struct GroupSeat {
     seed: GroupSessionSeed<SessionLink>,
     reads: GroupReads,
     records: FaceRecords<GroupReplies>,
-    rx: Option<ReceiveHalf>,
+    rx: ReceiveHalf,
 }
 
 /// The place of a group's session, made once for the group and kept across its joins: the
@@ -2211,10 +2239,13 @@ impl<H: GroupHand> EventSink for GroupEvents<'_, H> {
 /// it with the session let go of while each record it read is handed out, and takes the session's
 /// lock for each record it dispatches. Its values are one thread's, shared with the group's face:
 /// where other threads reach the session (`threads`) the rest of a step is made under the
-/// session's lock (`CoopEngine::step_groups`).
-/// The place is made once for the group, at the session's open: a session that ended is let go of
-/// with the place kept (`Self::let_go`), and each join again builds its session there. The slot
-/// is one heap place and a few handles, moved whole when a read takes it out of the session.
+/// session's lock (`CoopEngine::step_groups`), and so is its making and its leave; its receive
+/// half alone, which no face shares, is waited in with that lock let go of.
+/// It lies in the row of the group's place in the read slots' table, held by the holder of that
+/// row's slot, and never moves: the holder builds it there from the seat the group's first join
+/// owed the row, a session that ended is let go of with the place kept (`Self::let_go`), and each
+/// join again builds its session in the same place (`Self::rejoin`). The slot is one heap place
+/// and a few handles.
 #[cfg(not(wz_round))]
 pub(super) struct GroupPump<C: ClockSource + 'static> {
     runtime: CoopRuntime<C>,
@@ -2249,7 +2280,7 @@ impl<C: ClockSource + 'static> GroupPump<C> {
             place,
             reads,
             records,
-            rx,
+            rx: Some(rx),
         }
     }
 
@@ -2266,18 +2297,7 @@ impl<C: ClockSource + 'static> GroupPump<C> {
         self.place.build(seed, now_ms);
         self.reads = reads;
         self.records = records;
-        self.rx = rx;
-    }
-
-    /// Whether a read may wait in the group's receive for what it would wait on as `wait`
-    /// (`Self::await_input`): the session runs, and `wait` is its receive half's own input, on a
-    /// half whose receive waits.
-    pub(super) fn awaits(&self, wait: &LinkWait) -> bool {
-        self.holds_session()
-            && self
-                .rx
-                .as_ref()
-                .is_some_and(|rx| awaits_on(&**rx.borrow(), wait))
+        self.rx = Some(rx);
     }
 
     /// Whether the group's receive half waits in its receive (`Self::await_input`).
@@ -2758,7 +2778,7 @@ pub(super) trait AwaitedReads {
 }
 
 /// The reads of a group that is the one input its read waits on, on a receive half whose receive
-/// waits (`GroupPump::awaits`), up to `deadline_us`, the end of the read's wait, from the read's
+/// waits (`GroupFace::awaits`), up to `deadline_us`, the end of the read's wait, from the read's
 /// reading `since_us`: each a wait in the group's receive for what is left of the time, then a
 /// step that reads the datagram the wait kept, as zenoh-pico's read task handles a datagram a
 /// receive (`vendor/zenoh-pico/src/transport/multicast/read.c` @
@@ -2908,19 +2928,22 @@ mod side_tests {
 
     /// A read waits in a group's receive only for the half's own input, on a half whose receive
     /// waits; it waits on any other input, or on a half whose receive returns at once, as it did.
-    /// Turned red by a read that waits in a receive that returns at once (`awaits_on` without
+    /// Turned red by a read that waits in a receive that returns at once (`awaited_input` without
     /// `GroupReceive::awaits_input`), which would turn the read with no wait at all, or in the
     /// receive of a group for another socket's input.
     #[test]
     fn a_read_waits_in_a_groups_receive_only_for_its_own_input() {
         let own = LinkWait::input(WaitOn::Socket(7));
-        assert!(awaits_on(&Waiting(true), &own));
+        let awaits = |rx: &Waiting, wait: &LinkWait| {
+            awaited_input(rx).is_some_and(|on| LinkWait::input(on) == *wait)
+        };
+        assert!(awaits(&Waiting(true), &own));
         assert!(
-            !awaits_on(&Waiting(false), &own),
+            !awaits(&Waiting(false), &own),
             "a receive that returns at once"
         );
         assert!(
-            !awaits_on(&Waiting(true), &LinkWait::input(WaitOn::Socket(8))),
+            !awaits(&Waiting(true), &LinkWait::input(WaitOn::Socket(8))),
             "another socket's input"
         );
     }

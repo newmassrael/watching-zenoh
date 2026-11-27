@@ -6,9 +6,10 @@
 //! and hands each record out as it is read: a build without `threads`, and with `threads` one
 //! whose form gives each value a lock of its own (`build.rs`). A connection a port holds is taken
 //! by the read with no face's slot held, and its face's place is taken before the session's lock
-//! (`CoopEngine::accept_links`). A group's session lies in a read slot the session holds between
-//! two reads, taken out of it for each step and stepped, with other threads, under the session's
-//! lock but while a record it read is handed out (`CoopEngine::step_groups`).
+//! (`CoopEngine::accept_links`). A group's session lies in the read slot of its place's row,
+//! built there by the holder of that slot from what the group's join owed the row, and stepped
+//! where it lies, with other threads under the session's lock but while a record it read is
+//! handed out (`CoopEngine::step_groups`).
 //!
 //! The link's session lies in the engine's face ([`DirectFace`]), apart from the session's state,
 //! in two parts as a send and a receive use it: the receive (the pump, what its steps are handed,
@@ -514,7 +515,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> super::group::Gro
     }
 }
 
-/// A group's pump taken out of its place by a read that waits in the group's receive, stepped
+/// A group's pump in its row, whose slot a read that waits in the group's receive holds, stepped
 /// by the read's engine ([`super::group::read_awaited`]).
 #[cfg(feature = "group")]
 struct AwaitedGroup<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
@@ -1001,6 +1002,10 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// ones it holds let go of. Carried out once the lock is let go of (`Self::pay_site`).
     #[cfg(feature = "threads")]
     site_owed: Option<Option<FaceHeld<DirectParts<L, C>>>>,
+    /// The session of the group whose place the row is, from the first seat its joins owed the row
+    /// (`Self::seat_group`); `None` in the row of every other place.
+    #[cfg(feature = "group")]
+    group: Option<super::group::GroupPump<C>>,
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
@@ -1152,6 +1157,27 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
         #[cfg(feature = "threads")]
         {
             self.site_owed = None;
+        }
+    }
+
+    /// Build the group's session in the row from `seat`, what a join of the group owed it, on
+    /// `runtime`'s clock: in the place the row's last session lay in, or, at the group's first
+    /// join, in a place made for the group then. Under the session's lock, as the seat's handles
+    /// are the group's face's too.
+    #[cfg(feature = "group")]
+    fn seat_group(&mut self, runtime: &CoopRuntime<C>, seat: super::group::GroupSeat) {
+        match &mut self.group {
+            Some(pump) => pump.rejoin(seat),
+            None => self.group = Some(super::group::GroupPump::new(runtime.clone(), seat)),
+        }
+    }
+
+    /// End the group's session the row holds, which tells the group it leaves, and let its place
+    /// go: the session's close. Under the session's lock, or with the engine owned whole.
+    #[cfg(feature = "group")]
+    fn leave_group(&mut self) {
+        if let Some(pump) = self.group.take() {
+            pump.leave();
         }
     }
 
@@ -1442,6 +1468,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
                         noted_us: u64::MAX,
                         #[cfg(feature = "threads")]
                         site_owed: None,
+                        #[cfg(feature = "group")]
+                        group: None,
                     }))
                 },
             );
@@ -1490,9 +1518,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
         }
     }
 
-    /// Let go of the link with the face owned whole: the engine's drop.
+    /// Let go of the link with the face owned whole, and leave the group whose session the row
+    /// holds: the engine's drop.
     fn let_go_owned(&mut self) {
-        <CoopForm as LockForm>::get_mut(&mut self.slot).0.let_go();
+        let slot = &mut <CoopForm as LockForm>::get_mut(&mut self.slot).0;
+        slot.let_go();
+        #[cfg(feature = "group")]
+        slot.leave_group();
     }
 }
 
@@ -1674,9 +1706,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     }
 
     /// The face of the face table's row `at`; `None` past the rows the open made.
-    #[cfg(feature = "listen")]
+    #[cfg(any(feature = "listen", feature = "group"))]
     pub(super) fn face_at(&self, at: usize) -> Option<&DirectFace<L, C>> {
         self.rows.get(at)
+    }
+
+    /// Leave each group whose session a row holds, under the session's lock at its close: each
+    /// row's slot tried, as that lock is held. A row a read holds is left by that read, which finds
+    /// the session closed after its step (`CoopEngine::step_groups`).
+    #[cfg(feature = "group")]
+    pub(super) fn leave_groups(&self) {
+        for face in self.rows.iter() {
+            if let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) {
+                held.0.leave_group();
+            }
+        }
     }
 
     /// Let go of every face's link with the faces owned whole: the engine's drop.
@@ -2167,51 +2211,79 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
-    /// Step each group's session, its read slot taken out of the session for its steps and put
-    /// back after them (`Core::group_pumps`): each record a step reads is dispatched under the
-    /// session's lock, which is let go of before it is handed out (`DirectSink`), as a face's
-    /// are. A step reads the datagrams of the group's socket up to `GROUP_READS_PER_MOVE` of them,
+    /// Step each group's session where it lies, in the row of the group's place in the read slots'
+    /// table: the row's slot taken by a try, after the session's lock was let go of, as every read
+    /// slot is taken before it, and passed over when another read holds it. The holder first pays
+    /// what the group's last join owed the row, under the session's lock: the join's session built
+    /// in the row (`DirectSlot::seat_group`). Each record a step reads is dispatched under the
+    /// session's lock, which is let go of before it is handed out (`DirectSink`), as a face's are.
+    /// A step reads the datagrams of the group's socket up to `GROUP_READS_PER_MOVE` of them,
     /// each datagram's records handed out before the next is received, so a burst is read by one
     /// step of one read, its fixed part (the stop, the carrier, the beacon, the writes) taken
     /// once, and the links are moved once, after it, as a link's one receive is read. The step is
     /// made at `now_us`, the read's reading of the session's clock, or at a reading of its own
     /// where the read took none. What a burst holds past a callback that closed the session is
     /// read and taken by nothing, a closed session's state being reached by no record. A session
-    /// that ended at its step is let go of, its place put back for the group's next join and its
-    /// end left for the session to read (`Self::poll_groups`); a slot whose session ended is not
-    /// stepped. One a read finds the session closed after is stepped once more, which tells the
-    /// group it leaves.
+    /// that ended at its step is let go of, its place kept in the row for the group's next join
+    /// and its end left for the session to read (`Self::poll_groups`); a row whose session ended
+    /// is not stepped. A row whose holder finds the session closed leaves the group, as the close
+    /// leaves each row no read holds (`DirectFaces::leave_groups`).
     /// A group whose receive waits is handed `awaited_us`, the time the read made no wait for:
     /// it is read in its receive, with nothing of the session held while it waits, a datagram a
     /// step, until that time is out or the read owes the session a turn
     /// ([`super::group::read_awaited`]).
     #[cfg(feature = "group")]
     fn step_groups(&self, now_us: Option<u64>, mut awaited_us: Option<u64>) {
-        let mut at = 0;
+        let mut next = 0;
         loop {
-            let (pump, most) = {
-                let Some(mut held) = self.live() else {
+            let at = next;
+            next = at.saturating_add(1);
+            // A group keeps its place across its joins.
+            let place = {
+                let Some(held) = self.live() else {
                     return;
                 };
-                // The deploy's domain of the bound starts at one.
-                let most =
-                    core::num::NonZeroUsize::new(held.0.config.limits.group_reads_per_move())
-                        .unwrap_or(core::num::NonZeroUsize::MIN);
-                let Some(slot) = held.0.group_pumps.get_mut(at) else {
+                let Some(group) = held.0.transport.groups.get(at) else {
                     return;
                 };
-                let pump = if slot
-                    .as_ref()
-                    .is_some_and(super::group::GroupPump::holds_session)
-                {
-                    slot.take()
-                } else {
-                    None
-                };
-                (pump, most)
+                group.at()
             };
-            let Some(mut pump) = pump else {
-                at = at.saturating_add(1);
+            let Some(row) = self.direct.face_at(place) else {
+                continue;
+            };
+            let Some(mut held_row) = <CoopForm as LockForm>::try_lock(&row.slot) else {
+                continue;
+            };
+            let slot = &mut held_row.0;
+            let most = {
+                let mut held = self.core.lock();
+                if self.closed.load(Ordering::Acquire) {
+                    slot.leave_group();
+                    return;
+                }
+                let state = &mut held.0;
+                if let Some(seat) = state
+                    .transport
+                    .groups
+                    .get_mut(at)
+                    .and_then(GroupFace::take_seat)
+                {
+                    #[cfg(all(
+                        test,
+                        feature = "std",
+                        feature = "app-transport",
+                        not(feature = "threads")
+                    ))]
+                    if slot.group.is_none() {
+                        state.group_places_made += 1;
+                    }
+                    slot.seat_group(state.local.runtime(), seat);
+                }
+                // The deploy's domain of the bound starts at one.
+                core::num::NonZeroUsize::new(state.config.limits.group_reads_per_move())
+                    .unwrap_or(core::num::NonZeroUsize::MIN)
+            };
+            let Some(pump) = slot.group.as_mut().filter(|pump| pump.holds_session()) else {
                 continue;
             };
             // A burst read to its bound leaves the group's mark of input for the next read's
@@ -2223,7 +2295,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     super::group::read_awaited(
                         &mut AwaitedGroup {
                             engine: self,
-                            pump: &mut pump,
+                            pump: &mut *pump,
                         },
                         most,
                         since_us.saturating_add(timeout_us),
@@ -2232,35 +2304,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 }
                 _ => {
                     let now_us = now_us.unwrap_or_else(|| pump.now_us());
-                    self.step_group(&mut pump, most, now_us)
+                    self.step_group(pump, most, now_us)
                 }
             };
-            // What the slot shares with the group's face is let go of, stepped or put back under
-            // the session's lock, closed or not: a close let go of the face's handles under it.
-            let mut core = self.core.lock();
+            // What the row shares with the group's face is let go of under the session's lock,
+            // closed or not: a close let go of the face's handles under it.
+            let held = self.core.lock();
             // The ended session's transport goes before the session's poll joins the group again
             // (`Self::poll_groups`), a join that takes what the transport held of the stack's.
             if ended {
                 pump.let_go();
             }
             if self.closed.load(Ordering::Acquire) {
-                pump.leave();
+                slot.leave_group();
                 return;
             }
-            let unplaced = match core.0.group_pumps.get_mut(at) {
-                Some(slot) => {
-                    *slot = Some(pump);
-                    None
-                }
-                None => Some(pump),
-            };
-            drop(unplaced);
-            drop(core);
-            at = at.saturating_add(1);
+            drop(held);
         }
     }
 
-    /// One step of a group's session, `pump` its read slot taken out of the session, reading up
+    /// One step of a group's session, `pump` in the row whose slot the read holds, reading up
     /// to `most` datagrams at `now_us`: what it reads handed out as it is read, and the drains its
     /// Pushes put off made after it. Whether the session ended at it.
     #[cfg(feature = "group")]
@@ -2459,7 +2522,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// session closed.
     ///
     /// Where `awaits` is given and the wait is on one input, a group's that its step can wait for
-    /// in its receive (`GroupPump::awaits`), the wait's time is answered in it, in microseconds.
+    /// in its receive (`GroupFace::awaits`), the wait's time is answered in it, in microseconds.
     fn link_wait(
         &self,
         due_us: u64,
@@ -2497,10 +2560,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             if let [only] = on.as_slice() {
                 if held
                     .0
-                    .group_pumps
+                    .transport
+                    .groups
                     .iter()
-                    .flatten()
-                    .any(|pump| pump.awaits(only))
+                    .any(|group| group.awaits(only))
                 {
                     *awaits = Some(u64::from(*ms) * 1000);
                 }
@@ -3624,6 +3687,33 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn direct_faces(&self) -> (usize, usize) {
         (self.direct.iter().count(), self.direct.turned().count())
+    }
+
+    /// The rows of the read slots' table whose slot holds a group's session, and the places of the
+    /// session's groups in its face table, each in order.
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "group",
+        feature = "app-transport",
+        not(feature = "threads")
+    ))]
+    pub(crate) fn group_rows_and_places(&self) -> (Vec<usize>, Vec<usize>) {
+        let rows = self
+            .direct
+            .iter()
+            .enumerate()
+            .filter_map(|(at, face)| {
+                let held = <CoopForm as LockForm>::try_lock(&face.slot)?;
+                let in_row = held.0.group.is_some();
+                in_row.then_some(at)
+            })
+            .collect();
+        let places = self
+            .live()
+            .map(|held| held.0.transport.groups.iter().map(GroupFace::at).collect())
+            .unwrap_or_default();
+        (rows, places)
     }
 
     /// Whether the dial role's face lies in the engine's own place, the faces' table inline there,

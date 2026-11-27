@@ -3056,13 +3056,8 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// the deploy `GROUP_READS_PER_MOVE` limit (`CoopEngine::step`).
     #[cfg(all(feature = "group", wz_round))]
     group_reads: usize,
-    /// The read slot of each group, at the group's place in the session's groups, where the read
-    /// steps the group's session itself: `None` while a read holds it; one whose session ended
-    /// holds its place, empty, for the group's next join (`CoopEngine::read_groups`).
-    #[cfg(all(feature = "group", not(wz_round)))]
-    group_pumps: Vec<Option<group::GroupPump<C>>>,
-    /// How many places for a group's session the session made (`Self::seat_group`), which a
-    /// test of a group of one thread joined again counts.
+    /// How many places for a group's session the rows of the read slots' table made
+    /// (`CoopEngine::step_groups`), which a test of a group of one thread joined again counts.
     #[cfg(all(
         test,
         feature = "std",
@@ -6002,14 +5997,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     .install_shared_key_ids(id, ids.clone());
             }
             match self.join_group(held, join) {
-                #[cfg(wz_round)]
                 Ok(face) => self.transport.add_group(face),
-                // The read slot lies at the group's place in the session's groups.
-                #[cfg(not(wz_round))]
-                Ok((face, seat)) => {
-                    self.transport.add_group(face);
-                    self.seat_group(at, seat);
-                }
                 Err(refused) => {
                     self.session.registry.remove_face(held);
                     return Err(refused);
@@ -6143,23 +6131,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Join the group `join` names as the face `face` names, whose tables the registry holds at
     /// its place, where the read steps the group's session itself: the stack joins the group, and
-    /// what the group's read slot takes of the join is handed back beside the face, its session,
-    /// with a fresh dispatcher, built in the slot when it takes it (`Self::seat_group`). Its first
-    /// step is the read's, which tells a link that did not open
-    /// (`CoopEngine::first_group_steps`). [`OpenError::Group`] when the stack joins no such group.
+    /// the face owes the row of its place in the read slots' table what the row's slot takes of
+    /// the join, its session, with a fresh dispatcher, built in the row by the slot's holder
+    /// (`CoopEngine::step_groups`). Its first step is the read's, which tells a link that did not
+    /// open (`CoopEngine::first_group_steps`). [`OpenError::Group`] when the stack joins no such
+    /// group.
     #[cfg(all(feature = "group", not(wz_round)))]
     fn join_group(
         &mut self,
         face: HeldFace,
         join: GroupJoin,
-    ) -> Result<(GroupFace<L::Waits>, group::GroupSeat), OpenError> {
+    ) -> Result<GroupFace<L::Waits>, OpenError> {
         let joining = self.group_joining(face, join)?;
-        // SAFETY: the plane is read by the group's read slot, which the session lets go of at its
-        // links' end (`Core::end_links`), or a read that holds it lets go of once it finds the
-        // session closed, before the session's state, which owns the plane, is dropped.
+        // SAFETY: the plane is read by the group's session in its row of the read slots' table,
+        // which the session's close leaves (`DirectFaces::leave_groups`), a read that holds the
+        // row leaves once it finds the session closed, and the engine's drop leaves first
+        // (`DirectFaces::let_go_owned`), before the session's state, which owns the plane, is
+        // dropped.
         #[cfg(feature = "queryable")]
         let plane = unsafe { self.session.plane.share() };
-        let (group, seat) = GroupFace::join(
+        let group = GroupFace::join(
             joining,
             #[cfg(feature = "queryable")]
             plane,
@@ -6170,33 +6161,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if let Some(on) = group.room() {
             self.rooms.hold(face.at(), on);
         }
-        Ok((group, seat))
-    }
-
-    /// Seat the join `seat` in the read slot of the group at place `at`: its session built in
-    /// the place the group's last session lay in, or, at the group's first join, in a place made
-    /// for the group then. A slot a read holds now (none, as a group is joined again only between
-    /// two of its steps) is given a place of its own.
-    #[cfg(all(feature = "group", not(wz_round)))]
-    fn seat_group(&mut self, at: usize, seat: group::GroupSeat) {
-        if let Some(Some(pump)) = self.group_pumps.get_mut(at) {
-            pump.rejoin(seat);
-            return;
-        }
-        #[cfg(all(
-            test,
-            feature = "std",
-            feature = "app-transport",
-            not(feature = "threads")
-        ))]
-        {
-            self.group_places_made += 1;
-        }
-        let pump = group::GroupPump::new(self.local.runtime().clone(), seat);
-        match self.group_pumps.get_mut(at) {
-            Some(slot) => *slot = Some(pump),
-            None => self.group_pumps.push(Some(pump)),
-        }
+        Ok(group)
     }
 
     /// The link of face `id` while it is up, which a send to that face's peer goes over.
@@ -6403,12 +6368,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             if let Some(join) = due {
                 match self.join_group(face, join) {
                     Ok(joined) => {
-                        // The new join's session is built in the place of the one that ended,
-                        // which the read let go of with its session's transport.
-                        #[cfg(not(wz_round))]
-                        let (joined, seat) = joined;
-                        #[cfg(not(wz_round))]
-                        self.seat_group(at, seat);
+                        // Where the read steps the group's session itself, the new join's
+                        // session is built in the row of the group's place by the row's next
+                        // read, in the place of the one that ended (`CoopEngine::step_groups`).
                         // The liveliness subscribers ask the group again, as they would have
                         // had it been there when they were declared, as the tokio engine's
                         // group asks again when it comes up. What the session announced is
@@ -6790,15 +6752,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // leaves and lets the group's link go; its tables go with the other faces' below.
         #[cfg(feature = "group")]
         if self.transport.stop_groups() {
+            // Where the read steps each group's session itself, the session in each group's row
+            // left the group before (`DirectFaces::leave_groups`).
             #[cfg(wz_round)]
             self.run_tasks();
-            // Where the read steps each group's session itself, each read slot the session holds is
-            // stepped once more here; one a read holds is let go of by that read, which finds the
-            // session closed.
-            #[cfg(not(wz_round))]
-            for pump in self.group_pumps.drain(..).flatten() {
-                pump.leave();
-            }
             #[cfg(feature = "resource-snapshot")]
             for group in &self.transport.groups {
                 self.retired_groups.retire(&group.message_reading());
@@ -7333,8 +7290,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             plan_links: core::cell::Cell::new(0),
             #[cfg(all(feature = "group", wz_round))]
             group_reads: 0,
-            #[cfg(all(feature = "group", not(wz_round)))]
-            group_pumps: Vec::new(),
             #[cfg(all(
                 test,
                 feature = "std",
@@ -8106,8 +8061,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// How many places for a group's session the session made since the open, its first join
-    /// of each group and each join again (`Core::seat_group`). Compiled where its reader is: the
-    /// groups of one thread over the program's transport (`tests::one_thread::group`).
+    /// of each group and each join again (`CoopEngine::step_groups`). Compiled where its reader
+    /// is: the groups of one thread over the program's transport (`tests::one_thread::group`).
     #[cfg(all(
         test,
         feature = "std",
@@ -12814,6 +12769,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         // A key the program keeps past the close copies and gives back its hold at its row, with
         // no reach of the session: the row's word is what tells it the session is gone.
         tables(&core.session.registry).close_keyexpr_counts();
+        // Each group's session leaves from its row, with the session's lock held, before the
+        // groups' faces go with the links.
+        #[cfg(all(not(wz_round), feature = "group"))]
+        self.direct.leave_groups();
         core.end_links();
         // The rows of the session's own declarations, and the callbacks they hold, go after the
         // lock is let go of, one row at a time (`Self::let_go_of_rows`).
