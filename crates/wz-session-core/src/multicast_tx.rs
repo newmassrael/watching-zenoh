@@ -1087,6 +1087,223 @@ pub fn multicast_tx_token_reply<R>(
     }))
 }
 
+/// A declaration that answers a member's interest, as the arguments of the writer that makes it
+/// ([`crate::lent_control`]): what a group's dispatch hands its reply backing
+/// ([`MulticastReplyEnqueue::enqueue_declaration_reply`](crate::multicast_reply_sink::MulticastReplyEnqueue::enqueue_declaration_reply)).
+/// A backing that keeps its replies encoded where they wait writes it from these
+/// ([`multicast_tx_declaration_reply`]); one that queues owned items builds the owned `Declare`
+/// ([`Self::owned`]). The two are the same bytes, which the `lent_control` tests hold writer by
+/// writer.
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclarationReply<'a> {
+    /// The final of an interest's answer.
+    Final {
+        /// The interest it ends.
+        interest_id: u64,
+    },
+    /// A subscriber of the session whose key meets the interest's.
+    #[cfg(feature = "declare-subscriber")]
+    Subscriber {
+        /// The interest it answers.
+        interest_id: u64,
+        /// The subscriber's id.
+        subscriber_id: u64,
+        /// The subscriber's key, literal.
+        keyexpr: &'a str,
+    },
+    /// A queryable of the session whose key meets the interest's.
+    #[cfg(feature = "declare-queryable")]
+    Queryable {
+        /// The interest it answers.
+        interest_id: u64,
+        /// The queryable's id.
+        queryable_id: u64,
+        /// The queryable's key, literal.
+        keyexpr: &'a str,
+        /// Whether the queryable is complete.
+        complete: bool,
+    },
+    /// The retraction of an aggregate subscriber the interest was told of, by its id alone.
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    UndeclareSubscriber {
+        /// The id the subscriber was declared by.
+        subscriber_id: u64,
+    },
+    /// A keyexpr the session declared to the group, sent to a member that asked for the keyexprs
+    /// held now.
+    Keyexpr {
+        /// The interest it answers.
+        interest_id: u64,
+        /// The id the keyexpr was declared as.
+        mapping_id: core::num::NonZero<crate::wire_id::ExprId>,
+        /// The keyexpr, literal.
+        keyexpr: &'a str,
+    },
+}
+
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+impl DeclarationReply<'_> {
+    /// The owned `Declare` of the reply, as a backing that queues owned items keeps it: `None` for
+    /// a keyexpr past the protocol's bound, which the wire cannot carry.
+    pub fn owned(self) -> Option<crate::transport_profile::owned::DeclareOwned> {
+        use crate::declare_build as build;
+        match self {
+            Self::Final { interest_id } => Some(build::build_declare_final_reply(interest_id)),
+            #[cfg(feature = "declare-subscriber")]
+            Self::Subscriber {
+                interest_id,
+                subscriber_id,
+                keyexpr,
+            } => build::build_declare_subscriber_reply_with_id(interest_id, subscriber_id, keyexpr)
+                .ok(),
+            #[cfg(feature = "declare-queryable")]
+            Self::Queryable {
+                interest_id,
+                queryable_id,
+                keyexpr,
+                complete,
+            } => build::build_declare_queryable_reply_with_id(
+                interest_id,
+                queryable_id,
+                keyexpr,
+                crate::queryable_info::QueryableInfo::local(complete),
+            )
+            .ok(),
+            #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+            Self::UndeclareSubscriber { subscriber_id } => {
+                Some(build::build_undeclare_subscriber(subscriber_id))
+            }
+            Self::Keyexpr {
+                interest_id,
+                mapping_id,
+                keyexpr,
+            } => build::build_declare_kexpr_reply(interest_id, mapping_id.get(), keyexpr).ok(),
+        }
+    }
+}
+
+// The writer of every kind of reply is one body, not generic, so it is compiled once, and the
+// count of a reply (`encoded_size`) runs the same body.
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+impl crate::tx_buf::WireWrite for DeclarationReply<'_> {
+    fn write_wire(
+        &self,
+        sink: &mut crate::tx_buf::TxSink<'_>,
+    ) -> Result<(), sce_forge_runtime::codec::CodecError> {
+        use crate::lent_control as lent;
+        use wz_codecs::declare::DeclareWire;
+        match *self {
+            Self::Final { interest_id } => {
+                DeclareWire::encode_source(&lent::final_reply_declaration(interest_id), sink)
+            }
+            #[cfg(feature = "declare-subscriber")]
+            Self::Subscriber {
+                interest_id,
+                subscriber_id,
+                keyexpr,
+            } => DeclareWire::encode_source(
+                &lent::subscriber_reply_declaration(interest_id, subscriber_id, keyexpr)?,
+                sink,
+            ),
+            #[cfg(feature = "declare-queryable")]
+            Self::Queryable {
+                interest_id,
+                queryable_id,
+                keyexpr,
+                complete,
+            } => DeclareWire::encode_source(
+                &lent::queryable_reply_declaration(
+                    interest_id,
+                    queryable_id,
+                    keyexpr,
+                    crate::queryable_info::QueryableInfo::local(complete),
+                )?,
+                sink,
+            ),
+            #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+            Self::UndeclareSubscriber { subscriber_id } => DeclareWire::encode_source(
+                &lent::undeclare_subscriber_declaration(subscriber_id, None),
+                sink,
+            ),
+            Self::Keyexpr {
+                interest_id,
+                mapping_id,
+                keyexpr,
+            } => DeclareWire::encode_source(
+                &lent::kexpr_reply_declaration(interest_id, mapping_id, keyexpr)?,
+                sink,
+            ),
+        }
+    }
+}
+
+/// `f` handed `reply`, written from its parts by the writer of its kind, as a message lent for
+/// the call: framed and counted as its owned `Declare` ([`DeclarationReply::owned`]) is. `None`
+/// when its writer refuses it (a keyexpr past the protocol's bound), with `f` not called.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-push",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+pub fn multicast_tx_declaration_reply<R>(
+    reply: DeclarationReply<'_>,
+    f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
+) -> Option<R> {
+    let size = encoded_size(&reply)?;
+    let qos = crate::declare_ext_qos::QOS_DECLARE;
+    Some(f(&MulticastTxEncoded {
+        framing: MulticastTxFraming::Control { qos },
+        size,
+        body: &reply,
+        tally: MulticastTxTally::new(
+            qos.priority(),
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
+        ),
+    }))
+}
+
+/// `f` handed the final of the replies to `request_id`, written from its two numbers as a link's
+/// writer writes it ([`crate::lent_control::response_final`]), as a message lent for the call:
+/// framed and counted as the owned [`MulticastTxItem::ResponseFinal`] is, on the band `qos` names
+/// and the reliable channel. `None` when its writer refuses it, with `f` not called.
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "codec-response-final"
+))]
+pub fn multicast_tx_response_final<R>(
+    request_id: crate::wire_id::RequestId,
+    qos: crate::sample::QosLevel,
+    f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
+) -> Option<R> {
+    let body = |sink: &mut crate::tx_buf::TxSink<'_>| {
+        crate::lent_control::response_final(request_id, qos).encode(sink)
+    };
+    let size = encoded_size(&body)?;
+    Some(f(&MulticastTxEncoded {
+        framing: MulticastTxFraming::OwnBand {
+            qos,
+            reliable: true,
+        },
+        size,
+        body: &body,
+        tally: MulticastTxTally::new(
+            qos.priority(),
+            crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::ResponseFinal),
+        ),
+    }))
+}
+
 /// `f` handed the get `writer` writes from its borrowed parts
 /// ([`crate::lent_request::RequestWriter`]), as a message lent for the call: framed as the owned
 /// `Request` is, on the band its own `ext_qos` (`qos`) names, reliable. `None` when its writer
@@ -3246,6 +3463,70 @@ mod push_tests {
         assert_eq!(by_lent.asks.len(), by_owned.asks.len());
     }
 
+    /// The final of a query's replies written from its two numbers is framed as its owned item is:
+    /// the same datagrams, on the same conduit, under the same sequence numbers, with the default
+    /// QoS and with one that names a band of a group that runs QoS; it counts for its own length
+    /// and is tallied as the owned item is. Turned red by a final that carries another id or QoS
+    /// than `build_response_final` (`multicast_tx_response_final`), or one framed on another band
+    /// or channel than the owned item.
+    #[cfg(feature = "codec-response-final")]
+    #[test]
+    fn a_response_final_written_from_its_numbers_is_framed_as_the_owned_one_is() {
+        use crate::qos::CongestionControl;
+        use crate::sample::QosLevel;
+        let mut params = params(512);
+        params.is_qos = true;
+        let mask = mask_from_res(params.seq_num_res);
+        let qualities = [
+            QosLevel::DEFAULT,
+            QosLevel::from_parts(Priority::DataHigh, CongestionControl::Drop, true),
+        ];
+        for qos in qualities {
+            let owned = MulticastTxItem::ResponseFinal { request_id: 7, qos };
+            let conduit = multicast_tx_conduit(&owned, &params);
+            #[cfg(feature = "transport-stats")]
+            let of_item = MulticastTxTally::of(&owned);
+            let (mut by_owned, mut by_lent) = (Scripted::default(), Scripted::default());
+            let mut sn_owned = MulticastTxConduits::new(mask);
+            let mut sn_lent = MulticastTxConduits::new(mask);
+            assert_eq!(
+                multicast_tx_push(
+                    owned,
+                    &mut sn_owned,
+                    &params,
+                    &params.tx_queue,
+                    &mut by_owned
+                ),
+                PushOutcome::Pushed
+            );
+            let pushed = multicast_tx_response_final(7, qos, |lent| {
+                assert_eq!(multicast_tx_encoded_conduit(lent, &params), conduit);
+                let mut bytes = Vec::new();
+                lent.body
+                    .write_body(&mut crate::tx_buf::TxSink::new(&mut bytes))
+                    .expect("written");
+                assert_eq!(lent.size, bytes.len(), "counted for its own length");
+                #[cfg(feature = "transport-stats")]
+                assert_eq!(
+                    (lent.tally.priority(), *lent.tally.class()),
+                    (of_item.priority(), *of_item.class())
+                );
+                multicast_tx_push_encoded(
+                    lent,
+                    &mut sn_lent,
+                    &params,
+                    &params.tx_queue,
+                    &mut by_lent,
+                    None,
+                )
+            })
+            .expect("a final written from its numbers");
+            assert_eq!(pushed, PushOutcome::Pushed);
+            assert_eq!(by_lent.enqueued, by_owned.enqueued, "{qos:?}");
+            assert_eq!(by_lent.sns, by_owned.sns, "{qos:?}");
+        }
+    }
+
     /// A message counts on a lane for what its frame is reserved by when it is pushed, so a
     /// larger payload counts for at least its length more.
     #[test]
@@ -4551,6 +4832,103 @@ mod group_declarations_written_from_parts {
         let mut called = false;
         assert!(multicast_tx_token_reply(1, &past, 2, |_| called = true).is_none());
         assert!(!called, "a refused reply is handed to nobody");
+    }
+
+    /// Every answer to an interest this build writes from its parts: a final, a keyexpr (one with
+    /// a multi-byte id and key), and with their planes a subscriber, a queryable of each
+    /// completeness and an aggregate subscriber's retraction.
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+    fn answers(long: &str) -> Vec<DeclarationReply<'_>> {
+        let key = core::num::NonZero::new(300).expect("a declared id");
+        Vec::from([
+            DeclarationReply::Final { interest_id: 42 },
+            DeclarationReply::Keyexpr {
+                interest_id: 42,
+                mapping_id: key,
+                keyexpr: "demo/k",
+            },
+            DeclarationReply::Keyexpr {
+                interest_id: 70_000,
+                mapping_id: key,
+                keyexpr: long,
+            },
+            #[cfg(feature = "declare-subscriber")]
+            DeclarationReply::Subscriber {
+                interest_id: 42,
+                subscriber_id: 9,
+                keyexpr: "demo/s",
+            },
+            #[cfg(feature = "declare-queryable")]
+            DeclarationReply::Queryable {
+                interest_id: 42,
+                queryable_id: 9,
+                keyexpr: "demo/q",
+                complete: true,
+            },
+            #[cfg(feature = "declare-queryable")]
+            DeclarationReply::Queryable {
+                interest_id: 42,
+                queryable_id: 9,
+                keyexpr: "demo/q",
+                complete: false,
+            },
+            #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+            DeclarationReply::UndeclareSubscriber { subscriber_id: 9 },
+        ])
+    }
+
+    /// An answer to an interest written from its parts is the bytes of the owned `Declare` a
+    /// backing that queues owned items builds, counted as long as it is, and framed and tallied as
+    /// that one is; a keyexpr past the protocol's bound is refused with `f` not called, as its owned
+    /// form is never built. Turned red by a writer of a kind that answers with another header, id,
+    /// key or info than its owned builder (`DeclarationReply::write_wire`), a size that is not its
+    /// length, or a framing or a tally that reads another QoS than the owned reply's.
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+    #[test]
+    fn an_answer_written_from_its_parts_is_the_owned_replys_bytes() {
+        let long = "k".repeat(300);
+        let mut compared = 0usize;
+        for reply in answers(&long) {
+            let owned = reply.owned().expect("an owned reply");
+            let expected = written(&|sink: &mut crate::tx_buf::TxSink<'_>| owned.encode(sink));
+            let (bytes, size, framing) =
+                multicast_tx_declaration_reply(reply, |m| (written(m.body), m.size, m.framing))
+                    .expect("an answer written from its parts");
+            assert_eq!(bytes, expected, "{reply:?}");
+            assert_eq!(size, expected.len(), "{reply:?}");
+            assert_eq!(
+                framing,
+                MulticastTxFraming::Control {
+                    qos: crate::declare_ext_qos::read_declare_qos(&owned),
+                },
+                "{reply:?}"
+            );
+            #[cfg(feature = "transport-stats")]
+            {
+                let tally = multicast_tx_declaration_reply(reply, |m| m.tally).expect("an answer");
+                let of_item = MulticastTxTally::of(&MulticastTxItem::DeclareReply {
+                    declare: alloc::boxed::Box::new(owned.clone()),
+                });
+                assert_eq!(
+                    (tally.priority(), *tally.class()),
+                    (of_item.priority(), *of_item.class()),
+                    "{reply:?}"
+                );
+            }
+            compared += 1;
+        }
+        assert_eq!(compared, answers(&long).len());
+
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let refused = DeclarationReply::Keyexpr {
+            interest_id: 42,
+            mapping_id: core::num::NonZero::new(5).expect("a declared id"),
+            keyexpr: &past,
+        };
+        assert!(refused.owned().is_none(), "the owned form refuses it too");
+        let mut called = false;
+        assert!(multicast_tx_declaration_reply(refused, |_| called = true).is_none());
+        assert!(!called, "a refused answer is handed to nobody");
     }
 
     /// A declaration written from its parts is counted as the owned one is, a control message of

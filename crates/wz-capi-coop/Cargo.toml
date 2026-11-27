@@ -187,8 +187,8 @@ scout-datagram = [
 # The answering end of a query: a queryable, its replies (with their source info, encoding and
 # attachment, and the error reply) and a query a C program keeps past its callback. What
 # `wz-capi-core`'s `queryable` names on its runtime, named on session-core. A group's stage writes
-# a reply from its parts where it waits only under `wz-session-mcu`'s own name for the codec, so the
-# feature names it there too.
+# a reply and the final of a query's replies from their parts where they wait only under
+# `wz-session-mcu`'s own names for the codecs, so the feature names them there too.
 queryable = [
     "wz-runtime-coop/queryable",
     "wz-session-core/declare-queryable",
@@ -204,6 +204,7 @@ queryable = [
     "wz-session-core/codec-response",
     "wz-session-core/codec-response-final",
     "wz-session-mcu/codec-response",
+    "wz-session-mcu/codec-response-final",
 ]
 # Delivery to the session's own subscribers (zenoh-pico's `Z_FEATURE_LOCAL_SUBSCRIBER`): a put
 # reaches the subscribers of the session that made it, after it has gone out on the link, and a

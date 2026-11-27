@@ -2009,10 +2009,11 @@ fn answer_asks(
         // What is queued below, and what the dispatch queues, leaves after the JOIN the group's
         // next step sends: a step sends its beacon before what is queued.
         join_ask.ask();
-        // A reply is put on the stage without waiting, so the answers go as they are taken.
+        // A reply is put on the stage without waiting, so the answers go as they are taken, each
+        // written from its parts where it waits.
         let mut keyexprs = keyexprs.borrow_mut();
         keyexprs.asked(event);
-        keyexprs.take_answers(|reply| tx.enqueue_reply(reply));
+        keyexprs.take_declarations(|reply| tx.enqueue_declaration_reply(reply));
     }
 }
 

@@ -451,6 +451,21 @@ pub fn kexpr_declaration(
     Ok(DeclarationOf::new(None, kexpr_body(mapping_id, suffix)?))
 }
 
+/// [`kexpr_declaration`] answering the interest `interest_id`: a keyexpr the session holds, sent
+/// to a member that asked for the keyexprs held now.
+/// [`crate::declare_build::build_declare_kexpr_reply`], written in place.
+#[cfg(feature = "codec-declare")]
+pub fn kexpr_reply_declaration(
+    interest_id: u64,
+    mapping_id: core::num::NonZero<crate::wire_id::ExprId>,
+    suffix: &str,
+) -> Result<DeclarationOf<'_, DeclKexpr<'_>>, CodecError> {
+    Ok(DeclarationOf::new(
+        Some(interest_id),
+        kexpr_body(mapping_id, suffix)?,
+    ))
+}
+
 /// The body of [`declare_kexpr`].
 #[cfg(feature = "codec-declare")]
 fn kexpr_body(
@@ -1483,6 +1498,41 @@ mod tests {
         );
         assert_eq!(
             queryable_reply_declaration(1, 1, &past, QueryableInfo::DEFAULT).err(),
+            Some(CodecError::LengthOutOfRange)
+        );
+    }
+
+    /// The declaration of a keyexpr that answers an interest is the owned reply's bytes and
+    /// presents its arm, and a suffix past the protocol's `u16` length is refused as the
+    /// keyexpr's own declaration refuses it. Turned red by a writer that answers with another
+    /// header, interest id, mapping id or key than `build_declare_kexpr_reply`.
+    #[test]
+    fn a_keyexpr_answering_an_interest_is_written_as_its_builder_writes_it() {
+        use wz_codecs::declare::DeclareWire;
+        let named: [(crate::wire_id::ExprId, &str); 4] = [
+            (1, "a/b"),
+            (7, ""),
+            (300, "x/y/**"),
+            (crate::wire_id::ExprId::MAX, "k"),
+        ];
+        let mut compared = 0usize;
+        for interest_id in IDS {
+            for (mapping, suffix) in named {
+                let id = core::num::NonZero::new(mapping).expect("a declared id");
+                let owned = owned::build_declare_kexpr_reply(interest_id, mapping, suffix).unwrap();
+                assert_eq!(
+                    one_kind(&kexpr_reply_declaration(interest_id, id, suffix).unwrap()),
+                    (owned_declare(&owned), DeclareWire::tag_of(&owned)),
+                    "keyexpr {mapping} {suffix:?} answering {interest_id}"
+                );
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, IDS.len() * named.len());
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        assert_eq!(
+            kexpr_reply_declaration(1, core::num::NonZero::<crate::wire_id::ExprId>::MIN, &past)
+                .err(),
             Some(CodecError::LengthOutOfRange)
         );
     }

@@ -21,6 +21,8 @@
 //! Folding the impls here removes both: the two profiles now contribute only a
 //! [`MulticastReplyEnqueue`] backing.
 
+#[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+use crate::multicast_tx::DeclarationReply;
 use crate::multicast_tx::MulticastTxItem;
 #[cfg(any(
     feature = "codec-response",
@@ -80,6 +82,30 @@ pub trait MulticastReplyEnqueue {
             self.enqueue_reply(MulticastTxReply::DeclareReply(&declare));
         }
     }
+
+    /// Enqueue `reply`, a declaration that answers a member's interest, handed as the arguments
+    /// of its writer. A backing that queues owned items builds the owned `Declare` of it (the
+    /// default), and skips one the wire cannot carry; one that encodes its replies where they wait
+    /// writes it with the writer of its kind (`multicast_tx::multicast_tx_declaration_reply`), and
+    /// builds no owned record of it.
+    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+    fn enqueue_declaration_reply(&self, reply: DeclarationReply<'_>) {
+        if let Some(declare) = reply.owned() {
+            self.enqueue_reply(MulticastTxReply::DeclareReply(&declare));
+        }
+    }
+
+    /// Enqueue the final of the replies to `request_id`, with its query's `qos`. A backing that
+    /// queues owned items queues the owned item (the default); one that encodes its replies where
+    /// they wait writes it from its two numbers (`multicast_tx::multicast_tx_response_final`).
+    #[cfg(feature = "codec-response-final")]
+    fn enqueue_response_final(
+        &self,
+        request_id: crate::wire_id::RequestId,
+        qos: crate::sample::QosLevel,
+    ) {
+        self.enqueue(MulticastTxItem::ResponseFinal { request_id, qos });
+    }
 }
 
 /// The shared observer-drain reply sink: the SSOT for the staged-reply ->
@@ -134,8 +160,7 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::ResponseSink for MulticastR
         request_id: crate::wire_id::RequestId,
         qos: crate::sample::QosLevel,
     ) {
-        self.queue
-            .enqueue(MulticastTxItem::ResponseFinal { request_id, qos });
+        self.queue.enqueue_response_final(request_id, qos);
     }
 }
 
@@ -169,24 +194,20 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
         self.queue
             .enqueue_token_reply(token_id, keyexpr, interest_id);
     }
+    // Each answer goes to the backing as the arguments of its writer, so that a backing that writes
+    // its replies where they wait builds no owned record of it.
     fn send_declare_final_reply(&self, interest_id: u64) {
-        // Same UNGATED builder as the unicast sink, for the same reason: the
-        // `local_token` module does not exist in a `declare-subscriber`-only
-        // build, and `DeclFinal` was never a liveliness-specific message.
-        self.queue.enqueue_reply(MulticastTxReply::DeclareReply(
-            &crate::declare_build::build_declare_final_reply(interest_id),
-        ));
+        self.queue
+            .enqueue_declaration_reply(DeclarationReply::Final { interest_id });
     }
     #[cfg(feature = "declare-subscriber")]
     fn send_declare_subscriber_reply(&self, subscriber_id: u64, keyexpr: &str, interest_id: u64) {
-        if let Ok(declare) = crate::declare_build::build_declare_subscriber_reply_with_id(
-            interest_id,
-            subscriber_id,
-            keyexpr,
-        ) {
-            self.queue
-                .enqueue_reply(MulticastTxReply::DeclareReply(&declare));
-        }
+        self.queue
+            .enqueue_declaration_reply(DeclarationReply::Subscriber {
+                interest_id,
+                subscriber_id,
+                keyexpr,
+            });
     }
     /// Open-debt item 913 — a member's interest in queryables is answered on the group with each
     /// matching queryable, as zenoh-pico answers one on a multicast transport
@@ -203,25 +224,19 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
         complete: bool,
         interest_id: u64,
     ) {
-        if let Ok(declare) = crate::declare_build::build_declare_queryable_reply_with_id(
-            interest_id,
-            queryable_id,
-            keyexpr,
-            crate::queryable_info::QueryableInfo::local(complete),
-        ) {
-            self.queue
-                .enqueue_reply(MulticastTxReply::DeclareReply(&declare));
-        }
+        self.queue
+            .enqueue_declaration_reply(DeclarationReply::Queryable {
+                interest_id,
+                queryable_id,
+                keyexpr,
+                complete,
+            });
     }
+    // The id-only retraction the unicast sink sends, through this transport's own enqueue.
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
     fn send_undeclare_subscriber_reply(&self, subscriber_id: u64) {
-        // Same id-only retraction the unicast sink emits, through this
-        // transport's own enqueue. Infallible where the declare twin is not:
-        // an `UndeclSubscriber` carries no keyexpr, so there is no bounded
-        // field to overflow.
-        self.queue.enqueue_reply(MulticastTxReply::DeclareReply(
-            &crate::declare_build::build_undeclare_subscriber(subscriber_id),
-        ));
+        self.queue
+            .enqueue_declaration_reply(DeclarationReply::UndeclareSubscriber { subscriber_id });
     }
 }
 
@@ -418,12 +433,11 @@ impl GroupKeyexprAnswers {
         });
     }
 
-    /// Every owed answer handed to `each`, in the order it is sent, lent for the call, and none
-    /// owed after: each declared keyexpr that meets the interest's key, then the final when nothing
-    /// else ends the interest. An engine whose reply backing does not wait puts each on the group
-    /// at once; one whose push may wait for room keeps a copy ([`MulticastTxReply::to_item`]) and
-    /// queues it with its own lock let go.
-    pub fn take_answers(&mut self, mut each: impl FnMut(MulticastTxReply<'_>)) {
+    /// Every owed answer handed to `each` as the arguments of its writer, in the order it is sent,
+    /// and none owed after: each declared keyexpr that meets the interest's key, then the final
+    /// when nothing else ends the interest. An engine whose reply backing does not wait puts each
+    /// on the group at once (`MulticastReplyEnqueue::enqueue_declaration_reply`).
+    pub fn take_declarations(&mut self, mut each: impl FnMut(DeclarationReply<'_>)) {
         for ask in core::mem::take(&mut self.owed) {
             for (mapping_id, keyexpr) in &self.declared {
                 if ask.restriction.as_deref().is_some_and(|restriction| {
@@ -431,20 +445,35 @@ impl GroupKeyexprAnswers {
                 }) {
                     continue;
                 }
-                if let Ok(declare) = crate::declare_build::build_declare_kexpr_reply(
-                    ask.interest_id,
-                    *mapping_id,
-                    keyexpr,
-                ) {
-                    each(MulticastTxReply::DeclareReply(&declare));
-                }
+                // A keyexpr is declared under an id that is not the literal's zero, which would
+                // name no declaration.
+                let Some(mapping_id) = core::num::NonZero::new(*mapping_id) else {
+                    continue;
+                };
+                each(DeclarationReply::Keyexpr {
+                    interest_id: ask.interest_id,
+                    mapping_id,
+                    keyexpr: keyexpr.as_str(),
+                });
             }
             if ask.ends {
-                each(MulticastTxReply::DeclareReply(
-                    &crate::declare_build::build_declare_final_reply(ask.interest_id),
-                ));
+                each(DeclarationReply::Final {
+                    interest_id: ask.interest_id,
+                });
             }
         }
+    }
+
+    /// [`Self::take_declarations`], each answer handed as its owned `Declare`, lent for the call
+    /// ([`DeclarationReply::owned`]); one the wire cannot carry is skipped. An engine whose push may
+    /// wait for room keeps a copy ([`MulticastTxReply::to_item`]) and queues it with its own lock
+    /// let go.
+    pub fn take_answers(&mut self, mut each: impl FnMut(MulticastTxReply<'_>)) {
+        self.take_declarations(|reply| {
+            if let Some(declare) = reply.owned() {
+                each(MulticastTxReply::DeclareReply(&declare));
+            }
+        });
     }
 }
 
@@ -481,6 +510,166 @@ mod tests {
         #[cfg(feature = "liveliness-get")]
         sink.prune_liveliness_get_interest(7);
         assert!(recorded.0.borrow().is_empty());
+    }
+
+    /// What a backing that writes its replies where they wait was handed: each answer to an
+    /// interest as the arguments of its writer, and each final of a query's replies by its two
+    /// numbers. Nothing reaches it as an owned item.
+    #[derive(Default)]
+    struct Parts {
+        declarations: RefCell<Vec<alloc::string::String>>,
+        #[cfg(feature = "codec-response-final")]
+        finals: RefCell<Vec<(crate::wire_id::RequestId, crate::sample::QosLevel)>>,
+    }
+
+    impl MulticastReplyEnqueue for &Parts {
+        fn enqueue(&self, _item: MulticastTxItem) {
+            panic!("an answer reached the backing as an owned item");
+        }
+
+        fn enqueue_declaration_reply(&self, reply: DeclarationReply<'_>) {
+            self.declarations
+                .borrow_mut()
+                .push(alloc::format!("{reply:?}"));
+        }
+
+        #[cfg(feature = "codec-response-final")]
+        fn enqueue_response_final(
+            &self,
+            request_id: crate::wire_id::RequestId,
+            qos: crate::sample::QosLevel,
+        ) {
+            self.finals.borrow_mut().push((request_id, qos));
+        }
+    }
+
+    /// The group's sink hands each answer to an interest to its backing as the arguments of its
+    /// writer, and the final of a query's replies by its two numbers, and builds no owned record of
+    /// either. Turned red by a sink that builds the owned reply itself (`send_declare_*_reply`,
+    /// `send_response_final`) rather than handing its backing the parts.
+    #[test]
+    fn the_group_sink_hands_each_answer_to_its_backing_as_its_parts() {
+        let parts = Parts::default();
+        let sink = MulticastReplySink::new(&parts);
+        sink.send_declare_final_reply(42);
+        #[cfg(feature = "declare-subscriber")]
+        sink.send_declare_subscriber_reply(9, "demo/s", 42);
+        #[cfg(feature = "declare-queryable")]
+        sink.send_declare_queryable_reply(8, "demo/q", true, 42);
+        #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+        sink.send_undeclare_subscriber_reply(9);
+        let expected = Vec::from([
+            alloc::format!("{:?}", DeclarationReply::Final { interest_id: 42 }),
+            #[cfg(feature = "declare-subscriber")]
+            alloc::format!(
+                "{:?}",
+                DeclarationReply::Subscriber {
+                    interest_id: 42,
+                    subscriber_id: 9,
+                    keyexpr: "demo/s",
+                }
+            ),
+            #[cfg(feature = "declare-queryable")]
+            alloc::format!(
+                "{:?}",
+                DeclarationReply::Queryable {
+                    interest_id: 42,
+                    queryable_id: 8,
+                    keyexpr: "demo/q",
+                    complete: true,
+                }
+            ),
+            #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+            alloc::format!(
+                "{:?}",
+                DeclarationReply::UndeclareSubscriber { subscriber_id: 9 }
+            ),
+        ]);
+        assert_eq!(*parts.declarations.borrow(), expected);
+        #[cfg(feature = "codec-response-final")]
+        {
+            let qos = crate::sample::QosLevel::DEFAULT;
+            sink.send_response_final(7, qos);
+            assert_eq!(*parts.finals.borrow(), [(7, qos)]);
+        }
+    }
+
+    /// What a backing that queues owned items was handed: each declaration reply as the owned
+    /// `Declare`, and every other item as it came.
+    #[derive(Default)]
+    struct OwnedReplies {
+        declarations: RefCell<Vec<crate::transport_profile::owned::DeclareOwned>>,
+        items: RefCell<Vec<MulticastTxItem>>,
+    }
+
+    impl MulticastReplyEnqueue for &OwnedReplies {
+        fn enqueue(&self, item: MulticastTxItem) {
+            self.items.borrow_mut().push(item);
+        }
+
+        fn enqueue_reply(&self, reply: MulticastTxReply<'_>) {
+            match reply {
+                MulticastTxReply::DeclareReply(declare) => {
+                    self.declarations.borrow_mut().push(declare.clone());
+                }
+                #[cfg(feature = "codec-response")]
+                _ => panic!("an answer is a declaration reply"),
+            }
+        }
+    }
+
+    /// A backing that queues owned items is handed, for each answer to an interest, the owned reply
+    /// the builder of its kind builds, and nothing for a keyexpr past the protocol's bound; the
+    /// final of a query's replies reaches it as the owned item. Turned red by a default
+    /// `enqueue_declaration_reply` that builds another reply than the builder of its kind, or one
+    /// that queues a refused reply, or a default `enqueue_response_final` that queues another item.
+    #[test]
+    fn an_answer_reaches_an_owned_backing_as_its_builders_reply() {
+        let owned = OwnedReplies::default();
+        let sink = MulticastReplySink::new(&owned);
+        sink.send_declare_final_reply(42);
+        #[cfg(feature = "declare-subscriber")]
+        {
+            sink.send_declare_subscriber_reply(9, "demo/s", 42);
+            let past = "k".repeat(usize::from(u16::MAX) + 1);
+            sink.send_declare_subscriber_reply(10, &past, 42);
+        }
+        #[cfg(feature = "declare-queryable")]
+        sink.send_declare_queryable_reply(8, "demo/q", false, 42);
+        #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+        sink.send_undeclare_subscriber_reply(9);
+        let expected = Vec::from([
+            crate::declare_build::build_declare_final_reply(42),
+            #[cfg(feature = "declare-subscriber")]
+            crate::declare_build::build_declare_subscriber_reply_with_id(42, 9, "demo/s")
+                .expect("a reply"),
+            #[cfg(feature = "declare-queryable")]
+            crate::declare_build::build_declare_queryable_reply_with_id(
+                42,
+                8,
+                "demo/q",
+                crate::queryable_info::QueryableInfo::local(false),
+            )
+            .expect("a reply"),
+            #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+            crate::declare_build::build_undeclare_subscriber(9),
+        ]);
+        assert_eq!(*owned.declarations.borrow(), expected);
+        assert!(owned.items.borrow().is_empty(), "no answer is an item");
+        #[cfg(feature = "codec-response-final")]
+        {
+            let qos = crate::sample::QosLevel::DEFAULT;
+            sink.send_response_final(7, qos);
+            match owned.items.borrow().first() {
+                Some(MulticastTxItem::ResponseFinal {
+                    request_id,
+                    qos: of,
+                }) => {
+                    assert_eq!((*request_id, *of), (7, qos));
+                }
+                _ => panic!("the final is the owned item"),
+            }
+        }
     }
 
     /// A held token's answer to a member's interest reaches a backing that queues owned items as
@@ -618,5 +807,77 @@ mod tests {
                 build_declare_final_reply(42),
             ]
         );
+    }
+
+    /// The answers to a member's keyexpr interest are handed as the arguments of their writers, in
+    /// the order the owned replies go, each the parts of the owned reply `take_answers` hands; an
+    /// answer once handed is not owed again. Turned red by a walk that hands another id, key or
+    /// interest than the owned answer (`take_declarations`), or the final before the keys.
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-final",
+        feature = "storage-profile"
+    ))]
+    #[test]
+    fn a_keyexpr_interest_is_answered_with_the_parts_of_its_owned_replies() {
+        use crate::declare_build::{build_declare_final_reply, build_declare_kexpr_reply};
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::interest_build::{build_interest_exact, InterestKinds};
+        use crate::network_message::NetworkMessage;
+        let frame = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: alloc::vec![NetworkMessage::Interest(
+                build_interest_exact(42, InterestKinds::KEYEXPRS, true, false, None)
+                    .expect("an interest"),
+            )],
+            has_ext: false,
+            extensions: Vec::new(),
+            priority: crate::qos::Priority::DEFAULT,
+        };
+        let mut answers = GroupKeyexprAnswers::default();
+        answers.declared(9, "k/nine");
+        answers.declared(3, "k/three");
+        let mut owed = false;
+        crate::driver_loop::deliver_frame(&frame, |event| owed = answers.asked(&event));
+        assert!(owed);
+        let mut handed = Vec::new();
+        answers
+            .take_declarations(|reply| handed.push((alloc::format!("{reply:?}"), reply.owned())));
+        let key = |id: crate::wire_id::ExprId| core::num::NonZero::new(id).expect("a declared id");
+        assert_eq!(
+            handed,
+            [
+                (
+                    alloc::format!(
+                        "{:?}",
+                        DeclarationReply::Keyexpr {
+                            interest_id: 42,
+                            mapping_id: key(3),
+                            keyexpr: "k/three",
+                        }
+                    ),
+                    Some(build_declare_kexpr_reply(42, 3, "k/three").expect("a reply")),
+                ),
+                (
+                    alloc::format!(
+                        "{:?}",
+                        DeclarationReply::Keyexpr {
+                            interest_id: 42,
+                            mapping_id: key(9),
+                            keyexpr: "k/nine",
+                        }
+                    ),
+                    Some(build_declare_kexpr_reply(42, 9, "k/nine").expect("a reply")),
+                ),
+                (
+                    alloc::format!("{:?}", DeclarationReply::Final { interest_id: 42 }),
+                    Some(build_declare_final_reply(42)),
+                ),
+            ]
+        );
+        let mut again = 0usize;
+        answers.take_declarations(|_| again += 1);
+        assert_eq!(again, 0, "an answer is handed once");
     }
 }

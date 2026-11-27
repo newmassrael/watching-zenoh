@@ -832,6 +832,18 @@ impl GroupTxStage {
         self.count_entered(outcome, &tally);
     }
 
+    /// [`Self::admit_reply_body`] of a reply written from its parts and lent for the call, framed,
+    /// sized and counted as its writer says.
+    #[cfg(any(feature = "liveliness-token", feature = "codec-response-final"))]
+    fn admit_lent_reply(&self, message: &MulticastTxEncoded<'_>) {
+        self.admit_reply_body(
+            MulticastTxMeta::of_encoded(message, &self.inner.params),
+            message.size,
+            message.body,
+            message.tally,
+        );
+    }
+
     /// Keep a message pushed while another push holds the conduits, framed once they are let go
     /// ([`Self::push_deferred`]). One the staged storage cannot keep is refused as its kind is: a
     /// reply by the reply limit, counted in [`Self::dropped`], a message of the session as a
@@ -1177,19 +1189,39 @@ impl MulticastReplyEnqueue for GroupTxStage {
     // refuses holds no slot, as the owned one is never built.
     #[cfg(feature = "liveliness-token")]
     fn enqueue_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        let params = &self.inner.params;
         let _ = wz_session_core::multicast_tx::multicast_tx_token_reply(
             token_id,
             keyexpr,
             interest_id,
-            |message| {
-                self.admit_reply_body(
-                    MulticastTxMeta::of_encoded(message, params),
-                    message.size,
-                    message.body,
-                    message.tally,
-                );
-            },
+            |message| self.admit_lent_reply(message),
+        );
+    }
+
+    // Written from its parts by the writer of its kind into the lane or the staged storage, as a
+    // link's writer writes it: no owned `Declare` of it is built. One its writer refuses holds no
+    // slot, as the owned one is never built.
+    #[cfg(feature = "liveliness-token")]
+    fn enqueue_declaration_reply(
+        &self,
+        reply: wz_session_core::multicast_tx::DeclarationReply<'_>,
+    ) {
+        let _ = wz_session_core::multicast_tx::multicast_tx_declaration_reply(reply, |message| {
+            self.admit_lent_reply(message)
+        });
+    }
+
+    // Written from its two numbers into the lane or the staged storage, as a link's writer writes
+    // it: no owned item of it is built.
+    #[cfg(feature = "codec-response-final")]
+    fn enqueue_response_final(
+        &self,
+        request_id: wz_session_core::wire_id::RequestId,
+        qos: wz_session_core::sample::QosLevel,
+    ) {
+        let _ = wz_session_core::multicast_tx::multicast_tx_response_final(
+            request_id,
+            qos,
+            |message| self.admit_lent_reply(message),
         );
     }
 }
@@ -2724,6 +2756,129 @@ mod tests {
         assert!(refused.take().is_none(), "a refused reply is no datagram");
         assert_eq!(refused.inner.replies.get(), 0, "and holds no slot");
         assert_eq!(refused.dropped(), 0, "nor is it counted as a drop");
+    }
+
+    /// An answer to a member's interest handed as its parts is framed as the owned reply the trait's
+    /// default queues is, at once and when it is kept while the conduits are held, and holds a
+    /// reply slot until its datagram is taken; one past the protocol's bound is no datagram and
+    /// holds no slot. Turned red by an answer written with another band, channel or body than the
+    /// owned one (`enqueue_declaration_reply`), or by a refused answer that takes a slot.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn an_answer_handed_as_its_parts_is_framed_as_its_owned_reply() {
+        use wz_session_core::multicast_tx::DeclarationReply;
+        /// The owned items the trait's default `enqueue_declaration_reply` queues.
+        struct Owned(RefCell<Vec<MulticastTxItem>>);
+        impl MulticastReplyEnqueue for Owned {
+            fn enqueue(&self, item: MulticastTxItem) {
+                self.0.borrow_mut().push(item);
+            }
+        }
+        let key = core::num::NonZero::new(5).expect("a declared id");
+        let answers = [
+            DeclarationReply::Keyexpr {
+                interest_id: 42,
+                mapping_id: key,
+                keyexpr: "demo/a",
+            },
+            DeclarationReply::Final { interest_id: 42 },
+        ];
+        for reply in answers {
+            let recorded = Owned(RefCell::new(Vec::new()));
+            recorded.enqueue_declaration_reply(reply);
+            let item = recorded.0.borrow_mut().pop().expect("the owned reply");
+            let owned = GroupTxStage::new(&params());
+            owned.enqueue(item);
+            let lent = GroupTxStage::new(&params());
+            lent.enqueue_declaration_reply(reply);
+            let staged = GroupTxStage::new(&params());
+            {
+                let _held = staged.inner.conduits.borrow_mut();
+                staged.enqueue_declaration_reply(reply);
+                assert!(staged.take().is_none(), "kept while the conduits are held");
+                assert_eq!(
+                    staged.inner.replies.get(),
+                    1,
+                    "the kept reply holds its slot"
+                );
+            }
+            staged.push_deferred();
+            let expected = owned.take().expect("the owned reply");
+            for stage in [&lent, &staged] {
+                let datagram = stage.take().expect("the reply");
+                assert_eq!(datagram.bytes, expected.bytes, "{reply:?}");
+                assert_eq!(
+                    (datagram.priority, datagram.reliable),
+                    (expected.priority, expected.reliable)
+                );
+            }
+            assert_eq!(staged.inner.replies.get(), 0, "its slot is free once taken");
+            assert_eq!((lent.dropped(), staged.dropped()), (0, 0));
+        }
+
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let refused = DeclarationReply::Keyexpr {
+            interest_id: 42,
+            mapping_id: key,
+            keyexpr: &past,
+        };
+        let recorded = Owned(RefCell::new(Vec::new()));
+        recorded.enqueue_declaration_reply(refused);
+        assert!(
+            recorded.0.borrow().is_empty(),
+            "the owned form refuses it too"
+        );
+        let stage = GroupTxStage::new(&params());
+        stage.enqueue_declaration_reply(refused);
+        assert!(stage.take().is_none(), "a refused reply is no datagram");
+        assert_eq!(stage.inner.replies.get(), 0, "and holds no slot");
+        assert_eq!(stage.dropped(), 0, "nor is it counted as a drop");
+    }
+
+    /// The final of a query's replies written from its two numbers is framed as its owned item is,
+    /// on the band its QoS names, at once and when it is kept while the conduits are held, and
+    /// holds a reply slot until its datagram is taken. Turned red by a final written with another
+    /// band, channel or body than the owned item (`enqueue_response_final`).
+    #[cfg(feature = "codec-response-final")]
+    #[test]
+    fn a_response_final_written_from_its_numbers_is_framed_as_its_owned_item() {
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::sample::QosLevel;
+        let mut params = params();
+        params.is_qos = true;
+        let qualities = [
+            QosLevel::DEFAULT,
+            QosLevel::from_parts(Priority::DataHigh, CongestionControl::Block, false),
+        ];
+        for qos in qualities {
+            let owned = GroupTxStage::new(&params);
+            owned.enqueue(MulticastTxItem::ResponseFinal { request_id: 7, qos });
+            let lent = GroupTxStage::new(&params);
+            lent.enqueue_response_final(7, qos);
+            let staged = GroupTxStage::new(&params);
+            {
+                let _held = staged.inner.conduits.borrow_mut();
+                staged.enqueue_response_final(7, qos);
+                assert!(staged.take().is_none(), "kept while the conduits are held");
+                assert_eq!(
+                    staged.inner.replies.get(),
+                    1,
+                    "the kept final holds its slot"
+                );
+            }
+            staged.push_deferred();
+            let expected = owned.take().expect("the owned final");
+            for stage in [&lent, &staged] {
+                let datagram = stage.take().expect("the final");
+                assert_eq!(datagram.bytes, expected.bytes, "{qos:?}");
+                assert_eq!(
+                    (datagram.priority, datagram.reliable),
+                    (expected.priority, expected.reliable)
+                );
+            }
+            assert_eq!(staged.inner.replies.get(), 0, "its slot is free once taken");
+            assert_eq!((lent.dropped(), staged.dropped()), (0, 0));
+        }
     }
 
     /// A staged reply handed as its parts is framed as its owned record is, at once and when it is
