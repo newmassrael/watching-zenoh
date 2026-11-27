@@ -270,6 +270,16 @@ pub const PENDING_GET_ROWS: usize =
         0
     });
 
+/// What a pending get is, which bounds how many of it the gets' table holds at once
+/// ([`TableRows::pending_queries`], [`TableRows::pending_snapshots`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GetKind {
+    /// A query.
+    Query,
+    /// A liveliness snapshot: none in a build that asks for none (`liveliness-get`).
+    Snapshot,
+}
+
 /// What a write filter or a matching listener counts: the subscribers, or the queryables, complete
 /// ones alone where the querier's target requires them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1420,6 +1430,9 @@ pub struct PendingGetRow<Key, Cb> {
     /// `u64::MAX` for a get that waits with no deadline.
     deadline: u64,
     end: GetEnd,
+    /// Which bound it counts against, where the table holds more than one kind.
+    #[cfg(feature = "liveliness-get")]
+    kind: GetKind,
     callback: Cb,
 }
 
@@ -1567,9 +1580,11 @@ pub struct TableRows {
     /// The matching listeners declared on a key, each with a write filter of its own:
     /// `MAX_MATCHING_LISTENERS` where the engine keeps such listeners, none where it does not.
     pub key_listeners: usize,
-    /// `MAX_PENDING_QUERIES` and, with `liveliness-get`, `MAX_PENDING_LIVELINESS_GETS`: a row
-    /// for each get, a query's or a snapshot's, under [`PENDING_GET_ROWS`].
-    pub pending_gets: usize,
+    /// `MAX_PENDING_QUERIES`: the queries the gets' table holds at once.
+    pub pending_queries: usize,
+    /// `MAX_PENDING_LIVELINESS_GETS`: the liveliness snapshots the gets' table holds at once,
+    /// none where the build asks for none.
+    pub pending_snapshots: usize,
     /// `MAX_PENDING_REPLIES`: the replies the consolidating gets hold back, of all of them.
     pub held_replies: usize,
 }
@@ -1580,6 +1595,11 @@ impl TableRows {
         self.publishers
             .saturating_add(self.queriers)
             .saturating_add(self.key_listeners)
+    }
+
+    /// The gets' one table: a query's row each and a snapshot's, under [`PENDING_GET_ROWS`].
+    pub const fn pending_gets(&self) -> usize {
+        self.pending_queries.saturating_add(self.pending_snapshots)
     }
 }
 
@@ -1618,6 +1638,43 @@ impl PlaneBounds {
             _ if for_listener => !self.inverted_listeners,
             Plane::Subscribers => !self.inverted_publishers,
             Plane::Queryables { .. } => !self.inverted_queriers,
+        }
+    }
+}
+
+/// The most gets of each kind the tables hold, in the one table of them: a query's are held to
+/// `MAX_PENDING_QUERIES`, a snapshot's to `MAX_PENDING_LIVELINESS_GETS`. A build that asks for no
+/// snapshot keeps queries alone, which the table's own rows bound.
+// Kept inverted, as the planes' bounds are, so tables of all zero bytes are bound by nothing but
+// the table's own rows until the session's open holds them to its limits.
+#[cfg(feature = "liveliness-get")]
+#[derive(Clone, Copy, Debug)]
+struct GetBounds {
+    inverted_queries: usize,
+    inverted_snapshots: usize,
+}
+
+#[cfg(feature = "liveliness-get")]
+impl GetBounds {
+    /// No bound but the table's own.
+    const UNBOUND: Self = Self {
+        inverted_queries: 0,
+        inverted_snapshots: 0,
+    };
+
+    /// The bounds `rows` gives.
+    fn of(rows: &TableRows) -> Self {
+        Self {
+            inverted_queries: !rows.pending_queries,
+            inverted_snapshots: !rows.pending_snapshots,
+        }
+    }
+
+    /// The bound of a get of `kind`.
+    fn of_kind(self, kind: GetKind) -> usize {
+        match kind {
+            GetKind::Query => !self.inverted_queries,
+            GetKind::Snapshot => !self.inverted_snapshots,
         }
     }
 }
@@ -1902,6 +1959,9 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     plane_bounds: PlaneBounds,
     matching: MatchingListenersKept<F, P>,
     pending_gets: PendingGetsKept<F, P>,
+    /// What holds each kind of get to its own bound in the table they share.
+    #[cfg(feature = "liveliness-get")]
+    get_bounds: GetBounds,
     /// The earliest deadline of a standing get, past by one so that zero is none and the tables'
     /// zero bytes hold no deadline: kept as gets begin and stop standing, so a driver's wait reads
     /// it with no walk ([`Self::next_get_deadline`]).
@@ -2456,6 +2516,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             plane_bounds: PlaneBounds::UNBOUND,
             matching: <F::FilterPresence as Presence>::empty::<MatchingListeners<F, P>>(),
             pending_gets: <F::GetPresence as Presence>::empty::<PendingGets<F, P>>(),
+            #[cfg(feature = "liveliness-get")]
+            get_bounds: GetBounds::UNBOUND,
             get_due: 0,
             ended_gets: 0,
             #[cfg(feature = "storage-profile")]
@@ -2497,6 +2559,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// Hold each table to the rows `rows` gives it, under the build's bound.
     pub fn limit_to(&mut self, rows: &TableRows) {
         self.plane_bounds = PlaneBounds::of(rows);
+        #[cfg(feature = "liveliness-get")]
+        {
+            self.get_bounds = GetBounds::of(rows);
+        }
         self.keyexprs.limit_to(rows.keyexprs);
         self.subscribers.limit_to(rows.subscribers);
         if let Some(queryables) = self.kept_queryables_mut() {
@@ -2526,7 +2592,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         if let Some(table) =
             <F::GetPresence as Presence>::get_mut::<PendingGets<F, P>>(&mut self.pending_gets)
         {
-            table.limit_to(rows.pending_gets);
+            table.limit_to(rows.pending_gets());
         }
     }
 
@@ -3483,31 +3549,52 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     // ---- pending gets ----------------------------------------------------------------------
 
-    /// Begin a get whose replies pass `accept`, consolidated by `mode` over every leg, owed a
-    /// Final by each of its `legs`, ending unanswered at `deadline` (`u64::MAX` for never): its
-    /// row and the request id every leg's query carries. A caller that issues the legs one at a
-    /// time begins it with one, its own, which it ends once it has issued them ([`Self::add_leg`]).
+    /// Whether a get of `kind` finds a row now: the table has one free, and the gets of its kind
+    /// it holds are fewer than their bound. What a caller reads before it makes the get's
+    /// callback, so a get refused for want of a row makes none.
+    pub fn has_room_for_get(&self, kind: GetKind) -> bool {
+        // Tables that keep no pending get have no room for one.
+        self.kept_pending_gets()
+            .is_some_and(|gets| !gets.is_full() && self.kind_has_room(gets, kind))
+    }
+
+    /// Whether a get of `kind` is under its own bound in `gets`, the table every kind shares.
+    #[cfg(feature = "liveliness-get")]
+    fn kind_has_room(&self, gets: &PendingGets<F, P>, kind: GetKind) -> bool {
+        let held = gets.iter().filter(|(_, row)| row.kind == kind).count();
+        held < self.get_bounds.of_kind(kind)
+    }
+
+    /// A build that asks for no snapshot holds queries alone, under the table's own rows.
+    #[cfg(not(feature = "liveliness-get"))]
+    fn kind_has_room(&self, _gets: &PendingGets<F, P>, kind: GetKind) -> bool {
+        kind == GetKind::Query
+    }
+
+    /// Begin a get of `kind` whose replies pass `accept`, consolidated by `mode` over every
+    /// leg, owed a Final by each of its `legs`, ending unanswered at `deadline` (`u64::MAX` for
+    /// never): its row and the request id every leg's query carries. A caller that issues the legs
+    /// one at a time begins it with one, its own, which it ends once it has issued them
+    /// ([`Self::add_leg`]).
     ///
     /// Refused in the order the other declarations are, so a refused get spends no request id
-    /// and keeps no key: table room, then the gate's key (`KeyexprTooLong` past what a row
-    /// holds, `TableFull` when the key arena has no room), and the callback is handed back.
+    /// and keeps no key: table room for its kind ([`Self::has_room_for_get`]), then the gate's
+    /// key (`KeyexprTooLong` past what a row holds, `TableFull` when the key arena has no room),
+    /// and the callback is handed back.
     pub fn begin_get(
         &mut self,
+        kind: GetKind,
         accept: crate::reply_acceptance::ReplyAcceptance<'_>,
         mode: crate::query_mode::ConsolidationMode,
         legs: u16,
         deadline: u64,
         callback: F::Reply,
     ) -> Result<GetBegun, Refused<F::Reply>> {
-        // Tables that keep no pending get have no room for one.
-        match self.kept_pending_gets() {
-            Some(gets) if !gets.is_full() => {}
-            _ => {
-                return Err(Refused {
-                    why: RegisterError::TableFull,
-                    callback,
-                })
-            }
+        if !self.has_room_for_get(kind) {
+            return Err(Refused {
+                why: RegisterError::TableFull,
+                callback,
+            });
         }
         let gate = match accept {
             crate::reply_acceptance::ReplyAcceptance::Any => None,
@@ -3531,6 +3618,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             legs,
             deadline,
             end: GetEnd::Standing,
+            #[cfg(feature = "liveliness-get")]
+            kind,
             callback,
         };
         let Some(gets) = self.kept_pending_gets_mut() else {
@@ -4383,8 +4472,10 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             ),
             pending_gets: <F::GetPresence as Presence>::lent_from::<PendingGets<F, Lent>>(
                 &mut lend,
-                rows.pending_gets,
+                rows.pending_gets(),
             ),
+            #[cfg(feature = "liveliness-get")]
+            get_bounds: GetBounds::of(rows),
             get_due: 0,
             ended_gets: 0,
             #[cfg(feature = "storage-profile")]
@@ -4412,7 +4503,7 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             kept_bytes::<F::FilterPresence>(<MatchingListeners<F, Lent>>::arena_bytes(
                 rows.matching_listeners,
             )),
-            kept_bytes::<F::GetPresence>(<PendingGets<F, Lent>>::arena_bytes(rows.pending_gets)),
+            kept_bytes::<F::GetPresence>(<PendingGets<F, Lent>>::arena_bytes(rows.pending_gets())),
             held_arena_bytes(rows.held_replies),
         ];
         let mut sum = Some(0_usize);
@@ -4466,7 +4557,9 @@ impl<F: RowCallbacks> SessionTables<F, crate::bounded::OnUse> {
             >(rows.matching_listeners),
             pending_gets: <F::GetPresence as Presence>::counted::<
                 PendingGets<F, crate::bounded::OnUse>,
-            >(rows.pending_gets),
+            >(rows.pending_gets()),
+            #[cfg(feature = "liveliness-get")]
+            get_bounds: GetBounds::of(rows),
             get_due: 0,
             ended_gets: 0,
             held: crate::reply_hold::HeldReplies::counted(rows.held_replies),
@@ -4479,7 +4572,7 @@ impl<F: RowCallbacks> SessionTables<F, crate::bounded::OnUse> {
 // gets' due time of zero is none; the
 // match memory and the held replies are `ZeroEmpty` of this policy; every table is a `SlotMap` of
 // this policy (`ZeroEmpty`) or, absent, no bytes (`Presence` is sealed to the two); the plane
-// bounds of zero are none. Nothing drops a value, every sequence holding none.
+// bounds and the gets' bounds of zero are none. Nothing drops a value, every sequence holding none.
 unsafe impl<F: RowCallbacks> ZeroEmpty for SessionTables<F, Region> {}
 
 /// The lines a region's description holds for one [`SessionTables`] of the region policy, at most:

@@ -1821,9 +1821,9 @@ fn the_tables_hold_a_row_for_each_get_and_each_held_reply() {
         0
     };
     assert_eq!(
-        tables.pending_gets,
-        caps::MAX_PENDING_QUERIES + snapshots,
-        "a row of the tables for each query and each snapshot pending at once"
+        (tables.pending_queries, tables.pending_snapshots),
+        (caps::MAX_PENDING_QUERIES, snapshots),
+        "a row of the tables for each query and each snapshot pending at once, each kind its own"
     );
     assert_eq!(tables.held_replies, plan.session().held_replies());
     assert_eq!(tables.held_replies, caps::MAX_PENDING_REPLIES);

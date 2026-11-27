@@ -443,7 +443,7 @@ use {
     wz_session_core::registry_error::RegisterError,
     wz_session_core::reply_acceptance::ReplyAcceptance,
     wz_session_core::reply_sink::{timeout_reply, ReplyView},
-    wz_session_core::session_tables::{GetEnd, PendingGetHandle},
+    wz_session_core::session_tables::{GetEnd, GetKind, PendingGetHandle},
     wz_session_core::slot_map::Removal,
 };
 
@@ -10511,6 +10511,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                         let deadline_ms = leg_deadline_ms(core.clock.now_us(), timeout_ms);
                         let row = ReplyRow::for_get(leg(), GetShown::new(true, tag));
                         let begun = tables_mut(registry).begin_get(
+                            GetKind::Snapshot,
                             ReplyAcceptance::Any,
                             wz_session_core::query_mode::ConsolidationMode::None,
                             1,
@@ -10629,6 +10630,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 let deadline_ms = ask.deadline_ms;
                 let row = ReplyRow::for_get((ask.mint)(), GetShown::new(ask.expose, ask.fan));
                 let begun = tables_mut(registry).begin_get(
+                    GetKind::Query,
                     ReplyAcceptance::for_query(ask.keyexpr, ask.accept),
                     ask.consolidation,
                     1,

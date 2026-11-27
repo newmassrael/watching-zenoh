@@ -2388,10 +2388,10 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     pub const fn tables(&self) -> TableRows {
         let rows = &self.session.entities;
         // Each get the ABI holds pending, a query's or a liveliness snapshot's, is a row of the
-        // tables' gets, and the replies the gets hold back rows of the tables' held replies.
-        let pending_gets = rows
-            .of_kind(EntityKind::PendingGet)
-            .saturating_add(rows.of_kind(EntityKind::PendingLivelinessGet));
+        // tables' gets, each kind held to its own count there, and the replies the gets hold back
+        // rows of the tables' held replies.
+        let pending_queries = rows.of_kind(EntityKind::PendingGet);
+        let pending_snapshots = rows.of_kind(EntityKind::PendingLivelinessGet);
         #[cfg(feature = "query")]
         let held_replies = self.session.held_replies;
         #[cfg(not(feature = "query"))]
@@ -2406,7 +2406,8 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             queriers: rows.of_kind(EntityKind::Querier),
             matching_listeners: rows.of_kind(EntityKind::MatchingListener),
             key_listeners: rows.key_listeners(),
-            pending_gets,
+            pending_queries,
+            pending_snapshots,
             held_replies,
         }
     }
