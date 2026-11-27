@@ -1159,10 +1159,12 @@ fn a_read_turns_every_face_once() {
 #[cfg(all(not(wz_round), not(any(feature = "listen", feature = "group"))))]
 #[test]
 fn a_client_reads_its_one_face_through_a_table_of_one_row() {
-    assert!(
-        !crate::arena::TAKES_FACES,
-        "CONTROL: the build takes no face beside its dial role's"
-    );
+    const {
+        assert!(
+            !crate::arena::TAKES_FACES,
+            "CONTROL: the build takes no face beside its dial role's"
+        )
+    };
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     assert_eq!(
