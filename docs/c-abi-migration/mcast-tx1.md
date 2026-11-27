@@ -831,3 +831,81 @@ Next, in order:
   `wz-capi-pico` and `wz-capi-coop` forwarding `wz-session-mcu/multicast-send-hold`; main runs
   `wz_config.py --write`);
 - then T3c (with the gate widening of 17.1), F8b.
+
+## 19. Step T3b, the driver's waits and the readers the stage needs, as landed
+
+Main's rulings on section 18's open questions: the stage is generic over the runtime `R` (the
+stage is transport machinery and names no C ABI type, so layering points down only); with the
+hold, the JOIN reads the held frame's number off the driver; the group's counters are
+`GroupTx`'s, one home a counter.
+
+- **The driver waits on the host, never on the transport's own wait.** `GroupDriver<T, P>`
+  takes the host's pace (`P: GroupTxPace`, the wait the stage's producers wait with). Without
+  the hold a frame the socket refused is followed by one pass of the host and one wait on the
+  socket's writability (`GroupTxPace::wait_writable`) before it is offered again, as
+  zenoh-pico's blocking send waits inside the socket (`vendor/zenoh-pico/src/link/link.c` @
+  `z_result_t _z_link_send_wbuf(`); a group whose session ended drops the frame
+  (`NoTxSlot`). With the hold the ask for room runs the same pass and wait once and answers
+  how long it waited by the host's clock. The transport's `wait_for_room` is not asked: a stack
+  whose socket can be full but which gives no wait of its own (the raw Ethernet group, whose
+  writability is a `room_wait` handle the host's `LinkWaits` waits on) answers it at once,
+  and the loop over it was a spin. `GroupLink::wait_room` had no other reader and is gone.
+- **The held frame's lane is read where frames are read.** `inbound::frame_lane` reads the
+  priority, channel and number of a `Frame` or `Fragment` by the head decodes of the receive
+  path (`parse_frame_in_place`, `parse_fragment_in_place`), so the frame layout has one
+  reader. `GroupDriver::held_lane` (with the hold) answers it for the frame it holds; the
+  feature takes the core's `storage-profile`, which carries the decode.
+- **The readers the stage switch calls.** `GroupTx::sending` answers whether a sender holds
+  one of the group's conduits (the round form's task reads it before its socket, section 9.4);
+  `MulticastTxMeta::group_message` is a framing's `GroupTxMessage`, so a message sent through
+  the walk is framed as the stage framed it.
+
+Held by `group_drive::driver::tests`: without the hold
+`a_full_socket_is_waited_on_before_each_offer_inside_the_send` (red if an offer follows an
+offer with no wait between, if the send returns on a full socket, or if it waits on the
+transport's wait, which never frees room there) and `a_full_socket_of_an_ended_group_is_a_drop`;
+with it `a_frame_a_full_socket_refused_is_held_and_offered_first`,
+`a_held_frame_a_wait_did_not_free_leaves_the_link_congested` and
+`a_held_frame_answers_its_lane_until_it_leaves`; by `inbound::frame_lane_tests` (a frame, a
+fragment with `reassembly`, a QoS extension with `transport-qos`, and the units that are no
+frame); by `bundle_tests::group_tx_tests::a_group_reads_a_sender_inside_its_conduit` and
+`multicast_tx::push_tests::a_framing_is_the_group_message_it_reads_as`.
+
+Expected: 0 bytes on every case (no build calls the driver or the readers yet; the hold build
+compiles the core's storage profile, which every group build carries already); receive Ir none.
+
+### 19.1 The stage switch, as read before it is written
+
+The switch is one change across three crates, and these are its parts as the code reads them:
+
+- **The stage over the component.** `GroupTxStage<R>` holds a `GroupTx<R>` whose link is the
+  group's driver. `push_encoded` sends `MulticastTxMeta::of_encoded(..).group_message(size)`
+  with the message's body; `admit_reply` and the lent replies admit by the quota and send the
+  same way. A reply is then written at once or refused at once, so the quota bounds the replies a
+  hold keeps out (one, the held frame) and `MAX_MULTICAST_REPLIES`'s admission is the sink's,
+  as section 9.3 says; the stage's tests of a reply held past the quota become tests of the
+  sink's admission.
+- **What the pump reads of the stage.** The pump (`MulticastPump`) is not generic over `R`
+  and should not become so: it reads the stage through an object of the few answers it needs (the
+  JOIN's numbers, whether a frame is held, the losses, the reply admission, the window's flush),
+  which `GroupTxStage<R>` implements. The JOIN's numbers are `GroupTx::next_sn` per conduit
+  and channel, with the held frame's lane (`held_lane`) answering its own number.
+- **A typed handle on the driver.** `GroupTx::new` takes the driver erased
+  (`R::LinkSink`, `CellRc<dyn BoxedLinkDriver, K::LinkCount>` in the coop engine); the stage
+  keeps a clone of the typed handle made before the unsizing (`CellRc::into_sink`) to read
+  `held_lane`, so the stage is generic over the driver's transport and pace as well, or reads
+  them through the same object as the pump.
+- **The round form in the same change.** A reply admitted while a sender holds its conduit
+  would take the conduit's lock a second time on one task; the group's task reads
+  `GroupTx::sending` before it reads its socket (section 9.4), so this lands with the switch and
+  not after it.
+- **The engine.** `GroupFace` makes the driver over its `GroupLink<Watched>` with a pace made of
+  what its own `GroupTxPace` reads (`pace`, `waits`, `room`, the end), held apart from the
+  face so the driver does not hold the face that holds it; `write_staged` and the stage's own
+  writer go.
+- **The counters.** `GroupTx::new` makes its `TransportTx` with its own `TransportMetrics`;
+  the group's `TransportStats` the face shares with its task is to be the one the walk's emit
+  counts into, read before the switch's commit as section 9.6 asked of the link's emit.
+
+Next: the switch above, then the D2 capability rows (they claim the driver's behaviour, so they
+land after the driver is what sends), T3c with the gate widening of 17.1, F8b.
