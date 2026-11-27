@@ -619,6 +619,105 @@ without its queryable drops a query (`vendor/zenoh-pico/src/session/rx.c` @
 or token to its interests' processing whatever its features (`vendor/zenoh-pico/src/session/rx.c` @
 `case _Z_DECL_QUERYABLE:`), which keeps it only for an interest the session declared.
 
+## 9. Driver: a link's calls over the build's closed set of links
+
+Read from the RSS lane's reading of this preset's relocated data (`rss.md`, section 5.3, R3.1) and
+from the code: `BoxedLinkDriver` holds 112 slots of the library's tables and
+`SessionDatagramLink` 75, one table for each type a link of the build is unsized from. The stack
+of this preset is `IpLinks<PosixUdpSocket, PosixTcpDial>`, whose links are of two types known
+when the library is compiled (`UdpDriver` and the TCP stream's `StreamDriver`): a closed set, held
+behind `dyn` as if it were open. zenoh-pico's link is one record of function pointers
+(`text.md` R1), one indirect call a datagram.
+
+### 9.1 What a call on the link costs now: two tables, not one
+
+In a build whose read hands each record out as it is read (no `threads`, so no `wz_round`: this
+preset), nothing holds a link back, and the engine answered the link's own handle as its gate
+(`LinkCalls::gate`). The transport then placed that handle, a `CellRc<dyn SessionDatagramLink>`,
+in a cell of the gates' table and read the link through the cell (`gate.clone().into_link()` in
+`TransportState::build_wire`): the pump the read steps held a handle on a cell holding a handle
+on the driver. Every call the read makes on the link (its service, `takes_input`, `recv_with`,
+`take_rx_dropped`, `lost`, `keep`) was an indirect call into the forwarding implementation of
+the trait for `CellRc` (`crates/wz-runtime-coop/src/session_drive.rs` @
+`impl<T: SessionDatagramLink + ?Sized, N: crate::link_cells::CountKind> SessionDatagramLink`),
+which read the inner handle, worked out where its value lies from the table's alignment, and made
+the second indirect call into the driver. The forwarder's 19 bodies and its table were in the
+build for that one use, and each link took a cell of the gates' table it did not need.
+
+### 9.2 The design: one dispatch a call, and where the set is closed, none
+
+The textbook form of a set of variants known when the program is compiled is a sum type matched
+where it is used; a trait object is the form of a set a caller extends. `wz-runtime-coop` already
+holds the slot profile's links so (`IpDriver` and its `either!` match in `ip_stack.rs`); the
+heap profile, which this preset builds, gets the same shape in three steps, each removing a layer
+of dispatch, never adding one.
+
+1. **A link nothing holds back is its own gate** (landed with this section). `LinkCalls::Gate` is
+   what the link's session and its pump hold, and `LinkCalls::gate` places the gates in a cell of
+   the table it is handed only where they hold the link back (the round's, with `listen` the
+   admission's under it); `LinkCalls::gated_link` answers the handle the pump and the face read
+   the link through: the gates' cell unsized, or, with no gate, the link's own handle. The direct
+   read's link is then one handle on the driver and every call on it one indirect call.
+2. **The stack's links as one closed type.** `IpLinks` places every link it opens in its cell as
+   one enum over the stack's protocols (`Udp`, the `udp/` port's peer under `udp-listen`, `Tcp`,
+   `Tls`), stating both traits by one match a method as `IpDriver` does; its copying receive and
+   its byte send call `copied_receive` and `copied_send` with the enum itself, so no variant is
+   unsized and the variants' bodies are inlined into their arms. One table a trait for the stack.
+   Not landed alone: under `dyn` it adds a tag test to each call.
+3. **The stack's link type reaches the read and the send.** `SessionLinks` names the type its
+   shared link is (`type Link: SessionDatagramLink + ?Sized`; every stack but `IpLinks` states
+   `dyn SessionDatagramLink` and keeps its form), the transport's `LinkOf<T>` and
+   `LinkCalls::gate` take `CellRc<L::Link>`, and the direct read's pump is
+   `LinkPump<_, CellRc<L::Link>>`: the read calls the enum's methods directly, a tag test and the
+   variant's body, and a method only a table reached (each driver's copying `try_recv`, which a
+   read in place never calls) is not linked. The send
+   half is the same change on the sink: `SessionHandle<C, D, K>` is generic over its driver
+   already, and the engine's `LinkRuntime`, `LinkActions`, `LinkHandle` and `LinkHalves`, keyed
+   on the clock today, are keyed on the stack. The faces' waits keep `dyn` (`input_wait`,
+   `waits_for_buffer` are asked per wait, not per message), so one table of the enum stays.
+
+`text.md` R1 (lane T-LINK) folds the three link traits into one record of a socket's operations:
+the form for a set the build does not close (a program's own links, `app-transport`), whose one
+indirect call a datagram is what zenoh-pico pays. The closed set is the case where the build knows
+better than a table, and the two compose: the enum is the record of the closed set. The driver
+lane's designs (the owner's wait as the stack's type, the stream's send, the dial's open) are
+inside the drivers and do not cross these steps; step 3 carries the stack's type to where that
+lane's owner's wait is read.
+
+| step | text, expected | relocated data, expected | instructions |
+|------|---------------:|-------------------------:|--------------|
+| 1 | -400 to -900: the forwarder's 19 bodies the table kept, the direct build's gate placement in `build_wire` (a cell's claim, its refusal, the cell's drop) | -176 (one table of 19 slots and 3 words) | each call on the link loses one indirect call and the forwarder's offset sum, about 8; the read makes five or more a step |
+| 2 | about 0 (variants' bodies inlined into one match each; the per-type copies of the default methods fold) | about -900 (the stack's drivers' tables to one a trait) | +2 a call under `dyn` (the tag test), which is why it lands with 3 |
+| 3 | -1,500 to -3,000 (bodies only a table reached, the indirect call sequences at every call site) | the rest of the drivers' tables but the faces' | no indirect call on the link on the receive or the put: a tag test and the variant's body |
+
+The direct build's gate table stays laid out by the arena (`link_cells`, a cell a link); its bytes
+go to zero where `wz_round` is off with the open's `cells_of` of lane S-OPEN, which owns that
+function, so the step does not touch it twice.
+
+### 9.3 The relocated names (RSS R3.2 and R3.3): spans, not ends
+
+`rss.md` section 5.3.2 took back the limits' ids and the encodings' names as offsets into one
+string: each grew the size ledger's text (+113 and +264) because the readers walked a list of
+`u16` ends to find a name, a loop where a slice of `&str` was one load. The form that keeps the
+read as it is: each name a span, `(start: u16, len: u8)`, into one string, three bytes beside each
+row, and the string and the spans made by a `const fn` from the one table of names, so nothing is
+transcribed twice. A read is the span's load and one slice of the string: the two loads a `&str`
+was, from `.rodata` and not from a relocated word. The reverse lookup (name to id) stays the scan
+it is, comparing lengths first. Expected: the encodings' names -848 of relocated data for about
+160 of `.rodata` and text 0 to +40; the limits' table -5,040 relocated, its rows in `.rodata`,
+which the generator writes (`wz_config.py --emit rust-limit-snapshots`), so that change is the
+generator's owner's. Neither moves this case's text, which is this note's grade, so neither lands
+with this section; their reading is `rss.md`'s pages.
+
+### 9.4 Measuring step 1
+
+On the case's explain report: the driver and transport rows; the symbols of
+`<CellRc<dyn SessionDatagramLink, _> as SessionDatagramLink>` (gone where nothing else
+unsizes such a handle) and `TransportState::build_wire`'s lines in the engine's link placing
+(`CoopEngine::place_link_session`). On the receive: `ir-receive.md`'s count of instructions a
+message, which falls by the forwarder's share of each call on the link. The test is
+`wz-capi-coop`'s `tests::arena::a_link_nothing_holds_back_takes_no_cell_of_the_gates`.
+
 ## 10. Transport: the structure for what remains, and what SCE is asked for the machines
 
 Read from the same explain document as section 6 (2026-11-26, schema 5): transport 30,814 against
