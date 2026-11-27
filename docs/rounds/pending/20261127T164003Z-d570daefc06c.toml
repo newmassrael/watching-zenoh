@@ -1,0 +1,19 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Land the on-use storage form steps 1 and 2, the taskless peer runtime,
+and two gate repairs: the tests gate parses again and the group rooms
+accessor compiles where its test is; heap tables counted on first use.
+'''
+changes = '''
+- tables-on-use: key budget, state apart, counted tables, round on OnUse.
+- runtime-plan wins beside tables-on-use (features add); refusals as values.
+- peer F1 taskless runtime; prose and surface gate rows; tests gate parse.
+'''
+verification = '''
+- client 198,987 B and receive W 3020.8 unchanged (D12 form by design).
+- peer driver 3.4061 -> 3.1851; ledger and cost rc 0; preflight 7 gates.
+- capi-coop 308/497/374/358, on-use 6/7, both forms 1, pico 544.
+'''
+carry = '''
+- none for this lane.
+'''
