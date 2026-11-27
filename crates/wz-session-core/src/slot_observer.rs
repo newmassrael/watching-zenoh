@@ -131,10 +131,14 @@ pub struct RequesterRows {
     pub liveliness_gets: usize,
 }
 
-/// The rows of a [`Requesters`] of the region policy, which a region lays out beside it: each
-/// registry's, at the build's bounds.
-pub struct RequesterRegionRows<R: ReplySink, G: ReplySink> {
-    replies: crate::reply::ReplyRegistryRows<R>,
+/// The rows of a [`Requesters`] of a policy a description places, which a region lays out beside
+/// it: each registry's, at the build's bounds.
+pub struct RequesterRegionRows<
+    R: ReplySink,
+    G: ReplySink,
+    P: crate::bounded::LaidOut = crate::bounded::Region,
+> {
+    replies: crate::reply::ReplyRegistryRows<R, P>,
     #[cfg(feature = "liveliness-get")]
     liveliness_gets: crate::declare::liveliness_get::LivelinessGetRows<G>,
     _gets: core::marker::PhantomData<G>,
@@ -142,31 +146,46 @@ pub struct RequesterRegionRows<R: ReplySink, G: ReplySink> {
 
 // SAFETY: each field is rows of `MaybeUninit` (`ZeroEmpty`) or no bytes, holding no value until
 // placed.
-unsafe impl<R: ReplySink, G: ReplySink> crate::bounded::ZeroEmpty for RequesterRegionRows<R, G> {}
+unsafe impl<R: ReplySink, G: ReplySink, P: crate::bounded::LaidOut> crate::bounded::ZeroEmpty
+    for RequesterRegionRows<R, G, P>
+{
+}
 
-/// The lines a region's description holds for one [`Requesters`] of the region policy, at most:
-/// the pending queries' and, with `liveliness-get`, the pending snapshots' and their markers'.
+/// The lines a description holds for one [`Requesters`], at most: the pending queries' and, with
+/// `liveliness-get`, the pending snapshots' and their markers'.
 pub const REQUESTER_LINES: usize = crate::reply::REPLY_REGISTRY_LINES + 2;
 
-impl<R: ReplySink, G: ReplySink> Requesters<R, G, crate::bounded::Region> {
-    /// The description of requesters of the region policy at `at` in a region and their
-    /// [`RequesterRegionRows`] at `rows`: each registry's lines, and the queries' handle to the
-    /// region's key arena. The registries are written as [`Default`] makes them before the region
-    /// is placed, and held to the session's limits after ([`Self::limit_to`]).
+impl RequesterRows {
+    /// The counts the lines of the requesters' description are lent ([`Requesters::places`]).
+    pub const fn counts(&self) -> crate::bounded::RowCounts {
+        crate::bounded::RowCounts::NONE
+            .with(crate::bounded::RowCount::Queries, self.queries)
+            .with(
+                crate::bounded::RowCount::LivelinessGets,
+                self.liveliness_gets,
+            )
+    }
+}
+
+impl<R: ReplySink, G: ReplySink, P: crate::bounded::LaidOut> Requesters<R, G, P> {
+    /// The description of requesters at `at` and, in a region, their [`RequesterRegionRows`] at
+    /// `rows`: each registry's lines, and the queries' handle to the key arena. The registries are
+    /// written as [`Default`] makes them before they are placed or lent, and held to the session's
+    /// limits after ([`Self::limit_to`]).
     pub const fn places(at: usize, rows: usize) -> crate::bounded::RegionLines<REQUESTER_LINES> {
         let lines = crate::bounded::RegionLines::EMPTY.with(
-            &ReplyRegistry::<R, crate::bounded::Region>::places(
+            &ReplyRegistry::<R, P>::places(
                 at.wrapping_add(core::mem::offset_of!(Self, replies)),
-                rows.wrapping_add(core::mem::offset_of!(RequesterRegionRows<R, G>, replies)),
+                rows.wrapping_add(core::mem::offset_of!(RequesterRegionRows<R, G, P>, replies)),
             ),
             0,
         );
         #[cfg(feature = "liveliness-get")]
         let lines = lines.with(
-            &LivelinessGetRegistry::<G, crate::bounded::Region>::places(
+            &LivelinessGetRegistry::<G, P>::places(
                 at.wrapping_add(core::mem::offset_of!(Self, liveliness_gets)),
                 rows.wrapping_add(core::mem::offset_of!(
-                    RequesterRegionRows<R, G>,
+                    RequesterRegionRows<R, G, P>,
                     liveliness_gets
                 )),
             ),
@@ -217,42 +236,112 @@ mod requester_region_tests {
             );
         }
     }
+
+    /// Requesters of the lent policy are lent through the description a region places them by: each
+    /// registry's rows lie where the plan's count says, none meet, each holds its count, and the
+    /// arena took what `arena_bytes` counted; the region's description states the same lines but
+    /// for where they lie. Turned red by a registry's line of another count or another bound, or
+    /// by `arena_bytes` counting what the lend does not take.
+    #[test]
+    fn lent_requesters_lie_where_their_description_counts_them() {
+        use super::RequesterRows;
+        use crate::bounded::{Arena, Lent, ARENA_ALIGN};
+        type LentRequesters = Requesters<BoxedReplySink, BoxedReplySink, Lent>;
+        /// A span an arena may start on.
+        #[derive(Clone, Copy)]
+        #[repr(align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+        /// An arena of `bytes`, its memory leaked, so it outlives every table it lends.
+        fn leaked(bytes: usize) -> Arena {
+            let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
+            let memory: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
+            // SAFETY: the memory is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+            // leaked, so nothing else uses it.
+            unsafe { Arena::over(core::ptr::NonNull::from(memory).cast::<u8>(), bytes) }
+        }
+        let rows = RequesterRows {
+            queries: caps::MAX_PENDING_QUERIES.min(2),
+            liveliness_gets: caps::MAX_PENDING_LIVELINESS_GETS.min(1),
+        };
+        let space = crate::key_arena::KeySpace::span_bytes(256).expect("small");
+        let keys = leaked(space)
+            .lend_keys(
+                256,
+                crate::limits::SessionLimits::defaults().max_keyexpr_bytes_held(),
+            )
+            .expect("the key arena");
+        let bytes = LentRequesters::arena_bytes(rows).expect("small");
+        let mut arena = leaked(bytes);
+        let requesters = LentRequesters::lent(
+            &mut arena,
+            keys,
+            rows,
+            &crate::limits::SessionLimits::defaults(),
+        )
+        .expect("the rows the plan counted");
+        assert_eq!(arena.high_water(), bytes);
+        let lines = LentRequesters::places(0, 0);
+        let region = RegionRequesters::places(0, 0);
+        assert_eq!(lines.seq_lines().len(), region.seq_lines().len());
+        for (line, placed) in lines.seq_lines().iter().zip(region.seq_lines()) {
+            assert_eq!(
+                (line.stride, line.room, line.count),
+                (placed.stride, placed.room, placed.count),
+                "one description for both forms"
+            );
+        }
+        // SAFETY: the lines are the lent requesters' own description, read and not written.
+        let laid = unsafe {
+            crate::bounded::assert_lent_as_described(
+                core::ptr::NonNull::from(&requesters).cast::<u8>(),
+                core::mem::size_of::<LentRequesters>(),
+                lines.seq_lines(),
+                &rows.counts(),
+            )
+        };
+        assert_eq!(laid, bytes);
+    }
 }
 
 impl<R: ReplySink, G: ReplySink> Requesters<R, G, Lent> {
-    /// No query pending, each registry's rows lent from `arena` as `rows` states, the keyexpr
-    /// each query was asked under kept in `keys`, the session's key arena, and held to `limits`
-    /// as [`Requesters::with_limits`] holds one. Refused when the arena has not the room, the rows
-    /// lent so far going back with the arena.
+    /// The description of requesters of the lent policy, the region's of the same registries: the
+    /// lines [`Self::lent`] lends and [`Self::arena_bytes`] counts, from the requesters' start.
+    const LINES: crate::bounded::RegionLines<REQUESTER_LINES> = Self::places(0, 0);
+
+    /// No query pending, each registry's rows lent from `arena` as `rows` states, in the order of
+    /// their description ([`Requesters::places`]), the keyexpr each query was asked under kept in
+    /// `keys`, the session's key arena, and held to `limits` as [`Requesters::with_limits`] holds
+    /// one. Refused when the arena has not the room, the rows lent so far going back with the arena.
     pub fn lent(
         arena: &mut Arena,
         keys: KeySpace,
         rows: RequesterRows,
         limits: &crate::limits::SessionLimits,
     ) -> Result<Self, LendRefused> {
-        let mut requesters = Self {
-            replies: ReplyRegistry::lent(arena, keys, rows.queries)?,
-            #[cfg(feature = "liveliness-get")]
-            liveliness_gets: LivelinessGetRegistry::lent(arena, rows.liveliness_gets)?,
-            #[cfg(not(feature = "liveliness-get"))]
-            _gets: core::marker::PhantomData,
-        };
+        let mut requesters = Self::default();
+        let mut lend = crate::bounded::TableLender::new(arena);
+        // SAFETY: the description is this type's: each line names a sequence of `requesters`, which
+        // holds no value, and states the bytes of its rows (`SeqPlace::of`), and its key line the
+        // queries' handle, which holds no key; `requesters` is reached by nothing else during the
+        // call, and `keys` is the session's, which outlives them.
+        unsafe {
+            crate::key_arena::lend_region(
+                core::ptr::NonNull::from(&mut requesters).cast::<u8>(),
+                keys,
+                &Self::LINES,
+                &rows.counts(),
+                &mut lend,
+            );
+        }
+        lend.finish()?;
         requesters.limit_to(limits);
         Ok(requesters)
     }
 
-    /// The bytes of an arena [`Self::lent`] takes for `rows`: each registry's spans. `None` past
-    /// the address space.
+    /// The bytes of an arena [`Self::lent`] takes for `rows`: its description's lines summed.
+    /// `None` past the address space.
     pub const fn arena_bytes(rows: RequesterRows) -> Option<usize> {
-        // A build without `liveliness-get` lends the snapshots no rows.
-        #[cfg(feature = "liveliness-get")]
-        let gets = LivelinessGetRegistry::<G, Lent>::arena_bytes(rows.liveliness_gets);
-        #[cfg(not(feature = "liveliness-get"))]
-        let gets = Some(0);
-        match (ReplyRegistry::<R, Lent>::arena_bytes(rows.queries), gets) {
-            (Some(queries), Some(gets)) => queries.checked_add(gets),
-            _ => None,
-        }
+        crate::bounded::seq_bytes(Self::LINES.seq_lines(), &rows.counts())
     }
 }
 

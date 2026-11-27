@@ -1757,11 +1757,15 @@ pub enum RowCount {
     PendingGets,
     /// `MAX_PENDING_REPLIES`: the replies the consolidating gets hold back.
     HeldReplies,
+    /// `MAX_PENDING_QUERIES` of one face's requesters: the gets pending on it.
+    Queries,
+    /// `MAX_PENDING_LIVELINESS_GETS` of one face's requesters.
+    LivelinessGets,
 }
 
 impl RowCount {
     /// The last count: a count added after it moves this.
-    const LAST: Self = Self::HeldReplies;
+    const LAST: Self = Self::LivelinessGets;
     /// The counts a plan states, `Bound`'s place among them unused.
     const SLOTS: usize = (Self::LAST as usize).wrapping_add(1);
 }
@@ -4532,6 +4536,57 @@ mod tests {
         assert!(room.buffer(&mut ()).push_str("demo/key").is_ok());
         assert_eq!(room.buffer(&mut ()).as_str(), "demo/key");
     }
+}
+
+/// Hold what a plan lent through `lines` at `base`, a value of `size` bytes, to its description:
+/// each line's sequence lies inside the value and no two share a place, each table holds its line's
+/// count, its rows lie at the offset the plan's count of the lines before it says from the first
+/// table's, and no two tables' rows meet. Answers the bytes the lines take, which the arena that
+/// lent them took.
+///
+/// # Safety
+/// Each line names a [`LentSeq`] at `base` that a plan lent its rows, which nothing writes during
+/// the call.
+#[cfg(test)]
+pub(crate) unsafe fn assert_lent_as_described(
+    base: NonNull<u8>,
+    size: usize,
+    lines: &[SeqPlace],
+    counts: &RowCounts,
+) -> usize {
+    let seq = core::mem::size_of::<LentSeq<u8>>();
+    let mut first = None;
+    let mut offset = 0;
+    let mut spans: std::vec::Vec<(core::ops::Range<usize>, core::ops::Range<usize>)> =
+        std::vec::Vec::new();
+    for line in lines {
+        // SAFETY: the caller's contract.
+        let (at, room) = unsafe { seq_rows(base, line) };
+        let at = at.expect("a lent table has rows").as_ptr() as usize;
+        let start = *first.get_or_insert(at);
+        assert_eq!(
+            at - start,
+            offset,
+            "the rows lie where the plan's count says"
+        );
+        assert_eq!(room as usize, counts.of(line), "the table holds its count");
+        let span = Arena::stride_bytes(counts.of(line), line.stride as usize).expect("small");
+        let place = line.seq as usize..line.seq as usize + seq;
+        assert!(place.end <= size, "a sequence lies in what is described");
+        for (other_place, other_rows) in &spans {
+            assert!(
+                place.end <= other_place.start || other_place.end <= place.start,
+                "no two lines name one sequence"
+            );
+            assert!(
+                at + span <= other_rows.start || other_rows.end <= at,
+                "no two tables' rows meet"
+            );
+        }
+        spans.push((place, at..at + span));
+        offset += span;
+    }
+    offset
 }
 
 #[cfg(test)]

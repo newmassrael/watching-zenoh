@@ -65,9 +65,9 @@ use core::sync::atomic::AtomicU32;
 use portable_atomic::AtomicU32;
 
 use crate::bounded::{
-    lend_seqs, seq_bytes, Arena, BoundedVec, CapacityFull, KeyBacking, KeyLength, KeyMaker,
-    KeyUnkept, LaidOut, LendRefused, Lent, Profile, Region, RegionLines, RowCount, RowCounts,
-    SeqPlace, Static, Storage, TableLender, ZeroEmpty,
+    seq_bytes, Arena, BoundedVec, CapacityFull, KeyBacking, KeyLength, KeyMaker, KeyUnkept,
+    LaidOut, LendRefused, Lent, Profile, Region, RegionLines, RowCount, RowCounts, SeqPlace,
+    Static, Storage, TableLender, ZeroEmpty,
 };
 use crate::caps;
 use crate::declare_form::RetractionKey;
@@ -3985,17 +3985,19 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
     pub fn lent(arena: &mut Arena, keys: KeySpace, rows: &TableRows) -> Result<Self, LendRefused> {
         // A table whose rows are lent at open remembers no key: each slot of the cache would be
         // rows of its own, which only the arena could give it.
-        let mut tables = Self::of(LentKeys::from(keys), MatchMemo::new(0));
+        let mut tables = Self::of(LentKeys::default(), MatchMemo::new(0));
         // Lent whole and given up whole: a refused table leaves the ones after it rowless, and
         // the set goes at once, not one table at a time behind each refusal.
         let mut lend = TableLender::new(arena);
         // SAFETY: the description is this type's: each line names a sequence of `tables`, which
-        // holds no value, and states the bytes of its rows (`SeqPlace::of`); `tables` is reached by
-        // nothing else during the call.
+        // holds no value, and states the bytes of its rows (`SeqPlace::of`), and its key line the
+        // tables' handle, which holds no key; `tables` is reached by nothing else during the call,
+        // and `keys` is the session's, which outlives them.
         unsafe {
-            lend_seqs(
+            crate::key_arena::lend_region(
                 core::ptr::NonNull::from(&mut tables).cast::<u8>(),
-                Self::LINES.seq_lines(),
+                keys,
+                &Self::LINES,
                 &rows.counts(),
                 &mut lend,
             );

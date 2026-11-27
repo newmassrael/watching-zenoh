@@ -1791,13 +1791,7 @@ fn lent_tables_lie_where_their_description_counts_them() {
     let lines = SessionTables::<Calls, Lent>::places(0, 0);
     let region = SessionTables::<Calls, Region>::places(0, 0);
     let counts = rows.counts();
-    let base = NonNull::from(&tables).cast::<u8>();
-    let size = core::mem::size_of::<SessionTables<Calls, Lent>>();
-    let seq = core::mem::size_of::<crate::bounded::LentSeq<u8>>();
     assert_eq!(lines.seq_lines().len(), region.seq_lines().len());
-    let mut first = None;
-    let mut offset = 0;
-    let mut spans: Vec<(core::ops::Range<usize>, core::ops::Range<usize>)> = Vec::new();
     for (line, placed) in lines.seq_lines().iter().zip(region.seq_lines()) {
         assert_eq!(
             (line.stride, line.room, line.count),
@@ -1809,33 +1803,17 @@ fn lent_tables_lie_where_their_description_counts_them() {
             RowCount::Bound,
             "every table is held to its limit"
         );
-        // SAFETY: the line names a sequence of `tables`, read and not written.
-        let (at, room) = unsafe { crate::bounded::seq_rows(base, line) };
-        let at = at.expect("a lent table has rows").as_ptr() as usize;
-        let start = *first.get_or_insert(at);
-        assert_eq!(
-            at - start,
-            offset,
-            "the rows lie where the plan's count says"
-        );
-        assert_eq!(room as usize, counts.of(line), "the table holds its count");
-        let span = Arena::stride_bytes(counts.of(line), line.stride as usize).unwrap();
-        let place = line.seq as usize..line.seq as usize + seq;
-        assert!(place.end <= size, "a sequence lies in the tables");
-        for (other_place, other_rows) in &spans {
-            assert!(
-                place.end <= other_place.start || other_place.end <= place.start,
-                "no two lines name one sequence"
-            );
-            assert!(
-                at + span <= other_rows.start || other_rows.end <= at,
-                "no two tables' rows meet"
-            );
-        }
-        spans.push((place, at..at + span));
-        offset += span;
     }
-    assert_eq!(offset, bytes, "the lines are every byte the plan counts");
+    // SAFETY: the lines are the lent tables' own description, read and not written.
+    let laid = unsafe {
+        crate::bounded::assert_lent_as_described(
+            NonNull::from(&tables).cast::<u8>(),
+            core::mem::size_of::<SessionTables<Calls, Lent>>(),
+            lines.seq_lines(),
+            &counts,
+        )
+    };
+    assert_eq!(laid, bytes, "the lines are every byte the plan counts");
 }
 
 /// The rows of a session that keeps none of the kinds a build may leave out.
