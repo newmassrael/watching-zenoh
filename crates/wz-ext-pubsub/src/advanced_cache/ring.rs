@@ -12,8 +12,10 @@
 //! the span is written at its start, and the span's end is remembered.
 //!
 //! The ring keeps its state in the first [`RING_HEAD_BYTES`] of the span, so every cache of the
-//! session reads one state, and a span the session zeroed at its open is an empty ring. Every
-//! field is read and written as bytes, so nothing here reads past the span whatever it holds.
+//! session reads one state, and a span the session zeroed at its open is an empty ring. The state
+//! and each record's header are read as arrays of their own length, taken once, so a field read at
+//! one of the constant offsets below needs no check of its own, and a record whose header does not
+//! lie whole in the span is no record: nothing here reads past the span whatever it holds.
 
 use wz_session_core::sample::{EncodingRef, SampleKind, SourceInfo, TimestampHint};
 #[cfg(feature = "advanced-recovery")]
@@ -124,30 +126,60 @@ pub(super) fn record_bytes(body: &SampleBody<'_>) -> Option<usize> {
     }
 }
 
-fn read_u32(bytes: &[u8], at: usize) -> u32 {
-    at.checked_add(4)
-        .and_then(|end| bytes.get(at..end))
-        .and_then(|word| <[u8; 4]>::try_from(word).ok())
-        .map_or(0, u32::from_ne_bytes)
+/// The ring's state, the first bytes of its span.
+type RingHead = [u8; RING_HEAD_BYTES];
+
+/// A record's header, the first bytes of the record.
+type RecordHead = [u8; RECORD_HEAD_BYTES];
+
+/// The word at `at` of a header. Every offset a caller passes is one of the constants above and
+/// the header's length is its type's, so where this is inlined the place's check is folded away.
+#[inline(always)]
+fn head_u32<const N: usize>(head: &[u8; N], at: usize) -> u32 {
+    head.get(at..)
+        .and_then(<[u8]>::first_chunk::<4>)
+        .map_or(0, |word| u32::from_ne_bytes(*word))
 }
 
-fn write_u32(bytes: &mut [u8], at: usize, value: u32) {
-    if let Some(word) = at.checked_add(4).and_then(|end| bytes.get_mut(at..end)) {
-        word.copy_from_slice(&value.to_ne_bytes());
+/// Write `value` as the word at `at` of a header, as [`head_u32`] reads it.
+#[inline(always)]
+fn set_head_u32<const N: usize>(head: &mut [u8; N], at: usize, value: u32) {
+    if let Some(word) = head.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<4>) {
+        *word = value.to_ne_bytes();
     }
 }
 
-fn read_u64(bytes: &[u8], at: usize) -> u64 {
-    at.checked_add(8)
-        .and_then(|end| bytes.get(at..end))
-        .and_then(|word| <[u8; 8]>::try_from(word).ok())
-        .map_or(0, u64::from_ne_bytes)
+/// The double word at `at` of a record's header, as [`head_u32`] reads a word.
+#[inline(always)]
+fn head_u64(head: &RecordHead, at: usize) -> u64 {
+    head.get(at..)
+        .and_then(<[u8]>::first_chunk::<8>)
+        .map_or(0, |word| u64::from_ne_bytes(*word))
 }
 
-fn write_u64(bytes: &mut [u8], at: usize, value: u64) {
-    if let Some(word) = at.checked_add(8).and_then(|end| bytes.get_mut(at..end)) {
-        word.copy_from_slice(&value.to_ne_bytes());
+/// Write `value` as the double word at `at` of a record's header.
+#[inline(always)]
+fn set_head_u64(head: &mut RecordHead, at: usize, value: u64) {
+    if let Some(word) = head.get_mut(at..).and_then(<[u8]>::first_chunk_mut::<8>) {
+        *word = value.to_ne_bytes();
     }
+}
+
+/// The header of the record at `at`; `None` where it does not lie whole in `data`, which no
+/// record the ring wrote is.
+fn record_head(data: &[u8], at: usize) -> Option<&RecordHead> {
+    data.get(at..)?.first_chunk::<RECORD_HEAD_BYTES>()
+}
+
+/// The header of the record at `at`, to write; `None` as for [`record_head`].
+fn record_head_mut(data: &mut [u8], at: usize) -> Option<&mut RecordHead> {
+    data.get_mut(at..)?.first_chunk_mut::<RECORD_HEAD_BYTES>()
+}
+
+/// The word `field` of the header of the record at `at`; zero where the header does not lie
+/// whole in `data`.
+fn record_u32(data: &[u8], at: usize, field: usize) -> u32 {
+    record_head(data, at).map_or(0, |head| head_u32(head, field))
 }
 
 /// `len` bytes at `at` of `bytes`, if they lie in it.
@@ -183,7 +215,7 @@ struct Stamps<'a> {
 /// A session's ring, read and written over the bytes of its span.
 pub(crate) struct RecordRing<'a> {
     /// The ring's state.
-    head: &'a mut [u8],
+    head: &'a mut RingHead,
     /// The records.
     data: &'a mut [u8],
 }
@@ -196,7 +228,7 @@ impl<'a> RecordRing<'a> {
             return None;
         }
         let records = capacity(span.len());
-        let (head, rest) = span.split_at_mut(RING_HEAD_BYTES);
+        let (head, rest) = span.split_first_chunk_mut::<RING_HEAD_BYTES>()?;
         let data = rest.get_mut(..records)?;
         Some(Self { head, data })
     }
@@ -207,23 +239,23 @@ impl<'a> RecordRing<'a> {
     }
 
     fn state(&self, at: usize) -> usize {
-        read_u32(self.head, at) as usize
+        head_u32(self.head, at) as usize
     }
 
     fn set_state(&mut self, at: usize, value: usize) {
-        write_u32(self.head, at, word(value));
+        set_head_u32(self.head, at, word(value));
     }
 
     /// A new cache's owner id: one no record in the ring carries, never the dead one.
     pub(super) fn register(&mut self) -> u32 {
-        let mut owner = read_u32(self.head, NEXT_OWNER);
+        let mut owner = head_u32(self.head, NEXT_OWNER);
         loop {
             owner = owner.wrapping_add(1);
             if owner != DEAD && self.live(owner) == 0 {
                 break;
             }
         }
-        write_u32(self.head, NEXT_OWNER, owner);
+        set_head_u32(self.head, NEXT_OWNER, owner);
         owner
     }
 
@@ -236,7 +268,7 @@ impl<'a> RecordRing<'a> {
                 at = 0;
             }
             each(at);
-            let total = read_u32(self.data, at.saturating_add(R_TOTAL)) as usize;
+            let total = record_u32(self.data, at, R_TOTAL) as usize;
             if total == 0 {
                 return;
             }
@@ -248,7 +280,7 @@ impl<'a> RecordRing<'a> {
     pub(crate) fn live(&self, owner: u32) -> usize {
         let mut live = 0usize;
         self.each_record(&mut |at| {
-            if read_u32(self.data, at.saturating_add(R_OWNER)) == owner {
+            if record_u32(self.data, at, R_OWNER) == owner {
                 live = live.saturating_add(1);
             }
         });
@@ -259,7 +291,7 @@ impl<'a> RecordRing<'a> {
     fn oldest_of(&self, owner: u32) -> Option<usize> {
         let mut oldest = None;
         self.each_record(&mut |at| {
-            if oldest.is_none() && read_u32(self.data, at.saturating_add(R_OWNER)) == owner {
+            if oldest.is_none() && record_u32(self.data, at, R_OWNER) == owner {
                 oldest = Some(at);
             }
         });
@@ -269,11 +301,14 @@ impl<'a> RecordRing<'a> {
     /// Mark the record at `at` dead, letting go of what it held: its bytes come back when the
     /// tail reaches it.
     fn kill(&mut self, at: usize) {
-        if read_u32(self.data, at.saturating_add(R_OWNER)) == DEAD {
+        let Some(head) = record_head(self.data, at) else {
+            return;
+        };
+        if head_u32(head, R_OWNER) == DEAD {
             return;
         }
         #[cfg(feature = "transport-shm")]
-        if read_u32(self.data, at.saturating_add(R_FLAGS)) & F_SHARED != 0 {
+        if head_u32(head, R_FLAGS) & F_SHARED != 0 {
             // SAFETY: a live record that says it holds a handle holds one, written by `write` at
             // this place, and dropping it here is the only drop it gets: the record is marked
             // dead next and read no more.
@@ -281,7 +316,9 @@ impl<'a> RecordRing<'a> {
                 core::ptr::drop_in_place(self.shared_at(at));
             }
         }
-        write_u32(self.data, at.saturating_add(R_OWNER), DEAD);
+        if let Some(head) = record_head_mut(self.data, at) {
+            set_head_u32(head, R_OWNER, DEAD);
+        }
     }
 
     /// Let every record of `owner` go: the cache it belonged to goes.
@@ -298,7 +335,7 @@ impl<'a> RecordRing<'a> {
             return;
         }
         let tail = self.state(TAIL);
-        let total = read_u32(self.data, tail.saturating_add(R_TOTAL)) as usize;
+        let total = record_u32(self.data, tail, R_TOTAL) as usize;
         self.kill(tail);
         if total == 0 || count == 1 {
             // An empty ring, or one whose tail holds no record it can read past: either way none
@@ -324,7 +361,7 @@ impl<'a> RecordRing<'a> {
             if wrapped && at >= end {
                 at = 0;
             }
-            let total = read_u32(self.data, at.saturating_add(R_TOTAL)) as usize;
+            let total = record_u32(self.data, at, R_TOTAL) as usize;
             self.kill(at);
             if total == 0 {
                 break;
@@ -449,37 +486,39 @@ impl<'a> RecordRing<'a> {
         if body.shared.is_some() {
             flags |= F_SHARED;
         }
-        let data = &mut *self.data;
-        write_u32(data, at + R_TOTAL, word(total));
-        write_u32(data, at + R_OWNER, owner);
-        write_u32(data, at + R_FLAGS, flags);
-        write_u32(data, at + R_KEY, word(body.keyexpr.len()));
-        write_u32(data, at + R_PAYLOAD, word(body.payload.len()));
-        write_u32(
-            data,
-            at + R_ATTACHMENT,
+        let ts_zid = stamps.timestamp.map_or(&[][..], TimestampHint::zid_prefix);
+        let si_zid = source_info.map_or(&[][..], SourceInfo::zid_prefix);
+        // The room the ring took holds the record whole, so its header lies in the span.
+        let Some(head) = record_head_mut(self.data, at) else {
+            return;
+        };
+        set_head_u32(head, R_TOTAL, word(total));
+        set_head_u32(head, R_OWNER, owner);
+        set_head_u32(head, R_FLAGS, flags);
+        set_head_u32(head, R_KEY, word(body.keyexpr.len()));
+        set_head_u32(head, R_PAYLOAD, word(body.payload.len()));
+        set_head_u32(
+            head,
+            R_ATTACHMENT,
             word(body.attachment.map_or(0, <[u8]>::len)),
         );
-        write_u32(
-            data,
-            at + R_ENCODING,
+        set_head_u32(
+            head,
+            R_ENCODING,
             body.encoding.map_or(0, |encoding| encoding.packed_id),
         );
-        write_u32(data, at + R_SCHEMA, word(schema.map_or(0, <[u8]>::len)));
-        write_u64(data, at + R_TIME, stamps.timestamp.map_or(0, |ts| ts.time));
-        let ts_zid = stamps.timestamp.map_or(&[][..], TimestampHint::zid_prefix);
-        put_bytes(data, at + R_TS_ZID, ts_zid);
-        let si_zid = source_info.map_or(&[][..], SourceInfo::zid_prefix);
-        put_bytes(data, at + R_SI_ZID, si_zid);
-        write_u32(data, at + R_EID, source_info.map_or(0, |si| si.eid));
-        write_u32(data, at + R_SN, source_info.map_or(0, |si| si.sn));
-        put_bytes(
-            data,
-            at + R_TS_ZID_LEN,
-            &[ts_zid.len() as u8, si_zid.len() as u8],
-        );
+        set_head_u32(head, R_SCHEMA, word(schema.map_or(0, <[u8]>::len)));
+        set_head_u64(head, R_TIME, stamps.timestamp.map_or(0, |ts| ts.time));
+        put_bytes(head, R_TS_ZID, ts_zid);
+        put_bytes(head, R_SI_ZID, si_zid);
+        set_head_u32(head, R_EID, source_info.map_or(0, |si| si.eid));
+        set_head_u32(head, R_SN, source_info.map_or(0, |si| si.sn));
+        head[R_TS_ZID_LEN] = ts_zid.len() as u8;
+        head[R_SI_ZID_LEN] = si_zid.len() as u8;
         #[cfg(feature = "advanced-recovery")]
-        put_bytes(data, at + R_QOS, &[stamps.qos.map_or(0, |qos| qos.raw)]);
+        {
+            head[R_QOS] = stamps.qos.map_or(0, |qos| qos.raw);
+        }
         let mut off = at + RECORD_HEAD_BYTES;
         #[cfg(feature = "transport-shm")]
         if let Some(shared) = body.shared {
@@ -512,16 +551,16 @@ impl<'a> RecordRing<'a> {
     /// The owner of the record at `at`.
     #[cfg(feature = "advanced-recovery")]
     fn owner_at(&self, at: usize) -> u32 {
-        read_u32(self.data, at.saturating_add(R_OWNER))
+        record_u32(self.data, at, R_OWNER)
     }
 
     /// The number `order` reads off the record at `at`.
     #[cfg(feature = "advanced-recovery")]
     fn key_at(&self, at: usize, order: Order) -> u64 {
         match order {
-            Order::Sn => u64::from(read_u32(self.data, at.saturating_add(R_SN))),
+            Order::Sn => u64::from(record_u32(self.data, at, R_SN)),
             #[cfg(feature = "advanced-history")]
-            Order::Time => read_u64(self.data, at.saturating_add(R_TIME)),
+            Order::Time => record_head(self.data, at).map_or(0, |head| head_u64(head, R_TIME)),
         }
     }
 
@@ -600,11 +639,9 @@ impl<'a> RecordRing<'a> {
     /// The sample of the record at `at`, read where it lies, as a subscriber hands it on.
     #[cfg(feature = "advanced-recovery")]
     pub(crate) fn view_at(&self, at: usize) -> Option<RecordView<'_>> {
-        let flags = read_u32(self.data, at.saturating_add(R_FLAGS));
-        let qos = (flags & F_QOS != 0)
-            .then(|| self.data.get(at.saturating_add(R_QOS)).copied())
-            .flatten()
-            .map(QosLevel::from_raw);
+        let head = record_head(self.data, at)?;
+        let flags = head_u32(head, R_FLAGS);
+        let qos = (flags & F_QOS != 0).then(|| QosLevel::from_raw(head[R_QOS]));
         Some(RecordView {
             held: self.held(at)?,
             qos,
@@ -641,7 +678,7 @@ impl<'a> RecordRing<'a> {
     /// Call `each` with every live sample of `owner`, oldest first.
     pub(super) fn each_of(&self, owner: u32, each: &mut dyn FnMut(Held<'_>)) {
         self.each_record(&mut |at| {
-            if read_u32(self.data, at.saturating_add(R_OWNER)) == owner {
+            if record_u32(self.data, at, R_OWNER) == owner {
                 if let Some(held) = self.held(at) {
                     each(held);
                 }
@@ -652,26 +689,27 @@ impl<'a> RecordRing<'a> {
     /// The sample of the record at `at`, read where it lies.
     fn held(&self, at: usize) -> Option<Held<'_>> {
         let data: &[u8] = self.data;
-        let flags = read_u32(data, at + R_FLAGS);
-        let key_len = read_u32(data, at + R_KEY) as usize;
-        let payload_len = read_u32(data, at + R_PAYLOAD) as usize;
-        let attachment_len = read_u32(data, at + R_ATTACHMENT) as usize;
-        let schema_len = read_u32(data, at + R_SCHEMA) as usize;
-        let ts_zid_len = usize::from(*data.get(at + R_TS_ZID_LEN)?);
-        let si_zid_len = usize::from(*data.get(at + R_SI_ZID_LEN)?);
+        let head = record_head(data, at)?;
+        let flags = head_u32(head, R_FLAGS);
+        let key_len = head_u32(head, R_KEY) as usize;
+        let payload_len = head_u32(head, R_PAYLOAD) as usize;
+        let attachment_len = head_u32(head, R_ATTACHMENT) as usize;
+        let schema_len = head_u32(head, R_SCHEMA) as usize;
+        let ts_zid_len = usize::from(head[R_TS_ZID_LEN]);
+        let si_zid_len = usize::from(head[R_SI_ZID_LEN]);
         let timestamp = if flags & F_STAMPED != 0 {
             Some(TimestampHint::new(
-                read_u64(data, at + R_TIME),
-                span_of(data, at + R_TS_ZID, ts_zid_len)?,
+                head_u64(head, R_TIME),
+                span_of(head, R_TS_ZID, ts_zid_len)?,
             )?)
         } else {
             None
         };
         let source_info = if flags & F_SOURCE != 0 {
             Some(SourceInfo::new(
-                span_of(data, at + R_SI_ZID, si_zid_len)?,
-                read_u32(data, at + R_EID),
-                read_u32(data, at + R_SN),
+                span_of(head, R_SI_ZID, si_zid_len)?,
+                head_u32(head, R_EID),
+                head_u32(head, R_SN),
             ))
         } else {
             None
@@ -722,7 +760,7 @@ impl<'a> RecordRing<'a> {
                 SampleKind::Put
             },
             encoding: (flags & F_ENCODING != 0).then(|| EncodingRef {
-                packed_id: read_u32(data, at + R_ENCODING),
+                packed_id: head_u32(head, R_ENCODING),
                 schema,
             }),
             attachment,
@@ -781,5 +819,115 @@ impl SampleView for RecordView<'_> {
             .encoding
             .as_ref()
             .map(|encoding| (encoding.packed_id, encoding.schema))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A zeroed span of `len` bytes laid on a record's alignment: an empty ring's.
+    fn words(len: usize) -> Vec<u64> {
+        vec![0u64; len / 8]
+    }
+
+    /// The bytes of `words`.
+    fn bytes(words: &mut [u64]) -> &mut [u8] {
+        let len = words.len() * 8;
+        // SAFETY: the words are borrowed mutably for as long as the bytes are, and any bytes are a
+        // valid `u8`.
+        unsafe { core::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), len) }
+    }
+
+    /// The ring's state is the first bytes of its span, each field the word at its offset, so a
+    /// span the session zeroed is an empty ring. Turned red by a state taken from anywhere but
+    /// the span's start (`RecordRing::over`), or a field read at another place than it is written.
+    #[test]
+    fn the_rings_state_is_the_first_words_of_its_span() {
+        let mut span = words(RING_HEAD_BYTES + 256);
+        {
+            let mut ring = RecordRing::over(bytes(&mut span)).expect("a span of whole records");
+            for (field, value) in [(TAIL, 8), (HEAD, 96), (END, 200), (COUNT, 3), (WRAPPED, 1)] {
+                ring.set_state(field, value);
+                assert_eq!(ring.state(field), value);
+            }
+        }
+        let raw = bytes(&mut span);
+        for (field, value) in [
+            (TAIL, 8u32),
+            (HEAD, 96),
+            (END, 200),
+            (COUNT, 3),
+            (WRAPPED, 1),
+        ] {
+            assert_eq!(
+                raw[field..field + 4],
+                value.to_ne_bytes(),
+                "the word at {field}"
+            );
+        }
+    }
+
+    /// A record whose header does not lie whole in the span is no record, however its first words
+    /// read: it has no owner, holds no sample and is let go of without a write. Turned red by a
+    /// header read field by field (`record_head`), which would read the owner of the words that
+    /// do lie in the span.
+    #[test]
+    fn a_record_whose_header_runs_past_the_span_is_no_record() {
+        let mut span = words(RING_HEAD_BYTES + 256);
+        let mut ring = RecordRing::over(bytes(&mut span)).expect("a span of whole records");
+        let capacity = ring.capacity();
+        let at = capacity - 8;
+        ring.set_state(TAIL, at);
+        ring.set_state(HEAD, capacity);
+        ring.set_state(COUNT, 1);
+        ring.data[at + R_TOTAL..at + R_TOTAL + 4].copy_from_slice(&8u32.to_ne_bytes());
+        ring.data[at + R_OWNER..at + R_OWNER + 4].copy_from_slice(&7u32.to_ne_bytes());
+        assert_eq!(ring.live(7), 0);
+        assert!(ring.held(at).is_none());
+        ring.forget(7);
+        assert_eq!(
+            ring.data[at + R_OWNER..at + R_OWNER + 4],
+            7u32.to_ne_bytes(),
+            "nothing was written for it"
+        );
+    }
+
+    /// A record the ring writes reads back field by field through its header: its owner, its
+    /// lengths, its stamps and its key. Turned red by a field written at one offset and read at
+    /// another, or a header taken at another place than the record's.
+    #[test]
+    fn a_kept_record_reads_back_through_its_header() {
+        let mut span = words(RING_HEAD_BYTES + 512);
+        let mut ring = RecordRing::over(bytes(&mut span)).expect("a span of whole records");
+        let owner = ring.register();
+        let zid = [0xA5u8; 16];
+        let stamp = TimestampHint::new(0x1234_5678_9ABC_DEF0, &zid).expect("a stamp of a zid");
+        let body = SampleBody {
+            keyexpr: "demo/ring",
+            payload: b"payload",
+            kind: SampleKind::Put,
+            encoding: None,
+            attachment: Some(b"att"),
+            #[cfg(feature = "transport-shm")]
+            shared: None,
+        };
+        ring.keep(owner, 4, body, Some(SourceInfo::new(&zid, 9, 41)), &stamp);
+        assert_eq!(ring.live(owner), 1);
+        let mut seen = 0;
+        ring.each_of(owner, &mut |held| {
+            seen += 1;
+            assert_eq!(held.keyexpr, "demo/ring");
+            assert_eq!(held.bytes, b"payload");
+            assert_eq!(held.attachment, Some(&b"att"[..]));
+            assert_eq!(held.timestamp.as_ref().map(|ts| ts.time), Some(stamp.time));
+            let source = held
+                .source_info
+                .as_ref()
+                .expect("the record keeps its source");
+            assert_eq!((source.eid, source.sn), (9, 41));
+            assert!(held.encoding.is_none());
+        });
+        assert_eq!(seen, 1);
     }
 }
