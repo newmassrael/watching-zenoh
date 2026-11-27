@@ -11,6 +11,7 @@
 use alloc::vec::Vec;
 
 use wz_session_core::bounded::push_text;
+use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
@@ -22,7 +23,7 @@ use wz_session_core::response_sink::ResponseSink;
 
 use crate::executor::SpawnRefusal;
 use crate::faces::{FaceId, FaceSession, HandshakeEnd};
-use crate::link_cells::CellRc;
+use crate::link_cells::{CellRc, CountKind};
 use crate::locator_text::DialRefused;
 use crate::session_drive::{LinkOpenError, LinkWait, SessionDatagramLink};
 use crate::session_runtime::SessionHandle;
@@ -181,8 +182,10 @@ pub trait TransportSession<C: ClockSource + 'static, K: LockKind = crate::sync::
 /// the session tells its tables of the link, puts the link's pump behind its gates, and says what
 /// the link's task hands its reads to and what its face keeps of the link.
 pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared> {
-    /// The gates the session puts a link's pump behind, placed in the link's cell of its table.
-    type Gate: SessionDatagramLink + 'static;
+    /// The gates the session puts a link's pump behind, as the link's session and its pump hold
+    /// them: a handle on their cell of the session's table where they hold the link back, or the
+    /// link's own handle where nothing does ([`Self::gate`]).
+    type Gate: Clone + 'static;
     /// What a link's task hands what its session reads to, or, for a link whose session its
     /// owner steps itself, what the owner hands each step of it (`TransportState::place_wire`).
     type Dispatch;
@@ -200,20 +203,28 @@ pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>
     );
 
     /// The gates over `pump`, the link's one shared handle, whose session sends through
-    /// `actions`.
+    /// `actions`, placed in a cell of `cells` where they hold the link back: `None` when `cells`
+    /// has no cell left. Where nothing holds the link back its gate is `pump` itself, which takes no
+    /// cell, so every call on the link goes through the link's own table and not first through a
+    /// table of the gates over it.
     fn gate(
         &self,
         pump: CellRc<dyn SessionDatagramLink, K::LinkCount>,
         actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
-    ) -> Self::Gate;
+        cells: Option<&LentByteCells<<K::LinkCount as CountKind>::Flag>>,
+    ) -> Option<Self::Gate>;
+
+    /// The link as it is read behind `gate`: what the pump of its session steps and what its face
+    /// waits on.
+    fn gated_link(gate: &Self::Gate) -> CellRc<dyn SessionDatagramLink, K::LinkCount>;
 
     /// What the task of the link of face `face` hands its reads to, and what the face keeps of the
-    /// link: its actions and its gates, placed in their cell.
+    /// link: its actions and its gates.
     fn wire_parts(
         &self,
         face: FaceId,
         actions: SessionHandle<C, dyn BoxedLinkDriver, K>,
-        gate: &CellRc<Self::Gate, K::LinkCount>,
+        gate: &Self::Gate,
     ) -> (Self::Dispatch, Self::Session);
 }
 

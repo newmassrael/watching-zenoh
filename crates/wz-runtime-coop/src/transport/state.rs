@@ -213,8 +213,8 @@ pub struct TransportState<T: TransportFaces> {
     /// owns, which it drops after every link's actions and task.
     #[cfg(feature = "listen")]
     pub admission: PlacedRef<dyn LinkAdmission>,
-    /// The cells each link's gates are placed in when the session makes the link (`LinkGate`),
-    /// lent from the arena; none for a plan that laid out none.
+    /// The cells each link's gates are placed in when the session makes the link, where they hold
+    /// the link back (`LinkCalls::gate`), lent from the arena; none for a plan that laid out none.
     pub gate_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
     /// The cells each link's actions are placed in when the session makes the link, lent from the
     /// arena; none for a plan that laid out none.
@@ -463,21 +463,6 @@ impl<T: TransportFaces> TransportState<T> {
     ) -> wz_session_core::policy::KeyWireForm {
         self.key_forms
             .form_of(endpoint.map(|endpoint| endpoint.text(&self.endpoints)))
-    }
-
-    /// A link's gates placed in their cell of the session's table, as the link's driver is in one
-    /// of the stack's: a link past the cells is refused as one past the buffers is. The handle
-    /// names the gates as they are, so the engine can reach them as well as pump the link through
-    /// them (`CellRc::into_link`).
-    // Always inlined: its one caller held these values in its own frame.
-    #[inline(always)]
-    pub fn place_gate<Gate: SessionDatagramLink + 'static>(
-        &self,
-        gate: Gate,
-        endpoint: Option<&DialEndpoint>,
-    ) -> Result<CellRc<Gate, CountOf<T>>, TransportRefusal> {
-        CellRc::<_, CountOf<T>>::in_cells_of(self.gate_cells.as_ref(), gate)
-            .map_err(|_| self.cells_exhausted(endpoint))
     }
 
     /// Spawn the task of a link's session on `local`. The link's fragmented messages are staged
@@ -785,8 +770,12 @@ impl<T: TransportFaces> TransportState<T> {
         // What the session's read waits on for the link's input and its room, read off it before
         // its gates take it.
         let (input_wait, room_wait) = (pump.input_wait(), pump.room_wait());
-        let gate = self.place_gate(calls.gate(pump, &actions), endpoint)?;
-        let link = gate.clone().into_link();
+        // The gates take a cell of the session's table where they hold the link back, and a link
+        // past the cells is refused as one past the buffers is.
+        let gate = calls
+            .gate(pump, &actions, self.gate_cells.as_ref())
+            .ok_or_else(|| self.cells_exhausted(endpoint))?;
+        let link = K::gated_link(&gate);
         let (dispatch, session) = calls.wire_parts(face, actions.clone(), &gate);
         Ok(WireBuilt {
             fields: PumpFields {

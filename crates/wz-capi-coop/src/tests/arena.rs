@@ -2256,6 +2256,32 @@ fn a_links_halves_lie_in_its_cell_across_a_redial() {
     drop(router);
 }
 
+/// A link nothing holds back (a read that hands each record out as it is read, no `wz_round`) is
+/// its own gate: every call on it goes through its driver's table, and it takes no cell of the
+/// gates' table. Where the round holds its links back, the dial role's link holds its gates in one
+/// cell of that table. Turned red by a direct read whose gate is placed in a cell
+/// (`LinkMaking::gate` through `CellRc::in_cells_of`), which puts a second table in front of
+/// every call on the link.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn a_link_nothing_holds_back_takes_no_cell_of_the_gates() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_with(CoopConfig {
+        max_faces: 0,
+        ..config(&router)
+    });
+    until(&engine, "the dial role's link", || engine.faces_up() == 1);
+    let gates = engine.link_gates_in_use();
+    #[cfg(not(wz_round))]
+    assert_eq!(gates.unwrap_or(0), 0, "the link is its own gate");
+    #[cfg(wz_round)]
+    assert!(
+        matches!(gates, None | Some(1)),
+        "the dial role's link holds its gates in one cell: {gates:?}"
+    );
+    drop(router);
+}
+
 /// A session whose config admits no face besides the dial role's attaches none, as its arena holds
 /// the buffers of one link; the CONTROL is the plan of the same config.
 #[cfg(feature = "listen")]
