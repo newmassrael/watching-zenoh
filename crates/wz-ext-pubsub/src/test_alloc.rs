@@ -2,10 +2,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The lib test binary's allocator, which counts the allocations each thread makes, so a test can
-//! read what one call of the code under test takes of the heap, and refuses on a thread that asks
-//! every allocation of one layout ([`refusing`]), as a heap with no room for it would. Each lib
-//! test runs on a thread of its own and reads its own thread's count, so what the tests beside it
-//! allocate never reaches it.
+//! read what one call of the code under test takes of the heap. With the engine host's tests
+//! (`engine-host`) it also refuses on a thread that asks every allocation of one layout
+//! (`refusing`), as a heap with no room for it would. Each lib test runs on a thread of its own and
+//! reads its own thread's count, so what the tests beside it allocate never reaches it.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -15,6 +15,10 @@ struct CountingAllocator;
 
 thread_local! {
     static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(feature = "engine-host")]
+thread_local! {
     /// The layout every allocation of which this thread is refused, while it refuses one.
     static REFUSED: Cell<Option<Layout>> = const { Cell::new(None) };
 }
@@ -25,6 +29,7 @@ thread_local! {
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.with(|n| n.set(n.get() + 1));
+        #[cfg(feature = "engine-host")]
         if REFUSED.try_with(Cell::get).ok().flatten() == Some(layout) {
             return core::ptr::null_mut();
         }
@@ -60,6 +65,7 @@ pub(crate) fn allocations() -> usize {
 
 /// `run`'s answer, every allocation of `layout` the calling thread asks for while it runs
 /// refused, and every other made: what a call does when the heap has no room for that one block.
+#[cfg(feature = "engine-host")]
 pub(crate) fn refusing<R>(layout: Layout, run: impl FnOnce() -> R) -> R {
     REFUSED.with(|refused| refused.set(Some(layout)));
     let answer = run();
