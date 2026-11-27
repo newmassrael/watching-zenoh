@@ -6,6 +6,7 @@
 width of Windows: x64 and x86.
 
     pico_windows_package.py --build OUT --profile ID [--arch x64|x86] [--form single|split]
+    pico_windows_package.py --build OUT --preset ORIGINAL [--arch x64|x86] [--form single]
     pico_windows_package.py --measure [--arch x64|x86]
     pico_windows_package.py --size-plan ZIP PLAN
     pico_windows_package.py --size-judge ZIP READING-DIR
@@ -25,6 +26,18 @@ usage notes and release notes, the licence of the library and the notices of eve
 and `manifest.json`, the size and SHA-256 of every other file. For each width it writes
 `OUT/<name>/`, `OUT/<name>.zip` and `OUT/<name>.zip.sha256`, the width in `<name>` and the Rust
 target in the manifest's `target`.
+
+`--build OUT --preset ORIGINAL` makes the same package of ORIGINAL's own default build in wz in the
+place of a profile's: its defconfig alone (`configs/<ORIGINAL>_defconfig`, resolved by the same
+interpreter with no preset), the build the host benches measure as arm W
+(`wz_config.pico_bench_configuration`), for an original built through the pico ABI (`PRESETS`). It
+is the library the performance matrix measures on Windows (docs/pico-perf-matrix.md section 6), in
+the one form a release ships, and no release carries it. Its name says `<ORIGINAL>-preset` where a
+profile's package says the profile, and its manifest states `preset` where a profile's states
+`profile` (the other key null), which `perf_matrix.py windows-plan` reads. Its regression test
+(`--test`) holds it to its manifest, compiles the layout pins and reads each DLL's imports and
+exports; the examples and the check program call wz's own doors, which the preset is built without,
+so they are not run on it, and `--size-plan` and `--release` refuse it.
 
 `--form` names the form of the library, both when it names none: `single`, the one DLL
 `wz_capi_pico.dll` the default build makes, the core and the doors of the additional features in it;
@@ -292,9 +305,18 @@ RUNTIME_SYMBOLS = frozenset({
     "_aullrem",
 })
 PROFILE_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+# The originals a package is made as the own default build in wz of (`--preset`): those built
+# through the pico ABI.
+PRESETS = tuple(original for original, abi in wz_config.BASE_ABI.items() if abi == "pico")
+# The options of `--build` that name its build: a registered profile, or an original's preset.
+BUILD_OPTIONS = ("--profile", "--preset")
+# The capability whose door answers the build's conformance digest to a program.
+DIGEST_DOOR = "conformance-digest"
 FORMAT = "wz-pico-windows-package"
 # 3: `stdlib` joined the manifest; a version-2 manifest cannot say which a DLL is.
-FORMAT_VERSION = 3
+# 4: `preset` joined it beside `profile`; a version-3 manifest cannot say whether its build is a
+# profile's or an original's own.
+FORMAT_VERSION = 4
 MANIFEST = "manifest.json"
 STATEMENT = "build-statement.json"
 
@@ -363,12 +385,39 @@ def parse_env_lines(lines: list[str]) -> dict[str, str]:
     return out
 
 
-def package_name(version: str, profile: str, arch: str, commit: str, form: str = "single") -> str:
-    """The package's name: the one library's carries no form, the split one's says `split`; every
-    one says `nostd`, the standard library its DLL is built without, as the manifest's `stdlib`
-    does."""
+def package_name(version: str, build: str, arch: str, commit: str, form: str = "single") -> str:
+    """The package's name, `build` the word of its build (`build_word`): the one library's carries
+    no form, the split one's says `split`; every one says `nostd`, the standard library its DLL is
+    built without, as the manifest's `stdlib` does."""
     shape = "" if form == "single" else f"-{form}"
-    return f"{CRATE}-{version}-{profile}-windows-{arch}{shape}-{STDLIBS[0]}-{commit[:10]}"
+    return f"{CRATE}-{version}-{build}-windows-{arch}{shape}-{STDLIBS[0]}-{commit[:10]}"
+
+
+def preset_word(original: str) -> str:
+    """The word a package's name gives the own default build in wz of `original`."""
+    return f"{original}-preset"
+
+
+def manifest_preset(manifest: dict) -> str | None:
+    """The original whose own default build in wz a package's manifest states it is (`preset`),
+    or None for a package of a registered profile (`profile`). A manifest that states both, or
+    neither, or the preset of an original not built through the pico ABI, is refused."""
+    preset, profile = manifest.get("preset"), manifest.get("profile")
+    if preset is None:
+        if not isinstance(profile, str) or not PROFILE_ID_RE.match(profile):
+            raise Refusal(f"the manifest states neither a registered profile nor a preset ({profile!r})")
+        return None
+    if preset not in PRESETS:
+        raise Refusal(f"`{preset}` is no original built through the pico ABI ({', '.join(PRESETS)})")
+    if profile is not None:
+        raise Refusal(f"the manifest states the preset {preset} and the profile {profile}; a build is one")
+    return preset
+
+
+def build_word(manifest: dict) -> str:
+    """The word a package's name gives the build its manifest states (`manifest_preset`)."""
+    preset = manifest_preset(manifest)
+    return str(manifest["profile"]) if preset is None else preset_word(preset)
 
 
 def form_of(manifest: dict) -> str:
@@ -535,10 +584,11 @@ def notice_table(rows: list[dict]) -> list[str]:
     return out
 
 
-def render_notices(profile: str, target: str, linked: list[dict], compile_time: list[dict], rust: dict,
+def render_notices(built_as: str, target: str, linked: list[dict], compile_time: list[dict], rust: dict,
                    pico: dict, libraries: tuple[str, ...] = (LIBRARY,),
                    crates: tuple[str, ...] = (CRATE,)) -> str:
-    """THIRD-PARTY-NOTICES.md: what the libraries link and the texts that cover it."""
+    """THIRD-PARTY-NOTICES.md: what the libraries link and the texts that cover it, `built_as` the
+    build whose features the graph is read with, in words (`resolve_build`'s `said`)."""
     textless = [row for row in linked if not row["texts"]]
     one = len(libraries) == 1
     named = " and ".join(f"`release/bin/{lib}.dll` and `debug/bin/{lib}.dll`" for lib in libraries)
@@ -551,7 +601,7 @@ def render_notices(profile: str, target: str, linked: list[dict], compile_time: 
         f"{'It links' if one else 'They link'} the packages listed below, each under its own licence.",
         "",
         "This list is derived from the build, not written by hand: it is the normal-dependency graph of",
-        f"{graphs} built with the features of profile `{profile}` for `{target}` (`cargo tree`),",
+        f"{graphs} built with the features of {built_as} for `{target}` (`cargo tree`),",
         "each package joined with its manifest (`cargo metadata`) for its licence expression and its",
         "source. The texts are the licence, copyright and notice files each package ships, copied under",
         "`licenses/`; a copy of a package carried in the watching-zenoh tree with a changed arm ships its",
@@ -715,6 +765,11 @@ def release_notes(template: str, facts: dict) -> str:
     limits = [f"{x['id']} = {x['value']} (default {x['default']})" for x in statement["limits"] if x["value"] != x["default"]]
     policies = [f"{p['id']} = {p['value']} (upstream {p['upstream']})" for p in statement["policies"] if p["value"] != p["upstream"]]
     libraries = FORMS[facts.get("form", "single")]
+    preset = facts.get("preset")
+    built = (f"- Preset: `{preset}`, its own default build in wz (`configs/{preset}_defconfig`), which the "
+             "performance matrix measures and no release carries" if preset is not None else
+             f"- Profile: `{facts['profile']}` (`configs/profiles/{facts['profile']}.conf`)")
+    answers = any(c["id"] == DIGEST_DOOR and c["supported"] for c in statement["capabilities"])
     form = ("one library, `" + libraries[0] + ".dll`" if len(libraries) == 1 else
             "the core and the additional library built apart from one feature list, "
             + ", ".join(f"`{lib}.dll`" for lib in libraries) + " (a program links both)")
@@ -728,8 +783,9 @@ def release_notes(template: str, facts: dict) -> str:
         f"- Library version: {facts['version']}",
         f"- Source: commit `{facts['commit']}`" + ("" if facts["tree_clean"] else " with changes not committed"),
         f"- Toolchain: `{facts['rustc']}`, target `{facts['target']}`",
-        f"- Profile: `{facts['profile']}` (`configs/profiles/{facts['profile']}.conf`)",
-        f"- Conformance digest: `{statement['digest']}` (what `zext_conformance_digest()` answers)",
+        built,
+        f"- Conformance digest: `{statement['digest']}`" + (" (what `zext_conformance_digest()` answers)" if answers
+                                                        else " (the build has no `zext_conformance_digest()`)"),
         f"- Engine: {statement['engine']}",
         f"- Rust standard library: `{LIBRARY}.dll` links none: `core` and `alloc` over the system's own "
         f"calls (`{ENGINE_FEATURE}`), the process heap as its allocator, a panic ends the process",
@@ -910,12 +966,16 @@ def size_facts(manifest: dict, table: dict, decl: dict) -> dict:
     `wz_config.pico_reference` derives from the package's features (the size gate's and the host
     performance matrix's derivation) with the CMake platform of the width and `REFERENCE_CMAKE`.
     `table` is the feature table of wz-capi-pico, `decl` the declaration. A package of another form
-    than the one a release ships, and one naming a feature the crate does not have, are refused."""
+    than the one a release ships, a preset's package, and one naming a feature the crate does not
+    have, are refused."""
     arch = arch_of_target(manifest.get("target", ""))
     stdlib, form = stdlib_of(manifest), form_of(manifest)
     if form not in RELEASE_FORMS:
         raise Refusal(f"the ceiling holds the DLL a release ships ({stdlib}, {', '.join(RELEASE_FORMS)}), "
                       f"and this package is {stdlib} {form}")
+    if manifest.get("preset") is not None:
+        raise Refusal(f"the ceiling holds the DLL a release ships, and this package is "
+                      f"{manifest['preset']}'s preset")
     features = manifest.get("features")
     if not isinstance(features, list) or not features or not all(isinstance(f, str) for f in features):
         raise Refusal("the package's manifest lists no features of its build")
@@ -1035,8 +1095,13 @@ def run(cmd: list[str], cwd: pathlib.Path, env: dict[str, str] | None = None) ->
 
 
 def resolve_profile(decl: dict, profile: str) -> dict:
+    """The build of the registered profile `profile` (`resolve_build`). A name that is no word
+    list, or that a preset package's name gives its build (`preset_word`), is refused, so a
+    package's name tells the two apart."""
     if not PROFILE_ID_RE.match(profile):
         raise Refusal(f"`{profile}` is not the name of a registered profile")
+    if profile in {preset_word(original) for original in PRESETS}:
+        raise Refusal(f"`{profile}` is the word of a preset package's name, not a profile's")
     path = wz_config.PROFILES / f"{profile}.conf"
     if not path.is_file():
         known = sorted(p.stem for p in wz_config.PROFILES.glob("*.conf"))
@@ -1054,7 +1119,39 @@ def resolve_profile(decl: dict, profile: str) -> dict:
     except wz_config.PresetError as err:
         raise Refusal(f"profile {profile} does not resolve: {err}") from err
     statement = wz_config.resolved_statement(decl, "pico", kconf, {"kind": "presets", "inputs": [path.name]})
-    return {"features": features, "env": parse_env_lines(env_lines), "statement": statement}
+    return {"features": features, "env": parse_env_lines(env_lines), "statement": statement,
+            "profile": profile, "preset": None, "word": profile, "said": f"profile `{profile}`"}
+
+
+def resolve_preset(decl: dict, original: str) -> dict:
+    """The build of `original`'s own default build in wz (`resolve_build`): its defconfig alone,
+    resolved strictly by the pinned interpreter with no preset merged onto it, as a host bench
+    resolves arm W (`wz_config.pico_bench_configuration`), and read as `resolve_profile` reads a
+    profile: the limits and policies it gives the build, and its capabilities on the engine it
+    chooses. An original not built through the pico ABI is refused."""
+    if original not in PRESETS:
+        raise Refusal(f"`{original}` is no original built through the pico ABI ({', '.join(PRESETS)})")
+    defconfig = wz_config.defconfig_path(original)
+    try:
+        kconf = wz_config.resolve([], original=original)
+        _, env_lines = wz_config.resolved_build(decl, "pico", kconf)
+        features = wz_config.resolved_features(decl, "pico", kconf)
+    except wz_config.PresetError as err:
+        raise Refusal(f"{defconfig.name} does not resolve: {err}") from err
+    statement = wz_config.resolved_statement(decl, "pico", kconf, {"kind": "presets", "inputs": [defconfig.name]})
+    return {"features": features, "env": parse_env_lines(env_lines), "statement": statement,
+            "profile": None, "preset": original, "word": preset_word(original),
+            "said": f"{original}'s own default build in wz (`configs/{defconfig.name}`)"}
+
+
+def resolve_build(decl: dict, option: str, name: str) -> dict:
+    """The build `--build`'s `--profile ID` (`resolve_profile`) or `--preset ORIGINAL`
+    (`resolve_preset`) names: its features, the environment of its limits and policies, its
+    conformance statement, the `profile` and `preset` its manifest states (one of them None), the
+    `word` its package's name gives it and what it is in words (`said`)."""
+    if option not in BUILD_OPTIONS:
+        raise Refusal(f"`{option}` names no build ({', '.join(BUILD_OPTIONS)})")
+    return resolve_profile(decl, name) if option == "--profile" else resolve_preset(decl, name)
 
 
 def arm_header(decl: dict, features: list[str], env: dict[str, str]) -> str:
@@ -1071,10 +1168,11 @@ def arm_header(decl: dict, features: list[str], env: dict[str, str]) -> str:
     return header
 
 
-def build_selection(options: list[str]) -> tuple[list[str], list[str]]:
+def build_selection(options: list[str], made: tuple[str, ...] = tuple(FORMS)) -> tuple[list[str], list[str]]:
     """The widths and forms `--build`'s options name (`--arch A`, `--form F`, each at most once):
-    every width and every form for an option not given. A word that is no option, an option given
-    twice or without its value, and a value no package is made for are refused."""
+    every width and every form of `made` (the forms the build is made in) for an option not given.
+    A word that is no option, an option given twice or without its value, and a value no package
+    is made for are refused."""
     chosen: dict[str, str] = {}
     rest = list(options)
     while rest:
@@ -1083,13 +1181,13 @@ def build_selection(options: list[str]) -> tuple[list[str], list[str]]:
             raise Refusal(f"`{option}` is not an option of --build here (--arch A, --form F, each once)")
         chosen[option] = rest.pop(0)
     arches = [chosen["--arch"]] if "--arch" in chosen else list(ARCHES)
-    forms = [chosen["--form"]] if "--form" in chosen else list(FORMS)
+    forms = [chosen["--form"]] if "--form" in chosen else list(made)
     for arch in arches:
         if arch not in ARCHES:
             raise Refusal(f"`{arch}` is not a width a package is made for ({', '.join(ARCHES)})")
     for form in forms:
-        if form not in FORMS:
-            raise Refusal(f"`{form}` is not a form a package is made in ({', '.join(FORMS)})")
+        if form not in made:
+            raise Refusal(f"`{form}` is not a form this package is made in ({', '.join(made)})")
     return arches, forms
 
 
@@ -1167,7 +1265,9 @@ def copy_library(report: str, library: str, where: str, stage: pathlib.Path) -> 
     return dll
 
 
-def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path:
+def build(out: pathlib.Path, option: str, name: str, arch: str, form: str) -> pathlib.Path:
+    """The package of the build `option` and `name` give (`resolve_build`) for `arch` in `form`,
+    written to `out`; its zip."""
     if sys.platform != "win32":
         raise Refusal("the package is built on a Windows host: its DLL, import library and symbols are "
                       "the MSVC toolchain's")
@@ -1181,7 +1281,10 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
         raise Refusal(f"the environment states {', '.join(stated)}; the package's build is its profile's "
                       "alone, so unset them")
     decl = wz_config.load_decl()
-    plan = resolve_profile(decl, profile)
+    plan = resolve_build(decl, option, name)
+    if plan["preset"] is not None and form not in RELEASE_FORMS:
+        raise Refusal(f"{plan['preset']}'s preset is made in the form a release ships "
+                      f"({', '.join(RELEASE_FORMS)}), the one the performance matrix measures")
     features = library_features(plan["features"], wz_config.manifest_features(wz_config.MANIFESTS["pico"]))
     header = arm_header(decl, features, plan["env"])
     env = {**os.environ, **plan["env"], **DEBUG_INFO_ENV}
@@ -1197,7 +1300,7 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
     if form == "split" and ext is None:
         raise Refusal(f"{EXT_CRATE} is no package of the crates workspace, and the split form is built with it")
     commit = git("rev-parse", "HEAD")
-    name = package_name(crate["version"], profile, arch, commit, form)
+    name = package_name(crate["version"], plan["word"], arch, commit, form)
     stage = out / name
     if stage.exists():
         shutil.rmtree(stage)
@@ -1282,13 +1385,14 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
     rust = rust_notice(stage, "rustc " + release.split(":", 1)[1].strip())
     pico = pico_notice(stage)
     (stage / "THIRD-PARTY-NOTICES.md").write_text(
-        render_notices(profile, target, linked, compile_time, rust, pico, FORMS[form],
+        render_notices(plan["said"], target, linked, compile_time, rust, pico, FORMS[form],
                        tuple(crate_name for crate_name, _ in graphs)),
         encoding="utf-8", newline="\n")
 
     tree_clean = git("status", "--porcelain", "--untracked-files=no") == ""
     facts = {"name": name, "version": crate["version"], "commit": commit, "tree_clean": tree_clean,
-             "rustc": rust["release"], "target": target, "profile": profile, "features": features,
+             "rustc": rust["release"], "target": target, "profile": plan["profile"], "preset": plan["preset"],
+             "features": features,
              "statement": plan["statement"], "form": form}
     template = (PACKAGE_DOCS / "RELEASE-NOTES.md").read_text(encoding="utf-8")
     (stage / "RELEASE-NOTES.md").write_text(release_notes(template, facts), encoding="utf-8", newline="\n")
@@ -1298,7 +1402,8 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
         "format_version": FORMAT_VERSION,
         "name": name,
         "version": crate["version"],
-        "profile": profile,
+        "profile": plan["profile"],
+        "preset": plan["preset"],
         "target": target,
         "form": form,
         "stdlib": STDLIBS[0],
@@ -1676,6 +1781,7 @@ def test(archive: pathlib.Path) -> int:
         arch = arch_of_target(manifest.get("target", ""))
         vcvars = ARCHES[arch][1]
         libraries = FORMS[form_of(manifest)]
+        preset = manifest_preset(manifest)
         statement = json.loads((package / STATEMENT).read_text(encoding="utf-8"))
         programs = sorted(p for p in (package / "examples").glob("*.c"))
         if not programs:
@@ -1693,6 +1799,10 @@ def test(archive: pathlib.Path) -> int:
             failed += bool(findings)
             say(f"pico-package-test on Windows {arch}: {where} {LIBRARY}.dll imports and exports: "
                 f"{'FAIL' if findings else 'PASS'}")
+        if preset is not None:
+            say(f"pico-package-test on Windows {arch}: the examples and {CHECK_PROGRAM.name}: not run, "
+                f"they call wz's own doors, which {preset}'s preset is built without")
+            return 1 if failed else 0
         for where, _ in NOSTD_BUILDS:
             work = pathlib.Path(tmp) / f"work-{where}"
             work.mkdir()
@@ -1759,12 +1869,17 @@ def release_findings(directory: pathlib.Path, commit: str, tag: str) -> tuple[li
             arch = arch_of_target(str(manifest.get("target", "")))
             form = form_of(manifest)
             stdlib_of(manifest)
+            preset = manifest_preset(manifest)
         except Refusal as err:
             findings.append(f"{archive.name}: {err}")
             continue
         if form not in RELEASE_FORMS:
             findings.append(f"{archive.name}: the {form} form, which no release carries "
                             f"({', '.join(RELEASE_FORMS)})")
+            continue
+        if preset is not None:
+            findings.append(f"{archive.name}: {preset}'s preset, a build the performance matrix measures "
+                            "and no release carries")
             continue
         version = str(manifest.get("version", ""))
         profile = str(manifest.get("profile", ""))
@@ -1775,7 +1890,7 @@ def release_findings(directory: pathlib.Path, commit: str, tag: str) -> tuple[li
             findings.append(f"{archive.name}: built from commit {built.get('commit')}, the release is of {commit}")
         if built.get("tree_clean") is not True:
             findings.append(f"{archive.name}: built from a tree with changes not committed")
-        name = package_name(version, profile, arch, commit, form)
+        name = package_name(version, build_word(manifest), arch, commit, form)
         if archive.name != f"{name}.zip" or manifest.get("name") != name:
             findings.append(f"{archive.name}: its manifest makes it {name}.zip")
         if (arch, form) in seen:
@@ -2052,6 +2167,18 @@ def selftest() -> int:
         "statement": statement, "form": "split"})
     expect("the split form's notes name both libraries",
            "`wz_capi_pico.dll`, `wz_capi_pico_ext.dll` (a program links both)" in split_notes)
+    expect("a profile's notes name its profile, and a build without the digest's door says it has none",
+           "- Profile: `host-peer-ext` (`configs/profiles/host-peer-ext.conf`)" in notes
+           and "(the build has no `zext_conformance_digest()`)" in notes and "- Preset:" not in notes)
+    preset_notes = release_notes("# Notes\n", {
+        "name": "n", "version": "0.1.0", "commit": "c" * 40, "tree_clean": True, "rustc": "rustc 1.0.0",
+        "target": "x86_64-pc-windows-msvc", "profile": None, "preset": "zenoh-pico", "features": ["os-host"],
+        "statement": {**statement, "capabilities": [{"id": DIGEST_DOOR, "supported": True}]}})
+    expect("a preset's notes name the original's defconfig and no profile, and a build with the "
+           "digest's door says it answers it",
+           "- Preset: `zenoh-pico`, its own default build in wz (`configs/zenoh-pico_defconfig`)" in preset_notes
+           and "- Profile:" not in preset_notes
+           and "(what `zext_conformance_digest()` answers)" in preset_notes)
 
     expect("the one library's package says it is built without `std`",
            package_name("0.1.0", "p", "x64", "0123456789abc") == "wz-capi-pico-0.1.0-p-windows-x64-nostd-0123456789")
@@ -2082,6 +2209,62 @@ def selftest() -> int:
             expect(f"--build {' '.join(options)} is refused", False)
         except Refusal:
             pass
+    expect("a preset's package is made in the released form alone, every width when none is named",
+           build_selection([], RELEASE_FORMS) == (list(ARCHES), ["single"])
+           and build_selection(["--arch", "x64"], RELEASE_FORMS) == (["x64"], ["single"]))
+    try:
+        build_selection(["--form", "split"], RELEASE_FORMS)
+        expect("the split form of a preset's package is refused", False)
+    except Refusal:
+        pass
+
+    expect("a package is made as the preset of the original a bench measures, the pico ABI's alone",
+           PRESETS == ("zenoh-pico",) and wz_config.PICO_BENCH_ORIGINAL in PRESETS
+           and BUILD_OPTIONS == ("--profile", "--preset"))
+    expect("a preset package's name says the original's preset where a profile's says the profile",
+           package_name("0.1.0", preset_word("zenoh-pico"), "x64", "0123456789abc")
+           == "wz-capi-pico-0.1.0-zenoh-pico-preset-windows-x64-nostd-0123456789")
+    expect("a manifest of a profile states no preset, and one of a preset no profile",
+           manifest_preset({"profile": "host-peer-ext", "preset": None}) is None
+           and manifest_preset({"profile": "host-peer-ext"}) is None
+           and manifest_preset({"profile": None, "preset": "zenoh-pico"}) == "zenoh-pico")
+    expect("a package's name gives its build the profile, or the preset's word",
+           build_word({"profile": "host-peer-ext", "preset": None}) == "host-peer-ext"
+           and build_word({"profile": None, "preset": "zenoh-pico"}) == "zenoh-pico-preset")
+    for manifest, word in (({}, "neither"), ({"profile": "../x"}, "neither"),
+                           ({"profile": "host-peer-ext", "preset": "zenoh-pico"}, "a build is one"),
+                           ({"profile": None, "preset": "zenoh-c"}, "zenoh-c")):
+        try:
+            manifest_preset(manifest)
+            expect(f"a manifest {manifest} is refused", False)
+        except Refusal as err:
+            expect(f"the refusal of {manifest} names {word} ({err})", word in str(err))
+    for call, word in ((lambda: resolve_preset({}, "zenoh-c"), "zenoh-c"),
+                       (lambda: resolve_profile({}, preset_word("zenoh-pico")), "preset package"),
+                       (lambda: resolve_build({}, "--original", "zenoh-pico"), "--original")):
+        try:
+            call()
+            expect(f"a build of {word} is refused before anything is resolved", False)
+        except Refusal as err:
+            expect(f"the refusal names {word} ({err})", word in str(err))
+    if wz_config.kconfiglib_module() is not None:
+        # The preset's package is the build `perf_matrix.py windows-plan` holds it to: the features
+        # and the statement a bench derives for arm W from the same defconfig.
+        decl = wz_config.load_decl()
+        pico_table = wz_config.manifest_features(wz_config.MANIFESTS["pico"])
+        kconf = wz_config.pico_bench_configuration()
+        preset_plan = resolve_preset(decl, wz_config.PICO_BENCH_ORIGINAL)
+        expect("the preset's package is arm W of a bench: its features and its statement's digest",
+               wz_config.enabled_features(pico_table, preset_plan["features"])
+               == wz_config.preset_features("coop", [], pico_table, "nostd", decl, kconf)
+               and preset_plan["statement"]["digest"]
+               == wz_config.resolved_statement(decl, "pico", kconf, {"kind": "test"})["digest"]
+               and library_features(preset_plan["features"], pico_table) == preset_plan["features"])
+        expect("the preset's package states what it is, and its name says so",
+               preset_plan["preset"] == "zenoh-pico" and preset_plan["profile"] is None
+               and preset_plan["word"] == "zenoh-pico-preset"
+               and preset_plan["statement"]["derived_from"] == {"kind": "presets",
+                                                                "inputs": ["zenoh-pico_defconfig"]})
     expect("no option measures every width, and --arch one",
            measure_selection([]) == list(ARCHES) and measure_selection(["--arch", "x86"]) == ["x86"])
     for options in (["--arch"], ["--arch", "arm64"], ["--form", "single"], ["--arch", "x64", "--arch", "x86"]):
@@ -2281,6 +2464,7 @@ def selftest() -> int:
            and "-DCMAKE_SHARED_LINKER_FLAGS_RELEASE=/INCREMENTAL:NO /OPT:REF /OPT:ICF" in REFERENCE_CMAKE)
     for manifest, word in (({**shipped, "stdlib": "std"}, "std"),
                            ({**shipped, "form": "split"}, "split"),
+                           ({**shipped, "preset": "zenoh-pico"}, "preset"),
                            ({**shipped, "features": ["query", "absent"]}, "absent"),
                            ({**shipped, "features": []}, "features"),
                            ({**shipped, "target": "aarch64-pc-windows-msvc"}, "aarch64")):
@@ -2405,12 +2589,15 @@ def selftest() -> int:
                 built = {"commit": differs.get("commit", commit), "tree_clean": differs.get("clean", True)}
                 version = differs.get("version", "0.1.0")
                 stdlib = differs.get("stdlib", STDLIBS[0])
-                name = differs.get("name") or package_name(version, "p", arch, built["commit"], form)
+                preset = differs.get("preset")
+                word = "p" if preset is None else preset_word(preset)
+                name = differs.get("name") or package_name(version, word, arch, built["commit"], form)
                 stage = pathlib.Path(tempfile.mkdtemp(dir=tmp)) / name
                 stage.mkdir()
                 (stage / "README.md").write_text("r\n", encoding="utf-8")
                 manifest = {"format": FORMAT, "format_version": FORMAT_VERSION, "name": name, "version": version,
-                            "profile": "p", "target": ARCHES[arch][0], "form": form, "stdlib": stdlib,
+                            "profile": "p" if preset is None else None, "preset": preset,
+                            "target": ARCHES[arch][0], "form": form, "stdlib": stdlib,
                             "built_from": built, "files": file_rows(stage)}
                 (stage / MANIFEST).write_text(render_json(manifest), encoding="utf-8")
                 archive = out / f"{name}.zip"
@@ -2478,7 +2665,9 @@ def selftest() -> int:
                 # beside the release's package of its width and form, not over it.
                 ("x64", "single", {"stdlib": "std", "name": "wz-capi-pico-0.1.0-p-windows-x64-0123456789"},
                  "`std` is the standard library of no package (nostd)"),
-                ("x86", "split", {}, "the split form, which no release carries (single)")):
+                ("x86", "split", {}, "the split form, which no release carries (single)"),
+                ("x64", "single", {"preset": "zenoh-pico"},
+                 "zenoh-pico's preset, a build the performance matrix measures and no release carries")):
             findings, _ = release_findings(release_dir(every + [(arch, form, differs)]), commit, "v0.1.0")
             expect(f"a package of {arch} {form} {differs} beside a full release is a finding ({findings})",
                    len(findings) == 1 and findings[0].endswith(word))
@@ -2525,13 +2714,13 @@ def main(argv: list[str]) -> int:
     try:
         if len(argv) == 2 and argv[1] == "--selftest":
             return selftest()
-        if len(argv) >= 5 and argv[1] == "--build" and argv[3] == "--profile":
-            arches, forms = build_selection(argv[5:])
+        if len(argv) >= 5 and argv[1] == "--build" and argv[3] in BUILD_OPTIONS:
+            arches, forms = build_selection(argv[5:], tuple(FORMS) if argv[3] == "--profile" else RELEASE_FORMS)
             out = pathlib.Path(argv[2]).resolve()
             out.mkdir(parents=True, exist_ok=True)
             for arch in arches:
                 for form in forms:
-                    build(out, argv[4], arch, form)
+                    build(out, argv[3], argv[4], arch, form)
             return 0
         if len(argv) >= 2 and argv[1] == "--measure":
             for arch in measure_selection(argv[2:]):

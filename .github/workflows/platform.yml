@@ -1470,6 +1470,44 @@ jobs:
           work="$(cygpath -u "$RUNNER_TEMP")/pico-size-$WZ_PACKAGE_ARCH"
           python scripts/lib/pico_windows_package.py --size-features "$(cygpath -w "$work/reading")"
 
+  # zenoh-pico's preset as a Windows package (`pico_windows_package.py --build OUT --preset zenoh-pico`):
+  # the library of the build the host benches measure as arm W, configs/zenoh-pico_defconfig alone,
+  # resolved by the pinned Kconfig interpreter, for x64, the one width deploy/pico_perf_ceiling_windows.json
+  # holds, in the one form a release ships. Its manifest states `preset`, which `perf_matrix.py
+  # windows-plan` holds to the preset's features and conformance digest, so the plan of a run on a
+  # Windows host with this zip judges its rows against that table (docs/pico-perf-matrix.md section 6);
+  # a run with the release package plans no preset and judges none. It is built and tested by the same
+  # action as `package-windows`; its test runs no program of the examples, which call wz's own doors,
+  # and no release carries it. No Rust cache, as for `package-windows`.
+  package-windows-preset:
+    name: pico library package x64 zenoh-pico preset (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    if: ${{ inputs.host == '' || inputs.host == 'both' || inputs.host == 'windows' }}
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: build the package and run its regression test
+        id: package
+        uses: ./.github/actions/pico-windows-package
+        with:
+          arch: x64
+          form: single
+          preset: zenoh-pico
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-windows-preset-zenoh-pico-x64
+          path: |
+            ${{ steps.package.outputs.directory }}/*.zip
+            ${{ steps.package.outputs.directory }}/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
   # zenoh-pico's own API tests and example programs on the DLL a release ships
   # (scripts/lib/pico_upstream_programs.py; docs/release-proof-pico-windows.md, item W03): the
   # package without `std` of each width, as `package-windows` built it and its regression test

@@ -52,8 +52,9 @@ which carry planes zenoh-pico's own build has not. `reference` records it (`wz_p
 `reference.json`), the run carries it into `perf.json` (`record.preset`; a reading that names none was
 made of the crate's default features), and the gate refuses a run against a table filled from another
 build (`preset`), as it refuses another engine. A Windows package is planned as the preset only when its
-features are exactly the preset's (`windows-plan`, `wz_preset`, with `wz_beyond_preset` and
-`wz_short_of_preset` otherwise).
+manifest says it is (`preset`, the package `pico_windows_package.py --build OUT --preset zenoh-pico` makes)
+and its features and conformance digest are the preset's, which `windows-plan` holds it to (`wz_preset`); a
+package of a registered profile is planned as none, with `wz_beyond_preset` and `wz_short_of_preset`.
 
 **The standard library.** Arm W is the library the release ships: without `std` (`os-host`,
 docs/c-abi-engine-and-memory.md phase P4), the one form
@@ -502,7 +503,7 @@ Linux build as it was), the cells and their order, the alternation of the arms, 
 warm-up, window, round trips and timeout, the validity rule and its second pass, the reading's shape
 (`wz-pico-perf/1`) and the gate's rule. The plan carries the figures, the reasons a cell is not applicable and
 the rules of a cell from `perf_matrix.py` itself, so the runner states none of its own. The plan is of schema
-`wz-pico-perf-windows-plan/2` and the runner reads no other, so a plan and the runner it is handed are of one
+`wz-pico-perf-windows-plan/3` and the runner reads no other, so a plan and the runner it is handed are of one
 tree.
 
 **What differs, and why.**
@@ -539,13 +540,20 @@ committed table of the reading's platform. Layer C0 holds the population of both
 
 **A run.** On Linux, in a checkout of the commit the package was built from: `windows-plan` derives arm P's
 switches from this tree's declaration, feature table and pinned pico, and refuses a package whose commit differs
-from the tree in any of them. The package is the `package-windows` artifact of that commit's Platform run (x64,
-the single library without `std`, the form a release ships: `docs/c-abi-engine-and-memory.md` E7).
+from the tree in any of them. Arm W is zenoh-pico's preset, as on Linux, so the package is the
+`package-windows-preset` artifact of that commit's Platform run (`pico_windows_package.py --build OUT --preset
+zenoh-pico --arch x64`: x64, the single library without `std`, the form a release ships,
+`docs/c-abi-engine-and-memory.md` E7, of configs/zenoh-pico_defconfig alone). Its manifest states `preset`
+`zenoh-pico`, and `windows-plan` refuses it unless its features and its build statement's digest are the
+preset's, so a plan of it says `wz_preset` `zenoh-pico` and the run's rows are judged against the table. The
+release package (`package-windows`, the profile `host-peer-ext`) runs the same matrix, but its plan states no
+preset, the runner says so, and the gate judges no row of it against this table. The preset package runs none of
+the examples in its test (they call wz's own doors, which the preset is built without) and no release carries it.
 
 ```sh
 out=target/perf-win; mkdir -p "$out"
-gh run download <platform run id> -n pico-windows-package-x64-single -D "$out"
-zip="$(ls "$out"/wz-capi-pico-*-windows-x64-*.zip)"
+gh run download <platform run id> -n pico-windows-preset-zenoh-pico-x64 -D "$out"
+zip="$(ls "$out"/wz-capi-pico-*-zenoh-pico-preset-windows-x64-*.zip)"
 python3 scripts/host-bench/perf_matrix.py windows-plan "$zip" "$out/plan.json"
 git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$PWD/$out/zenoh-pico.zip" HEAD
 ssh pc3-win "if not exist C:\wzperf mkdir C:\wzperf"
