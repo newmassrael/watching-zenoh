@@ -17,6 +17,7 @@
 # instructions does not re-record every unit while a new function does speak.
 # tolerance: 64
 # measured-with: arm-none-eabi-gcc (Arm GNU Toolchain 13.2.rel1 (Build arm-13.7)) 13.2.1 20231009
+app_link_sm	4692	955	0	4
 close	3086	21	0	0
 cobs_decode	116	0	0	0
 cobs_encode	152	0	0	0
@@ -29,12 +30,14 @@ drop_report_due	6092	102	0	0
 e2e_counter_step	6050	102	0	0
 e2e_counter_verdict	26	0	0	0
 encoding	3704	157	0	0
+eth_rx_pool_mcu	820	464	0	16
 ext_unit	3002	18	0	0
 ext_zbuf	3206	21	0	0
 ext_zint	3078	21	0	0
 extension_v1_dispatch	34	0	0	0
 fragment	3240	25	0	0
 frame	3240	25	0	0
+hello_received_schema	0	0	0	0
 init_body	4238	169	0	0
 join	3790	45	0	0
 keep_alive	3002	18	0	0
@@ -57,19 +60,40 @@ keyexpr_walk	2024	0	0	0
 linkstate_link	3078	21	0	0
 linkstate_weight	3078	21	0	0
 locator	3276	21	0	0
+multicast_peer_sm	4376	875	0	4
 network_mid_v1_valid	16	0	0	0
 open_body	3738	161	0	0
 payload_ext_id_v1_valid	56	0	0	0
 payload_z_mid_v1_valid	16	0	0	0
+peer_connection_sm	5704	1194	0	4
 put_outcome	42	35	0	0
+reassembly_pool_ap	792	464	0	32
+reassembly_pool_mcu	792	464	0	4
+reassembly_slot_sm	4654	959	0	4
 replay_reply_admission	6080	102	0	0
+replay_round_sm	4616	914	0	4
+replay_serving_sm	4328	838	0	4
 reset_peer_schema	0	0	0	0
 scout	3762	49	0	0
+scout_rx_pool_mcu	792	464	0	8
 scouting_mid_v1_valid	16	0	0	0
+scouting_sm	6678	1446	0	4
 serial_envelope	3366	29	0	0
+session_fsm_multicast_sm	4430	883	0	4
 session_mid_v1_valid	12	0	0	0
+session_rx_pool_ap	836	464	0	64
+session_rx_pool_ap_small	848	464	0	258
+session_rx_pool_mcu	820	464	0	16
+session_rx_pool_mcu_minimal	792	464	0	4
+session_rx_pool_mcu_multicast	820	464	0	32
+session_slot_pool_mcu	828	464	0	3
+session_tx_pool_ap	836	464	0	16
+session_tx_pool_ap_small	848	464	0	728
+session_tx_pool_mcu	820	464	0	8
+stream_activation_sm	4340	881	0	4
 stream_deadline	7244	102	0	0
 stream_envelope	3202	21	0	0
+supervision_sm	4444	918	0	4
 take_generation	9430	173	0	0
 take_generation_duplicate	0	0	0	0
 take_generation_kind	42	36	0	0
@@ -78,6 +102,7 @@ tick_elapsed	6046	102	0	0
 tick_until_due	6048	102	0	0
 timestamp	3240	25	0	0
 transport_ext_id_v1_valid	38	0	0	0
+unicast_link_sm	5324	1137	0	4
 vle_byte_length	6190	102	0	0
 vle_u64_decode	6232	102	0	0
 whatami_v1_valid	14	0	0	0
