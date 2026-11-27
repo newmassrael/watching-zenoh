@@ -1,0 +1,95 @@
+{
+  "v": 1,
+  "models": [
+    {
+      "module": "QueryFinals",
+      "decision": "docs/zenoh-logic-as-sce-kinds.md, W16 (S7 13)",
+      "parts": {
+        "Hold": "TRUE",
+        "RefuseFull": "TRUE",
+        "Sticky": "TRUE",
+        "OweRefused": "TRUE",
+        "GiveBack": "TRUE",
+        "ReplyKeeps": "TRUE"
+      },
+      "runs": [
+        {
+          "config": "QueryFinals.cfg",
+          "expect": "holds",
+          "possible": "NoRowHeld"
+        },
+        {
+          "config": "QueryFinals_live.cfg",
+          "expect": "holds"
+        },
+        {
+          "config": "QueryFinals_live_without_fairness.cfg",
+          "expect": "violates",
+          "property": "Ends",
+          "against": "the fairness of LiveSpec",
+          "promise": "kept",
+          "why": "fairness is what makes a query end; the promise of the service is safety and needs none"
+        },
+        {
+          "config": "QueryFinals_without_hold.cfg",
+          "expect": "violates",
+          "invariant": "NothingAfterFinal",
+          "without": "Hold",
+          "promise": "broken"
+        },
+        {
+          "config": "QueryFinals_without_reply_keep.cfg",
+          "expect": "violates",
+          "invariant": "NothingAfterFinal",
+          "without": "ReplyKeeps",
+          "promise": "broken"
+        },
+        {
+          "config": "QueryFinals_without_sticky_refusal.cfg",
+          "expect": "violates",
+          "invariant": "RefusedSilent",
+          "without": "Sticky",
+          "promise": "broken"
+        },
+        {
+          "config": "QueryFinals_without_owed_refusal.cfg",
+          "expect": "violates",
+          "invariant": "RefusedSilent",
+          "without": "OweRefused",
+          "promise": "kept",
+          "why": "a refused query sent a bare Final reads as one no queryable matched; that it is sent nothing is zenoh-pico's refusal, which RefusedSilent holds, not the service's promise"
+        },
+        {
+          "config": "QueryFinals_without_refusal.cfg",
+          "expect": "violates",
+          "invariant": "Bounded",
+          "without": "RefuseFull",
+          "promise": "kept",
+          "why": "a table past its rows tells no querier anything false; the bound is what the session's arena is promised"
+        },
+        {
+          "config": "QueryFinals_without_give_back.cfg",
+          "expect": "violates",
+          "possible": "NoRowHeld",
+          "without": "GiveBack",
+          "promise": "kept",
+          "why": "a hold never given back sends nothing false; it keeps the query's Final and its row for ever, which Ends and NoRowHeld say"
+        }
+      ],
+      "promise": "Refines",
+      "refines": "QueryFinalService",
+      "progress": [
+        "Ends"
+      ],
+      "possible": [
+        "NoRowHeld"
+      ]
+    },
+    {
+      "module": "QueryFinalService",
+      "decision": "docs/zenoh-logic-as-sce-kinds.md, W16 (S7 13)",
+      "runs": [],
+      "abstract": true
+    }
+  ]
+}

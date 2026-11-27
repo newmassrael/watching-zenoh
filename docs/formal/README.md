@@ -1,0 +1,89 @@
+# Formal models of wz: the promises are written here, and SCE's judge checks them once wz pins it
+
+Status: plan and first model, 2026-11-27. No configuration here has been run by TLC yet (section 4).
+
+wz is to be generated from SCE documents for Rust and C, and checked with TLA+ as SCE ADR 0115 lays
+out (`vendor/sce/docs/adr/0115-*.md`): a promise module (level 1) says what a user may rely on, a
+protocol model refines it (level 2), each part of the protocol has a configuration that takes it
+out and must fail, and progress is stated with the fairness it stands on. Levels 4 and 5 (a model
+generated from a document, a recorded run read against it) are SCE's to build; wz writes the
+promises those levels will be held to.
+
+## 1. What is here
+
+| File | Level | What it says |
+|---|---|---|
+| `QueryFinalService.tla` | 1, promise | A query that reached a session is refused whole (no callback ran, nothing sent, not even a Final) or answered: each queryable's callback at most once, replies only after a callback ran, then exactly one Final and nothing after it |
+| `QueryFinals.tla` | 2, protocol | How the session keeps that promise: the table of held Finals (`FinalHolds`, `crates/wz-session-core/src/query_plane.rs`), the Final the dispatch owes, a query a program keeps, the own get's row. `Refines` checks it against the promise |
+| `QueryFinals*.cfg` | bounded exploration | Two queries (one in the two live runs), two queryables, one row; one configuration per part taken out |
+| `models.json` | manifest | Every module and configuration, in the format of SCE's `schemas/sce-formal-models.v1.schema.json` (`"v": 1`, no tool pin) |
+
+## 2. Each part of the query's Final has a configuration that fails without it
+
+The mechanism is S7 13 of `docs/zenoh-logic-as-sce-kinds.md` (W16): the table of held
+`ResponseFinal`s, bounded by `MAX_PENDING_FINALS` since 2026-11-22. It is chosen because it is
+to move into an SCE document (`map<record:FinalKey, record:FinalHold>[N]`), its order of a
+reply and a Final runs across threads, and both upstream presets state the same promise: zenoh
+sends the Final when the last `Query` is dropped, zenoh-pico when the last reference to its query
+is dropped, and sends nothing for a query it cannot build (the citations are in the module's
+head).
+
+| Part (constant) | What it keeps | Without it TLC is to find | Promise |
+|---|---|---|---|
+| `Hold` | the Final waits for the last hold | a reply after the Final (`NothingAfterFinal`) | broken |
+| `ReplyKeeps` | a reply to a kept query holds a keep of its own | a reply after the Final, the program letting go from another thread | broken |
+| `Sticky` | a query refused at one queryable stays refused in its dispatch | a refused query whose callback ran (`RefusedSilent`), a row having come free meanwhile | broken |
+| `OweRefused` | a refused query is sent no Final | a refused query sent a Final (`RefusedSilent`) | kept |
+| `RefuseFull` | a query with no row left is refused before its callback | a table past its rows (`Bounded`) | kept |
+| `GiveBack` | a hold whose call was not begun is given back | a state from which no query's row can be freed (`NoRowHeld`, D9) | kept |
+
+`Ends` (every query that arrived is answered or refused) holds under `LiveSpec` and fails
+without its fairness (`QueryFinals_live_without_fairness.cfg`).
+
+Not modelled: a query's link lost, under which nothing is sent (`query_plane.rs` lines 32-37); a
+second keep of a kept query; the own get's answers, of which only its row is modelled.
+
+## 3. The judge is SCE's, and the SCE revision wz pins cannot run it on this manifest
+
+- At wz's pin (`vendor/sce` at 2d736122d01, SCE's main on 2026-11-27) the judge is
+  `scripts/formal/models.py`. It reads one manifest, its own tree's
+  (`ROOT = Path(__file__).resolve().parents[2]`, `MANIFEST = FORMAL / "models.json"`, lines 58-60),
+  and has no option for another (`--self-test`, `--record`, `--only`, `--shard`, `--workers`).
+  Running it by its path from the vendored tree is the plan SCE ADR 0146 rejected: a path and keys
+  that no contract states, and a second runner of TLC beside the generator's.
+- The judge wz runs is `sce-codegen formal models --manifest <file>` (SCE ADR 0146, D1 and D7). It
+  reads the modules beside the manifest, pins TLC 1.7.4 by digest in
+  `sce-build/src/formal/toolchain.json`, fetches nothing (`sce-codegen formal install` does),
+  refuses a manifest that names a tool, and leaves with 15 when a tool is missing. It is on SCE's
+  branch `adr0144-formal-judge` (92dee02bf86), item 446 of SCE's landing queue, and not yet on
+  SCE's main.
+- What SCE has to land for wz: that branch on its main. Levels 1 and 2 need nothing more.
+
+## 4. Order of work
+
+1. Done: the promise and the protocol of the query's Final (sections 1 and 2).
+2. When item 446 is on SCE's main: move `vendor/sce` to it; build `sce-codegen` from the pin
+   (`cargo build --bin sce-codegen --features cli -p sce-build`); `sce-codegen formal install
+   --tool tlc`; `sce-codegen formal models --manifest docs/formal/models.json --record`, which
+   writes the two holding runs' counts of distinct states that `models.json` does not record yet
+   (the judge refuses a holding run without one), and read the diff; then the same command without
+   `--record` must exit 0. Then register it as a lane: exit 1 is a verdict, 15 is "could not run"
+   and no pass.
+3. Promises of the next mechanisms, level 1 first: the declaration sync (S2 44 of
+   `docs/zenoh-logic-as-sce-kinds.md`) and the unicast link (`sources/session/unicast_link.scxml`).
+   The link is an SCE document already, so its protocol model is the one D7 generates; only its
+   promise is written by hand.
+4. When SCE builds D7 (`sce-codegen model`): the table of held Finals moves into an SCE document,
+   and the model generated from it must refine `QueryFinalService`, as `QueryFinals` does now.
+5. When SCE builds D4 and D8 (`sce-codegen formal traces`): runs recorded from the Rust engine
+   (`crates/wz-capi-coop`) and from the C11 lane are read against the generated model.
+
+## 5. What the models stand on
+
+- TLC 1.7.4, as SCE's judge pins it, and the Java that runs it.
+- The bounds of a configuration: two queries, two queryables, one row, one reply. An error past
+  them is not found.
+- The lines under "Taken as given" in `QueryFinals.tla`: which lock each step holds, read from the
+  code at this revision. A change of the code that moves a lock moves the model's ground, and no
+  check says so until level 5 reads runs of the code.
+- That the promise is what a querier and a queryable rely on. A person reads it.
