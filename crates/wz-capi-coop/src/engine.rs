@@ -3181,7 +3181,7 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// slot is made at its place's first face (`direct::DirectFaces::made_at`), its Router over
     /// these, as the open made every face's Router over them in a build that lends the slots.
     #[cfg(all(wz_on_use, feature = "listen", not(wz_round)))]
-    face_chains: (wz_session_core::byte_cells::LentByteCells, usize),
+    face_chains: (LentByteCells, usize),
     /// The state the places of the session's own values and its keys lie in (`StateHold`): the
     /// region, which holds its registry too (`crate::region`), or the session's own state where
     /// its tables take their memory on use. After the session's state, whose handle of the registry
