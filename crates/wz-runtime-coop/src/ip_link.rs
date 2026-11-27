@@ -5,16 +5,22 @@
 //! [`IpLink`]: a sum over the stack's protocols, each link placed in its cell as one of its
 //! variants. Where nothing adds a link to the stack's set, the session reads the link as this type
 //! and calls a link's methods with a tag test and the variant's body, not through a table
-//! ([`ClosedSet`]); where a stack wrapping this one adds links of its own, the session reads each
-//! link behind its trait's table, as one of an open set ([`OpenSet`]). Either way the session's
-//! actions send through the variant's own table, and what a face keeps to wait on the link reads it
+//! ([`ClosedSet`]), and its actions send through it so too; where a stack wrapping this one adds
+//! links of its own, the session reads and sends through each link behind its variant's tables, as
+//! one of an open set ([`OpenSet`]). Either way what a face keeps to wait on the link reads it
 //! behind a table.
 
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 
 use wz_session_core::byte_cells::LentByteCells;
-use wz_session_core::link::{BoxedLinkDriver, LostCause, RxFrame};
+use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
+use wz_session_core::link::{
+    BoxedLinkDriver, LinkEnds, LinkSendOutcome, LinkSubject, LostCause, RoomAnswer, RoomWait,
+    RxFrame, TxSlot, TxSlotGrant,
+};
+use wz_session_core::qos::Priority;
+use wz_session_core::reliability::Reliability;
 
 use crate::link_cells::{CellRc, CountKind};
 use crate::link_storage::{RxBuffer, TxBuffer};
@@ -159,9 +165,9 @@ where
     }
 
     /// The link `make` writes as the variant `tag` in a claimed cell, and the two handles the
-    /// session holds it by: the sink its actions send through, the variant's own (its table is the
-    /// variant's), and the pump, as the set `F` reads the link. A link refused is never made, and
-    /// what `make` would have made it of is let go of where it lies.
+    /// session holds it by, the sink its actions send through and the pump, as the set `F` hands
+    /// the link on. A link refused is never made, and what `make` would have made it of is let go
+    /// of where it lies.
     ///
     /// # Safety
     /// `tag` is the discriminant of the variant whose field is a `V`, and `make` leaves a whole `V`
@@ -185,13 +191,14 @@ where
             // SAFETY: the caller's contract, which is this call's.
             .made(|place| unsafe { Self::write_variant(place, tag, make) })
             .ok_or(LinkOpenError::Exhausted)?;
-        // SAFETY: the cell holds the variant `tag`, whose field is a `V` at that place.
-        let sink = unsafe { Self::variant::<V>(whole.clone()) }.into_sink();
-        // SAFETY: as for the sink.
-        let pump = F::pump(whole, |whole| {
-            unsafe { Self::variant::<V>(whole) }.into_link()
-        });
-        Ok(OpenedLink { sink, pump })
+        Ok(F::opened(whole, |whole| {
+            // SAFETY: the cell holds the variant `tag`, whose field is a `V` at that place.
+            let variant = unsafe { Self::variant::<V>(whole) };
+            OpenedLink {
+                sink: variant.clone().into_sink(),
+                pump: variant.into_link(),
+            }
+        }))
     }
 
     /// The variant `tag` written in `place`: its field by `make`, where the field lies, then its tag.
@@ -318,48 +325,237 @@ where
     }
 }
 
-/// How the links of a stack whose links are `E` reach the session that reads them
-/// (`SessionLinks::Pump`): the set the build closes or leaves open.
-pub trait LinkSet<E: SessionDatagramLink + 'static, N: CountKind>: 'static {
-    /// The handle a link of the stack is pumped through.
-    type Pump: SharedPump<N>;
+/// The sends of the link, answered by the variant it is: the methods any variant states for
+/// itself, as [`crate::ip_stack::IpDriver`] answers them, the rest the trait's own.
+impl<U, S, T, N, W> BoxedLinkDriver for IpLink<U, S, T, N, W>
+where
+    U: DatagramSocket + 'static,
+    S: StreamSocket + 'static,
+    T: StreamSocket + 'static,
+    N: CountKind,
+    W: InputWaiter,
+{
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        on_variant!(self, link => link.send_blocking(bytes, reliability))
+    }
 
-    /// The handle on `whole`, a link of the stack in its cell, as the set pumps it; `variant` is
-    /// the same link read behind its variant's table.
-    fn pump(
-        whole: CellRc<E, N>,
-        variant: impl FnOnce(CellRc<E, N>) -> CellRc<dyn SessionDatagramLink, N>,
-    ) -> Self::Pump;
+    // Forwarded, or every session over this link would find room on a stream that has none.
+    fn wait_for_room(&self, priority: Priority, wait: RoomWait) -> RoomAnswer {
+        on_variant!(self, link => link.wait_for_room(priority, wait))
+    }
+
+    fn tx_slot_acquire(&self, want: usize, priority: Priority) -> Option<TxSlotGrant> {
+        on_variant!(self, link => link.tx_slot_acquire(want, priority))
+    }
+
+    fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
+        on_variant!(self, link => link.tx_slot_storage(slot))
+    }
+
+    fn tx_slot_send(
+        &self,
+        slot: TxSlot,
+        start: usize,
+        len: usize,
+        reliability: Reliability,
+        priority: Priority,
+    ) -> LinkSendOutcome {
+        on_variant!(self, link => link.tx_slot_send(slot, start, len, reliability, priority))
+    }
+
+    fn tx_slot_abort(&self, slot: TxSlot) {
+        on_variant!(self, link => link.tx_slot_abort(slot))
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn tx_slot_spare(&self) -> bool {
+        on_variant!(self, link => link.tx_slot_spare())
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn tx_slot_claimable(&self) -> bool {
+        on_variant!(self, link => link.tx_slot_claimable())
+    }
+
+    fn open_blocking(&self) {
+        on_variant!(self, link => link.open_blocking())
+    }
+
+    fn close_blocking(&self) {
+        on_variant!(self, link => link.close_blocking())
+    }
+
+    fn link_ends(&self) -> Option<LinkEnds<'_>> {
+        on_variant!(self, link => link.link_ends())
+    }
+
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        on_variant!(self, link => link.link_subject())
+    }
+
+    fn peer_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
+        on_variant!(self, link => link.peer_credential_zid())
+    }
+
+    fn batch_length_prefixed(&self) -> bool {
+        on_variant!(self, link => link.batch_length_prefixed())
+    }
+
+    fn link_mtu(&self) -> usize {
+        on_variant!(self, link => link.link_mtu())
+    }
+
+    fn link_rx_capacity(&self) -> usize {
+        on_variant!(self, link => link.link_rx_capacity())
+    }
 }
 
-/// The links of a stack that another stack wraps and adds links of its own to: read behind the
-/// table of their variant, one of an open set, as every link of the wrapping stack is.
+/// How the links of a stack whose links are `E` reach the session that reads and sends through
+/// them (`SessionLinks::Pump`, `SharedPump::Sink`): the set the build closes or leaves open.
+pub trait LinkSet<E: SessionDatagramLink + BoxedLinkDriver + 'static, N: CountKind>:
+    'static
+{
+    /// The handle a link of the stack is pumped through, which names the type its sink is.
+    type Pump: SharedPump<N>;
+
+    /// The two handles the session holds `whole`, a link of the stack in its cell, by, as the set
+    /// hands it on; `variant` hands the same link on behind its variant's tables.
+    fn opened(
+        whole: CellRc<E, N>,
+        variant: impl FnOnce(CellRc<E, N>) -> OpenedLink<CellRc<dyn SessionDatagramLink, N>, N>,
+    ) -> OpenedLink<Self::Pump, N>;
+}
+
+/// The links of a stack that another stack wraps and adds links of its own to: read and sent
+/// through behind the tables of their variant, one of an open set, as every link of the wrapping
+/// stack is.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OpenSet;
 
-impl<E: SessionDatagramLink + 'static, N: CountKind> LinkSet<E, N> for OpenSet {
+impl<E: SessionDatagramLink + BoxedLinkDriver + 'static, N: CountKind> LinkSet<E, N> for OpenSet {
     type Pump = CellRc<dyn SessionDatagramLink, N>;
 
-    fn pump(
+    fn opened(
         whole: CellRc<E, N>,
-        variant: impl FnOnce(CellRc<E, N>) -> CellRc<dyn SessionDatagramLink, N>,
-    ) -> Self::Pump {
+        variant: impl FnOnce(CellRc<E, N>) -> OpenedLink<CellRc<dyn SessionDatagramLink, N>, N>,
+    ) -> OpenedLink<Self::Pump, N> {
         variant(whole)
     }
 }
 
-/// The links of a stack nothing adds to: read as the stack's own type, so each call on a link is
-/// the tag test and its variant's body, inlined where it is read, and no table is reached.
+/// The links of a stack nothing adds to: read and sent through as the stack's own type, so each
+/// call on a link is the tag test and its variant's body, inlined where it is made, and no table
+/// is reached.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ClosedSet;
 
-impl<E: SessionDatagramLink + 'static, N: CountKind> LinkSet<E, N> for ClosedSet {
-    type Pump = CellRc<E, N>;
+impl<E: SessionDatagramLink + BoxedLinkDriver + 'static, N: CountKind> LinkSet<E, N> for ClosedSet {
+    type Pump = ClosedLink<E, N>;
 
-    fn pump(
+    fn opened(
         whole: CellRc<E, N>,
-        _variant: impl FnOnce(CellRc<E, N>) -> CellRc<dyn SessionDatagramLink, N>,
-    ) -> Self::Pump {
-        whole
+        _variant: impl FnOnce(CellRc<E, N>) -> OpenedLink<CellRc<dyn SessionDatagramLink, N>, N>,
+    ) -> OpenedLink<Self::Pump, N> {
+        OpenedLink {
+            sink: whole.clone(),
+            pump: ClosedLink(whole),
+        }
+    }
+}
+
+/// A link of a closed set in its cell, as the stack hands it to the session's pump ([`ClosedSet`]):
+/// the handle on the cell, which names the stack's own type both as the type the link is read as
+/// and as the type its sink sends through. A handle on a cell of any other type names the driver's
+/// trait for its sink (`SharedPump` for `CellRc`), which is what a stack keeps whose links a
+/// session sends through behind a table.
+pub struct ClosedLink<E: 'static, N: CountKind>(CellRc<E, N>);
+
+impl<E: 'static, N: CountKind> ClosedLink<E, N> {
+    /// The handle on the link's cell.
+    pub fn cell(&self) -> &CellRc<E, N> {
+        &self.0
+    }
+}
+
+impl<E: SessionDatagramLink + BoxedLinkDriver + 'static, N: CountKind> SharedPump<N>
+    for ClosedLink<E, N>
+{
+    type Link = E;
+    type Sink = E;
+
+    fn share(self) -> Option<CellRc<E, N>> {
+        Some(self.0)
+    }
+}
+
+impl<E: SessionDatagramLink + 'static, N: CountKind> SessionDatagramLink for ClosedLink<E, N> {
+    fn service(&self) {
+        self.0.service();
+    }
+
+    fn service_within(&self, max_wait_ms: u64) {
+        self.0.service_within(max_wait_ms);
+    }
+
+    fn uses_wake_budget(&self) -> bool {
+        self.0.uses_wake_budget()
+    }
+
+    fn try_recv(&self) -> Option<RxFrame> {
+        self.0.try_recv()
+    }
+
+    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        self.0.recv_with(f)
+    }
+
+    fn lost(&self) -> Option<LostCause> {
+        self.0.lost()
+    }
+
+    fn take_rx_dropped(&self) -> usize {
+        self.0.take_rx_dropped()
+    }
+
+    fn holds_input(&self) -> bool {
+        self.0.holds_input()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn waits_for_buffer(&self) -> bool {
+        self.0.waits_for_buffer()
+    }
+
+    fn owes_write(&self) -> bool {
+        self.0.owes_write()
+    }
+
+    #[cfg(feature = "session-unicast-accept")]
+    fn write_owed_now(&self) {
+        self.0.write_owed_now();
+    }
+
+    fn takes_input(&self) -> bool {
+        self.0.takes_input()
+    }
+
+    fn keeps_input(&self) -> bool {
+        self.0.keeps_input()
+    }
+
+    fn keep(&self) {
+        self.0.keep();
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        self.0.lends_until_next_receive()
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.0.input_wait()
+    }
+
+    fn room_wait(&self) -> Option<WaitOn> {
+        self.0.room_wait()
     }
 }

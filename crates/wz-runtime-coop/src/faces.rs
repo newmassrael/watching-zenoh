@@ -41,7 +41,7 @@ use crate::link_cells::{CellRc, CountKind, FaceHeld, FaceParts, OneTask};
 use crate::session_drive::Locator;
 use crate::session_drive::{
     LinkOpenError, LinkWait, LinkWaits, OpenedLink, PendingDial, SessionDatagramLink, SessionLinks,
-    WaitOn,
+    SharedPump, WaitOn,
 };
 use crate::sync::{FacePlace, HoldKind, Lend, LockKind, PlaceHold};
 use crate::transport::TransportRefusal;
@@ -1629,6 +1629,7 @@ impl<D> Dial<D> {
     /// ([`LinkSupervisor::read_face`]).
     pub fn answer<P, N: CountKind>(&mut self) -> Option<Result<OpenedLink<P, N>, LinkOpenError>>
     where
+        P: SharedPump<N>,
         D: PendingDial<P, N>,
     {
         self.pending.poll()
@@ -1701,7 +1702,7 @@ pub enum HandshakeEnd {
 /// A port the session listens on, and the row of the endpoint its links are stated for, when the
 /// session states one. A build without `listen` opens no port, so it holds none of them.
 #[cfg(feature = "listen")]
-struct Listening<P, N: CountKind> {
+struct Listening<P: SharedPump<N>, N: CountKind> {
     listener: alloc::boxed::Box<dyn crate::session_drive::LinkListener<P, N>>,
     endpoint: Option<usize>,
     /// What the port gave the last read's wait to wait on, when the port is asked for a
@@ -1714,7 +1715,7 @@ struct Listening<P, N: CountKind> {
 
 /// What a link taken off a port came to ([`LinkSupervisor::accept_at`]).
 #[cfg(feature = "listen")]
-pub enum Accepted<P, N: CountKind = OneTask> {
+pub enum Accepted<P: SharedPump<N>, N: CountKind = OneTask> {
     /// A connection, with the endpoint its port is stated for.
     Link(OpenedLink<P, N>, Option<DialEndpoint>),
     /// No connection waits on the port now, no wait found it ready since it last had none, or the

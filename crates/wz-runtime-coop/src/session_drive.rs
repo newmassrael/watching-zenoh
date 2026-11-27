@@ -1057,10 +1057,14 @@ pub enum LinkOpenError {
 /// profile is a driver moved into a slot of the session table with a pump over a
 /// handle to it (fixed-memory step S9c; `wz_session_lwip::session_host::SessionHost`).
 #[cfg(not(feature = "session-slot"))]
-pub struct OpenedLink<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
+pub struct OpenedLink<
+    P: SharedPump<N>,
+    N: crate::link_cells::CountKind = crate::link_cells::OneTask,
+> {
     /// What the session's actions send through: a counted handle on the cell the link's driver
-    /// lives in (`crate::link_cells`), counted as `N` counts the session's handles.
-    pub sink: crate::link_cells::CellRc<dyn BoxedLinkDriver, N>,
+    /// lives in (`crate::link_cells`), counted as `N` counts the session's handles, of the type the
+    /// pump names for it ([`SharedPump::Sink`]).
+    pub sink: crate::link_cells::CellRc<P::Sink, N>,
     /// What the drive loop services and takes datagrams from.
     pub pump: P,
 }
@@ -1096,6 +1100,37 @@ impl DynLink for dyn SessionDatagramLink {
     }
 }
 
+/// What a session's actions send through, as a handle on its cell, can be sent through behind the
+/// table of [`BoxedLinkDriver`]: what joins the sinks of two stacks into one type sends through
+/// them so (`crate::either_links::EitherLinks`).
+#[cfg(not(feature = "session-slot"))]
+pub trait DynSink: BoxedLinkDriver + 'static {
+    /// `sink` sent through behind the table of [`BoxedLinkDriver`].
+    fn into_dyn_sink<N: crate::link_cells::CountKind>(
+        sink: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn BoxedLinkDriver, N>;
+}
+
+/// A driver of a type of its own is sent through behind its type's table.
+#[cfg(not(feature = "session-slot"))]
+impl<T: BoxedLinkDriver + 'static> DynSink for T {
+    fn into_dyn_sink<N: crate::link_cells::CountKind>(
+        sink: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn BoxedLinkDriver, N> {
+        sink.into_sink()
+    }
+}
+
+/// A sink already behind the table is sent through so as it is.
+#[cfg(not(feature = "session-slot"))]
+impl DynSink for dyn BoxedLinkDriver {
+    fn into_dyn_sink<N: crate::link_cells::CountKind>(
+        sink: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn BoxedLinkDriver, N> {
+        sink
+    }
+}
+
 /// What a stack's pump ([`SessionLinks::Pump`]) is once whatever reads the link shares it: one
 /// handle on a cell, whose clones the session's gates over the link and its loop read the same link
 /// through, of the type the link is read as ([`Self::Link`]). A pump that is such a handle already
@@ -1108,6 +1143,10 @@ pub trait SharedPump<N: crate::link_cells::CountKind = crate::link_cells::OneTas
     /// The type the shared handle reads the link as.
     type Link: ?Sized + DynLink;
 
+    /// The type the session's actions send through the link as ([`OpenedLink::sink`]): the
+    /// stack's own type where its set of links is closed, the driver's trait where it is open.
+    type Sink: ?Sized + DynSink;
+
     /// The pump as one shared handle; `None`, with the pump let go of, when the heap has no room
     /// for the handle's cell.
     fn share(self) -> Option<crate::link_cells::CellRc<Self::Link, N>>;
@@ -1119,6 +1158,7 @@ impl<T: ?Sized + DynLink, N: crate::link_cells::CountKind> SharedPump<N>
     for crate::link_cells::CellRc<T, N>
 {
     type Link = T;
+    type Sink = dyn BoxedLinkDriver;
 
     fn share(self) -> Option<Self> {
         Some(self)
@@ -1131,6 +1171,7 @@ impl<T: ?Sized + SessionDatagramLink + 'static, N: crate::link_cells::CountKind>
     for Rc<T>
 {
     type Link = Self;
+    type Sink = dyn BoxedLinkDriver;
 
     fn share(self) -> Option<crate::link_cells::CellRc<Self, N>> {
         crate::link_cells::CellRc::try_on_heap(self)
@@ -1299,7 +1340,11 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
 ///
 /// Absent under `session-slot`, with [`OpenedLink`] (see there).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub trait LinkListener<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
+pub trait LinkListener<
+    P: SharedPump<N>,
+    N: crate::link_cells::CountKind = crate::link_cells::OneTask,
+>
+{
     /// The locator the listener is bound to, with the port the stack chose when the one asked
     /// for was 0.
     fn local(&self) -> Locator;
@@ -1330,7 +1375,11 @@ pub trait LinkListener<P, N: crate::link_cells::CountKind = crate::link_cells::O
 /// A dial begun and not yet answered ([`SessionLinks::begin_initiator`]), asked without waiting
 /// whether its link has been made.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub trait PendingDial<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
+pub trait PendingDial<
+    P: SharedPump<N>,
+    N: crate::link_cells::CountKind = crate::link_cells::OneTask,
+>
+{
     /// The link, once its connection is made; the refusal, once the other end or the stack has
     /// refused it; `None` while it is still being made, and after it has answered.
     fn poll(&mut self) -> Option<Result<OpenedLink<P, N>, LinkOpenError>>;
@@ -1339,12 +1388,12 @@ pub trait PendingDial<P, N: crate::link_cells::CountKind = crate::link_cells::On
 /// A dial whose link was made by the time it was begun: what a stack whose dials do not wait
 /// answers [`SessionLinks::begin_initiator`] with.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub struct Dialled<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask>(
+pub struct Dialled<P: SharedPump<N>, N: crate::link_cells::CountKind = crate::link_cells::OneTask>(
     Option<OpenedLink<P, N>>,
 );
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<P, N: crate::link_cells::CountKind> Dialled<P, N> {
+impl<P: SharedPump<N>, N: crate::link_cells::CountKind> Dialled<P, N> {
     /// The dial whose link is `opened`.
     pub fn new(opened: OpenedLink<P, N>) -> Self {
         Self(Some(opened))
@@ -1352,14 +1401,14 @@ impl<P, N: crate::link_cells::CountKind> Dialled<P, N> {
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<P, N: crate::link_cells::CountKind> PendingDial<P, N> for Dialled<P, N> {
+impl<P: SharedPump<N>, N: crate::link_cells::CountKind> PendingDial<P, N> for Dialled<P, N> {
     fn poll(&mut self) -> Option<Result<OpenedLink<P, N>, LinkOpenError>> {
         self.0.take().map(Ok)
     }
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<P, N: crate::link_cells::CountKind> From<OpenedLink<P, N>> for Dialled<P, N> {
+impl<P: SharedPump<N>, N: crate::link_cells::CountKind> From<OpenedLink<P, N>> for Dialled<P, N> {
     fn from(opened: OpenedLink<P, N>) -> Self {
         Self::new(opened)
     }
@@ -2357,9 +2406,9 @@ impl<D, H> MakeRouter<wz_session_core::unicast_rx::RouterLend<D, H>>
 /// Out of line: the task's future is built here, apart from the frame and body of the caller.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 #[inline(never)]
-pub fn spawn_session_with_router<C, L, R, M, F, K>(
+pub fn spawn_session_with_router<C, L, R, M, F, K, D>(
     local: &CoopLocalSet<C>,
-    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
+    fields: PumpFields<C, L, D, K>,
     make_router: M,
     on_event: F,
 ) -> Result<CoopLocalJoinHandle<DriverOutcome>, crate::executor::SpawnRefusal>
@@ -2370,10 +2419,12 @@ where
     M: MakeRouter<R> + 'static,
     F: EventSink + 'static,
     K: LockKind,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
-    let mut task = local.claim_local::<RouterSessionTask<C, L, R, M, F, K>>()?;
-    // The local set's runtime, read under the lock type of the session's values.
-    let runtime: CoopRuntime<C, dyn BoxedLinkDriver, K> = local.runtime().retyped();
+    let mut task = local.claim_local::<RouterSessionTask<C, L, R, M, F, K, D>>()?;
+    // The local set's runtime, read under the lock type of the session's values and as sending
+    // through the type of its link's sink.
+    let runtime: CoopRuntime<C, D, K> = local.runtime().retyped();
     let at = task.as_mut_ptr();
     // SAFETY: the place is this claim's alone, long enough and aligned for the task. Every field of
     // the task is written in it here, once, before the task starts: the parts whole, in the place
@@ -2399,18 +2450,19 @@ where
 /// frame.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 #[inline(never)]
-pub fn place_session_with_router<C, L, R, M, K>(
-    place: &mut MaybeUninit<SessionPump<C, L, dyn BoxedLinkDriver, R, K>>,
-    runtime: CoopRuntime<C, dyn BoxedLinkDriver, K>,
-    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
+pub fn place_session_with_router<C, L, R, M, K, D>(
+    place: &mut MaybeUninit<SessionPump<C, L, D, R, K>>,
+    runtime: CoopRuntime<C, D, K>,
+    fields: PumpFields<C, L, D, K>,
     make_router: M,
-) -> Option<&mut SessionPump<C, L, dyn BoxedLinkDriver, R, K>>
+) -> Option<&mut SessionPump<C, L, D, R, K>>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
     M: MakeRouter<R>,
     K: LockKind,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
     SessionPump::with_router_in(place, runtime, fields, |router| make_router.make_in(router))
 }
@@ -2421,15 +2473,16 @@ where
 /// opens. It builds the session's pump in its own memory at its first poll, then steps the session
 /// once each poll and yields, as a loop of [`SessionPump::step`] and [`yield_now`] does.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-pub struct RouterSessionTask<C, L, R, M, F, K = crate::sync::Shared>
+pub struct RouterSessionTask<C, L, R, M, F, K = crate::sync::Shared, D = dyn BoxedLinkDriver>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
     K: LockKind,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
     /// What the pump is made of until the task first runs, and then the pump, in the same bytes.
-    place: TaskPlace<C, L, R, M, K>,
+    place: TaskPlace<C, L, R, M, K, D>,
     on_event: F,
     /// The pump is built in `place` and points into itself: the task stays where it is polled.
     _pinned: core::marker::PhantomPinned,
@@ -2437,19 +2490,19 @@ where
 
 /// The place a [`RouterSessionTask`] holds its pump's parts in, and then its pump.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-type TaskPlace<C, L, R, M, K> =
-    Becomes<PumpParts<C, L, M, K>, SessionPump<C, L, dyn BoxedLinkDriver, R, K>>;
+type TaskPlace<C, L, R, M, K, D> = Becomes<PumpParts<C, L, M, K, D>, SessionPump<C, L, D, R, K>>;
 
 /// What a [`RouterSessionTask`] builds its pump of.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-struct PumpParts<C: ClockSource + 'static, L, M, K: LockKind> {
-    runtime: CoopRuntime<C, dyn BoxedLinkDriver, K>,
-    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
+struct PumpParts<C: ClockSource + 'static, L, M, K: LockKind, D: BoxedLinkDriver + ?Sized + 'static>
+{
+    runtime: CoopRuntime<C, D, K>,
+    fields: PumpFields<C, L, D, K>,
     make_router: M,
 }
 
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-impl<C, L, R, M, F, K> core::future::Future for RouterSessionTask<C, L, R, M, F, K>
+impl<C, L, R, M, F, K, D> core::future::Future for RouterSessionTask<C, L, R, M, F, K, D>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
@@ -2457,6 +2510,7 @@ where
     M: MakeRouter<R>,
     F: EventSink,
     K: LockKind,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
     type Output = DriverOutcome;
 
@@ -2495,7 +2549,7 @@ where
 /// gives its cells, so that a layer that grows is a number that follows and not a spawn that is
 /// refused ([`crate::executor::SpawnRefusal::TooLarge`]).
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-pub const fn router_session_task_bytes<C, L, R, M, F, K>() -> usize
+pub const fn router_session_task_bytes<C, L, R, M, F, K, D>() -> usize
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
@@ -2503,8 +2557,9 @@ where
     M: MakeRouter<R>,
     F: EventSink,
     K: LockKind,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
-    crate::executor::cell_bytes_for::<RouterSessionTask<C, L, R, M, F, K>>()
+    crate::executor::cell_bytes_for::<RouterSessionTask<C, L, R, M, F, K, D>>()
 }
 
 /// The bytes a task's pump is built in, which hold what the pump is made of until it is: the parts

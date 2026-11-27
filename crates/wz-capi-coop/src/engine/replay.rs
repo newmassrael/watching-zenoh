@@ -51,6 +51,7 @@
 
 use super::CoopLinks;
 use super::LinkActions;
+use super::{DynSink, SinkOf};
 #[cfg(wz_round)]
 use wz_runtime_coop::faces::LendsSession;
 use wz_runtime_coop::faces::{FacePlaces, FaceRecord};
@@ -106,13 +107,15 @@ pub(super) enum TurnEnd {
 /// What a declaration sends a link, handed to the walks of the faces by reference: whether the link
 /// took it. A trait of one method, so a value handed as `&dyn` has its body made once, where a
 /// `dyn Fn`'s table holds `call` and `call_once` apart, each a copy of a small body.
-pub(super) trait SendTo<C: ClockSource + 'static> {
+pub(super) trait SendTo<C: ClockSource + 'static, D: ?Sized + DynSink> {
     /// Send it over `actions`: whether the link took it.
-    fn send_to(&self, actions: &LinkActions<C>) -> bool;
+    fn send_to(&self, actions: &LinkActions<C, D>) -> bool;
 }
 
-impl<C: ClockSource + 'static, F: Fn(&LinkActions<C>) -> bool> SendTo<C> for F {
-    fn send_to(&self, actions: &LinkActions<C>) -> bool {
+impl<C: ClockSource + 'static, D: ?Sized + DynSink, F: Fn(&LinkActions<C, D>) -> bool> SendTo<C, D>
+    for F
+{
+    fn send_to(&self, actions: &LinkActions<C, D>) -> bool {
         self(actions)
     }
 }
@@ -290,11 +293,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// `tx` ([`super::send_through`]), read off its row as it is sent ([`tell`]): whether the
     /// link took it, a place with nothing to send counting as taken. `None` while the face holds
     /// no link, or `tx` no wire.
-    fn emit(&self, at: usize, place: usize, tx: super::LinkTx<'_, C>) -> Option<bool> {
+    fn emit(&self, at: usize, place: usize, tx: super::LinkTx<'_, C, SinkOf<L>>) -> Option<bool> {
         let wire = self.transport.links.face(at)?.link.wire()?;
         let tables = super::tables(&self.session.registry);
         let declared = declared_at(tables, place);
-        super::send_through(wire, tx, &|actions: &LinkActions<C>| {
+        super::send_through(wire, tx, &|actions: &LinkActions<C, SinkOf<L>>| {
             declared.is_none_or(|declared| tell(tables, actions, declared))
         })
     }
@@ -309,7 +312,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         at: usize,
         now_ms: u64,
-        tx: super::LinkTx<'_, C>,
+        tx: super::LinkTx<'_, C, SinkOf<L>>,
     ) -> TurnEnd {
         if !ReplayPacing::REACHABLE {
             return self.tell_in_one_lap(at, tx);
@@ -344,7 +347,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// lap with no wire to tell it through stops at its first place.
     /// The lap is ended by the `DeclareFinal` of the initial interest when its link owes one
     /// ([`Self::end_initial_interest`]).
-    pub(super) fn tell_in_one_lap(&mut self, at: usize, tx: super::LinkTx<'_, C>) -> TurnEnd {
+    pub(super) fn tell_in_one_lap(
+        &mut self,
+        at: usize,
+        tx: super::LinkTx<'_, C, SinkOf<L>>,
+    ) -> TurnEnd {
         if let Some(face) = self.transport.links.face_mut(at) {
             face.replay.lap_owed = false;
         }
@@ -353,7 +360,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// [`Self::tell_in_one_lap`] without the Final: the declarations of the lap.
-    fn tell_lap(&self, at: usize, tx: super::LinkTx<'_, C>) -> TurnEnd {
+    fn tell_lap(&self, at: usize, tx: super::LinkTx<'_, C, SinkOf<L>>) -> TurnEnd {
         for place in 0..self.sequence_len() {
             match self.emit(at, place, tx) {
                 Some(true) => {}
@@ -390,7 +397,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         at: usize,
         end: TurnEnd,
-        tx: super::LinkTx<'_, C>,
+        tx: super::LinkTx<'_, C, SinkOf<L>>,
     ) -> TurnEnd {
         let due = self
             .transport
@@ -406,7 +413,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             .face(at)
             .and_then(|face| face.link.wire())
             .and_then(|wire| {
-                super::send_through(wire, tx, &|actions: &LinkActions<C>| {
+                super::send_through(wire, tx, &|actions: &LinkActions<C, SinkOf<L>>| {
                     actions.send_declare_final_reply(INITIAL_INTEREST_ID);
                     true
                 })
@@ -422,7 +429,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The end of a turn in a build that neither listens nor answers an Interest, whose links are
     /// owed no Final: what the turn leaves of the link, as it left it.
     #[cfg(not(any(feature = "interest-answer", feature = "listen")))]
-    fn end_initial_interest(&self, _at: usize, end: TurnEnd, _tx: super::LinkTx<'_, C>) -> TurnEnd {
+    fn end_initial_interest(
+        &self,
+        _at: usize,
+        end: TurnEnd,
+        _tx: super::LinkTx<'_, C, SinkOf<L>>,
+    ) -> TurnEnd {
         end
     }
 
@@ -436,14 +448,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         at: usize,
         now_ms: u64,
-        tx: super::LinkTx<'_, C>,
+        tx: super::LinkTx<'_, C, SinkOf<L>>,
     ) -> TurnEnd {
         let end = self.tell_turn(at, now_ms, tx);
         self.end_initial_interest(at, end, tx)
     }
 
     /// [`Self::replay_turn`] without the Final: the declarations of one turn.
-    fn tell_turn(&mut self, at: usize, now_ms: u64, tx: super::LinkTx<'_, C>) -> TurnEnd {
+    fn tell_turn(
+        &mut self,
+        at: usize,
+        now_ms: u64,
+        tx: super::LinkTx<'_, C, SinkOf<L>>,
+    ) -> TurnEnd {
         // A place with no face has no replay to send.
         let Some(Face { replay, .. }) = self.transport.links.face(at) else {
             return TurnEnd::Kept;
@@ -496,7 +513,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         declared: DeclaredRow,
         on_refusal: OnRefusal,
         undo: Option<Retract<'_>>,
-        tx: super::LinkTx<'_, C>,
+        tx: super::LinkTx<'_, C, SinkOf<L>>,
     ) -> bool {
         let place = self.place_of(declared);
         let registry = &self.session.registry;
@@ -504,7 +521,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.transport.links.places_mut(),
             place,
             on_refusal,
-            &|actions: &LinkActions<C>| tell(super::tables(registry), actions, declared),
+            &|actions: &LinkActions<C, SinkOf<L>>| tell(super::tables(registry), actions, declared),
             undo,
             tx,
         )
@@ -515,7 +532,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// (`CoopEngine::live_on_link`): a refusal leaves it stored.
     // Out of line: one body for every caller of a declaration that is not undone.
     #[inline(never)]
-    pub(super) fn announce(&mut self, declared: DeclaredRow, tx: super::LinkTx<'_, C>) {
+    pub(super) fn announce(&mut self, declared: DeclaredRow, tx: super::LinkTx<'_, C, SinkOf<L>>) {
         self.announce_row(declared, OnRefusal::Forget, None, tx);
     }
 
@@ -525,7 +542,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         declared: DeclaredRow,
         undo: Retract<'_>,
-        tx: super::LinkTx<'_, C>,
+        tx: super::LinkTx<'_, C, SinkOf<L>>,
     ) -> bool {
         self.announce_row(declared, OnRefusal::Undo, Some(undo), tx)
     }
@@ -540,7 +557,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         interest: Option<EntityId>,
         rank: Option<usize>,
-        tx: super::LinkTx<'_, C>,
+        tx: super::LinkTx<'_, C, SinkOf<L>>,
     ) {
         if let Some(at) = rank {
             let place = self.place(DeclaredTable::Interests, at);
@@ -559,7 +576,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         place: usize,
         retract: Option<Retract<'_>>,
-        tx: super::LinkTx<'_, C>,
+        tx: super::LinkTx<'_, C, SinkOf<L>>,
     ) {
         for face in self.transport.links.faces_mut() {
             // The wire and the replay are fields apart: the replay's cursor moves while the wire
@@ -616,18 +633,18 @@ fn held_before(tables: &super::CoopTables, end: Option<DeclaredTable>) -> usize 
 /// `tables`: whether the link took it. One body for every kind, which reads the kind, so a turn of
 /// the replay and a declaration announced to the faces build each kind's message here alone. A row
 /// that names none has nothing to send, which counts as taken.
-fn tell<C: ClockSource + 'static>(
+fn tell<C: ClockSource + 'static, D: ?Sized + DynSink>(
     tables: &super::CoopTables,
-    actions: &LinkActions<C>,
+    actions: &LinkActions<C, D>,
     declared: DeclaredRow,
 ) -> bool {
     told(tables, actions, declared).unwrap_or(true)
 }
 
 /// [`tell`], `None` when `declared` names no row. A key the tables name no more is refused.
-fn told<C: ClockSource + 'static>(
+fn told<C: ClockSource + 'static, D: ?Sized + DynSink>(
     tables: &super::CoopTables,
-    actions: &LinkActions<C>,
+    actions: &LinkActions<C, D>,
     declared: DeclaredRow,
 ) -> Option<bool> {
     let bits = declared.row;
@@ -713,7 +730,7 @@ impl Retract<'_> {
     // Out of line: a retraction and an announce undone each tell one, and each kind's message is
     // built in this one body.
     #[inline(never)]
-    fn tell<C: ClockSource + 'static>(self, actions: &LinkActions<C>) {
+    fn tell<C: ClockSource + 'static, D: ?Sized + DynSink>(self, actions: &LinkActions<C, D>) {
         match self {
             Self::Keyexpr(id) => actions.send_undeclare_kexpr(id),
             Self::Interest(id) => actions.send_interest_final(id),
@@ -734,7 +751,7 @@ impl Retract<'_> {
 #[cfg(not(wz_round))]
 fn tell_on<L: CoopLinks + 'static, C: ClockSource + 'static>(
     wire: &super::direct::DirectWire<L, C>,
-    tx: super::LinkTx<'_, C>,
+    tx: super::LinkTx<'_, C, SinkOf<L>>,
     retract: Retract<'_>,
 ) {
     if let Some(held) = tx.held_wire(wire) {
@@ -742,7 +759,7 @@ fn tell_on<L: CoopLinks + 'static, C: ClockSource + 'static>(
             retract.tell(&held.actions);
         }
     } else {
-        let _ = super::send_on(wire, &|actions: &LinkActions<C>| {
+        let _ = super::send_on(wire, &|actions: &LinkActions<C, SinkOf<L>>| {
             retract.tell(actions);
             true
         });
@@ -754,12 +771,12 @@ fn tell_on<L: CoopLinks + 'static, C: ClockSource + 'static>(
 /// is made there ([`super::send_on`]). It leaves the face owed nothing: a replay tells only
 /// declarations that stand, so a retraction is told as it is made or not at all.
 #[cfg(wz_round)]
-fn tell_on<C: ClockSource + 'static>(
-    wire: &impl LendsSession<Session = super::LinkSession<C>>,
-    _tx: super::LinkTx<'_, C>,
+fn tell_on<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    wire: &impl LendsSession<Session = super::LinkSession<C, D>>,
+    _tx: super::LinkTx<'_, C, D>,
     retract: Retract<'_>,
 ) {
-    let _ = super::send_on(wire, &|actions: &LinkActions<C>| {
+    let _ = super::send_on(wire, &|actions: &LinkActions<C, D>| {
         retract.tell(actions);
         true
     });
@@ -778,9 +795,9 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
     faces: &mut impl FacePlaces<Face<C, L>>,
     place: usize,
     on_refusal: OnRefusal,
-    send: &dyn SendTo<C>,
+    send: &dyn SendTo<C, SinkOf<L>>,
     undo: Option<Retract<'_>>,
-    tx: super::LinkTx<'_, C>,
+    tx: super::LinkTx<'_, C, SinkOf<L>>,
 ) -> bool {
     // Whether the replay of `face` is past the declaration, so its link is told it now: in a
     // build that reaches no pace, once the lap its link came up with ran.

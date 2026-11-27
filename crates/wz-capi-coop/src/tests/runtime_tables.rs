@@ -283,7 +283,10 @@ fn print_the_parts_of_a_link_tasks_cell() {
             "parts to build it: maker + config",
             size_of::<Router>() + size_of::<SessionDriveConfig>(),
         ),
-        ("event sink (FaceDispatch)", size_of::<FaceDispatch<C>>()),
+        (
+            "event sink (FaceDispatch)",
+            size_of::<FaceDispatch<C, dyn BoxedLinkDriver>>(),
+        ),
     ];
     std::println!("link task cell: {cell} B");
     for (name, bytes) in parts {

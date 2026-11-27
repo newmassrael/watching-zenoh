@@ -242,24 +242,30 @@ pub enum TransportRefusal {
 
 /// What the transport reads of the session's half of a link beyond what its supervisor asks
 /// ([`FaceSession`]): the actions the session sends over the link through. `K` is how the
-/// session's runtime locks what it lends.
-pub trait TransportSession<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>:
-    FaceSession
+/// session's runtime locks what it lends; `D` is the type the actions send through the link as
+/// (`crate::session_drive::SharedPump::Sink`).
+pub trait TransportSession<
+    C: ClockSource + 'static,
+    K: LockKind = crate::sync::Shared,
+    D: ?Sized + BoxedLinkDriver + 'static = dyn BoxedLinkDriver,
+>: FaceSession
 {
     /// The actions of the link's session.
-    fn actions(&self) -> &SessionHandle<C, dyn BoxedLinkDriver, K>;
+    fn actions(&self) -> &SessionHandle<C, D, K>;
 }
 
 /// What the session does in the making of each of its links' sessions, in the engine's own types
 /// ([`TransportState::make_wire`]): the transport makes the link's actions, its cells and its task;
 /// the session tells its tables of the link, puts the link's pump behind its gates, and says what
 /// the link's task hands its reads to and what its face keeps of the link. `L` is the type the
-/// stack's shared handle on a link reads it as (`crate::session_drive::SharedPump::Link`): the
-/// stack's own type where its set of links is closed, the link's trait where it is open.
+/// stack's shared handle on a link reads it as (`crate::session_drive::SharedPump::Link`), and `D`
+/// the type the link's actions send through it as (`crate::session_drive::SharedPump::Sink`): each
+/// the stack's own type where its set of links is closed, the link's trait where it is open.
 pub trait LinkCalls<
     C: ClockSource + 'static,
     K: LockKind = crate::sync::Shared,
     L: ?Sized + DynLink = dyn SessionDatagramLink,
+    D: ?Sized + BoxedLinkDriver + 'static = dyn BoxedLinkDriver,
 >
 {
     /// The gates the session puts a link's pump behind, as the link's session and its pump hold
@@ -282,7 +288,7 @@ pub trait LinkCalls<
     fn link_made(
         &mut self,
         face: FaceId,
-        actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
+        actions: &SessionHandle<C, D, K>,
         key_form: Option<KeyWireForm>,
     );
 
@@ -294,7 +300,7 @@ pub trait LinkCalls<
     fn gate(
         &self,
         pump: CellRc<L, K::LinkCount>,
-        actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
+        actions: &SessionHandle<C, D, K>,
         cells: Option<&LentByteCells<<K::LinkCount as CountKind>::Flag>>,
     ) -> Option<Self::Gate>;
 
@@ -307,7 +313,7 @@ pub trait LinkCalls<
     fn wire_parts(
         &self,
         face: FaceId,
-        actions: SessionHandle<C, dyn BoxedLinkDriver, K>,
+        actions: SessionHandle<C, D, K>,
         gate: &Self::Gate,
     ) -> (Self::Dispatch, Self::Session);
 }

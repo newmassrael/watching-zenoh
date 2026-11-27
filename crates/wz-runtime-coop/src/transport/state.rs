@@ -22,7 +22,6 @@ use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 #[cfg(feature = "group")]
 use wz_session_core::group_locator::parse_group_locator;
-use wz_session_core::link::BoxedLinkDriver;
 #[cfg(feature = "link-admission")]
 use wz_session_core::link_admission::LinkAdmission;
 #[cfg(feature = "link-admission")]
@@ -67,9 +66,14 @@ use wz_session_core::link_life::{Effects, LinkPhase, LinkRole};
 use wz_session_core::reassembly_dispatch::ChainPeers;
 
 /// The runtime of a link's session over the transport of `T`, read under the lock type of the
-/// values it lends the session.
+/// values it lends the session and as sending through the type of its link's sink.
 type LinkRuntime<T> =
-    CoopRuntime<<T as TransportFaces>::Clock, dyn BoxedLinkDriver, <T as TransportFaces>::Lock>;
+    CoopRuntime<<T as TransportFaces>::Clock, SinkOf<T>, <T as TransportFaces>::Lock>;
+
+/// The type the actions of a link's session over the network of `T` send through the link as: the
+/// stack's own type where its set of links is closed, the driver's trait where it is open
+/// (`SharedPump::Sink`).
+type SinkOf<T> = <PumpOf<T> as SharedPump<CountOf<T>>>::Sink;
 
 /// The session of a link over the transport of `T` whose pump its owner holds and steps itself
 /// ([`TransportState::place_link`]): it stages its fragments in the Router of the face it serves,
@@ -77,7 +81,7 @@ type LinkRuntime<T> =
 pub type LinkPump<T, P> = SessionPump<
     <T as TransportFaces>::Clock,
     P,
-    dyn BoxedLinkDriver,
+    SinkOf<T>,
     RouterLend<RouterOf<T>, <T as TransportFaces>::RouterPlace>,
     <T as TransportFaces>::Lock,
 >;
@@ -88,7 +92,7 @@ pub type RouterOf<T> = SessionReassembly<<T as TransportFaces>::Peers>;
 
 /// The handle on the actions of a link's session over the transport of `T`.
 type LinkHandle<T> =
-    SessionHandle<<T as TransportFaces>::Clock, dyn BoxedLinkDriver, <T as TransportFaces>::Lock>;
+    SessionHandle<<T as TransportFaces>::Clock, SinkOf<T>, <T as TransportFaces>::Lock>;
 
 /// The session's clock over the transport of `T`.
 type LinkTime<T> = CoopTime<<T as TransportFaces>::Clock>;
@@ -131,8 +135,15 @@ pub trait TransportFaces {
     type Lock: LockKind;
     /// The network the session's links, ports and groups are opened on.
     type Links: SessionLinks<<Self::Lock as LockKind>::LinkCount> + 'static;
-    /// The session's half of one link.
-    type Session: TransportSession<Self::Clock, Self::Lock>;
+    /// The session's half of one link, whose actions send through the link as the type its stack's
+    /// pump names (`SharedPump::Sink`).
+    type Session: TransportSession<
+        Self::Clock,
+        Self::Lock,
+        <<Self::Links as SessionLinks<<Self::Lock as LockKind>::LinkCount>>::Pump as SharedPump<
+            <Self::Lock as LockKind>::LinkCount,
+        >>::Sink,
+    >;
     /// What a face holds of its link while the link is up or in its handshake: the session's half
     /// of the link itself, or a handle on the place that holds it apart from the session's state.
     type Wire: FaceWire;
@@ -312,7 +323,12 @@ pub struct PumpPlace<'p, T: TransportFaces, E> {
 
 /// A link whose session its owner steps itself, made ([`TransportState::place_wire`]): the
 /// wire its face keeps, what the session hands its reads to, and the pump, in its place.
-pub struct PlacedWire<'p, T: TransportFaces, K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>>, E> {
+pub struct PlacedWire<
+    'p,
+    T: TransportFaces,
+    K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, SinkOf<T>>,
+    E,
+> {
     /// The wire the face keeps.
     pub wire: Wire<K::Session, E, CountOf<T>>,
     /// What the owner hands each step of the pump.
@@ -324,7 +340,7 @@ pub struct PlacedWire<'p, T: TransportFaces, K: LinkCalls<T::Clock, T::Lock, Sta
 /// What the making of a link's session builds before the session runs
 /// ([`TransportState::build_wire`]); `R` is the type its pump reads the link as.
 struct WireBuilt<T: TransportFaces, D, S, R: ?Sized + DynLink> {
-    fields: PumpFields<T::Clock, CellRc<R, CountOf<T>>, dyn BoxedLinkDriver, T::Lock>,
+    fields: PumpFields<T::Clock, CellRc<R, CountOf<T>>, SinkOf<T>, T::Lock>,
     dispatch: D,
     session: S,
     link: CellRc<R, CountOf<T>>,
@@ -506,7 +522,7 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn spawn_link<P, D>(
         &self,
         local: &CoopLocalSet<T::Clock>,
-        fields: PumpFields<T::Clock, P, dyn BoxedLinkDriver, T::Lock>,
+        fields: PumpFields<T::Clock, P, SinkOf<T>, T::Lock>,
         dispatch: D,
     ) -> Result<CoopLocalJoinHandle<DriverOutcome>, TransportRefusal>
     where
@@ -527,8 +543,8 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn place_link<'p, P>(
         &self,
         place: &'p mut MaybeUninit<LinkPump<T, P>>,
-        runtime: CoopRuntime<T::Clock, dyn BoxedLinkDriver, T::Lock>,
-        fields: PumpFields<T::Clock, P, dyn BoxedLinkDriver, T::Lock>,
+        runtime: CoopRuntime<T::Clock, SinkOf<T>, T::Lock>,
+        fields: PumpFields<T::Clock, P, SinkOf<T>, T::Lock>,
         lend: RouterLend<RouterOf<T>, T::RouterPlace>,
     ) -> Option<&'p mut LinkPump<T, P>>
     where
@@ -686,7 +702,7 @@ impl<T: TransportFaces> TransportState<T> {
     // Always inlined: its one caller is never inlined, so what is built here lies in that frame,
     // which has returned before the link's task first runs.
     #[inline(always)]
-    pub fn make_wire<K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>>>(
+    pub fn make_wire<K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, SinkOf<T>>>(
         &self,
         calls: &mut K,
         face: FaceId,
@@ -725,7 +741,7 @@ impl<T: TransportFaces> TransportState<T> {
         place: PumpPlace<'p, T, E>,
     ) -> Result<PlacedWire<'p, T, K, E>, TransportRefusal>
     where
-        K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, Link = StackLinkOf<T>>,
+        K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, SinkOf<T>, Link = StackLinkOf<T>>,
     {
         let runtime = making.local.runtime().retyped();
         let OpenedAs {
@@ -755,7 +771,7 @@ impl<T: TransportFaces> TransportState<T> {
     /// halves placed in their cells, the session's tables told of the link, its pump behind the
     /// gates, placed in theirs, and the parts the session's pump is built of.
     #[inline(always)]
-    fn build_wire<K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>>>(
+    fn build_wire<K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, SinkOf<T>>>(
         &self,
         calls: &mut K,
         face: FaceId,

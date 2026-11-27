@@ -22,6 +22,7 @@ use core::ptr::NonNull;
 
 #[cfg(feature = "group")]
 use super::CoopLinks;
+use super::DynSink;
 use super::LinkActions;
 use wz_capi_port::{KeyAnchor, LivelinessSink, SubId, TokenId, WireKey};
 use wz_runtime_coop::ClockSource;
@@ -40,8 +41,8 @@ use super::transport::TellGroups;
 
 /// Announce the token `id` the session holds on `key` over `actions`, its key named as the
 /// session's tables name it or as the link's key-wire form says: whether the link took it.
-pub(super) fn declare_token<C: ClockSource + 'static>(
-    actions: &LinkActions<C>,
+pub(super) fn declare_token<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    actions: &LinkActions<C, D>,
     id: TokenId,
     key: NamedKey<'_>,
 ) -> bool {
@@ -78,8 +79,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L, C>
 
 /// Retract the token `id` over `actions`, naming its key as `names` says (the declaration's id
 /// and the rest of the key) when its declaration asked to.
-pub(super) fn retract_token<C: ClockSource + 'static>(
-    actions: &LinkActions<C>,
+pub(super) fn retract_token<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    actions: &LinkActions<C, D>,
     id: TokenId,
     names: Option<(ExprId, &str)>,
 ) {
@@ -129,8 +130,8 @@ impl LivelinessRow {
 /// Send the Interest of liveliness subscriber `id` on `keyexpr` over `actions`: the tokens to
 /// come, and with `history` the ones alive now, its key named as the session's tables name it
 /// (`form`) or as the link's key-wire form says: whether the link took it.
-pub(super) fn ask<C: ClockSource + 'static>(
-    actions: &LinkActions<C>,
+pub(super) fn ask<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    actions: &LinkActions<C, D>,
     id: SubId,
     keyexpr: &str,
     form: WireForm<'_>,

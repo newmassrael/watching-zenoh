@@ -3024,35 +3024,55 @@ mod tests {
         );
     }
 
-    /// Links closed by their build are read as the stack's one type: a `udp/` dial is the `Udp`
-    /// variant and a `tcp/` one the `Tcp` variant, and the sink the session sends through names
-    /// the variant's field where the cell holds it, as the pump of the links left open does. Turned
-    /// red by a variant written under another tag, by a field written anywhere but where the
-    /// variant's layout puts it, or by a closed set that pumps the variant behind its table.
+    /// Links closed by their build are read and sent through as the stack's one type: a `udp/`
+    /// dial is the `Udp` variant and a `tcp/` one the `Tcp` variant, each field where the
+    /// variant's layout puts it, and the sink the session sends through is the same handle on the
+    /// whole link as the pump, whose sends each answer as the variant's. Turned red by a variant
+    /// written under another tag, by a field written anywhere but `align_of` of it into the link,
+    /// by a closed set that pumps or sends through the variant behind its table, or by a send the
+    /// link answers itself instead of passing to its variant.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn closed_links_are_read_as_the_stacks_one_type() {
+        use wz_session_core::link::BoxedLinkDriver;
+
         let links = IpLinks::<Datagrams, Dial>::new(NODE, Dial).closed();
         let datagram = links
             .open_initiator(Locator::udp(ROUTER))
             .expect("a datagram link");
-        let IpLink::Udp(driver) = &*datagram.pump else {
+        let whole = datagram.pump.cell();
+        let IpLink::Udp(driver) = &**whole else {
             panic!("a udp/ dial is the stack's Udp link");
         };
-        assert!(
-            core::ptr::addr_eq(CellRc::as_ptr(&datagram.sink), core::ptr::from_ref(driver)),
-            "the sink is the variant's field, where the cell holds it"
+        assert_eq!(
+            core::ptr::from_ref(driver) as usize - CellRc::as_ptr(whole) as usize,
+            core::mem::align_of_val(driver),
+            "the variant's field lies where the variant's layout puts it"
         );
+        assert!(
+            core::ptr::eq(CellRc::as_ptr(&datagram.sink), CellRc::as_ptr(whole)),
+            "the sink is the whole link, as the pump is"
+        );
+        assert!(!BoxedLinkDriver::batch_length_prefixed(&*datagram.sink));
         let stream = links
             .open_initiator(Locator::tcp(ROUTER))
             .expect("a stream link");
-        let IpLink::Tcp(driver) = &*stream.pump else {
+        let whole = stream.pump.cell();
+        let IpLink::Tcp(driver) = &**whole else {
             panic!("a tcp/ dial is the stack's Tcp link");
         };
-        assert!(core::ptr::addr_eq(
+        assert_eq!(
+            core::ptr::from_ref(driver) as usize - CellRc::as_ptr(whole) as usize,
+            core::mem::align_of_val(driver)
+        );
+        assert!(core::ptr::eq(
             CellRc::as_ptr(&stream.sink),
-            core::ptr::from_ref(driver)
+            CellRc::as_ptr(whole)
         ));
+        assert!(
+            BoxedLinkDriver::batch_length_prefixed(&*stream.sink),
+            "a send through the whole link answers as its stream variant"
+        );
 
         let open = IpLinks::<Datagrams, Dial>::new(NODE, Dial)
             .open_initiator(Locator::udp(ROUTER))

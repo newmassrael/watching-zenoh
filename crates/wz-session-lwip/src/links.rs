@@ -193,6 +193,7 @@ impl<L: Deref<Target = LwipLink> + 'static, N: wz_runtime_coop::link_cells::Coun
     wz_runtime_coop::session_drive::SharedPump<N> for LwipSessionLink<L>
 {
     type Link = Self;
+    type Sink = dyn wz_session_core::link::BoxedLinkDriver;
 
     fn share(self) -> Option<wz_runtime_coop::link_cells::CellRc<Self, N>> {
         wz_runtime_coop::link_cells::CellRc::try_on_heap(self)

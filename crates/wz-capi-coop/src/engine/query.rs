@@ -53,6 +53,7 @@ use wz_capi_port::sync::Lock;
 use wz_capi_port::{HeldQueryId, KeyAnchor, QblId, QueryHolder, QueryableSink, Refusal};
 
 use super::CoopLinks;
+use super::DynSink;
 use super::LinkActions;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::named_key::NamedKey;
@@ -114,11 +115,11 @@ impl QueryableRow {
 
     /// Declare queryable `id`, the id its row in the tables holds, on `key`, answering for the
     /// whole of it when `complete`, over `actions`: whether the link took it.
-    pub(super) fn declare<C: ClockSource + 'static>(
+    pub(super) fn declare<C: ClockSource + 'static, D: ?Sized + DynSink>(
         id: QblId,
         key: NamedKey<'_>,
         complete: bool,
-        actions: &LinkActions<C>,
+        actions: &LinkActions<C, D>,
     ) -> bool {
         actions
             .send_declare_queryable(id, key_on_link(actions, key), complete)
@@ -128,10 +129,10 @@ impl QueryableRow {
     /// Retract queryable `id` over `actions`, naming its key as `names` says (the declaration's
     /// id and the rest of the key) when its declaration asked to. Read off the row before it is
     /// undeclared, as a subscriber's is.
-    pub(super) fn retract<C: ClockSource + 'static>(
+    pub(super) fn retract<C: ClockSource + 'static, D: ?Sized + DynSink>(
         id: QblId,
         names: Option<(wz_session_core::wire_id::ExprId, &str)>,
-        actions: &LinkActions<C>,
+        actions: &LinkActions<C, D>,
     ) {
         match names {
             Some((mapping, suffix)) => {
