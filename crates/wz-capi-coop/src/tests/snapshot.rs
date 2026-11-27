@@ -147,6 +147,42 @@ fn a_snapshot_of_one_peer_ends_its_askers_leg_in_the_walks_last_hold() {
     });
 }
 
+/// A snapshot its DeclFinal ends is handed out by the delivery of the read that read the DeclFinal:
+/// no read returns with the ended snapshot still to hand out, and its token comes back before its
+/// end. The CONTROL is the leg before the first read: open, with no end owed. Turned red by a
+/// declaration's dispatch that leaves the engine's word of ended gets unset (`note_ended_gets` in
+/// `CoopEngine::dispatch_records`): the end then waits for a later look at the face, which a face
+/// that brings nothing more makes no sooner than its life or the snapshot's deadline is due.
+#[cfg(all(feature = "std", not(wz_round)))]
+#[test]
+fn a_snapshot_its_final_ends_is_handed_out_by_the_read_that_read_the_final() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    router.send(Command::HoldToken(14, "demo/snap/a"));
+    until(&engine, "the router to hold its token", || {
+        router.seen(|s| s.held == 1)
+    });
+    let (issued, leg) = ask(&engine, "demo/snap/**", 0, None, None);
+    assert_eq!(issued, Ok(1), "one leg: the link's peer");
+    assert!(
+        !leg.lock().unwrap().ended && !engine.owes_ended_get(),
+        "CONTROL: the leg is open and no end is owed before a read"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !leg.lock().unwrap().ended {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the snapshot to end"
+        );
+        let _ = SessionDrive::read(&*engine, false);
+        assert!(
+            !engine.owes_ended_get(),
+            "the read that ended the snapshot left its end to a later look"
+        );
+    }
+    assert_eq!(keys(&leg), ["demo/snap/a"]);
+}
+
 /// A snapshot of a key nothing is alive on ends with the DeclFinal alone: no reply, no timeout.
 #[test]
 fn a_snapshot_of_nothing_alive_ends_with_the_final_alone() {

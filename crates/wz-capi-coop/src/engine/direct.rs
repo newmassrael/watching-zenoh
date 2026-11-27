@@ -433,8 +433,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
                 let Some(mut held) = self.engine.live() else {
                     return;
                 };
-                self.records.dispatch(
-                    &mut held.0.session.registry,
+                self.engine.dispatch_records(
+                    &mut held,
+                    self.records,
                     event,
                     Planes::BesideSubscribers,
                 );
@@ -458,8 +459,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
                 let Some(mut held) = self.engine.live() else {
                     return;
                 };
-                self.records
-                    .dispatch(&mut held.0.session.registry, event, Planes::All);
+                self.engine
+                    .dispatch_records(&mut held, self.records, event, Planes::All);
             }
         }
         self.engine.deliver();
@@ -2937,11 +2938,30 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .session
             .registry
             .take_lent_token(face, record, &mut news);
-        records.dispatch(&mut held.0.session.registry, event, Planes::All);
+        self.dispatch_records(&mut held, records, event, Planes::All);
         drop(held);
         if told {
             self.hand_token_row_by_row(&news, false);
         }
+    }
+
+    /// Dispatch `event`, a record or a frame of the face `records` reads, to the planes `planes`
+    /// names under the hold `held`, and note in that same hold a get whose last leg a Final of it
+    /// ended (`Self::note_ended_gets`): a DeclFinal lent with a declaration, or a Final or a
+    /// DeclFinal among the owned records of a frame. The delivery after the record hands the get
+    /// out, not a later look at the face, which a face that brings nothing more may not make
+    /// before the get's deadline.
+    #[inline(always)]
+    fn dispatch_records<A: RecordActions>(
+        &self,
+        held: &mut LiveCore<'_, L, C>,
+        records: &FaceRecords<A>,
+        event: IterationEvent<'_, '_>,
+        planes: Planes,
+    ) {
+        records.dispatch(&mut held.0.session.registry, event, planes);
+        #[cfg(feature = "query")]
+        self.note_ended_gets(&held.0);
     }
 
     /// Begin the handshake of the link the last dial made: what the life is told of it.

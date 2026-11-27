@@ -8097,6 +8097,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.core.lock().0.session.registry.reply_dispatches()
     }
 
+    /// Whether the session's tables hold a get its answer or its deadline ended that no delivery
+    /// has handed out yet (`SessionTables::owes_ended_get`).
+    #[cfg(all(test, feature = "std", feature = "liveliness-get", not(wz_round)))]
+    pub(crate) fn owes_ended_get(&self) -> bool {
+        tables(&self.core.lock().0.session.registry).owes_ended_get()
+    }
+
     /// How often the session's links drained a run of Pushes before a later record of its own
     /// frame: what tells a test that a Push and the record after it came in one frame.
     #[cfg(all(test, feature = "std", feature = "queryable"))]
