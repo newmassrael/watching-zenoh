@@ -766,7 +766,7 @@ impl<R: SessionRuntime> Drop for LinkTx<R> {
     fn drop(&mut self) {
         for record in &self.batch_slots {
             if let Some(slot) = record.take() {
-                self.link_driver().tx_slot_abort(slot);
+                crate::link::BoxedLinkDriver::tx_slot_abort(self.link_driver(), slot);
             }
         }
     }
@@ -1592,8 +1592,12 @@ impl<R: SessionRuntime> TxRoute<'_, R> {
         // The room of the queue this message's class leaves by: a best-effort message on a link
         // that carries it apart never waits for its streams' room.
         let answer = self.with_conduit_link(reliability, priority, |link| {
-            link.link_driver()
-                .wait_for_room_for(reliability, priority, deadline.ask())
+            crate::link::BoxedLinkDriver::wait_for_room_for(
+                link.link_driver(),
+                reliability,
+                priority,
+                deadline.ask(),
+            )
         });
         deadline.spend(answer.waited_us);
         answer.room == crate::link::LinkRoom::Congested
@@ -1862,7 +1866,7 @@ impl<R: SessionRuntime> TxRoute<'_, R> {
                     // A record with no open frame naming it: the stage and the link disagree,
                     // which the shared conduit lock rules out. Give the slot back rather than
                     // lose it, and say so.
-                    link.link_driver().tx_slot_abort(stale);
+                    crate::link::BoxedLinkDriver::tx_slot_abort(link.link_driver(), stale);
                     batch.lend.lost = batch.lend.lost.wrapping_add(1);
                 }
                 batch.lend.slot_frames = batch.lend.slot_frames.wrapping_add(1);
@@ -1871,7 +1875,7 @@ impl<R: SessionRuntime> TxRoute<'_, R> {
                 // this message alone, as the window's flush would send it, and the next link that
                 // asks for a slot finds one.
                 #[cfg(feature = "session-unicast-accept")]
-                let keeps = link.link_driver().tx_slot_spare();
+                let keeps = crate::link::BoxedLinkDriver::tx_slot_spare(link.link_driver());
                 #[cfg(not(feature = "session-unicast-accept"))]
                 let keeps = true;
                 if keeps {
@@ -2338,8 +2342,12 @@ impl<R: SessionRuntime> TxRoute<'_, R> {
             // none: that room is the sender's, and asking would count its own promise.
             if emitted > 0 && !deadline.is_covered() {
                 let answer = self.with_conduit_link(reliability, priority, |link| {
-                    link.link_driver()
-                        .wait_for_room_for(reliability, priority, deadline.ask())
+                    crate::link::BoxedLinkDriver::wait_for_room_for(
+                        link.link_driver(),
+                        reliability,
+                        priority,
+                        deadline.ask(),
+                    )
                 });
                 deadline.spend(answer.waited_us);
                 if answer.room == crate::link::LinkRoom::Congested {
