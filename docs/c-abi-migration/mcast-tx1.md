@@ -422,6 +422,28 @@ call is added on the link's path:
   session's counter type, or the facts carry a counter of each, is read before the emit's
   commit.
 
+Read before T3a-2, the order is the other way: every method of the walk ends in the emit (the
+flush in `send_wire` and `close_lent_batch`, the frame in `emit_on_link`), so the emit and its
+facts move first. Those facts are the session's, reached through its locked rows
+(`fact_metrics` for the registry cells, `fact_tx_refusals` for the lend-only refusals) and its
+counters (`stats`), and `compresses_batches` reads the handshake's outcome. Three forms keep one
+body of the walk, and they differ in what the link's send pays:
+
+- the facts as a value of the transmit state: the transmitter's counters and refusal counts move
+  out of the session's rows into `TransportTx`, the registry's cell stays the link's
+  (`LinkState::stats_slot`), and compression is a flag the establishment sets on the state. No
+  call is added; the session's JSON and registry readers read the counters there. The textbook
+  form (zenoh-pico's common transport keeps what its send counts), and the largest change;
+- the facts behind one trait object the borrow carries: one indirect call on each emit where
+  `transport-stats` or `transport-compression` is compiled, none on a build without both;
+- the walk generic over the facts: no call added, and one more instance of the walk in a build
+  that sends on a group, which S2 is to remove.
+
+The choice is the main session's, with `size_ledger_gate.py --explain pico-api-coop-nostd` and
+arm W's send Ir: whether the pico cases compile `transport-stats` or `transport-compression`
+decides what the second form costs them. T3a-2 waits for it; T4's first half (section 12), which
+does not depend on it, lands before.
+
 ## 10. The one writer of each control message, as landed
 
 Section 3.4 of `arch-mono.md` (on its branch) read the bodies that still write one message twice
