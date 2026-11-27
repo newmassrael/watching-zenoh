@@ -4882,7 +4882,9 @@ def workspace_features() -> dict:
         ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline"],
         cwd=ROOT / "crates",
         capture_output=True,
-        text=True,
+        # Cargo writes UTF-8 whatever the host's code page; a Windows host whose locale is CP949
+        # read it as that and lost the whole output.
+        encoding="utf-8",
     )
     if proc.returncode != 0:
         raise OSError(f"`cargo metadata` failed, so the manifests have no input: {proc.stderr.strip()}")
@@ -4907,7 +4909,7 @@ def package_features(manifest: pathlib.Path) -> dict:
         ["cargo", "metadata", "--no-deps", "--format-version", "1", "--offline",
          "--manifest-path", str(manifest)],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
     )
     if proc.returncode != 0:
         raise OSError(f"`cargo metadata` of {manifest} failed: {proc.stderr.strip()}")
