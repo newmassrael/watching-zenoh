@@ -2542,7 +2542,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// ([`super::group::read_awaited`]).
     #[cfg(feature = "group")]
     fn step_groups(&self, now_us: Option<u64>, mut awaited_us: Option<u64>) {
-        let mut next = 0;
+        let mut next: usize = 0;
         loop {
             let at = next;
             next = at.saturating_add(1);
