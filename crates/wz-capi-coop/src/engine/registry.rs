@@ -144,10 +144,11 @@ pub(super) type PeerRoom = wz_session_core::pubsub::LentRoom<RowPolicy>;
 
 /// What the session holds for one face: what its peer wrote and what the session asked of it.
 ///
-/// A set is built where the registry keeps it ([`Self::rowless_in`], then `Self::lend`) and is
-/// never moved from there: a face that comes takes a set where it lies and one that goes empties it
-/// there, its rows of the session's pools going back to them. A set holds a few words for each of
-/// its tables, and the session's tables are placed once and not moved.
+/// A set is built where the registry keeps it (`Self::rowless_in`, or over the region's zero bytes
+/// `Self::rowless_over_zero`, then `Self::lend`) and is never moved from there: a face that comes
+/// takes a set where it lies and one that goes empties it there, its rows of the session's pools
+/// going back to them. A set holds a few words for each of its tables, and the session's tables
+/// are placed once and not moved.
 /// Which face holds a set is the registry's index of held sets, not the set's: a walk over the
 /// faces reads no set to learn whether a face holds it.
 pub(super) struct FaceTables {
@@ -169,17 +170,16 @@ pub(super) struct FaceTables {
 }
 
 impl FaceTables {
-    /// A set for no face yet, written field by field into `place`, which is overwritten without
-    /// dropping what it held: tables of no rows, each refusing what is asked of it until
-    /// `Self::lend` lends it rows, the peer's held to `limits`. Not inlined: the peer's tables,
-    /// nearly all of the set, are written where they lie by `init_in`, and of the set only its
-    /// gets are a value in this frame.
-    #[inline(never)]
-    fn rowless_in<'p>(place: &'p mut MaybeUninit<Self>, limits: &SessionLimits) -> &'p mut Self {
-        let at = place.as_mut_ptr();
-        // A field added to the set and not written below would be read uninitialised. This names
-        // every field with no `..`, so adding one without naming it here (and so without writing
-        // it below) does not compile.
+    /// Write every field of the set at `at` but its peer's tables, each once, through a pointer to
+    /// it: gets of no rows, no deadline, nothing being retracted. What the two ways a set is made
+    /// share; each writes or keeps the peer's tables itself.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self` and aligned for it.
+    unsafe fn write_unpeered(at: *mut Self) {
+        // A field added to the set and not written here or by its makers would be read
+        // uninitialised. This names every field with no `..`, so adding one without naming it here
+        // (and so without writing it) does not compile.
         let _every_field_is_written = |set: &Self| {
             let Self {
                 peer: _,
@@ -190,17 +190,62 @@ impl FaceTables {
                     retracting: _,
             } = set;
         };
-        // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
-        // pointer to it, the peer's tables by `init_in`, which writes them whole (a
-        // `MaybeUninit<T>` has the layout of `T`). The list above names every field, so the set is
-        // whole when it is lent.
-        let set = unsafe {
+        // SAFETY: the caller's contract; each field is written once through a pointer to it.
+        unsafe {
             ptr::write(addr_of_mut!((*at).gets), Gets::default());
             #[cfg(feature = "query")]
             ptr::write(addr_of_mut!((*at).due), DueRow::NEVER);
             #[cfg(feature = "liveliness")]
             ptr::write(addr_of_mut!((*at).retracting), false);
+        }
+    }
+
+    /// A set for no face yet, written field by field into `place`, which is overwritten without
+    /// dropping what it held: tables of no rows, each refusing what is asked of it until
+    /// `Self::lend` lends it rows, the peer's held to `limits`. Not inlined: the peer's tables,
+    /// nearly all of the set, are written where they lie by `init_in`, and of the set only its
+    /// gets are a value in this frame.
+    #[cfg(feature = "runtime-plan")]
+    #[inline(never)]
+    fn rowless_in<'p>(place: &'p mut MaybeUninit<Self>, limits: &SessionLimits) -> &'p mut Self {
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is valid for writes of a `Self`: every field but the peer's tables is
+        // written by `write_unpeered`, and the peer's tables by `init_in`, which writes them whole
+        // (a `MaybeUninit<T>` has the layout of `T`), so the set is whole when it is lent.
+        let set = unsafe {
+            Self::write_unpeered(at);
             Peer::init_in(&mut *addr_of_mut!((*at).peer).cast::<MaybeUninit<Peer>>());
+            &mut *at
+        };
+        set.peer.limit_to(limits);
+        set
+    }
+
+    /// A set for no face yet over the zero bytes of the region's place for it: its peer's tables
+    /// are left as those bytes, which are tables of the region policy holding no row, and held to
+    /// `limits`; the rest of the set is written as `rowless_in` writes it. The region's walk hands
+    /// the tables their rows and their key arena after.
+    ///
+    /// # Safety
+    /// `place` holds all zero bytes, and nothing else reaches it.
+    #[cfg(not(feature = "runtime-plan"))]
+    #[inline(never)]
+    unsafe fn rowless_over_zero<'p>(
+        place: &'p mut MaybeUninit<Self>,
+        limits: &SessionLimits,
+    ) -> &'p mut Self
+    where
+        // The peer's tables are read as they lie only because zero bytes are a whole empty value
+        // of them; a policy whose tables are not is refused here.
+        Peer: wz_session_core::bounded::ZeroEmpty,
+    {
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` (a `MaybeUninit<T>` has the layout of
+        // `T`): every field but the peer's tables is written by `write_unpeered`, and the peer's
+        // tables are the place's zero bytes (the caller's contract), which are tables of no rows
+        // (`ZeroEmpty`, held above), so the set is whole when it is read.
+        let set = unsafe {
+            Self::write_unpeered(at);
             &mut *at
         };
         set.peer.limit_to(limits);

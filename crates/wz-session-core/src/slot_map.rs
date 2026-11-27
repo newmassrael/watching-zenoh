@@ -45,8 +45,8 @@ use core::marker::PhantomData;
 use core::num::{NonZeroU16, NonZeroU32};
 
 use crate::bounded::{
-    Arena, BoundedVec, CapacityFull, LendRefused, Lent, Profile, Region, SeqPlace, Storage,
-    TableLender, ZeroEmpty, ZeroSeqs, ARENA_ALIGN,
+    push_erased, Arena, BoundedVec, CapacityFull, LendRefused, Lent, LentSeq, Profile, Region,
+    SeqBacking, SeqPlace, Storage, TableLender, ZeroEmpty, ZeroSeqs, ARENA_ALIGN,
 };
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
@@ -722,6 +722,13 @@ pub trait RowColumn<T> {
 
     /// Where the rows lie, to read and change through.
     fn rows_at_mut(&mut self) -> RowsAt;
+
+    /// The column as a lent table apart from its rows' type, where it is one (the lent and the
+    /// region policies), so one body grows every table by its rows' stride. `None` for a column
+    /// that grows by its own type.
+    fn lent_rows(&mut self) -> Option<NonNull<LentSeq<u8>>> {
+        None
+    }
 }
 
 // A sequence of a policy that never moves an element to make room: a fixed buffer, or what it was
@@ -777,6 +784,10 @@ impl<T, const N: usize, P: Storage> RowColumn<T> for BoundedVec<T, N, P> {
 
     fn rows_at_mut(&mut self) -> RowsAt {
         RowsAt::flat(NonNull::from(&mut **self).cast())
+    }
+
+    fn lent_rows(&mut self) -> Option<NonNull<LentSeq<u8>>> {
+        self.as_lent().map(|seq| NonNull::from(seq).cast())
     }
 }
 
@@ -1025,6 +1036,45 @@ impl<K, T, const N: usize, P: Storage> Entry<'_, K, T, N, P> {
     }
 }
 
+/// Add a free slot to a table whose two columns are lent tables, as [`SlotMap::add_free_slot`]
+/// does: one body for every row type and bound, handed the rows' stride and the one step that
+/// knows their type, the write of a free slot's empty row.
+///
+/// # Safety
+/// `rows` points at the table's rows column, a [`LentSeq`] of rows of an `Option<T>` whose size
+/// is `stride`, reached by nothing else during the call, and `write_none` writes a `None` of
+/// that `Option<T>` at the place it is handed.
+#[inline(never)]
+unsafe fn add_free_lent_slot(
+    core: &mut Core,
+    meta: &mut LentSeq<Meta>,
+    rows: NonNull<LentSeq<u8>>,
+    stride: usize,
+    write_none: unsafe fn(NonNull<u8>),
+) {
+    let at = meta.as_slice().len();
+    // A slot's index is a `u16` counted from one: the place past the last has none.
+    if core.held >= core.limit() || at >= MAX_SLOTS || meta.free_slots() == 0 {
+        return;
+    }
+    // The rows' column first: a slot of the metadata column is a place of the rows' column too,
+    // so the metadata column never grows past it.
+    // SAFETY: the caller's contract.
+    if !unsafe { push_erased(rows, stride, write_none) } || meta.push(Meta::FREED).is_err() {
+        return;
+    }
+    core.adopt(meta.as_mut_slice(), at);
+}
+
+/// Write the empty row a free slot holds, a `None` of `Option<T>`, at `at`.
+///
+/// # Safety
+/// `at` is valid for writes of an `Option<T>`, aligned for it, and holds no value.
+unsafe fn write_none<T>(at: NonNull<u8>) {
+    // SAFETY: the caller's contract.
+    unsafe { at.cast::<Option<T>>().as_ptr().write(None) }
+}
+
 /// A table of at most `N` rows of `T`, named by [`Handle<K>`], kept as the storage policy `P`
 /// keeps a table. See the module.
 pub struct SlotMap<K, T, const N: usize, P: Storage = Profile> {
@@ -1139,10 +1189,30 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     }
 
     /// Add a slot after every slot there is, on the free list, when the table is under its bound
-    /// and both columns have a place for it. Typed, as it grows the columns, which only the
-    /// table's own type knows; out of line, so an insert reaches it by one call.
+    /// and both columns have a place for it. Where both columns are lent tables (the lent and the
+    /// region policies) one body grows every table by its rows' stride ([`add_free_lent_slot`]);
+    /// elsewhere the columns grow by their own type ([`Self::add_free_typed_slot`]). Out of line,
+    /// so an insert reaches it by one call.
     #[inline(never)]
     fn add_free_slot(&mut self) {
+        if let Some(rows) = self.rows.lent_rows() {
+            if let Some(meta) = self.meta.as_lent() {
+                // SAFETY: `rows` is this table's rows column, a lent table of `Option<T>`, whose
+                // stride is `STRIDE`, reached by nothing else while the table is borrowed, and
+                // `write_none::<T>` writes a `None` of that type.
+                unsafe {
+                    add_free_lent_slot(&mut self.core, meta, rows, Self::STRIDE, write_none::<T>);
+                }
+                return;
+            }
+        }
+        self.add_free_typed_slot();
+    }
+
+    /// [`Self::add_free_slot`] of columns that grow by their own type, which only the table's
+    /// own type knows.
+    #[inline(never)]
+    fn add_free_typed_slot(&mut self) {
         let at = self.meta.len();
         // A slot's index is a `u16` counted from one: the place past the last has none.
         if self.core.held >= self.core.limit()

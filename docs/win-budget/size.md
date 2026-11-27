@@ -504,3 +504,109 @@ for five object types, and
 `object_slot::tests::a_refused_fill_gives_the_lent_place_back_to_its_session` holds the refused
 fill's and the release's give-back; the existing
 `a_session_lends_its_entities_places_and_spends_none_of_anothers` holds the unfilled drop.
+
+## 8. Sessions read again: the largest bodies against zenoh-pico's, by what differs
+
+Read from the size ledger's `--explain` document of this case dated 2026-11-27 (schema 5):
+sessions 67,963 against pico's 27,508, +40,455. The twenty largest bodies of the area hold 33,980
+bytes; each is set beside the zenoh-pico functions that do the same job, by their bytes in the same
+report. A row is **work** where wz does something pico's build does not (a cut is a decision about
+what the preset does), **shape** where the job is the same and the bytes are how it is written
+(a design can remove them), and **hot** where the body is on the receive or the put, whose
+instructions a message are under pico's (3,078 against 4,049, `ir-receive.md`), so a change is
+judged on both readings and no call step is added.
+
+### 8.1 The twenty bodies
+
+| wz body | bytes | zenoh-pico, same job | bytes | kind | what differs |
+|---------|------:|----------------------|------:|------|--------------|
+| `lend_session` | 4,545 | `_z_open`, `_z_session_init`, `_z_open_locators_client` | 902 | work, shape | the open lays the session's whole arena out (every table's rows, the key arena, the links' cells), because the preset holds no heap past the open, where pico allocates each object when it is declared: work the no-heap contract asks. The lays of the holds after the rows (`arena`'s lines, 2,303) are shape: S-OPEN makes them constants of the region |
+| `CoopEngine::assemble` | 3,662 | `_zp_start_transport_tasks` | 202 | shape | the `Core` is built as a value and moved into `engine_of` (655), each layer's table placed by its own call; T-OPEN's plan |
+| `CoopEngine::link_turn` | 2,690 | `_z_handle_network_message` | 635 | hot | the turn holds the link machine's events, the lease's judgement and the replay's start, which pico runs in its lease and read tasks (transport area) |
+| `declare_write_filter` | 2,418 | `_z_write_filter_create`, `_z_write_filter_ctx_add_callback`, `_z_add_interest` | 1,536 | shape, work | the Interest's own table and slot map are shape (S-FILTER); the filter's row keeps the put's facts and head so a put through it writes no header, which pico does not keep: work |
+| `put_through_filter` | 2,053 | `_z_write`, `_z_publisher_put_impl` | 458 | hot | the frame lend, the filter's state and the kept head, inlined from the tables and the key arena |
+| `DirectSink::event` | 2,012 | `_z_trigger_subscriptions_impl`, `_z_trigger_push` | 1,730 | hot | +282: the in-place read and the matching of rows |
+| `undeclare_subscriber` (engine) | 1,666 | `_z_undeclare_subscriber`, `_z_unregister_subscription` | 656 | shape | the row taken out under the lock, its key released, the wire undeclaration and the wait on its latch, each inlined; S1 |
+| `Declaring::declare` (subscriber) | 1,514 | `_z_register_subscription` | 623 | shape | the parts moved by value, the link set's judgement, the refusal paths (`t-decl.md`, section 11) |
+| `undeclare_write_filter_quietly` | 1,423 | `_z_write_filter_session_unregister`, `_z_write_filter_clear`, `_z_remove_interest` | 815 | shape | S-FILTER: the Interest's row and the listeners' table |
+| `declare_subscriber_on_wire` | 1,324 | `_z_declare_subscriber`, `_z_register_subscriber` | 835 | shape | S1 |
+| `declare_keyexpr_where` | 1,219 | `_z_declare_resource`, `_z_register_resource_inner` | 894 | shape | the key arena's take and its quota (`MAX_KEYEXPR_BYTES`), inlined |
+| `publish_to_link` | 1,175 | (with `_z_write` above) | | hot | the publisher's put |
+| `hand_row_by_row` closure | 1,117 | (with `_z_trigger_subscriptions_impl`) | | hot | the delivery to each matched row |
+| `drive_link` | 1,064 | (pico's read loop is in its transport area) | | hot | |
+| `Declaring::keyed` | 1,038 | (with `_z_register_resource_inner`) | | shape | S1, the own key |
+| `RemoteSubscriberTable::dispatch_iteration_event_with_local` | 1,032 | `_z_interest_process_declares`, `_z_interest_process_undeclares` | 1,233 | won | |
+| `SessionDrive::close` | 1,017 | `_z_session_clear` | 98 | not paired | pico's close is not read here beyond this body |
+| `deliver` closure | 1,011 | (with `_z_trigger_subscriptions_impl`) | | hot | |
+| `replay::told` | 1,009 | `_z_client_reopen_task_fn`, `_z_interest_replay_declare` | 1,122 | won | |
+| `ext_admit::judge_entry` | 991 | none in sessions | 0 | same work | pico reads the extensions in its codec (911 there); the area differs, not the job |
+
+### 8.2 Where the 40 KB are
+
+| job | wz | zenoh-pico | wz - pico | kind |
+|-----|---:|-----------:|----------:|------|
+| the receive and the put (the seven hot bodies) | 11,122 | 2,823 | +8,299 | hot: their instructions a message are under pico's; a design that moves bytes out of them is read on both |
+| the open and the assembly | 8,207 | 1,104 | +7,103 | about 2,300 to 3,000 shape (S-OPEN, T-OPEN); the rest the arena the no-heap contract lays out |
+| the declarations and their undeclaration | 10,602 | 5,359 | +5,243 | shape (S-FILTER, S1), less the filter row's kept head (work) |
+| a peer's declarations and the replay | 2,041 | 2,355 | -314 | won |
+| the extension admission | 991 | 0 | +991 | same work, in pico's codec |
+| the close | 1,017 | 98 | +919 | not paired |
+| the other 237 bodies | 33,983 | 15,769 | +18,214 | not paired body by body: the largest owners there are the engine (`wz_capi_coop::engine`, 15,781 in 71 bodies in all), the tables (`session_tables` 7,898 in 43, `slot_map` 6,600 in 50) and the key arena (3,192 in 25), whose lines are inlined into the declarations' bodies |
+
+So of the 40,455: about 8,300 are the hot paths, held by the receive's instruction count; about
+4,000 to 4,800 the open's arena, the no-heap contract's work, which changes only with what the
+preset holds; a few hundred the filter row's kept head, a wz choice for the put; about 1,000 the
+extension admission, the same work counted in another area. Of the paired rows, about 7,000 to
+8,000 are shape (the declarations' bodies and the open's lays), which S-FILTER, S1 and S-OPEN
+design. The 18,214 of the bodies not paired here are not graded by this section; their largest
+owners are the tables, whose lines section 3.1.1 reads as shape inlined into their callers. No row
+of this reading needs a preset decision: the work rows are the no-heap contract, already decided,
+and the put's kept head, a choice of wz for the put.
+
+### 8.3 The steps landed with this section
+
+- **S2's first step: a lent table's free slots grow by one body.** `SlotMap::add_free_slot` had
+  five bodies in this build, one per row type (`Interest`, `Keyexpr`, `MatchingListener`,
+  `Subscriber`, `WriteFilter`), 40 bytes each in sessions and 70 to 75 each in language, 566 in
+  all: each pushed its type's `None` into its rows column. Where both columns are lent tables (the
+  lent and the region policies), `add_free_slot` is now a short typed body that calls
+  `add_free_lent_slot`, one body for every row type, handed the rows' stride and the one typed step
+  (`write_none::<T>`, through a function pointer: a slot is added once, when the table first grows
+  to it, never on a receive or a put). The column grows through `bounded::push_erased`, which reads
+  a `LentSeq` by its `repr(C)` words as `place_seqs` does. The growable and the fixed policies
+  keep their typed growth (`add_free_typed_slot`). Expected on the case: about -200 to -350 in all
+  (the five bodies against one of about 110, five calls of about 25 and five writes of a `None`).
+  Test: `slot_map::tests::a_lent_table_adds_its_free_slots_by_its_rows_stride`.
+- **The region's face set leaves its peer's tables as zero bytes.** `PeerTables::init_in` (491 in
+  this build) wrote the seven tables of the region's one face set by one call each, five of them
+  tables of planes the case does not build, into a place the region hands zeroed, where
+  `PeerTables<Region>` is a whole empty value (`ZeroEmpty`, held by
+  `peer_tables::lent_tests::region_peer_tables_of_zero_bytes_refuse_until_bound_then_hold_their_build_bounds`).
+  The region's set is now made by `FaceTables::rowless_over_zero`, which writes the set's other
+  fields and holds the peer's tables to the session's limits; the arena form (`runtime-plan`) still
+  writes them whole by `rowless_in`, its place not being zeroed. Expected: `init_in` leaves the
+  case's image, sessions about -450 to -500. Test:
+  `registry::placed::tests::a_set_over_zero_bytes_holds_its_empty_peer_to_the_sessions_limits`.
+
+Neither step is on the receive or the put: the receive's count of instructions a message (3,078)
+should not move. Each is read on the sessions and language rows and reverted when its row does not
+move by its expectation.
+
+### 8.4 What keeping the five tables by `Presence` asks, not landed
+
+The design of the step above's successor keeps a peer's queryables, tokens, staged replies, owed
+Finals and query judgement by `Presence` (`Absent` in a build without `declare-queryable`,
+`liveliness-token` and `query-queryable`), as `SessionTables` keeps its queryables: the tables
+would hold no bytes in the region (which the step above does not change) and no call would read
+them. It is not landed here: `PeerTables`'s fields are read directly, outside any feature gate, by
+session-core's `slot_observer` (the queryables' and the tokens' dispatch and their flush on a lost
+link, the query dispatch, the drain of owed Finals), its `observer` (the halves it hands out),
+`peer_tables` itself (`limit_to`, `keep_keys_in`, `forget_peer`, the region's key lines),
+`wz-capi-coop`'s registry (the queriers' matching, a request's pinning, the owed Finals and the
+tokens of a lost face) and its declaration watch, and `wz-session-mcu`'s application layer: about
+forty sites, each of which needs an answer for a table that is not there. And the receive then
+keeps nothing of a declaration of that plane, which is read against zenoh-pico first: a build
+without its queryable drops a query (`vendor/zenoh-pico/src/session/rx.c` @
+`_Z_DEBUG("_Z_REQUEST_QUERY dropped, queryables not supported");`), and hands a declared queryable
+or token to its interests' processing whatever its features (`vendor/zenoh-pico/src/session/rx.c` @
+`case _Z_DECL_QUERYABLE:`), which keeps it only for an interest the session declared.
