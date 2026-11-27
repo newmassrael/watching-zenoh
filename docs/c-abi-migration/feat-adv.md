@@ -416,6 +416,26 @@ A19's measurement is main's: no harness in the tree counts an advanced subscribe
 subscriber's sample path is read in the explain report (`State::admit`, `hand_on`) of
 `pico-api-coop-nostd`.
 
+### 11.3 A red of the lint pass, repaid
+
+The next verification linted the crates over `wz-ext-pubsub` for the first time and found one
+red of this lane, which origin/main does not carry (its `declare_in` takes six arguments):
+`EngineSubscriber::declare_in` had grown to eight with the place it writes in and the forms it
+keeps, over clippy's `too_many_arguments` bound, so `wz-ext-pubsub`, `wz-capi-pico` and
+`wz-capi-c` were red under `-D warnings` and the nondefault-features gate with them.
+
+- `refactor(ext-pubsub): Hand a subscriber's two callbacks as one value`. The sample callback
+  and the miss listeners travel together everywhere: into the shared part (`write_shared_part`,
+  then `State::write_in`) and, refused, out of a declaration in one drop. They are one value now,
+  `Callbacks` (exported beside `LentCore`), which `declare_in`, `declare_with` and
+  `write_shared_part` take whole; `declare_in` is at seven. `declare` and
+  `declare_with_miss_listener` keep their signatures, so `wz-capi-c` is unchanged; the pico
+  door hands `Callbacks { on_sample, misses }`. No behaviour moves, so the existing tests hold
+  it: `a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder` (red if the
+  refusal stopped dropping the callbacks before the core goes back) and
+  `a_subscriber_is_declared_in_the_place_its_host_gives`. No size or Ir moves: the value is two
+  fields moved by value into the place they were moved into before.
+
 ## 10. Rows for `contract-switches.md`
 
 The behaviours of this lane read as contract. `docs/c-abi-migration/contract-switches.md` is not on
