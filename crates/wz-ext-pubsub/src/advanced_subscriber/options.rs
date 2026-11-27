@@ -409,26 +409,41 @@ impl EntityForm {
 
     /// Make a subscriber's retraction name `key` beside its id.
     pub fn with_retraction_naming(mut self, key: Option<RetractionKey>) -> Self {
-        self.retraction = key;
+        self.name_on_retraction(key);
         self
+    }
+
+    /// [`Self::with_retraction_naming`], on the form where it lies.
+    pub fn name_on_retraction(&mut self, key: Option<RetractionKey>) {
+        self.retraction = key;
     }
 
     /// Make a token's retraction name its own key beside its id.
     pub fn with_token_retraction_naming_the_key(mut self, on: bool) -> Self {
-        self.names_key_on_retraction = on;
+        self.name_key_on_token_retraction(on);
         self
+    }
+
+    /// [`Self::with_token_retraction_naming_the_key`], on the form where it lies.
+    pub fn name_key_on_token_retraction(&mut self, on: bool) {
+        self.names_key_on_retraction = on;
     }
 
     /// Hold `anchor` for as long as the entity declared in this form stands. A suffix that lay in
     /// what the form kept before is copied into the form first.
     pub fn keeping(mut self, anchor: Kept) -> Self {
+        self.keep(anchor);
+        self
+    }
+
+    /// [`Self::keeping`], on the form where it lies.
+    pub fn keep(&mut self, anchor: Kept) {
         if let FormSuffix::Lent { .. } = self.suffix {
             self.suffix = self
                 .suffix()
                 .map_or(FormSuffix::None, |rest| FormSuffix::Owned(rest.into()));
         }
         self.keeps = Some(anchor);
-        self
     }
 
     /// Whether the entity is announced on the literal key.
@@ -467,6 +482,12 @@ impl EntityForm {
     /// What keeps the declaration alive, to be let go of AFTER the entity.
     pub fn kept(&self) -> Option<&Kept> {
         self.keeps.as_ref()
+    }
+
+    /// What keeps the declaration alive, the form given up for it: the entity declared in the
+    /// form holds it, with no count of its own.
+    pub fn into_kept(self) -> Option<Kept> {
+        self.keeps
     }
 }
 

@@ -715,10 +715,11 @@ impl<E: EngineHolder> EngineSubscriber<E> {
     pub fn declare_with(
         engine: &E,
         keyexpr: impl AsRef<str>,
-        options: AdvancedSubscriberOptions,
+        mut options: AdvancedSubscriberOptions,
         on_sample: OnSample,
         misses: MissHandlers,
     ) -> Result<Self, HostError> {
+        let forms = options.forms.take();
         let base_keyexpr = admitted(engine, keyexpr.as_ref(), &options)?;
         let make = |place: NonNull<Shared<E>>| {
             // SAFETY: the place is the box's, valid for one `Shared`, holding none, never moved.
@@ -728,7 +729,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         // dropped uncalled, and the callbacks with it.
         let shared = unsafe { Strong::try_boxed_in(make) }.map_err(|NoPlace| HostError::NoRoom)?;
         let mut place = MaybeUninit::uninit();
-        Self::declare_over(&mut place, engine, shared, &options)?;
+        Self::declare_over(&mut place, engine, shared, &options, forms)?;
         // SAFETY: `declare_over` answered `Ok`, which it does with every field written.
         Ok(unsafe { place.assume_init() })
     }
@@ -738,21 +739,30 @@ impl<E: EngineHolder> EngineSubscriber<E> {
     /// of its own declares with no memory taken for it and moves no subscriber into its place.
     /// Refused, `place` is left unwritten.
     ///
+    /// The options are read where the caller holds them, and the entities are named by `forms`,
+    /// handed over by value so the subscriber keeps them with no count of its own; the options'
+    /// own `forms` is [`Self::declare_with`]'s and is left empty here.
+    ///
     /// The core is given back once ([`LentCore::new`]): at once when the declaration is refused
     /// before the part is made, and otherwise with the last of what holds the part.
     pub fn declare_in<'p>(
         place: &'p mut MaybeUninit<Self>,
         engine: &E,
         keyexpr: impl AsRef<str>,
-        options: AdvancedSubscriberOptions,
+        options: &AdvancedSubscriberOptions,
+        forms: Option<FormsHandle>,
         on_sample: OnSample,
         misses: MissHandlers,
         core: LentCore<E>,
     ) -> Result<&'p mut Self, HostError> {
-        let base_keyexpr = match admitted(engine, keyexpr.as_ref(), &options) {
+        debug_assert!(
+            options.forms.is_none(),
+            "a subscriber declared in a lent place is named by the forms handed over"
+        );
+        let base_keyexpr = match admitted(engine, keyexpr.as_ref(), options) {
             Ok(base_keyexpr) => base_keyexpr,
             Err(refused) => {
-                drop((on_sample, misses));
+                drop((on_sample, misses, forms));
                 // SAFETY: `LentCore::new`'s: nothing was lodged, so the place goes back now, once.
                 unsafe { (core.give_back)(core.context) };
                 return Err(refused);
@@ -761,7 +771,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         let make = |place: NonNull<Shared<E>>| {
             // SAFETY: the place is the lent core's, valid for one `Shared`, holding none, never
             // moved while it is counted.
-            unsafe { write_shared_part(place, engine, base_keyexpr, &options, on_sample, misses) }
+            unsafe { write_shared_part(place, engine, base_keyexpr, options, on_sample, misses) }
         };
         // SAFETY: `LentCore::new`'s; a `SubscriberCore` is the place of its lodging
         // (`repr(transparent)`); `make` makes the whole shared part in the place it is handed.
@@ -773,22 +783,23 @@ impl<E: EngineHolder> EngineSubscriber<E> {
                 core.context,
             )
         };
-        Self::declare_over(place, engine, shared, &options)
+        Self::declare_over(place, engine, shared, options, forms)
     }
 
     /// Declare what `options` asks for over `shared`, the subscriber's shared part, made, and
     /// write the subscriber in `place` once nothing is left to refuse, so a refusal leaves it
-    /// unwritten. The options are read where the caller holds them, as nothing declared keeps them.
+    /// unwritten. The options are read where the caller holds them, as nothing declared keeps them;
+    /// the entities are named by `forms`, which the subscriber keeps.
     fn declare_over<'p>(
         place: &'p mut MaybeUninit<Self>,
         engine: &E,
         shared: Strong<Shared<E>>,
         options: &AdvancedSubscriberOptions,
+        forms: Option<FormsHandle>,
     ) -> Result<&'p mut Self, HostError> {
         let zid = engine.session_zid();
         let recovery = options.recovery;
         let history = options.history;
-        let forms = options.forms.clone();
         let base = shared.base();
 
         // The live subscription.
@@ -796,7 +807,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         let subscriber = declare_subscription(
             engine,
             base,
-            &subscriber_form,
+            subscriber_form,
             options.allowed_origin,
             own_sink(&shared, on_live::<E>),
         )?;
@@ -836,7 +847,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
                 )
             };
             Some(declare_liveliness_subscription(
-                engine, &keyexpr, &form, true, sink,
+                engine, &keyexpr, form, true, sink,
             )?)
         } else {
             None
@@ -851,7 +862,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
                 Some(declare_subscription(
                     engine,
                     &keyexpr,
-                    &form,
+                    form,
                     options.allowed_origin,
                     own_sink(&shared, on_heartbeat::<E>),
                 )?)
@@ -868,7 +879,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         };
 
         // The detection token, last: a subscriber advertises itself once it can receive.
-        let detection_token = declare_detection_token(engine, base, options, id)?;
+        let detection_token = declare_detection_token(engine, base, options, forms.as_ref(), id)?;
 
         let cancel = GetCancel {
             shared: shared.clone(),
@@ -1081,20 +1092,20 @@ fn identity_of(
     EntityGlobalId::of_session(zid, eid)
 }
 
-/// Declare a plain subscription on `keyexpr` in `form`.
+/// Declare a plain subscription on `keyexpr` in `form`, whose keep the subscription holds.
 fn declare_subscription<E: EngineHolder>(
     engine: &E,
     keyexpr: &str,
-    form: &EntityForm,
+    form: EntityForm,
     origin: Locality,
     sink: SubscriberSink,
 ) -> Result<Held<Subscription<E>>, HostError> {
     let id = engine
         .declare_subscriber_on_wire(
             keyexpr,
-            wire_of(form),
+            wire_of(&form),
             origin,
-            form.retraction().cloned(),
+            form.retraction().copied(),
             sink,
         )
         .map_err(HostError::of("the engine has no subscribers"))?
@@ -1105,20 +1116,20 @@ fn declare_subscription<E: EngineHolder>(
             id,
             retract: true,
         },
-        keeps: form.kept().cloned(),
+        keeps: form.into_kept(),
     })
 }
 
-/// Declare a liveliness subscription on `keyexpr` in `form`.
+/// Declare a liveliness subscription on `keyexpr` in `form`, whose keep the subscription holds.
 fn declare_liveliness_subscription<E: EngineHolder>(
     engine: &E,
     keyexpr: &str,
-    form: &EntityForm,
+    form: EntityForm,
     history: bool,
     sink: LivelinessSink,
 ) -> Result<Held<Subscription<E>>, HostError> {
     let id = engine
-        .declare_liveliness_subscriber_on_wire(keyexpr, wire_of(form), history, sink)
+        .declare_liveliness_subscriber_on_wire(keyexpr, wire_of(&form), history, sink)
         .map_err(HostError::of("the engine has no liveliness plane"))?
         .id;
     Ok(Held {
@@ -1127,7 +1138,7 @@ fn declare_liveliness_subscription<E: EngineHolder>(
             id,
             retract: true,
         },
-        keeps: form.kept().cloned(),
+        keeps: form.into_kept(),
     })
 }
 
@@ -1136,6 +1147,7 @@ fn declare_detection_token<E: EngineHolder>(
     engine: &E,
     keyexpr: &str,
     options: &AdvancedSubscriberOptions,
+    forms: Option<&FormsHandle>,
     id: EntityGlobalId,
 ) -> Result<Option<Held<Token<E>>>, HostError> {
     let Some(detection) = options.subscriber_detection.as_ref() else {
@@ -1148,7 +1160,7 @@ fn declare_detection_token<E: EngineHolder>(
         id.eid(),
         detection.metadata.as_deref(),
     );
-    let form = form_of(options.forms.as_ref(), |f| f.token(&ke));
+    let form = form_of(forms, |f| f.token(&ke));
     let retraction = form.names_key_on_retraction().then(|| {
         if form.is_literal() {
             RetractionKey::literal()
@@ -1165,7 +1177,7 @@ fn declare_detection_token<E: EngineHolder>(
             id: token,
             retract: true,
         },
-        keeps: form.kept().cloned(),
+        keeps: form.into_kept(),
     }))
 }
 

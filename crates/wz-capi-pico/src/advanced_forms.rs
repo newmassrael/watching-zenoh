@@ -286,24 +286,30 @@ impl PicoSubscriberForms {
             return EntityForm::literal();
         };
         let kept = Kept::lodged(anchor.clone());
-        let form = match anchor
+        // Made once and named where it lies, not handed through a chain of builders each moving it.
+        let mut form = match anchor
             .announced
             .aliased_parts(crate::session::EngineHold::as_ref(&shared))
         {
             // SAFETY: the rest lies in the anchor's announced key, which the anchor keeps,
             // unchanged, for as long as a count of it is held, and `kept` is one.
             Some((mapping_id, rest)) => unsafe { EntityForm::aliased_in(mapping_id, rest, kept) },
-            None => EntityForm::literal().keeping(kept),
+            None => {
+                let mut literal = EntityForm::literal();
+                literal.keep(kept);
+                literal
+            }
         };
         match entity {
-            Entity::Subscriber | Entity::Heartbeat => form.with_retraction_naming(
+            Entity::Subscriber | Entity::Heartbeat => form.name_on_retraction(
                 anchor
                     .key
                     .retraction_naming_in(self.mode, crate::session::EngineHold::as_ref(&shared)),
             ),
-            Entity::LatePublishers => form,
-            Entity::Token => form.with_token_retraction_naming_the_key(true),
+            Entity::LatePublishers => {}
+            Entity::Token => form.name_key_on_token_retraction(true),
         }
+        form
     }
 }
 

@@ -1561,8 +1561,7 @@ unsafe fn declare_subscriber_state(
     // SAFETY: as above; the forms are asked only while the subscriber's entities are declared,
     // below, while the owner holds the place.
     let forms = unsafe { lodge_forms(state, PicoSession::of(handle), base) };
-    let opts =
-        advanced_subscriber_options(options).with_declaration_forms(FormsHandle::lodged(forms));
+    let opts = advanced_subscriber_options(options);
     // SAFETY: as above.
     let miss = unsafe { lodge_miss_set(state) };
     let lent_miss = Strong::into_raw(miss.clone());
@@ -1574,7 +1573,16 @@ unsafe fn declare_subscriber_state(
     // The subscriber is declared in the state's place, which was filled with none.
     // SAFETY: as above; nothing else reaches the field until the state is handed out.
     let place = unsafe { &mut *core::ptr::addr_of_mut!((*state).subscriber) };
-    let declared = EngineSubscriber::declare_in(place, engine, ke, opts, on_sample, misses, core);
+    let declared = EngineSubscriber::declare_in(
+        place,
+        engine,
+        ke,
+        &opts,
+        Some(FormsHandle::lodged(forms)),
+        on_sample,
+        misses,
+        core,
+    );
     match declared {
         Ok(_) => {
             (*state).bind();
