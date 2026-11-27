@@ -718,6 +718,51 @@ unsizes such a handle) and `TransportState::build_wire`'s lines in the engine's 
 message, which falls by the forwarder's share of each call on the link. The test is
 `wz-capi-coop`'s `tests::arena::a_link_nothing_holds_back_takes_no_cell_of_the_gates`.
 
+### 9.5 Steps 2 and 3 as built (not built or run by this lane)
+
+One commit, "Read a closed stack's links as its own type", with two changes of shape against 9.2
+that the code asked for.
+
+- **The set is closed where the build closes it, not by the stack.** The stacks that add links
+  beside `IpLinks` (`WsLinks`, `SerialLinks`, `UnixpipeLinks`) take it as `S: SessionLinks<N,
+  Pump = HeapLink<N>>` and hand its dials and listeners on as they are, so `IpLinks` cannot read its
+  links as its own type in every build. It takes a seventh parameter, the set `F`
+  (`ip_link::LinkSet`): `OpenSet`, the default, hands each link behind its variant's table, as
+  before; `IpLinks::closed` gives `ClosedSet`, whose pump is `CellRc<IpLink<..>>`. `wz-capi-pico`
+  closes the host's links (`ReadSocketLinks`, `open_on_coop`) where the build adds none of ws,
+  serial or a unixpipe host; `app-transport`'s `EitherLinks` takes either form.
+- **The type the transport reads is the pump's, not a new item of every stack.** `SessionLinks`
+  keeps its items but `share_pump`; its `Pump` is `SharedPump<N>`, which names the type the
+  shared handle reads the link as (`Link`): a `CellRc<T>` pump is shared as it is and read as
+  `T`, a pump of another form is put in a cell of the heap and read as its own type, and
+  `EitherPump` is read behind the table. `TransportState` reads `LinkOf<T>`, `CellRc` of that
+  type; `LinkCalls` takes it as a parameter and names what its gates are read as (`Link`): the
+  link itself in the direct read, the round's gates (`dyn`, as before) where `wz_round` is on.
+  What a face keeps to wait on the link stays `dyn` (`DynLink::into_dyn`), and the read's facts
+  take the pump's type (`ReadFacts::of_link`).
+
+`IpLink` (`crates/wz-runtime-coop/src/ip_link.rs`) is a `repr(u8)` sum of the stack's `Udp`,
+`Peer` (`udp-listen`), `Tcp` and `Tls` drivers. A link is written where its cell holds it: the
+variant's field `align_of::<V>()` bytes in, by the driver's own in-place maker, then the tag, so no
+driver is built in a frame and moved. The send half of step 3 is not in this commit: the sink is
+the variant's field read behind the variant's own table (`CellRc::part`), so a send is what it
+was, with no tag test; the enum states `BoxedLinkDriver` with the step that keys the actions on the
+stack (`SessionHandle<C, D, K>`, `LinkRuntime`), which removes the variants' sending tables too.
+
+Expected on the case: the read's calls on the link (service, `takes_input`, `recv_with`,
+`take_rx_dropped`, `lost`, `keep`) lose their indirect call; the variants' `SessionDatagramLink`
+tables give way to the enum's one (the face's waits), about -150 to -300 relocated; text by 9.2's
+step 3 less the bodies the enum's table still reaches (its `try_recv` holds both drivers' copying
+receive), so nearer the low end of -1,500 to -3,000. Receive Ir lower by an indirect call a call on
+the link; send Ir unchanged. Not measured.
+
+Tests: `ip_stack::tests::closed_links_are_read_as_the_stacks_one_type` (red if a variant is written
+under another tag, its field anywhere but `align_of::<V>()` in, or `ClosedSet` pumps the variant;
+its CONTROL the open set's pump and sink naming the same field) and
+`a_closed_link_in_a_lent_cell_gives_it_back_whole` (red if the drop reads another variant); the
+open set's tests of `IpLinks` are unchanged and cover `OpenSet`; `either_links`'s
+`a_pump_is_shared_as_its_own_stack_shares_it` now shares through `SharedPump`.
+
 ## 10. Transport: the structure for what remains, and what SCE is asked for the machines
 
 Read from the same explain document as section 6 (2026-11-26, schema 5): transport 30,814 against
