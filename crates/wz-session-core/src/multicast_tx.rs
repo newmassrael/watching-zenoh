@@ -1195,9 +1195,10 @@ impl DeclarationReply<'_> {
 /// A declaration a group sends, as the arguments of the writer that makes it
 /// ([`crate::lent_control`]): an answer to a member's interest, the answer to a member's interest
 /// in tokens, an entity of the session told to the group or retracted from it, and a keyexpr the
-/// session declares to the group or undeclares. Every one is written by one writer (its
-/// `WireWrite`), which is not generic, so the encoder of each kind is compiled once into it
-/// whoever sends it, and a send is one call of [`multicast_tx_declaration`] with this value.
+/// session declares to the group or undeclares. Every one is written by the one writer of the
+/// declarations a link and a group send ([`crate::lent_control::LentDeclaration`]), so the encoder
+/// of each kind is compiled once into it whoever sends it, and a send is one call of
+/// [`multicast_tx_declaration`] with this value.
 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
 #[derive(Clone, Copy)]
 pub enum GroupDeclare<'a> {
@@ -1251,29 +1252,13 @@ pub enum GroupDeclare<'a> {
 }
 
 #[cfg(all(feature = "alloc", feature = "codec-push", feature = "codec-declare"))]
-impl GroupDeclare<'_> {
-    /// The declaration's own `ext_qos`, which its frame is read off: the declare QoS every
-    /// `Declare` envelope carries, and the default for the token reply, whose envelope carries
-    /// none.
-    fn qos(&self) -> crate::sample::QosLevel {
-        #[cfg(feature = "liveliness-token")]
-        if let Self::TokenReply { .. } = self {
-            return crate::sample::QosLevel::DEFAULT;
-        }
-        crate::declare_ext_qos::QOS_DECLARE
-    }
-}
-
-// The writer of every declaration a group sends is this one body, not generic, so it is compiled
-// once, and the count of a declaration (`encoded_size`) runs the same body. Each arm writes a
-// declaration of its one kind (`lent_control::DeclarationOf`), with the encoder a link's
-// lend-only session writes that kind with.
-#[cfg(all(feature = "alloc", feature = "codec-declare"))]
-impl crate::tx_buf::WireWrite for GroupDeclare<'_> {
-    fn write_wire(
-        &self,
-        sink: &mut crate::tx_buf::TxSink<'_>,
-    ) -> Result<(), sce_forge_runtime::codec::CodecError> {
+impl<'a> GroupDeclare<'a> {
+    /// The declaration as the arguments of the one writer a link writes its declarations with
+    /// too ([`crate::lent_control::LentDeclaration`]), so the encoder of each kind is compiled
+    /// once into that writer whoever sends it. `None` for a kind this build has no declaration
+    /// plane of, which the senders refuse before they get here
+    /// (`multicast_tx_group_announcement`, `multicast_tx_group_retraction`).
+    fn parts(self) -> Option<crate::lent_control::LentDeclaration<'a>> {
         // Named by the arms of the kinds this build declares, which may be none.
         #[cfg(any(
             feature = "declare-subscriber",
@@ -1281,22 +1266,22 @@ impl crate::tx_buf::WireWrite for GroupDeclare<'_> {
             feature = "liveliness-token"
         ))]
         use crate::declare_form::GroupDeclaration;
-        use crate::lent_control as lent;
-        use wz_codecs::declare::DeclareWire;
-        match *self {
+        use crate::lent_control::LentDeclaration as Lent;
+        Some(match self {
             #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
             Self::Reply(DeclarationReply::Final { interest_id }) => {
-                DeclareWire::encode_source(&lent::final_reply_declaration(interest_id), sink)
+                Lent::FinalReply { interest_id }
             }
             #[cfg(feature = "declare-subscriber")]
             Self::Reply(DeclarationReply::Subscriber {
                 interest_id,
                 subscriber_id,
                 keyexpr,
-            }) => DeclareWire::encode_source(
-                &lent::subscriber_reply_declaration(interest_id, subscriber_id, keyexpr)?,
-                sink,
-            ),
+            }) => Lent::SubscriberReply {
+                interest_id,
+                subscriber_id,
+                keyexpr,
+            },
             #[cfg(all(
                 feature = "declare-queryable",
                 any(feature = "liveliness-token", feature = "declare-subscriber")
@@ -1306,128 +1291,117 @@ impl crate::tx_buf::WireWrite for GroupDeclare<'_> {
                 queryable_id,
                 keyexpr,
                 complete,
-            }) => DeclareWire::encode_source(
-                &lent::queryable_reply_declaration(
-                    interest_id,
-                    queryable_id,
-                    keyexpr,
-                    crate::queryable_info::QueryableInfo::local(complete),
-                )?,
-                sink,
-            ),
+            }) => Lent::QueryableReply {
+                interest_id,
+                queryable_id,
+                keyexpr,
+                complete,
+            },
             #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
             Self::Reply(DeclarationReply::UndeclareSubscriber { subscriber_id }) => {
-                DeclareWire::encode_source(
-                    &lent::undeclare_subscriber_declaration(subscriber_id, None),
-                    sink,
-                )
+                Lent::UndeclareSubscriber {
+                    id: subscriber_id,
+                    key: None,
+                }
             }
             #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
             Self::Reply(DeclarationReply::Keyexpr {
                 interest_id,
                 mapping_id,
                 keyexpr,
-            }) => DeclareWire::encode_source(
-                &lent::kexpr_reply_declaration(interest_id, mapping_id, keyexpr)?,
-                sink,
-            ),
+            }) => Lent::KeyexprReply {
+                interest_id,
+                mapping_id,
+                keyexpr,
+            },
             #[cfg(feature = "liveliness-token")]
             Self::TokenReply {
                 token_id,
                 keyexpr,
                 interest_id,
-            } => DeclareWire::encode_source(
-                &lent::token_reply_declaration(token_id, keyexpr, interest_id)?,
-                sink,
-            ),
+            } => Lent::TokenReply {
+                token_id,
+                keyexpr,
+                interest_id,
+            },
             #[cfg(feature = "declare-subscriber")]
             Self::Announcement {
                 what: GroupDeclaration::Subscriber,
                 id,
                 key,
-            } => DeclareWire::encode_source(
-                &lent::subscriber_declaration(id, key.mapping_id, key.suffix)?,
-                sink,
-            ),
+            } => Lent::Subscriber {
+                id,
+                mapping_id: key.mapping_id,
+                suffix: key.suffix,
+            },
             #[cfg(feature = "declare-queryable")]
             Self::Announcement {
                 what: GroupDeclaration::Queryable { complete },
                 id,
                 key,
-            } => DeclareWire::encode_source(
-                &lent::queryable_declaration(
-                    id,
-                    key.mapping_id,
-                    key.suffix,
-                    crate::queryable_info::QueryableInfo::local(complete),
-                )?,
-                sink,
-            ),
+            } => Lent::Queryable {
+                id,
+                mapping_id: key.mapping_id,
+                suffix: key.suffix,
+                complete,
+            },
             #[cfg(feature = "liveliness-token")]
             Self::Announcement {
                 what: GroupDeclaration::Token,
                 id,
                 key,
-            } => DeclareWire::encode_source(
-                &lent::token_declaration(id, key.mapping_id, key.suffix)?,
-                sink,
-            ),
+            } => Lent::Token {
+                id,
+                mapping_id: key.mapping_id,
+                suffix: key.suffix,
+            },
             #[cfg(feature = "declare-subscriber")]
             Self::Retraction {
                 what: GroupDeclaration::Subscriber,
                 id,
                 key,
-            } => DeclareWire::encode_source(
-                &lent::undeclare_subscriber_declaration(id, Some(key)),
-                sink,
-            ),
+            } => Lent::UndeclareSubscriber { id, key: Some(key) },
             #[cfg(feature = "declare-queryable")]
             Self::Retraction {
                 what: GroupDeclaration::Queryable { .. },
                 id,
                 key,
-            } => DeclareWire::encode_source(
-                &lent::undeclare_queryable_declaration(id, Some(key)),
-                sink,
-            ),
+            } => Lent::UndeclareQueryable { id, key: Some(key) },
             #[cfg(feature = "liveliness-token")]
             Self::Retraction {
                 what: GroupDeclaration::Token,
                 id,
                 key,
-            } => {
-                DeclareWire::encode_source(&lent::undeclare_token_declaration(id, Some(key)), sink)
-            }
-            // A kind this build has no declaration plane of has no writer: the senders refuse it
-            // before they write (`multicast_tx_group_announcement`, `multicast_tx_group_retraction`).
+            } => Lent::UndeclareToken { id, key: Some(key) },
             #[cfg(not(all(
                 feature = "declare-subscriber",
                 feature = "declare-queryable",
                 feature = "liveliness-token"
             )))]
-            Self::Announcement { .. } | Self::Retraction { .. } => {
-                Err(sce_forge_runtime::codec::CodecError::UndeclaredEnumValue)
-            }
+            Self::Announcement { .. } | Self::Retraction { .. } => return None,
             Self::Keyexpr {
                 mapping_id,
                 keyexpr,
-            } => DeclareWire::encode_source(&lent::kexpr_declaration(mapping_id, keyexpr)?, sink),
-            Self::UndeclareKeyexpr { mapping_id } => {
-                DeclareWire::encode_source(&lent::undeclare_kexpr_declaration(mapping_id), sink)
-            }
-        }
+            } => Lent::Keyexpr {
+                mapping_id,
+                suffix: keyexpr,
+            },
+            Self::UndeclareKeyexpr { mapping_id } => Lent::UndeclareKeyexpr { mapping_id },
+        })
     }
 }
 
-/// `f` handed `declaration`, written from its parts by the group's one writer of its declarations
-/// ([`GroupDeclare`]), as a message lent for the call: framed and counted as its owned `Declare`
-/// is, on the band its own `ext_qos` names. `None` when its writer refuses it (a keyexpr past the
-/// protocol's bound), with `f` not called.
+/// `f` handed `declaration`, written from its parts by the one writer of the declarations a link
+/// and a group send ([`crate::lent_control::LentDeclaration`]), as a message lent for the call:
+/// framed and counted as its owned `Declare` is, on the band its own `ext_qos` names. `None`
+/// when its writer refuses it (a keyexpr past the protocol's bound) or this build has no plane of
+/// its kind, with `f` not called.
 #[cfg(all(feature = "alloc", feature = "codec-push", feature = "codec-declare"))]
 pub fn multicast_tx_declaration<R>(
     declaration: GroupDeclare<'_>,
     f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
 ) -> Option<R> {
+    let declaration = declaration.parts()?;
     let size = encoded_size(&declaration)?;
     let qos = declaration.qos();
     Some(f(&MulticastTxEncoded {
@@ -1470,9 +1444,7 @@ pub fn multicast_tx_response_final<R>(
     qos: crate::sample::QosLevel,
     f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
 ) -> Option<R> {
-    let body = |sink: &mut crate::tx_buf::TxSink<'_>| {
-        crate::lent_control::response_final(request_id, qos).encode(sink)
-    };
+    let body = crate::lent_control::ResponseFinalOf { request_id, qos };
     let size = encoded_size(&body)?;
     Some(f(&MulticastTxEncoded {
         framing: MulticastTxFraming::OwnBand {
@@ -5084,9 +5056,9 @@ mod group_declarations_written_from_parts {
     }
 
     /// A kind this build has no declaration plane of is refused as `FeatureDisabled` by the
-    /// announcement and the retraction, with `f` not called, and the one writer refuses it if it
-    /// is handed one all the same. Turned red by a sender that writes a kind it has no plane of,
-    /// or reports its refusal as another error.
+    /// announcement and the retraction, with `f` not called, and the one send of a declaration
+    /// refuses it if it is handed one all the same. Turned red by a sender that writes a kind it
+    /// has no plane of, or reports its refusal as another error.
     #[cfg(not(all(
         feature = "declare-subscriber",
         feature = "declare-queryable",
@@ -5144,7 +5116,7 @@ mod group_declarations_written_from_parts {
                 |_| called = true
             )
             .is_none());
-            assert!(!called, "the writer refuses a kind it has no arm for");
+            assert!(!called, "the send refuses a kind it has no writer arm for");
         }
     }
 
@@ -5237,7 +5209,7 @@ mod group_declarations_written_from_parts {
     /// backing that queues owned items builds, counted as long as it is, and framed and tallied as
     /// that one is; a keyexpr past the protocol's bound is refused with `f` not called, as its owned
     /// form is never built. Turned red by a writer of a kind that answers with another header, id,
-    /// key or info than its owned builder (`GroupDeclare::write_wire`), a size that is not its
+    /// key or info than its owned builder (`LentDeclaration`'s writer), a size that is not its
     /// length, or a framing or a tally that reads another QoS than the owned reply's.
     #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
     #[test]

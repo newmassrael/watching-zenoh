@@ -3966,12 +3966,8 @@ enum DispatchStage {
     ReservedChain,
 }
 
-/// A declaration written from its parts, as the arguments of the writer of
-/// [`crate::lent_control`] that makes it: every one a session with no allocator sends, and every
-/// one a lend-only session (`tx-lend-only`) sends, where an owned `DeclareOwned` would be built
-/// only to be encoded into the slot its link lends and dropped.
-/// [`SessionLinkActions::dispatch_declare_lent`] takes one of these, so the kinds share one
-/// dispatch and one encoder.
+// Every declaration this session writes from its parts is one value of the one writer a group
+// writes its declarations with too.
 #[cfg(all(
     any(not(feature = "alloc"), feature = "tx-lend-only"),
     any(
@@ -3982,315 +3978,7 @@ enum DispatchStage {
         feature = "liveliness-token"
     )
 ))]
-enum LentDeclaration<'a> {
-    /// The close of an interest's answer.
-    #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
-    FinalReply { interest_id: u64 },
-    /// A subscriber declared in answer to an interest.
-    #[cfg(feature = "declare-subscriber")]
-    SubscriberReply {
-        interest_id: u64,
-        subscriber_id: u64,
-        keyexpr: &'a str,
-    },
-    #[cfg(feature = "declare-subscriber")]
-    Subscriber {
-        id: u64,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&'a str>,
-    },
-    #[cfg(feature = "declare-queryable")]
-    Queryable {
-        id: u64,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&'a str>,
-        complete: bool,
-    },
-    #[cfg(feature = "declare-token")]
-    Token {
-        id: u64,
-        mapping_id: crate::wire_id::ExprId,
-        suffix: Option<&'a str>,
-    },
-    /// A queryable declared in answer to an interest.
-    #[cfg(all(
-        feature = "alloc",
-        feature = "declare-queryable",
-        any(feature = "liveliness-token", feature = "declare-subscriber")
-    ))]
-    QueryableReply {
-        interest_id: u64,
-        queryable_id: u64,
-        keyexpr: &'a str,
-        complete: bool,
-    },
-    #[cfg(feature = "declare-keyexpr")]
-    Keyexpr {
-        mapping_id: core::num::NonZero<crate::wire_id::ExprId>,
-        suffix: &'a str,
-    },
-    #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
-    UndeclareKeyexpr { mapping_id: crate::wire_id::ExprId },
-    /// A retraction, naming its key when `key` holds it.
-    #[cfg(all(
-        feature = "tx-lend-only",
-        feature = "declare-subscriber",
-        feature = "declare-undeclare"
-    ))]
-    UndeclareSubscriber {
-        id: u64,
-        key: Option<&'a crate::lent_control::NamedKeyexpr>,
-    },
-    #[cfg(all(
-        feature = "tx-lend-only",
-        feature = "declare-queryable",
-        feature = "declare-undeclare"
-    ))]
-    UndeclareQueryable {
-        id: u64,
-        key: Option<&'a crate::lent_control::NamedKeyexpr>,
-    },
-    #[cfg(all(
-        feature = "tx-lend-only",
-        feature = "declare-token",
-        feature = "declare-undeclare"
-    ))]
-    UndeclareToken {
-        id: u64,
-        key: Option<&'a crate::lent_control::NamedKeyexpr>,
-    },
-}
-
-#[cfg(all(
-    any(not(feature = "alloc"), feature = "tx-lend-only"),
-    any(
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "liveliness-token"
-    )
-))]
-impl<'a> LentDeclaration<'a> {
-    /// Hand the declaration, borrowing the text the arguments borrow, to `with`: each kind as
-    /// a declaration of that kind alone ([`crate::lent_control::DeclarationOf`]), so the
-    /// writer a build links for it holds the encoders of the kinds this enum has in that build
-    /// and no other. `LengthOutOfRange` for a keyexpr suffix past the protocol's `u16`
-    /// length, which is not sent.
-    fn compose<W: DeclarationWith>(&self, with: W) -> W::Out {
-        match *self {
-            #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
-            Self::FinalReply { interest_id } => with.declaration(Ok(
-                crate::lent_control::final_reply_declaration(interest_id),
-            )),
-            #[cfg(feature = "declare-subscriber")]
-            Self::SubscriberReply {
-                interest_id,
-                subscriber_id,
-                keyexpr,
-            } => with.declaration(crate::lent_control::subscriber_reply_declaration(
-                interest_id,
-                subscriber_id,
-                keyexpr,
-            )),
-            #[cfg(feature = "declare-subscriber")]
-            Self::Subscriber {
-                id,
-                mapping_id,
-                suffix,
-            } => with.declaration(crate::lent_control::subscriber_declaration(
-                id, mapping_id, suffix,
-            )),
-            #[cfg(feature = "declare-queryable")]
-            Self::Queryable {
-                id,
-                mapping_id,
-                suffix,
-                complete,
-            } => with.declaration(crate::lent_control::queryable_declaration(
-                id,
-                mapping_id,
-                suffix,
-                crate::queryable_info::QueryableInfo::local(complete),
-            )),
-            #[cfg(feature = "declare-token")]
-            Self::Token {
-                id,
-                mapping_id,
-                suffix,
-            } => with.declaration(crate::lent_control::token_declaration(
-                id, mapping_id, suffix,
-            )),
-            #[cfg(all(
-                feature = "alloc",
-                feature = "declare-queryable",
-                any(feature = "liveliness-token", feature = "declare-subscriber")
-            ))]
-            Self::QueryableReply {
-                interest_id,
-                queryable_id,
-                keyexpr,
-                complete,
-            } => with.declaration(crate::lent_control::queryable_reply_declaration(
-                interest_id,
-                queryable_id,
-                keyexpr,
-                crate::queryable_info::QueryableInfo {
-                    complete,
-                    distance: 0,
-                },
-            )),
-            #[cfg(feature = "declare-keyexpr")]
-            Self::Keyexpr { mapping_id, suffix } => {
-                with.declaration(crate::lent_control::kexpr_declaration(mapping_id, suffix))
-            }
-            #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
-            Self::UndeclareKeyexpr { mapping_id } => with.declaration(Ok(
-                crate::lent_control::undeclare_kexpr_declaration(mapping_id),
-            )),
-            #[cfg(all(
-                feature = "tx-lend-only",
-                feature = "declare-subscriber",
-                feature = "declare-undeclare"
-            ))]
-            Self::UndeclareSubscriber { id, key } => with.declaration(Ok(
-                crate::lent_control::undeclare_subscriber_declaration(id, key),
-            )),
-            #[cfg(all(
-                feature = "tx-lend-only",
-                feature = "declare-queryable",
-                feature = "declare-undeclare"
-            ))]
-            Self::UndeclareQueryable { id, key } => with.declaration(Ok(
-                crate::lent_control::undeclare_queryable_declaration(id, key),
-            )),
-            #[cfg(all(
-                feature = "tx-lend-only",
-                feature = "declare-token",
-                feature = "declare-undeclare"
-            ))]
-            Self::UndeclareToken { id, key } => with.declaration(Ok(
-                crate::lent_control::undeclare_token_declaration(id, key),
-            )),
-        }
-    }
-
-    /// The bytes the declaration encodes to: what the dispatch asks the link to lend for it, since
-    /// a `Declare` has no size constant (its keyexpr suffix's bound is upstream's u16 length). Its
-    /// own frame, not inlined, so the `Declare` it counts is on the stack only while it counts, and
-    /// the dispatch's frame does not carry it beside the one the encoder builds.
-    ///
-    /// A declaration that cannot be composed counts as zero: the encoder then refuses it with the
-    /// same error, and the dispatch reports that refusal.
-    ///
-    /// A lend-only session with an allocator counts with the writer it sends with
-    /// (`frame_encode::push_capacity_hint` says why), so each kind's encoder is compiled once.
-    #[inline(never)]
-    fn encoded_len(&self) -> usize {
-        #[cfg(not(feature = "alloc"))]
-        {
-            self.compose(CountDeclaration)
-        }
-        #[cfg(feature = "alloc")]
-        {
-            crate::tx_buf::encoded_len(as_encoder(&|sink| self.encode(sink)))
-        }
-    }
-
-    /// The declaration's bytes into `sink`, or the refusal of one that cannot be composed.
-    fn encode(
-        &self,
-        sink: &mut crate::tx_buf::TxSink<'_>,
-    ) -> Result<(), sce_forge_runtime::codec::CodecError> {
-        self.compose(WriteDeclaration(sink))
-    }
-}
-
-/// What [`LentDeclaration::compose`] does with the declaration it composes, whose type is the
-/// kind's own.
-#[cfg(all(
-    any(not(feature = "alloc"), feature = "tx-lend-only"),
-    any(
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "liveliness-token"
-    )
-))]
-trait DeclarationWith {
-    type Out;
-    fn declaration<S: wz_codecs::declare::DeclareSource>(
-        self,
-        declaration: Result<S, sce_forge_runtime::codec::CodecError>,
-    ) -> Self::Out;
-}
-
-/// The bytes a declaration encodes to, zero for one that cannot be composed.
-#[cfg(all(
-    not(feature = "alloc"),
-    any(
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "liveliness-token"
-    )
-))]
-struct CountDeclaration;
-
-#[cfg(all(
-    not(feature = "alloc"),
-    any(
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "liveliness-token"
-    )
-))]
-impl DeclarationWith for CountDeclaration {
-    type Out = usize;
-    fn declaration<S: wz_codecs::declare::DeclareSource>(
-        self,
-        declaration: Result<S, sce_forge_runtime::codec::CodecError>,
-    ) -> usize {
-        declaration.map_or(0, |declaration| {
-            wz_codecs::declare::DeclareWire::measure(&declaration).len()
-        })
-    }
-}
-
-/// A declaration written into the transmit sink.
-#[cfg(all(
-    any(not(feature = "alloc"), feature = "tx-lend-only"),
-    any(
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "liveliness-token"
-    )
-))]
-struct WriteDeclaration<'s, 'b>(&'s mut crate::tx_buf::TxSink<'b>);
-
-#[cfg(all(
-    any(not(feature = "alloc"), feature = "tx-lend-only"),
-    any(
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "liveliness-token"
-    )
-))]
-impl DeclarationWith for WriteDeclaration<'_, '_> {
-    type Out = Result<(), sce_forge_runtime::codec::CodecError>;
-    fn declaration<S: wz_codecs::declare::DeclareSource>(
-        self,
-        declaration: Result<S, sce_forge_runtime::codec::CodecError>,
-    ) -> Self::Out {
-        wz_codecs::declare::DeclareWire::encode_source(&declaration?, self.0)
-    }
-}
+use crate::lent_control::LentDeclaration;
 
 /// What [`SessionLinkActions::try_send_network_message_qos`] did not send, and whose it still is.
 #[cfg(feature = "tx-probe")]
@@ -5034,10 +4722,10 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
 // encodes the same borrowed value through `SliceSink`. No reply-shape
 // duplication across profiles.
 impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R, T> {
-    // With no allocator the reply is written into the lent slot as a declaration of its one
-    // kind (`lent_control::token_reply_declaration`, the group's writer of it too): the bytes of
-    // the borrowed reply the heap form converts to its owned mirror (`build_token_reply`), the
-    // same routing (control band, the default QoS a reply with no `ext_qos` reads as).
+    // With no allocator the reply is written into the lent slot by the one writer of the
+    // declarations a link and a group send (`LentDeclaration::TokenReply`): the bytes of the
+    // borrowed reply the heap form converts to its owned mirror (`build_token_reply`), on the
+    // control band with the default QoS a reply with no `ext_qos` reads as.
     #[cfg(all(feature = "liveliness-token", not(feature = "alloc")))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
         // A keyexpr past the session's `MAX_KEYEXPR_BYTES` is not answered, as the subscriber
@@ -5051,27 +4739,11 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         {
             return;
         }
-        let _ = self
-            .dispatch_network_message_at(
-                DispatchStage::Fresh,
-                Conduit::new(Priority::Control, true),
-                crate::sample::QosLevel::DEFAULT,
-                size_hint(|| {
-                    crate::declare::local_token::token_reply_len(token_id, keyexpr, interest_id)
-                }),
-                crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-                as_encoder(&|sink| {
-                    wz_codecs::declare::DeclareWire::encode_source(
-                        &crate::lent_control::token_reply_declaration(
-                            token_id,
-                            keyexpr,
-                            interest_id,
-                        )?,
-                        sink,
-                    )
-                }),
-            )
-            .map(|_| ());
+        let _ = self.dispatch_declare_lent(&LentDeclaration::TokenReply {
+            token_id,
+            keyexpr,
+            interest_id,
+        });
     }
     // A lend-only session writes the reply from its parts, as the session with no allocator
     // does, and builds the owned one only for what reads it (`send_declare_from_parts`).
@@ -5098,24 +4770,11 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                     .ok()
             },
             || {
-                let reply = |sink: &mut crate::tx_buf::TxSink<'_>| {
-                    wz_codecs::declare::DeclareWire::encode_source(
-                        &crate::lent_control::token_reply_declaration(
-                            token_id,
-                            keyexpr,
-                            interest_id,
-                        )?,
-                        sink,
-                    )
-                };
-                let _ = self.dispatch_network_message_at(
-                    DispatchStage::Fresh,
-                    Conduit::new(Priority::Control, true),
-                    crate::sample::QosLevel::DEFAULT,
-                    size_hint(|| crate::tx_buf::encoded_len(as_encoder(&reply))),
-                    crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-                    as_encoder(&reply),
-                );
+                let _ = self.dispatch_declare_lent(&LentDeclaration::TokenReply {
+                    token_id,
+                    keyexpr,
+                    interest_id,
+                });
             },
         );
     }
@@ -15773,10 +15432,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
             Conduit::new(Priority::Control, true),
-            crate::declare_ext_qos::QOS_DECLARE,
+            what.qos(),
             size_hint(|| what.encoded_len()),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-            as_encoder(&|sink| what.encode(sink)),
+            as_encoder(&|sink| crate::tx_buf::WireWrite::write_wire(what, sink)),
         )
         .map(|_| ())
     }
@@ -18891,14 +18550,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         request_id: crate::wire_id::RequestId,
         qos: crate::sample::QosLevel,
     ) {
-        // The terminator is written from its two numbers through the borrowed writer of
-        // `lent_control`, routed as `dispatch_response_final` routes it: on the band its own
-        // `ext_qos` names, as control plane. An owned one would hold a query's QoS in an
-        // extension chain on the heap, once for every query answered.
+        // The terminator is written from its two numbers by the one writer a group writes it
+        // with too (`lent_control::ResponseFinalOf`), routed as `dispatch_response_final`
+        // routes it: on the band its own `ext_qos` names, as control plane. An owned one would
+        // hold a query's QoS in an extension chain on the heap, once for every query answered.
         #[cfg(feature = "codec-response-final")]
         {
+            let response_final = crate::lent_control::ResponseFinalOf { request_id, qos };
             let encode = |sink: &mut crate::tx_buf::TxSink<'_>| {
-                crate::lent_control::response_final(request_id, qos).encode(sink)
+                crate::tx_buf::WireWrite::write_wire(&response_final, sink)
             };
             // A lend-only build measures nothing: every frame of it asks for the whole batch budget.
             let len = size_hint(|| crate::lent_control::response_final_len(request_id, qos));
