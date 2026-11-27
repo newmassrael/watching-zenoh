@@ -161,9 +161,9 @@ pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::transport::{
     LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
 };
-use wz_runtime_coop::{
-    ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimePlace, RuntimeRows,
-};
+#[cfg(not(wz_on_use))]
+use wz_runtime_coop::RuntimePlace;
+use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimeRows};
 #[cfg(any(
     all(test, feature = "std"),
     feature = "advanced-cache",
@@ -916,7 +916,10 @@ struct SessionLent {
     /// (`wz_round`) places none.
     #[cfg(wz_round)]
     samples: Placed<Round>,
-    /// The span the session's runtime is placed in, and the count of the arena it is kept by.
+    /// The span the session's runtime is placed in, and the count of the arena it is kept by,
+    /// where the arena holds it: a session whose tables take their memory on use makes its runtime
+    /// of the allocator.
+    #[cfg(not(wz_on_use))]
     runtime: RuntimePlace,
     /// The place the session's engine is written at, and the count of the arena it is kept by.
     #[cfg(not(wz_on_use))]
@@ -1015,7 +1018,8 @@ fn lend_session(
         }
     }
     let OpenPlaces {
-        runtime: runtime_bytes,
+        #[cfg(not(wz_on_use))]
+            runtime: runtime_bytes,
         #[cfg(not(wz_on_use))]
             engine: engine_bytes,
         // The engine lies in an allocation of its own the open claimed (`SharedClaim`).
@@ -1270,6 +1274,7 @@ fn lend_session(
         plan.peers(),
         delivery,
     )?;
+    #[cfg(not(wz_on_use))]
     let runtime = arena
         .runtime_place(runtime_bytes)
         .map_err(ArenaRefused::Lend)?;
@@ -1291,6 +1296,7 @@ fn lend_session(
     // places.
     let lodgings = unsafe { lodgings.kept_by(memory) };
     Ok(SessionLent {
+        #[cfg(not(wz_on_use))]
         runtime,
         engine,
         transport,
@@ -4813,7 +4819,9 @@ pub(crate) struct OpenHolds<'h> {
     pub(crate) rooms: usize,
     /// The ABI's places.
     pub(crate) held: &'h HeldPlaces,
-    /// The span the session's runtime is placed in.
+    /// The span the session's runtime is placed in, where the arena holds it: a session whose
+    /// tables take their memory on use makes its runtime of the allocator.
+    #[cfg(not(wz_on_use))]
     pub(crate) runtime: usize,
     /// The place the session's engine lies in.
     pub(crate) engine: usize,
@@ -4847,6 +4855,7 @@ impl OpenFrom<'_> {
             Self::Region(region) => region.places(),
             #[cfg(any(feature = "runtime-plan", test))]
             Self::Config(holds) => OpenPlaces {
+                #[cfg(not(wz_on_use))]
                 runtime: holds.runtime,
                 engine: holds.engine,
             },
@@ -4917,7 +4926,12 @@ pub(crate) const fn lay_out_open<const ROWS: usize>(
     if let Err(refused) = plan.lay_held(holds.held) {
         return Err(refused);
     }
+    #[cfg(not(wz_on_use))]
     plan.lay_runtime(holds.runtime);
+    // A runtime of the allocator (`RuntimeTables::made`) takes no span of the arena; the engine
+    // still keeps the arena by its count, for what of the arena it holds (`SessionArena::keep`).
+    #[cfg(wz_on_use)]
+    plan.lay_keep();
     // An engine in an allocation of its own (`SharedClaim`) takes no place of the arena.
     #[cfg(not(wz_on_use))]
     plan.lay_engine(holds.engine);
@@ -5005,7 +5019,8 @@ impl RuntimeTables {
     /// (`ArenaRegion::shape`): a `const fn`, so a region laid out when the build is compiled holds
     /// the runtime's span. A config the region admits that dials no endpoint where the shape dials
     /// some, while it listens or joins a group, takes no cell for a dial the region holds one for.
-    #[cfg(wz_round)]
+    /// A region of a session whose tables take their memory on use holds no span of the runtime.
+    #[cfg(all(wz_round, not(wz_on_use)))]
     pub(crate) const fn of_shape<C: ClockSource + 'static>(
         shape: &crate::arena::PlanShape,
     ) -> Self {
@@ -5045,8 +5060,9 @@ impl RuntimeTables {
 
     /// [`Self::of`] for a config of `shape`, the numbers a region was laid out for
     /// (`ArenaRegion::shape`): a `const fn`, so a region laid out when the build is compiled holds
-    /// the runtime's span.
-    #[cfg(not(wz_round))]
+    /// the runtime's span. A region of a session whose tables take their memory on use holds no
+    /// span of the runtime.
+    #[cfg(all(not(wz_round), not(wz_on_use)))]
     pub(crate) const fn of_shape(shape: &crate::arena::PlanShape) -> Self {
         Self::of_groups(shape.groups)
     }
@@ -5089,6 +5105,7 @@ impl RuntimeTables {
     /// The runtime is placed in `place`, the span of the session's arena the open lent it
     /// ([`Self::placed_bytes`]), with the session's local set: nothing of them is of the heap.
     /// `None` for a span short of it.
+    #[cfg(not(wz_on_use))]
     pub(crate) fn runtime<C: ClockSource>(
         self,
         clock: C,
@@ -5097,8 +5114,20 @@ impl RuntimeTables {
         CoopRuntime::placed(clock, self.rows(), Self::form(self.groups), place)
     }
 
+    /// The runtime of a session whose tables take their memory on use, and its local set, of the
+    /// allocator, in the form the other forms place in a span of their arena (`Self::runtime`):
+    /// the arena lays out no span for it. `None` when the allocator has no room for them.
+    #[cfg(wz_on_use)]
+    pub(crate) fn made<C: ClockSource>(
+        self,
+        clock: C,
+    ) -> Option<(CoopRuntime<C>, CoopLocalSet<C>)> {
+        CoopRuntime::try_formed(clock, self.rows(), Self::form(self.groups))
+    }
+
     /// The bytes of the span of the session's arena [`Self::runtime`] places the runtime in;
     /// `None` past the address space.
+    #[cfg(not(wz_on_use))]
     pub(crate) const fn placed_bytes<C: ClockSource>(self) -> Option<usize> {
         match CoopRuntime::<C>::placed_layout(self.rows(), Self::form(self.groups)) {
             Some(span) => Some(span.size()),
@@ -6959,26 +6988,37 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         rows: ArenaRegion,
         held: HeldPlaces,
     ) -> Result<OpenRegion, ArenaRefused> {
-        #[cfg(wz_round)]
+        let driver = <S as SessionLinks<LinkCount>>::LINK_CELL_BYTES;
+        #[cfg(all(wz_round, not(wz_on_use)))]
         let tables = RuntimeTables::of_shape::<C>(rows.shape());
-        #[cfg(not(wz_round))]
+        #[cfg(all(not(wz_round), not(wz_on_use)))]
         let tables = RuntimeTables::of_shape(rows.shape());
+        #[cfg(not(wz_on_use))]
         let Some(runtime) = tables.placed_bytes::<C>() else {
             return Err(ArenaRefused::TooLarge);
         };
-        let driver = <S as SessionLinks<LinkCount>>::LINK_CELL_BYTES;
-        OpenRegion::laid(rows, &Self::open_holds(driver, &held, runtime))
+        #[cfg(not(wz_on_use))]
+        let holds = Self::open_holds(driver, &held, runtime);
+        #[cfg(wz_on_use)]
+        let holds = Self::open_holds(driver, &held);
+        OpenRegion::laid(rows, &holds)
     }
 
     /// What an open of this engine lays out after the rows its limits size (`lay_out_open`): the
     /// cells of its links, a driver's `driver` bytes, its faces' rooms, the ABI's places `held`,
-    /// the runtime's span of `runtime` bytes, the engine's own place and its planes'.
-    const fn open_holds(driver: usize, held: &HeldPlaces, runtime: usize) -> OpenHolds<'_> {
+    /// the runtime's span of `runtime` bytes where the arena holds it, the engine's own place and
+    /// its planes'.
+    const fn open_holds(
+        driver: usize,
+        held: &HeldPlaces,
+        #[cfg(not(wz_on_use))] runtime: usize,
+    ) -> OpenHolds<'_> {
         OpenHolds {
             cells: cells_of::<C>(driver),
             #[cfg(not(wz_on_use))]
             rooms: link_rooms_bytes::<L>(),
             held,
+            #[cfg(not(wz_on_use))]
             runtime,
             engine: Shared::<Self>::layout().size(),
             planes: SessionPlanes::OF_BUILD,
@@ -7086,7 +7126,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(wz_on_use)]
         let claim = SharedClaim::<Self>::try_new()
             .ok_or_else(|| heap_refused(Shared::<Self>::layout().size()))?;
-        // The runtime's tables are placed in the arena, so its plan holds their span.
+        // The runtime's tables: placed in the arena, whose plan then holds their span, or made of
+        // the allocator where the tables take their memory on use.
         #[cfg(wz_round)]
         let tables = RuntimeTables::of::<C>(&config);
         #[cfg(not(wz_round))]
@@ -7099,7 +7140,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 debug_assert_eq!(region.places().engine, Shared::<Self>::layout().size());
                 OpenFrom::Region(region)
             }
-            #[cfg(any(feature = "runtime-plan", test))]
+            #[cfg(all(any(feature = "runtime-plan", test), not(wz_on_use)))]
             PlanFrom::Config(held) => OpenFrom::Config(Self::open_holds(
                 links.link_cell_bytes(),
                 held,
@@ -7107,7 +7148,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     .placed_bytes::<C>()
                     .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?,
             )),
+            #[cfg(all(any(feature = "runtime-plan", test), wz_on_use))]
+            PlanFrom::Config(held) => {
+                OpenFrom::Config(Self::open_holds(links.link_cell_bytes(), held))
+            }
         };
+        #[cfg(not(wz_on_use))]
         let runtime_bytes = from.places().runtime;
         let mut lent = lend_session(&from, memory, &config, &policy).map_err(OpenError::Arena)?;
         // The texts of the endpoints, each read and written once into the row the plan laid out
@@ -7222,11 +7268,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     wz_runtime_coop::session_drive::LinkWait,
                 >()))
             })?;
-        // The task and timer tables and the session's local set, placed here once in the arena: no
-        // spawn and no sleep of the session takes memory after its open (`open_links` seals them).
+        // The task and timer tables and the session's local set, made here once, in the arena or of
+        // the allocator: no spawn and no sleep of the session takes memory after its open
+        // (`open_links` seals them).
+        #[cfg(not(wz_on_use))]
         let (runtime, local) = tables
             .runtime(clock.clone(), lent.runtime)
             .ok_or_else(|| lend_exhausted(runtime_bytes))?;
+        #[cfg(wz_on_use)]
+        let (runtime, local) = tables
+            .made(clock.clone())
+            .ok_or_else(|| heap_refused(tables.rows().reserved_bytes()))?;
         // SAFETY: the runtime is the session's alone: it and its local set go into the `Core` made
         // below and into no other value, the opening frame owns them until the `Core` is behind
         // its `CoreLock`, and from then on every spawn, pass and handle of its tasks is reached

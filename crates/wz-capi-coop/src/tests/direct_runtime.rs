@@ -11,23 +11,32 @@ use wz_runtime_coop::RuntimeForm;
 use wz_runtime_posix::PosixClock;
 
 use super::client_config;
+#[cfg(not(wz_on_use))]
 use crate::arena::{AllocatorMemory, ArenaPlan, SessionArena};
 use crate::engine::RuntimeTables;
 use crate::CoopConfig;
 
-/// The runtime `tables` are for, placed as an open places it, holds no cell: a spawn on it is
-/// refused, counted, and a pass runs nothing.
+/// The runtime `tables` are for, made as an open makes it (placed in a span of its arena, or of
+/// the allocator where the session's tables take their memory on use), holds no cell: a spawn on
+/// it is refused, counted, and a pass runs nothing.
 fn assert_no_cell(tables: RuntimeTables) {
-    let bytes = tables
-        .placed_bytes::<PosixClock>()
-        .expect("a span of the tables' rows");
-    let mut plan = ArenaPlan::vacant();
-    plan.holding_runtime(bytes).expect("the span fits");
-    let mut arena = SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has it");
-    let place = arena.runtime_place(bytes).expect("the plan holds the span");
+    #[cfg(not(wz_on_use))]
+    let (runtime, local) = {
+        let bytes = tables
+            .placed_bytes::<PosixClock>()
+            .expect("a span of the tables' rows");
+        let mut plan = ArenaPlan::vacant();
+        plan.holding_runtime(bytes).expect("the span fits");
+        let mut arena = SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has it");
+        let place = arena.runtime_place(bytes).expect("the plan holds the span");
+        tables
+            .runtime(PosixClock, place)
+            .expect("the span fits the runtime")
+    };
+    #[cfg(wz_on_use)]
     let (runtime, local) = tables
-        .runtime(PosixClock, place)
-        .expect("the span fits the runtime");
+        .made(PosixClock)
+        .expect("the allocator has room for the runtime");
     assert!(
         local.try_spawn_local(async { 1u8 }).is_err(),
         "no cell for any task"

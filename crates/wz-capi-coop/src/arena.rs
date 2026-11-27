@@ -127,6 +127,7 @@ use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 #[cfg(feature = "udp-listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
+#[cfg(not(wz_on_use))]
 use wz_runtime_coop::RuntimePlace;
 #[cfg(any(wz_lent, feature = "udp-listen"))]
 use wz_session_core::bounded::Lent;
@@ -852,9 +853,11 @@ pub struct OpenRegion {
 }
 
 /// The bytes of the two places an open lends by their size after its tables: the span its
-/// runtime is placed in and the place its engine lies in.
+/// runtime is placed in, where the arena holds it (a session whose tables take their memory on use
+/// makes its runtime of the allocator), and the place its engine lies in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct OpenPlaces {
+    #[cfg(not(wz_on_use))]
     pub(crate) runtime: usize,
     pub(crate) engine: usize,
 }
@@ -870,6 +873,7 @@ impl OpenRegion {
             Ok(()) => Ok(Self {
                 rows,
                 places: OpenPlaces {
+                    #[cfg(not(wz_on_use))]
                     runtime: holds.runtime,
                     engine: holds.engine,
                 },
@@ -2755,6 +2759,15 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         }
     }
 
+    /// Lay out the count the arena is kept by alone (`SessionArena::keep`), for an open whose
+    /// runtime and engine are made of the allocator: the engine keeps the arena by it for what of
+    /// the arena it holds (the lodgings, the handle's place). Laid out after every other row, once,
+    /// at the open; the plan not settled.
+    #[cfg(wz_on_use)]
+    pub(crate) const fn lay_keep(&mut self) {
+        self.put(ArenaPart::ArenaKeep, 1, core::mem::size_of::<ArenaKept>());
+    }
+
     /// Lay out the place of `bytes` the session's engine lies in, counted by its holders, which
     /// keeps the arena's memory until the last of them lets go (`SessionArena::engine_place`).
     /// Laid out after every other row, once, at the open. The plan is laid out where it lies; a
@@ -3954,6 +3967,7 @@ impl SessionArena {
     /// the arena's alignment, and the count that keeps the arena's memory for it: the memory goes
     /// back once the session lets the arena go and the runtime's last holder lets go, whichever
     /// is last. Refused past what the arena has left.
+    #[cfg(not(wz_on_use))]
     pub(crate) fn runtime_place(&mut self, bytes: usize) -> Result<RuntimePlace, LendRefused> {
         let (at, memory) = self.kept_span(bytes)?;
         // SAFETY: the span is `bytes` of the arena's memory, lent to the runtime alone, and the
@@ -3976,6 +3990,7 @@ impl SessionArena {
     /// memory for what is placed there. Refused past what the arena has left. Out of line: the
     /// runtime's place and the engine's are both lent by it, and a copy in each would carry the
     /// placing of the count twice.
+    #[cfg(not(wz_on_use))]
     #[inline(never)]
     fn kept_span(&mut self, bytes: usize) -> Result<(NonNull<u8>, NonNull<Kept>), LendRefused> {
         let memory = self.keep()?;
@@ -4666,10 +4681,13 @@ mod tests {
 
     /// What the arena of `an_arena_a_runtime_is_placed_in_goes_back_after_its_last_holder` is
     /// reserved from: the allocator, counting what it is given back.
+    #[cfg(not(wz_on_use))]
     struct CountedReleases;
 
+    #[cfg(not(wz_on_use))]
     static RELEASES: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
+    #[cfg(not(wz_on_use))]
     impl ArenaMemory for CountedReleases {
         fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
             AllocatorMemory.reserve(layout)
@@ -4683,8 +4701,10 @@ mod tests {
     }
 
     /// A clock that does not move.
+    #[cfg(not(wz_on_use))]
     struct Still;
 
+    #[cfg(not(wz_on_use))]
     impl wz_runtime_coop::ClockSource for Still {
         fn now_us(&self) -> u64 {
             0
@@ -4695,7 +4715,9 @@ mod tests {
     /// in is given back once, after both the session and the runtime's last holder let go: the
     /// session letting go first gives nothing back. Turned red by a session that gives the arena
     /// back while the runtime still lies in it, by a runtime that never gives its count back, or by
-    /// a plan that lays the rows out twice.
+    /// a plan that lays the rows out twice. A session whose tables take their memory on use makes
+    /// its runtime of the allocator, and its arena lends no span for it.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn an_arena_a_runtime_is_placed_in_goes_back_after_its_last_holder() {
         use wz_runtime_coop::{CoopRuntime, RuntimeForm, RuntimeRows};

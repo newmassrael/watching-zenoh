@@ -203,13 +203,15 @@ fn an_on_use_sessions_link_admission_lies_apart_from_its_arena() {
     );
 }
 
-/// The plan of a session whose tables take their memory on use lays out no place for its engine or
-/// its faces' rooms, which lie in allocations of their own, while the CONTROL rows, the runtime's
-/// span and the count the arena is kept by, are laid out as the D12 plan lays them. Turned red by
-/// `lay_out_open` laying the engine's place (`ArenaPlan::lay_engine`) or a place of the rooms
-/// (`ArenaPlan::lay_rooms`, of any bytes) in the on-use form, whose holds name no rooms' bytes.
+/// The plan of a session whose tables take their memory on use lays out no place for its engine,
+/// its faces' rooms or its runtime, which lie in allocations of their own, while the CONTROL row,
+/// the count the arena is kept by, is laid out as the D12 plan lays it beside the runtime's span.
+/// Turned red by `lay_out_open` laying the engine's place (`ArenaPlan::lay_engine`), a place of
+/// the rooms (`ArenaPlan::lay_rooms`, of any bytes) or the runtime's span
+/// (`ArenaPlan::lay_runtime`) in the on-use form, whose holds name none of their bytes, or by one
+/// that leaves the count out with the span (`ArenaPlan::lay_keep`).
 #[test]
-fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
+fn an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime() {
     use crate::arena::{ArenaPart, ArenaPlan, HeldPlaces, LinkCells, PlanShape};
     let mut plan = ArenaPlan::planned(
         PlanShape::dial_only(1, 1024, &wz_session_core::policy::SessionPolicy::defaults()),
@@ -226,7 +228,6 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
                 halves: 64,
             },
             held: &HeldPlaces::NONE,
-            runtime: 64,
             engine: 64,
             planes: crate::engine::SessionPlanes::OF_BUILD,
         },
@@ -234,13 +235,10 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
     .expect("the holds lay out");
     let laid = |part: ArenaPart| plan.rows().any(|row| row.part() == part.part());
     assert!(
-        laid(ArenaPart::RuntimeState),
-        "CONTROL: the runtime's span is laid out"
-    );
-    assert!(
         laid(ArenaPart::ArenaKeep),
-        "CONTROL: so is the count the arena is kept by"
+        "CONTROL: the count the arena is kept by is laid out"
     );
+    assert!(!laid(ArenaPart::RuntimeState), "the runtime lies apart");
     assert!(!laid(ArenaPart::EngineState), "the engine lies apart");
     assert!(!laid(ArenaPart::LinkRooms), "the rooms lie apart");
 }
