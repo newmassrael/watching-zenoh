@@ -23700,7 +23700,7 @@ layer_z_zenohd_interop() {
     # run 44165924219 was the first to reach the leg since). Additive: the flag
     # it reads, `--stats-filters`, is absent from every other leg's argv. Both
     # restatements carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,transport-stats,zenoh-config --quiet) || return 1
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,transport-stats,zenoh-config,session-close-ingress --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -23953,7 +23953,9 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     # RELAYED Put's `T` flag, and without the feature `NodeHlc::is_stamping` is
     # false unconditionally so both documents answer `bare`. Both restatements
     # carry it. `routing-routes` likewise, for the reason at the opening build.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,transport-stats,zenoh-config --quiet) || return 1
+    # D17 adds `session-close-ingress`: the heap peer hosts the lifecycle queries whose sealed
+    # commands the leg after Zcmd sends through zenohd. Both restatements carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,transport-stats,zenoh-config,session-close-ingress --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of
@@ -24840,6 +24842,19 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     wz_test_args wz-integration-tests wz_declared_commander_zenohd_interop
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zcmd 9 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_CAPI_C_LIFECYCLE_LIB="$cmd_capi_target/debug/libwz_capi_c.so" \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        -- --ignored --quiet --test-threads=1 || decl_rc=1; }
+    # Decision D17 (docs/session-lifecycle-intent.md section 5b): a command sealed by its
+    # commander's key, carried through a stock zenohd whose own key no grant names, is decided for
+    # that commander. Four legs on the declared node of the fixed profile (a listed commander
+    # permitted, a replay refused, an unlisted key refused, the echo after a restart) and three on
+    # the heap peer (the demo built above carries `session-close-ingress`).
+    wz_test_args wz-integration-tests wz_sealed_commander_zenohd_interop zenohd_lane_fixed_
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zseal 4 env WZ_ZENOHD_BIN="$zenohd" \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        -- --ignored --quiet --test-threads=1 || decl_rc=1; }
+    wz_test_args wz-integration-tests wz_sealed_commander_zenohd_interop zenohd_lane_heap_
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zseal 3 env WZ_ZENOHD_BIN="$zenohd" \
         cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     rm -rf "$decl_pkg"
