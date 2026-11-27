@@ -274,7 +274,10 @@ mod listen {
 
     /// A node of one thread dialled twice by one peer of one thread holds the first link and
     /// refuses the second: each end holds one face, and keeps it, and the link carries a put. Twin
-    /// of `one_face::a_second_dial_to_a_node_the_session_holds_is_refused`.
+    /// of `one_face::a_second_dial_to_a_node_the_session_holds_is_refused`. The refusal is the
+    /// link admission's (`link-admission`), which a build without it does not make
+    /// (`a_second_dial_to_a_node_of_one_thread_is_a_face_of_its_own_without_the_admission`).
+    #[cfg(feature = "link-admission")]
     #[test]
     fn a_second_dial_to_a_node_of_one_thread_is_refused() {
         let (listener, endpoint) = listening(0xa1, |_| {});
@@ -304,6 +307,43 @@ mod listen {
                 .unwrap()
                 .iter()
                 .any(|got| got == b"over-the-one")
+        });
+    }
+
+    /// A node of one thread dialled twice by one peer of one thread, in a build without the link
+    /// admission (`link-admission`, off in the zenoh-pico preset), takes the second link as a face
+    /// of its own, as each link is a peer of zenoh-pico's own
+    /// (`vendor/zenoh-pico/src/transport/peer.c` @ `z_result_t _z_transport_peer_unicast_add(`):
+    /// each end holds two faces and keeps them, and a put of the dialler reaches the listener. The
+    /// CONTROL is the first link alone, one face at each end. Twin, in the other build, of
+    /// `a_second_dial_to_a_node_of_one_thread_is_refused`. Turned red by a link asked about in
+    /// its handshake by a build without the admission, which would refuse the second link.
+    #[cfg(not(feature = "link-admission"))]
+    #[test]
+    fn a_second_dial_to_a_node_of_one_thread_is_a_face_of_its_own_without_the_admission() {
+        let (listener, endpoint) = listening(0xa1, |_| {});
+        let dialler = client(&endpoint, 0xc1);
+        eventually("CONTROL: the first link, one face at each end", || {
+            faces_up(&listener) == 1 && faces_up(&dialler) == 1
+        });
+        let again = endpoint.clone();
+        assert!(
+            dialler.call(move |engine| engine.attach_face(&again).is_ok()),
+            "the second dial reaches the port"
+        );
+        eventually("the second link to come up at both ends", || {
+            faces_up(&listener) == 2 && faces_up(&dialler) == 2
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            (faces_up(&listener), faces_up(&dialler)),
+            (2, 2),
+            "each end holds both links as faces and keeps them"
+        );
+        let heard = hearing(&listener, "demo/two/**", payload);
+        put(&dialler, "demo/two/x", b"over-both");
+        eventually("the listener to hear the dialler", || {
+            heard.lock().unwrap().iter().any(|got| got == b"over-both")
         });
     }
 

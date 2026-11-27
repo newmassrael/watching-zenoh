@@ -810,22 +810,24 @@ files::decl_watch_doors::"
     # 4, compiled with `query`, `queryable` and `local-queryable`), and the session that listens,
     # taking two clients of its own engine over loopback (`tests::listen::`, 5, compiled with
     # `listen`, `query` and `queryable`, its `udp/` port's with `udp-listen`, and its answers to
-    # a peer's Interest with `interest-answer`); the crate's own tests were 65 passed with all of
-    # them.
+    # a peer's Interest with `interest-answer`), and one face to a node that dials and is dialled
+    # (`tests::one_face::`, 3, compiled with `link-admission`); the crate's own tests were 65
+    # passed with all of them.
     # The `tls/` provider of a host (`tests/tls_provider.rs`, 8, compiled with `tls-mbedtls`) builds
     # the pinned Mbed TLS from its submodules, which is why the feature is a leg of its own cost.
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
-    "wz-capi-coop|hook|connectivity,interest-answer,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats,udp-listen|"
+    "wz-capi-coop|hook|connectivity,interest-answer,link-admission,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats,udp-listen|"
     # The same suite in the form the C library ships for pico's single-threaded arm: no `threads`,
     # so the rows count their calls on the latch of one thread, a delivery is one flag and no read
     # task starts (`row_callback::OneThread`). The tests a read task or a second thread on one
     # session steps are `threads`' and leave this build; the rest must pass in it as they do above.
     # `tls-mbedtls` is the row above's cost and is not repeated. Matching listeners on a key stay
     # in (`key-matching-listener`, a default the row above has), so the suite's tests of them run
-    # in this form too. It listens without `udp-listen` and `interest-answer`, as the zenoh-pico
-    # preset's peer does, so a `udp/` endpoint to listen on is refused here and a peer's Interest
-    # is not answered.
+    # in this form too. It listens without `udp-listen`, `interest-answer` and `link-admission`,
+    # as the zenoh-pico preset's peer does, so a `udp/` endpoint to listen on is refused here, a
+    # peer's Interest is not answered, and a second link to a node is a face of its own
+    # (`tests::one_thread::listen::`).
     "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
     # The declaration watch in the same form: a round of one thread tells a catch-up a declaration a
     # round with the links held, which the watch's tests prove only where they run in it.
@@ -833,7 +835,10 @@ files::decl_watch_doors::"
     # The features that hold more than one link, face or session, in the same form: each session
     # is opened, called and read on a thread of its own (`tests::one_thread::OwnThread`). The
     # `listen` ones (a listener, one face, the outbound pool, a dial under way) run in the row
-    # above; the dictionary of key ids and the group of the program's transport here.
+    # above; the dictionary of key ids and the group of the program's transport here, and the
+    # listener's again with its links admitted (`link-admission`), which the row above leaves out
+    # as the zenoh-pico preset's peer does: a second link to a node is refused here.
+    "wz-capi-coop|hook|-default,std,key-matching-listener,link-admission,query,queryable|tests::one_thread::listen::"
     "wz-capi-coop|hook|-default,std,listen,liveliness,liveliness-get,query,queryable,shared-key-ids|tests::one_thread::shared_key_ids::"
     "wz-capi-coop|hook|-default,std,app-transport,group|tests::one_thread::group::"
     # The host's group in the same form: the joiner's tests run here; the engine's, which needs a

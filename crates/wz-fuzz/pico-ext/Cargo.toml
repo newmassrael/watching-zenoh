@@ -70,6 +70,7 @@ advanced-source-retention = ["wz-capi-pico/advanced-source-retention"]
 advanced-node-clock = ["wz-capi-pico/advanced-node-clock"]
 udp-listen = ["wz-capi-pico/udp-listen"]
 interest-answer = ["wz-capi-pico/interest-answer"]
+link-admission = ["wz-capi-pico/link-admission"]
 
 [dependencies]
 libfuzzer-sys = "0.4.10"

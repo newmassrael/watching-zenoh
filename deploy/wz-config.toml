@@ -1891,6 +1891,22 @@ abis = ["core", "pico"]
 implies = ["peer"]
 help = "A unicast udp/ endpoint a peer listens on: one socket whose peers are told apart by the address each datagram came from, each a face of its own (wz-own). Off, a udp/ endpoint to listen on is refused by name as a scheme the links do not carry, as zenoh-pico's POSIX link has no such listener, and a peer accepts over tcp/ alone."
 
+[[capability]]
+id = "link-admission"
+kconfig = "WZ_CAP_LINK_ADMISSION"
+# On in a build that names nothing and off in the zenoh-pico preset: each link zenoh-pico's peer
+# accepts or dials is a peer of its own (`vendor/zenoh-pico/src/transport/peer.c` @
+# `z_result_t _z_transport_peer_unicast_add(`), so two of its peers that dial each other hold two
+# links. It changes which links a peer of the session keeps and is off in that preset all the same,
+# the preset's contract being zenoh-pico's. A behaviour of the cooperative engine (wz-capi-coop's
+# feature of the same name, over wz-runtime-coop's), decided in each link's handshake and never on
+# a message: the tokio engine's runtime admits its links whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["peer"]
+help = "One link to a remote node when both dial, or one dials twice: each link is asked about in its handshake, and a second link to a node the session holds is refused with MAX_LINKS, the one the node with the lower zid dialled being kept at both ends (wz-own). Off, every link that ends its handshake is a face of its own, as each link zenoh-pico's peer accepts or dials is a peer of its own, so two nodes that dial each other hold two faces."
+
 # ## The upstream switches (a complete map: every upstream switch is classified)
 #
 # Every build switch of zenoh-pico (each `Z_FEATURE_*` its CMakeLists defines) and of zenoh-c

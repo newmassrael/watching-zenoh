@@ -356,12 +356,15 @@ switchboard = ["dep:wz-session-core", "wz-session-core/switchboard"]
 app-link = ["session-unicast", "alloc", "wz-session-core/app-link"]
 
 # The transport of a session as an engine over the faces holds it (`transport::TransportState`),
-# beside its links: the ports it listens on and its say on a second link to a node it holds
-# (`listen`), the groups it joined (`group`), the key-wire form of each link (`shared-key-ids`),
-# where an answer to a query goes (`queryable`), the faces a get asks (`query`) and the rows of
-# its links it reports (`connectivity`). Each is the engine's feature of the same name, which the
-# engine forwards here; a build without one holds none of it.
+# beside its links: the ports it listens on (`listen`), its say on a second link to a node it
+# holds (`link-admission`), the groups it joined (`group`), the key-wire form of each link
+# (`shared-key-ids`), where an answer to a query goes (`queryable`), the faces a get asks
+# (`query`) and the rows of its links it reports (`connectivity`). Each is the engine's feature
+# of the same name, which the engine forwards here; a build without one holds none of it. Without
+# `link-admission` a link is given no place in an admission before its handshake, so every link
+# that ends its handshake is a face of its own, two to a node that dials and is dialled.
 listen = ["session-unicast-accept"]
+link-admission = ["listen"]
 group = []
 shared-key-ids = ["dep:wz-session-core", "wz-session-core/shared-key-ids"]
 queryable = []

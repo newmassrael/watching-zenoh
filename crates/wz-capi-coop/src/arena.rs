@@ -632,8 +632,8 @@ const PLANE_ROWS: usize = cfg!(feature = "runtime-plan") as usize
         + cfg!(feature = "query") as usize
         + cfg!(feature = "connectivity") as usize);
 /// The admission the links of a session that listens ask while their handshakes run
-/// (`ArenaPlan::lay_admission`).
-const ADMISSION_ROWS: usize = cfg!(feature = "listen") as usize;
+/// (`ArenaPlan::lay_admission`, `link-admission`): a build without it lays none out.
+const ADMISSION_ROWS: usize = cfg!(feature = "link-admission") as usize;
 
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
@@ -2793,7 +2793,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// Lay out the place of `bytes` the admission of a session that listens lies in, which the
     /// session's state owns and its links' leases reach by handles that count nothing. Laid out
     /// once, at the open, the plan not settled: a refusal is kept for `Self::settled`.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "link-admission")]
     pub(crate) const fn lay_admission(&mut self, bytes: usize) {
         self.put(ArenaPart::LinkAdmissionState, 1, bytes);
     }

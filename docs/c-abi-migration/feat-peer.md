@@ -158,11 +158,21 @@ interest, which zenoh-pico sends a new peer after the declarations it pushes
 `any(interest-answer, listen)` in `engine/replay.rs`, so a peer without the answer still ends its
 push as zenoh-pico's does.
 
-**W2.** The admission (`LinkAdmission`, `LinkBook`, `LinkRegistry`, the arena's
-`LinkAdmissionState` and, in the work form, `admission_gate`) is gated by `link-admission` in
-place of `listen`; without it every link that ends its handshake is a face, as each accepted or
-dialled link is a peer of zenoh-pico's own (`vendor/zenoh-pico/src/transport/peer.c` @
-`z_result_t _z_transport_peer_unicast_add(`).
+**W2 (this branch).** The admission (`LinkAdmission`, `LinkBook`, `LinkRegistry` as the engine's
+`Admission`, the arena's `LinkAdmissionState` row and `SessionLent::links`) and its place in each
+link's handshake (`TransportState::admission` and `place_actions`' install, `wz-runtime-coop`'s
+own `link-admission`) are gated by `link-admission` in place of `listen`; without it no link is
+asked about, so every link that ends its handshake is a face, as each accepted or dialled link is
+a peer of zenoh-pico's own (`vendor/zenoh-pico/src/transport/peer.c` @
+`z_result_t _z_transport_peer_unicast_add(`). The work form's `admission_gate` stays with
+`listen`: what it holds back is a taken link's input until its face is brought up, which a link
+that was not asked about needs as much. The dial role's standing by for a node another face holds
+(`LinkSupervisor::read_node`) stays too: it reads a handshake that ended at a held node, which
+only a peer's own admission refuses, and keeps the dial role from dialling that node again. Held by
+`tests::one_thread::listen::a_second_dial_to_a_node_of_one_thread_is_a_face_of_its_own_without_the_admission`
+(two faces at each end, the first link the CONTROL) and, with it, by
+`a_second_dial_to_a_node_of_one_thread_is_refused` and `tests::one_face::` as before; the arena's
+row by `tests::arena::a_listening_session_lays_out_its_link_admission_only_where_the_build_has_one`.
 
 **W1.** `accept-cookie` gates `accept_cookie`, the cookie half of `signing_key` and
 `CookieKey`'s key; the session machine is unchanged, since its two accept guards are events the
@@ -226,3 +236,19 @@ to: with `udp/` listening out of the pico preset the step still holds every buil
 - W3, Layer C1cs: `pico-peer-coop` lower by 11,000 to 13,000, most in the driver area;
   `pico-client-coop-nostd` and `pico-api-coop-nostd` unchanged (`host-peer` keeps
   `udp-listen`); `nm -C` of the peer library holds no `IpUdpListener` and no `UdpPort` body.
+- W2: `wz_config.py --write` and `--check` as for W3; build and clippy of `wz-runtime-coop` with
+  `alloc,session-unicast,listen` and with `alloc,session-unicast,link-admission`, of
+  `wz-capi-coop` with `listen` and with `link-admission`, the latter also under
+  `WZ_COOP_VALUE_LOCKS=off` (the work form), and of `wz-capi-pico` with `os-host,link-udp,peer`
+  and with its defaults.
+- W2, off, 2 tests:
+  `cargo test -p wz-capi-coop --lib --no-default-features --features std,key-matching-listener,listen,query,queryable admission`
+  runs `a_second_dial_to_a_node_of_one_thread_is_a_face_of_its_own_without_the_admission` and
+  `a_listening_session_lays_out_its_link_admission_only_where_the_build_has_one`.
+- W2, on: the same filter with `link-admission` beside them runs the arena's test and
+  `tests::admission_heap::`, the filter `a_second_dial_to_a_node_of_one_thread` the refused twin
+  alone, and
+  `cargo test -p wz-capi-coop --lib --features link-admission,query,queryable one_face` runs the
+  three of `tests::one_face::`.
+- W2, Layer C1cs: `pico-peer-coop` lower by 1,500 to 2,300 (`rival_says`, `LinkRegistry::reserve`,
+  `LinkBook::try_with_order`); `pico-client-coop-nostd` and `pico-api-coop-nostd` unchanged.

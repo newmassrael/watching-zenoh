@@ -108,6 +108,8 @@ default = [
     # `interest-answer`).
     "udp-listen",
     "interest-answer",
+    # One link to a remote node when both dial (`link-admission`).
+    "link-admission",
     "config-verdict",
     "transport_compression",
     "auth_usrpwd",
@@ -369,6 +371,10 @@ udp-listen = []
 # runtime takes the session core with the answer named, so the feature only carries the
 # capability's name.
 interest-answer = []
+# One link to a remote node when both dial (`wz-capi-pico/link-admission`): this engine's runtime
+# admits its links through its own registry whatever is named, so the feature only carries the
+# capability's name.
+link-admission = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

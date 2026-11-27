@@ -4160,7 +4160,7 @@ fn an_open_whose_dial_is_refused_lets_go_of_the_port_it_bound() {
         .expect("the failed open let go of its port");
 }
 
-#[cfg(feature = "listen")]
+#[cfg(feature = "link-admission")]
 mod admission_heap;
 #[cfg(all(feature = "ticker", feature = "query", feature = "liveliness"))]
 mod advanced;
@@ -4229,8 +4229,9 @@ mod local_query;
 // A session whose tables take their memory at their first row.
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 mod on_use;
+// One face to a node is the link admission's (`link-admission`); without it each link is a face.
 #[cfg(all(
-    feature = "listen",
+    feature = "link-admission",
     feature = "query",
     feature = "queryable",
     feature = "threads"

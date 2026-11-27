@@ -253,6 +253,18 @@ udp-listen = [
     "wz-runtime-coop/udp-listen",
     "wz-runtime-coop/udp-port-lent-only",
 ]
+# `link-admission`: one link to a remote node when both dial, or one dials twice. Each link is
+# given its place in the session's admission (the session core's `LinkRegistry`, laid out in the
+# session's arena) before its handshake runs, and a second link to a node the session holds is
+# refused there with `MaxLinks`, the link the node with the lower zid dialled being the one both
+# ends keep. A behaviour zenoh-pico's peer does not have: each link it accepts or dials is a peer
+# of its own (`vendor/zenoh-pico/src/transport/peer.c` @
+# `z_result_t _z_transport_peer_unicast_add(`). The pico ABI's capability of the same name
+# (deploy/wz-config.toml) turns it on, which the zenoh-pico preset leaves off: without it no link
+# is asked about in its handshake, every link that ends its handshake is a face, and the build
+# holds no admission, no book of its links' nodes and no row of the arena for them. Nothing the
+# receive does for a message changes, only which links become faces.
+link-admission = ["listen", "wz-runtime-coop/link-admission"]
 # The answering end of a peer's Interest (`wz-session-core`'s `interest-answer`): what the
 # application registers after a peer asked is staged for that peer's face before each drain. A peer
 # asks a node that listens or joins a group: `group` turns it on, as zenoh-pico answers an

@@ -256,7 +256,7 @@ fn held_plan(
             runtime,
             engine: wz_runtime_coop::kept::Shared::<Engine>::layout().size(),
             planes: crate::engine::SessionPlanes::OF_BUILD,
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "link-admission")]
             admission: core::mem::size_of::<crate::engine::Admission<PosixClock>>(),
             #[cfg(not(wz_round))]
             direct_face: Engine::DIRECT_FACE_BYTES,
@@ -677,6 +677,26 @@ fn a_session_that_listens_on_tcp_alone_is_lent_no_port_slot() {
     assert!(
         tcp_bytes < both_bytes,
         "{tcp_bytes} B is not under {both_bytes} B"
+    );
+}
+
+/// A session that listens lays out the place of its link admission where the build has one
+/// (`link-admission`), and none where it does not, as the zenoh-pico preset's peer, whose links
+/// are each a face of their own and ask no admission. Turned red by an admission laid out in a
+/// build without the capability (`lay_out_open`), or one left out of a build that has it.
+#[cfg(feature = "listen")]
+#[test]
+fn a_listening_session_lays_out_its_link_admission_only_where_the_build_has_one() {
+    let listening = host_plan(&CoopConfig {
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        max_faces: 2,
+        ..client_config()
+    })
+    .expect("the build's limits lay an arena out");
+    assert_eq!(
+        listening.rows().any(|laid| laid.part() == "link admission"),
+        cfg!(feature = "link-admission"),
+        "the admission's place is laid out exactly where the build has the admission"
     );
 }
 
@@ -3315,7 +3335,7 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
     plan.holding_engine(64)
         .expect("the build's limits lay the engine's place out");
     plan.lay_planes(crate::engine::SessionPlanes::OF_BUILD);
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "link-admission")]
     plan.lay_admission(64);
     #[cfg(not(wz_round))]
     plan.lay_direct_faces(64);

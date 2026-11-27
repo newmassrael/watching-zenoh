@@ -23,9 +23,9 @@ use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 #[cfg(feature = "group")]
 use wz_session_core::group_locator::parse_group_locator;
 use wz_session_core::link::BoxedLinkDriver;
-#[cfg(feature = "listen")]
+#[cfg(feature = "link-admission")]
 use wz_session_core::link_admission::LinkAdmission;
-#[cfg(feature = "listen")]
+#[cfg(feature = "link-admission")]
 use wz_session_core::placed::PlacedRef;
 #[cfg(all(feature = "queryable", feature = "group"))]
 use wz_session_core::response_sink::ResponseSink;
@@ -209,9 +209,9 @@ pub struct TransportState<T: TransportFaces> {
     /// The zid in its wire form, which every handshake of the session announces.
     pub wire_zid: SessionZid,
     /// The session's say on a link to a node it holds a link to, asked while the link's handshake
-    /// runs (`install_placed_link_admission`, `listen`): a handle of the admission the engine
-    /// owns, which it drops after every link's actions and task.
-    #[cfg(feature = "listen")]
+    /// runs (`install_placed_link_admission`, `link-admission`): a handle of the admission the
+    /// engine owns, which it drops after every link's actions and task.
+    #[cfg(feature = "link-admission")]
     pub admission: PlacedRef<dyn LinkAdmission>,
     /// The cells each link's gates are placed in when the session makes the link, where they hold
     /// the link back (`LinkCalls::gate`), lent from the arena; none for a plan that laid out none.
@@ -415,10 +415,11 @@ impl<T: TransportFaces> TransportState<T> {
     }
 
     /// The actions of a link the session makes, placed in their cell of the session's table: a
-    /// link past the cells is refused as one past the stack's buffers is. With `listen` the link
-    /// has its place in the session's admission before its handshake runs, which asks it once the
-    /// remote's zid is known: a second link to a node the session holds is refused there, with
-    /// nothing declared over it by either end, and not closed after it came up.
+    /// link past the cells is refused as one past the stack's buffers is. With `link-admission`
+    /// the link has its place in the session's admission before its handshake runs, which asks it
+    /// once the remote's zid is known: a second link to a node the session holds is refused there,
+    /// with nothing declared over it by either end, and not closed after it came up. Without it no
+    /// link is asked about, and each that ends its handshake is a face of its own.
     // Always inlined: its one caller held these values in its own frame.
     #[inline(always)]
     pub fn place_actions(
@@ -430,10 +431,10 @@ impl<T: TransportFaces> TransportState<T> {
         let actions: LinkHandle<T> =
             CellRc::<_, CountOf<T>>::in_cells_of(self.actions_cells.as_ref(), actions)
                 .map_err(|_| self.cells_exhausted(endpoint))?;
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "link-admission")]
         actions
             .install_placed_link_admission(self.admission, matches!(role, SessionRole::Initiator));
-        #[cfg(not(feature = "listen"))]
+        #[cfg(not(feature = "link-admission"))]
         let _ = role;
         Ok(actions)
     }

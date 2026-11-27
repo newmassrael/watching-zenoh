@@ -166,7 +166,7 @@ use wz_session_core::entropy::EntropySource;
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::lent_push;
 use wz_session_core::limits::SessionLimits;
-#[cfg(feature = "listen")]
+#[cfg(feature = "link-admission")]
 use wz_session_core::link_admission::{LinkAdmission, LinkBook, LinkRegistry};
 #[cfg(wz_round)]
 use wz_session_core::link_life::{Effects, LinkInput, LinkPhase, Refused as HandshakeRefusal};
@@ -847,7 +847,7 @@ struct SessionLent {
     /// The places for values lodged by counts, each of which keeps the arena's memory while lent.
     lodgings: LodgingPlaces,
     /// The links the plan holds buffers for: the rows of the session's link admission.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "link-admission")]
     links: usize,
     /// Whether the outbound slots the links share are fewer than the links.
     #[cfg(feature = "listen")]
@@ -1249,7 +1249,7 @@ fn lend_session(
         handle_place,
         places,
         lodgings,
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "link-admission")]
         links: plan.links(),
         #[cfg(feature = "listen")]
         tx_pool_short: plan.tx_pool_short(),
@@ -2964,7 +2964,7 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// and the transport reach by handles that count nothing: after the transport, the state and
     /// the tasks, which hold every lease, and before the arena it lies in. Held for its owner's
     /// drop alone.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "link-admission")]
     _admission: Placed<Admission<C>>,
     /// The state the places of the session's own values and its keys lie in (`StateHold`): the
     /// region, which holds its registry too (`crate::region`), or the session's own state where
@@ -4608,7 +4608,7 @@ pub(crate) struct OpenHolds<'h> {
     /// The places of the planes the session's state owns.
     pub(crate) planes: SessionPlanes,
     /// The place of the admission the links of a session that listens ask ([`Admission`]).
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "link-admission")]
     pub(crate) admission: usize,
     /// The read slot and send place of one face past the dial role's (`direct`).
     #[cfg(not(wz_round))]
@@ -4640,12 +4640,14 @@ impl OpenFrom<'_> {
 
 /// The admission the links of a session over the clock `C` ask while their handshakes run: owned
 /// by the session's state where its arena lent it, and reached by each link's lease through a
-/// handle that counts nothing.
-#[cfg(feature = "listen")]
+/// handle that counts nothing. A build without `link-admission` holds none: each link that ends
+/// its handshake is a face of its own, as each link is a peer of zenoh-pico's own
+/// (`vendor/zenoh-pico/src/transport/peer.c` @ `z_result_t _z_transport_peer_unicast_add(`).
+#[cfg(feature = "link-admission")]
 pub(crate) type Admission<C> = LinkRegistry<CoopRuntime<C>>;
 
 /// The admission as its links' leases ask it.
-#[cfg(feature = "listen")]
+#[cfg(feature = "link-admission")]
 fn as_link_admission<C: ClockSource + 'static>(
     admission: &Admission<C>,
 ) -> &(dyn LinkAdmission + 'static) {
@@ -4699,7 +4701,7 @@ pub(crate) const fn lay_out_open<const ROWS: usize>(
     plan.lay_runtime(holds.runtime);
     plan.lay_engine(holds.engine);
     plan.lay_planes(holds.planes);
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "link-admission")]
     plan.lay_admission(holds.admission);
     #[cfg(not(wz_round))]
     plan.lay_direct_faces(holds.direct_face);
@@ -6753,7 +6755,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             runtime,
             engine: Shared::<Self>::layout().size(),
             planes: SessionPlanes::OF_BUILD,
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "link-admission")]
             admission: core::mem::size_of::<Admission<C>>(),
             #[cfg(not(wz_round))]
             direct_face: Self::DIRECT_FACE_BYTES,
@@ -6960,7 +6962,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // after its open is admitted in place. The admission lies in the row the plan laid out for
         // it (`ArenaPlan::lay_admission`); its rows are the heap's, and a heap that refuses them
         // refuses the open.
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "link-admission")]
         let admission = Admission::<C>::try_with_order(
             &wire,
             policy.link_tie_order(),
@@ -6969,7 +6971,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         .ok_or(OpenError::Arena(ArenaRefused::NoMemory {
             bytes: lent.links.saturating_mul(LinkBook::row_bytes()),
         }))?;
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "link-admission")]
         let admission = lent
             .arena
             .arena_mut()
@@ -6980,7 +6982,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // session's tasks before `Core` (`CoopLocalSet::drop_tasks`), and `Core` drops its
         // transport and its state before the owner, a field after theirs. Nothing changes the
         // admission through its owner.
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "link-admission")]
         let link_admission = unsafe { admission.share() }.map(as_link_admission::<C>);
         // The faces' links keep the places the registry lends their tables at: one table of them.
         let places = lent.registry.places();
@@ -7025,7 +7027,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 endpoints: lent.transport.endpoints,
                 #[cfg(feature = "group")]
                 groups: Vec::new(),
-                #[cfg(feature = "listen")]
+                #[cfg(feature = "link-admission")]
                 admission: link_admission,
                 wire_zid: wire,
                 gate_cells: lent.transport.cells.gate,
@@ -7123,7 +7125,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             session_time,
             places: lent.places,
             _steps: lent.steps,
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "link-admission")]
             _admission: admission,
             #[cfg(not(feature = "runtime-plan"))]
             _state: lent.state,
@@ -7484,7 +7486,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// The session's say on a second link to a node, the one its links' handshakes ask, for a
     /// test that asks it as they do.
-    #[cfg(all(test, feature = "std", feature = "listen"))]
+    #[cfg(all(test, feature = "std", feature = "link-admission"))]
     pub(crate) fn link_admission(&self) -> PlacedRef<dyn LinkAdmission> {
         self.core.lock().0.transport.admission
     }
