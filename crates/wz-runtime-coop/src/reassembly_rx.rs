@@ -53,6 +53,8 @@
 use wz_session_core::bounded::Lent;
 #[cfg(feature = "alloc")]
 use wz_session_core::bounded::OnUse;
+#[cfg(feature = "alloc")]
+use wz_session_core::byte_cells::HeapByteCells;
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 #[cfg(feature = "alloc")]
@@ -170,17 +172,20 @@ pub const SESSION_REASSEMBLY_SLOTS: usize = LENT_CHAINS;
 pub type SessionChains = LentStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }>;
 
 /// The staging of a Router of a session whose tables take their memory on use: each chain a
-/// buffer of its own, taken of the allocator at its first fragment and given back when it ends.
+/// buffer of the session's table of the allocator's buffers, taken at its first fragment and
+/// given back when it ends, or, kept by its delivery, when the delivery lets it go.
 #[cfg(feature = "alloc")]
 pub type OwnSessionChains = OwnStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }>;
 
 /// Where the chains of a session's Routers take their buffers, as the storage policy of the
 /// session's tables says: a table the open lent ([`Lent`]), whose buffers the session's Routers
-/// share, or the allocator at each chain's first fragment ([`OnUse`]). The session holds a
-/// [`Self::Source`] for its life and makes each Router's staging of it.
+/// share, or the allocator at each chain's first fragment ([`OnUse`]), counted against a table of
+/// the same count, which the Routers share as they share a lent one. The session holds a
+/// [`Self::Source`] and makes each Router's staging of it.
 pub trait ChainStore {
-    /// What the session holds to make a Router's staging: a handle, copied into each.
-    type Source: Copy + 'static;
+    /// What the session holds to make a Router's staging: a handle of the session's table, which
+    /// each staging holds one of.
+    type Source: 'static;
     /// A Router's staging.
     type Chains: ChainStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }> + 'static;
     /// The staging of one Router, over `source`.
@@ -211,21 +216,42 @@ impl ChainStore for Lent {
     }
 }
 
-/// The buffer each chain of a session whose tables take their memory on use takes of the
-/// allocator, as long as the session's bound on a rejoined message, and the most chains one
-/// Router holds open at once: what each Router's staging is sized by.
+/// The chain buffers of a session whose tables take their memory on use: a table of as many
+/// buffers as a lent table would hold, each taken of the allocator as a chain starts, as long as
+/// the session's bound on a rejoined message, which its Routers share, a message kept by its
+/// delivery holding its buffer out of the table as a lent table's cell is held; and the most
+/// chains one Router holds open at once.
 #[cfg(feature = "alloc")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct HeapChains {
-    bytes: usize,
+    cells: HeapByteCells,
     chains: usize,
 }
 
 #[cfg(feature = "alloc")]
 impl HeapChains {
-    /// Each chain a buffer of `bytes`, each Router holding at most `chains` chains open.
-    pub const fn sized(bytes: usize, chains: usize) -> Self {
-        Self { bytes, chains }
+    /// A table of `buffers` buffers of `bytes`, each Router holding at most `chains` chains
+    /// open in it; `None` where the allocator refuses the table's count. No buffer is taken now.
+    pub fn try_sized(bytes: usize, buffers: usize, chains: usize) -> Option<Self> {
+        Some(Self {
+            cells: HeapByteCells::try_new(bytes, buffers)?,
+            chains,
+        })
+    }
+
+    /// The length of each chain's buffer.
+    pub fn bytes(&self) -> usize {
+        self.cells.size()
+    }
+
+    /// How many buffers the session's chains and the messages kept hold at most.
+    pub fn buffers(&self) -> usize {
+        self.cells.capacity()
+    }
+
+    /// The most chains one Router holds open at once.
+    pub const fn chains(&self) -> usize {
+        self.chains
     }
 }
 
@@ -235,7 +261,7 @@ impl ChainStore for OnUse {
     type Chains = OwnSessionChains;
 
     fn chains(source: &HeapChains) -> OwnSessionChains {
-        OwnSessionChains::sized(source.bytes, source.chains)
+        OwnSessionChains::over(&source.cells, source.chains)
     }
 }
 
@@ -1218,9 +1244,15 @@ mod tests {
         use wz_session_core::bounded::OnUse;
         use wz_session_core::reassembly_dispatch::{AbortReason, ChainBytes};
 
+        let chains = HeapChains::try_sized(16, SESSION_CHAIN_BUFFERS, LENT_CHAINS)
+            .expect("the allocator has the table's count");
+        assert_eq!(
+            (chains.bytes(), chains.buffers(), chains.chains()),
+            (16, SESSION_CHAIN_BUFFERS, LENT_CHAINS)
+        );
         let mut router = session_reassembly::<OnePeer, _>(
             &SessionPolicy::defaults(),
-            <OnUse as ChainStore>::chains(&HeapChains::sized(16, LENT_CHAINS)),
+            <OnUse as ChainStore>::chains(&chains),
         );
         assert_eq!(router.staging_available(), LENT_CHAINS);
         assert_eq!(
@@ -1264,6 +1296,90 @@ mod tests {
         assert_eq!(router.staging_available(), 0, "two chains open, its count");
         drop(kept);
         assert_eq!(router.active_chains(), LENT_CHAINS);
+    }
+
+    /// The two forms admit the same chains, whatever memory their buffers lie in: a rejoined
+    /// message kept by its reader holds a buffer of the session's table in both, so over a table
+    /// of `LENT_CHAINS` buffers the chain that starts while it is kept is refused in both, and over
+    /// `SESSION_CHAIN_BUFFERS` it begins in both; let go of, the kept buffer is the table's again
+    /// in both. The CONTROL is the lent form's outcome over each table. Turned red by an on-use
+    /// staging that does not count a kept message against its table (`OwnStaging::keep` giving
+    /// the buffer back, or its `take` reading its own chains' count alone), or a table whose
+    /// buffer a kept message's drop does not give back (`OwnBuf`'s drop).
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn both_forms_count_a_kept_message_against_the_sessions_chains() {
+        use core::ptr::NonNull;
+        use wz_session_core::bounded::{Arena, OnUse};
+        use wz_session_core::reassembly_dispatch::{ChainBytes, RefuseReason};
+
+        #[repr(C, align(16))]
+        struct Memory([u8; 256]);
+
+        /// Chain A best-effort and chain C reliable open, C completes and is kept, and chain B
+        /// reliable starts: B's outcome, and what the staging has free before and after the kept
+        /// message is let go of, B still open where it began.
+        fn run<S>(chains: S) -> (IngestOutcome, usize, usize)
+        where
+            S: ChainStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }>,
+        {
+            let mut router = session_reassembly::<OnePeer, _>(&SessionPolicy::defaults(), chains);
+            let best_effort = Fragment {
+                reliable: false,
+                ..frag(1, 1, b"a")
+            };
+            assert_eq!(
+                router.ingest(best_effort, MASK, 0, |_| {}),
+                IngestOutcome::Begun
+            );
+            assert_eq!(
+                router.ingest(frag(10, 1, b"c-"), MASK, 0, |_| {}),
+                IngestOutcome::Begun
+            );
+            let mut kept = None;
+            let completed = router.ingest_keeping(frag(11, 0, b"end"), MASK, 0, |chain| {
+                if let ChainBytes::Kept(bytes) = chain {
+                    kept = Some(bytes);
+                }
+            });
+            assert_eq!(completed, IngestOutcome::Reassembled);
+            let kept = kept.expect("both stagings keep a completed chain");
+            let started = router.ingest(frag(12, 1, b"b"), MASK, 0, |_| {});
+            let held = router.staging_available();
+            drop(kept);
+            (started, held, router.staging_available())
+        }
+
+        for buffers in [LENT_CHAINS, SESSION_CHAIN_BUFFERS] {
+            let mut memory = Memory([0; 256]);
+            // SAFETY: the memory is aligned as an arena's spans start, 256 bytes long, used by
+            // nothing else, and this frame's, which outlives the table, the Router and every
+            // buffer of the table.
+            let mut arena = unsafe { Arena::over(NonNull::from(&mut memory).cast::<u8>(), 256) };
+            let cells = arena
+                .lend_byte_cells(16, buffers)
+                .expect("the memory holds the table");
+            let lent = run(<Lent as ChainStore>::chains(&LentChainTable::over(
+                cells,
+                LENT_CHAINS,
+            )));
+            let heap = HeapChains::try_sized(16, buffers, LENT_CHAINS)
+                .expect("the allocator has the table's count");
+            let on_use = run(<OnUse as ChainStore>::chains(&heap));
+            assert_eq!(
+                on_use, lent,
+                "over {buffers} buffers the forms admit the same"
+            );
+            let expected = if buffers > LENT_CHAINS {
+                (IngestOutcome::Begun, 0, 0)
+            } else {
+                (IngestOutcome::Refused(RefuseReason::PoolExhausted), 0, 1)
+            };
+            assert_eq!(
+                lent, expected,
+                "CONTROL: the lent form over {buffers} buffers"
+            );
+        }
     }
 
     /// The build's default of a session's `REASSEMBLY_CHAINS` is the count of buffers at which no

@@ -432,13 +432,14 @@ fn an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts() {
 /// A session whose tables take their memory on use hands each of its reassembly Routers the length
 /// of a chain's own buffer, the session's bound on a rejoined message, and the most chains one
 /// holds open at once, its share of the chains up to those a Router stages at once
-/// (`LENT_CHAINS`), and is lent no table for them: the transport's tables are counted from the
-/// plan and asked of no lender. Turned red by a transport lent a table of chains on use, or sized
-/// to another length or count than the plan's (`TransportRows::counted`).
+/// (`LENT_CHAINS`), and counts its chains and the messages kept against a table of as many
+/// buffers as the lent table the plan counts, none taken yet: the transport's tables are counted
+/// from the plan and asked of no lender. Turned red by a transport lent a table of chains on use,
+/// or sized or counted to another length or count than the plan's (`TransportRows::counted`).
 #[test]
 fn an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table() {
     use crate::arena::ArenaPlan;
-    use wz_runtime_coop::reassembly_rx::{HeapChains, LENT_CHAINS};
+    use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 
     let config = crate::CoopConfig {
         endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
@@ -454,10 +455,14 @@ fn an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table() {
         plan.peers().sets()
     };
     let share = chains / faces;
-    let transport = plan.transport().counted();
+    let transport = plan
+        .transport()
+        .counted()
+        .expect("the allocator has the count");
+    let source = &transport.reassembly;
     assert_eq!(
-        transport.reassembly,
-        HeapChains::sized(bytes, share.min(LENT_CHAINS))
+        (source.bytes(), source.buffers(), source.chains()),
+        (bytes, chains, share.min(LENT_CHAINS))
     );
 }
 
@@ -479,7 +484,10 @@ fn an_on_use_sessions_links_take_their_batch_of_the_heap() {
     };
     let plan = ArenaPlan::of(&config, &config.limits).expect("the client's limits lay a plan out");
     let batch = usize::from(config.batch_size);
-    let transport = plan.transport().counted();
+    let transport = plan
+        .transport()
+        .counted()
+        .expect("the allocator has the count");
     assert_eq!(
         transport.links,
         HeapBuffers::sized(batch, LINK_TX_SLOTS),

@@ -287,6 +287,169 @@ impl<F: CellFlag> LentByteCells<F> {
     }
 }
 
+/// The count of a [`HeapByteCells`] table: its buffers lent and the holders of the count, in an
+/// allocation of its own.
+#[cfg(feature = "alloc")]
+struct HeapCells {
+    /// The handles of the table and the buffers it lent: the last of them gives the allocation
+    /// back.
+    holders: Cell<usize>,
+    /// How many buffers are lent.
+    lent: Cell<usize>,
+    /// The length of every buffer.
+    size: usize,
+    /// The most buffers lent at once.
+    count: usize,
+}
+
+/// A table of `count` buffers of `size` bytes whose memory the allocator gives: each buffer taken
+/// when it is claimed and given back when its claim drops, as a [`LentByteCells`] cell is lent and
+/// given back, so a claim is refused where a lent table of the same count refuses it, with every
+/// buffer out, whatever memory the buffers lie in; and where the allocator refuses the buffer. A
+/// table that lends nothing holds no buffer.
+///
+/// A handle: a clone names the same table. The count lies in an allocation of its own, taken when
+/// the table is made, which every handle and every buffer the table lent holds, so a buffer may
+/// outlive the handle it was claimed through and the count stands until the last of them lets go.
+/// Neither `Send` nor `Sync`: as a lent table of cells, one task claims and releases.
+#[cfg(feature = "alloc")]
+pub struct HeapByteCells {
+    at: NonNull<HeapCells>,
+}
+
+#[cfg(feature = "alloc")]
+impl HeapByteCells {
+    /// The bytes the table's count takes of the allocator when the table is made.
+    pub const COUNT_BYTES: usize = core::mem::size_of::<HeapCells>();
+
+    /// A table of `count` buffers of `size` bytes, none lent; `None` where the allocator refuses
+    /// the table's count.
+    pub fn try_new(size: usize, count: usize) -> Option<Self> {
+        let layout = core::alloc::Layout::new::<HeapCells>();
+        // SAFETY: the layout's size is not zero: the count holds two cells and two words.
+        let at = NonNull::new(unsafe { alloc::alloc::alloc(layout) }.cast::<HeapCells>())?;
+        // SAFETY: `at` was allocated for one `HeapCells`, written once here before any handle
+        // reads it.
+        unsafe {
+            at.as_ptr().write(HeapCells {
+                holders: Cell::new(1),
+                lent: Cell::new(0),
+                size,
+                count,
+            });
+        }
+        Some(Self { at })
+    }
+
+    /// The table's count.
+    fn cells(&self) -> &HeapCells {
+        // SAFETY: this handle holds the count, so its allocation stands.
+        unsafe { self.at.as_ref() }
+    }
+
+    /// Lend a buffer of room for the table's length, none of it written; `None` when every buffer
+    /// is out or the allocator refuses the room.
+    pub fn claim(&self) -> Option<OwnBuf> {
+        let cells = self.cells();
+        if cells.lent.get() >= cells.count {
+            return None;
+        }
+        let mut bytes = alloc::vec::Vec::new();
+        bytes.try_reserve_exact(cells.size).ok()?;
+        // Below the count.
+        cells.lent.set(cells.lent.get().saturating_add(1));
+        Some(OwnBuf {
+            bytes,
+            table: self.clone(),
+        })
+    }
+
+    /// The length of every buffer.
+    pub fn size(&self) -> usize {
+        self.cells().size
+    }
+
+    /// How many buffers the table lends at once.
+    pub fn capacity(&self) -> usize {
+        self.cells().count
+    }
+
+    /// How many buffers are lent.
+    pub fn in_use(&self) -> usize {
+        self.cells().lent.get()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Clone for HeapByteCells {
+    fn clone(&self) -> Self {
+        let holders = &self.cells().holders;
+        holders.set(holders.get().saturating_add(1));
+        Self { at: self.at }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Drop for HeapByteCells {
+    fn drop(&mut self) {
+        let holders = &self.cells().holders;
+        let left = holders.get().saturating_sub(1);
+        holders.set(left);
+        if left == 0 {
+            // SAFETY: no holder is left, so nothing reads the count again: it was allocated by
+            // `Self::try_new` for its layout and is given back once, here.
+            unsafe {
+                core::ptr::drop_in_place(self.at.as_ptr());
+                alloc::alloc::dealloc(
+                    self.at.as_ptr().cast::<u8>(),
+                    core::alloc::Layout::new::<HeapCells>(),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl core::fmt::Debug for HeapByteCells {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HeapByteCells")
+            .field("size", &self.size())
+            .field("count", &self.capacity())
+            .field("lent", &self.in_use())
+            .finish()
+    }
+}
+
+/// A buffer a [`HeapByteCells`] table lent, until it is dropped: what was written in it, in room
+/// for the table's length taken when it was claimed, and the count of its table it is out of,
+/// given back when it drops, its memory to the allocator with it. Not `Send`, as its table is not.
+#[cfg(feature = "alloc")]
+pub struct OwnBuf {
+    bytes: alloc::vec::Vec<u8>,
+    table: HeapByteCells,
+}
+
+#[cfg(feature = "alloc")]
+impl OwnBuf {
+    /// What was written in the buffer.
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// What was written in the buffer, to write more in the room it was claimed with.
+    pub(crate) fn written(&mut self) -> &mut alloc::vec::Vec<u8> {
+        &mut self.bytes
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Drop for OwnBuf {
+    fn drop(&mut self) {
+        let lent = &self.table.cells().lent;
+        lent.set(lent.get().saturating_sub(1));
+    }
+}
+
 /// A buffer lent by a [`ByteCells`] table or a [`LentByteCells`] one, until it is dropped. Of a
 /// table of cells it is not `Send`: it belongs to the task that claimed it. Of a table of atomic
 /// flags it may be given back on another thread.
@@ -340,8 +503,9 @@ impl<F: CellFlag> Drop for ByteBuf<F> {
 }
 
 /// Bytes kept past the call that wrote them, where they were written: the first bytes of a buffer
-/// a table lent, whose cell is lent to no other claim until this drops, or a buffer of the
-/// allocator that is the keeper's alone and goes back to the allocator when this drops. What reads
+/// a table lent, whose cell is lent to no other claim until this drops, or a buffer a table of the
+/// allocator's buffers lent, out of its table's count until this drops and given back to the
+/// allocator then. What reads
 /// those bytes where they lie may do so for as long as it holds this. A completed reassembly chain
 /// is handed up as one when its staging can give its buffer away (`ChainStaging::keep`). Not
 /// `Send`, as the claim it may hold is not.
@@ -353,9 +517,9 @@ pub struct KeptBytes {
 enum Held {
     /// The first `len` bytes of a table's cell.
     Cell { buf: ByteBuf, len: usize },
-    /// A buffer of the allocator, as long as what it keeps.
+    /// A buffer of the allocator a table lent, as long as what it keeps.
     #[cfg(feature = "alloc")]
-    Own(alloc::vec::Vec<u8>),
+    Own(OwnBuf),
 }
 
 impl KeptBytes {
@@ -367,9 +531,10 @@ impl KeptBytes {
         }
     }
 
-    /// The bytes of `bytes`, kept where they lie: the buffer moves in, not its bytes.
+    /// The bytes of `bytes`, kept where they lie: the buffer moves in, not its bytes, and stays
+    /// out of its table until this drops.
     #[cfg(feature = "alloc")]
-    pub fn own(bytes: alloc::vec::Vec<u8>) -> Self {
+    pub fn own(bytes: OwnBuf) -> Self {
         Self {
             held: Held::Own(bytes),
         }
@@ -466,17 +631,64 @@ mod tests {
         assert_eq!(whole.as_slice(), &[1, 2, 3, 4], "at most the whole buffer");
     }
 
-    /// Kept bytes of a buffer of the allocator are the buffer's whole length, read where the
-    /// buffer lies: the buffer moved in, its bytes did not. Turned red by a keep that copies them.
+    /// Kept bytes of a buffer of the allocator are what was written in it, read where the buffer
+    /// lies, and the buffer stays out of its table until they drop. Turned red by a keep that
+    /// copies them, or one that gives the buffer back to its table while they are held.
     #[cfg(feature = "alloc")]
     #[test]
     fn kept_bytes_of_an_own_buffer_are_read_where_it_lies() {
-        let mut bytes = alloc::vec::Vec::with_capacity(8);
-        bytes.extend_from_slice(&[5, 6, 7]);
-        let base = bytes.as_ptr();
-        let kept = KeptBytes::own(bytes);
+        let table = HeapByteCells::try_new(8, 1).expect("the allocator has the count");
+        let mut buf = table.claim().expect("the table's one buffer");
+        buf.written().extend_from_slice(&[5, 6, 7]);
+        let base = buf.as_slice().as_ptr();
+        let kept = KeptBytes::own(buf);
         assert_eq!(kept.as_slice(), &[5, 6, 7]);
         assert_eq!(kept.as_slice().as_ptr(), base, "read where the buffer lies");
+        assert_eq!(table.in_use(), 1, "kept, the buffer is out of its table");
+        drop(kept);
+        assert_eq!(table.in_use(), 0, "let go of, it is the table's again");
+    }
+
+    /// A table of the allocator's buffers lends as a lent table does: a buffer of room for its
+    /// length to each claim, none past its count while its buffers are out, a buffer given back by
+    /// its claim's drop, through any clone of the handle; and a buffer outlives the handle it was
+    /// claimed through. The CONTROL is the lent table of the same count, which refuses the same
+    /// claim. Turned red by a claim past the count (`HeapByteCells::claim`), a buffer whose drop
+    /// gives nothing back (`OwnBuf`'s drop), or a count let go of while a buffer holds it.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_heap_table_lends_as_many_buffers_as_a_lent_table_of_its_count() {
+        let flags = [Cell::new(false), Cell::new(false)];
+        let mut bytes = [0u8; 8];
+        // SAFETY: two flags, each false, and two cells of four bytes, all in this frame, which
+        // outlives the table and every claim of it.
+        let lent = unsafe {
+            LentByteCells::over(
+                NonNull::from(&flags).cast::<Cell<bool>>(),
+                NonNull::from(&mut bytes).cast::<u8>(),
+                4,
+                2,
+            )
+        };
+        let table = HeapByteCells::try_new(4, 2).expect("the allocator has the count");
+        assert_eq!((table.size(), table.capacity(), table.in_use()), (4, 2, 0));
+        let (_lent_a, _lent_b) = (lent.claim().expect("first"), lent.claim().expect("second"));
+        assert!(
+            lent.claim().is_none(),
+            "CONTROL: the lent table refuses a third"
+        );
+        let a = table.claim().expect("first");
+        assert!(a.as_slice().is_empty(), "nothing written yet");
+        let copy = table.clone();
+        let b = copy.claim().expect("second, through a clone of the handle");
+        assert_eq!(table.in_use(), 2, "the clone names the same table");
+        assert!(table.claim().is_none(), "a third claim is refused");
+        drop(a);
+        assert_eq!(table.in_use(), 1, "a dropped claim is the table's again");
+        drop(copy);
+        drop(table);
+        assert!(b.as_slice().is_empty(), "the buffer outlives every handle");
+        drop(b);
     }
 
     /// A claim kept past its own life is taken back by the address it starts at, once, and an

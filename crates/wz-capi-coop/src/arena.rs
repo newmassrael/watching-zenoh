@@ -71,9 +71,11 @@
 //!   rejoins (`PICO_FRAG_MAX_BYTES`, under the build's, which a chain past it is ended at, as pico
 //!   ends one), with the flags that say which are lent (`TransportRows::lent_from`), lent
 //!   with the links' tables. Where the tables take their memory on use none is laid out: each
-//!   chain takes a buffer of its own of that length at its first fragment, a face's chains open
-//!   at once held to the same share, and a buffer the allocator refuses is refused and counted as
-//!   one the table had none free for (`OwnStaging` of `wz_session_core::chain_staging`);
+//!   chain takes a buffer of its own of that length at its first fragment, counted against a
+//!   table of the same count, which a kept message holds its buffer out of as it holds a lent
+//!   cell, a face's chains open at once held to the same share, and a buffer the allocator
+//!   refuses is refused and counted as one the table had none free for (`OwnStaging` of
+//!   `wz_session_core::chain_staging`);
 //! - with `listen` or `group`, the places of the droppable publishes the session keeps for the
 //!   faces they were not dropped on while a send holds it (`HANDED_LEG_BYTES`, under the build's),
 //!   each a link's batch long, with their flags and a row beside each for the rest of the
@@ -159,6 +161,8 @@ use wz_session_core::bounded::Lent;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 use wz_session_core::bounded::ZeroEmpty;
 use wz_session_core::bounded::{Arena, LendRefused, TableLender, ARENA_ALIGN};
+#[cfg(wz_on_use)]
+use wz_session_core::byte_cells::HeapByteCells;
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 #[cfg(wz_lent)]
@@ -1519,23 +1523,33 @@ impl TransportRows {
     /// The transport's tables where they take their memory on use: each sized or counted to the
     /// rows the plan counts and laid out in none, so no lender is asked. Each link takes its
     /// buffers as it opens, each group its buffer as it is joined, the ports their rows and
-    /// buffers as they use them, each chain a buffer of its own at its first fragment, each
-    /// role's texts their rows as the first is written, and the kept publishes their rows at the
-    /// first kept, each place a link's batch as it is first needed.
+    /// buffers as they use them, each chain a buffer of its own at its first fragment, counted
+    /// against a table of the lent table's count, each role's texts their rows as the first is
+    /// written, and the kept publishes their rows at the first kept, each place a link's batch as
+    /// it is first needed. Refused where the allocator has no room for the chains' count, the one
+    /// thing taken now.
     #[cfg(wz_on_use)]
-    pub(crate) fn counted(&self) -> TransportTables {
+    pub(crate) fn counted(&self) -> Result<TransportTables, ArenaRefused> {
         let (dials, listens) = self.endpoint_rows;
-        TransportTables {
+        let reassembly = HeapChains::try_sized(
+            self.reassembly_bytes,
+            self.reassembly_chains,
+            self.face_chains,
+        )
+        .ok_or(ArenaRefused::NoMemory {
+            bytes: HeapByteCells::COUNT_BYTES,
+        })?;
+        Ok(TransportTables {
             links: HeapBuffers::sized(self.link_bytes, LINK_TX_SLOTS),
             #[cfg(feature = "group")]
             groups: self.groups_sized(),
             #[cfg(feature = "udp-listen")]
             ports: self.ports_sized(),
-            reassembly: HeapChains::sized(self.reassembly_bytes, self.face_chains),
+            reassembly,
             endpoints: EndpointTexts::counted(dials, listens),
             #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             handed: HandedTable::counted(self.link_bytes, self.handed_legs),
-        }
+        })
     }
 
     /// The cells of the links' drivers, their gates, their actions and their halves, lent by

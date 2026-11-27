@@ -2772,18 +2772,21 @@ mod tests {
         staging.release(chain);
     }
 
-    /// A staging whose chains take their own buffers takes one when a chain starts and gives it
-    /// back when the chain ends: none is held while no chain is open, no more chains than its
-    /// count are open at once, each refusal is counted and a served chain counts nothing, and its
-    /// count and its buffers' length are held to the Router's `SLOTS` and `CAP`. Turned red by
-    /// an `acquire` past the count, one that refuses without counting, or a `release` that
-    /// does not free the chain's place.
+    /// A staging whose chains take their own buffers takes one of its table when a chain starts
+    /// and gives it back when the chain ends: none is held while no chain is open, no more chains
+    /// than its count are open at once, each refusal is counted and a served chain counts nothing,
+    /// and its count and its buffers' length are held to the Router's `SLOTS` and `CAP`. Turned
+    /// red by an `acquire` past the count, one that refuses without counting, or a `release`
+    /// that does not free the chain's place or its table's buffer.
     #[cfg(feature = "alloc")]
     #[test]
     fn an_own_staging_takes_a_buffer_when_a_chain_starts_and_none_past_its_count() {
+        use crate::byte_cells::HeapByteCells;
         use crate::chain_staging::{ChainStaging, OwnStaging};
 
-        let mut staging = OwnStaging::<4, 64>::sized(8, 2);
+        let table = |bytes, count| HeapByteCells::try_new(bytes, count).expect("the count");
+        let cells = table(8, 2);
+        let mut staging = OwnStaging::<4, 64>::over(&cells, 2);
         assert_eq!((staging.available(), staging.capacity()), (2, 8));
         let first = staging.acquire().expect("a buffer");
         assert_eq!(staging.available(), 1, "the first chain holds one");
@@ -2805,15 +2808,15 @@ mod tests {
         );
         staging.release(again);
         staging.release(second);
-        assert_eq!(staging.available(), 2);
+        assert_eq!((staging.available(), cells.in_use()), (2, 0));
 
-        let held = OwnStaging::<4, 64>::sized(100, 9);
+        let held = OwnStaging::<4, 64>::over(&table(100, 9), 9);
         assert_eq!(
             (held.available(), held.capacity()),
             (4, 64),
             "the Router's slots and ceiling bound the staging"
         );
-        let mut none = OwnStaging::<4, 64>::sized(8, 0);
+        let mut none = OwnStaging::<4, 64>::over(&table(8, 2), 0);
         assert!(
             none.acquire().is_none(),
             "a staging of no chain refuses each"
@@ -2826,9 +2829,11 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn an_own_chain_stages_what_its_filler_wrote() {
+        use crate::byte_cells::HeapByteCells;
         use crate::chain_staging::{ChainStaging, OwnStaging, StagingError};
 
-        let mut staging = OwnStaging::<1, 64>::sized(8, 1);
+        let cells = HeapByteCells::try_new(8, 1).expect("the count");
+        let mut staging = OwnStaging::<1, 64>::over(&cells, 1);
         let mut chain = staging.acquire().expect("a buffer");
         staging.append(&mut chain, b"ab").expect("room");
         staging
@@ -2861,12 +2866,14 @@ mod tests {
     #[cfg(feature = "alloc")]
     #[test]
     fn a_chain_past_the_own_bound_is_refused() {
+        use crate::byte_cells::HeapByteCells;
         use crate::chain_staging::OwnStaging;
 
+        let cells = HeapByteCells::try_new(8, 2).expect("the count");
         let mut d: ReassemblyDispatcher<4, 64, OwnStaging<4, 64>> =
             ReassemblyDispatcher::with_staging(
                 ReassemblyConfig::new(2, 5_000),
-                OwnStaging::sized(8, 2),
+                OwnStaging::over(&cells, 2),
             );
         let mut out = None;
         d.ingest(frag(PEER_A, true, 1, 1, b"aaaa"), MASK, 0, |_| {});
@@ -2885,15 +2892,20 @@ mod tests {
     }
 
     /// A chain of its own buffer ingested to be kept is handed up as that buffer, read where it
-    /// was staged: the Router's slot and the staging's place are free at once, so a chain that
-    /// starts while it is kept begins, and the staging owes the kept buffer nothing. Turned red by
-    /// a keep that copies the chain, or one that keeps the place held while the buffer is kept.
+    /// was staged: the Router's slot and the staging's place are free at once, and the buffer is
+    /// out of its table until the kept bytes drop, so a chain that starts while it is kept begins
+    /// over a table of a buffer more than the chains, and is refused over a table of as many, as
+    /// a lent table refuses it. Turned red by a keep that copies the chain, one that keeps the
+    /// place held while the buffer is kept, or one that gives the buffer back to its table before
+    /// the kept bytes drop.
     #[cfg(feature = "alloc")]
     #[test]
     fn a_kept_own_chain_is_handed_up_where_it_was_staged() {
+        use crate::byte_cells::HeapByteCells;
         use crate::chain_staging::{ChainStaging, OwnStaging};
 
-        let mut staging = OwnStaging::<2, 64>::sized(8, 1);
+        let table = |count| HeapByteCells::try_new(8, count).expect("the count");
+        let mut staging = OwnStaging::<2, 64>::over(&table(2), 1);
         let mut chain = staging.acquire().expect("a buffer");
         staging.append(&mut chain, b"abc").expect("room");
         let staged = staging.bytes(&chain).as_ptr();
@@ -2904,11 +2916,13 @@ mod tests {
         assert_eq!(kept.as_slice().as_ptr(), staged, "read where it was staged");
         assert_eq!(staging.available(), 1, "the place is free while it is kept");
 
-        let mut d: ReassemblyDispatcher<4, 64, OwnStaging<4, 64>> =
+        let router = |count| -> ReassemblyDispatcher<4, 64, OwnStaging<4, 64>> {
             ReassemblyDispatcher::with_staging(
                 ReassemblyConfig::new(2, 5_000),
-                OwnStaging::sized(8, 1),
-            );
+                OwnStaging::over(&table(count), 1),
+            )
+        };
+        let mut d = router(2);
         d.ingest_keeping(frag(PEER_A, true, 1, 1, b"aaaa"), MASK, 0, |_| {});
         let mut kept = None;
         let r = d.ingest_keeping(frag(PEER_A, true, 2, 0, b"bbbb"), MASK, 0, |chain| {
@@ -2931,6 +2945,28 @@ mod tests {
             d.staging_available(),
             0,
             "the open chain holds the one place"
+        );
+
+        let mut short = router(1);
+        short.ingest_keeping(frag(PEER_A, true, 1, 1, b"aaaa"), MASK, 0, |_| {});
+        let mut kept = None;
+        short.ingest_keeping(frag(PEER_A, true, 2, 0, b"bbbb"), MASK, 0, |chain| {
+            if let ChainBytes::Kept(bytes) = chain {
+                kept = Some(bytes);
+            }
+        });
+        assert!(kept.is_some(), "CONTROL: the chain completed and is kept");
+        assert_eq!(
+            short.ingest_keeping(frag(PEER_A, true, 3, 1, b"cccc"), MASK, 0, |_| {}),
+            IngestOutcome::Refused(RefuseReason::PoolExhausted),
+            "the table's one buffer is the kept message's"
+        );
+        assert_eq!(short.staging_available(), 0, "no buffer is free");
+        drop(kept);
+        assert_eq!(
+            short.staging_available(),
+            1,
+            "let go of, the buffer is the table's again"
         );
     }
 

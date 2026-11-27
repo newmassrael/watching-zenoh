@@ -1065,7 +1065,7 @@ fn lend_session(
     #[cfg(not(wz_on_use))]
     let transport = plan.transport().lent_from(&mut lend);
     #[cfg(wz_on_use)]
-    let transport = plan.transport().counted();
+    let transport = plan.transport().counted()?;
     // The key arena is the arena's where the open lends the registry from it, and the region's
     // otherwise, beside the registry whose tables keep their keys there.
     #[cfg(wz_lent)]

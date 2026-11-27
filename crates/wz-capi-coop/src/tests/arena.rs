@@ -1752,7 +1752,11 @@ fn an_on_use_session_counts_the_publishes_it_keeps_and_lays_out_none() {
         HeldPublishDrop::HeldFaces => caps::HANDED_LEG_BYTES / batch,
         HeldPublishDrop::EveryFace => 0,
     };
-    let mut handed = plan.transport().counted().handed;
+    let mut handed = plan
+        .transport()
+        .counted()
+        .expect("the allocator has the count")
+        .handed;
     // A publish whose key and payload fill a batch fits a place; one a byte longer does not.
     let whole = vec![0u8; batch - 1];
     let longer = vec![0u8; batch];
