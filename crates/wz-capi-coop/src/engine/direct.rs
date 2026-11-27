@@ -1412,8 +1412,10 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     holds_face: AtomicBool,
     /// Whether the face has nothing a look would move: no pump, no dial and no opened link, a
     /// life idle or closed with no wake, and no chain in its Router, so a read passes it over
-    /// while it turns another (`CoopEngine::read_faces`). Written under the session's lock: set
-    /// by the face's own look and by the open of a dial role that dials nothing, and ended where
+    /// while it turns another (`CoopEngine::read_faces`) and a publish's walk tries no leg on it.
+    /// A row past the dial role's rests from its making, as a group's row does for its life: its
+    /// group's read steps it, and no look of a face reaches it. Written under the session's lock:
+    /// set by the face's own look and by the open of a dial role that dials nothing, and ended where
     /// the slot is given a link and where the row is given a face (`DirectFaces::hold_face`),
     /// whose attached dial only the face's look asks. Outside the slot, as an attach holds the
     /// session's lock and not the face's slot.
@@ -1478,7 +1480,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
             #[cfg(any(feature = "listen", feature = "group"))]
             {
                 addr_of_mut!((*at).due_us).write(AtomicU64::new(u64::MAX));
-                addr_of_mut!((*at).rests).write(AtomicBool::new(false));
+                addr_of_mut!((*at).rests).write(AtomicBool::new(row != 0));
             }
             #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
             {
@@ -3687,6 +3689,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn direct_faces(&self) -> (usize, usize) {
         (self.direct.iter().count(), self.direct.turned().count())
+    }
+
+    /// Whether each row of the session's face table rests (`DirectFace::rests`), the dial role's
+    /// first.
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "group",
+        feature = "app-transport",
+        feature = "threads"
+    ))]
+    pub(crate) fn rows_at_rest(&self) -> Vec<bool> {
+        self.direct
+            .iter()
+            .map(|face| face.rests.load(Ordering::Acquire))
+            .collect()
     }
 
     /// The rows of the read slots' table whose slot holds a group's session, and the places of the
