@@ -172,3 +172,9 @@ The lane states the tables' policy once, in the build script (`wz_lent`,
   on-use tests read the count of face places as `places()`, which peer-prop
   renamed `face_places()` (`9a08b72f2a`), `places` being the registry's
   description; the tests read the new name.
+- `crates/wz-capi-coop/src/tests.rs`: main's router stand-in answers a
+  token Interest itself (`answer_token_interests`, `25e6f6358b`) through
+  `LocalTokenRegistry::answer_iteration_event`, which l3-queryable moved to
+  the peer's staging (`TokenAnswers`, `b88db8bad5`). It now stages into a
+  `TokenAnswers` of its own from the stand-in's registry, reads the refusals
+  off it and drains it with `next_answer`, as the observer drains a peer's.

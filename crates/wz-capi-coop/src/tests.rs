@@ -534,9 +534,10 @@ enum StandInEnd {
 /// Answer each CURRENT Interest in tokens that `event` carries with the tokens `observer` holds:
 /// one `DeclToken` for each that matches, then the `DeclareFinal`, staged and drained as the
 /// session core does where it answers a peer's Interest (`interest-answer`), through the same
-/// `LocalTokenRegistry::answer_iteration_event`. The router stand-in's session is built with the
-/// session core of the engine under test, and a build without `interest-answer` (the zenoh-pico
-/// preset's peer) answers none; a router answers every one, so the stand-in answers here.
+/// staging (`TokenAnswers::answer_iteration_event`), answered from the stand-in's tokens. The
+/// router stand-in's session is built with the session core of the engine under test, and a build
+/// without `interest-answer` (the zenoh-pico preset's peer) answers none; a router answers every
+/// one, so the stand-in answers here.
 #[cfg(all(feature = "liveliness", not(feature = "interest-answer")))]
 fn answer_token_interests<S>(
     observer: &ApplicationLayerObserver,
@@ -545,20 +546,16 @@ fn answer_token_interests<S>(
 ) where
     S: wz_session_core::response_sink::DeclareReplySink + ?Sized,
 {
-    use wz_session_core::declare::local_token::DeclResponseItem;
+    use wz_session_core::declare::local_token::{DeclResponseItem, TokenAnswers};
     observer.read_parts(|app, face| {
-        let mut owed: wz_session_core::bounded::BoundedVec<
-            DeclResponseItem,
-            { wz_session_core::caps::MAX_PENDING_DECLARES },
-        > = Default::default();
-        let refused = app.local_tokens.answer_iteration_event(
-            app.local_tokens,
-            event,
-            face.subscribers.mapping_spaces(),
-            &mut owed,
+        let mut answers: TokenAnswers = TokenAnswers::default();
+        answers.answer_iteration_event(app.local_tokens, event, face.subscribers.mapping_spaces());
+        assert_eq!(
+            answers.refusals(),
+            0,
+            "the stand-in stages every answer it owes"
         );
-        assert_eq!(refused, 0, "the stand-in stages every answer it owes");
-        for item in owed {
+        while let Some(item) = answers.next_answer() {
             match item {
                 DeclResponseItem::Token {
                     token_id,
