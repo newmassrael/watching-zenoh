@@ -257,6 +257,23 @@ readings move is when a dial under way is next asked, which only a timing shows;
 `tests::dial_in_flight` and `tests::direct_receive` is the check, and a test whose count moved
 is named here once the run is read.
 
-### 6.6 Not built in this pass
+### 6.6 Not built in this pass: what 6b-6 needs, read in the code
 
-6b-6 (the life in the transport value) is left as section 4 states it.
+6b-6 (the life in the transport value) is left. Its premise holds, but it is a re-layout, not a
+change of `DirectSlot::next_input` alone:
+
+- The transport value is per link: the pump builds a `UnicastTransport<R, MadeLink>` with each
+  link's session (`wz-runtime-coop/src/session_drive.rs`, `init_made_in` in the pump's making)
+  and drops it with the pump. The life is per face, kept across dials and links in the face's
+  record (`FaceRecord::life`) and read there by L0 at about 34 sites (`faces.rs` 15, `direct.rs` 8,
+  `engine.rs` 5, `faces_added.rs` 4, `transport/state.rs` 2).
+- So the transport that holds the life must outlive its links: built with the face, its receive
+  over the face's Router (already the face's, `DirectSlot::router`, lent at each step), its
+  timers armed for each link's session machine (`TransportTimers`). The value splits into a
+  part a face holds (the life, the receive) and a part a link holds (the timers), and the pump
+  borrows the face's part for each step as it borrows the Router now (`RouterLend`).
+- The 34 reads of the life then go through the face's transport; the round, which keeps no
+  pump place of its own, holds the same face part in its record.
+
+The step is its own design pass with a receive count read before it lands (`next_input` runs at
+every look), and is not started on this branch.
