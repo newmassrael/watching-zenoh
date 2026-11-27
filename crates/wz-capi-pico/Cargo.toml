@@ -943,12 +943,6 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # serialization format, named where they live for the reason above. Nothing named: both modules
 # are ungated, and a feature named here would become every dependent's (R311y614).
 wz-codecs = { path = "../wz-codecs", default-features = false }
-# The record the generated table of pico's links returns (`src/link_properties.rs`,
-# `sources/algorithms/pico_link_properties.scxml`) implements `::sce_portable_bytes::MapKey`, so a
-# record of it could key a map (SCE ADR 0108), and names the crate by its path, so it is declared
-# direct. Already in every build's graph through the session core, which depends on it
-# unconditionally; no feature named, as the core names the ones it needs.
-sce-portable-bytes = { path = "../../vendor/sce/backends/rust/portable-bytes", default-features = false }
 # The advanced plane's rules (the `@adv` grammar, the cache, the publisher's composite, the
 # subscriber's machine and its host over the port) and the node's time its publisher stamps from,
 # which no engine owns: named where they live, so the plane runs on either engine
