@@ -210,17 +210,28 @@ def _in_generic_list(text: str, brace: int) -> bool:
                 angle += 1
             # A qualified path opens a list straight after the first (`Row<<P as T>::K>`) or as a
             # later argument (`Row<K, <P as T>::L>`): its `<` follows a `<` or a space and comes
-            # before a name, where a shift or a comparison stands between spaces.
+            # before a name, where a shift or a comparison stands between spaces. A qualified path
+            # whose type is itself one (`<<F as T>::A as U>::B`) opens with a run of `<` that a
+            # name ends, where a shift's `<<` is followed by a space.
             elif ch == "<" and (
                 prev.isalnum()
                 or prev in "_:"
-                or ((prev == "<" or prev.isspace()) and text[i + 1 : i + 2].isalnum())
+                or ((prev == "<" or prev.isspace()) and _opens_a_name(text, i + 1))
             ):
                 if angle == 0:
                     return True
                 angle -= 1
         i -= 1
     return False
+
+
+def _opens_a_name(text: str, at: int) -> bool:
+    """Whether a name starts at `at` after a run of `<`: the run a nested qualified path opens
+    with (`<<F as T>::A as U>::B`), told from a shift (`n << 2`), whose run a space follows."""
+    while text[at : at + 1] == "<":
+        at += 1
+    nxt = text[at : at + 1]
+    return nxt.isalnum() or nxt == "_"
 
 
 def is_storage(text: str, pos: int) -> bool:
@@ -431,6 +442,9 @@ def selftest() -> int:
                "    a: [u8; caps::MOVED],\n    b: [u8; { caps::DONE }],\n}\n"
                "pub type Keyed<P> =\n    Map<Row<<P as Store>::Key>, { caps::MOVED }, P>;\n"
                "pub type Lens<P> =\n    Map<Row<<P as Store>::Key, <P as Store>::Len>, { caps::MOVED }, P>;\n"
+               "pub type Pinned<F> =\n    BoundedVec<\n        <<F as Rows>::Sub as Row>::Call,\n"
+               "        { caps::MOVED },\n        Static,\n    >;\n"
+               "pub fn shifted(n: usize) -> usize {\n    f(n << 2, { caps::MOVED })\n}\n"
                "pub fn turbo() -> usize {\n    Foo::<{ crate::caps::MOVED }>::new().len()\n}\n"
                "pub fn fill() -> [u8; 4] {\n    [0; caps::MOVED]\n}\n"
                "pub fn machine(n: usize) -> bool {\n    n < caps::MOVED\n}\n"
@@ -455,6 +469,7 @@ def selftest() -> int:
         want = {
             ("crates/a/src/lib.rs", "machine", "MOVED"),
             ("crates/a/src/lib.rs", "call", "MOVED"),
+            ("crates/a/src/lib.rs", "shifted", "MOVED"),
             ("crates/a/src/lib.rs", "indexed", "MOVED"),
             ("crates/a/src/lib.rs", "compared", "MOVED"),
             ("crates/a/src/lib.rs", "creator", "MOVED"),
@@ -471,6 +486,7 @@ def selftest() -> int:
             ("crates/a/src/lib.rs", "creator", "a creator"),
             ("crates/a/src/lib.rs", "<module>", "an import"),
             ("crates/a/src/lib.rs", "call", "a call"),
+            ("crates/a/src/lib.rs", "shifted", "a shift"),
             ("crates/a/src/lib.rs", "indexed", "an index"),
             ("crates/a/src/lib.rs", "compared", "a block"),
         )
