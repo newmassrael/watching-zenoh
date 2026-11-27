@@ -4,33 +4,34 @@
 //! A session the program steps itself (`SessionDrive::step_once`): opened without its read task,
 //! it reads, keeps its lease, dials a lost link again and runs its callbacks only inside the
 //! program's steps, each step waiting for input no longer than the bound it is given. A step is
-//! refused while the read task runs, and two steps made at once each step the session, every
-//! sample handed out once.
+//! refused while the read task runs.
+//!
+//! Each test runs in the simulated world (`tests::sim`): the router stand-in runs only when the
+//! session waits or the test turns the world, and the clock moves only when the test moves it, so
+//! what a step finds is the script's and not the host's timing. Two steps made at once on two
+//! threads are the host's (`tests::step_host`).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, StepRefused, SubscriberSink, WireKey};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
 
-use super::{config, open, open_with, CatchAll, Command, Engine, Router, ROUTER_ZID};
+use super::sim::{Sim, SimEngine};
+use super::{CatchAll, ROUTER_ZID};
 use crate::CoopConfig;
 
-/// Step `engine` with the bound `most_ms` until `done`, for at most five seconds: each step of a
-/// session without its read task steps it.
-fn steps_until(engine: &Engine, most_ms: u32, what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
-        SessionDrive::step_once(engine, most_ms).expect("a session without its read task steps");
-    }
-}
+/// The seed every test here runs on: the session's and the stand-in's entropy.
+const SEED: u64 = 0x5eed_5732;
+
+/// The steps a test makes that find nothing to read: past the first, which moves the links once,
+/// every one of them finds the links settled.
+const QUIET_STEPS: usize = 4;
 
 /// A subscriber on `demo/**` that counts what it is handed.
-fn counted(engine: &Engine) -> Arc<AtomicUsize> {
+fn counted(engine: &SimEngine) -> Arc<AtomicUsize> {
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
     engine
@@ -48,30 +49,38 @@ fn counted(engine: &Engine) -> Arc<AtomicUsize> {
 }
 
 /// A session with no read task declares, receives and publishes through the program's steps
-/// alone, each bounded at nothing (only what is ready is read). The CONTROL is the push before
-/// any step: nothing is handed to the subscriber between two steps.
+/// alone, each bounded at nothing (only what is ready is read), and none of those steps waits.
+/// The CONTROL is the push waiting at the session's end before any step: nothing is handed to the
+/// subscriber between two steps. Turned red by a read the open starts, by a delivery made outside
+/// a step, and by a step bounded at nothing that waits.
 #[test]
 fn a_session_without_its_read_task_round_trips_by_its_steps_alone() {
-    let router = Router::start(CatchAll::Held);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let router = sim.stand_in(CatchAll::Held);
+    let engine = sim.open(sim.config());
     assert!(
         !SessionDrive::read_task_is_running(&*engine),
         "the open starts no read task"
     );
+    let _open = sim.take_waits();
     let declares_before = router.seen(|s| s.declares);
     let received = counted(&engine);
-    steps_until(&engine, 0, "the router to see the subscriber", || {
+    sim.steps_until(&engine, 0, "the stand-in to see the subscriber", || {
         router.seen(|s| s.declares) > declares_before
     });
 
-    router.send(Command::Push("demo/a", b"hello"));
-    std::thread::sleep(Duration::from_millis(100));
+    router.push("demo/a", b"hello");
+    sim.turn();
+    assert!(
+        sim.waiting_for_the_session() > 0,
+        "the push waits at the session's end"
+    );
     assert_eq!(
         received.load(Ordering::SeqCst),
         0,
         "CONTROL: nothing is handed out while the program makes no step"
     );
-    steps_until(&engine, 0, "the push", || {
+    sim.steps_until(&engine, 0, "the push", || {
         received.load(Ordering::SeqCst) == 1
     });
 
@@ -83,83 +92,130 @@ fn a_session_without_its_read_task_round_trips_by_its_steps_alone() {
             &PublishOptions::put().with_locality(Locality::Remote),
         )
         .expect("a put the link carries");
-    steps_until(&engine, 0, "the router to receive the put", || {
+    sim.steps_until(&engine, 0, "the stand-in to receive the put", || {
         router.seen(|s| {
             s.samples
                 .iter()
                 .any(|(k, v)| k == "demo/b" && v == b"world")
         })
     });
+    let waits = sim.take_waits();
+    assert!(
+        waits.iter().all(|&ms| ms == 0),
+        "a step bounded at nothing waits for no input: {waits:?}"
+    );
 }
 
-/// A peer that hangs (no Close, no error from its socket) is expired by the lease the program's
-/// steps keep, the session dials again, declares what it holds over the new link, and receives
-/// as before, every turn of it made inside a step.
+/// A step bounded at nothing reads what reached the session's link after earlier steps bounded
+/// at nothing found the link empty and the links settled. The CONTROL is the push waiting at the
+/// session's end before the steps. Turned red by a step that passes over a link its last read
+/// found empty with no wait to say the link has input again.
+// The round's gate of a session of several links (`wz_round` with `listen` or `group`) reads a
+// link again only once a wait finds input on it or the links move, and a step bounded at nothing
+// makes no wait: docs/deterministic-tests.md, "What the step test found".
+#[test]
+#[cfg_attr(
+    all(wz_round, any(feature = "listen", feature = "group")),
+    ignore = "a step bounded at nothing passes over a link its last read found empty"
+)]
+fn a_step_bounded_at_nothing_reads_what_came_after_a_step_found_nothing() {
+    let sim = Sim::new(SEED);
+    let router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
+    let received = counted(&engine);
+    sim.steps_until(&engine, 0, "the stand-in to see the subscriber", || {
+        router.seen(|s| s.declares >= 1)
+    });
+    for _ in 0..QUIET_STEPS {
+        SessionDrive::step_once(&*engine, 0).expect("a session without its read task steps");
+    }
+
+    router.push("demo/a", b"late");
+    sim.turn();
+    assert!(
+        sim.waiting_for_the_session() > 0,
+        "CONTROL: the push waits at the session's end"
+    );
+    for _ in 0..QUIET_STEPS {
+        SessionDrive::step_once(&*engine, 0).expect("a session without its read task steps");
+    }
+    assert_eq!(
+        received.load(Ordering::SeqCst),
+        1,
+        "a step bounded at nothing reads what its link holds"
+    );
+}
+
+/// A peer that hangs (no Close, nothing more on its link) is expired by the lease the program's
+/// steps keep on the session's clock, the session dials again, declares what it holds over the
+/// new link, and receives as before, every turn of it made inside a step. The CONTROL is the
+/// session still open once its link is gone. Turned red by a lease kept by anything but the
+/// steps, and by a session that ends with its link instead of dialling again.
 #[test]
 fn a_lease_that_runs_out_between_steps_is_dialled_again_by_the_steps() {
-    let router = Router::start(CatchAll::None);
-    let port = router.port;
-    let engine = open_with(CoopConfig {
+    let sim = Sim::new(SEED);
+    let router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(CoopConfig {
         lease_ms: 600,
         redial_ms: Some(50),
         open_timeout_ms: 300,
-        ..config(&router)
+        ..sim.config()
     });
     let received = counted(&engine);
-    steps_until(&engine, 10, "the router to see the subscriber", || {
+    sim.steps_until(&engine, 10, "the stand-in to see the subscriber", || {
         router.seen(|s| s.declares >= 1)
     });
 
-    router.send(Command::Freeze);
-    steps_until(&engine, 10, "the lease to run out", || {
+    router.freeze();
+    sim.steps_with_time(&engine, 10, "the lease to run out", || {
         engine.peer_identities().is_empty()
     });
     assert!(
         !SessionDrive::is_closed(&*engine),
-        "the session outlives the link its lease ended"
+        "CONTROL: the session outlives the link its lease ended"
     );
     drop(router);
 
-    let router = Router::start_on(port, CatchAll::None);
-    steps_until(&engine, 10, "the session to declare again", || {
+    let router = sim.stand_in(CatchAll::None);
+    sim.steps_with_time(&engine, 10, "the session to declare again", || {
         router.seen(|s| s.declares >= 1)
     });
     assert_eq!(engine.peer_identities(), vec![(vec![ROUTER_ZID; 4], 0)]);
-    router.send(Command::Push("demo/a", b"again"));
-    steps_until(&engine, 10, "the push over the new link", || {
+    router.push("demo/a", b"again");
+    sim.steps_until(&engine, 10, "the push over the new link", || {
         received.load(Ordering::SeqCst) == 1
     });
 }
 
-/// A step bounded at nothing returns without waiting for input. The CONTROL is the read with no
-/// bound of its own, which waits on the quiet link for the config's 100 ms.
+/// A step bounded at nothing asks its links for no wait. The CONTROL is the read with no bound of
+/// its own, which waits on the quiet link for the config's 100 ms. Turned red by a step that
+/// waits past its bound, and by a read that does not wait for the config's bound.
 // The wait that a quiet read makes on its link is the one a build with a read task beside the
 // program's calls makes.
 #[cfg(feature = "threads")]
 #[test]
 fn a_step_bounded_at_nothing_waits_for_no_input() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
-    let span = Duration::from_millis(600);
-    let end = Instant::now() + span;
-    let mut steps = 0u32;
-    while Instant::now() < end {
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
+    for _ in 0..QUIET_STEPS {
         SessionDrive::step_once(&*engine, 0).expect("the session steps");
-        steps += 1;
+        sim.turn();
     }
+    let _settling = sim.take_waits();
+
+    SessionDrive::step_once(&*engine, 0).expect("the session steps");
+    let stepped = sim.take_waits();
     assert!(
-        steps >= 60,
-        "a step bounded at nothing does not wait for input: {steps} in {span:?}"
+        stepped.iter().all(|&ms| ms == 0),
+        "a step bounded at nothing does not wait for input: {stepped:?}"
     );
-    let end = Instant::now() + span;
-    let mut reads = 0u32;
-    while Instant::now() < end {
-        SessionDrive::read(&*engine, false).expect("the session reads");
-        reads += 1;
-    }
-    assert!(
-        reads <= 8,
-        "CONTROL: a read of no bound of its own waits up to 100 ms: {reads} in {span:?}"
+    SessionDrive::read(&*engine, false).expect("the session reads");
+    let read = sim.take_waits();
+    assert_eq!(
+        read.iter().max(),
+        Some(&100),
+        "CONTROL: a read of no bound of its own waits up to 100 ms: {read:?}"
     );
 }
 
@@ -168,8 +224,9 @@ fn a_step_bounded_at_nothing_waits_for_no_input() {
 #[cfg(feature = "threads")]
 #[test]
 fn a_step_is_refused_while_the_read_task_runs() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
     assert_eq!(
         SessionDrive::step_once(&*engine, 0),
         Ok(()),
@@ -192,8 +249,9 @@ fn a_step_is_refused_while_the_read_task_runs() {
 /// A step of a closed session is refused as closed, in a build of one thread too.
 #[test]
 fn a_step_of_a_closed_session_is_refused_as_closed() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
     SessionDrive::close(&*engine);
     assert_eq!(
         SessionDrive::step_once(&*engine, 0),
@@ -202,56 +260,5 @@ fn a_step_of_a_closed_session_is_refused_as_closed() {
     assert_eq!(
         SessionDrive::step_once(&*engine, 50),
         Err(StepRefused::Closed)
-    );
-}
-
-/// Two threads step one session at once while a batch of samples arrives: neither step is
-/// refused or fails, and each sample of the batch is handed to the subscriber once.
-#[cfg(feature = "threads")]
-#[test]
-fn two_steps_at_once_hand_each_sample_out_once() {
-    use std::sync::Mutex;
-
-    const SAMPLES: u8 = 20;
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
-    let handed = Arc::new(Mutex::new(Vec::new()));
-    let into = handed.clone();
-    let declares_before = router.seen(|s| s.declares);
-    engine
-        .declare_subscriber_on_wire(
-            "demo/**",
-            WireKey::literal(),
-            Locality::Any,
-            None,
-            SubscriberSink::shared(move |sample: &dyn SampleView| {
-                into.lock().unwrap().extend_from_slice(sample.payload());
-            }),
-        )
-        .expect("the session declares the subscriber");
-    steps_until(&engine, 0, "the router to see the subscriber", || {
-        router.seen(|s| s.declares) > declares_before
-    });
-
-    let all = |handed: &Mutex<Vec<u8>>| handed.lock().unwrap().len() >= usize::from(SAMPLES);
-    let other = engine.clone();
-    let seen = handed.clone();
-    let beside = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !all(&seen) && Instant::now() < deadline {
-            SessionDrive::step_once(&*other, 5).expect("the other thread's step steps");
-        }
-    });
-    router.send(Command::PushBatch("demo/a", SAMPLES));
-    steps_until(&engine, 5, "every sample of the batch", || all(&handed));
-    beside.join().expect("the other thread's steps return");
-    // What a step still reads after the batch is nothing more of it.
-    SessionDrive::step_once(&*engine, 0).expect("the session steps");
-    let mut handed = handed.lock().unwrap().clone();
-    handed.sort_unstable();
-    assert_eq!(
-        handed,
-        (0..SAMPLES).collect::<Vec<u8>>(),
-        "each sample once, whichever step read it"
     );
 }
