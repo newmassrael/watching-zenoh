@@ -135,6 +135,16 @@ pub(crate) type RowPolicy = wz_session_core::bounded::Lent;
 /// See the form of a build with `runtime-plan`.
 #[cfg(not(feature = "runtime-plan"))]
 pub(crate) type RowPolicy = wz_session_core::bounded::Region;
+// The session takes the memory of its tables when it opens and none after (docs/upstream-parity.md,
+// D12): the moment this engine lays its tables out at, which every form above answers. A policy
+// that takes its memory at another moment is a form of its own, chosen with the moment.
+const _: () = assert!(
+    matches!(
+        <RowPolicy as wz_session_core::bounded::Storage>::TAKEN,
+        wz_session_core::bounded::Taken::AtOpen
+    ),
+    "the session's tables take their memory at its open"
+);
 // How the engine's calls stand to its threads, and the locks that choice decides.
 mod form;
 

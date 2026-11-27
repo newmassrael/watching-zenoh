@@ -19,7 +19,8 @@
 //! that selects code, so heap or no heap is the instantiation and the algorithm exists once.
 //! There are four policies, because "an allocator is linked", "the declared capacities are
 //! hard", "the capacities are known when the session opens" and "the build lays the session out"
-//! are different facts about a build:
+//! are different facts about a build; when a table takes its memory is one more, which each policy
+//! states ([`Taken`](crate::bounded::Taken)):
 //!
 //! - [`Heap`](crate::bounded::Heap) (needs `alloc`) -- backed by `alloc::vec::Vec<T>` and
 //!   `alloc::string::String`. [`push`](crate::bounded::BoundedVec::push) never fails; the
@@ -151,8 +152,19 @@ pub trait Storage: 'static {
     const ENFORCES_CAPACITY: bool;
 
     /// Whether a table of this policy has rows only where its maker lent it some from an
-    /// arena (`true`), so a sequence a table makes for itself by `Default` has none.
+    /// arena (`true`), so a sequence a table makes for itself by `Default` has none. Where a row
+    /// lies is [`Self::ROWS_STAY_APART`]'s question, and when its memory is taken [`Self::TAKEN`]'s.
     const LENT_AT_OPEN: bool;
+
+    /// Whether every table of this policy keeps its rows apart from itself, behind a pointer, where
+    /// none moves while it stands: what a reader of a row where it lies, with the tables let go (a
+    /// callback's call on another thread), needs of the policy, since no `&mut` of a table reaches
+    /// such a row. The lent and the region policies keep them so; the static policy
+    /// keeps its rows inline in the table, and the growable one's sequences move theirs as they grow.
+    const ROWS_STAY_APART: bool;
+
+    /// When a table of this policy takes the memory its rows lie in ([`Taken`]).
+    const TAKEN: Taken;
 
     /// The policy of a working buffer an algorithm over a table of this policy keeps while it
     /// runs (a key's chunks while it is canonized): this policy where it can make one for itself,
@@ -239,6 +251,23 @@ pub trait Storage: 'static {
     /// memory after it.
     #[cfg(feature = "storage-profile")]
     type Compose: crate::wireexpr_resolve::ComposeRoom;
+}
+
+/// When a table of a [`Storage`] policy takes the memory its rows lie in ([`Storage::TAKEN`]): a
+/// fact of its own, apart from whether the build links an allocator ([`Profile`]) and from where
+/// the rows lie ([`Storage::ROWS_STAY_APART`]). An engine states the moment its session takes
+/// its memory at, and the policy it lays its tables out by answers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Taken {
+    /// When the image is built: the rows lie in the table, at its build count.
+    AtBuild,
+    /// When the session opens, from the limits it resolved, and nothing after
+    /// (`docs/upstream-parity.md`, D12).
+    AtOpen,
+    /// At a table's first value, all of its count's rows at once, and nothing after for that table.
+    AtFirstUse,
+    /// As a table grows.
+    AsItGrows,
 }
 
 /// A policy's [`Storage::HeapForm`]: the unit on the growable policy, and a type of no value on a
@@ -668,6 +697,8 @@ pub struct Heap;
 impl Storage for Heap {
     const ENFORCES_CAPACITY: bool = false;
     const LENT_AT_OPEN: bool = false;
+    const ROWS_STAY_APART: bool = false;
+    const TAKEN: Taken = Taken::AsItGrows;
     type Scratch = Heap;
     type Seq<T, const N: usize> = Vec<T>;
     type Rows<T, const N: usize> = crate::slot_map::Chunked<T>;
@@ -694,6 +725,8 @@ pub struct Static;
 impl Storage for Static {
     const ENFORCES_CAPACITY: bool = true;
     const LENT_AT_OPEN: bool = false;
+    const ROWS_STAY_APART: bool = false;
+    const TAKEN: Taken = Taken::AtBuild;
     type Scratch = Static;
     type Seq<T, const N: usize> = heapless::Vec<T, N>;
     type Rows<T, const N: usize> = BoundedVec<T, N, Static>;
@@ -733,6 +766,8 @@ pub struct Lent;
 impl Storage for Lent {
     const ENFORCES_CAPACITY: bool = true;
     const LENT_AT_OPEN: bool = true;
+    const ROWS_STAY_APART: bool = true;
+    const TAKEN: Taken = Taken::AtOpen;
     type Scratch = Static;
     type Seq<T, const N: usize> = LentSeq<T>;
     type Rows<T, const N: usize> = BoundedVec<T, N, Lent>;
@@ -774,6 +809,8 @@ pub struct Region;
 impl Storage for Region {
     const ENFORCES_CAPACITY: bool = true;
     const LENT_AT_OPEN: bool = true;
+    const ROWS_STAY_APART: bool = true;
+    const TAKEN: Taken = Taken::AtOpen;
     type Scratch = Static;
     type Seq<T, const N: usize> = LentSeq<T>;
     type Rows<T, const N: usize> = BoundedVec<T, N, Region>;
@@ -2808,6 +2845,38 @@ mod tests {
             TypeId::of::<<Heap as Storage>::HeapForm>(),
             TypeId::of::<()>()
         );
+    }
+
+    /// Each policy states when its tables take their memory and whether their rows lie apart from
+    /// them: the lent and the region policies at the session's open, their rows apart; the static
+    /// one when the image is built, its rows inline; the growable one as it grows, its sequences
+    /// moving their rows. Turned red by a policy that answers another's moment, which an engine's
+    /// assertion of its own moment reads, or that claims rows apart it keeps inline or moves, which
+    /// `row_may_lie_in` of the session's tables reads.
+    #[test]
+    fn each_policy_states_when_its_tables_take_their_memory() {
+        assert_eq!(<Static as Storage>::TAKEN, Taken::AtBuild);
+        assert_eq!(<Lent as Storage>::TAKEN, Taken::AtOpen);
+        assert_eq!(<Region as Storage>::TAKEN, Taken::AtOpen);
+        assert_eq!(
+            [
+                <Static as Storage>::ROWS_STAY_APART,
+                <Lent as Storage>::ROWS_STAY_APART,
+                <Region as Storage>::ROWS_STAY_APART,
+            ],
+            [false, true, true]
+        );
+        #[cfg(feature = "alloc")]
+        {
+            assert_eq!(<Heap as Storage>::TAKEN, Taken::AsItGrows);
+            assert_eq!(
+                [
+                    <Heap as Storage>::ROWS_STAY_APART,
+                    <Heap as Storage>::LENT_AT_OPEN,
+                ],
+                [false, false]
+            );
+        }
     }
 
     #[test]

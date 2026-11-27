@@ -4081,9 +4081,10 @@ const fn kept_bytes<K: Presence>(bytes: Option<usize>) -> Option<usize> {
 /// Whether a row whose callback is `Cb` may lie in a table of policy `P`: a callback whose calls
 /// read its row where it lies ([`RowCallback::READS_ROW_IN_PLACE`]) is read on another thread while
 /// the tables are held, so its row lies only where no `&mut` of the tables, nor of what holds them,
-/// reaches it: in the arena, behind the pointer a table of the lent policy keeps (P3, P11).
+/// reaches it: behind the pointer a table keeps where its policy keeps every row apart from the
+/// table and never moves one ([`Storage::ROWS_STAY_APART`]), whenever it took the memory (P3, P11).
 const fn row_may_lie_in<Cb: RowCallback, P: Storage>() -> bool {
-    !Cb::READS_ROW_IN_PLACE || P::LENT_AT_OPEN
+    !Cb::READS_ROW_IN_PLACE || P::ROWS_STAY_APART
 }
 
 /// A row whose calls read it where it lies ([`RowCallback::READS_ROW_IN_PLACE`]) is read by them

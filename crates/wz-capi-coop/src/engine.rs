@@ -3416,11 +3416,11 @@ impl SubscriberRow {
     }
 }
 
-// A call reads its row where it lies, so the rows lie in the session's arena, lent at its open,
-// where no table moves them and the dispatch reads them only through a shared borrow.
+// A call reads its row where it lies, so the rows lie apart from the tables, where no table moves
+// them and the dispatch reads them only through a shared borrow.
 const _: () = assert!(
-    <RowPolicy as wz_session_core::bounded::Storage>::LENT_AT_OPEN,
-    "the session's tables lend their rows from its arena and never move one"
+    <RowPolicy as wz_session_core::bounded::Storage>::ROWS_STAY_APART,
+    "the session's tables keep their rows apart from themselves and never move one"
 );
 
 // A delivery ends a call with no lock of the session held; a target whose latch is ended only with
