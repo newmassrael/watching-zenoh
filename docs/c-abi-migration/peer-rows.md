@@ -593,6 +593,51 @@ FORBIDS `HeldOperation|UnderHeldFaces` in `pico-peer-coop` and `pico-api-coop-no
 link a form the source no longer defines, so the pattern's control is the source: its selftest
 holds every crate to defining none of those names (`REMOVED_FORMS`, `removed_form_defined`).
 
+### 7.5 R8 landed for the faces: the read of many rows by one run
+
+**What changed** (`crates/wz-capi-coop/src/engine/direct.rs`, `crates/wz-runtime-coop/src/faces.rs`;
+`docs/c-abi-architecture.md` section 8.14's Q5 for the faces, `peer-proportion.md` F5's walk).
+The quiet read of the read task (`CoopEngine::read_quiet`) read one face, entered only where every
+other face rested. It now reads every face a read turns that does not rest, each found quiet by its
+own look, in one run: the kept set of its waits holds each face's link in the table's order, then
+each port and the clock's wake (`LinkSupervisor::run_waits`, which was `lone_waits` of one row and
+refuses two rows or a port that give one wait, as a datagram port's faces do). Each pass waits on
+that set with nothing held, asks the session's one question under its lock, then steps each face
+whose link the wait found ready, or which holds input, its slot alone held, handing out what each
+step left before the next face's slot is taken (section 8.4: no two read slots held). The faces'
+dues are read by one walk at the run's start (each face's look deadline and its slot's due: the
+lease, the keep-alive, the pump's) and each step's own after it, as zenoh-pico's lease and
+keep-alive tasks walk their list. A face's look (`CoopEngine::quiet_until`) no longer asks the
+other faces anything; the run asks that each face's mark is set. A run of one face steps it after
+every wait, as before.
+
+**What is not in this step: the groups.** Section 8.14.6's Q5 also puts every group in the run's
+set, read as D10 reads it. A group is not a row of the face table yet: its pump is stepped by
+`CoopEngine::step_groups` under the dial role's slot and its socket is no face's link, so a run that
+waited on it would hold no slot for it to step under. R5 makes a group a row of the table (kind
+`group`), and the group joins the run there: `quiet_until` keeps refusing a session that joined a
+group until then.
+
+**Expected.** Bytes: about even (one body grows by the walk of the run's faces, the other loses
+its single-face form; `peer-proportion.md` F5's "at most -3,000" is the whole of F5, the measured
+attribution of `read_faces`, `wait_on_faces` and `face_turn`, which this step does not claim).
+Instructions: a listener of several faces reads each batch in the run, not through a whole turn
+(section 8.14.1: the looks, 1,110, and most of the wait's 782 and the read's 554, which the run
+took from one face, now for each). The client case compiles none of it (`read_quiet` is the
+listening or grouping form's), so its receive Ir does not move. A run of one face walks a slice of
+one where it held one face: a few instructions a batch, which the subprofile's W arm reads; the
+step after a wait is not gated by the ready set there (`count == 1`), so no comparison is added.
+
+**Tests** (`tests::listen`, compiled with `std`, `listen`, `query`, `queryable` and `threads`):
+`each_face_is_found_quiet_by_its_own_look_beside_another`, which was
+`a_lone_face_is_found_quiet_by_its_look_and_not_beside_another` (two faces up are both quiet now:
+red if `quiet_until` holds a face unquiet for another that does not rest); and
+`a_quiet_read_of_two_faces_turns_them_once_a_deadline_not_once_a_batch` (puts from two clients in
+turn, each read by a step of its face in the run, the faces turned fewer than one time in four
+batches: red if the run is entered for one face alone or `run_waits` leaves a face's link out). The
+single-face tests of section 8.14.7 stand, among them
+`a_connection_arriving_during_a_quiet_read_is_taken_at_once` (the ports in the kept set).
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)
