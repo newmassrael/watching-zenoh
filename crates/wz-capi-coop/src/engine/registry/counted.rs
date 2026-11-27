@@ -20,13 +20,13 @@ use wz_session_core::pending_get::DueRow;
 use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::{ObserverRows, RequesterRows};
 
-use super::held::OneHolder;
+use super::held::HeldPlaces;
 #[cfg(any(
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
 ))]
 use super::DeclWatches;
-use super::{App, FaceTables, Gets, RegistryOf, FACE_SETS};
+use super::{App, FaceTables, Gets, Registry, FACE_SETS};
 use crate::arena::{ArenaRefused, MAX_FACE_SETS};
 use crate::engine::RoundDelivery;
 use crate::RowPolicy;
@@ -47,7 +47,7 @@ impl FaceTables {
     }
 }
 
-impl RegistryOf<OneHolder> {
+impl Registry {
     /// A session that holds nothing and has been told nothing, with its dial face, made by value:
     /// the application's tables of the rows `tables` counts, the dial face's set of `gets` rows of
     /// gets and `peer` of its peer's tables, and the session's own gets where it answers its own,
@@ -111,7 +111,7 @@ impl RegistryOf<OneHolder> {
             app: ManuallyDrop::new(app),
             delivery,
             sets: ManuallyDrop::new(sets),
-            holders: OneHolder,
+            holders: HeldPlaces::default(),
             #[cfg(feature = "local-queryable")]
             local,
             #[cfg(feature = "local-queryable")]

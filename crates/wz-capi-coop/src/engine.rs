@@ -7944,7 +7944,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// How often the faces' tables were handed out to a write since the open
-    /// (`RegistryOf::faces_written`): what a test of the bookkeeping a received sample owes counts.
+    /// (`Registry::faces_written`): what a test of the bookkeeping a received sample owes counts.
     /// Read under the lock, uncounted as a take.
     #[cfg(all(
         test,

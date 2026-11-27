@@ -389,7 +389,7 @@ impl ArenaPart {
             Self::PendingLegs => ("pending legs", GETS),
             Self::HeldReplies => ("held replies", "MAX_PENDING_REPLIES"),
             Self::FaceTables => ("face tables", "MAX_FACES + 1"),
-            Self::HeldFaces => ("held faces", "MAX_FACES + 1"),
+            Self::HeldFaces => ("held faces", "MAX_FACES"),
             Self::PeerTables => ("peer tables", "MAX_PENDING_DECLARES + MAX_PENDING_FINALS"),
             Self::PeerAliasPool => ("peer alias pool", ALIAS_LIMITS.session.name()),
             Self::PeerDeclarationPools => ("peer declaration pools", DECL_LIMITS.session.name()),
@@ -2264,12 +2264,13 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             self.session.peers.sets(),
             FACE_SET_BYTES,
         );
-        // Which face holds which set, a row for each set, in a build that takes faces beside its
-        // dial role's.
+        // Which face holds each place past the dial role's, a mark for each, in a build that takes
+        // faces beside its dial role's: the dial role's face holds the first place for the
+        // table's life, which is no row (`engine::registry::HeldPlaces`).
         #[cfg(any(feature = "listen", feature = "group"))]
         self.put(
             ArenaPart::HeldFaces,
-            self.session.peers.sets(),
+            self.session.peers.sets().saturating_sub(1),
             HELD_SET_BYTES,
         );
         // What the face holding each set names for a wait for its room, a place for each set

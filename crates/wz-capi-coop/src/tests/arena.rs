@@ -557,9 +557,11 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
         assert_eq!(row(&plan, "room places").count, plan.peers().sets());
         #[cfg(not(feature = "runtime-plan"))]
         assert!(plan.rows().all(|laid| laid.part() != "room places"));
-        // The index of held sets is a row of a build that takes faces beside the dial role's.
+        // The marks of the places are a row of a build that takes faces beside the dial role's,
+        // a mark for each place past the dial role's, whose place is its face's for the table's
+        // life.
         if crate::arena::TAKES_FACES {
-            assert_eq!(row(&plan, "held faces").count, plan.peers().sets());
+            assert_eq!(row(&plan, "held faces").count, plan.peers().sets() - 1);
         } else {
             assert!(plan.rows().all(|laid| laid.part() != "held faces"));
         }
@@ -2896,9 +2898,14 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             ours.count * (faces + handshakes)
         } else if theirs.part() == "peer tables" {
             ours.count * faces
-        } else if ["face tables", "held faces", "room places"].contains(&theirs.part()) {
+        } else if ["face tables", "room places"].contains(&theirs.part()) {
             // Its dial role's face holds a set of no rows all the same, first, beside the faces'.
             ours.count * (1 + faces)
+        } else if theirs.part() == "held faces" {
+            // The dial role's place is its face's for the table's life and has no mark of its own:
+            // a mark for each face past it, of which the client's one face has none.
+            assert_eq!(ours.count, 0, "the client's one place is the dial role's");
+            faces
         } else if FACE_PARTS.contains(&theirs.part()) {
             // The gets' tables, and the ends of their legs, hold the session's own once.
             ours.count / (1 + own) * (faces + own)

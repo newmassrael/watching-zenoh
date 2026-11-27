@@ -7,7 +7,7 @@
 //! deadline and the counts as the last service left them, so a step that finds neither passed nor
 //! moved runs none of it, at the cost of one comparison of each.
 //!
-//! The gets' deadlines are the index the registry keeps (`RegistryOf::dues`), which a read's wait
+//! The gets' deadlines are the index the registry keeps (`Registry::dues`), which a read's wait
 //! reads; the ledger is only due by them: each leg held lowers its due time
 //! (`Ledger::owe_leg_due`), and each service settles it from the index.
 

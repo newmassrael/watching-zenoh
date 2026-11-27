@@ -1,23 +1,31 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Which face holds each set of a session's face tables, by the set's place, in the two forms a
-//! build may take: a session that adds faces beside its dial role's (`listen`, `group`) keeps an
-//! index lent from its arena ([`ManyHolders`]); one of its dial role's face alone knows that face
-//! holds the first set and no other face is held ([`OneHolder`]), and lends no index. The registry
-//! is written once over [`Holders`], so its tests build either form whatever the build.
+//! Which face holds each place of the session's faces, the mark of each row of the table of
+//! places: the face's id, free (`NO_FACE`) or kept for a departed face's tomb (`KEPT`). The
+//! dial role's face holds the first place for the table's life, so its mark is no row of memory;
+//! the rows past it are lent from the arena where the build adds faces beside the dial role's
+//! (`listen`, `group`), and a build of that face alone has none, the bound of the table a
+//! build limit and not a type. The other faces a matching verdict counts are the table's rows but
+//! the caller's ([`OtherFaces`]): none where the table is of one row.
 
-use super::{FaceId, FaceTables, DIAL_FACE};
+use super::{names_face, FaceId, FaceTables, DIAL_FACE};
 #[cfg(feature = "runtime-plan")]
 use wz_session_core::bounded::{Arena, LendRefused};
-use wz_session_core::slot_observer::OtherPeers;
 
 #[cfg(any(
     feature = "listen",
     feature = "group",
     all(test, feature = "runtime-plan")
 ))]
-use super::{Others, NO_FACE};
+use super::Others;
+#[cfg(any(
+    feature = "connectivity",
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
+use super::NO_FACE;
 #[cfg(any(
     feature = "listen",
     feature = "group",
@@ -31,89 +39,181 @@ use crate::arena::MAX_FACE_SETS;
 ))]
 use wz_session_core::bounded::{BoundedVec, Lent};
 
-#[cfg(any(not(any(feature = "listen", feature = "group")), test))]
+#[cfg(not(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+)))]
 use wz_session_core::slot_observer::NoOtherPeers;
 
-/// The index of held sets: a row for each set, naming the face that holds it, `NO_FACE` for a
-/// free set and `KEPT` for one a departed face's tomb keeps.
-pub(in crate::engine) trait Holders: Sized {
-    /// The faces other than the one a call acts on, which the matching verdicts of that call
-    /// count.
-    type Others<'a>: OtherPeers
-    where
-        Self: 'a;
+/// The marks of the places past the dial role's, by the place less one: a row for each place the
+/// open lent past it, lent from the arena with the sets (`crate::arena::ArenaPart::HeldFaces`), so
+/// a face coming or going writes its place's row and moves none.
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
+type PastDial = BoundedVec<FaceId, MAX_FACE_SETS, Lent>;
 
-    /// The index of `sets` sets, lent from `arena` where the form keeps one: the dial role's face
-    /// holds the first set, and every other is free. Refused when the arena has not the rows. A
-    /// build of the region's form holds its one set in the region and asks for no index.
-    #[cfg(feature = "runtime-plan")]
-    fn lent(arena: &mut Arena, sets: usize) -> Result<Self, LendRefused>;
+/// See the form of a build that adds faces: a session of its dial role's face alone has no place
+/// past it.
+#[cfg(not(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+)))]
+type PastDial = [FaceId; 0];
 
-    /// The face of each set, by the set's place.
-    fn rows(&self) -> &[FaceId];
+/// The faces other than the one a call acts on, which the matching verdicts of that call count:
+/// the sets of the table's rows but the caller's that a face holds.
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
+pub(super) type OtherFaces<'a> = Others<'a>;
 
-    /// The rows a call may write: a set's that a face other than the dial role's may take.
-    fn rows_mut(&mut self) -> &mut [FaceId];
+/// See the form of a build that adds faces: the table of one row has no row but the caller's.
+#[cfg(not(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+)))]
+pub(super) type OtherFaces<'a> = NoOtherPeers;
 
-    /// The set at `at` among `sets`, to write, and the others beside it.
-    fn split<'a>(
-        &'a self,
-        sets: &'a mut [FaceTables],
-        at: usize,
-    ) -> Option<(&'a mut FaceTables, Self::Others<'a>)>;
+/// The table of the session's places, by its marks (see the module documentation).
+#[derive(Default)]
+pub(in crate::engine) struct HeldPlaces {
+    past_dial: PastDial,
 }
 
-/// The index of a session that adds faces beside its dial role's: a row for each set the open
-/// lent, lent from the arena with them (`crate::arena::ArenaPart::HeldFaces`), so a face coming
-/// or going writes its set's row and moves none.
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
-))]
-pub(in crate::engine) struct ManyHolders(BoundedVec<FaceId, MAX_FACE_SETS, Lent>);
-
-#[cfg(any(
-    feature = "listen",
-    feature = "group",
-    all(test, feature = "runtime-plan")
-))]
-impl Holders for ManyHolders {
-    type Others<'a>
-        = Others<'a>
-    where
-        Self: 'a;
-
+impl HeldPlaces {
+    /// The marks of `sets` places, the rows past the dial role's lent from `arena` and free.
+    /// Refused when the arena has not the rows. A session of its dial role's face alone is lent one
+    /// set, and this lends nothing.
     #[cfg(feature = "runtime-plan")]
-    fn lent(arena: &mut Arena, sets: usize) -> Result<Self, LendRefused> {
-        let mut rows: BoundedVec<FaceId, MAX_FACE_SETS, Lent> = arena.lend(sets)?;
-        let faces = core::iter::once(DIAL_FACE).chain(core::iter::repeat(NO_FACE));
-        for holder in faces.take(sets) {
-            rows.push(holder).map_err(|_| LendRefused::OverCeiling {
-                rows: 1,
-                ceiling: 0,
-            })?;
+    pub(super) fn lent(arena: &mut Arena, sets: usize) -> Result<Self, LendRefused> {
+        #[cfg(any(
+            feature = "listen",
+            feature = "group",
+            all(test, feature = "runtime-plan")
+        ))]
+        {
+            let past = sets.saturating_sub(1);
+            let mut past_dial: PastDial = arena.lend(past)?;
+            for _ in 0..past {
+                past_dial
+                    .push(NO_FACE)
+                    .map_err(|_| LendRefused::OverCeiling {
+                        rows: 1,
+                        ceiling: 0,
+                    })?;
+            }
+            Ok(Self { past_dial })
         }
-        Ok(Self(rows))
+        #[cfg(not(any(
+            feature = "listen",
+            feature = "group",
+            all(test, feature = "runtime-plan")
+        )))]
+        {
+            debug_assert_eq!(sets, 1, "a session of one face is lent one set");
+            let _ = arena;
+            Ok(Self::default())
+        }
     }
 
-    fn rows(&self) -> &[FaceId] {
-        &self.0
+    /// How many places the table has, the dial role's among them.
+    pub(super) fn count(&self) -> usize {
+        self.past_dial.len().saturating_add(1)
     }
 
-    fn rows_mut(&mut self) -> &mut [FaceId] {
-        &mut self.0
+    /// The mark of each place, the dial role's first.
+    pub(super) fn marks(&self) -> impl Iterator<Item = FaceId> + '_ {
+        core::iter::once(DIAL_FACE).chain(self.past_dial.iter().copied())
     }
 
-    fn split<'a>(
+    /// Whether the place `at` is held by face `id`: read at the place, with no walk.
+    #[inline(always)]
+    pub(super) fn holds(&self, at: usize, id: FaceId) -> bool {
+        match at.checked_sub(1) {
+            None => id == DIAL_FACE,
+            Some(past) => self.past_dial.get(past) == Some(&id),
+        }
+    }
+
+    /// Where the place face `id` holds lies: never a free or a kept place, whose mark names no
+    /// face.
+    pub(super) fn place_of(&self, id: FaceId) -> Option<usize> {
+        if id == DIAL_FACE {
+            return Some(0);
+        }
+        if !names_face(id) {
+            return None;
+        }
+        let past = self.past_dial.iter().position(|holder| *holder == id)?;
+        Some(past.saturating_add(1))
+    }
+
+    /// The marks of the places past the dial role's, to write: the dial role's is never written.
+    pub(super) fn past_dial_mut(&mut self) -> &mut [FaceId] {
+        &mut self.past_dial
+    }
+
+    /// The mark of place `at` to write, past the dial role's alone.
+    #[cfg(any(
+        feature = "connectivity",
+        feature = "listen",
+        feature = "group",
+        all(test, feature = "runtime-plan")
+    ))]
+    pub(super) fn mark_mut(&mut self, at: usize) -> Option<&mut FaceId> {
+        self.past_dial.get_mut(at.checked_sub(1)?)
+    }
+
+    /// The first place no face holds and no tomb keeps.
+    #[cfg(any(
+        feature = "connectivity",
+        feature = "listen",
+        feature = "group",
+        all(test, feature = "runtime-plan")
+    ))]
+    pub(super) fn free(&self) -> Option<usize> {
+        let past = self
+            .past_dial
+            .iter()
+            .position(|holder| *holder == NO_FACE)?;
+        Some(past.saturating_add(1))
+    }
+
+    /// The set at `at` among `sets`, to write, and the faces of the table's other rows.
+    #[cfg(any(
+        feature = "listen",
+        feature = "group",
+        all(test, feature = "runtime-plan")
+    ))]
+    pub(super) fn split<'a>(
         &'a self,
         sets: &'a mut [FaceTables],
         at: usize,
-    ) -> Option<(&'a mut FaceTables, Others<'a>)> {
-        let (before, rest) = sets.split_at_mut_checked(at)?;
+    ) -> Option<(&'a mut FaceTables, OtherFaces<'a>)> {
+        let (dial, past) = sets.split_first_mut()?;
+        let Some(at) = at.checked_sub(1) else {
+            let others = Others {
+                dial: None,
+                before: &[],
+                after: &*past,
+                held_before: &[],
+                held_after: &self.past_dial,
+            };
+            return Some((dial, others));
+        };
+        let (before, rest) = past.split_at_mut_checked(at)?;
         let (face, after) = rest.split_first_mut()?;
-        let (held_before, rest) = self.rows().split_at_checked(at)?;
+        let (held_before, rest) = self.past_dial.split_at_checked(at)?;
         let others = Others {
+            dial: Some(&*dial),
             before: &*before,
             after: &*after,
             held_before,
@@ -121,41 +221,18 @@ impl Holders for ManyHolders {
         };
         Some((face, others))
     }
-}
 
-/// The index of a session of its dial role's face alone: that face holds the first set, which the
-/// open lends whether the session dials or not, and no other face is ever held, so the index is
-/// known when compiled and the arena lends none. Its one row is never written, so a call that
-/// would free or keep a set finds none to write.
-#[cfg(any(not(any(feature = "listen", feature = "group")), test))]
-pub(in crate::engine) struct OneHolder;
-
-#[cfg(any(not(any(feature = "listen", feature = "group")), test))]
-impl Holders for OneHolder {
-    type Others<'a>
-        = NoOtherPeers
-    where
-        Self: 'a;
-
-    #[cfg(feature = "runtime-plan")]
-    fn lent(_arena: &mut Arena, sets: usize) -> Result<Self, LendRefused> {
-        debug_assert_eq!(sets, 1, "a session of one face is lent one set");
-        Ok(Self)
-    }
-
-    fn rows(&self) -> &[FaceId] {
-        &[DIAL_FACE]
-    }
-
-    fn rows_mut(&mut self) -> &mut [FaceId] {
-        &mut []
-    }
-
-    fn split<'a>(
+    /// See the form of a build that adds faces: the one set lies at the first place.
+    #[cfg(not(any(
+        feature = "listen",
+        feature = "group",
+        all(test, feature = "runtime-plan")
+    )))]
+    pub(super) fn split<'a>(
         &'a self,
         sets: &'a mut [FaceTables],
         at: usize,
-    ) -> Option<(&'a mut FaceTables, NoOtherPeers)> {
+    ) -> Option<(&'a mut FaceTables, OtherFaces<'a>)> {
         Some((sets.get_mut(at)?, NoOtherPeers))
     }
 }

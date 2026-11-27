@@ -25,7 +25,6 @@ use wz_session_core::slot_observer::{ObserverRegionRows, SLOT_OBSERVER_LINES};
 #[cfg(feature = "query")]
 use wz_session_core::slot_observer::{RequesterRegionRows, REQUESTER_LINES};
 
-use super::held::OneHolder;
 #[cfg(any(
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
@@ -33,7 +32,7 @@ use super::held::OneHolder;
 use super::DeclWatches;
 #[cfg(feature = "local-queryable")]
 use super::Gets;
-use super::{App, CoopSinks, FaceTables, Registry, RegistryOf, FACE_SETS};
+use super::{App, CoopSinks, FaceTables, Registry, FACE_SETS};
 use crate::engine::{CoopRows, RoundDelivery};
 #[cfg(feature = "query")]
 use crate::engine::{LegHold, LegSink};
@@ -129,7 +128,7 @@ impl RegistryRegion {
     pub(crate) const fn places(at: usize) -> RegionLines<REGISTRY_REGION_LINES> {
         let registry = at.wrapping_add(offset_of!(Self, registry));
         let rows = at.wrapping_add(offset_of!(Self, rows));
-        let app = registry.wrapping_add(offset_of!(RegistryOf<OneHolder>, app));
+        let app = registry.wrapping_add(offset_of!(Registry, app));
         let sets = rows.wrapping_add(offset_of!(RegistryRows, sets));
         let set_rows = rows.wrapping_add(offset_of!(RegistryRows, set_rows));
         let mut lines = RegionLines::EMPTY
@@ -145,7 +144,7 @@ impl RegistryRegion {
                 0,
             )
             .seq(SeqPlace::of::<FaceTables>(
-                registry.wrapping_add(offset_of!(RegistryOf<OneHolder>, sets)),
+                registry.wrapping_add(offset_of!(Registry, sets)),
                 sets,
                 FACE_SETS,
             ));
@@ -163,7 +162,7 @@ impl RegistryRegion {
         #[cfg(feature = "local-queryable")]
         let lines = lines.with(
             &Gets::places(
-                registry.wrapping_add(offset_of!(RegistryOf<OneHolder>, local)),
+                registry.wrapping_add(offset_of!(Registry, local)),
                 rows.wrapping_add(offset_of!(RegistryRows, local)),
             ),
             0,
