@@ -150,7 +150,7 @@ pub trait TransportFaces {
     /// share one Router, each chain keyed by its peer, or the one peer of the one link a Router
     /// serves, each chain keyed by its channel alone. The engine composes the links with their
     /// Routers, so it says which.
-    type Peers: ChainPeers;
+    type Peers: ChainPeers + 'static;
     /// The handle on the place the session lends its Router in ([`TransportState::lend`]): a
     /// counted cell, or one the session's arena holds.
     type RouterPlace: Deref<Target = LendCell<SessionReassembly<Self::Peers>>> + Clone + 'static;
