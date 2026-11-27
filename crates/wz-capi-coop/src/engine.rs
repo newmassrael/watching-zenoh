@@ -1998,6 +1998,22 @@ impl<W: LinkWaits> LinkRooms<W> {
         }
     }
 
+    /// What a droppable publish is told on the face at place `at`, whose send place another
+    /// holder has while the publish holds nothing of the session: the place is held as a send on
+    /// that face holds it, so the profile answers as behind such a send for a leg on that face
+    /// alone ([`Self::for_held`]). Pico's is dropped on the face at once ([`Room::Held`]), as
+    /// pico's try of that transport's transmit lock finds it taken; zenoh's asks that face alone
+    /// for room within `wait_us`; and a build without the held-conduit wait (`tx-held-wait`)
+    /// answers either profile as pico's, with no face asked.
+    pub(crate) fn for_held_place(&self, held_drop: HeldDrop, at: usize, wait_us: u64) -> Room {
+        self.for_held(
+            held_drop,
+            Holder::Sending(mark_of_place(at)),
+            wait_us,
+            Some(at),
+        )
+    }
+
     /// The place `at` of the table, read under the lock, which goes before the caller waits on
     /// what it names: `None` past the table, and a free place as `Some(None)`.
     #[cfg(feature = "tx-held-wait")]

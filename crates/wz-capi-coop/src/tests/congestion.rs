@@ -270,6 +270,50 @@ fn a_leg_held_alone_answers_for_its_own_face_behind_a_held_session() {
     );
 }
 
+/// A droppable publish whose face's send place another holder has answers as a leg behind a send
+/// on that face: under zenoh's profile it asks that face alone for room and is dropped on it when
+/// it took none, a place no face holds naming no wait; under pico's it is dropped on the face at
+/// once, with no face asked. Turned red by `LinkRooms::for_held_place` reading the held place as
+/// a holder other than a send on its own face, or asking past the leg's face.
+#[cfg(feature = "tx-held-wait")]
+#[test]
+fn a_held_face_place_answers_as_a_send_on_that_face() {
+    use wz_session_core::session_init_params::HeldDrop;
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(0, answers.face(10, false));
+    rooms.hold(1, answers.face(11, true));
+    assert_eq!(
+        rooms.for_held_place(HeldDrop::DropAtOnce, 1, 1_000),
+        Room::Held(1),
+        "pico's profile drops on the held face at once"
+    );
+    assert!(
+        answers.asked(11).is_empty(),
+        "pico's profile asked the held face for room"
+    );
+    assert_eq!(
+        rooms.for_held_place(HeldDrop::WaitForRoom, 1, 1_000),
+        Room::Free,
+        "the held face has room"
+    );
+    assert_eq!(answers.asked(11), [1_000]);
+    assert!(
+        answers.asked(10).is_empty(),
+        "a full face the publish is not sent on was asked"
+    );
+    assert_eq!(
+        congested(rooms.for_held_place(HeldDrop::WaitForRoom, 0, 1_000)),
+        Some(vec![0]),
+        "the held face took no bytes"
+    );
+    assert_eq!(
+        rooms.for_held_place(HeldDrop::WaitForRoom, 2, 1_000),
+        Room::Unasked,
+        "a place no face holds names no wait"
+    );
+}
+
 /// Without the held-conduit wait (`tx-held-wait`) every profile answers a held session as
 /// zenoh-pico's: a publish behind another publish's send on its face is dropped at once, one
 /// behind a publish between its sends or behind a read working out its wait tries again, one
@@ -315,6 +359,38 @@ fn without_the_held_wait_every_profile_answers_as_pico() {
             Room::Held(1),
             "{profile:?} behind a send on its own face"
         );
+    }
+    assert!(
+        answers.asked(10).is_empty(),
+        "the full face was asked for room"
+    );
+    assert!(
+        answers.asked(11).is_empty(),
+        "the face with room was asked for room"
+    );
+}
+
+/// Without the held-conduit wait a publish whose face's send place another holder has is dropped
+/// on that face at once under either profile, with no face asked for room, as zenoh-pico's try of
+/// a transport's transmit lock fails while another send holds it. Turned red by
+/// `LinkRooms::for_held_place` asking the face's room in this build, or answering otherwise than
+/// a drop on the held face.
+#[cfg(not(feature = "tx-held-wait"))]
+#[test]
+fn without_the_held_wait_a_held_face_place_drops_at_once() {
+    use wz_session_core::session_init_params::HeldDrop;
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(0, answers.face(10, false));
+    rooms.hold(1, answers.face(11, true));
+    for profile in [HeldDrop::DropAtOnce, HeldDrop::WaitForRoom] {
+        for (at, face) in [(0, 0), (1, 1), (2, 2)] {
+            assert_eq!(
+                rooms.for_held_place(profile, at, 1_000),
+                Room::Held(face),
+                "{profile:?} at place {at}"
+            );
+        }
     }
     assert!(
         answers.asked(10).is_empty(),
