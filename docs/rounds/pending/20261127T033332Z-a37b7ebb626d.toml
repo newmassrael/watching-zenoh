@@ -1,0 +1,18 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Shrink the sessions area of the no_std pico preset: a lent table grows its
+free slots through one body for every row type, and a region face leaves
+its peer tables as the zero bytes it was placed on.
+'''
+changes = '''
+- session-core slot_map: add_free_lent_slot over push_erased.
+- capi-coop registry: rowless_over_zero for a region face set.
+- size.md 8: the twenty largest sessions bodies paired with zenoh-pico's.
+'''
+verification = '''
+- size ledger: total 214,179 B vs main 214,870 (-691); Ir W 3,074.5.
+- session-core 1788 and capi-coop 282 lib tests pass; clippy clean.
+'''
+carry = '''
+- none for this lane.
+'''
