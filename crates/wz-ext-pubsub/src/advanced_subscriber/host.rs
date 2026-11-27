@@ -616,6 +616,16 @@ impl<E: EngineHolder> LentCore<E> {
     }
 }
 
+/// What a subscriber hands its samples and its holes to, both kept as long as it stands and let
+/// go of together: refused, a declaration drops the two at once, and its shared part is made
+/// with the two.
+pub struct Callbacks {
+    /// What each sample is delivered to, in order.
+    pub on_sample: OnSample,
+    /// The miss listeners registered from the start.
+    pub misses: MissHandlers,
+}
+
 /// A live advanced subscriber on an engine's port, named by the engine's type `E` (the port's
 /// object unless the holder names its engine's own).
 pub struct EngineSubscriber<E: EngineHolder = Arc<dyn SessionEngine>> {
@@ -685,8 +695,10 @@ impl<E: EngineHolder> EngineSubscriber<E> {
             engine,
             keyexpr,
             options,
-            OnSample::boxed(Box::new(on_sample)),
-            MissHandlers::default(),
+            Callbacks {
+                on_sample: OnSample::boxed(Box::new(on_sample)),
+                misses: MissHandlers::default(),
+            },
         )
     }
 
@@ -704,26 +716,28 @@ impl<E: EngineHolder> EngineSubscriber<E> {
             engine,
             keyexpr,
             options,
-            OnSample::boxed(Box::new(on_sample)),
-            misses,
+            Callbacks {
+                on_sample: OnSample::boxed(Box::new(on_sample)),
+                misses,
+            },
         )
     }
 
-    /// [`Self::declare`] delivering to `on_sample` and reporting holes to the listeners
-    /// `misses` holds from the start, in whichever form each was made: a host whose callbacks are
-    /// lent ([`OnSample::lent`], [`MissHandlers::lent`]) declares with no memory taken for them.
+    /// [`Self::declare`] delivering to `callbacks`' sample callback and reporting holes to the
+    /// listeners it holds from the start, in whichever form each was made: a host whose callbacks
+    /// are lent ([`OnSample::lent`], [`MissHandlers::lent`]) declares with no memory taken for
+    /// them.
     pub fn declare_with(
         engine: &E,
         keyexpr: impl AsRef<str>,
         mut options: AdvancedSubscriberOptions,
-        on_sample: OnSample,
-        misses: MissHandlers,
+        callbacks: Callbacks,
     ) -> Result<Self, HostError> {
         let forms = options.forms.take();
         let base_keyexpr = admitted(engine, keyexpr.as_ref(), &options)?;
         let make = |place: NonNull<Shared<E>>| {
             // SAFETY: the place is the box's, valid for one `Shared`, holding none, never moved.
-            unsafe { write_shared_part(place, engine, base_keyexpr, &options, on_sample, misses) }
+            unsafe { write_shared_part(place, engine, base_keyexpr, &options, callbacks) }
         };
         // SAFETY: `make` makes the whole shared part in the place it is handed. Refused, `make` is
         // dropped uncalled, and the callbacks with it.
@@ -751,8 +765,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         keyexpr: impl AsRef<str>,
         options: &AdvancedSubscriberOptions,
         forms: Option<FormsHandle>,
-        on_sample: OnSample,
-        misses: MissHandlers,
+        callbacks: Callbacks,
         core: LentCore<E>,
     ) -> Result<&'p mut Self, HostError> {
         debug_assert!(
@@ -762,7 +775,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         let base_keyexpr = match admitted(engine, keyexpr.as_ref(), options) {
             Ok(base_keyexpr) => base_keyexpr,
             Err(refused) => {
-                drop((on_sample, misses, forms));
+                drop((callbacks, forms));
                 // SAFETY: `LentCore::new`'s: nothing was lodged, so the place goes back now, once.
                 unsafe { (core.give_back)(core.context) };
                 return Err(refused);
@@ -771,7 +784,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         let make = |place: NonNull<Shared<E>>| {
             // SAFETY: the place is the lent core's, valid for one `Shared`, holding none, never
             // moved while it is counted.
-            unsafe { write_shared_part(place, engine, base_keyexpr, options, on_sample, misses) }
+            unsafe { write_shared_part(place, engine, base_keyexpr, options, callbacks) }
         };
         // SAFETY: `LentCore::new`'s; a `SubscriberCore` is the place of its lodging
         // (`repr(transparent)`); `make` makes the whole shared part in the place it is handed.
@@ -1047,8 +1060,7 @@ unsafe fn write_shared_part<E: EngineHolder>(
     engine: &E,
     base_keyexpr: FixedKey,
     options: &AdvancedSubscriberOptions,
-    on_sample: OnSample,
-    misses: MissHandlers,
+    callbacks: Callbacks,
 ) {
     let history = options.history;
     // SAFETY: the caller's, which is `write_in`'s; the part is whole before its bounds are set.
@@ -1059,8 +1071,8 @@ unsafe fn write_shared_part<E: EngineHolder>(
             |cell| {
                 State::write_in(
                     cell,
-                    on_sample,
-                    misses,
+                    callbacks.on_sample,
+                    callbacks.misses,
                     options.recovery.is_some(),
                     usize::from(history.is_some()),
                     history

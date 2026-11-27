@@ -57,8 +57,8 @@ use wz_ext_pubsub::advanced_publisher::{
 };
 use wz_ext_pubsub::advanced_subscriber::FormsHandle;
 use wz_ext_pubsub::advanced_subscriber::{
-    AdvancedSubscriberOptions, Delivery, EngineSubscriber, HistoryConfig, HostError, LentCore,
-    Miss, MissHandlers, OnSample, RecoveryConfig, SubscriberCore, SubscriberDetection,
+    AdvancedSubscriberOptions, Callbacks, Delivery, EngineSubscriber, HistoryConfig, HostError,
+    LentCore, Miss, MissHandlers, OnSample, RecoveryConfig, SubscriberCore, SubscriberDetection,
 };
 use wz_session_core::publish_options::PublishError;
 
@@ -1628,8 +1628,7 @@ unsafe fn declare_subscriber_state(
         ke,
         &opts,
         Some(FormsHandle::lodged(forms)),
-        on_sample,
-        misses,
+        Callbacks { on_sample, misses },
         core,
     );
     match declared {

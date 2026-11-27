@@ -34,7 +34,7 @@ use super::super::options::{
     RecoveryConfig, SubscriberDetection,
 };
 use super::super::state::{Delivery, Miss, MissHandlers, OnSample, State};
-use super::{EngineSubscriber, HostError, LentCore, SubscriberCore};
+use super::{Callbacks, EngineSubscriber, HostError, LentCore, SubscriberCore};
 use crate::test_alloc::allocations;
 use wz_capi_port::lodge::{Lodging, Strong};
 
@@ -1697,8 +1697,10 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
         "demo/data",
         &options(),
         None,
-        OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
-        MissHandlers::default(),
+        Callbacks {
+            on_sample: OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+            misses: MissHandlers::default(),
+        },
         lent,
     )
     .expect("the subscriber declares in the lent place");
@@ -1737,8 +1739,10 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
         "demo/data",
         &AdvancedSubscriberOptions::new().with_history(HistoryConfig::new().max_samples(0)),
         None,
-        OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
-        MissHandlers::default(),
+        Callbacks {
+            on_sample: OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+            misses: MissHandlers::default(),
+        },
         lent,
     );
     assert!(matches!(refused, Err(HostError::HistoryBoundZero { .. })));
@@ -1772,8 +1776,10 @@ fn a_subscriber_is_declared_in_the_place_its_host_gives() {
         "demo/data",
         &AdvancedSubscriberOptions::new(),
         None,
-        OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
-        MissHandlers::default(),
+        Callbacks {
+            on_sample: OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+            misses: MissHandlers::default(),
+        },
         lent,
     )
     .expect("the subscriber declares in the given place");
@@ -1820,8 +1826,10 @@ fn a_subscriber_is_declared_in_the_place_its_host_gives() {
         &AdvancedSubscriberOptions::new()
             .with_recovery(RecoveryConfig::new().with_periodic_queries(Duration::from_millis(500))),
         None,
-        OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
-        MissHandlers::default(),
+        Callbacks {
+            on_sample: OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+            misses: MissHandlers::default(),
+        },
         lent,
     )
     .map(|_| ());
@@ -1904,8 +1912,10 @@ fn a_subscriber_declared_in_a_lent_place_refuses_forms_in_its_options() {
         &AdvancedSubscriberOptions::new()
             .with_declaration_forms(FormsHandle::new(Arc::new(Literal))),
         Some(FormsHandle::new(Arc::new(Literal))),
-        OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
-        MissHandlers::default(),
+        Callbacks {
+            on_sample: OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+            misses: MissHandlers::default(),
+        },
         lent,
     );
 }
