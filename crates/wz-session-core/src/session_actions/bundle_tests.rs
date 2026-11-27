@@ -4623,11 +4623,10 @@ mod group_tx_tests {
         fn close_blocking(&self) {}
     }
 
-    /// A group of 1,024-byte frames numbered from 7 in the 28-bit ring, with no QoS.
-    fn group() -> (GroupTx<PlainRuntime>, Arc<Socket>) {
-        let socket = Arc::new(Socket::default());
-        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = socket.clone();
-        let limits = GroupTxLimits {
+    /// The limits of a group of 1,024-byte frames in the 28-bit ring, with no QoS, waiting as the
+    /// default policy waits.
+    fn limits() -> GroupTxLimits {
+        GroupTxLimits {
             frame_budget: 1024,
             sn_mask: crate::sn::mask_from_res(2),
             max_reassembly_bytes: usize::MAX,
@@ -4637,8 +4636,14 @@ mod group_tx_tests {
                 &crate::policy::SessionPolicy::defaults(),
                 &crate::limits::SessionLimits::BUILD,
             ),
-        };
-        (GroupTx::new(sink, 7, limits), socket)
+        }
+    }
+
+    /// A group of [`limits`] numbered from 7.
+    fn group() -> (GroupTx<PlainRuntime>, Arc<Socket>) {
+        let socket = Arc::new(Socket::default());
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = socket.clone();
+        (GroupTx::new(sink, 7, limits()), socket)
     }
 
     /// A reliable message that waits for room, of two bytes.
@@ -4692,6 +4697,61 @@ mod group_tx_tests {
             Err(SendWireError::TransportUnavailable)
         ));
         assert!(socket.sent().is_empty());
+    }
+
+    /// A link whose queue stays full: each ask for room is answered congested, the wait it was
+    /// made with noted.
+    #[derive(Default)]
+    struct Full {
+        asked: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl BoxedLinkDriver for Full {
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            LinkSendOutcome::Sent
+        }
+
+        fn wait_for_room(
+            &self,
+            _priority: Priority,
+            wait: crate::link::RoomWait,
+        ) -> crate::link::RoomAnswer {
+            self.asked
+                .lock()
+                .expect("no test thread panicked")
+                .push(wait.wait_us());
+            crate::link::RoomAnswer {
+                room: crate::link::LinkRoom::Congested,
+                waited_us: wait.wait_us(),
+            }
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+    }
+
+    /// A message that may not be dropped, sent at once on a link whose queue is full, asks for
+    /// room with no wait and is congested, where the same message sent to wait asks with the
+    /// group's `wait_before_close`. Turned red by an at-once send that asks with the message's
+    /// own wait, or one that is answered pushed on a full link.
+    #[test]
+    fn a_message_sent_at_once_asks_for_room_with_no_wait() {
+        let full = Arc::new(Full::default());
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = full.clone();
+        let close_us = limits().tx_queue.wait_before_close_us;
+        assert!(close_us > 0, "the default policy waits before it closes");
+        let group = GroupTx::<PlainRuntime>::new(sink, 7, limits());
+        assert!(matches!(
+            group.send_at_once(PUT, &body),
+            Ok(PushOutcome::Congested)
+        ));
+        assert!(matches!(group.send(PUT, &body), Ok(PushOutcome::Congested)));
+        assert_eq!(
+            *full.asked.lock().expect("no test thread panicked"),
+            [0, close_us]
+        );
+        assert_eq!(group.next_sn(Priority::DEFAULT, true), 7, "nothing minted");
     }
 
     /// A sender is read as holding its conduit while its body is written, and as gone once its

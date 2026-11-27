@@ -837,6 +837,20 @@ impl MulticastTxConduits {
         self.select_mut(priority).written(reliable, sn);
     }
 
+    /// The next SN the `(priority, reliable)` conduit will write is `next`, on its ring: what a
+    /// sender whose numbers are kept elsewhere (a group's transmit state) tells the announcer its
+    /// JOIN is encoded from.
+    pub fn set_next(&mut self, priority: crate::qos::Priority, reliable: bool, next: Sn) {
+        let conduit = self.select_mut(priority);
+        let mask = conduit.mask;
+        let slot = if reliable {
+            &mut conduit.next_reliable
+        } else {
+            &mut conduit.next_best_effort
+        };
+        *slot = next & mask;
+    }
+
     /// The DEFAULT-priority conduit as a plain [`TxSn`] snapshot — the source of
     /// the single-conduit JOIN advertisement (`Join.next_sn`, and the whole beacon
     /// on a non-qos session). Zenoh's qos JOIN sets `next_sn = PrioritySn::DEFAULT`
@@ -1563,6 +1577,24 @@ mod tests {
             "one shared ring: the second mint is +1"
         );
         assert_eq!(tx.advertise_default().next_reliable, 2);
+    }
+
+    /// A next SN set on one channel of a conduit is what that channel advertises, held to the
+    /// ring, and the other channel keeps its own. Turned red by a set that writes the other
+    /// channel, or one that leaves a number past the ring.
+    #[test]
+    fn mcast_tx_conduits_advertise_a_next_set_from_outside() {
+        use crate::qos::Priority;
+        let mask = mask_from_res(0x00);
+        let mut tx = MulticastTxConduits::new(mask);
+        tx.set_next(Priority::DEFAULT, true, mask + 5);
+        let advertised = tx.advertise_default();
+        assert_eq!(advertised.next_reliable, 4, "held to the ring");
+        assert_eq!(
+            advertised.next_best_effort, 0,
+            "the other channel is its own"
+        );
+        assert_eq!(tx.mint(Priority::DEFAULT, true), 4);
     }
 
     /// R311y227 — the multicast per-peer RX conduits gate INDEPENDENTLY (the RX

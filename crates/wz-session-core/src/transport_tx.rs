@@ -2623,6 +2623,14 @@ impl<R: SessionRuntime> GroupTx<R> {
         crate::sn::from_wire(self.tx.frame_sn.next(priority, reliable)) & self.limits.sn_mask
     }
 
+    /// The counters the group's sends are counted into: the walk's emit counts each frame it
+    /// handed the group's link here, as a unicast session's sends are counted into its transmit
+    /// state's.
+    #[cfg(feature = "transport-stats")]
+    pub fn stats(&self) -> &crate::stats::TransportStats {
+        &self.tx.stats
+    }
+
     /// Send `message`, whose body `body` writes, as a unicast session's dispatch does from its
     /// conduit's lock on: the conduit locked, the frame opened or joined, its room asked within
     /// the message's wait, its sequence number minted and the frame handed to the group's link,
@@ -2648,6 +2656,65 @@ impl<R: SessionRuntime> GroupTx<R> {
         message: GroupTxMessage,
         body: &dyn crate::tx_buf::WireWrite,
     ) -> Result<crate::tx_deadline::PushOutcome, crate::send_wire_error::SendWireError> {
+        let deadline =
+            crate::tx_deadline::PushDeadline::new(message.droppable, &self.limits.tx_queue);
+        self.send_within(message, body, deadline, message.droppable)
+    }
+
+    /// [`Self::send`] of a message that may not wait, whatever its congestion control: its room is
+    /// asked with a wait of zero, and a conduit another sender holds drops it at once
+    /// (`PushOutcome::Held`). What the group's own step sends (a reply its dispatch answers) runs
+    /// inside the wait a sender of the group waits with, so a wait of its own could only wait on
+    /// itself.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    pub fn send_at_once(
+        &self,
+        message: GroupTxMessage,
+        body: &dyn crate::tx_buf::WireWrite,
+    ) -> Result<crate::tx_deadline::PushOutcome, crate::send_wire_error::SendWireError> {
+        let at_once = crate::session_init_params::TxQueueConf {
+            wait_before_drop_us: 0,
+            max_wait_before_drop_fragments_us: 0,
+            wait_before_close_us: 0,
+            no_progress_us: None,
+            ..self.limits.tx_queue
+        };
+        let deadline = crate::tx_deadline::PushDeadline::new(message.droppable, &at_once);
+        self.send_within(message, body, deadline, true)
+    }
+
+    /// The one body of [`Self::send`] and [`Self::send_at_once`]: `message` written within
+    /// `deadline`, and dropped at once behind another sender of its conduit when `try_lock`.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn send_within(
+        &self,
+        message: GroupTxMessage,
+        body: &dyn crate::tx_buf::WireWrite,
+        deadline: crate::tx_deadline::PushDeadline,
+        try_lock: bool,
+    ) -> Result<crate::tx_deadline::PushOutcome, crate::send_wire_error::SendWireError> {
         use crate::tx_deadline::PushOutcome;
         if !self.link.transport_available.is_open() {
             return Err(crate::send_wire_error::SendWireError::TransportUnavailable);
@@ -2666,8 +2733,6 @@ impl<R: SessionRuntime> GroupTx<R> {
         #[cfg(not(feature = "transport-qos"))]
         let ext_qos = None;
         let route = self.route();
-        let deadline =
-            crate::tx_deadline::PushDeadline::new(message.droppable, &self.limits.tx_queue);
         let write = |batch: &mut BatchTx| {
             route.write(
                 batch,
@@ -2689,7 +2754,7 @@ impl<R: SessionRuntime> GroupTx<R> {
             )
         };
         let conduit = self.tx.conduits.conduit(priority);
-        let pushed = if message.droppable {
+        let pushed = if try_lock {
             let mut write = Some(write);
             loop {
                 let taken =
