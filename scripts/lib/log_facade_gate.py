@@ -20,8 +20,8 @@ that enables it notices. This gate makes the rule a static verdict.
 Every member of the `crates` workspace but the crates in `EXEMPT`: their `src/**.rs`, minus every file
 and item that exists only in a test build (`subsystem_spawn_gate`'s reader, so the gates agree on
 what test code is), and their manifests' normal dependencies. A crate is exempt only when it is a
-host's alone: a member, outside the graph `cargo tree` resolves for `wz-capi-pico` under its `coop`
-documentation set (every feature but the tokio engine's, the set `host_lock_gate` reads), and
+host's alone: a member, outside the graphs `cargo tree` resolves for `wz-capi-pico` under its
+cooperative documentation sets (the host's and the Zephyr image's, the sets `host_lock_gate` reads), and
 calling the facade somewhere, or its entry is one to remove.
 
 ## What is refused
@@ -258,7 +258,7 @@ def grade(
 def check() -> int:
     try:
         meta = cargo_workspaces.metadata("crates")
-        tree = host_lock_gate.library_tree(host_lock_gate.library_features(meta))
+        tree = host_lock_gate.cooperative_tree(meta)
         findings, crates, found = grade(REPO_ROOT, meta, tree, ALLOWED, EXEMPT, LOG_DEPENDENCY)
     except (InputError, host_lock_gate.InputError, RuntimeError, OSError) as e:
         print(f"log-facade: FAIL -- cannot grade: {e}", file=sys.stderr)

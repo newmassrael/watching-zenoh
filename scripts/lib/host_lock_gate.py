@@ -21,9 +21,10 @@ library name `std`'s lock in one file, the one that chooses it.
 ## The population
 
 Every workspace member the cooperative pico C ABI links: what `cargo tree -e normal` resolves for
-`wz-capi-pico` under its `coop` documentation set (`[package.metadata.wz-docs]`, read by
-`doc_feature_sets.py`: every feature but the tokio engine's), so a crate that set reaches is held
-and the tokio engine's crates are not. Their `src/**.rs`, minus every file and item that exists
+`wz-capi-pico` under each of its cooperative documentation sets (`[package.metadata.wz-docs]`,
+read by `doc_feature_sets.py`), the host's and the Zephyr image's, so a crate either system reaches
+is held and the tokio engine's crates are not. One set cannot hold both systems (`os-host` beside
+`os-zephyr` is refused), so the population is the union of the two graphs. Their `src/**.rs`, minus every file and item that exists
 only in a test build (`subsystem_spawn_gate`'s reader, so the gates agree on what test code is):
 a test may hold `std`'s lock, and the test binaries count what the host's lock takes.
 
@@ -68,19 +69,20 @@ from subsystem_spawn_gate import cfg_test_files, cfg_test_spans  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: The library whose graph is the population, and its documentation set that is the cooperative
-#: engine's.
+#: The library whose graph is the population, and its documentation sets that are the cooperative
+#: engine's, one a system: the host's and the Zephyr image's.
 LIBRARY = "wz-capi-pico"
-FEATURE_SET = "coop"
+FEATURE_SETS = ("host", "zephyr")
 #: The crate the lock comes from; a population without it measured nothing.
 DOOR = "wz-host-sync"
 
 #: (path relative to the root) -> (how many places name `std`'s lock there, the reason).
 ALLOWED: dict[str, tuple[int, str]] = {
     "crates/wz-host-sync/src/std_lock.rs": (
-        6,
+        7,
         "the door: `std`'s lock, condition variable and reader-writer lock, which the crate root "
-        "chooses in a build with `std` on a host where they lie in their own bytes",
+        "chooses in a build with `std` on a host where they lie in their own bytes; the lock is "
+        "made in two places, by value and in the place it stays (`Mutex::init_at`)",
     ),
     "crates/wz-session-core/src/session_actions.rs": (
         2,
@@ -109,8 +111,8 @@ class InputError(Exception):
     """An input this gate could not read. Reported as a FAIL, never a traceback."""
 
 
-def library_features(meta: dict) -> list[str]:
-    """The features of `LIBRARY`'s `FEATURE_SET` documentation set."""
+def library_feature_sets(meta: dict) -> list[list[str]]:
+    """The features of each of `LIBRARY`'s `FEATURE_SETS` documentation sets."""
     for pkg in meta.get("packages", []):
         if pkg.get("name") != LIBRARY:
             continue
@@ -118,9 +120,10 @@ def library_features(meta: dict) -> list[str]:
             sets = dict(doc_feature_sets.documentation_sets(pkg))
         except doc_feature_sets.ManifestError as e:
             raise InputError(f"{LIBRARY}'s documentation sets: {e}") from e
-        if FEATURE_SET not in sets:
-            raise InputError(f"{LIBRARY} declares no `{FEATURE_SET}` documentation set")
-        return list(sets[FEATURE_SET])
+        missing = [name for name in FEATURE_SETS if name not in sets]
+        if missing:
+            raise InputError(f"{LIBRARY} declares no `{missing[0]}` documentation set")
+        return [list(sets[name]) for name in FEATURE_SETS]
     raise InputError(f"{LIBRARY} is not a workspace member; nothing was measured")
 
 
@@ -138,6 +141,11 @@ def library_tree(features: list[str]) -> str:
     if proc.returncode != 0:
         raise InputError(f"`cargo tree` failed (rc={proc.returncode}): {proc.stderr.strip()[:400]}")
     return proc.stdout
+
+
+def cooperative_tree(meta: dict) -> str:
+    """The `library_tree` of every cooperative set, one after the other: the union of the graphs."""
+    return "".join(library_tree(features) for features in library_feature_sets(meta))
 
 
 def population(meta: dict, tree: str) -> dict[str, Path]:
@@ -228,7 +236,7 @@ def grade(
 def check() -> int:
     try:
         meta = cargo_workspaces.metadata("crates")
-        tree = library_tree(library_features(meta))
+        tree = cooperative_tree(meta)
         findings, crates, found = grade(REPO_ROOT, meta, tree, ALLOWED)
     except (InputError, RuntimeError, OSError) as e:
         print(f"host-lock: FAIL -- cannot grade: {e}", file=sys.stderr)

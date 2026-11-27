@@ -206,12 +206,14 @@ def cfg_test_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     for start, end in _test_cfg_attrs(text):
         i = text.find("{", end)
-        if i < 0:
-            continue
-        # An item with no body (`mod tests;`, `use ..;`) ends at its `;`: the next block is not
-        # its own. The out-of-line module is `cfg_test_files`'s.
+        # An item with no body (`type ..;`, `use ..;`, `mod tests;`) ends at its `;`: the next
+        # block is not its own, and the item itself is test code (a test-only `type` alias naming a
+        # host's lock was read as production). The out-of-line module's file is `cfg_test_files`'s.
         semi = text.find(";", end)
-        if 0 <= semi < i:
+        if semi >= 0 and (i < 0 or semi < i):
+            spans.append((start, semi + 1))
+            continue
+        if i < 0:
             continue
         depth = 0
         j = i
@@ -459,6 +461,12 @@ def selftest() -> int:
             "under cfg(all(test, feature)), which is test-only as well",
             '#[cfg(all(test, feature = "engine-tokio"))]\nmod t {\n    fn f() { tokio::spawn(g()); }\n}',
             0,
+            0,
+        ),
+        (
+            "after a test-only item with no body, whose span ends at its own `;`",
+            "#[cfg(test)]\ntype T = u8;\nfn f() { tokio::spawn(g()); }",
+            1,
             0,
         ),
         (
