@@ -995,7 +995,7 @@ impl State {
     /// [`Self::with_retransmission`] and [`Self::with_history`] set them, made in `place`: a state
     /// holds the bytes its sources hold samples back in (`ADVANCED_SUBSCRIBER_PENDING_BYTES`), so a
     /// host that keeps it in a place of its own writes it there rather than moving it there.
-    #[cfg(feature = "advanced-history")]
+    #[cfg(feature = "engine-host")]
     pub(crate) fn write_in(
         place: &mut core::mem::MaybeUninit<Self>,
         on_sample: OnSample,

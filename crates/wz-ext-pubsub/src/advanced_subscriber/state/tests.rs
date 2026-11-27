@@ -209,7 +209,7 @@ fn a_lent_listener_alone_makes_no_map_and_is_heard_first() {
 /// its range, and both go on in order once their gets end. The place is filled with ones first,
 /// so a field `State::write_in` left unwritten (the span samples are held back in, above all) is
 /// read as it was left. Turned red by a field written at another value than the builder's.
-#[cfg(feature = "advanced-history")]
+#[cfg(feature = "engine-host")]
 #[test]
 fn a_state_written_in_its_place_is_the_one_the_builder_makes() {
     let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
