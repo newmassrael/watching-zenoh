@@ -24829,7 +24829,7 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
         --features lifecycle-doors,identity-make --target-dir "$cmd_capi_target" --quiet) \
         || decl_rc=1; }
     wz_test_args wz-integration-tests wz_declared_commander_zenohd_interop
-    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zcmd 6 env WZ_ZENOHD_BIN="$zenohd" \
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zcmd 9 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_CAPI_C_LIFECYCLE_LIB="$cmd_capi_target/debug/libwz_capi_c.so" \
         cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
