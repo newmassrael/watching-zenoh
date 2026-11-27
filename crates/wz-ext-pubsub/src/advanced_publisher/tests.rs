@@ -16,6 +16,8 @@ struct RecordingPlane {
     order_from: Option<std::sync::atomic::AtomicU64>,
     /// The time word and the sequence number of each sample sent, in order.
     stamped: std::sync::Mutex<Vec<(Option<u64>, Option<u32>)>>,
+    /// The kind and the payload's length of each sample sent, in order.
+    sent: std::sync::Mutex<Vec<(SampleKind, usize)>>,
     /// The node clock the plane answers with; `NodeHlc::disabled()` unless a test gives one.
     node: NodeHlc,
     /// The bytes of the ring the session keeps its caches in; `None` keeps them on the heap.
@@ -45,6 +47,7 @@ impl RecordingPlane {
             ticks: std::sync::Mutex::new(Vec::new()),
             order_from: None,
             stamped: std::sync::Mutex::new(Vec::new()),
+            sent: std::sync::Mutex::new(Vec::new()),
             node: NodeHlc::disabled(),
             ring: None,
         }
@@ -186,6 +189,10 @@ impl AdvancedPublisherPlane for RecordingPlane {
         options: PublishOptions,
     ) -> Result<usize, PublishError> {
         self.events.lock().unwrap().push(String::from("publish"));
+        self.sent
+            .lock()
+            .unwrap()
+            .push((options.kind, payload.len()));
         self.stamped.lock().unwrap().push((
             options.timestamp.map(|timestamp| timestamp.time),
             options.source_info.map(|source| source.sn),
@@ -645,6 +652,54 @@ fn a_put_and_a_delete_carry_the_time_the_plane_orders() {
     publisher.put(b"x").expect("a put is accepted");
     publisher.delete().expect("a delete is accepted");
     assert_eq!(plane.stamped(), [(Some(42), Some(0)), (Some(43), Some(1))]);
+}
+
+/// A delete is the put's one body with the Del kind and no value: it goes out as a Del with no
+/// payload, takes the next number of the same counter, and its cache keeps it beside the puts.
+/// Turned red by a delete that leaves the kind of the put it is written with.
+#[test]
+fn a_delete_is_sent_and_kept_as_a_del_through_the_puts_body() {
+    let plane = Arc::new(RecordingPlane::new(true));
+    let options = AdvancedPublisherOptions {
+        cache: Some(CacheConfig {
+            max_samples: 3,
+            ..CacheConfig::default()
+        }),
+        publisher_detection: false,
+        ..AdvancedPublisherOptions::default()
+    };
+    let publisher = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/del",
+        options,
+        SessionZid::from([0x01]),
+    )
+    .expect("the declaration is accepted");
+    publisher.put(b"xy").expect("a put is accepted");
+    assert_eq!(publisher.delete(), Ok(0), "a Del carries no payload");
+    publisher.put(b"z").expect("a put is accepted");
+    assert_eq!(
+        *plane.sent.lock().unwrap(),
+        [
+            (SampleKind::Put, 2),
+            (SampleKind::Del, 0),
+            (SampleKind::Put, 1)
+        ]
+    );
+    assert_eq!(
+        plane
+            .stamped()
+            .iter()
+            .map(|(_, sn)| *sn)
+            .collect::<Vec<_>>(),
+        [Some(0), Some(1), Some(2)],
+        "one counter numbers the puts and the Del"
+    );
+    assert_eq!(
+        publisher.cache().map(CacheStore::len),
+        Some(3),
+        "the cache kept the Del too"
+    );
 }
 
 /// A plane that does not order stamps carries the node clock's proposal as it is.

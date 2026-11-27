@@ -1093,7 +1093,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         payload: &[u8],
         options: AdvancedPutOptions<'_>,
     ) -> Result<usize, PublishError> {
-        self.put_sample(SamplePayload::Bytes(payload), options)
+        self.put_sample(SamplePayload::Bytes(payload), options, SampleKind::Put)
     }
 
     /// R3063 -- [`Self::put_with`] for a payload that is a CHUNK of shared memory: the same
@@ -1106,7 +1106,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         payload: &Arc<dyn ShmChunk>,
         options: AdvancedPutOptions<'_>,
     ) -> Result<usize, PublishError> {
-        self.put_sample(SamplePayload::Chunk(payload), options)
+        self.put_sample(SamplePayload::Chunk(payload), options, SampleKind::Put)
     }
 
     /// The timestamp of the next sample, a Put's or a Del's: the node clock's proposal, as the
@@ -1131,12 +1131,14 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         )
     }
 
-    /// The one body of [`Self::put_with`] and `put_shm_with`: what a put stamps and
-    /// retains is written once, so a chunk and bytes cannot be sequenced differently.
+    /// The one body of [`Self::put_with`], `put_shm_with` and [`Self::delete`]: what a sample
+    /// stamps and retains is written once, so a chunk, bytes and a Del cannot be sequenced
+    /// differently.
     fn put_sample(
         &self,
         payload: SamplePayload<'_>,
         options: AdvancedPutOptions<'_>,
+        kind: SampleKind,
     ) -> Result<usize, PublishError> {
         // What the cache keeps of the sample, read where the put holds it. A cache that cannot
         // keep it refuses the put first, before it takes a time or a sequence number, so no
@@ -1150,7 +1152,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
                         #[cfg(feature = "transport-shm")]
                         SamplePayload::Chunk(_) => &[],
                     },
-                    kind: SampleKind::Put,
+                    kind,
                     encoding: options.encoding.as_ref().map(CarriedEncoding::view),
                     attachment: options.attachment.as_deref(),
                     #[cfg(feature = "transport-shm")]
@@ -1185,6 +1187,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         let mut opts = self
             .qos
             .apply(PublishOptions::put())
+            .with_kind(kind)
             .with_timestamp(timestamp.clone());
         if let Some(si) = &source_info {
             opts = opts.with_source_info(si.clone());
@@ -1252,52 +1255,14 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
         // (`has_attachment` is `_is_put && ..`, and the encoding is read only in the `_is_put`
         // branch — `message.c:263,269-276`), and upstream's
         // `ze_advanced_publisher_delete_options_t` has no slot for either. The absence is
-        // structural, not an omission. Refused first when the cache cannot keep it, as a put is.
-        let kept = match &self.cache {
-            Some(cache) => {
-                let body = SampleBody {
-                    keyexpr: &self.keyexpr,
-                    payload: &[],
-                    kind: SampleKind::Del,
-                    encoding: None,
-                    attachment: None,
-                    #[cfg(feature = "transport-shm")]
-                    shared: None,
-                };
-                cache.store.check_room(&body)?;
-                Some((&cache.store, body))
-            }
-            None => None,
-        };
-        // The time first, as a put takes it: a refused delete takes no sequence number.
-        let timestamp = self.next_timestamp()?;
-        let sn = self
-            .seqnum
-            .as_ref()
-            .map(|counter| counter.fetch_add(1, Ordering::Relaxed));
-        let source_info = sn.map(|sn| SourceInfo::new(&self.zid, self.eid, sn));
-
-        // R2618 — the SAME fold as the Put arm. The encoding / attachment chain
-        // is deliberately absent here (a Del body carries neither ext), but QoS,
-        // locality and reliability are properties of the PUBLISHER and a Del
-        // carries them exactly as a Put does.
-        let mut opts = self
-            .qos
-            .apply(PublishOptions::put())
-            .with_kind(SampleKind::Del)
-            .with_timestamp(timestamp.clone());
-        if let Some(si) = &source_info {
-            opts = opts.with_source_info(si.clone());
-        }
-        let written = self
-            .plane
-            .publish(&self.publisher, &self.keyexpr, &[], opts)?;
-
-        if let Some((store, body)) = kept {
-            self.hold_cache_key(store);
-            store.retain(body, source_info, timestamp);
-        }
-        Ok(written)
+        // structural, not an omission. QoS, locality and reliability are properties of the
+        // PUBLISHER (R2618), and a Del carries them exactly as a Put does: it is the put's one
+        // body, with the Del kind and no value.
+        self.put_sample(
+            SamplePayload::Bytes(&[]),
+            AdvancedPutOptions::default(),
+            SampleKind::Del,
+        )
     }
 
     /// Hand the publisher's key to its cache with the first sample the cache keeps
