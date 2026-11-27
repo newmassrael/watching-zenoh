@@ -5,10 +5,10 @@ The size of the pico C ABI's release DLL against zenoh-pico on Windows (docs/ups
 the half of the reading only a Windows host can make, zenoh-pico built with MSVC as the plan says.
 'pico_windows_package.py --size-plan' makes the plan from a package zip, and
 'pico_windows_package.py --size-judge' grades what this leaves. It runs in Windows PowerShell 5.1 and
-needs the MSVC toolchain and CMake; no Python and no Rust.
+needs the MSVC toolchain, CMake and the linker a Rust toolchain ships; no Python.
 
-  size_ceiling.ps1 -Plan plan.json -PicoSource DIR|ZIP -Work DIR -Out DIR [-CMake cmake.exe]
-                   [-Generator NAME]
+  size_ceiling.ps1 -Plan plan.json -PicoSource DIR|ZIP -Linker LLD-LINK -Work DIR -Out DIR
+                   [-CMake cmake.exe] [-Generator NAME]
 
 The plan names the width (the compiler vcvarsall.bat sets up and CMake's platform), the switches
 derived from the package's features, the other CMake arguments of the same build and its
@@ -18,9 +18,15 @@ configured, since pico's configure writes into its source tree. The generator is
 generator of the newest Visual Studio vswhere names, the one whose compiler vcvarsall.bat sets up,
 configured on that installation; -Generator names another, and then CMake picks its installation.
 
+-Linker is the lld-link.exe of the Rust toolchain the package was built with (the pin of
+rust-toolchain.toml; under its sysroot, lib\rustlib\<host>\bin\gcc-ld\lld-link.exe). The release DLL
+is linked by that linker and no library of Visual Studio (crates/.cargo/capi-nostd.toml), so the
+reference is linked by it as well, MSBuild given it for every link (LinkToolExe, LinkToolPath): the
+judge holds both DLLs to one linker. Its version is part of the reading's toolchain.
+
 -Out is left holding the reading: plan.json (the plan as it was given), zenohpico.dll (the
 reference), config.h (the header pico generated, from which the judge reads a switch built otherwise
-than asked) and reading.json (the toolchain, the date, and the CMake cache entries of pico's own
+than asked) and reading.json (the toolchain, the linker, the date, and the CMake cache entries of pico's own
 options and of the build's type and flags). Each run writes the four files over what was there.
 
 Exit status: 0 when the reference was built and the reading written, 2 when an input is refused or
@@ -37,17 +43,24 @@ Platform run, the single library without std of the width (x86 alike, with its a
   git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$PWD/$out/zenoh-pico.zip" HEAD
   ssh pc3-win "if not exist C:\wzsize mkdir C:\wzsize"
   scp "$out/plan.json" "$out/zenoh-pico.zip" scripts/host-bench/windows/size_ceiling.ps1 pc3-win:C:/wzsize/
-  ssh pc3-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\wzsize\size_ceiling.ps1 -Plan C:\wzsize\plan.json -PicoSource C:\wzsize\zenoh-pico.zip -Work C:\wzsize\work -Out C:\wzsize\reading"
+  tc="$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)-x86_64-pc-windows-msvc"
+  ssh pc3-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\wzsize\size_ceiling.ps1 -Plan C:\wzsize\plan.json -PicoSource C:\wzsize\zenoh-pico.zip -Linker %USERPROFILE%\.rustup\toolchains\\$tc\lib\rustlib\x86_64-pc-windows-msvc\bin\gcc-ld\lld-link.exe -Work C:\wzsize\work -Out C:\wzsize\reading"
   scp -r pc3-win:C:/wzsize/reading "$out/"
   python3 scripts/lib/pico_windows_package.py --size-judge "$zip" "$out/reading"
 
-The judge holds the two DLLs to one linker: on a host whose link.exe is another version than the one
-that linked the package, the reading is a finding and not a figure.
+The judge holds the two DLLs to one linker: a reference linked by another linker than the one that
+linked the package (MSBuild's own link.exe above all) is a finding and not a figure.
+
+The like-for-like verdict (pico_windows_package.py --size-features) builds wz's libraries, so it runs on
+the Windows host itself, in a checkout of the same commit with its submodules, the pinned Rust
+toolchain with both Windows targets and the Python of .github/python-version, on the reading this
+left: python scripts/lib/pico_windows_package.py --size-features C:\wzsize\reading
 #>
 [CmdletBinding()]
 param(
     [string]$Plan = '',
     [string]$PicoSource = '',
+    [string]$Linker = '',
     [string]$Work = '',
     [string]$Out = '',
     [string]$CMake = '',
@@ -63,7 +76,7 @@ $Utf8 = New-Object System.Text.UTF8Encoding $false
 $CRLF = [string][char]13 + [string][char]10
 $Q = '"'
 $PlanSchema = 'wz-pico-size-windows-plan/1'
-$ReadingSchema = 'wz-pico-size-windows-reading/1'
+$ReadingSchema = 'wz-pico-size-windows-reading/2'
 
 function Fail([string]$why) {
     [Console]::Out.WriteLine("pico-size-windows: REFUSED, $why")
@@ -185,6 +198,7 @@ function Get-CacheOptions([string]$cache) {
 foreach ($given in @(@('-Plan', $Plan), @('-PicoSource', $PicoSource))) {
     if (-not $given[1] -or -not (Test-Path -LiteralPath $given[1])) { Fail "$($given[0]) names nothing ('$($given[1])')" }
 }
+if (-not $Linker -or -not (Test-Path -LiteralPath $Linker -PathType Leaf)) { Fail "-Linker names no linker ('$Linker')" }
 if (-not $Work) { Fail '-Work names no directory' }
 if (-not $Out) { Fail '-Out names no directory' }
 $planPath = (Resolve-Path -LiteralPath $Plan).Path
@@ -207,6 +221,10 @@ $vsRoot = Find-VsRoot $vswhere
 $script:VcVars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvarsall.bat'
 if (-not (Test-Path -LiteralPath $script:VcVars)) { Fail "no vcvarsall.bat at $script:VcVars" }
 $cmakeExe = Find-CMake
+$linkerPath = (Resolve-Path -LiteralPath $Linker).Path
+# MSBuild links with the tool these name in place of its own link.exe, for every project CMake writes.
+$linkGlobals = '-DCMAKE_VS_GLOBALS=LinkToolExe=' + (Split-Path -Leaf $linkerPath) + ';LinkToolPath=' +
+               (Split-Path -Parent $linkerPath).Replace('\', '/')
 # A derived generator is held to the installation it was derived from; a named one is CMake's to place.
 if ($Generator) {
     $generatorName = $Generator
@@ -236,7 +254,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $picoTree 'CMakeLists.txt'))) { Fail
 $build = Join-Path $script:WorkDir 'pico-build'
 Reset-Directory $build
 $switches = @($planDoc.reference_switches.PSObject.Properties | Sort-Object Name)
-$arguments = @($planDoc.reference_cmake) + $instance + @($switches | ForEach-Object { '-D' + $_.Name + '=' + $_.Value })
+$arguments = @($planDoc.reference_cmake) + $instance + @($linkGlobals) + @($switches | ForEach-Object { '-D' + $_.Name + '=' + $_.Value })
 $quoted = ($arguments | ForEach-Object { $Q + $_ + $Q }) -join ' '
 $configure = $Q + $cmakeExe + $Q + ' -S ' + $Q + $picoTree + $Q + ' -B ' + $Q + $build + $Q + ' -G ' + $Q + $generatorName + $Q +
              ' -A ' + $platform + ' ' + $quoted
@@ -251,13 +269,16 @@ if ($dll.Count -ne 1) { Fail "the reference build left $($dll.Count) zenohpico.d
 $header = Join-Path $build 'include\zenoh-pico\config.h'
 if (-not (Test-Path -LiteralPath $header)) { Fail "the reference build left no $header" }
 
-# The toolchain, in the words the reading gives it: cl's banner (it exits non-zero with no input) and CMake's.
+# The toolchain, in the words the reading gives it: CMake's, the linker's, and cl's banner, last since it
+# exits non-zero with no input.
 $versionLog = Join-Path $script:WorkDir 'toolchain.log'
 if (Test-Path -LiteralPath $versionLog) { Remove-Item -Force -LiteralPath $versionLog }
-[void](Invoke-InVs 'toolchain' $compilerArch @(($Q + $cmakeExe + $Q + ' --version'), 'cl') $versionLog)
+[void](Invoke-InVs 'toolchain' $compilerArch @(($Q + $cmakeExe + $Q + ' --version'), ($Q + $linkerPath + $Q + ' --version'), 'cl') $versionLog)
 $said = @((Read-Text $versionLog) -split "\r?\n")
 $compiler = @($said | Where-Object { $_ -match '^Microsoft \(R\) C/C\+\+' } | Select-Object -First 1)
 $maker = @($said | Where-Object { $_ -match '^cmake version' } | Select-Object -First 1)
+$linkerSaid = @($said | Where-Object { $_ -match '^LLD [0-9]' } | Select-Object -First 1)
+if ($linkerSaid.Count -ne 1) { Fail-WithLog "$Linker did not state its version as LLD does" $versionLog }
 if ($compiler.Count -ne 1 -or $maker.Count -ne 1) { Fail-WithLog 'the toolchain did not state its versions' $versionLog }
 
 # -- the reading ---------------------------------------------------------------------------------------
@@ -265,7 +286,9 @@ if ($compiler.Count -ne 1 -or $maker.Count -ne 1) { Fail-WithLog 'the toolchain 
 $reading = [ordered]@{
     schema = $ReadingSchema
     date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')
-    toolchain = ('{0}; {1}; generator {2} {3}' -f "$($compiler[0])".Trim(), "$($maker[0])".Trim(), $generatorName, $platform)
+    toolchain = ('{0}; {1}; generator {2} {3}; linker {4}' -f "$($compiler[0])".Trim(), "$($maker[0])".Trim(),
+                 $generatorName, $platform, "$($linkerSaid[0])".Trim())
+    linker = "$($linkerSaid[0])".Trim()
     reference_cache = Get-CacheOptions (Read-Text (Join-Path $build 'CMakeCache.txt'))
 }
 if (-not (Test-Path -LiteralPath $Out)) { [void](New-Item -ItemType Directory -Path $Out) }
