@@ -46,7 +46,7 @@ use wz_capi_port::lodge::Strong;
 use wz_capi_port::cancellation::{CancellationToken, TokenRef};
 use wz_capi_port::FilterPlane;
 
-use crate::abi::{handle_ref, impl_handle_ownership7, z_loaned_keyexpr_t, z_moved_bytes_t};
+use crate::abi::{handle_at, impl_handle_ownership7, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::ffi::guarded;
 use crate::get::{issue_get, z_moved_closure_reply_t, GetMoved, GetShape};
 use crate::get::{
@@ -59,13 +59,14 @@ use crate::matching::{
     z_owned_matching_listener_t,
 };
 // A build of one engine calls the engine through its own type, so the port's trait is in scope.
+use crate::object_slot::{entity_engine, Answering};
 #[cfg(not(feature = "engine-tokio"))]
 use crate::prelude::*;
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
 use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
 use crate::session::{session_handle, z_loaned_session_t};
-use crate::write_filter::{FilteredKey, PicoSession, WriteFilter};
+use crate::write_filter::{FilterOn, FilteredKey, PicoSession};
 
 // --- options ---------------------------------------------------------------
 
@@ -243,14 +244,18 @@ impl GetShape {
 
 // --- handle ----------------------------------------------------------------
 
-/// Behind a `z_owned_querier_t`: the declared keyexpr, the options every get
-/// through it inherits, and the session's engine to ask them on.
+/// Behind a `z_owned_querier_t`: the declared keyexpr and the options every get
+/// through it inherits. It lies in a place of its session's, whose lender holds the session's
+/// engine to ask them on (`crate::object_slot::entity_engine`).
 pub(crate) struct QuerierState {
+    /// The session's engine on the tokio engine, whose places are its pools' and hold none.
+    #[cfg(feature = "engine-tokio")]
+    shared: crate::session::EngineHold,
     /// pico's write filter for this querier, which decides whether a get is SENT, and which its
-    /// matching listeners are declared on and retracted with, holding the session the querier is
-    /// declared in; the querier's key, which the session's record of the filter keeps with the
-    /// whole-key declaration pico makes for it, retracted after the filter's Interest, as the
-    /// publisher's is; and the `eid` half of the global id `z_querier_id` reports.
+    /// matching listeners are declared on and retracted with; the querier's key, which the
+    /// session's record of the filter keeps with the whole-key declaration pico makes for it,
+    /// retracted after the filter's Interest, as the publisher's is; and the `eid` half of the
+    /// global id `z_querier_id` reports.
     entity: FilteredKey,
     /// The loan `z_querier_keyexpr` hands back, from the record ([`FilteredKey::lend`]); bound
     /// once the state sits at its final address.
@@ -276,22 +281,42 @@ pub(crate) struct QuerierState {
     cancel: CancellationToken,
 }
 
-impl QuerierState {
-    /// Point the cached loan at the key the session's record keeps, once placed.
-    pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr = self.entity.lend(&mut self.record);
-    }
+/// A querier reaches its session's engine through its place, whose lender keeps the one count.
+impl crate::object_slot::SessionEntity for QuerierState {
+    #[cfg(not(feature = "engine-tokio"))]
+    type Placed = Answering<QuerierState>;
 
+    #[cfg(feature = "engine-tokio")]
+    fn kept_engine(&self) -> &crate::session::EngineHold {
+        &self.shared
+    }
+}
+
+/// Point the cached loan of the querier at `state` at the key the session's record keeps, naming
+/// the engine where the querier reaches it, once placed.
+///
+/// # Safety
+/// `state` is a live querier filled in a place
+/// [`Slot::take_entity`](crate::object_slot::Slot::take_entity) took, read through the pointer it
+/// was filled at, and its owner holds it.
+unsafe fn bind_querier(state: *mut QuerierState) {
+    // SAFETY: the caller's.
+    let engine = unsafe { entity_engine(state) };
+    // SAFETY: the caller's: the state is live and its owner holds it; the key and the record are
+    // fields of their own, apart from the engine's count.
+    unsafe {
+        let loan = (*state)
+            .entity
+            .lend(engine, &mut *addr_of_mut!((*state).record));
+        addr_of_mut!((*state).loaned_keyexpr).write(loan);
+    }
+}
+
+impl QuerierState {
     /// The `eid` half of the global id `z_querier_id` reports.
     #[cfg(feature = "unstable-api")]
     pub(crate) fn entity_id(&self) -> wz_session_core::wire_id::EntityId {
         self.entity.eid
-    }
-
-    /// The SESSION's zid — the other half of that global id.
-    #[cfg(feature = "unstable-api")]
-    pub(crate) fn shared_zid(&self) -> [u8; 16] {
-        self.entity.filter.engine().zid()
     }
 
     /// The cached borrow `z_querier_keyexpr` hands back.
@@ -343,6 +368,8 @@ unsafe fn free_querier(h: *mut c_void) {
     let state = h as *mut QuerierState;
     (*state).cancel.cancel();
     crate::object_slot::closures_of::<_, ()>(state).wait_none();
+    // Its write filter and the listeners on it, then its key's record, before the state goes.
+    (*state).entity.retract(entity_engine(state));
     crate::object_slot::retire_entity::<_, ()>(state);
 }
 
@@ -402,7 +429,7 @@ pub unsafe extern "C" fn z_declare_querier(
         // The querier's place is taken from its session before anything is declared, so a
         // session with no place left refuses the querier and nothing is declared.
         let Some(slot) = crate::object_slot::Slot::take_entity(
-            &session.engine,
+            session.engine,
             crate::object_slot::Kind::Querier,
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
@@ -433,6 +460,8 @@ pub unsafe extern "C" fn z_declare_querier(
             // holding none and never moved while the querier stands; each field is written once
             // through a pointer to it, not null as it is inside the place, the token made there.
             unsafe {
+                #[cfg(feature = "engine-tokio")]
+                addr_of_mut!((*at).shared).write(crate::session::EngineHold::clone(session.engine));
                 addr_of_mut!((*at).entity).write(filtered);
                 addr_of_mut!((*at).loaned_keyexpr).write(crate::abi::z_loaned_keyexpr_t::borrowed(
                     core::ptr::null(),
@@ -444,11 +473,11 @@ pub unsafe extern "C" fn z_declare_querier(
                 CancellationToken::init_in(NonNull::new_unchecked(addr_of_mut!((*at).cancel)));
             }
         };
-        let write = |at: *mut crate::object_slot::Answering<QuerierState>| {
+        let write = |at: *mut Answering<QuerierState>| {
             // SAFETY: the slot hands a place valid for writes of the querier's `Answering`,
             // holding none; `write_state` writes the whole querier.
             unsafe {
-                crate::object_slot::Answering::write_at(at, write_state, |kept: NonNull<()>| {
+                Answering::write_at(at, write_state, |kept: NonNull<()>| {
                     kept.as_ptr().write(());
                 })
             }
@@ -457,7 +486,7 @@ pub unsafe extern "C" fn z_declare_querier(
         let state = unsafe { slot.fill_in_place(write) };
         // The querier is the first thing in its place, so the place is its handle.
         let state = state.cast::<QuerierState>();
-        (*state).bind();
+        bind_querier(state);
         *querier = z_owned_querier_t {
             handle: state as *mut c_void,
             _pad: [core::ptr::null_mut(); 22],
@@ -476,7 +505,7 @@ pub unsafe extern "C" fn z_undeclare_querier(querier: *mut z_moved_querier_t) ->
         let handle = (*querier)._this.handle;
         if !handle.is_null() {
             (*querier)._this = z_owned_querier_t::null_value();
-            // Its drop retracts this querier's matching listeners; its place goes back with the
+            // Its release retracts this querier's matching listeners; its place goes back with the
             // last of it and its gets' closures.
             free_querier(handle);
         }
@@ -530,13 +559,15 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             Err(code) => return code,
         };
 
-        let state = match handle_ref::<z_loaned_querier_t, QuerierState>(querier) {
-            Some(s) => s,
+        let Some(at) = handle_at::<z_loaned_querier_t, QuerierState>(querier) else {
             // `closure` drops here, running the caller's `drop(context)`.
-            None => return Z_ERR_NULL,
+            return Z_ERR_NULL;
         };
         // Undeclaring the querier waits for this get's closure, and its place stands until then.
-        crate::object_slot::count_in_entity::<_, (), _>(core::ptr::from_ref(state), &mut closure);
+        crate::object_slot::count_in_entity::<_, (), _>(at, &mut closure);
+        // A live loaned querier names a live state in its place, whose lender holds the engine.
+        let engine = entity_engine(at);
+        let state = &*at;
         // R2962 — a write filter that says no queryable matches SENDS NOTHING and
         // runs the closure's `drop`, which is how this get completes without a
         // reply; the call still answers `Z_OK`
@@ -546,12 +577,11 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         // pico checks the session first, then the write filter, and on either refusal runs
         // the closure's `drop` (`z_querier_get_with_parameters_substr`, `should_proceed`); a
         // session on a multicast transport proceeds whatever the filter says.
-        let engine = state.entity.filter.engine();
         if engine.is_closed() {
             drop(closure);
             return Z_ERR_SESSION_CLOSED;
         }
-        if state.entity.filter.holds_back() {
+        if state.entity.filter.holds_back(engine) {
             drop(closure);
             return Z_OK;
         }
@@ -568,7 +598,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         issue_get(
             engine,
             state.entity.keyexpr(),
-            state.entity.wire_once(),
+            state.entity.wire_once(engine),
             &ask,
             closure,
             token,
@@ -596,11 +626,10 @@ pub unsafe extern "C" fn z_querier_get_matching_status(
         if matching_status.is_null() {
             return Z_ERR_NULL;
         }
-        let state = match handle_ref::<z_loaned_querier_t, QuerierState>(querier) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
+        let Some(filter) = querier_filter(querier) else {
+            return Z_ERR_NULL;
         };
-        (*matching_status).matching = !state.entity.filter.active();
+        (*matching_status).matching = filter.matches();
         Z_OK
     })
 }
@@ -634,9 +663,14 @@ pub unsafe extern "C" fn z_querier_declare_background_matching_listener(
 /// `ALL_COMPLETE` and the session's own for a querier whose destination admits them.
 ///
 /// # Safety
-/// `querier` must be null or a live loaned querier.
-unsafe fn querier_filter<'a>(querier: *const z_loaned_querier_t) -> Option<&'a WriteFilter> {
-    handle_ref::<z_loaned_querier_t, QuerierState>(querier).map(|state| &state.entity.filter)
+/// `querier` must be null or a live loaned querier, which stands for `'a`.
+unsafe fn querier_filter<'a>(querier: *const z_loaned_querier_t) -> Option<FilterOn<'a>> {
+    let state = handle_at::<z_loaned_querier_t, QuerierState>(querier)?;
+    Some(FilterOn {
+        filter: &(*state).entity.filter,
+        // A live loaned querier names a live state in its place, whose lender holds the engine.
+        engine: entity_engine(state),
+    })
 }
 
 #[cfg(test)]

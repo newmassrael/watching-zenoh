@@ -48,8 +48,6 @@
 use wz_capi_port::{
     FilterId, FilterPlane, FilteredPut, KeyView, MatchId, MatchingSink, Refusal, WireKey,
 };
-#[cfg(feature = "advanced")]
-use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::WhatAmI;
 
@@ -69,51 +67,31 @@ pub(crate) fn session_mode(handle: &PicoSessionHandle) -> WhatAmI {
     handle.ext.mode
 }
 
-/// What an entity needs of the session it is declared on, OWNED: the key table
-/// and the role.
+/// What an entity needs of the session it is declared on, lent from the session's handle for
+/// the length of a declaring call: the engine the session's drive holds, which the key
+/// declarations and the entities live in, and the session's role, which the write filter and the
+/// retractions follow. Both are the handle's own; the view keeps no copy of either.
 ///
-/// A declaring entry point borrows the session handle out of the C handle for
-/// the length of its call, and that is all it needs. A composite that declares
-/// more entities later — an advanced publisher beaconing from a task, say — has
-/// to keep what it declares them with, and the borrowed state cannot be kept. So
-/// the two facts every declaration reads are lifted out: the registry the key
-/// declarations and the entities live in, and the role the write filter and the
-/// retractions follow.
+/// A composite that declares more entities later (an advanced publisher beaconing from a task)
+/// keeps a count of the engine and the role where it keeps them, and lends the same view from
+/// those.
 ///
 /// The registry is the port's [`Engine`], which is all the client surface (keys,
 /// publishers, subscribers, matching, write filters) and the advanced plane may
 /// name (`docs/capi-pico-on-coop-engine.md`).
-#[derive(Clone)]
-pub(crate) struct PicoSession {
-    pub(crate) engine: EngineHold,
+#[derive(Clone, Copy)]
+pub(crate) struct PicoSession<'a> {
+    pub(crate) engine: &'a EngineHold,
     pub(crate) mode: WhatAmI,
-    /// The session's clock — `NodeHlc::disabled()` for a session this ABI did
-    /// not open, which no C entry point can hand it. Read by the advanced plane alone, whose
-    /// publisher stamps with it.
-    #[cfg(feature = "advanced")]
-    pub(crate) hlc: NodeHlc,
-    /// Every time the session gives, which the advanced plane's publisher stamps through, as a
-    /// program's `z_timestamp_new` does.
-    #[cfg(feature = "advanced")]
-    pub(crate) time: crate::last_timestamp::SessionTime,
 }
 
-impl PicoSession {
-    /// The session behind a borrowed handle, as its open made it once: a door that declares on it
-    /// borrows it, and one that keeps it clones it where it keeps it.
-    pub(crate) fn of(handle: &PicoSessionHandle) -> &Self {
-        &handle.pico
-    }
-
-    /// The session running on `engine` whose pico-side state is `ext`: made once, by the open.
-    pub(crate) fn over(engine: EngineHold, ext: &crate::session_ext::PicoSessionExt) -> Self {
+impl<'a> PicoSession<'a> {
+    /// The session behind a borrowed handle: its drive's engine and its role, where the handle
+    /// keeps them.
+    pub(crate) fn of(handle: &'a PicoSessionHandle) -> Self {
         Self {
-            engine,
-            mode: ext.mode,
-            #[cfg(feature = "advanced")]
-            hlc: ext.hlc.clone(),
-            #[cfg(feature = "advanced")]
-            time: ext.time.clone(),
+            engine: crate::session::engine_held(handle),
+            mode: handle.ext.mode,
         }
     }
 }
@@ -128,11 +106,12 @@ impl PicoSession {
 /// so it counts what the filter counts, and goes when the filter goes. A background
 /// listener, which has no handle, goes with it too.
 ///
-/// Declared BEFORE the entity's key in the owning struct, so the Interest is
-/// retracted while the declaration it names still stands — upstream's order
-/// (`_z_undeclare_publisher` clears the filter, then the key).
+/// It names no engine: its owner reaches the engine of the session it is declared in (through its
+/// place's lender, for an entity a program holds) and hands it to each call, and retracts the
+/// filter with it ([`Self::retract`]) before it lets go of the filter, while the declaration the
+/// filter's Interest names still stands: upstream's order (`_z_undeclare_publisher` clears the
+/// filter, then the key).
 pub(crate) struct WriteFilter {
-    shared: EngineHold,
     /// What the filter counts, on which key and whether the session's own entities count are the
     /// engine's, kept with this id, and its listeners count the same.
     id: FilterId,
@@ -161,20 +140,19 @@ impl WriteFilter {
     /// Beside the filter, its key as the session's record of it keeps it, valid until the filter
     /// is undeclared.
     pub(crate) fn declare(
-        session: &PicoSession,
+        session: PicoSession<'_>,
         plane: FilterPlane,
         keyexpr: &str,
         wire: &WireKey,
         count_local: bool,
     ) -> Result<(Self, KeyView), ZResult> {
-        let shared = session.engine.clone();
-        let ask = interest_ask(&shared, session.mode, keyexpr, wire);
-        let declared = shared
+        let engine = session.engine;
+        let ask = interest_ask(engine, session.mode, keyexpr, wire);
+        let declared = engine
             .declare_write_filter(plane, keyexpr, wire, ask, count_local)
             .map_err(|refused| refusal_code(refused, Door::WriteFilter))?;
         Ok((
             Self {
-                shared,
                 id: declared.id,
                 listeners: FilterListeners::default(),
             },
@@ -182,19 +160,18 @@ impl WriteFilter {
         ))
     }
 
-    /// Declare a matching listener on this filter (pico `_z_matching_listener_register` on
-    /// the entity's filter): `sink` is told whether what the filter counts matches, now and
-    /// each time that changes. The caller puts the listener on the filter's list
-    /// ([`Self::listeners`]), which retracts it with the filter.
+    /// Declare a matching listener on this filter of `engine` (pico
+    /// `_z_matching_listener_register` on the entity's filter): `sink` is told whether what the
+    /// filter counts matches, now and each time that changes. The caller puts the listener on the
+    /// filter's list ([`Self::listeners`]), which retracts it with the filter.
     ///
     /// A listener the engine refuses is answered by its cause, with `sink` let go of.
-    pub(crate) fn declare_matching_listener(&self, sink: MatchingSink) -> Result<MatchId, Refusal> {
-        self.shared.declare_filter_matching_listener(self.id, sink)
-    }
-
-    /// The session the filter is declared in, where its listeners are declared too.
-    pub(crate) fn engine(&self) -> &EngineHold {
-        &self.shared
+    pub(crate) fn declare_matching_listener(
+        &self,
+        engine: &EngineHold,
+        sink: MatchingSink,
+    ) -> Result<MatchId, Refusal> {
+        engine.declare_filter_matching_listener(self.id, sink)
     }
 
     /// The listeners declared on this filter that its drop retracts.
@@ -204,8 +181,8 @@ impl WriteFilter {
 
     /// pico `_z_write_filter_active`: `true` when nothing has said it matches,
     /// which is when the entity must send nothing.
-    pub(crate) fn active(&self) -> bool {
-        self.shared.write_filter_active(self.id)
+    pub(crate) fn active(&self, engine: &EngineHold) -> bool {
+        engine.write_filter_active(self.id)
     }
 
     /// Whether the filter keeps a get from being sent: [`Self::active`], unless the session
@@ -213,20 +190,21 @@ impl WriteFilter {
     /// `write_filter_holds_back`). A matching status still reads [`Self::active`]; a put and
     /// a delete are judged by the engine in the step that sends them ([`Self::publish`]).
     #[cfg(feature = "query")]
-    pub(crate) fn holds_back(&self) -> bool {
-        self.shared.write_filter_holds_back(self.id)
+    pub(crate) fn holds_back(&self, engine: &EngineHold) -> bool {
+        engine.write_filter_holds_back(self.id)
     }
 
     /// State how a write of this filter's entity that brings nothing of its own goes the plain
     /// way, once, at the entity's declare: the filter's row in the engine keeps it.
     pub(crate) fn keep_plain(
         &self,
+        engine: &EngineHold,
         plain: Option<(
             wz_session_core::publish_options::PlainPutParams,
             wz_session_core::session_tables::KeyexprRef,
         )>,
     ) {
-        self.shared.keep_write_filter_plain(self.id, plain);
+        engine.keep_write_filter_plain(self.id, plain);
     }
 
     /// A put or a delete of the entity this filter is for, unless the filter holds it back: the
@@ -234,13 +212,38 @@ impl WriteFilter {
     /// the plain way the row keeps ([`Self::keep_plain`]), or comes back `NotPlain`.
     pub(crate) fn publish(
         &self,
+        engine: &EngineHold,
         keyexpr: &str,
         wire: &WireKey,
         payload: &[u8],
         opts: Option<&wz_session_core::publish_options::PublishOptions>,
     ) -> FilteredPut {
-        self.shared
-            .publish_filtered(self.id, keyexpr, wire, payload, opts)
+        engine.publish_filtered(self.id, keyexpr, wire, payload, opts)
+    }
+
+    /// Retract the filter from `engine`, the session it was declared in: its listeners, each waited
+    /// for until its closure's `drop(context)` has run (unless this is inside a callback), then the
+    /// filter, which releases the Interest it took. Its owner calls it once, on every path that
+    /// lets go of the filter (`z_undeclare_*` and `z_*_drop` alike), and uses the filter no more.
+    pub(crate) fn retract(&self, engine: &EngineHold) {
+        self.listeners.retract_all(EngineHold::as_ref(engine));
+        engine.undeclare_write_filter(self.id);
+    }
+}
+
+/// A write filter and the engine of the session it is declared in, as the filter's owner reaches
+/// it: what a matching door reads the status of and declares a listener on.
+#[derive(Clone, Copy)]
+pub(crate) struct FilterOn<'a> {
+    pub(crate) filter: &'a WriteFilter,
+    pub(crate) engine: &'a EngineHold,
+}
+
+impl FilterOn<'_> {
+    /// pico's matching status of the filter's entity: whether what the filter counts has a match
+    /// (`!_z_write_filter_active`).
+    pub(crate) fn matches(self) -> bool {
+        !self.filter.active(self.engine)
     }
 }
 
@@ -276,7 +279,7 @@ impl FilteredKey {
         all(test, not(feature = "engine-tokio"), feature = "peer")
     ))]
     pub(crate) fn declare(
-        session: &PicoSession,
+        session: PicoSession<'_>,
         plane: FilterPlane,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
@@ -305,13 +308,13 @@ impl FilteredKey {
     /// `at` is valid for the write of a `FilteredKey` and holds none.
     pub(crate) unsafe fn declare_at(
         at: *mut Self,
-        session: &PicoSession,
+        session: PicoSession<'_>,
         plane: FilterPlane,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
         count_local: bool,
     ) -> Result<(), ZResult> {
-        let key = crate::keyexpr::EntityKey::whole(&session.engine, keyexpr, existing)?;
+        let key = crate::keyexpr::EntityKey::whole(session.engine, keyexpr, existing)?;
         let eid = session.engine.next_entity_id().ok_or(Z_ERR_GENERIC)?;
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
@@ -322,6 +325,7 @@ impl FilteredKey {
         // and an engine that keeps none refuses the entity, its filter undeclared.
         drop(key);
         if lent.is_absent() {
+            filter.retract(session.engine);
             return Err(Z_ERR_GENERIC);
         }
         // SAFETY: the caller's: `at` is room for one, written field by field, once each.
@@ -349,47 +353,44 @@ impl FilteredKey {
         }
     }
 
-    /// The session the entity is on and the declaration its key is lent with: what a key made of
-    /// its loan holds.
+    /// The declaration the key is lent with: what a key made of its loan holds, on the session the
+    /// entity is on.
     #[cfg(feature = "advanced")]
-    pub(crate) fn record_key(&self) -> (&EngineHold, Option<wz_capi_port::OwnKey>) {
-        (self.filter.engine(), self.key.own)
+    pub(crate) fn own_key(&self) -> Option<wz_capi_port::OwnKey> {
+        self.key.own
     }
 
-    /// The loan of the entity's key: the record's text, and `record`, written here, naming the
-    /// session and the declaration ([`crate::keyexpr::record_loan`]). `self` and `record` must
-    /// stay at their address while the loan is read: `record` lies in the entity's state beside
-    /// `self`.
+    /// The loan of the entity's key: the record's text, and `record`, written here, naming
+    /// `engine`, the session the entity is on, and the declaration
+    /// ([`crate::keyexpr::record_loan`]). `self`, `engine` and `record` must stay at their address
+    /// while the loan is read: `record` lies in the entity's state beside `self`, and `engine` is
+    /// the count the entity reaches its session through.
     pub(crate) fn lend(
         &self,
+        engine: &EngineHold,
         record: &mut crate::keyexpr::RecordKey,
     ) -> crate::abi::z_loaned_keyexpr_t {
-        *record = crate::keyexpr::RecordKey::lent(self.filter.engine(), self.key.own);
+        *record = crate::keyexpr::RecordKey::lent(engine, self.key.own);
         crate::keyexpr::record_loan(self.key, record)
     }
 
-    /// The key as a message sent once names it: the record's declaration and the rest of the key.
+    /// The key as a message sent once on `engine`, the entity's session, names it: the record's
+    /// declaration and the rest of the key.
     #[cfg(feature = "query")]
-    pub(crate) fn wire_once(&self) -> WireKey {
-        let shared = self.filter.engine();
+    pub(crate) fn wire_once(&self, engine: &EngineHold) -> WireKey {
         crate::keyexpr::record_wire(
-            shared,
+            engine,
             self.key.own,
             self.key.len,
-            EngineHold::as_ref(shared),
+            EngineHold::as_ref(engine),
         )
     }
-}
 
-/// Retracting on DROP reaches every path that releases the entity: `z_undeclare_*` and
-/// `z_*_drop` alike. A listener its handle undeclared is off the list already. The drop returns
-/// once every listener's closure has run its `drop(context)`: a callback still running on
-/// another thread is waited for, as zenoh-pico's undeclare waits for it.
-impl Drop for WriteFilter {
-    fn drop(&mut self) {
-        self.listeners
-            .retract_all(crate::session::EngineHold::as_ref(&self.shared));
-        self.shared.undeclare_write_filter(self.id);
+    /// Retract the entity's filter from `engine` ([`WriteFilter::retract`]), which lets the
+    /// record go and the declaration it holds with it: once, by the entity's owner, before it lets
+    /// go of the entity.
+    pub(crate) fn retract(&self, engine: &EngineHold) {
+        self.filter.retract(engine);
     }
 }
 
@@ -421,26 +422,28 @@ mod tests {
         z_session_move,
     };
 
-    /// A door that declares on a session borrows the one view its open made: the same each time,
-    /// over the engine the session's entities keep and in the session's role. Turned red by a view
-    /// made per call, or over another engine.
+    /// A door that declares on a session borrows the handle's own facts: the engine where the
+    /// session's drive holds it, and the session's role; the view is made of those each time and
+    /// keeps no count of the engine. Turned red by a view kept beside the drive (its engine at
+    /// another address), or one that takes a count when it is made.
     #[test]
     fn a_door_borrows_the_view_its_session_was_opened_with() {
         let mut session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) }
             .expect("an open session has its handle");
+        let held = crate::session::EngineHold::holders(engine_held(handle));
+        let view = PicoSession::of(handle);
         assert!(
-            core::ptr::eq(PicoSession::of(handle), PicoSession::of(handle)),
-            "one view, lent each time"
+            core::ptr::eq(view.engine, engine_held(handle)),
+            "the drive's own count, lent"
         );
-        let kept = engine_held(handle).clone();
-        assert!(
-            crate::session::EngineHold::ptr_eq(&PicoSession::of(handle).engine, &kept),
-            "over the session's engine"
+        assert_eq!(
+            crate::session::EngineHold::holders(view.engine),
+            held,
+            "the view takes no count"
         );
-        assert!(PicoSession::of(handle).mode == session_mode(handle));
-        drop(kept);
+        assert!(view.mode == session_mode(handle));
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };
     }
@@ -463,16 +466,18 @@ mod tests {
         assert_ne!(id, 0, "the wire names the key's own declaration");
         assert_eq!(rest, None, "the declaration names the whole key");
         assert!(
-            filtered.filter.active(),
+            filtered.filter.active(pico.engine),
             "nothing matches on a session with no peer"
         );
         #[cfg(feature = "unstable-api")]
         {
-            let next = wz_capi_port::SessionEngine::next_entity_id(&*pico.engine)
-                .expect("the session has ids left");
+            let next = wz_capi_port::SessionEngine::next_entity_id(
+                crate::session::EngineHold::as_ref(pico.engine),
+            )
+            .expect("the session has ids left");
             assert!(next > filtered.eid, "the entity's id was taken first");
         }
-        drop(filtered);
+        filtered.retract(pico.engine);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };
     }

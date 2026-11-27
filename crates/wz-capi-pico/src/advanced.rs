@@ -600,7 +600,12 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         ) else {
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let plane = PicoPlane::new(session.clone(), declared);
+        let plane = PicoPlane::new(
+            session,
+            handle.ext.hlc.clone(),
+            handle.ext.time.clone(),
+            declared,
+        );
         let wz_options = advanced_publisher_options(options);
         let zid = engine.session_zid();
         // The publisher is declared in the state's place and the rest of the state written after
@@ -1291,7 +1296,7 @@ unsafe fn let_go_miss_place(context: *mut c_void) {
 /// are declared, and no forms are lodged in it yet.
 unsafe fn lodge_forms(
     state: *mut AdvSubState,
-    session: &PicoSession,
+    session: PicoSession<'_>,
     base: DeclaredKeyexpr,
 ) -> Strong<PicoSubscriberForms> {
     // SAFETY: the caller's; the keep is written before the forms are lodged, and the forms and
@@ -2132,12 +2137,10 @@ pub unsafe extern "C" fn ze_advanced_publisher_get_matching_status(
         if matching_status.is_null() {
             return Z_ERR_NULL;
         }
-        let Some(state) =
-            crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(publisher)
-        else {
+        let Some(filter) = advanced_publisher_filter(publisher) else {
             return Z_ERR_NULL;
         };
-        (*matching_status).matching = state.publisher.publisher().filter_matches();
+        (*matching_status).matching = filter.matches();
         Z_OK
     })
 }
@@ -2193,9 +2196,9 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_background_matching_liste
 /// `pub_` must be null or a live loaned advanced publisher.
 unsafe fn advanced_publisher_filter<'a>(
     pub_: *const ze_loaned_advanced_publisher_t,
-) -> Option<&'a crate::write_filter::WriteFilter> {
+) -> Option<crate::write_filter::FilterOn<'a>> {
     crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
-        .map(|state| state.publisher.publisher().filter())
+        .map(|state| state.publisher.publisher().filter_on())
 }
 
 /// Declare a miss listener that lives as long as its subscriber (pico
