@@ -146,19 +146,18 @@ async fn r78_accepting_path_handshake_terminates_at_established() {
             matches!(outcome, DriverLoopOutcome::AdvancedFsm),
             "OpenSyn Rx must AdvanceFsm; got {outcome:?}"
         );
-        // SentOpenAck has an eventless transition to Established;
-        // the SCXML macrostep traverses both states in one
-        // process_event so the observable state is Established.
+        // The OpenSyn's own transition sends the OpenAck and enters
+        // Established in one process_event.
         assert_eq!(
             engine.get_current_state(),
             S::Established,
-            "Rx(OpenSyn) must drive SentInitAck -> SentOpenAck -> Established"
+            "Rx(OpenSyn) must drive SentInitAck -> Established"
         );
 
         let trace = actions.trace_snapshot();
         assert_eq!(
             trace.send_open_ack, 1,
-            "SentOpenAck.onentry must dispatch send_open_ack"
+            "the OpenSyn's transition must dispatch send_open_ack"
         );
         // Established.onentry side effects (matches
         // session_fsm_coverage.rs::r61 listener-path assertions).
@@ -175,7 +174,7 @@ async fn r78_accepting_path_handshake_terminates_at_established() {
             "Established.onentry must start the keepalive worker"
         );
         // R89 — the cookie_valid() guard MUST have fired exactly
-        // once on the SentInitAck -> SentOpenAck transition. The
+        // once on the SentInitAck -> Established transition. The
         // happy-path OpenSyn arrival was the only candidate.
         assert_eq!(
             trace.cookie_valid_check, 1,
