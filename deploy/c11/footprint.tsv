@@ -17,6 +17,7 @@
 # instructions does not re-record every unit while a new function does speak.
 # tolerance: 64
 # measured-with: arm-none-eabi-gcc (Arm GNU Toolchain 13.2.rel1 (Build arm-13.7)) 13.2.1 20231009
+abi_gate_verdict	42	0	0	0
 app_link_sm	4692	955	0	4
 capacity_calibrated_emission	7338	102	0	0
 capacity_cost_with_margin	6104	102	0	0
@@ -52,6 +53,8 @@ ext_zbuf	3206	21	0	0
 ext_zint	3078	21	0	0
 extension_v1_dispatch	34	0	0	0
 fragment	3240	25	0	0
+fragment_pacing_step	0	0	0	0
+fragment_pacing_wait	6118	102	0	0
 frame	3240	25	0	0
 hello	4264	45	0	0
 hello_received_schema	0	0	0	0
@@ -151,6 +154,7 @@ undecl_token	4958	54	0	0
 unicast_link_sm	5324	1137	0	4
 vle_byte_length	6190	102	0	0
 vle_u64_decode	6232	102	0	0
+volume_abi_verdict	104	0	0	0
 whatami_v1_valid	14	0	0	0
 wireexpr	4792	169	0	0
 wireexpr_local	3756	157	0	0
