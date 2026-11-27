@@ -8139,6 +8139,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         })
     }
 
+    /// The session's state for what a step that ended the session left to hand out: reached past
+    /// that end, which [`Self::live`] refuses, until the program's close lets go of what the
+    /// session holds (`Core::released`). `None` once it has: the close ended every get itself,
+    /// and nothing of the session is handed out after it.
+    #[cfg(feature = "query")]
+    fn unreleased(&self) -> Option<CoreGuard<'_, L, C>> {
+        let guard = self.core.lock();
+        #[cfg(test)]
+        self.takes.core.fetch_add(1, Ordering::Relaxed);
+        (!guard.0.released).then_some(guard)
+    }
+
     /// The session's state for an operation that sends on the faces, with what it sends through
     /// (`LinkTx`): the session's lock alone, where each face's record holds its link and is
     /// reached under it. `None` once the session is closed.
@@ -8476,7 +8488,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// a call begun for its timeout when its deadline ended it, the get retired and its legs
     /// forgotten on every face; the call is made and ended with no lock held, and the row let go of
     /// by the call that ended last, or here when none ran. What it held, then its timeout, as
-    /// upstream's querier hands them. Whether any call was made.
+    /// upstream's querier hands them. A step that ended the session (its link lost with nothing to
+    /// dial) ended the gets asked over that link with it, and the delivery after the step hands
+    /// them out as one of a session that goes on does, as it hands that loss's retractions: the
+    /// session is reached past its end until the program's close ([`Self::unreleased`]). Whether
+    /// any call was made.
     #[cfg(feature = "query")]
     fn hand_out_ended_gets(&self) -> bool {
         let mut handed = false;
@@ -8486,7 +8502,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let mut cursor = 0;
         let mut current = None;
         loop {
-            let Some(mut core) = self.live() else {
+            let Some(mut core) = self.unreleased() else {
                 break;
             };
             let registry = &mut core.0.session.registry;
