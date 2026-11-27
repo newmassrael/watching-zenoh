@@ -9318,6 +9318,31 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4736": {
+      "decision_summary": "Stand up the C11 half of \"one source set, Rust and C11\": Layer Bc generates every document of sources/codecs and sources/algorithms as one C11 set, compiles each unit for a Cortex-M4 with no C library, weighs it, and runs the vectors its document states.",
+      "changes_bullets": [
+        "scripts/c11-lane.sh: orchestrate -l c11 --deploy over the set and the sce:std documents it imports; each unit compiled with SCE ADR 0110 D3's flags, every inline function kept.",
+        "A unit may leave undefined only memcpy, memset, memmove, memcmp and what libgcc defines; deploy/c11/footprint.tsv holds .text/.rodata/.data/.bss of 68 units, band 64 B.",
+        "Document vectors run on the host from the generated sidecars; the count run must equal the count the document states (20 rows of 7 documents).",
+        "deploy/c11/refusals.tsv names 39 units by the first error they give; they wait for an SCE C11 defect: a codec imported under an alias other than its name is called by the alias. Reported to SCE.",
+        "The compiler is Arm GNU Toolchain 13.2.rel1 as SCE pins it (scripts/install-arm-gnu-toolchain.sh, [tools.arm-gnu-toolchain] in bx.toml); codegen-verify installs it and runs Bc with WZ_BC_REQUIRE."
+      ],
+      "verification_bullets": [
+        "bash scripts/run-ci.sh --layer Bc passes on two build machines with the same figures: 68 compiled and weighed, 39 refused as declared, 20 vectors of 7 documents.",
+        "Controls: a budget figure moved out of its band, and a refusal row for a unit that compiles, each red the lane (exit 1); both restored.",
+        "lanes_gate, lane_decl, runci_plan, unwired_lane_lint, lane_decline_read, runci_leg_ledger_gate, script_exercise_census, sce_codegen_spawn_lint, lane_digest, apt_package_census pass; shellcheck and actionlint clean."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "39 units wait for the SCE C11 alias fix; when it lands their rows go and their figures are recorded.",
+        "The vectors run on the host only: the generated sidecar uses stdio, which a freestanding image lacks. Running them under QEMU waits for SCE to report through the log seam (asked).",
+        "xtask regen drops the Rust <stem>_test.rs, so the same document vectors run on no Rust lane yet.",
+        "lane_input_closure --lane Bc --run names two reads the lane does not own: run-ci.sh read by its own per-function awk at start (every lane), and vendor/sce/.cargo/config.toml read by git -C, resolved against the root."
+      ]
     }
   },
   "inventory_entries": {
