@@ -1396,15 +1396,34 @@ impl<Cb> MatchingRow<Cb> {
 }
 
 /// A get the session waits on: the request id its legs carry, the key its replies must
-/// intersect, how many legs still owe their Final, and when it ends unanswered.
+/// intersect, how they are consolidated over every leg, how many legs still owe their Final, when
+/// it ends unanswered, and whether it ended.
 #[derive(Debug)]
 pub struct PendingGetRow<Key, Cb> {
     request: RequestId,
     /// `None` for a get that takes a reply on any key (pico's `_anyke`).
     gate: Option<Key>,
+    /// One mode for the get, whatever leg a reply comes by, as zenoh keeps the reception mode in
+    /// the query's state.
+    mode: crate::query_mode::ConsolidationMode,
     legs: u16,
+    /// `u64::MAX` for a get that waits with no deadline.
     deadline: u64,
+    end: GetEnd,
     callback: Cb,
+}
+
+/// Whether a pending get still takes replies. An ended get takes none, and its row stays until
+/// the caller has handed out what it held and its end, and retires it
+/// ([`SessionTables::retire_get`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GetEnd {
+    /// Its legs still owe Finals, and its deadline has not passed.
+    Standing,
+    /// Every leg's Final came, or no leg is left to send one.
+    Answered,
+    /// Its deadline passed first: its callback is owed a timeout after what it held.
+    TimedOut,
 }
 
 impl<Key: KeyBacking, Cb> PendingGetRow<Key, Cb> {
@@ -1424,14 +1443,24 @@ impl<Key: KeyBacking, Cb> PendingGetRow<Key, Cb> {
         crate::reply_acceptance::admits_reply(self.gate(), reply)
     }
 
+    /// How its replies are consolidated.
+    pub fn mode(&self) -> crate::query_mode::ConsolidationMode {
+        self.mode
+    }
+
     /// How many legs still owe their Final.
     pub fn legs(&self) -> u16 {
         self.legs
     }
 
-    /// When it ends unanswered, in the driver's clock.
+    /// When it ends unanswered, in the driver's clock; `u64::MAX` for never.
     pub fn deadline(&self) -> u64 {
         self.deadline
+    }
+
+    /// Whether it still takes replies, or how it ended.
+    pub fn end(&self) -> GetEnd {
+        self.end
     }
 
     /// Its callback.
@@ -1792,12 +1821,25 @@ pub struct Unwatched<R> {
 }
 
 /// What ending one leg of a get left of it.
-#[derive(Debug)]
-pub enum LegEnded<R> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LegEnded {
     /// Other legs still owe their Final: how many.
     Owed(u16),
-    /// That was the last leg: the get is over, its row as [`SessionTables::end_get`] hands it.
-    Over(Removal<R>),
+    /// That was the last leg: the get ended answered ([`GetEnd::Answered`]).
+    Over,
+}
+
+/// What the tables made of a reply handed to a pending get (`SessionTables::admit_reply`).
+#[derive(Debug)]
+pub enum ReplyAdmitted<C> {
+    /// Let through to the get's callback: the call begun on its row, made once the tables are
+    /// let go, or `None` where the row begins none.
+    Passed(Option<C>),
+    /// Held back by the get's consolidation, for its end.
+    Held,
+    /// Not handed on: no standing get of the handle, a key its gate does not take, or a reply
+    /// older than what its key holds.
+    Dropped,
 }
 
 /// The bytes the table of held replies takes of an arena for `rows`; none in a build that holds
@@ -1850,7 +1892,11 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     plane_bounds: PlaneBounds,
     matching: MatchingListenersKept<F, P>,
     pending_gets: PendingGetsKept<F, P>,
-    /// What the consolidating gets hold back (`consolidate_reply`).
+    /// The earliest deadline of a standing get, past by one so that zero is none and the tables'
+    /// zero bytes hold no deadline: kept as gets begin and stop standing, so a driver's wait reads
+    /// it with no walk ([`Self::next_get_deadline`]).
+    get_due: u64,
+    /// What the consolidating gets hold back (`admit_reply`).
     #[cfg(feature = "storage-profile")]
     held: crate::reply_hold::HeldReplies<PendingGetHandle, P>,
 }
@@ -2387,6 +2433,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             plane_bounds: PlaneBounds::UNBOUND,
             matching: <F::FilterPresence as Presence>::empty::<MatchingListeners<F, P>>(),
             pending_gets: <F::GetPresence as Presence>::empty::<PendingGets<F, P>>(),
+            get_due: 0,
             #[cfg(feature = "storage-profile")]
             held: crate::reply_hold::HeldReplies::default(),
         }
@@ -3412,8 +3459,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     // ---- pending gets ----------------------------------------------------------------------
 
-    /// Begin a get whose replies pass `accept`, owed a Final by each of its `legs`, ending
-    /// unanswered at `deadline`: its row and the request id every leg's query carries.
+    /// Begin a get whose replies pass `accept`, consolidated by `mode` over every leg, owed a
+    /// Final by each of its `legs`, ending unanswered at `deadline` (`u64::MAX` for never): its
+    /// row and the request id every leg's query carries. A caller that issues the legs one at a
+    /// time begins it with one, its own, which it ends once it has issued them ([`Self::add_leg`]).
     ///
     /// Refused in the order the other declarations are, so a refused get spends no request id
     /// and keeps no key: table room, then the gate's key (`KeyexprTooLong` past what a row
@@ -3421,6 +3470,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     pub fn begin_get(
         &mut self,
         accept: crate::reply_acceptance::ReplyAcceptance<'_>,
+        mode: crate::query_mode::ConsolidationMode,
         legs: u16,
         deadline: u64,
         callback: F::Reply,
@@ -3453,8 +3503,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         let row = PendingGetRow {
             request,
             gate,
+            mode,
             legs,
             deadline,
+            end: GetEnd::Standing,
             callback,
         };
         let Some(gets) = self.kept_pending_gets_mut() else {
@@ -3464,7 +3516,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             });
         };
         match gets.insert(row) {
-            Ok(handle) => Ok(GetBegun { handle, request }),
+            Ok(handle) => {
+                self.lower_get_due(deadline);
+                Ok(GetBegun { handle, request })
+            }
             Err(CapacityFull(row)) => Err(Refused {
                 why: RegisterError::TableFull,
                 callback: row.callback,
@@ -3497,9 +3552,62 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             .find(|(_, row)| row.request == request)
     }
 
-    /// Begin a call of the get `handle` names, with a reply the tables admitted, the tables held:
-    /// what the call is made with once they are let go, `None` when no live row is named. See
-    /// [`Self::begin_subscriber`].
+    /// One more leg of the standing get `handle` names, owing its Final: whether it was counted.
+    /// An ended get takes no leg, and a get counts at most `u16::MAX` at once.
+    pub fn add_leg(&mut self, handle: PendingGetHandle) -> bool {
+        let Some(row) = self
+            .kept_pending_gets_mut()
+            .and_then(|gets| gets.get_mut(handle))
+        else {
+            return false;
+        };
+        if row.end != GetEnd::Standing {
+            return false;
+        }
+        let Some(legs) = row.legs.checked_add(1) else {
+            return false;
+        };
+        row.legs = legs;
+        true
+    }
+
+    #[cfg(feature = "storage-profile")]
+    /// Hand `reply` to the get `handle` names, with the tables held: refused unless the get
+    /// stands and its gate admits the reply; then its mode's consolidation holds it back, drops it
+    /// as stale, or lets it through, with a call of the get's callback begun for the caller to
+    /// make once the tables are let go, as a subscriber's call is begun. An Err and every reply of
+    /// a get that does not consolidate are let through; one `Latest` has no room to hold is let
+    /// through at once and counted ([`Self::held_refused`]). The rule is
+    /// [`crate::reply_hold::consolidate`]'s, the one every consolidating get applies, over every
+    /// leg of the get.
+    pub fn admit_reply(
+        &mut self,
+        handle: PendingGetHandle,
+        reply: &dyn crate::reply_sink::ReplyView,
+    ) -> ReplyAdmitted<<F::Reply as RowCallback>::Call> {
+        let Some(row) = self.kept_pending_gets().and_then(|gets| gets.get(handle)) else {
+            return ReplyAdmitted::Dropped;
+        };
+        if row.end != GetEnd::Standing || !row.admits(reply) {
+            return ReplyAdmitted::Dropped;
+        }
+        let mode = row.mode;
+        let consolidated =
+            crate::reply_hold::consolidate(mode, &mut self.held.of(handle), reply, &mut |_| {});
+        match consolidated {
+            crate::reply_hold::Consolidated::Forwarded
+            | crate::reply_hold::Consolidated::Refused(_) => {
+                ReplyAdmitted::Passed(self.begin_reply(handle))
+            }
+            crate::reply_hold::Consolidated::Held => ReplyAdmitted::Held,
+            crate::reply_hold::Consolidated::Stale => ReplyAdmitted::Dropped,
+        }
+    }
+
+    /// Begin a call of the get `handle` names, the tables held, whether or not it still stands:
+    /// what the call is made with once they are let go, `None` when no live row is named. What an
+    /// ended get held and its timeout are handed to its callback by such calls before it is
+    /// retired. See [`Self::begin_subscriber`].
     pub fn begin_reply(&self, handle: PendingGetHandle) -> Option<<F::Reply as RowCallback>::Call> {
         const {
             assert!(row_may_lie_in::<F::Reply, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
@@ -3507,58 +3615,85 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.kept_pending_gets()?.get(handle)?.callback.begin()
     }
 
-    /// Let go of the get `handle` named, ended while a call of it ran, once that call ended last:
-    /// its row, to drop where no lock is held.
+    /// Let go of the get `handle` named, retired while a call of it ran, once that call ended
+    /// last: its row, to drop where no lock is held.
     pub fn release_get(&mut self, handle: PendingGetHandle) -> Option<PendingGet<F, P>> {
         self.kept_pending_gets_mut()?.release(handle)
     }
 
-    /// One leg of the get `handle` names has its Final, or will have none (its face is gone): what
-    /// is left of the get. The last leg ends it as [`Self::end_get`] does.
-    pub fn end_leg(&mut self, handle: PendingGetHandle) -> Option<LegEnded<PendingGet<F, P>>> {
+    /// One leg of the standing get `handle` names has its Final, or will have none (its face is
+    /// gone): what is left of the get. The last leg ends it answered; an ended get has no leg.
+    pub fn end_leg(&mut self, handle: PendingGetHandle) -> Option<LegEnded> {
         let row = self.kept_pending_gets_mut()?.get_mut(handle)?;
+        if row.end != GetEnd::Standing {
+            return None;
+        }
         row.legs = row.legs.saturating_sub(1);
         if row.legs > 0 {
             return Some(LegEnded::Owed(row.legs));
         }
-        self.end_get(handle).map(LegEnded::Over)
+        row.end = GetEnd::Answered;
+        let deadline = row.deadline;
+        self.raise_get_due(deadline);
+        Some(LegEnded::Over)
     }
 
-    /// End the get `handle` names, whatever its legs still owe (its deadline passed, its asker
-    /// cancelled it): no call of its callback begins after this. Its row is handed back at once
-    /// when no call runs, else the call that ends last lets it go ([`Self::release_get`]).
-    pub fn end_get(&mut self, handle: PendingGetHandle) -> Option<Removal<PendingGet<F, P>>> {
-        // What it held back goes with it: a get that delivers its held replies takes them out
-        // first (`take_held`).
+    /// The standing get `handle` names timed out, whatever its legs still owe: it takes no reply
+    /// from here on, and its callback is owed a timeout after what it held. Whether it stood.
+    pub fn time_out_get(&mut self, handle: PendingGetHandle) -> bool {
+        let Some(row) = self
+            .kept_pending_gets_mut()
+            .and_then(|gets| gets.get_mut(handle))
+        else {
+            return false;
+        };
+        if row.end != GetEnd::Standing {
+            return false;
+        }
+        row.end = GetEnd::TimedOut;
+        let deadline = row.deadline;
+        self.raise_get_due(deadline);
+        true
+    }
+
+    /// The next get at or after `cursor` that ended, and how: what the caller hands out (what it
+    /// held, then its timeout) before it retires it. A walk from cursor `0` to `None` finds every
+    /// such get, each once.
+    pub fn next_ended_get(&self, cursor: &mut usize) -> Option<(PendingGetHandle, GetEnd)> {
+        loop {
+            let (handle, row) = self.kept_pending_gets()?.next_from(cursor)?;
+            if row.end != GetEnd::Standing {
+                return Some((handle, row.end));
+            }
+        }
+    }
+
+    /// Retire the get `handle` names, ended or not (its end handed out, or its asker cancelled it,
+    /// or the session is closed): no call of its callback begins after this, and what it still
+    /// holds back goes with it. Its row is handed back at once when no call runs, else the call
+    /// that ends last lets it go ([`Self::release_get`]).
+    pub fn retire_get(&mut self, handle: PendingGetHandle) -> Option<Removal<PendingGet<F, P>>> {
         #[cfg(feature = "storage-profile")]
         self.held.forget(handle);
         let gets =
             <F::GetPresence as Presence>::get_mut::<PendingGets<F, P>>(&mut self.pending_gets)?;
         let mut entry = gets.entry(handle)?;
-        if !(entry.get()?.callback.retire() || entry.pin()) {
+        let row = entry.get()?;
+        let stood = (row.end == GetEnd::Standing).then_some(row.deadline);
+        if !(row.callback.retire() || entry.pin()) {
             return None;
         }
-        entry.remove()
-    }
-
-    #[cfg(feature = "storage-profile")]
-    /// Apply the get's consolidation `mode` to `reply`, one its gate admitted: hold it back, drop
-    /// it as stale, or let it through (`Consolidated::Forwarded`), for the caller to hand to the
-    /// get's callback once the tables are let go. The rule is [`crate::reply_hold::consolidate`]'s,
-    /// the one every consolidating get applies.
-    pub fn consolidate_reply(
-        &mut self,
-        handle: PendingGetHandle,
-        mode: crate::query_mode::ConsolidationMode,
-        reply: &dyn crate::reply_sink::ReplyView,
-    ) -> crate::reply_hold::Consolidated {
-        crate::reply_hold::consolidate(mode, &mut self.held.of(handle), reply, &mut |_| {})
+        let removed = entry.remove();
+        if let Some(deadline) = stood {
+            self.raise_get_due(deadline);
+        }
+        removed
     }
 
     #[cfg(feature = "storage-profile")]
     /// Take out the next reply the get `handle` names held back, for its caller to hand to the
-    /// get's callback once the tables are let go: what a `Latest` get delivers at its end, before
-    /// [`Self::end_get`] lets go of what is left.
+    /// get's callback once the tables are let go: what a consolidating get delivers at its end,
+    /// before [`Self::retire_get`] lets go of what is left.
     pub fn take_held(
         &mut self,
         handle: PendingGetHandle,
@@ -3572,22 +3707,49 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.held.refused()
     }
 
-    /// The next get at or after `cursor` whose deadline is at or before `now`.
+    /// The next standing get at or after `cursor` whose deadline is at or before `now`.
     pub fn next_expired_get(&self, now: u64, cursor: &mut usize) -> Option<PendingGetHandle> {
         loop {
             let (handle, row) = self.kept_pending_gets()?.next_from(cursor)?;
-            if row.deadline <= now {
+            if row.end == GetEnd::Standing && row.deadline <= now {
                 return Some(handle);
             }
         }
     }
 
-    /// The nearest deadline of a pending get: what a driver's wait is cut short to.
+    /// The nearest deadline of a standing get: what a driver's wait is cut short to. Read with no
+    /// walk of the gets.
     pub fn next_get_deadline(&self) -> Option<u64> {
-        self.kept_pending_gets()?
+        self.get_due.checked_sub(1)
+    }
+
+    /// A standing get due at `deadline` began: the gets' due time is that, if earlier.
+    fn lower_get_due(&mut self, deadline: u64) {
+        // A deadline of `u64::MAX` is none, and so is its count past by one.
+        let due = deadline.wrapping_add(1);
+        if due != 0 && (self.get_due == 0 || due < self.get_due) {
+            self.get_due = due;
+        }
+    }
+
+    /// A get due at `deadline` stopped standing: the gets' due time is worked out again from the
+    /// ones left when it was the one due.
+    fn raise_get_due(&mut self, deadline: u64) {
+        if self.get_due != deadline.wrapping_add(1) {
+            return;
+        }
+        self.get_due = 0;
+        let Some(gets) = self.kept_pending_gets() else {
+            return;
+        };
+        let earliest = gets
             .iter()
+            .filter(|(_, row)| row.end == GetEnd::Standing)
             .map(|(_, row)| row.deadline)
-            .min()
+            .min();
+        if let Some(earliest) = earliest {
+            self.lower_get_due(earliest);
+        }
     }
 
     // ---- delivery --------------------------------------------------------------------------
@@ -4137,6 +4299,7 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
                 &mut lend,
                 rows.pending_gets,
             ),
+            get_due: 0,
             #[cfg(feature = "storage-profile")]
             held: lend
                 .lend_with(|arena| crate::reply_hold::HeldReplies::lent(arena, rows.held_replies)),
@@ -4217,13 +4380,15 @@ impl<F: RowCallbacks> SessionTables<F, crate::bounded::OnUse> {
             pending_gets: <F::GetPresence as Presence>::counted::<
                 PendingGets<F, crate::bounded::OnUse>,
             >(rows.pending_gets),
+            get_due: 0,
             held: crate::reply_hold::HeldReplies::counted(rows.held_replies),
         }
     }
 }
 
 // SAFETY: the key arena handle is `LentKeys`, whose zero is no arena; the ids are counts of ids
-// handed out, a zero expression id is minted as 1, the request id and the epoch are counts; the
+// handed out, a zero expression id is minted as 1, the request id and the epoch are counts, the
+// gets' due time of zero is none; the
 // match memory and the held replies are `ZeroEmpty` of this policy; every table is a `SlotMap` of
 // this policy (`ZeroEmpty`) or, absent, no bytes (`Presence` is sealed to the two); the plane
 // bounds of zero are none. Nothing drops a value, every sequence holding none.
