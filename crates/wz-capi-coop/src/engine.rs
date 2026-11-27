@@ -10182,7 +10182,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // `_Z_CLEAN_RETURN_IF_ERR(ret, _z_unregister_pending_query(zn, qid));`).
         #[cfg(feature = "local-queryable")]
         let mut own: Option<query::OwnFinalHold<'_>> = None;
-        #[cfg(feature = "local-queryable")]
+        // Whether the get was refused whole under its first hold, before its callback was made or
+        // any leg asked: the tables hold no more queries, or the session's own queryables no more
+        // Finals.
         let mut refused = false;
         let mut started = false;
         // What every link is asked, read from the options once: the sink of each leg consolidates
@@ -10220,6 +10222,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let turn = self.live_on_link(|core, tx| {
                 if !started {
                     started = true;
+                    // The tables' row of the get is what bounds the queries pending
+                    // (`MAX_PENDING_QUERIES`), whatever room a face's table of legs has: a get
+                    // past it is refused here, before anything is sent, as zenoh-pico refuses
+                    // one it cannot register (`vendor/zenoh-pico/src/net/primitives.c` @
+                    // `_z_pending_query_t *pq = _z_unsafe_register_pending_query(zn);`).
+                    if !tables(&core.session.registry).has_room_for_get(GetKind::Query) {
+                        refused = true;
+                        return LegTurn::Done;
+                    }
                     #[cfg(feature = "local-queryable")]
                     if opts.allowed_destination.allows_local() {
                         // The session's own request ids are a space of their own: the leg is
@@ -10314,7 +10325,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 more = core.transport.next_up_face(remote, asked).is_some();
                 LegTurn::Issued
             });
-            #[cfg(feature = "local-queryable")]
             if refused {
                 return Err(Declined::TableFull);
             }
