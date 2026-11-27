@@ -809,6 +809,33 @@ variant behind its table, or the enum answers a send itself. `either_links`'s
 `a_link_made_at_once_is_a_dial_answered_already` holds that the made link is answered once,
 whichever stack made it; red if it is handed to a side's dial or answered twice.
 
+### 9.7 What 9.5 and 9.6 left red, repaid (not built or run by this lane)
+
+Three commits, each the root of one red the merge found; no behaviour moves.
+
+- **A face's pump is a `SharedPump`** (`faces.rs`): `FaceRecord::Pump` is bounded as
+  `SessionLinks::Pump` is, since `PendingDial<P, N>` and `OpenedLink<P, N>` ask it of `P`
+  since 9.6. The two session-task tests name the sink type `router_session_task_bytes` takes.
+- **Every heap link's cell is claimed through `heap_link`** (`ip_stack.rs`): `IpLink::open_as`
+  claims its cell by `heap_link` and writes the variant by `LinkCell::made`, which answers the
+  handle on the cell, so the claim and its two refusals are stated once wherever a heap stack is
+  built. `OpenedLink::behind_tables` (`session_drive.rs`) is the open set's two handles on a cell,
+  which the open `LinkSet` and the ws, serial, unixpipe and app links hand on. Before, the closed
+  set's claim was a copy of `heap_link`, which only the unixpipe and app links reached, so a build
+  of neither had it dead.
+- **The heap stack's opened link and a wire's parts are named** (`ip_stack.rs`,
+  `transport/state.rs`): `SetOpened` (what a link's opening answers), `StreamMade`, `StackBeside`
+  (a listener's other link types), `LinkFields` (a link pump's fields over `T`), and
+  `WireBuilt<T, K>` keyed on the session's calls in place of four of their types.
+
+Expected on the case: none. The claim, the refusals and the handles are the same calls, inlined
+at the same sites (`LinkCell::made` is `#[inline]`, `behind_tables` a generic of two moves), and
+the names are aliases. Size and Ir unchanged. Not measured.
+
+Tests: no branch is new. `closed_links_are_read_as_the_stacks_one_type` and
+`a_closed_link_in_a_lent_cell_gives_it_back_whole` now reach `heap_link` on the closed set; the
+open set's tests of `IpLinks`, ws, unixpipe and app links reach `behind_tables`.
+
 ## 10. Transport: the structure for what remains, and what SCE is asked for the machines
 
 Read from the same explain document as section 6 (2026-11-26, schema 5): transport 30,814 against
