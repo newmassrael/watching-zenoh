@@ -467,12 +467,14 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   the bound); and a subscriber declared after the open told to the router and handed what it pushes
   (red if the subscribers' table refuses its first row).
 - At the build: `crates/wz-capi-coop/src/lib.rs` asserts `RowPolicy::TAKEN` is `AtOpen` outside
-  the on-use form and `AtFirstUse` in it (9.2, 1), and refuses `tables-on-use` beside
-  `runtime-plan` by name until N3c covers that form. Every item of the on-use form outside
-  `region.rs` (which a build with `runtime-plan` does not compile) reads the feature beside
-  `not(feature = "runtime-plan")`, and its twin the negation of both, so the refused build is the
-  form that plans at the open and the refusal is its one error. `region.rs` asserts the key budget
-  has no drop, which the region's drop would leave undone.
+  the on-use form and `AtFirstUse` in it (9.2, 1). Beside `runtime-plan` the feature yields (9.1):
+  every item of the on-use form outside `region.rs` (which a build with `runtime-plan` does not
+  compile) reads the feature beside `not(feature = "runtime-plan")`, and its twin the negation of
+  both, so a build of both, `--all-features` among them, is the form that plans at the open, item
+  for item. `form_precedence_tests::a_build_of_both_forms_lays_its_tables_out_at_the_open`, in that
+  build alone, holds it (red if a build of both names `OnUse`, or any policy but `Lent`, as its
+  `RowPolicy`, the `runtime-plan` arm of `lib.rs` read only without `tables-on-use`).
+  `region.rs` asserts the key budget has no drop, which the region's drop would leave undone.
 - Not tested: the open refused when the allocator has no room for the dial face's set
   (`ArenaRefused::NoMemory`); only a refusing allocator reaches it.
 
@@ -488,8 +490,13 @@ Nothing of N1, N2, N3a, N3b or N3c's first step was built or run by this lane.
   liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use` 5 (the two legs of
   `scripts/lib/nondefault-tests-gate.sh`); `cargo clippy -p wz-capi-coop --features tables-on-use
   --all-targets -- -D warnings`; the client library in that form, `cargo build -p wz-capi-pico
-  --no-default-features --features os-host,link-udp,wz-capi-coop/tables-on-use`; and a build of it
-  beside `peer` refused by name, the refusal its one error.
+  --no-default-features --features os-host,link-udp,wz-capi-coop/tables-on-use`. The precedence of
+  the two forms (9.1): `cargo test -p wz-capi-coop --features runtime-plan,tables-on-use --lib
+  form_precedence_tests` 1 (a leg of that gate beside the two above), and the two gates that
+  build the crate with `--all-features` again: `cargo clippy -p wz-capi-coop --all-features
+  --all-targets -- -D warnings` (pre-push gate 7, `scripts/lib/nondefault-features-gate.sh`)
+  and the census of `nondefault-tests-gate.sh --census` (Layer C1cn), whose only new test of the
+  crate is that one. The client library beside `peer` builds, as the peer's D12 form.
 
 - N3b, with the crate's default features: `cargo test -p wz-session-core --lib reply_stage::tests`
   51 (32 before: fifteen `on_first_use` bodies and four tests of the counted stages added);
@@ -567,15 +574,23 @@ features = ["tables-on-use"]
   (`wz_config.py` `engine_features`), and `wz_config.pico_reference` leaves `tables-on-use` out of
   the reference's switches as it leaves `os-host` out.
 - Cargo: `wz-capi-pico` `tables-on-use = ["wz-capi-coop?/tables-on-use"]`, `wz-capi-coop`
-  `tables-on-use = []`, which makes `RowPolicy` `OnUse` and compiles the on-use open (N3c). Unified
-  into a graph it changes the moment of every session there, so the C library, a cdylib built by
-  itself, is the only graph that names it, and the guards below read what it resolved to.
+  `tables-on-use = []`, which makes `RowPolicy` `OnUse` and compiles the on-use open (N3c) where
+  `runtime-plan` is off. Features add (The Cargo Book, Features: a feature turns code on and never
+  off), so two forms are not written to exclude each other; where both are named, one wins:
+  `runtime-plan`, the session laid out at the open from its config. A build of both,
+  `--all-features` and a graph that unifies `peer`, `listen` or `group` with `tables-on-use`
+  among them, is the `runtime-plan` form whole, its policy `Lent` and its moment the open's
+  (`crates/wz-capi-coop/src/lib.rs`, where `RowPolicy` is named, and the feature's note in its
+  `Cargo.toml`). Unified into a graph without `runtime-plan` it changes the moment of every session
+  there, so the C library, a cdylib built by itself, is the only graph that names it, and the guards
+  below read what it resolved to.
 
 ### 9.2 What keeps the release at D12
 
 1. At the build: `crates/wz-capi-coop/src/lib.rs` asserts `RowPolicy::TAKEN` is `AtOpen` (N1,
    landed); N3c compiles it outside the on-use form (`tables-on-use` without `runtime-plan`)
-   beside its `AtFirstUse` twin, so no form builds whose policy disagrees with its moment.
+   beside its `AtFirstUse` twin, so no form builds whose policy disagrees with its moment. A build
+   that names both features is outside the on-use form (9.1) and asserts `AtOpen`.
 2. At the resolution: `layer_c1nh_no_heap_after_open` (`scripts/run-ci.sh`) resolves
    `configs/profiles/host-peer-ext.conf` and, before it builds, fails by name when the resolved
    arguments name `tables-on-use` ("the release form resolved to on-use"), so a profile that lost
@@ -649,9 +664,10 @@ Every pico case is the D12 form, and so is every case of the size ledger (C1cs:
   "pico-api-coop-nostd"}`) and moves with it.
 - The statement: a library states the form it is, so `wz_config.conformance_statement` includes
   the axis's value, and the statement case of the pico ABI gains its on-use twin.
-- A peer twin (`pico-peer-coop-on-use`) waits for N3c to cover `runtime-plan`, where a listening
-  session's faces come and go: on `OnUse` each face's tables are counted at its attach (N3b's
-  constructors), with no pool lent at open.
+- A peer twin (`pico-peer-coop-on-use`) waits for N3c to cover `runtime-plan` (until then a build
+  of `peer` beside `tables-on-use` is the D12 peer, 9.1), where a listening session's faces come
+  and go: on `OnUse` each face's tables are counted at its attach (N3b's constructors), with no
+  pool lent at open.
 
 ## 11. What N3c has to give a home to
 
