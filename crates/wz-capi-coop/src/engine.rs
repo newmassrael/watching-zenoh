@@ -11819,21 +11819,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
     ) -> Result<Declared<QblId>, Declined> {
-        // Taken by the declaration once it has an id; let go of, with the session and the link's
-        // place, after it, whether it was declared or not.
+        // Taken by the declaration into the row it offers the tables; let go of, with the session
+        // and the link's place, after it, whether it was declared or not.
         let mut unmade = Some((wire, sink));
         // The row the tables refuse, let go of as the key and the sink are: the declaration
         // answers only why, so its answer carries no row.
         let mut refused_row = None;
         let declared = self.live_on_link(|core, tx| {
-            // The queryable is one row of the session's tables, numbered by the id they hand out
-            // next: a full table, a key the session cannot hold or no id left refuses it before
-            // anything is sent, and before its callback is minted. The row holds the key
-            // expression declaration its key is named by for as long as it stands.
-            let next = tables(&core.session.registry).next_entity_id();
-            let Some(id) = next else {
-                return Err(Declined::NoEntityId);
-            };
+            // The queryable is one row of the session's tables, numbered by the id they mint for
+            // it: a full table, a key the session cannot hold or no id left refuses it before
+            // anything is sent. The row holds the key expression declaration its key is named by
+            // for as long as it stands.
             // Taken once: the declaration runs once.
             let Some((wire, sink)) = unmade.take() else {
                 return Err(Declined::NoEntityId);
@@ -11864,10 +11860,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     return Err(Declined::from(refused.why));
                 }
             };
-            debug_assert_eq!(
-                declared.id, id,
-                "the tables number a row as they said they would"
-            );
+            // The id the tables numbered the row by: they mint it, after the room and the key, so
+            // a declaration is refused in their one order.
+            let id = declared.id;
             // The key as the tables read it off the row they put it in: its text is the row's own,
             // which does not move while the row stands.
             let lent = lent_key(tables(&core.session.registry), declared.key);
@@ -12546,15 +12541,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // The row the tables refuse, let go of as the key and the sink are.
         let mut refused_row = None;
         let declared = self.live_on_link(|core, tx| {
-            // The subscriber is one row of the session's tables, numbered by the id they hand out
-            // next, which its Interest carries: a full table, a key the session cannot hold or no
-            // id left refuses it before anything is asked, and the sink goes with the refusal. The
+            // The subscriber is one row of the session's tables, numbered by the id they mint for
+            // it, which its Interest carries: a full table, a key the session cannot hold or no id
+            // left refuses it before anything is asked, and the sink goes with the refusal. The
             // row holds the key expression declaration its Interest names the key by for as long
             // as it stands.
-            let next = tables(&core.session.registry).next_entity_id();
-            let Some(id) = next else {
-                return Err(Declined::NoEntityId);
-            };
             // Taken once: the declaration runs once.
             let Some((wire, sink)) = unmade.take() else {
                 return Err(Declined::NoEntityId);
@@ -12578,10 +12569,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     return Err(Declined::from(refused.why));
                 }
             };
-            debug_assert_eq!(
-                declared.id, id,
-                "the tables number a row as they said they would"
-            );
+            // The id the tables numbered the row by, after the room and the key: the one its
+            // Interest carries.
+            let id = declared.id;
             // One with no history asks the links as it is declared.
             if !history {
                 core.ask_liveliness_subscriber(declared.handle, tx);
