@@ -2526,6 +2526,237 @@ impl<R: SessionRuntime> TxRoute<'_, R> {
     }
 }
 
+/// The limits a group's frames are cut, numbered and waited for by, settled when the group is
+/// joined: a group has no handshake, so its terms are its own and every member's
+/// (`crate::multicast_params::MulticastParams`), where a link's are settled by its establishment.
+#[derive(Debug, Clone)]
+pub struct GroupTxLimits {
+    /// The bytes one frame may fill; a message past it leaves as a fragment chain.
+    pub frame_budget: usize,
+    /// The sequence number ring every frame of the group is numbered in.
+    pub sn_mask: crate::sn::Sn,
+    /// The longest chain a member of this profile can rejoin; a longer message is refused.
+    pub max_reassembly_bytes: usize,
+    /// Whether the group runs a conduit per priority and its frames carry their priority. Read
+    /// only where the build has the per-priority conduits (`transport-qos`): without them the
+    /// group has one conduit, as zenoh-pico's multicast transport does.
+    pub qos: bool,
+    /// Whether the group's batches are compressed. Read only where the build compresses
+    /// (`transport-compression`).
+    pub compresses: bool,
+    /// The waits a message may spend for room, by whether it may be dropped.
+    pub tx_queue: crate::session_init_params::TxQueueConf,
+}
+
+/// One message a group sends: how it is framed, and the bound its codec gives its bytes.
+#[derive(Debug, Clone, Copy)]
+pub struct GroupTxMessage {
+    /// The priority the message is sent at; the group's one conduit's when it runs no QoS.
+    pub priority: Priority,
+    /// Whether it rides the reliable channel.
+    pub reliable: bool,
+    /// Whether it may be dropped when its conduit's link has no room within its wait.
+    pub droppable: bool,
+    /// Whether it leaves at once, with what its conduit and the more urgent ones hold open.
+    pub express: bool,
+    /// The most bytes its body encodes to.
+    pub worst_case_payload: usize,
+}
+
+/// The transmit state of a multicast group: the conduits and frame numbers of a transport, over
+/// the transmit half of the one link it sends on, the group's send socket as a driver. A group
+/// writes its messages with the walk a unicast session writes with (`TxRoute::write`), compiled
+/// once a build, as zenoh-pico's multicast transport sends with the function its unicast one
+/// does (`vendor/zenoh-pico/src/transport/common/tx.c` @
+/// `static z_result_t _z_transport_tx_send_n_msg_inner(`). Its JOIN advertises the numbers the
+/// walk has handed its link ([`Self::next_sn`]).
+pub struct GroupTx<R: SessionRuntime> {
+    tx: TransportTx<R>,
+    link: LinkTx<R>,
+    limits: GroupTxLimits,
+    /// The set an aggregated unicast session routes by: a group sends on its one link, so the set
+    /// is empty and every frame leaves by `link`.
+    #[cfg(feature = "transport-multilink")]
+    no_links: std::sync::Mutex<alloc::vec::Vec<R::Shared<crate::session_actions::LinkState<R>>>>,
+}
+
+impl<R: SessionRuntime> GroupTx<R> {
+    /// The transmit state of a group that sends on `driver`, every conduit and channel at
+    /// `initial_sn`, framed by `limits`. Its send gate is open at once: the limits a link waits
+    /// for its establishment to settle are the group's from the start.
+    pub fn new(driver: R::LinkSink, initial_sn: u64, limits: GroupTxLimits) -> Self {
+        let link = LinkTx::new(
+            driver,
+            #[cfg(feature = "transport-stats")]
+            None,
+        );
+        #[cfg(feature = "transport-compression")]
+        link.settle_compression(limits.compresses);
+        link.transport_available.open();
+        Self {
+            tx: TransportTx::new(
+                initial_sn,
+                #[cfg(feature = "transport-stats")]
+                crate::stats_registry::TransportMetrics::default(),
+            ),
+            link,
+            limits,
+            #[cfg(feature = "transport-multilink")]
+            no_links: std::sync::Mutex::new(alloc::vec::Vec::new()),
+        }
+    }
+
+    /// The borrow a send of the group is made with: its transmit state and its one link.
+    pub fn route(&self) -> TxRoute<'_, R> {
+        TxRoute {
+            tx: &self.tx,
+            own: &self.link,
+            #[cfg(feature = "transport-multilink")]
+            links: &self.no_links,
+        }
+    }
+
+    /// The sequence number the next frame of `priority`'s conduit on `reliable`'s channel
+    /// takes, in the group's ring: what the group's JOIN advertises. A frame the walk handed its
+    /// link is behind it, whether or not the socket has written it yet.
+    pub fn next_sn(&self, priority: Priority, reliable: bool) -> crate::sn::Sn {
+        crate::sn::from_wire(self.tx.frame_sn.next(priority, reliable)) & self.limits.sn_mask
+    }
+
+    /// Send `message`, whose body `body` writes, as a unicast session's dispatch does from its
+    /// conduit's lock on: the conduit locked, the frame opened or joined, its room asked within
+    /// the message's wait, its sequence number minted and the frame handed to the group's link,
+    /// or cut into a chain past the frame budget. A message that may be dropped and finds its
+    /// conduit held by another sender is dropped at once (`PushOutcome::Held`), as zenoh-pico's
+    /// dropping send fails its try of the transmit lock; one that may not waits for the lock. A
+    /// body the codec refuses is `PushOutcome::Refused`; a group whose link's writer is gone,
+    /// or a send the link refused, is the error.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    pub fn send(
+        &self,
+        message: GroupTxMessage,
+        body: &dyn crate::tx_buf::WireWrite,
+    ) -> Result<crate::tx_deadline::PushOutcome, crate::send_wire_error::SendWireError> {
+        use crate::tx_deadline::PushOutcome;
+        if !self.link.transport_available.is_open() {
+            return Err(crate::send_wire_error::SendWireError::TransportUnavailable);
+        }
+        #[cfg(feature = "transport-qos")]
+        let priority = if self.limits.qos {
+            message.priority
+        } else {
+            Priority::DEFAULT
+        };
+        #[cfg(not(feature = "transport-qos"))]
+        let priority = Priority::DEFAULT;
+        // A frame of the default priority carries no QoS extension, as a unicast frame does not.
+        #[cfg(feature = "transport-qos")]
+        let ext_qos = (priority != Priority::DEFAULT).then_some(priority);
+        #[cfg(not(feature = "transport-qos"))]
+        let ext_qos = None;
+        let route = self.route();
+        let deadline =
+            crate::tx_deadline::PushDeadline::new(message.droppable, &self.limits.tx_queue);
+        let write = |batch: &mut BatchTx| {
+            route.write(
+                batch,
+                false,
+                priority,
+                false,
+                FrameEmit {
+                    ext_qos,
+                    sn: 0,
+                    reliable: message.reliable,
+                    mtu: self.limits.frame_budget,
+                    sn_mask: self.limits.sn_mask,
+                    max_reassembly_bytes: self.limits.max_reassembly_bytes,
+                    deadline,
+                    #[cfg(not(feature = "tx-lend-only"))]
+                    worst_case_payload: message.worst_case_payload,
+                },
+                body,
+            )
+        };
+        let conduit = self.tx.conduits.conduit(priority);
+        let pushed = if message.droppable {
+            let mut write = Some(write);
+            loop {
+                let taken =
+                    R::try_with_mutex_mut(conduit, |batch| write.take().map(|write| write(batch)));
+                match taken {
+                    Some(Some(pushed)) => break pushed,
+                    // The write runs in the one call that takes the lock.
+                    Some(None) => break Ok(UnicastPush::Congested),
+                    None => {}
+                }
+                // Dropped behind another sender only: a holder that is not one (a drain of the
+                // window) lets go once it has written, and is waited for.
+                if crate::runtime_cell::FlagCell::load(
+                    self.tx.conduits.sender_flag(priority),
+                    core::sync::atomic::Ordering::Relaxed,
+                ) {
+                    return Ok(PushOutcome::Held);
+                }
+                core::hint::spin_loop();
+            }
+        } else {
+            R::with_mutex_mut(conduit, write)
+        };
+        // An express message takes what its conduit and the more urgent ones hold open with it.
+        #[cfg(feature = "transport-batching")]
+        if message.express {
+            let band = TxConduits::<R>::conduit_index(priority);
+            route.drain_conduits(&|idx| idx <= band, true);
+        }
+        match pushed {
+            Ok(UnicastPush::Pushed) => Ok(PushOutcome::Pushed),
+            Ok(UnicastPush::Congested) => Ok(PushOutcome::Congested),
+            // A chain is refused so only to a sender that may not wait, which a group's is not.
+            #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
+            Ok(UnicastPush::Chain) => Ok(PushOutcome::Congested),
+            Err(crate::send_wire_error::SendWireError::Codec(error)) => {
+                Ok(PushOutcome::Refused(error))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Open the batch window (zenoh-pico `zp_batch_start` on a multicast transport): a message
+    /// joins its conduit's open frame until the frame fills, an express message takes it, or the
+    /// window is flushed or stopped.
+    #[cfg(feature = "transport-batching")]
+    pub fn batch_start(&self) {
+        self.tx.conduits.set_active(true);
+    }
+
+    /// Hand every conduit's open frame to the link, the most urgent first, and keep the window
+    /// open (zenoh-pico `zp_batch_flush`).
+    #[cfg(feature = "transport-batching")]
+    pub fn batch_flush(&self) {
+        self.route().drain_conduits(&|_| true, true);
+    }
+
+    /// Close the batch window and hand every conduit's open frame to the link (zenoh-pico
+    /// `zp_batch_stop`), closed first, so a send racing the stop leaves alone.
+    #[cfg(feature = "transport-batching")]
+    pub fn batch_stop(&self) {
+        self.tx.conduits.close_and_drain(WINDOW_CALLER, || {
+            self.route().drain_conduits(&|_| true, true);
+        });
+    }
+}
+
 impl<R: SessionRuntime> core::fmt::Debug for TransportTx<R> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("TransportTx")
@@ -3727,6 +3958,16 @@ impl<W: crate::runtime_cell::WordCell> ConduitTxSn<W> {
         slot.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
     }
 
+    /// The SN the next mint on `reliable`'s channel takes, raw: the count the mint masks.
+    pub fn next(&self, reliable: bool) -> u64 {
+        let slot = if reliable {
+            &self.reliable
+        } else {
+            &self.best_effort
+        };
+        slot.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Re-seed BOTH channels to `initial_sn` on reopen (the fresh-rebuild
     /// path). SeqCst pairs with `mint` / `reserve_next` so the store cannot
     /// reorder against a straggling in-flight mint.
@@ -3799,6 +4040,11 @@ impl<W: crate::runtime_cell::WordCell> FrameTxConduits<W> {
     /// send refused before any byte of it left — see [`ConduitTxSn::unmint`].
     pub fn unmint(&self, priority: Priority, reliable: bool) {
         self.select(priority).unmint(reliable);
+    }
+
+    /// The raw SN the next mint on `(priority, reliable)` takes — see [`ConduitTxSn::next`].
+    pub fn next(&self, priority: Priority, reliable: bool) -> u64 {
+        self.select(priority).next(reliable)
     }
 
     /// Re-seed EVERY conduit to `initial_sn` on reopen.

@@ -4569,3 +4569,148 @@ mod unicast_transport {
         assert_eq!(lost, [true], "one loss, with the peer's close as its cause");
     }
 }
+
+// A group's transmit state over a runtime of this crate's own: what its one link is handed, and
+// the numbers its JOIN reads. The tests send whole frames on the heap, which a lend-only build
+// has no form of.
+#[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
+mod group_tx_tests {
+    use alloc::sync::Arc;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use sce_forge_runtime::codec::{CodecError, SceSink};
+
+    use super::PlainRuntime;
+    use crate::link::{BoxedLinkDriver, LinkDropCause, LinkSendOutcome};
+    use crate::qos::Priority;
+    use crate::reliability::Reliability;
+    use crate::send_wire_error::SendWireError;
+    use crate::session_init_params::TxQueueConf;
+    use crate::transport_tx::{GroupTx, GroupTxLimits, GroupTxMessage};
+    use crate::tx_buf::TxSink;
+    use crate::tx_deadline::PushOutcome;
+
+    /// A group's send socket that keeps each datagram it is handed, or, once its writer is gone,
+    /// refuses each as a driver with no writer does.
+    #[derive(Default)]
+    struct Socket {
+        sent: std::sync::Mutex<Vec<Vec<u8>>>,
+        gone: AtomicBool,
+    }
+
+    impl Socket {
+        fn sent(&self) -> Vec<Vec<u8>> {
+            self.sent.lock().expect("no test thread panicked").clone()
+        }
+    }
+
+    impl BoxedLinkDriver for Socket {
+        fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            if self.gone.load(Ordering::SeqCst) {
+                return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+            }
+            self.sent
+                .lock()
+                .expect("no test thread panicked")
+                .push(bytes.to_vec());
+            LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+    }
+
+    /// A group of 1,024-byte frames numbered from 7 in the 28-bit ring, with no QoS.
+    fn group() -> (GroupTx<PlainRuntime>, Arc<Socket>) {
+        let socket = Arc::new(Socket::default());
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = socket.clone();
+        let limits = GroupTxLimits {
+            frame_budget: 1024,
+            sn_mask: crate::sn::mask_from_res(2),
+            max_reassembly_bytes: usize::MAX,
+            qos: false,
+            compresses: false,
+            tx_queue: TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
+        };
+        (GroupTx::new(sink, 7, limits), socket)
+    }
+
+    /// A reliable message that waits for room, of two bytes.
+    const PUT: GroupTxMessage = GroupTxMessage {
+        priority: Priority::DEFAULT,
+        reliable: true,
+        droppable: false,
+        express: false,
+        worst_case_payload: 2,
+    };
+
+    fn body(sink: &mut TxSink<'_>) -> Result<(), CodecError> {
+        sink.write_bytes(&[0xAA, 0xBB])
+    }
+
+    /// A message leaves as one reliable frame of the group's first number on its one link, and
+    /// the JOIN reads the reliable channel past it and the best-effort one where it began. Turned
+    /// red by a send that mints on another channel than the message's, by a group whose gate is
+    /// closed at its making, or by a `next_sn` that answers the last number minted.
+    #[test]
+    fn a_group_frames_a_message_on_its_link_and_its_join_reads_past_it() {
+        let (group, socket) = group();
+        assert_eq!(group.next_sn(Priority::DEFAULT, true), 7);
+        assert!(matches!(group.send(PUT, &body), Ok(PushOutcome::Pushed)));
+        assert_eq!(
+            socket.sent(),
+            [vec![0x25, 0x07, 0xAA, 0xBB]],
+            "a reliable Frame of SN 7 holding the message"
+        );
+        assert_eq!(group.next_sn(Priority::DEFAULT, true), 8);
+        assert_eq!(
+            group.next_sn(Priority::DEFAULT, false),
+            7,
+            "the best-effort channel minted nothing"
+        );
+    }
+
+    /// A group whose socket's writer went away refuses its next send typed, as a link's closed
+    /// gate does, and hands the socket nothing more. Turned red by a send that does not read the
+    /// gate, or an emit that leaves it open on a writer that is gone.
+    #[test]
+    fn a_group_whose_writer_is_gone_refuses_its_next_send() {
+        let (group, socket) = group();
+        socket.gone.store(true, Ordering::SeqCst);
+        assert!(
+            matches!(group.send(PUT, &body), Ok(PushOutcome::Pushed)),
+            "the frame was handed over; the socket's refusal closes the gate behind it"
+        );
+        assert!(matches!(
+            group.send(PUT, &body),
+            Err(SendWireError::TransportUnavailable)
+        ));
+        assert!(socket.sent().is_empty());
+    }
+
+    /// Inside the batch window two messages join one frame, which leaves only at the stop, under
+    /// one number. Turned red by a `batch_start` that opens no window, or a `batch_stop` that
+    /// closes it without handing the open frame over.
+    #[cfg(feature = "transport-batching")]
+    #[test]
+    fn a_group_window_holds_its_messages_in_one_frame_until_the_stop() {
+        let (group, socket) = group();
+        group.batch_start();
+        assert!(matches!(group.send(PUT, &body), Ok(PushOutcome::Pushed)));
+        assert!(matches!(group.send(PUT, &body), Ok(PushOutcome::Pushed)));
+        assert!(socket.sent().is_empty(), "the window holds the frame");
+        group.batch_stop();
+        assert_eq!(
+            socket.sent(),
+            [vec![0x25, 0x07, 0xAA, 0xBB, 0xAA, 0xBB]],
+            "one frame of SN 7 holding both"
+        );
+        assert_eq!(group.next_sn(Priority::DEFAULT, true), 8);
+    }
+}
