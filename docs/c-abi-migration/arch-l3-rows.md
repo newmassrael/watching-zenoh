@@ -148,10 +148,10 @@ What it shows:
 | H2 | which row a subscriber is | the row's handle (`Declared::handle`, generation-checked, P10) | the entity id the port hands the door (`Declared<SubId>`), by which `undeclare_subscriber` walks the liveliness subscribers and then the subscribers, enumerated, comparing ids | yes | D4 |
 | H3 | the key's text while a retraction is written | the row's `EntityKey` | none | no | gone (D3, D3q, D3t) |
 | H4 | what keeps a key's declaration alive | the tables' count of the declaration (`KeyexprCount`) | the ABI's anchor in every callback row (`KeyAnchor` in `SubscriberRow`, `QueryableRow`, `LivelinessRow`), which the pico ABI fills only on its advanced plane (`wz-capi-pico/src/advanced_forms.rs`) | the field and its drop, never filled | D5 |
-| H5 | the callback protocol of a row | the subscriber's record | the queryable's and the liveliness subscriber's records, each `{anchor, sink, latch}` with the same `RowCallback` body | one instance | D6 |
+| H5 | the callback protocol of a row | one record for every kind (`LatchedRow<S, A>` in `wz-capi-coop/src/engine.rs`) | none | no | gone (D6) |
 | H6 | the session's L3 tables as a value | `SessionTables` and `PeerTables` in `wz-session-core` | `RegistryOf<H>` in `wz-capi-coop/src/engine/registry.rs`: the application's observer (`SlotObserverOf`, whose `tables` is the `SessionTables`), the faces' `FaceTables` (`peer`, `gets`, the due row), the holders' index and the written count; every operation reaches the tables through it | 1,101 bytes; 7,938 in the peer case, 18,542 in the api case | D7 |
 | H7 | a pending get | `SessionTables::pending_gets` | each face's `FaceTables::gets` (`Requesters<ConsolidatingSink<LegSink, LegHold>>`) and the due index (`Dues`) | no | D8 |
-| H8 | a query kept past its callback | the queries' plane (`wz-session-core/src/query_plane.rs`, `QueryPlane`'s Final holds) | the engine's held queries (`engine/query.rs`, `keep_query`, `HeldQueryId`) | no | D8 |
+| H8 | a query kept past its callback | the queries' plane (`wz-session-core/src/query_plane.rs`, `FinalHold::kept`) | none: the engine keeps no copy, only the query's name across the port (`HeldQueryId`), read in 6.2 | no | not held twice |
 | H9 | the session's own tokens | the application's tables (`ObserverTables::held_tokens`) | none; the tokens a lost face owes are kept apart (`OwedTokens`), read with D7 | no | gone (D9a, D9b) |
 | H10 | a sample between a read and a callback | the read's frame | the round, under `wz_round` | no | D10 |
 
@@ -179,9 +179,9 @@ reverted when its row does not move by its expectation.
 | D3t | H3, the token's | landed | `RetractedEntity for TokenRow`, `undeclare_token`; the engine's `undeclare_liveliness_token` | 0 (not built); the api case 0 to -60 (the names are read once, in the tables; the row is no longer handed back whole) | 0 | `session_tables::tests::a_tokens_undeclaration_names_its_retraction_off_the_row_it_removes`; `tests/liveliness.rs` unchanged |
 | D4 | H2, every kind at once | with step 5 (`arch-l4-facade` F7) | the port's `Declared` answers the row (`EntityRow`, the handle's bits on this engine, the id on an engine that has no rows); `undeclare_subscriber`, `undeclare_queryable` and the liveliness kinds take it; the doors keep it; L3's undeclarations by handle are there already | -150 to -300 (the walk of two tables by id), more where liveliness is built | 0 | an undeclaration by a row of an earlier generation finds nothing; one of a liveliness subscriber reaches its own table |
 | D5 | H4 | with S-SINK (`docs/win-budget/size.md` section 3.1) | the port's `KeyAnchor` as a type of no size where no ABI keeps an anchor | -100 to -200 text, 32 bytes a row of the region | 0 | the anchor test of `tests/liveliness.rs` kept on the build that keeps anchors; a size assertion of the row on one that does not |
-| D6 | H5 | the queryable stage | `wz-capi-coop/src/engine.rs`, `engine/query.rs`: one latched record over the sink type | 0 (one instance) | 0 | `closure_drops` |
+| D6 | H5 | landed | `wz-capi-coop/src/engine.rs` (`LatchedRow<S, A>`, `RowCall<S, A>`, one `RowCallback` impl), `engine/query.rs` and `engine/liveliness.rs` (`QueryableRow`, `LivelinessRow` its instances); the subscriber's timestamp choice is the row's `shown` field, so its row is laid out as before | 0: the measured case builds the subscriber's instance alone, whose layout, constructor (out of line) and calls are unchanged; the api case 0 (each kind is still its own instance) | 0 | `closure_drops`, `queryable`, `liveliness`, `round` unchanged |
 | D7 | H6 | with the driver lane, step 6d | the registry becomes the session core's (`wz-session-core`: the table set and the faces' sets, a face named by its set's handle) | -300 to -800; `pico-peer-coop` and the api case to be read (7,938 and 18,542 held now) | to be read: the receive's one look at its face's set is kept, and no call is added | the registry's tests move with it; `direct_receive`, `in_place` |
-| D8 | H7, H8 | the gets' and queries' stage | the gets' legs as rows of the pending get; the held query as a row of the queries' plane | 0; the api case to be read | 0 | `get`, `local_query`, `queryable` |
+| D8 | H7 (H8 read as not held twice, 6.2) | read, not designed (6.2) | the gets' legs as rows of the pending get | 0; the api case to be read | 0 | `get`, `local_query`, `queryable` |
 | D9a | H9: the answering apart from the holder | landed | `local_token.rs` (`TokenAnswers`), `peer_tables.rs` (`PeerTables::token_answers`), the observer's answer and drain | 0 (no liveliness); the api case 0 to -100 (the observer's sum of refusals and its `try_from`, read on `dispatch_event_among` and `answer_iteration_event`) | 0 (an Interest's path only) | `local_token::tests` (the staging's tests now stage through `TokenAnswers`, and `a_chain_that_does_not_fit_whole_is_refused_and_stages_nothing` reads the refusal it counts), `peer_tables::lent_tests::a_lent_peer_holds_a_liveliness_answer` (the refusal counted by the lent row's staging), `limits::tests::max_pending_declares_stated_refuses_the_next_chain_whole` (the quota reaches the staging through `PeerTables::limit_to`, and the observer reads the refusal off it) |
 | D9b | H9: one holder | landed | `slot_observer.rs` (`RegistryTables::local_tokens`, `RegistryRows::local_tokens`, `ObserverTables::held_tokens` and `init_empty_at`; `ObserverRows` and the observer's field, region rows and line gone), `observer.rs` (the heap view reads the tables' registry), `local_token.rs` (the registry's region and counted forms gone), the coop engine's three callers of the observer's lent and counted forms and its region rows | 0 (no liveliness); the api case -100 to -400 (the observer's `LocalTokenRegistry<Region>` state, its region line, its lend of no row, its two `limit_*` calls, and the `HeldTokens` of `LocalTokenRegistry<Lent>`, whose vtable the `unwrap_or` named) | 0 | `slot_observer::lent_tests::a_lent_observers_tokens_are_a_registry_of_its_tables_lent_their_own_rows`; `limits::tests::max_local_tokens_*` (the token quota reaches the registry through `RegistryTables::hold_to`); `liveliness` |
 | D10 | H10 | the MCU matrix | a lock per value on a target without 64-bit atomics (the kernel's), so no `threads` form keeps the round | 0 on a host; the MCU images' to be read | to be read on the MCU matrix | `one_thread`, `round` until they go |
@@ -255,6 +255,27 @@ was written:
   bundle of the storage policies is written field by field where it lies
   (`ObserverTables::init_empty_at`), so the observer's in-place write still holds one table at a
   time on its frame, the token registry among them.
+
+### 6.2 D8, read
+
+H8's premise does not hold in the code. The query a program keeps past its callback is a row of
+the queries' plane already: `CoopEngine::keep` (`engine/query.rs`) asks the plane's holds
+(`FinalHolds::keep`, `keep_again`, `release_kept`) and writes what the replies are built from
+into the plane's row of that query's Final (`FinalHold::kept`, `KeptQuery`). What the engine
+keeps is `HeldQueryId`, the link generation and the request id the row is found by, which is the
+port's name of the kept query (`wz_capi_port::QueryHolder`), not a second record of it. Whether
+that name should be the row's handle rather than a lookup by generation and id is H2's question,
+one contract for every entity across the port, and goes with D4.
+
+H7 holds: a get the session waits on is recorded three times. The tables' row
+(`SessionTables::pending_gets`, `PendingGetRow`: the request id, the gate, the legs still owing
+their Final, the deadline, the callback); the engine's note of each leg pending
+(`CoopEngine::pending_gets`, `Rows<PendingGet>`, lent with the legs' rows); and each face's
+requesters (`FaceTables::gets`, `Requesters<ConsolidatingSink<LegSink, LegHold>>`), with the
+index of the earliest deadline over the faces' sets (`Dues`, a `DueRow` per set). Folding the
+legs into the pending get's row reaches the get's send, its replies' consolidation per leg, the
+deadline index, the round's reply calls and the faces' sets, and is designed against those before
+it is written; it is the next step of this lane.
 
 D4 is the façade lane's because the port's identity of an entity is one contract for every kind
 and every engine: the cooperative engine, the tokio engine's port (`wz-capi-core/src/engine_port.rs`),
