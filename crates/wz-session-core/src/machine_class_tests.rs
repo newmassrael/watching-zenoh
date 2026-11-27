@@ -7,8 +7,8 @@
 //! every `<final>` at the top level and no eventless transition. The runtime's general turn asks
 //! for eventless transitions after every event and drains an internal queue; for this class one
 //! external event selects at most one transition and nothing follows it, which is the turn
-//! `docs/win-budget/size.md` section 7 asks of SCE. A document that leaves the class is found here,
-//! in the build that links it, and not only in the image's size.
+//! `docs/win-budget/size.md` section 10 asks of SCE. A document that leaves the class is found
+//! here, in the build that links it, and not only in the image's size.
 
 use sce_rust_runtime::{
     CandidateCell, CandidateRows, DocumentTables, StateId, StateKind, StateRow, TransitionId,
