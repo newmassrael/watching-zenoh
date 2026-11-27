@@ -267,6 +267,20 @@ called `wz_artifact_root_init`, `artifact("<rel>")` in a gate or a test helper.
 Layer Ero runs Ewire and its pico oracle build in a read-only mount of the
 checkout to measure it.
 
+### Oracles a machine builds once (the oracle store)
+
+`$WZ_ORACLE_STORE`, else `$XDG_CACHE_HOME/watching-zenoh/oracles`, else
+`~/.cache/watching-zenoh/oracles`, holds what one checkout of the machine built
+for all of them: zenohd per version (`scripts/lib/oracle_store.py`) and
+`sce-codegen` per SCE source state, `build-sce.sh` digest and toolchain
+(`<store>/sce-codegen/<rev>-<dirty>-<recipe>-<toolchain>/`, "The store" in
+`scripts/lib/sce-codegen-oracle.sh`). A new worktree, or a build machine's copy
+of the tree, at a pin another checkout built runs that binary instead of
+building it again; both doors still grade its stamp against the tree. A
+`vendor/sce` with local changes is built in its checkout only. Remove an
+entry to have it built again. `bx.toml`'s `[view] shared` names the
+`sce-codegen` part so the slots of a build machine share it.
+
 ### Attributing a kit image's size change
 
 To say what moved an image's text, flash, static RAM, stack objects or
