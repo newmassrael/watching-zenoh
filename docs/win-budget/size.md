@@ -206,7 +206,7 @@ reliability when none is open, write in place, on no room flush once and retry, 
 than a batch to one cold fragment body). The second share is the session's machine: 8,200 bytes of
 SCE runtime against pico's 2,300 of hand-written handshake. Its design is SCE's (X3: the runtime's
 operations one body each, the machine's tables as data), proposed through `docs/sce-proposals/`
-and measured in text plus rodata.
+and measured in text plus rodata. Section 6 reads both again on the writer as it landed.
 
 ## 4. The step landed with this note: a peer space's heap arms out of the bounded policies' reads
 
@@ -237,3 +237,108 @@ each policy's `HeapForm`; the heap arms stay covered by `wireexpr_resolve`'s tes
 The main session reads each step on the case's explain report: the area table above, and for this
 step the body `PeerSpace<wz_session_core::bounded::Region>::literal` and the `hashbrown` owner
 lines in language. A step whose area does not move by its expectation is reverted, as tdecl-13 was.
+
+## 6. Transport read again: the send writer as it landed, and the session machine's bytes
+
+Read from the size ledger's `--explain` document of this case dated 2026-11-26 (schema 5), whose
+transport area is 30,814 against pico's 13,951. Bytes are each side's in the area, as in section 2.
+
+### 6.1 X1: the one writer is there; what the send side still holds
+
+`text.md` X1's `TxBatch` landed as `SessionLinkActions::write_n_msg`: one body opens the frame for
+the message's reliability, joins the conduit's open frame or sends it once and opens the next,
+mints the SN where the slot is written and gives it back where the frame does not leave
+(`crates/wz-session-core/src/session_actions.rs` @ `fn write_n_msg(`). Fragments and control
+messages do not carry a buffer of their own either: a fragment is written by
+`frame_encode::write_fragment` through `send_lent`, and an Init, an Open and a Close through
+`send_control_lent`, both into the one lend `send_lent_on`. The frame opener over a `dyn Fn` and
+the sizing pass of section 3.3 are gone from the lend-only build (`size_hint` measures nothing
+there); the message's writer is one `&dyn WireWrite`, so the writer is one body for every kind.
+
+| body | bytes | what it is |
+|------|------:|------------|
+| `dispatch_network_message_in::<false>` | 1,517 | the gate (availability, limits), the deadline, the Control barrier, the conduit lock and the outcome; pico's `_z_transport_tx_send_n_msg_inner` 1,261 does the same jobs but the barrier |
+| `write_n_msg` | 1,498 | the frame lend (section above); pico has no slot lend, its batch is one buffer |
+| `dispatch_declare_lent::{closure#1}` | 1,177 | the declaration's composition and its encoder, inlined into the one encoder closure: codec and sessions work, not the send's |
+| `emit_fragment_chain`, `send_fragment`, `emit_fragments_encoded` | 1,302 | the chain's plan, per-fragment room and credit, the stop marker; pico's `_z_transport_tx_send_fragment` 414 has no credit and no stop marker |
+| `send_control_lent::{closure#0}` | 376 | `write_control`: Init, Open, Close and the held answer into the lent slot |
+| `CoopEngine::send_on_links`, `CoopEngine::place_link_session` | 1,539 | the engine's fan-out of a put to the session's links (844) and its placing of a link's session (695), attributed here by their inlined lines |
+
+So X1's remaining bytes are not a second writer: they are the dispatch's admission jobs that pico
+does not have (the barrier, the probe, the expiry run) and the fragment chain's credit and stop
+marker, each a behaviour the parity contract states. A further cut here is a change of what the
+lend-only preset does (for example a preset in which no session holds a window open, so
+`write_n_msg`'s join arm is not compiled), which is a preset decision and not this lane's.
+
+### 6.2 X3: where the session machine's bytes are
+
+The generated code is not where the machines are large. The three machines' own code in this
+image is 583 bytes (`out/wz-session-core/unicast_link_sm.rs` 309, `session_fsm_unicast_sm.rs`
+211, `reassembly_slot_sm.rs` 63, the last in sessions): their selection is already rows (SCE ADR
+0135, the `candidates` of each `DocumentTables`), their microsteps read `entry_rows`, and what is
+left of the generated code is the hooks' `match` over a state or transition number calling one
+host action each. Writing those hooks as action-op tables too would remove at most about 300 bytes
+of text for about 100 of rodata: a table-driven generator is not X3's lever.
+
+The SCE runtime is 8,319 bytes of the area, in three parts:
+
+| part | bytes | bodies |
+|------|------:|--------|
+| the shared walk, one body for every machine | 3,505 | `Turn::run` 1,296, `exit_states_from_rows` 655, `enter_states_from_rows` 562, `select_transition_from_rows` 474, `Turn::take_microstep` 389, `Turn::take_event` 129 |
+| the per-machine monomorphs | 1,491 | `Engine::run_turn` 468 in 3, `Engine::new_in_place` 353 in 3, `EngineHost` `enter_state` 198 in 3, `queue` 137 in 2, `execute_transition_content` 137 in 3, `store` 114 in 2, `exit_state` 51 in 2, `behaviour` 33 in 3: 793 beyond each one's largest body |
+| the engine's API inlined into the host's bodies | 2,422 | the session machine's `process_event` (its queue push and its turn) in `LinkSession::service_due` and `init_in` 777, `drive::dispatch_copied` 256, `CoopEngine::link_turn` 240, `UnicastRx::dispatch_datagram` 164, `drive::admit_head_in_place` 156, `drive::dispatch_control_in_place` 153: 1,746; the link machine's in `UnicastLink::input` 519 and `new` 100; the slot machine's in `turn_slot_engine` 57 |
+
+pico's handshake is `vendor/zenoh-pico/src/transport/unicast/transport.c` @
+`static z_result_t _z_unicast_handshake_open(` 873 and the file's other bodies, 2,324 in all.
+
+### 6.3 The wz step landed with this section: one body hands the session machine its events
+
+`wz_session_core::drive::deliver_session_event` is `Engine::process_event` out of line, and every
+path that tells the session machine something calls it: `dispatch_link_lost`,
+`dispatch_link_event`, `dispatch_unit_in`, `dispatch_lean_unit`, `admit_head_in_place`,
+`refused_data_unit`, `dispatch_control_in_place`, `lean_in_place`, `frame_in_place`,
+`judge_lease`, `check_requested_close`, `check_out_of_band`, `TransportTimers::fire_due`, and the
+coop pump's role activation (`LinkSession::init_in`, `open_step`). None of them is on a sample's
+path: each is a refusal, a decided handshake event, a timer that has fallen due or a request from
+outside the loop, so the receive's per-message instructions do not change; what goes is the inlined
+copy of the queue push and the turn's opening and closing in each of those bodies.
+
+Expected on the case: of the 1,746 bytes above, one body of about 300 stays and each caller keeps a
+call: transport about -900 to -1,400 (`drive::dispatch_copied`, `dispatch_control_in_place`,
+`admit_head_in_place`, `UnicastRx::dispatch_datagram`, `LinkSession::service_due` and
+`CoopEngine::link_turn` each lose their `sce_rust_runtime::engine` and `event_queue` lines;
+`LinkSession::init_in` keeps its `initialize`). The test is `wz-runtime-coop`'s
+`session_drive::wake_budget_tests::the_session_machine_takes_its_events_through_the_one_body`.
+
+### 6.4 Proposal for SCE: the runtime's share, in three items
+
+Graded by text plus rodata (`text.md` O4), on this case's transport area and on the same image's
+callgrind of one handshake and one fragmented message (cell M9 of `text.md`).
+
+1. **`Engine::process_event` (and `lend_event`, `initialize`) out of line in the runtime.** Each
+   is `pub fn` with no inline attribute, so a host that calls it from N places carries N copies of
+   the queue push and the turn's `begin_turn`/`end_turn` around the one `run_turn` call
+   (`vendor/sce/backends/rust/runtime/src/engine.rs` @ `pub fn process_event(&mut self, event: P::Event) {`).
+   `#[inline(never)]` there gives every host what section 6.3 gives the session machine of this
+   one, without a wrapper of its own; for this image, after 6.3, about -100 more (the link and slot
+   machines are reached from one body each already). Instructions: one call per event, which is per
+   transport event and never per sample.
+2. **Fold the machine-independent half of the per-machine monomorphs.** `run_turn` builds the
+   machine's workspace and its `EngineHost` and hands `Turn::run` a `&mut dyn MainLoop`: the
+   workspace split and the `Turn` construction do not depend on the policy beyond the workspace's
+   size, which the tables can state. The same holds for the core fields `new_in_place` writes.
+   Expected -300 to -500 of the 793 duplicated bytes; the hooks (`enter_state`, `exit_state`,
+   `execute_transition_content`) stay one per machine, since each calls its policy directly.
+3. **Exit rows beside the entry rows.** For a document the row walk serves (no `<history>`, no
+   `<parallel>`, no transition of more than one target), the exit set of a transition taken from an
+   atomic state is fixed as its entry path is: the chain from that state up to the domain's child,
+   in exit order. The generator writes it as `exit_paths` (as it writes `entry_paths`), and
+   `exit_states_from_rows` reads one row and calls the exit hook per state instead of computing the
+   set against the configuration through the state set. The three machines of this image are of
+   that class (configurations of at most two states, no internal events). Expected
+   `exit_states_from_rows` 655 to about 200 and the state set's 548 to about 250, -600 to -800 of
+   text for about 60 of rodata; per transition a few instructions fewer (no set to sort).
+
+Together with 6.3 the transport area moves by about -1,800 to -2,700. The gap to pico that remains
+is the receive's (`drive` 4,657, `reassembly_dispatch` 2,111, `transport_timers` 786: `text.md`
+X2, X4, X5) and the send's admission jobs of section 6.1.
