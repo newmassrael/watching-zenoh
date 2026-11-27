@@ -1322,6 +1322,12 @@ impl PortStore for OwnRx {
     }
 }
 
+/// What a source gives the book of a stack's ports ([`PortSource::book`]): the rows the ports
+/// share, stored as `S`, each datagram held in what the reads `R` hold it in, and `Reads`, what
+/// makes each port's reads.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+pub type BookParts<S, R, Reads> = (PortRows<S, <R as PortStore>::Held>, Reads);
+
 /// Where the udp ports of a stack whose links count their handles as a kind does keep their peers
 /// and the datagrams sorted for them ([`CountKind::Ports`]), which a session hands the stack
 /// once (`SessionLinks::lend_ports`): what it lent, or the heap, counted to what it stated. A
@@ -1343,12 +1349,7 @@ pub trait PortSource<F: CellFlag> {
 
     /// The rows of the book the stack's ports share, and what makes each port's reads; `None`
     /// for a source that gives no port.
-    fn book(
-        self,
-    ) -> Option<(
-        PortRows<Self::Rows, <Self::Rx as PortStore>::Held>,
-        Self::Reads,
-    )>;
+    fn book(self) -> Option<BookParts<Self::Rows, Self::Rx, Self::Reads>>;
 
     /// The reads of a port opened now; `None` when there is no memory for them, and the port is
     /// not opened.
