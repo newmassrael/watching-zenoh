@@ -290,7 +290,7 @@ session takes its row at its open, as every policy's does.
 | **N3b (landed, `ffde81a72e`, `b83c368fbd`, `3da7536dde`)** | the session core's other tables a face and the application hold, counted on `OnUse`, each a constructor as N3a's from the limits the open resolved: `PeerTables::counted` and `count_rows` (the in-place form, as `lend_rows`), `SubscriberPeer::counted`, `ReplyStage::counted`, `FinalStage::counted`, `Requesters::counted` (`ReplyRegistry`, `LivelinessGetRegistry`), `SlotObserverOf::counted` over `CountedTables` (the watcher lists, `LocalTokenRegistry`); `LentRoom` and `PeerTokens` need none (on `OnUse` the composing room is inline, `ComposeInline`, and a peer's tokens a `FixedIdMap` whose keys `keep_keys_in` hands). `ReplyStage::stage_parts` makes both its columns' rooms before it writes either, and the query dispatch asks `FinalStaging::make_room` before a query runs, on a first-use policy (each arm folds away on every other) | `peer_tables.rs`, `slot_observer.rs`, `pubsub.rs`, `reply_stage.rs`, `reply.rs`, `decl_sink.rs`, `declare/{subscriber,queryable,liveliness,liveliness_get,local_token}.rs`, `query.rs`, `query/{in_place,pinned}.rs` | 0 (no case names them; the two room arms fold away on the D12 policies) | 0 | 0 |
 | N3c | the cooperative engine on `OnUse` under `tables-on-use`: `RowPolicy = OnUse`, the registry made by value (a third form beside `RegistryRegion` and the arena's), the open with no plan, no region and no lender (3.1), the session's `KeyBudget` in the boxed engine state (3.2); the moment assertion of N1 reads `AtFirstUse` in that form | `crates/wz-capi-coop` (`lib.rs`, `engine.rs` `lend_session` and `assemble`, `engine/registry.rs`, `registry/placed.rs`; `arena.rs` and `region.rs` not compiled in the form) | -4,500 to -8,200 (3.1, 3.2, 3.3, 3.5) | 0 to -6 (3.2); +3 at worst (3.5) | section 5 |
 | **N3c, step 3a (landed on the lane: `f104d31bc8`, `81cebf0f4c`, `b0afa53110`)** | the engine and the faces' rooms of an on-use session each in an allocation of its own, the engine's claimed before anything is reserved and keeping the arena's memory by a count (11, 3a) | `crates/wz-runtime-coop/src/kept.rs` (`SharedClaim`), `crates/wz-capi-coop` (`engine.rs` `assemble`, `engine_of`, `lay_out_open`; `engine/state_places.rs` `OwnPlaced`; `arena.rs`) | the on-use case +100 to +300 (the claim and the rooms' block, until 3d); D12 0 | 0 | the on-use arena smaller by the engine's and the rooms' bytes, the same bytes from the allocator |
-| N3d (11, 3c) | link memory on the heap arm alone (3.6), its source a type the engine names, not a feature | `crates/wz-runtime-coop` (`link_cells.rs` `heap_head`, `kept.rs`, `link_storage.rs`) | -1,000 to -2,000 | 0 to -30 | section 5 |
+| N3d (11, 3c; step (a) landed on the lane: `a5a7f0c8bf`, `23ff61faf7`, `46c8fd37e8`) | link memory on the heap arm alone (3.6), its source a type the engine names, not a feature; (a): the cells by `CountKind::Cells`, `OnHeap` and `LinksOnHeap` on use (7.18); (b) the buffers and (c) the ports, groups and kept publishes to come | `crates/wz-runtime-coop` (`link_cells.rs` `heap_head`, `kept.rs`, `link_storage.rs`) | -1,000 to -2,000 | 0 to -30 | section 5 |
 | N3e | a key held apart from every row (an object outside the lock: `KeyRef::hold_apart`, `KeysLocked::adopt`, `SampleView::keyexpr_held`) as a `HeapKey` clone taken and let go of under the lock, read by its text outside it | `key_arena.rs` beside `on_use.rs`, `sink.rs`, the engine's object paths | -200 to +200 | 0 | 0 |
 | N4 | the doors: 3.7 | `crates/wz-capi-pico` (`process_pool.rs`, `object_slot.rs`, `bytes.rs`) | -2,000 to -3,000 | 0; the put's to be read | -0 to -8 KiB a pair |
 | **R1, step 0 (landed on the lane: `6b6041bf09`)** | the policy of the session's tables stated once, by `build.rs` (`TablePolicy`), as the cfg of its name (`wz_lent`, `wz_on_use`): an item that differs by the policy reads its name, one that differs by where the counts come from reads `runtime-plan` (7.9) | `crates/wz-capi-coop` (`build.rs`, `lib.rs`, `arena.rs`, `engine.rs`, `engine/{registry,registry/held,state_places,query,decl_watch}.rs`, `round.rs`, the tests) | 0 (every predicate is the one it replaced) | 0 | 0 |
@@ -1031,7 +1031,71 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
     their runtime by `RuntimeTables::made` in an on-use build, so each on-use leg holds the made
     runtime to the cells the D12 form's placed one holds.
 
+### 7.18 R3, 3c, step (a): a link's cells made through its kind's source
+
+- What it does (`a5a7f0c8bf`, `23ff61faf7`, `46c8fd37e8`): where a link's parts are made is the
+  handle's kind's to say, `CountKind::Cells`, a `CellSource` (`crates/wz-runtime-coop/src/link_cells.rs`):
+  `Option<LentByteCells<F>>` for the kinds a session may lend a table to (a table while one is
+  lent, refused past its cells; the heap while none is), `HeapCells` for `OnHeap<N>`, a kind
+  counted as `N` counts whose every cell is the heap's. `CellRc::{in_cells_of, claim_of,
+  halves_in_of}` take the source by reference and reach the cell through `head_of`, which calls
+  the out-of-line `head_in` for a source that lends (`CellSource::LENDS`) and `heap_head` alone
+  for one that does not, so a build whose kind is `OnHeap` instantiates neither `head_in` nor
+  `table_head` and makes no `Owner::Table`. `try_on_heap` and the two entropy holders and the
+  ports' book, which were placed through `None`, name `HeapCells`; the one task's conveniences
+  (`in_cells`, `claim`, `halves`, `halves_in`) keep their `Option<&LentByteCells>`, the source
+  of the kinds that lend.
+- The stacks (`ip_stack`, `app_link`, `serial_link`, `unixpipe_link`, `ws_link`, `either_links`)
+  and the transport (`TransportState::{gate,actions,halves}_cells`, `LinkCalls::gate`) hold
+  `N::Cells`, and `SessionLinks::lend_cells` hands the source itself, so a heap kind's stack is
+  never lent a table: the type has none to take. The kind reaches the stacks by the type every
+  program already names (`counted_by::<wz_capi_coop::LinkCount>()`), and the runtime by its lock
+  kind: `sync::LinksOnHeap<K>` is `K` in every item but `LinkCount`, which is
+  `OnHeap<K::LinkCount>`. A feature of `wz-runtime-coop` could not say it (3c above).
+- The engine (`46c8fd37e8`): on `wz_on_use` `LinkCount` is `OnHeap` of the form's kind and
+  `SessionLock` is `LinksOnHeap<FormLock>` (`form.rs`; `FormLock` is `LockForm::SessionLock`, which
+  the direct read's assertion of a lock of each value's own now reads). `lay_out_open` lays out
+  no table of cells, `OpenHolds::cells`, `TransportTables::cells`, `TransportRows::cells_from`,
+  `OpenRegion::cell_bytes`, `cells_of`, `link_cells` and `LinkHalves` are the D12 forms' alone, and
+  the open hands the stack and the transport `HeapCells`. `ArenaPlan::holding_cells` stays the
+  plan's public word in every form.
+- D12: the kinds and their sources are the ones they were (`Option<LentByteCells>` is what each
+  stack held), `lend_cells` is called with the arena's `Option` once instead of behind an
+  `if let`, and `try_on_heap` calls `heap_head` directly rather than `head_in(None)`.
+- Size, on use: `table_head`, `head_in`, the table arm of every cell's maker and the lend of four
+  tables of cells leave the form; the arena is smaller by the four tables (a flag and a cell for
+  each link of each); each link's parts are three or four blocks of the allocator at its open.
+  Receive Ir: none (cells are made at a link's open, not per batch).
+- Tests:
+  - `link_cells::tests::each_source_makes_its_cells_where_it_says`: red if `head_of` calls the
+    heap's maker for a source that lends (a full lent table would hand back a heap cell), or a
+    source of no table claims none.
+  - `link_cells::tests::a_handle_whose_cells_are_the_heaps_counts_as_its_kind_does`: red if
+    `OnHeap` counts apart from the kind it wraps (two handles counted otherwise, the value let go
+    early) or its source makes no cell.
+  - `ip_stack::tests::links_whose_cells_are_the_heaps_open_each_link_on_the_heap`: red if a stack
+    of a heap kind refuses a link for want of a cell, or its sink and pump are not one cell.
+  - `sync::tests::a_kind_whose_links_cells_are_the_heaps_is_its_kind_in_all_else`: red if an item
+    of `LinksOnHeap` is not the wrapped kind's.
+  - `tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime`
+    asserts no table of cells too; `tests::on_use::an_on_use_sessions_link_parts_lie_on_the_heap`:
+    red if the on-use open lends its transport a table of cells.
+  - On use, `tests::arena::a_links_halves_lie_in_its_cell_across_a_redial` and
+    `arena::tests::the_cells_of_each_kind_held_are_lent_past_the_kinds_with_none` are not compiled:
+    the form lends no cell.
+
 ## 8. What the main session runs
+
+- R3, 3c (a) (`a5a7f0c8bf`, `23ff61faf7`, `46c8fd37e8`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast --lib
+  link_cells` two more than before, `... --lib ip_stack` one more, `... --lib sync::tests` one
+  more; `cargo clippy --manifest-path crates/Cargo.toml -p wz-runtime-coop --all-targets -- -D
+  warnings` with the crate's feature sets (heap, heap-lent-ports, slot). wz-capi-coop:
+  `--features tables-on-use --lib on_use` one more, `--features tables-on-use --lib tests::arena`
+  one fewer, the defaults' `--lib tests::arena` and `--lib arena::tests` unchanged; clippy of
+  wz-capi-coop with the legs of 3b's bullet below, and `--features threads,tables-on-use` (the
+  form of several threads over `LinksOnHeap<ManyThreads>`). Size: D12 unchanged or a few bytes
+  smaller; the on-use case smaller by the cell tables' code and rows.
 
 - R3, 3b (`a0a99b28b6`, `26217c7d5b`), not built or run by this lane. `cargo test --manifest-path
   crates/Cargo.toml -p wz-runtime-coop --lib table_tests` one more than before; `cargo clippy
@@ -1475,6 +1539,10 @@ The order that builds at each step:
      its first fragment; the endpoints' texts by value. Each stack's `lend_buffers` and
      `lend_cells` (`ip_stack.rs`, `app_link.rs`, `serial_link/links.rs`, `unixpipe_link.rs`,
      `ws_link/links.rs`, `either_links.rs`, `session_drive.rs`) reads the source.
+     Written, step (a) (7.18): the cells' source is the handle's kind's (`CountKind::Cells`), so
+     it reaches every stack by the type the programs already hand them (`LinkCount`), and the
+     runtime by its lock kind (`LinksOnHeap`); the buffers (b) and the ports, groups and kept
+     publishes (c) are next.
 4. N4 (3.7): the doors' objects from the allocator, counted against their kinds, so the places the
    ABI holds in the arena today (the handle's, the entities', the lodgings) are the ABI's own.
 5. 3d, the arena: with every tenant housed, the on-use form reserves no arena. `SessionArena`,
