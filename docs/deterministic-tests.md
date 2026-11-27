@@ -2,8 +2,9 @@
 
 Status: design note, 2026-11-27. It states the cause of the flake that started it, the census of
 where tests touch nondeterminism, the target structure, the layer rule and the gate that holds
-it, and the order of the migration. The first step (the simulated world and the step tests on
-it) is built; the rest is the plan. Like the other notes under `docs/`, the atomic store does not
+it, and the order of the migration. Built: the simulated world and the step tests on it, the gate
+of section 5 with its first table, and the moves of `tests::ticker`, `tests::program_clock` and
+`tests::runtime_tables` (section 8); the rest is the plan. Like the other notes under `docs/`, the atomic store does not
 parse it.
 
 The owner's instruction: a flake is to be made impossible by the structure of the test, not
@@ -295,32 +296,58 @@ implementation of the protocol) is declared, with the reason, in the gate's tabl
 `scripts/lib/deterministic_test_layer_gate.py`, `--check` and `--selftest`, Python 3.10 at the
 lowest, a text read with no build:
 
-- **Population**, derived: every tracked `.rs` test module of the crates the gate covers (first
-  `wz-capi-coop`: `src/tests.rs`, `src/tests/*.rs`, `src/**/tests.rs`, `tests/*.rs`), read with
-  comments and string literals blanked.
-- **Table**: `docs/deterministic-tests/system-layer.tsv`, one row per system-layer module:
-  path, the sources it reaches (`clock`, `socket`, `thread`, `random`, `process`), the reason.
-- **Findings**: a module outside the table that names a source of section 4; a row whose file is
-  not tracked; a row with no reason; a row that names a source its module no longer reaches (the
-  row is stale: the module moved to the unit layer, and the row goes); a population of zero
-  modules or a table read as empty (the gate lost its subject).
-- **Ratchet**: the first table lists every module that reaches a source today, so the gate is
-  green on the day it lands and every migration deletes a row; a row is never added for a module
-  that is unit-layer today.
-- **Wiring**, beside the census coverage gate: the pre-push list
-  (`.githooks/pre-push`, next to `"logic_census_coverage_gate.py --check"`), and in
-  `scripts/run-ci.sh` the two legs
-  `_runci_leg deterministic_test_layer_gate.selftest -- python3 scripts/lib/deterministic_test_layer_gate.py --selftest`
-  and `_runci_leg deterministic_test_layer_gate --after deterministic_test_layer_gate.selftest -- python3 scripts/lib/deterministic_test_layer_gate.py --check`.
-- **Selftest**: a fixture tree holding one unit module that names `Instant::now` (red), the same
-  module in the table (green), a table row for a missing file (red), a row with no reason (red), a
-  stale row (red), a source named only in a comment or a string (green), an empty population
-  (red).
+- **Population**, derived: every tracked `.rs` file of a covered crate whose path is a test's (a
+  `tests/` or `benches/` directory, a file named `tests.rs` or `*_tests.rs`). The covered crates
+  are `wz-capi-coop`; another crate joins with its first table rows. Each file is read with its
+  comments and the bodies of its literals blanked (`scripts/lib/rust_comments.py`).
+- **Reach**, derived: a module reaches a source when its text names one of the source's needles
+  (section 4), or when it takes from another module of the population an item that reaches it:
+  a `use super::..` or `use crate::tests::..` import, or such a path in its code (a `super`
+  inside an inline module stays in its file). An item's text is its definition and, for a type,
+  every impl block of that type in its file; an item reaches what its text names, what the items
+  of its own module it names reach, and what its module's imports it names reach, to a fixed
+  point. The read through imports is load-bearing: `tests::admission_heap` names no source and
+  opens its sessions on the host's links through the test root's `open_with`, and a read of what
+  a module names alone put it in the unit layer.
+- **Table**: `docs/deterministic-tests/system-layer.tsv`, a header and one row per system-layer
+  module: path, kind (`pending`: owed a move to the simulated world; `system`: the host is its
+  subject), the sources it reaches (`clock`, `socket`, `thread`, `random`, `process`), the
+  reason.
+- **Findings**: a module that reaches a source and has no row; a row for a path that is not a
+  tracked test module of a covered crate, or a second row; a kind, a source list or a reason that
+  does not read; a row that declares a source its module no longer reaches (the row is stale:
+  the module moved, and the source or the row goes) or that leaves out one it reaches; a
+  population of zero modules or a table read as empty (the gate lost its subject). A line that
+  does not read as a row is a finding, never dropped.
+- **Ratchet**: the first table listed every module that reached a source the day it was written
+  (47 rows of 50 modules: 40 `pending`, 7 `system`), so the gate is green on the day it lands
+  and every migration deletes a row; a row is never added for a module that is unit-layer
+  today. That last rule is the review's: the gate cannot tell a new system-layer module from a
+  unit module that went back to the host.
+- **Wiring**, beside the census coverage gate: the pre-push list (`.githooks/pre-push`, after
+  `"logic_census_coverage_gate.py --check"`), and in Layer C0 of `scripts/run-ci.sh` the two legs
+  `deterministic_test_layer_gate.selftest` and `deterministic_test_layer_gate`, the second
+  `--after` the first.
+- **Selftest**: a fixture tree whose modules each hold one way to reach a source: a needle named
+  directly, an item imported from the test root, an item of the root that names another, a type
+  whose impl block names one, `super::super` from an inline module, a path in code; and, held
+  to reach nothing, a glob inside an inline module, a needle only in a comment or a string, and
+  the CONTROL, an import from the root of an item that reaches nothing. Against a table that
+  declares them it is green; a module with its row taken out, a row for a missing file, a row
+  with no reason, a stale source, a row for a module that reaches nothing, a source left out, an
+  unknown kind or source, a row of three cells and a wrong header are each a finding; an empty
+  population and a table of no row are each refused.
+
+What the gate does not see, by its construction: a source reached through a macro, a re-export,
+an impl block in another file than its type, or a product item; an integration test target
+(`tests/*.rs`) is a crate of its own, read for what it names alone; an inline
+`#[cfg(test)] mod tests` inside a product file is outside the population (section 2); and a
+`cfg` is not read, so a source under a `cfg` no lane builds still counts.
 
 ## 6. Migration order
 
-1. **`tests::step`** (this step): the flake above. The two-thread test stays on the host
-   (`tests::step_host`, system layer).
+1. **`tests::step`**: the flake above. The two-thread test stays on the host
+   (`tests::step_host`, system layer). Done.
 2. **The modules whose waits are the wall clock's** and whose verdict is a deadline:
    `tests::program_clock` (its CONTROL is a lease on the wall clock), `tests::redial_wait`,
    `tests::dial_in_flight`, `tests::listen`, `tests::congestion`, `tests::direct_receive`,
@@ -328,17 +355,36 @@ lowest, a text read with no build:
    the host stand-in, the most starts first (`tests::direct_receive`, `tests::entity_tables`,
    `tests::arena`, `tests::get`, `tests::faces`, `tests::held_keys`, ...). The stand-in's
    commands (`Command`) move to the simulated stand-in as each module needs them.
+
+   Moved: `tests::ticker`, `tests::program_clock` and `tests::runtime_tables` (section 8),
+   each in a commit that deletes its row of the table. They needed nothing of the world beyond
+   what the step tests use. The next modules each need the world to grow first, in
+   `tests::sim`:
+
+   | Module | What the world needs first |
+   |---|---|
+   | `tests::redial_wait`, `tests::dial_in_flight` | the session opened over links that wrap the simulated ones (a dial refused, or answered, a while of the session's clock later), and the steps of `Sim` taking an engine of such links on its clock |
+   | `tests::queryable`, `tests::direct_receive`, `tests::get` | the host stand-in's commands on `StandIn`: a query and its replies, a batch of pushes, a declaration, a close |
+   | `tests::listen`, `tests::one_face` | a peer that dials the session's port in the world, and ends the test holds of its own |
+   | `tests::congestion` | a link whose room the test withholds and gives back |
+
+   Twenty-six of the `pending` modules take the test root's `open`, `open_with` or `until`
+   (the table names what each takes): a simulated pair of those helpers moves the ones among them
+   that need no more of the stand-in than a push, a freeze and its tables, the rest once the
+   stand-in's commands they send are in the world.
 3. **System layer by nature**, kept there and brought to the rules of section 4: the slow-reader
    pool test (`tests::tx_pool`, the kernel's stream buffers are its subject), the host's groups
-   (`tests::host_group`), the TLS provider, `scout/tests.rs`, and outside this crate the
-   interoperation suites (`wz-integration-tests`, `wz-runtime-tokio`'s end-to-end tests), whose
-   past flakes were each a step taken before its precondition arrived.
-4. **The gate** of section 5 lands with its ratchet table once the first modules have moved.
+   (`tests::host_group`), the TLS provider and sessions (`tests/tls_provider.rs`,
+   `tests/tls_sessions.rs`), `scout/tests.rs`, the two-thread step test, the test root while
+   any module needs its host stand-in, and outside this crate the interoperation suites
+   (`wz-integration-tests`, `wz-runtime-tokio`'s end-to-end tests), whose past flakes were each
+   a step taken before its precondition arrived. These are the table's `system` rows.
+4. **The gate** of section 5, with its ratchet table. Done.
 
-Each migration changes test code only (`#[cfg(test)]` modules, `tests/` targets, this note and
-`docs/zenoh-logic-as-sce-kinds/files.md`): no byte of the shipped text and no instruction count
-moves. `git diff --stat` of each step names no file outside those, and the size and instruction
-lanes read the same as on its base.
+Each migration changes test code only (`#[cfg(test)]` modules, `tests/` targets, this note, the
+table and `docs/zenoh-logic-as-sce-kinds/files.md`): no byte of the shipped text and no
+instruction count moves. `git diff --stat` of each step names no file outside those, and the
+size and instruction lanes read the same as on its base.
 
 ## 7. What the migrated step tests keep
 
@@ -355,3 +401,22 @@ lanes read the same as on its base.
 | A step of a closed session is refused, one thread too | test of every build | same | a closed session that steps |
 | Two steps at once hand each sample out once | host test | unchanged, moved to `tests::step_host` (system layer: two threads of the host) | a sample handed twice or lost |
 | (new) A step bounded at nothing reads what came after a step found nothing | not tested: it was the flake | `a_step_bounded_at_nothing_reads_what_came_after_a_step_found_nothing`, in every form (the fix of section 1) | a step that passes over a link its last read found empty |
+
+## 8. What the moved modules keep
+
+| Module | What the original held | Original (host) | Now (simulated world) | The line whose change turns it red |
+|---|---|---|---|---|
+| `tests::ticker` | A job does not run before its time, nor without a step | 80 ms sleep with no step, then a step; its run no sooner than 60 ms of the wall clock | a read at 59 ms runs nothing; the clock at 119 ms with no step runs nothing (CONTROL); the next read runs it once | a job run by anything but a step, or before `due_ms <= now_ms` |
+| `tests::ticker` | A read with no job due takes the lock twice; a due run adds two | takes counted right after the open | counted once the session rests (no datagram waits, links settled) | a step that takes the jobs' lock with nothing due |
+| `tests::ticker` | Runs are a period apart, counted from the last run's end | wall-clock gaps of at least 25 ms | gaps of the session's clock, read by a counter the test moves with it, of at least 25 ms, the first at 25 ms or later | a job run again inside its period (a run to catch up) |
+| `tests::ticker` | A job that answers `false` ends; a stopped job runs no more | wall-clock loops | the clock moved 1 ms a step; CONTROL: a job beside the stopped one runs in the same steps | a job rearmed after `false` or after its stop |
+| `tests::ticker` | A job may publish on its session | stand-in thread hears the tick | the stand-in hears it at its turn | a job run under the session's lock (its publish waits on it) |
+| `tests::ticker` | A slow job runs once a step | a 10 ms sleep inside the job | the job moves the clock 10 ms itself | a step that runs a job again to catch up |
+| `tests::program_clock` | A lease runs on the clock the session was opened with | reads for 1.6 s of the wall clock, the program's clock still | 64 reads, the clock still: the stand-in is still the peer; then the clock past the lease ends the session | a lease read against anything but the session's clock, or a read counted as time |
+| `tests::program_clock` | CONTROL: an expiry is seen when there is one | the same session on `PosixClock` | the same session on the running clock ends, and not inside its lease | a session that outlives, or ends inside, its lease |
+| `tests::runtime_tables` | The tables and the runtime's cells a config reserves | sized for `PosixClock` | sized for the simulated world's clock type; every count as before | a table that leaves out a face, a port, a group or the clock's word |
+
+The program clock's original also held, by its wall clock running 1.6 s, that no timer of the
+engine reads the host's clock. In the world, a read's wait takes no time of the host's, so that
+half is not a unit test's: it is held by the engine's build without `std` (`no_std` in
+`crates/wz-capi-coop/src/lib.rs`), where the engine has no host clock to name.
