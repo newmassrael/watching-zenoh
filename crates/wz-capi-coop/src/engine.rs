@@ -1131,7 +1131,8 @@ fn lend_session(
     // Finals of them are held here, in rows the plan counts.
     #[cfg(feature = "queryable")]
     let final_holds = query::FinalHolds::over(held_finals, refused_finals);
-    // SAFETY: as for the gets' plane above.
+    // SAFETY: the arena hands a place aligned for the plane and valid for writes of one, where it
+    // stays.
     #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
     let plane = unsafe {
         arena
@@ -3676,7 +3677,7 @@ impl SubscriberCall {
     /// Hand `sample` to the row's callback, unless the subscriber was undeclared since the call
     /// was begun: a call the round or a plane owes is made at a time of its own after the lock that
     /// began it, so an undeclaration made meanwhile says the program wants nothing more of it.
-    #[cfg(any(wz_round, feature = "query", feature = "queryable"))]
+    #[cfg(any(wz_round, feature = "queryable"))]
     #[inline]
     pub(crate) fn hand(&self, sample: &SampleRef<'_>) {
         // SAFETY: the row lies where the call began until its last call ended, and this one has
@@ -4307,22 +4308,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The port's mutex, as the lock the session core's planes keep their state under and the queues
 /// the deliveries drain sit behind: the planes' of the engine's calls (`PlaneCalls::Queues`, every
-/// build that names them, `crate::calls`), the faces' watchers (`connectivity`) and the gets'
-/// queues (`query`).
-#[cfg(any(
-    wz_round,
-    feature = "query",
-    feature = "queryable",
-    feature = "connectivity"
-))]
+/// build that names them, `crate::calls`) and the faces' watchers (`connectivity`).
+#[cfg(any(wz_round, feature = "queryable", feature = "connectivity"))]
 pub(crate) enum CoopLocks {}
 
-#[cfg(any(
-    wz_round,
-    feature = "query",
-    feature = "queryable",
-    feature = "connectivity"
-))]
+#[cfg(any(wz_round, feature = "queryable", feature = "connectivity"))]
 impl wz_session_core::plane_lock::LockFamily for CoopLocks {
     type Lock<T> = Mutex<T>;
 
@@ -4342,12 +4332,7 @@ impl wz_session_core::plane_lock::LockFamily for CoopLocks {
 #[cfg(all(
     test,
     feature = "std",
-    any(
-        wz_round,
-        feature = "query",
-        feature = "queryable",
-        feature = "connectivity"
-    )
+    any(wz_round, feature = "queryable", feature = "connectivity")
 ))]
 mod plane_lock_tests {
     use super::{CoopLocks, Mutex};

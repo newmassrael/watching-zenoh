@@ -3,8 +3,8 @@
 
 //! The calls the engine's rows are made through and the kinds of record a round of them keeps, as
 //! the engine's build names them (`CoopCalls`): the one type the session core's round
-//! ([`crate::round`]), its queryables' plane and its gets' plane are each of. A build that keeps
-//! no round still names them where one of those planes is held.
+//! ([`crate::round`]) and its queryables' plane are each of. A build that keeps no round still
+//! names them where the queryables' plane is held.
 
 use wz_session_core::plane_lock::LockFamily;
 use wz_session_core::round::{PlaneCalls, RoundCall, RoundCalls, SampleCall};

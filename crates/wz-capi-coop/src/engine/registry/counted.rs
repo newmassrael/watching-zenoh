@@ -95,7 +95,7 @@ impl RegistryOf<OneHolder> {
             not(wz_round)
         ))]
         let decl_watches = DeclWatches::under(limits).map_err(ArenaRefused::Lend)?;
-        let mut registry = Self {
+        Ok(Self {
             app: ManuallyDrop::new(app),
             delivery,
             sets: ManuallyDrop::new(sets),
@@ -120,8 +120,7 @@ impl RegistryOf<OneHolder> {
             replies_alone: 0,
             #[cfg(all(test, feature = "std", feature = "queryable"))]
             drains_within_frames: 0,
-        };
-        Ok(registry)
+        })
     }
 }
 
