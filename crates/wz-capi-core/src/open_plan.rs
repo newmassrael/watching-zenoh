@@ -262,6 +262,8 @@ pub fn session_defaults_of(node: &ZenohNodeConfig) -> Result<SessionDefaults, Op
         // takes it from the program hands an open.
         #[cfg(feature = "time-base")]
         time_base: None,
+        // The node's own address the document's `wz/owned-address` states, read with its policies.
+        owned_address: node.owned_address,
     })
 }
 
@@ -3564,6 +3566,41 @@ mod tests {
                 "{list}"
             );
         }
+    }
+
+    /// The node's own address a document's `wz/owned-address` states reaches the session the
+    /// plan opens, through what the session applies above its links, and a document that states
+    /// none hands none; a malformed one refuses the open as a refused policy does.
+    #[test]
+    fn the_plan_hands_the_documents_owned_address_to_the_session() {
+        let plan = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ scouting: { multicast: { enabled: false } },
+                 wz: { "owned-address": "127.0.0.1" } }"#,
+        )
+        .expect("opens");
+        assert_eq!(plan.session.owned_address, Some([127, 0, 0, 1]));
+        let silent = plan_of(
+            WhatAmI::Client,
+            &["tcp/127.0.0.1:1"],
+            &[],
+            r#"{ scouting: { multicast: { enabled: false } } }"#,
+        )
+        .expect("opens");
+        assert_eq!(silent.session.owned_address, None);
+        assert_eq!(
+            refusal_of(
+                WhatAmI::Client,
+                &["tcp/127.0.0.1:1"],
+                &[],
+                r#"{ scouting: { multicast: { enabled: false } },
+                     wz: { "owned-address": "127.0.0.1.1" } }"#,
+            ),
+            OpenRefusal::Policies,
+            "a refused member refuses the open as a refused policy does"
+        );
     }
 
     /// The key ids a document's `wz/key-ids` states reach the session the plan opens, the same

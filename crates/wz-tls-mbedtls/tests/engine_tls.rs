@@ -66,6 +66,7 @@ fn base_config() -> CoopConfig {
         endpoints: Vec::new(),
         whatami: WhatAmI::Client,
         zid: Some(SessionZid::from([0xb1; 4])),
+        owned_address: None,
         batch_size: 1024,
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::PICO,

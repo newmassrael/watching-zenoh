@@ -410,6 +410,10 @@ pub struct CoopConfig<E = Vec<String>> {
     /// non-zero byte, as zenoh writes an id; `None` has the open make one as the session's
     /// policy says.
     pub zid: Option<SessionZid>,
+    /// The node's own IPv4 address as the config states it (`wz/owned-address`), which heads a
+    /// zid `zid-derivation = address-ports` derives in place of the address of a listener, so
+    /// that a session that only dials derives one. `None` for a config that states none.
+    pub owned_address: Option<[u8; 4]>,
     /// The batch size the session advertises.
     pub batch_size: u16,
     /// The lease the session advertises, in milliseconds.
@@ -489,6 +493,7 @@ impl CoopConfig {
             endpoints,
             whatami,
             zid,
+            owned_address,
             batch_size,
             lease_ms,
             keep_alive,
@@ -511,6 +516,7 @@ impl CoopConfig {
             endpoints: Counted::of(endpoints.iter().map(String::as_str)),
             whatami,
             zid,
+            owned_address,
             batch_size,
             lease_ms,
             keep_alive,
@@ -618,8 +624,9 @@ pub enum OpenError {
     EntropyUnavailable,
     /// The configured zid is not one: it is not one to sixteen bytes, or its bytes are all zero.
     InvalidZid(ZidError),
-    /// The session states no zid and its `zid-derivation` is `address-ports`, and its `listen`
-    /// endpoints give the node no address a zid can be built on.
+    /// The session states no zid and its `zid-derivation` is `address-ports`, and neither its
+    /// config (`wz/owned-address`) nor its `listen` endpoints give the node an address a zid can
+    /// be built on.
     ZidDerivation(wz_session_core::zid_derivation::ZidDerivationError),
     /// The session's `key-wire-form` cannot be honoured: see [`KeyWireFormRefused`].
     KeyWireForm(KeyWireFormRefused),
@@ -1164,8 +1171,9 @@ fn lend_session(
 }
 
 /// The zid the session opened with `config` announces: the configured one, or one drawn from
-/// `entropy`, or one derived from the endpoints it listens on (`endpoints`) and `entropy`, as
-/// `policy` says. Out of line and generic over nothing, as [`lend_session`] is.
+/// `entropy`, or one derived from the node's own address the config states, the endpoints it
+/// listens on (`endpoints`) and `entropy`, as `policy` says. Out of line and generic over
+/// nothing, as [`lend_session`] is.
 #[inline(never)]
 fn session_zid(
     config: &CoopConfig<Counted>,
@@ -1178,6 +1186,7 @@ fn session_zid(
         (None, wz_session_core::policy::ZidDerivation::Random) => fresh_zid(entropy),
         (None, wz_session_core::policy::ZidDerivation::AddressPorts) => derived_zid(
             (0..endpoints.listens()).map(|at| endpoints.listen_text(at)),
+            config.owned_address,
             entropy,
         ),
     }
@@ -1213,10 +1222,13 @@ fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<SessionZid, OpenError> {
     wire_zid(&zid)
 }
 
-/// The zid `zid-derivation = address-ports` derives from the `listen` endpoints and eight bytes
-/// of `entropy` (see `wz_session_core::zid_derivation`), in its wire form.
+/// The zid `zid-derivation = address-ports` derives from `owned`, the node's own address the
+/// config states, the `listen` endpoints and eight bytes of `entropy` (see
+/// `wz_session_core::zid_derivation`), in its wire form: the stated address heads it, else the
+/// first listener that binds an address of the node's.
 pub(crate) fn derived_zid<T: AsRef<str>>(
     listen: impl IntoIterator<Item = T>,
+    owned: Option<[u8; 4]>,
     entropy: &mut dyn EntropySource,
 ) -> Result<SessionZid, OpenError> {
     use wz_runtime_coop::session_drive::{LinkProto, Locator};
@@ -1249,7 +1261,7 @@ pub(crate) fn derived_zid<T: AsRef<str>>(
         }
     }
     let zid = facts
-        .derive(None, random)
+        .derive(owned, random)
         .map_err(OpenError::ZidDerivation)?;
     wire_zid(&zid)
 }

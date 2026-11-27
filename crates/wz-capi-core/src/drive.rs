@@ -1278,15 +1278,41 @@ fn session_zids(configured: Option<ConfiguredZid>) -> Option<([u8; ZID_LENGTH], 
     }
 }
 
-/// The two forms of the id `zid-derivation = address-ports` derives from the `listen` endpoints
-/// and eight random bytes, see [`wz_session_core::zid_derivation`]. A node whose listeners name
-/// no address of its own is refused with the reason, as is one whose random source fails.
-fn derived_zids(listen: &[String]) -> Result<([u8; ZID_LENGTH], SessionZid), DerivedZidError> {
+/// The two forms of the id a session opens on, from `configured`, the id its configuration
+/// states, which is the session's whatever `policy` says: an unstated one is drawn at random
+/// (upstream's), or derived under `zid-derivation = address-ports` from `owned`, the node's own
+/// address its configuration states, and the `listen` endpoints ([`derived_zids`]). A refused
+/// derivation fails the open with its reason logged, and so does an entropy source that fails.
+fn open_zids(
+    configured: Option<ConfiguredZid>,
+    policy: &SessionPolicy,
+    listen: &[String],
+    owned: Option<[u8; 4]>,
+) -> Result<([u8; ZID_LENGTH], SessionZid), OpenError> {
+    match (configured, policy.zid_derivation()) {
+        (None, wz_session_core::policy::ZidDerivation::AddressPorts) => derived_zids(listen, owned)
+            .map_err(|refused| {
+                log_open_failure("zid", &refused.to_string());
+                OpenError::DriveFailed
+            }),
+        (configured, _) => session_zids(configured).ok_or(OpenError::DriveFailed),
+    }
+}
+
+/// The two forms of the id `zid-derivation = address-ports` derives from `owned`, the node's
+/// own address its configuration states, the `listen` endpoints and eight random bytes, see
+/// [`wz_session_core::zid_derivation`]: the stated address heads the id, else the first listener
+/// that binds an address of the node's. A node that states none and whose listeners name none is
+/// refused with the reason, as is one whose random source fails.
+fn derived_zids(
+    listen: &[String],
+    owned: Option<[u8; 4]>,
+) -> Result<([u8; ZID_LENGTH], SessionZid), DerivedZidError> {
     use wz_session_core::zid_derivation::{ListenerFacts, RANDOM_BYTES};
     let mut random = [0u8; RANDOM_BYTES];
     getrandom::getrandom(&mut random).map_err(|_| DerivedZidError::Entropy)?;
     let derived = ListenerFacts::of_endpoints(listen.iter().map(String::as_str))
-        .derive(None, random)
+        .derive(owned, random)
         .map_err(DerivedZidError::Address)?;
     minted_zids(derived).ok_or(DerivedZidError::Entropy)
 }
@@ -1294,7 +1320,8 @@ fn derived_zids(listen: &[String]) -> Result<([u8; ZID_LENGTH], SessionZid), Der
 /// Why [`derived_zids`] derived no zid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DerivedZidError {
-    /// The listeners gave the node no address a zid can be built on.
+    /// Neither the configuration nor the listeners gave the node an address a zid can be built
+    /// on.
     Address(wz_session_core::zid_derivation::ZidDerivationError),
     /// The random source failed, which fails the open as a random zid's failure does.
     Entropy,
@@ -4743,15 +4770,14 @@ pub fn open_blocking(
     // Fixed here, on the CALLING thread, so `SessionState` can hand it to
     // `z_info_zid` and the INIT cannot disagree with it — see the field doc.
     // A stated zid is the session's whatever the policy says; an unstated one is drawn at random
-    // (upstream's), or derived from the listeners under `zid-derivation = address-ports`.
-    let (zid, wire_zid) = match (zid, session_policy.zid_derivation()) {
-        (None, wz_session_core::policy::ZidDerivation::AddressPorts) => derived_zids(&listen)
-            .map_err(|refused| {
-                log_open_failure("zid", &refused.to_string());
-                OpenError::DriveFailed
-            })?,
-        (configured, _) => session_zids(configured).ok_or(OpenError::DriveFailed)?,
-    };
+    // (upstream's), or derived from the node's own address and its listeners under
+    // `zid-derivation = address-ports`.
+    let (zid, wire_zid) = open_zids(
+        zid,
+        &session_policy,
+        &listen,
+        session_defaults.owned_address,
+    )?;
     // R3064 -- the node's clock, built ONCE here from the identity just fixed and the role the
     // session plays, and handed to the registry, which installs a clone on its plane and on every
     // face session it makes. `None` inside when the config does not enable timestamping for this
@@ -5281,8 +5307,8 @@ mod tests {
             "udp/10.9.8.7:32500".to_string(),
             "udp/10.9.8.8:32400".to_string(),
         ];
-        let (state_a, wire_a) = derived_zids(&listen).expect("a listener names the node");
-        let (state_b, _) = derived_zids(&listen).expect("a listener names the node");
+        let (state_a, wire_a) = derived_zids(&listen, None).expect("a listener names the node");
+        let (state_b, _) = derived_zids(&listen, None).expect("a listener names the node");
         assert_eq!(
             &state_a[..4],
             &[10, 9, 8, 7],
@@ -5326,10 +5352,76 @@ mod tests {
             vec!["udp/239.1.2.3:30000".to_string()],
         ] {
             assert_eq!(
-                derived_zids(&listen),
+                derived_zids(&listen, None),
                 Err(DerivedZidError::Address(ZidDerivationError::NoAddress)),
                 "{listen:?}"
             );
+        }
+    }
+
+    /// A node that only dials has no listener: the address its configuration states
+    /// (`wz/owned-address`) heads the id, both port fields are `0`, as the address-ports rule
+    /// writes them for a node with no listener of either protocol, and the random half follows.
+    /// The stated address heads the id over a listener's too, whose ports still follow it.
+    #[test]
+    fn a_derived_id_of_a_node_that_only_dials_is_its_stated_address() {
+        let (state, wire) =
+            derived_zids(&[], Some([127, 0, 0, 1])).expect("the stated address names the node");
+        assert_eq!(&state[..8], &[127, 0, 0, 1, 0, 0, 0, 0]);
+        assert_eq!(
+            wire.as_slice(),
+            wz_runtime_tokio::zid_hex::canonical_zid(&state),
+            "one choice, two views"
+        );
+        let listen = ["tcp/10.9.8.7:31500".to_string()];
+        let (state, _) =
+            derived_zids(&listen, Some([10, 77, 0, 5])).expect("the stated address names the node");
+        assert_eq!(
+            &state[..4],
+            &[10, 77, 0, 5],
+            "the stated address over the listener's"
+        );
+        assert_eq!(
+            &state[4..6],
+            &31_500u16.to_le_bytes(),
+            "the listener's port"
+        );
+        assert_eq!(&state[6..8], &[0, 0], "no udp listener");
+    }
+
+    /// The open's choice of id: a stated one stands whatever the policy says; under
+    /// `address-ports` a node that only dials opens on its stated address and is refused without
+    /// one, and under `random` the stated address is not read.
+    #[test]
+    fn the_open_derives_its_id_from_the_stated_address_under_address_ports() {
+        use wz_session_core::policy::ZidDerivation;
+        let mut derives = SessionPolicy::defaults();
+        if derives
+            .select_zid_derivation(ZidDerivation::AddressPorts)
+            .is_err()
+        {
+            // A build whose domain of the policy leaves the value out derives no id at all.
+            return;
+        }
+        let (state, _) =
+            open_zids(None, &derives, &[], Some([127, 0, 0, 1])).expect("the stated address");
+        assert_eq!(&state[..8], &[127, 0, 0, 1, 0, 0, 0, 0]);
+        assert_eq!(
+            open_zids(None, &derives, &[], None).err(),
+            Some(OpenError::DriveFailed),
+            "a node that only dials and states no address is refused"
+        );
+        let configured = ConfiguredZid::from_zenoh_text("c11e47c11e49").expect("accepted");
+        let (_, wire) = open_zids(Some(configured), &derives, &[], None).expect("stated");
+        assert_eq!(
+            wire,
+            vec![0x49, 0x1e, 0xc1, 0x47, 0x1e, 0xc1],
+            "a stated id stands"
+        );
+        if SessionPolicy::defaults().zid_derivation() == ZidDerivation::Random {
+            let (state, _) = open_zids(None, &SessionPolicy::defaults(), &[], Some([127, 0, 0, 1]))
+                .expect("a random id");
+            assert_ne!(&state[..4], &[127, 0, 0, 1], "random draws every byte");
         }
     }
 

@@ -58,6 +58,7 @@ fn config() -> CoopConfig {
         endpoints: vec!["tcp/127.0.0.1:9".to_owned()],
         whatami: WhatAmI::Client,
         zid: Some(SessionZid::from([0xe1; 4])),
+        owned_address: None,
         batch_size: 1024,
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::PICO,
