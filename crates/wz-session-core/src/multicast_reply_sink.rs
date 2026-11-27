@@ -668,7 +668,7 @@ mod tests {
                     assert_eq!((*request_id, *of), (7, qos));
                 }
                 _ => panic!("the final is the owned item"),
-            }
+            };
         }
     }
 
