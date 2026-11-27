@@ -25782,7 +25782,7 @@ layer_e6_peer_mesh() {
     # The session lifecycle QUERIES, over the wire between real nodes: a GET closes
     # the session with a named peer and is answered with a verdict (and that peer's
     # face really goes DOWN), a second GET lists the node's verbs, and a node that
-    # hosts the queries without `--session-close-permit` answers `refused` with a
+    # hosts the queries with no `--session-commander` grant answers `refused` with a
     # reason. Rides the SAME E6 binary (built above with `session-close-ingress`).
     # Two tests, so the count guard reddens on a dropped `#[ignore]` (0 selected).
     wz_test_args wz-integration-tests wz_peer_session_lifecycle_query
@@ -29660,6 +29660,28 @@ layer_qza_zephyr_admin_node_vs_zenohd() {
         -nic "user,model=lan9118,mac=$mac,hostfwd=udp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
         -kernel "$elf" || fail=1
     rm -rf "$(dirname "$build_dir")"
+    # D18 (docs/session-lifecycle-intent.md section 5b): the fixed profile's passive hold on the
+    # image that ships it. The same scenario the host witness runs (Layer Z, Zcmd) runs against the
+    # admin image built with a tls listener and a commander list the leg makes (a P-256 key whose zid
+    # the image lists for open, close and status), the verbs asked in band through a stock zenohd the
+    # commander's key dials the image with.
+    local pw
+    pw="$(mktemp -d)"
+    bash scripts/zephyr-passive-witness.sh keys "$pw/keys" || fail=1
+    if [[ "$fail" -eq 0 ]] && _qz_west_build Qza deploy/zephyr-admin-node mps2/an385 "$pw/zbuild" \
+        qza-passive-west-build.log \
+        -- -DEXTRA_CONF_FILE="overlays/qemu_admin_fixed_tls.conf;$pw/keys/commanders.conf"; then
+        wz_test_args wz-integration-tests wz_declared_commander_zenohd_target_matrix zenohd_qemu_
+        _runci_guarded_test Qza 1 env WZ_ZENOHD_BIN="${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}" \
+            WZ_ZEPHYR_PASSIVE_QEMU_ELF="$pw/zbuild/zephyr/zephyr.elf" \
+            WZ_ZEPHYR_PASSIVE_COMMANDER_CERT="$pw/keys/commander.pem" \
+            WZ_ZEPHYR_PASSIVE_COMMANDER_KEY="$pw/keys/commander.key" \
+            cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+            || fail=1
+    else
+        fail=1
+    fi
+    rm -rf "$pw"
     return "$fail"
 }
 
