@@ -38,8 +38,7 @@
 (*                                                                         *)
 (* What upstream does, which the promise is read against: zenoh keeps one  *)
 (* transport for each remote zid,                                          *)
-(*   `io/zenoh-transport/src/unicast/manager.rs` @                         *)
-(*   `init_existing_transport_unicast`.                                    *)
+(*   `io/zenoh-transport/src/unicast/manager.rs` @ `init_existing_transport_unicast`. *)
 (***************************************************************************)
 EXTENDS FiniteSets, Naturals
 
