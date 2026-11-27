@@ -9425,6 +9425,28 @@
         "The state counts, the promise check of each part and NoRowHeld (AG EF) are the judge's: run sce-codegen formal models --record once SCE item 446 lands and wz pins it, then register the lane.",
         "Whether a refused query owing no Final belongs in the promise or stays an invariant matching pico is open."
       ]
+    },
+    "Round 4741": {
+      "decision_summary": "Move census row S11 2, the end-to-end receiver's table of sender slots, from hand Rust into SCE algorithm documents generated for Rust and C11, and weigh C11 units without the checkout's path.",
+      "changes_bullets": [
+        "sources/algorithms: e2e_sender_slot (the slot rule) and e2e_bind_sender (binding the listed senders) over a map<uint64, uint32>, with their schema, enum and union.",
+        "wz-app-frame's receiver holds the senders in a BoundedMap and calls the generated functions; two tests added before the move (a damaged frame of a listed and of an unlisted sender, a full table).",
+        "xtask emits the units and put_outcome into out/wz-app-frame; verify-codegen declares the two unlowered on cpp, kotlin, go, python, as take_generation.",
+        "c11-lane.sh maps the tree's and the artifact root's paths out of every target compile; the pools' .rodata had measured the checkout's directory through assert's __FILE__."
+      ],
+      "verification_bullets": [
+        "wz-app-frame tests with replay 99 passed, clippy -D warnings; wz-capi-pico e2e_doors with e2e-sender-demux 3 passed, the per-sender slot test among them.",
+        "verify-codegen of both documents: rust and c11 emit, four backends unlowered as declared; regen-codegen writes the six units committed.",
+        "Layer Bc: 98 units compiled and weighed; no object carries an absolute path after the prefix map."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "The table is Heap-held with the caller's slot_limit as its live bound; the census row's fixed [E2E_SENDER_SLOTS] (no heap) would drop slot_limit from the C ABI and is a decision.",
+        "7.4's Fits-now count of the census document is not yet restated for S11 2."
+      ]
     }
   },
   "inventory_entries": {
