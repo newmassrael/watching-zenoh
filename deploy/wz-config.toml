@@ -1807,6 +1807,23 @@ implies = []
 help = "ZEXT_CONFIG_LIMITS_KEY: the numbered config key by which a program states its session's limits and the values it holds apart from any session, judged at the insert and read by the open (wz-own). Off, the key is held unread as zenoh-pico's config holds a key it does not know, and every session opens each table at the preset's bound, what a statement could have raised it to."
 
 [[capability]]
+id = "interest-answer"
+kconfig = "WZ_CAP_INTEREST_ANSWER"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's unicast session
+# answers no Interest a peer sends (`vendor/zenoh-pico/src/session/interest.c` @
+# `// Nothing to do on unicast`) and tells a new peer its declarations once, ended by the
+# DeclareFinal of interest 0, which a peer without this capability still sends. It changes what a
+# peer sees on the wire and is off in that preset all the same, the preset's contract being
+# zenoh-pico's. A behaviour of the session core (its feature of the same name, through
+# wz-capi-coop's), not a door: a build that joins a group answers on every face, as zenoh-pico
+# answers on its multicast transport, and the tokio engine's runtime answers whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["peer"]
+help = "The answering end of a peer's Interest on a unicast face: the session's declarations the Interest reaches and its DeclareFinal, and for a future Interest the ones declared later, kept current (wz-own). Off, a peer's Interest on a unicast face is not answered, as zenoh-pico's unicast session does, and a new peer is told the session's declarations once, ended by the DeclareFinal of interest 0."
+
+[[capability]]
 id = "transport_compression"
 kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
 os_needs = []

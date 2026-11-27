@@ -256,7 +256,7 @@ enum Command {
     PushSequenced(&'static str, &'static [u8], u32),
     /// Ask the session, as Interest `.0`, for its subscribers on the key, those it holds now and
     /// those it declares later.
-    #[cfg(feature = "interest-answer")]
+    #[cfg(any(feature = "interest-answer", feature = "listen"))]
     AskSubscribers(u64, &'static str),
     /// Hold the cache of that advanced publisher: a queryable on its `@adv` key that answers as
     /// the publisher's own cache does, out of the samples with the sequence numbers `.0`, each
@@ -280,10 +280,10 @@ struct Seen {
     undeclared_subscribers: Vec<u64>,
     interests: usize,
     /// The Interest each subscriber declaration that answers one names, in the order they arrived.
-    #[cfg(feature = "interest-answer")]
+    #[cfg(any(feature = "interest-answer", feature = "listen"))]
     subscriber_answers: Vec<u64>,
     /// The Interest each declaration Final names, in the order they arrived.
-    #[cfg(feature = "interest-answer")]
+    #[cfg(any(feature = "interest-answer", feature = "listen"))]
     interest_finals: Vec<u64>,
     pushes: usize,
     /// What the router's catch-all subscriber received, when it holds one.
@@ -658,7 +658,7 @@ fn run_router(
                                 let at = seen.declares;
                                 seen.initial_finals.push(at);
                             }
-                            #[cfg(feature = "interest-answer")]
+                            #[cfg(any(feature = "interest-answer", feature = "listen"))]
                             if let Some(interest) = declare.interest_id {
                                 use wz_codecs::declare::DeclareOwnedVariant as Body;
                                 match &declare.body {
@@ -747,7 +747,7 @@ fn run_router(
                         let at = seen.declares;
                         seen.initial_finals.push(at);
                     }
-                    #[cfg(feature = "interest-answer")]
+                    #[cfg(any(feature = "interest-answer", feature = "listen"))]
                     if let Some(interest) = declare.interest_id {
                         match &declare.body {
                             wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(_) => {
@@ -864,7 +864,7 @@ fn run_router(
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
             }
-            #[cfg(feature = "interest-answer")]
+            #[cfg(any(feature = "interest-answer", feature = "listen"))]
             Ok(Command::AskSubscribers(id, key)) => {
                 let _ = actions.send_interest_subscribers(id, true, true, 0, Some(key));
             }
@@ -1454,6 +1454,46 @@ fn a_subscriber_declared_after_a_peers_interest_is_answered_by_the_declaration()
     unstepped("the answer to the Interest", &|s| {
         s.subscriber_answers.contains(&INTEREST)
     });
+}
+
+/// A session that listens without the answering end of an Interest (`listen` without
+/// `interest-answer`, as the zenoh-pico preset builds a peer) answers no Interest a peer asks on a
+/// unicast face, as zenoh-pico's unicast session answers none: no `DeclareFinal` names it, and a
+/// subscriber declared after it reaches the peer as a declaration and not as an answer. The CONTROL
+/// is that declaration. Turned red by an answer staged, or a Final sent, in such a build.
+#[cfg(all(feature = "listen", not(feature = "interest-answer")))]
+#[test]
+fn a_listening_build_without_the_answer_answers_no_interest() {
+    const INTEREST: u64 = 41;
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    router.send(Command::AskSubscribers(INTEREST, "demo/**"));
+    let declared_before = router.seen(|s| s.subscribers.len());
+    engine
+        .declare_subscriber_on_wire(
+            "demo/a",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
+        )
+        .expect("the session declares the subscriber");
+    until(&engine, "CONTROL: the declaration", || {
+        router.seen(|s| s.subscribers.len() > declared_before)
+    });
+    // Stepped long enough for the Interest, sent before the declaration, to have been read.
+    let settled = Instant::now() + Duration::from_millis(200);
+    until(&engine, "the Interest to be read", || {
+        Instant::now() >= settled
+    });
+    assert!(
+        !router.seen(|s| s.interest_finals.contains(&INTEREST)),
+        "no DeclareFinal answers the Interest"
+    );
+    assert!(
+        !router.seen(|s| s.subscriber_answers.contains(&INTEREST)),
+        "no subscriber answers it"
+    );
 }
 
 /// A publish that finds nothing handed to the session takes the session's lock once and the queue

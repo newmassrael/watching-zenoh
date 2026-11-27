@@ -121,6 +121,7 @@ default = [
     "advanced-source-retention",
     "advanced-node-clock",
     "udp-listen",
+    "interest-answer",
 ]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
@@ -731,6 +732,14 @@ advanced-node-clock = ["wz-capi-core?/advanced-node-clock", "wz-node-time?/time-
 # book of a port's peers and no datagram link of a port's peer. The tokio engine's runtime listens
 # on `udp/` whatever is named, so it selects neither engine.
 udp-listen = ["peer", "wz-capi-core?/udp-listen", "wz-capi-coop?/udp-listen"]
+# `interest-answer`: the answering end of a peer's Interest on a unicast face, the session's
+# declarations it reaches, its `DeclareFinal` and, for a future Interest, the ones declared later
+# (`wz-capi-coop`'s `interest-answer`). Off, a peer's Interest on a unicast face is not answered,
+# as zenoh-pico's unicast session answers none, and a new peer is told the session's declarations
+# once, ended by the `DeclareFinal` of interest 0, as zenoh-pico's push to a new peer is. A build
+# that joins a group (`multicast-transport`) answers on every face, as zenoh-pico answers on its
+# multicast transport. The tokio engine's runtime answers whatever is named.
+interest-answer = ["peer", "wz-capi-core?/interest-answer", "wz-capi-coop?/interest-answer"]
 # `config-document`: `zext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a

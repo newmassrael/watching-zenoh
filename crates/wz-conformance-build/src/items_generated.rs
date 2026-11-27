@@ -89,6 +89,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("tx-held-wait", &["core", "pico"]),
     ("tx-stream-owed", &["core", "pico"]),
     ("udp-listen", &["core", "pico"]),
+    ("interest-answer", &["core", "pico"]),
     ("transport_compression", &["core", "c"]),
     ("auth_usrpwd", &["core", "c"]),
     ("interceptors", &["core", "c"]),

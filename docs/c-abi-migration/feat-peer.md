@@ -144,10 +144,12 @@ is refused with `OpenError::Listen` naming the endpoint and `LinkOpenError::Unsu
 `udp-listen`, with a `tcp/` CONTROL) and, with it, by the udp tests of `tests::listen::` and
 `tests::arena::` as before.
 
-**W4.** The session core's `session-unicast-accept` stops implying `interest-answer`; each crate
-that takes the session core without its defaults and accepts names `interest-answer` beside the
-role (the tokio runtime, `wz-session-mcu`'s `listen`, `wz-session-lwip`), so nothing but the
-pico peer changes. `wz-capi-coop`'s `listen` drops it and `group` keeps it (zenoh-pico answers an
+**W4 (this branch).** The session core's `session-unicast-accept` stops implying `interest-answer`;
+each crate that takes the session core without its defaults and accepts names `interest-answer`
+beside the role (`wz-session-mcu`'s `listen` and `adminspace-write`, `wz-session-lwip`'s
+`session-unicast-accept` and `adminspace-write`, and the facade's accepting role through the
+runtime's new `interest-answer`; the tokio runtime names it already), so nothing but the pico peer
+changes. `wz-capi-coop`'s `listen` drops it and `group` keeps it (zenoh-pico answers an
 `Interest` on a multicast transport, `vendor/zenoh-pico/src/session/interest.c` @
 `// Nothing to do on unicast` being the unicast arm alone). The `DeclareFinal` of the initial
 interest, which zenoh-pico sends a new peer after the declarations it pushes
@@ -212,6 +214,15 @@ to: with `udp/` listening out of the pico preset the step still holds every buil
   `cargo test -p wz-capi-coop --lib --no-default-features --features std,key-matching-listener,listen,query,queryable a_build_without_the_udp_listener`;
   with `udp-listen` the same filter runs 0, and `cargo test -p wz-capi-coop --lib --features listen,query,queryable,udp-listen udp`
   runs the udp listener's tests as before.
+- W4: build and clippy of `wz-session-core` with `session-unicast,session-unicast-accept,no_std`
+  and no defaults (the accepting role without the answer, a combination no build had before), of
+  `wz-capi-coop` with `listen` and with `listen,interest-answer`, of `wz-session-mcu` with
+  `listen` and of `wz-session-lwip` with `session-unicast-accept`; `wz_config.py --write` and
+  `--check` as for W3.
+- W4, the refused case, 1 test:
+  `cargo test -p wz-capi-coop --lib --no-default-features --features std,key-matching-listener,listen,query,queryable a_listening_build_without_the_answer`;
+  the filter `initial_final` in the same build runs the tests of the initial interest's Final
+  (`engine::replay`'s and `tests::replay`'s), which a build that listens keeps without the answer.
 - W3, Layer C1cs: `pico-peer-coop` lower by 11,000 to 13,000, most in the driver area;
   `pico-client-coop-nostd` and `pico-api-coop-nostd` unchanged (`host-peer` keeps
   `udp-listen`); `nm -C` of the peer library holds no `IpUdpListener` and no `UdpPort` body.

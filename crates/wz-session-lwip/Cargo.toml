@@ -220,6 +220,8 @@ session-unicast-open = [
 ]
 session-unicast-accept = [
     "wz-session-core/session-unicast-accept",
+    # The accepting node answers its peers' Interests, which the accepting role no longer brings.
+    "wz-session-core/interest-answer",
     "wz-session-core/codec-init-body",
     "wz-session-core/codec-open-body",
 ]
@@ -300,6 +302,7 @@ adminspace-write = [
     "wz-session-core/pubsub-delete",
     "wz-session-core/session-unicast-open",
     "wz-session-core/session-unicast-accept",
+    "wz-session-core/interest-answer",
     "wz-session-core/codec-init-body",
     "wz-session-core/codec-open-body",
     # R2838 — a router forwards a PUT only to a face that DECLARED a matching

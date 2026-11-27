@@ -302,6 +302,11 @@ codec-open-body = ["dep:wz-session-core", "wz-session-core/codec-open-body"]
 codec-keep-alive = ["dep:wz-session-core", "wz-session-core/codec-keep-alive"]
 codec-close = ["dep:wz-session-core", "wz-session-core/codec-close"]
 session-unicast-accept = ["dep:wz-session-core", "wz-session-core/session-unicast-accept"]
+# The answering end of a peer's Interest (`wz-session-core`'s `interest-answer`), which the session
+# core's accepting role no longer brings: named beside `session-unicast-accept` by a node that
+# answers its peers' Interests (the facade's accepting role), and left out by the zenoh-pico
+# preset's peer, which answers none on a unicast face.
+interest-answer = ["dep:wz-session-core", "wz-session-core/interest-answer"]
 # No `session-close-ingress` here: the lifecycle verbs compile only beside a
 # secure channel (decision D2 of docs/session-lifecycle-intent.md), and this
 # runtime cannot promise one, so a feature naming the verbs here would name a

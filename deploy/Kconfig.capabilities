@@ -541,6 +541,14 @@ config WZ_CAP_UDP_LISTEN
 	  A unicast udp/ endpoint a peer listens on: one socket whose peers are told apart by the address each datagram came from, each a face of its own (wz-own). Off, a udp/ endpoint to listen on is refused by name as a scheme the links do not carry, as zenoh-pico's POSIX link has no such listener, and a peer accepts over tcp/ alone.
 	  Exported by: pico.
 
+config WZ_CAP_INTEREST_ANSWER
+	bool "interest-answer"
+	default y
+	select WZ_CAP_PEER
+	help
+	  The answering end of a peer's Interest on a unicast face: the session's declarations the Interest reaches and its DeclareFinal, and for a future Interest the ones declared later, kept current (wz-own). Off, a peer's Interest on a unicast face is not answered, as zenoh-pico's unicast session does, and a new peer is told the session's declarations once, ended by the DeclareFinal of interest 0.
+	  Exported by: pico.
+
 config WZ_CAP_TRANSPORT_COMPRESSION
 	bool "transport_compression"
 	default y

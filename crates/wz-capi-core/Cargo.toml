@@ -104,7 +104,10 @@ default = [
     # The node clock an advanced publisher stamps from (`advanced-node-clock`).
     "advanced-node-clock",
     # The peer's behaviours zenoh-pico's peer does not have (deploy/wz-config.toml, `udp-listen`).
+    # The peer's behaviours zenoh-pico's peer does not have (deploy/wz-config.toml, `udp-listen`,
+    # `interest-answer`).
     "udp-listen",
+    "interest-answer",
     "config-verdict",
     "transport_compression",
     "auth_usrpwd",
@@ -362,6 +365,10 @@ advanced-node-clock = []
 # A unicast `udp/` endpoint a peer listens on (`wz-capi-pico/udp-listen`): this engine's runtime
 # listens on `udp/` whatever is named, so the feature only carries the capability's name.
 udp-listen = []
+# The answer to a peer's Interest on a unicast face (`wz-capi-pico/interest-answer`): this engine's
+# runtime takes the session core with the answer named, so the feature only carries the
+# capability's name.
+interest-answer = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]
