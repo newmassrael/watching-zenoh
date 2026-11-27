@@ -972,11 +972,25 @@ count per conduit and the replies' drop count:
   the face's `write_staged` and its callers (`engine.rs` `group.write_staged()`), and the
   stage's tests of lanes and staging; the tests of the JOIN's numbers, the quota and the counters
   are written again over the driver.
-- Open: without the hold a reply sent at once on a full socket still waits inside the driver's
-  send (`tx_slot_send` waits on the pace); in the round form that pace runs the session's tasks
-  from inside the group's own. The round form builds the hold by default, so the combination is
-  a build that names the round form and leaves the hold out, and wants a ruling: refuse it, or
-  let a send that asks no room drop on a full socket.
+- The driver honours the send's own deadline, ruled by the main session: no build combination is
+  refused. A frame whose ask for room allowed no wait (`send_at_once`, a reply) waits inside the
+  driver in no build. Without the hold the ask records what it allowed and the send takes it: a
+  full socket refusing such a frame is a congestion drop, counted by the driver
+  (`HeldFrame::congested`), the answer `send_at_once` gives behind a sender that holds its
+  conduit; a frame whose ask allowed a wait, or that was handed over with no ask (a window's
+  flush), waits through the host's pace as before. With the hold the ask is answered congested
+  at once while the held frame is refused, and a frame handed over with no ask while one is held
+  is the same counted drop. So the round form without the hold never runs the session's tasks
+  from inside the group's own task for a reply. The frame had its number when the socket refused
+  it, so the drop is the driver's count and not the walk's answer; the stage adds it to the
+  group's drops.
+
+  Held by `group_drive::driver::tests::a_frame_asked_at_once_is_not_waited_for_on_a_full_socket`
+  (without the hold; red if an at-once frame passes or waits, is not counted, or an ask's zero
+  wait outlives its frame); with the hold by
+  `a_frame_handed_over_while_one_is_held_is_a_counted_drop` (red if the drop is not counted, or
+  lets the held frame go or overtakes it). Expected: 0 bytes on
+  every case (no build calls the driver yet).
 
 Next: the stage of 20.1 with the pump's object and the engine in one change, then the D2
 capability rows, T3c with the gate widening of 17.1, F8b.
