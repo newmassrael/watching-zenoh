@@ -130,6 +130,13 @@ on:
       # The pico library without `std` (`os-host`): its host's locks, threads and clocks, and
       # the configuration its profile is built with.
       - "crates/wz-host-sync/**"
+      - "crates/wz-zenoh-buffers/**"
+      - "crates/wz-zenoh-collections/**"
+      - "crates/wz-zenoh-core/**"
+      - "crates/wz-zenoh-keyexpr/**"
+      - "crates/wz-zenoh-result/**"
+      - "crates/wz-zenoh-runtime/**"
+      - "crates/wz-zenoh-shm/**"
       - "crates/.cargo/capi-nostd.toml"
       - "rust-toolchain.toml"
   workflow_dispatch:
