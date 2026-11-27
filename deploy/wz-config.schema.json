@@ -1721,6 +1721,11 @@
             }
           },
           "additionalProperties": false
+        },
+        "owned-address": {
+          "description": "The node's own IPv4 address, dotted, which heads the zid zid-derivation = address-ports derives in place of the address of a listener, so that a node that only dials derives one.",
+          "type": "string",
+          "format": "ipv4"
         }
       },
       "additionalProperties": false

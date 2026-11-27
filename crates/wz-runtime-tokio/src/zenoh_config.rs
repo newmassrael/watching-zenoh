@@ -1600,6 +1600,12 @@ pub struct ZenohNodeConfig {
     /// refuses the member by name. [`Self::to_json5`] writes it back.
     #[cfg(feature = "shared-key-ids")]
     pub key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
+    /// `wz/owned-address`: the node's own IPv4 address, which heads the zid
+    /// `zid-derivation = address-ports` derives in place of the address of a listener, so that a
+    /// node that only dials derives one; read with the policies of the same member and refused in
+    /// the same list ([`ConfigIngestError::PoliciesRefused`]). `None` when the document states
+    /// none. [`Self::to_json5`] writes it back.
+    pub owned_address: Option<[u8; 4]>,
 }
 
 impl Default for ZenohNodeConfig {
@@ -1783,6 +1789,7 @@ impl Default for ZenohNodeConfig {
             policies: build_policies(),
             #[cfg(feature = "shared-key-ids")]
             key_ids: Default::default(),
+            owned_address: None,
         }
     }
 }
@@ -2386,7 +2393,12 @@ impl ZenohNodeConfig {
             }
             out.push_str("] }");
         }
-        push_wz_member(&self.policies, self.key_ids_member(), &mut out);
+        push_wz_member(
+            &self.policies,
+            self.key_ids_member(),
+            self.owned_address_member(),
+            &mut out,
+        );
         out.push_str("\n}\n");
         out
     }
@@ -2408,10 +2420,12 @@ impl ZenohNodeConfig {
 /// [`Origin::Api`]: crate::policy_document::Origin::Api
 ///
 /// `key_ids` is the member's `key-ids`, already written ([`ZenohNodeConfig::key_ids_member`]),
-/// which comes last, and makes the member written when no policy needs it.
+/// and `owned_address` its `owned-address` ([`ZenohNodeConfig::owned_address_member`]), which
+/// come last, and either makes the member written when no policy needs it.
 fn push_wz_member(
     policies: &crate::policy_document::Resolved,
     key_ids: Option<String>,
+    owned_address: Option<String>,
     out: &mut String,
 ) {
     use crate::policy_document::Origin;
@@ -2434,7 +2448,12 @@ fn push_wz_member(
         .map(|(entry, _)| (entry.id(), entry.value_in(&policies.policy)))
         .collect();
     let limits = stated_limits(&policies.limits);
-    if profile.is_none() && stated.is_empty() && limits.is_empty() && key_ids.is_none() {
+    if profile.is_none()
+        && stated.is_empty()
+        && limits.is_empty()
+        && key_ids.is_none()
+        && owned_address.is_none()
+    {
         return;
     }
     // Each member of the `wz` member, in the order a document states them, with a comma between
@@ -2479,6 +2498,7 @@ fn push_wz_member(
         members.push(member);
     }
     members.extend(key_ids);
+    members.extend(owned_address);
     out.push_str(",\n  ");
     escape_into(WZ_MEMBER, out);
     out.push_str(": {");
@@ -2557,6 +2577,16 @@ impl ZenohNodeConfig {
     #[cfg(not(feature = "shared-key-ids"))]
     fn key_ids_member(&self) -> Option<String> {
         None
+    }
+
+    /// The `owned-address` member of the [`WZ_MEMBER`] that states [`Self::owned_address`]
+    /// again, as a document states it, or `None` when the node states no address of its own.
+    fn owned_address_member(&self) -> Option<String> {
+        let [a, b, c, d] = self.owned_address?;
+        let mut out = String::from(" ");
+        escape_into("owned-address", &mut out);
+        let _ = write!(out, ": \"{a}.{b}.{c}.{d}\"");
+        Some(out)
     }
 }
 
@@ -5269,8 +5299,9 @@ pub const WZ_MEMBER: &str = "wz";
 /// Whether `path` is a part of the document's [`WZ_MEMBER`] that the open reads: the member
 /// itself, `wz/profile`, `wz/policies`, `wz/policies/<id>` where `<id>` names a policy of the
 /// build, `wz/limits`, `wz/limits/<id>` where `<id>` names a limit a stage after the build may
-/// decide, of a session or of a runtime, whose machines read it from the snapshot, and, in a build
-/// with the `shared-key-ids` capability, `wz/key-ids` and its two lists. Any other path below the
+/// decide, of a session or of a runtime, whose machines read it from the snapshot,
+/// `wz/owned-address`, and, in a build with the `shared-key-ids` capability, `wz/key-ids` and
+/// its two lists. Any other path below the
 /// member, a limit only the build decides and a limit whose machines still read the build's value
 /// among them, is one the open refuses by name ([`ConfigIngestError::PoliciesRefused`]), and is
 /// no key wz honours.
@@ -5288,7 +5319,7 @@ pub fn wz_member_path_is_read(path: &str) -> bool {
         return false;
     };
     match below.split_once('/') {
-        None => matches!(below, "profile" | "policies" | "limits"),
+        None => matches!(below, "profile" | "policies" | "limits" | "owned-address"),
         Some(("policies", policy)) => crate::policy::POLICIES
             .iter()
             .any(|entry| entry.id() == policy),
@@ -5363,6 +5394,15 @@ fn key_ids_of(
 ) -> Result<wz_session_core::shared_key_ids::KeyIdsAtOpen, ConfigIngestError> {
     crate::policy_document::statements_from_json5(wz_member)
         .map(|read| read.key_ids)
+        .map_err(member_refused)
+}
+
+/// The node's own address the `wz` member of a document states (`wz/owned-address`), read by
+/// the reader that resolves its policies ([`policies_of`]), which refuses the member first when
+/// it refuses any of it; `None` when the member states none.
+fn owned_address_of(wz_member: &Json5Value) -> Result<Option<[u8; 4]>, ConfigIngestError> {
+    crate::policy_document::statements_from_json5(wz_member)
+        .map(|read| read.owned_address)
         .map_err(member_refused)
 }
 
@@ -8461,6 +8501,7 @@ impl ZenohNodeConfig {
         {
             out.key_ids = key_ids_of(&wz_member)?;
         }
+        out.owned_address = owned_address_of(&wz_member)?;
         let mut named: Vec<&'static str> = Vec::new();
         // R2081 (open-debt item 500) — keys the document states for OTHER modes.
         // Neither honoured (this node got no instruction) nor ignored (wz reads
@@ -15744,6 +15785,51 @@ mod wz_member_tests {
                 "{path}"
             );
         }
+    }
+
+    /// `wz/owned-address` is a path of the member the open reads, its address is read into the
+    /// node with its policies and written back by the export, and a text that is no IPv4 address
+    /// of a node fails the ingest by name.
+    #[test]
+    fn the_owned_address_of_the_member_is_read_exported_and_refused_by_name() {
+        assert!(wz_member_path_is_read("wz/owned-address"));
+        assert_eq!(
+            config_key_disposition("wz/owned-address"),
+            ConfigKeyDisposition::Honoured
+        );
+        assert!(!honours_config_key("wz/owned-address"), "no admin write");
+        assert!(!wz_member_path_is_read("wz/owned-address/0"));
+        let read = ZenohNodeConfig::from_json5(
+            r#"{ mode: "peer", wz: { "owned-address": "127.0.0.1" } }"#,
+        )
+        .expect("the member reads");
+        assert_eq!(read.config.owned_address, Some([127, 0, 0, 1]));
+        assert_eq!(
+            read.config.policies,
+            build_policies(),
+            "the address states no policy"
+        );
+        let export = read.config.to_json5();
+        let again = ZenohNodeConfig::from_json5(&export).expect("the export reads back");
+        assert_eq!(again.config.owned_address, Some([127, 0, 0, 1]), "{export}");
+        assert_eq!(
+            ZenohNodeConfig::from_json5(r#"{ mode: "peer" }"#)
+                .expect("reads")
+                .config
+                .owned_address,
+            None,
+            "a document with no member states no address"
+        );
+        let error =
+            ZenohNodeConfig::from_json5(r#"{ wz: { "owned-address": "127.0.0" } }"#).unwrap_err();
+        assert!(
+            matches!(error, ConfigIngestError::PoliciesRefused { .. }),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("`wz/owned-address` = `127.0.0`"),
+            "{error}"
+        );
     }
 
     /// The document's key ids are read into the node with its policies, and the export reads
