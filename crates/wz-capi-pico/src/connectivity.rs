@@ -98,7 +98,7 @@ use wz_capi_port::os::{mutex_in, Mutex, MutexGuard};
 
 use wz_capi_port::told::{ToldKey, ToldPlane};
 use wz_capi_port::SessionEngine;
-use wz_session_core::face::{FaceEventKind, FaceLinkRow};
+use wz_session_core::face::{FaceEventKind, FaceLinkRow, GroupRowText};
 use wz_session_core::text_out::{FixedText, TextOut};
 
 use crate::abi::z_owned_string_t;
@@ -502,13 +502,31 @@ fn pico_group_endpoint_text(endpoint: &str) -> String {
     read.text("")
 }
 
+/// The text pico writes of the endpoint a session joined its group by
+/// ([`pico_group_endpoint_text`]), which each member's link starts at: written once, as the
+/// session is opened, and read by every door that hands a member's link out.
+pub(crate) struct GroupText(GroupRowText);
+
+impl GroupText {
+    /// The text of `endpoint`, the one the session joins its group by.
+    pub(crate) fn of(endpoint: &str) -> Self {
+        Self(GroupRowText::of(&pico_group_endpoint_text(endpoint)))
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
 /// The link pico reports for one link of an established face.
 ///
 /// A group member's link starts at the endpoint the session joined the group by, as pico
 /// labels it (`vendor/zenoh-pico/src/transport/multicast/rx.c` @
 /// `entry->common._link_src = _z_endpoint_to_string(&ztm->_common._link->_endpoint);`),
-/// written as pico writes an endpoint ([`pico_group_endpoint_text`]). Its other fields are
-/// those of the group's own link, which pico reads off the transport
+/// written as pico writes an endpoint: the session's `group`, which its open wrote once
+/// ([`GroupText`]). A member of a group the session did not join by its open, which no open of
+/// this ABI makes, starts at the group's locator. Its other fields are those of the group's own
+/// link, which pico reads off the transport
 /// (`vendor/zenoh-pico/include/zenoh-pico/api/primitives.h` @ `*mtu = transport->_link->_mtu;`):
 /// a raweth group's link is a 1514-byte frame (`vendor/zenoh-pico/src/transport/raweth/link.c`
 /// @ `static uint16_t _z_get_link_mtu_raweth(void) { return _ZP_MAX_ETH_FRAME_SIZE; }`),
@@ -521,7 +539,7 @@ fn pico_group_endpoint_text(endpoint: &str) -> String {
 ///
 /// Each end is written here, once, into the string handed out, from the facts the row holds of
 /// it ([`FaceLinkRow::write_src`], [`FaceLinkRow::write_dst`]).
-fn link_of_row(row: &FaceLinkRow) -> z_loaned_link_t {
+fn link_of_row(row: &FaceLinkRow, group: Option<&GroupText>) -> z_loaned_link_t {
     let group_endpoint = row.group_endpoint.as_deref();
     let raweth = group_endpoint.is_some_and(|endpoint| endpoint.starts_with("reth/"));
     let (mtu, is_streamed, is_reliable) = if raweth {
@@ -529,8 +547,8 @@ fn link_of_row(row: &FaceLinkRow) -> z_loaned_link_t {
     } else {
         pico_link_properties(row.kind, row.mtu)
     };
-    let src = match group_endpoint {
-        Some(endpoint) => ConnText::new(pico_group_endpoint_text(endpoint).as_bytes()),
+    let src = match group.filter(|_| group_endpoint.is_some()) {
+        Some(group) => ConnText::new(group.as_bytes()),
         None => ConnText::written(|text| row.write_src(text)),
     };
     let dst = if raweth {
@@ -1067,8 +1085,13 @@ fn key_of_row(plane: ToldPlane, row: &FaceLinkRow) -> ToldKey {
 }
 
 /// The event of `plane` that tells `row` came (`PUT`) or left, as `kind` says: its face's
-/// transport, or its link.
-fn event_of_row(plane: ToldPlane, kind: z_sample_kind_t, row: &FaceLinkRow) -> ConnEvent {
+/// transport, or its link, a member's starting at the session's `group`.
+fn event_of_row(
+    plane: ToldPlane,
+    kind: z_sample_kind_t,
+    row: &FaceLinkRow,
+    group: Option<&GroupText>,
+) -> ConnEvent {
     match plane {
         ToldPlane::Transports => ConnEvent::Transport(z_loaned_transport_event_t {
             kind,
@@ -1076,7 +1099,7 @@ fn event_of_row(plane: ToldPlane, kind: z_sample_kind_t, row: &FaceLinkRow) -> C
         }),
         ToldPlane::Links => ConnEvent::Link(z_loaned_link_event_t {
             kind,
-            link: link_of_row(row),
+            link: link_of_row(row, group),
         }),
     }
 }
@@ -1086,17 +1109,23 @@ fn event_of_row(plane: ToldPlane, kind: z_sample_kind_t, row: &FaceLinkRow) -> C
 /// then each row that stands, that it hears and that it was not told is told came. A row that went
 /// and came back under its key is told neither, the one reconnect the contract says may be lost
 /// past the queue.
-fn converge(engine: &Engine, plane: ToldPlane, slot: usize, listener: &Listener) {
+fn converge(
+    engine: &Engine,
+    group: Option<&GroupText>,
+    plane: ToldPlane,
+    slot: usize,
+    listener: &Listener,
+) {
     while let Some(row) = SessionEngine::first_told_gone(engine, plane, slot) {
         if !SessionEngine::tell_went(engine, plane, slot, &key_of_row(plane, &row)) {
             break;
         }
-        let event = event_of_row(plane, Z_SAMPLE_KIND_DELETE, &row);
+        let event = event_of_row(plane, Z_SAMPLE_KIND_DELETE, &row, group);
         listener.delivery.call(event);
     }
     for row in rows(engine).filter(|row| listener.hears(row)) {
         if SessionEngine::tell_came(engine, plane, slot, &key_of_row(plane, &row)) {
-            let event = event_of_row(plane, Z_SAMPLE_KIND_PUT, &row);
+            let event = event_of_row(plane, Z_SAMPLE_KIND_PUT, &row, group);
             listener.delivery.call(event);
         }
     }
@@ -1188,13 +1217,17 @@ fn stands_as_told(told: &FaceLinkRow, standing: &impl Fn(usize) -> Option<FaceLi
 pub(crate) struct Connectivity {
     listeners: Mutex<Table>,
     told: Mutex<Told>,
+    /// The text of the endpoint the session joined its group by, `None` for a session that
+    /// joined none.
+    group: Option<GroupText>,
 }
 
 impl Connectivity {
     /// A session's hub with no listener and nothing told, made in `place`, which its session
-    /// lent, with its locks made there; the place goes back with the last count of the hub, which
-    /// a listener's handle may hold past the session.
-    pub(crate) fn new(place: Lent<Self>) -> Strong<Self> {
+    /// lent, with its locks made there, and the text of the session's `group`, which its open
+    /// wrote; the place goes back with the last count of the hub, which a listener's handle may
+    /// hold past the session.
+    pub(crate) fn new(place: Lent<Self>, group: Option<GroupText>) -> Strong<Self> {
         let make = |place: NonNull<Self>| {
             let at = place.as_ptr();
             // SAFETY: the place is the lent one's, valid for one hub, holding none, never moved;
@@ -1207,10 +1240,16 @@ impl Connectivity {
                 mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).told)), |told| {
                     told.write(Told::new())
                 });
+                addr_of_mut!((*at).group).write(group);
             }
         };
         // SAFETY: `make` makes the whole hub in the place it is handed.
         unsafe { Strong::lodge_at(place, make) }
+    }
+
+    /// The text of the endpoint the session joined its group by, which a member's link starts at.
+    fn group(&self) -> Option<&GroupText> {
+        self.group.as_ref()
     }
 
     /// The listener of `plane` of the first row from `at` on that holds one, and a hold of its
@@ -1404,7 +1443,7 @@ impl Connectivity {
             if listener.wants(row) {
                 listener
                     .delivery
-                    .deliver(event_of_row(plane, kind, row), key);
+                    .deliver(event_of_row(plane, kind, row, self.group()), key);
             }
             drop(hold);
         }
@@ -1494,15 +1533,16 @@ impl Connectivity {
             // SAFETY: the owner holds the place for the length of the replay.
             let listener = unsafe { listener_at(object) };
             let engine = crate::session::EngineHold::as_ref(engine);
+            let group = hub.group();
             for row in rows(engine).filter(|row| listener.hears(row)) {
                 if SessionEngine::tell_came(engine, plane, slot, &key_of_row(plane, &row)) {
-                    let event = event_of_row(plane, Z_SAMPLE_KIND_PUT, &row);
+                    let event = event_of_row(plane, Z_SAMPLE_KIND_PUT, &row, group);
                     listener.delivery.call(event);
                 }
             }
             listener.delivery.finish_replay(
                 |came, key| told(engine, plane, slot, came, key),
-                |_| converge(engine, plane, slot, listener),
+                |_| converge(engine, group, plane, slot, listener),
             );
             SessionEngine::forget_told(engine, plane, slot);
             hub.end_replay(plane, slot);
@@ -2183,13 +2223,14 @@ pub unsafe extern "C" fn z_info_links(
         let Some(handle) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
+        let group = handle.ext.connectivity.group();
         for row in rows(engine_ref(handle)) {
             if let Some((zid, multicast)) = filter {
                 if zid != row.zid || multicast != row.is_multicast {
                     continue;
                 }
             }
-            let mut held = HeldLink(link_of_row(&row));
+            let mut held = HeldLink(link_of_row(&row, group));
             if let Some(call) = closure.call {
                 call(&mut held.0, closure.context.0);
             }
@@ -2664,7 +2705,7 @@ pub(crate) mod tests {
 
     /// A session's hub in a box of its own.
     fn hub_in_heap() -> Strong<Connectivity> {
-        Connectivity::new(Lent::try_boxed().expect("the test's heap"))
+        Connectivity::new(Lent::try_boxed().expect("the test's heap"), None)
     }
 
     /// A transport listener of `hub`, as the door declares one.
@@ -2744,7 +2785,15 @@ pub(crate) mod tests {
             is_shm: false,
             links: vec![link.clone()],
         };
-        link_of_row(&FaceLinkRow::of_snapshot(&face, 0).expect("the face's one link"))
+        // The group's text, as the session's open writes it when it joins the group.
+        let group = link
+            .group
+            .as_ref()
+            .map(|group| GroupText::of(&group.endpoint));
+        link_of_row(
+            &FaceLinkRow::of_snapshot(&face, 0).expect("the face's one link"),
+            group.as_ref(),
+        )
     }
 
     fn face(first: u8, multicast: bool, src: &str) -> FaceSnapshot {
@@ -3395,7 +3444,7 @@ pub(crate) mod tests {
     fn a_hub_keeps_its_lent_place_while_a_listener_holds_it() {
         static PLACES: wz_capi_port::lodge::StaticPlaces<Connectivity, 1> =
             wz_capi_port::lodge::StaticPlaces::new();
-        let hub = Connectivity::new(PLACES.lend().expect("CONTROL: a fresh table lends"));
+        let hub = Connectivity::new(PLACES.lend().expect("CONTROL: a fresh table lends"), None);
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
         let transport = declare_transport(&hub, &engine, false, transport_closure(log))
@@ -3722,7 +3771,7 @@ mod told_tests {
         ] {
             let mut told = row(1, "");
             told.ends = RowEnds::lent(Some(lent));
-            let held = HeldLink(link_of_row(&told));
+            let held = HeldLink(link_of_row(&told, None));
             let (mut src, mut dst) = (String::new(), String::new());
             lent.write_src(&mut src);
             lent.write_dst(&mut dst);
@@ -3738,8 +3787,41 @@ mod told_tests {
             src: LentEnd::Ip(local),
             dst: LentEnd::Ip(peer),
         };
-        let held = HeldLink(link_of_row(&told));
+        let held = HeldLink(link_of_row(&told, None));
         assert_eq!(held.0.dst.as_bytes(), b"tcp/10.0.0.1:7447");
+    }
+
+    /// A group member's link starts at the text the session's open wrote of the group's endpoint,
+    /// and goes to the member's address; a unicast link of the same session starts at its own end.
+    ///
+    /// # Control
+    ///
+    /// A door that reads the group's text for every row reds the unicast link's assertion; one
+    /// that ignores it reds the member's, which then starts at the group's locator.
+    #[test]
+    fn a_members_link_starts_at_the_text_the_open_wrote() {
+        let joined = "udp/224.0.0.224:7447#iface=lo";
+        let group = GroupText::of(joined);
+        let mut member = row(2, "");
+        member.is_multicast = true;
+        member.ends = RowEnds::Member {
+            src: RowText::of("udp/224.0.0.224:7447"),
+            at: core::net::SocketAddr::from(([192, 0, 2, 9], 7447)),
+        };
+        member.group_endpoint = Some(wz_session_core::face::GroupRowText::of(joined));
+        let held = HeldLink(link_of_row(&member, Some(&group)));
+        assert_eq!(
+            (held.0.src.as_bytes(), held.0.dst.as_bytes()),
+            (
+                &b"udp/224.0.0.224:7447iface=lo"[..],
+                &b"udp/192.0.2.9:7447"[..]
+            )
+        );
+        let held = HeldLink(link_of_row(&member, None));
+        assert_eq!(held.0.src.as_bytes(), b"udp/224.0.0.224:7447");
+        let unicast = row(3, "tcp/127.0.0.1:7447");
+        let held = HeldLink(link_of_row(&unicast, Some(&group)));
+        assert_eq!(held.0.src.as_bytes(), b"tcp/127.0.0.1:7447");
     }
 
     /// The row of a peer whose zid starts with `n`'s bytes, from `src`.

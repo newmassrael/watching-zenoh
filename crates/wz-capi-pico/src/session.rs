@@ -2008,6 +2008,10 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
     // the multicast transport has no link for it, and refuses it as pico's does.
     let group =
         group_endpoint(listen.as_deref(), connect.first().map(String::as_str)).map(String::from);
+    // The text pico writes of the group's endpoint, which each member's link starts at, written
+    // once, here.
+    #[cfg(feature = "connectivity")]
+    let group_text = group.as_deref().map(crate::connectivity::GroupText::of);
     #[cfg(not(feature = "multicast-transport"))]
     if group.is_some() {
         return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
@@ -2163,6 +2167,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
                 policy,
                 limits,
                 drive.engine_hold(),
+                group_text,
             );
             #[cfg(not(feature = "connectivity"))]
             let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid, policy, limits);
@@ -2547,6 +2552,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // transport refuses it.
     let group = group_endpoint(listen, stated);
     let joins_a_group = group.is_some();
+    // The text pico writes of the group's endpoint, which each member's link starts at, written
+    // once, here, while the config it is read from stands.
+    #[cfg(feature = "connectivity")]
+    let group_text = group.map(crate::connectivity::GroupText::of);
     #[cfg(not(feature = "multicast-transport"))]
     if joins_a_group {
         return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
@@ -2830,6 +2839,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         policy,
         limits,
         drive.engine_hold(),
+        group_text,
     );
     #[cfg(not(feature = "connectivity"))]
     let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy, limits);
