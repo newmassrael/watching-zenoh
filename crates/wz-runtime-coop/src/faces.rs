@@ -2874,7 +2874,7 @@ impl<
                 .listener
                 .input_wait()
                 .filter(|_| listening.listener.asked_when_ready())?;
-            if waits[..links].iter().any(|wait| wait.on == on) {
+            if waits.iter().take(links).any(|wait| wait.on == on) {
                 return None;
             }
             waits.push(LinkWait::input(on)).ok()?;
