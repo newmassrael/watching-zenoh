@@ -2,7 +2,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The holders of a session's engine. The engine lies in its session's own arena, counted by its
-//! holders there ([`EngineHold`]), so the open takes no memory of the heap for it; it is reached
+//! holders there ([`EngineHold`]), so the open takes no memory of the heap for it; where the
+//! session's tables take their memory on use, in an allocation of its own the open claims first,
+//! which keeps the arena's memory while the engine is held. It is reached
 //! without being held ([`EngineHandle`]) through the row of the process's table it was put in at
 //! its open (`super::reach`), which its close takes it out of, so a handle kept past the
 //! close reaches nothing, whatever still holds the engine.

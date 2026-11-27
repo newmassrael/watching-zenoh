@@ -496,11 +496,12 @@ runtime-plan = []
 # budget of its `KEY_ARENA_BYTES`. The budget and the places of the state's own values (its round,
 # its planes, the cells it lends for a step, the rows of its plain tables) lie in a state of the
 # session's own, one allocation the open takes from the allocator apart from its arena, and no
-# region is laid out; the arena is still the open's. Beside `runtime-plan` (which `listen` and `group`
-# turn on, and `--all-features` names) it yields, as features add: a session laid out at the open
-# from its config takes its tables' memory there, so a build of both is the `runtime-plan` form
-# (`src/lib.rs`, where `RowPolicy` is named). Off, every table takes its memory at the open and
-# none after (docs/upstream-parity.md, D12).
+# region is laid out; the engine lies in an allocation of its own the open claims first, which keeps
+# the arena's memory while it is held. The arena is still the open's for the rest. Beside
+# `runtime-plan` (which `listen` and `group` turn on, and `--all-features` names) it yields, as
+# features add: a session laid out at the open from its config takes its tables' memory there, so a
+# build of both is the `runtime-plan` form (`src/lib.rs`, where `RowPolicy` is named). Off, every
+# table takes its memory at the open and none after (docs/upstream-parity.md, D12).
 tables-on-use = []
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside

@@ -3754,12 +3754,14 @@ fn a_sessions_planes_lie_in_its_own_arena() {
 /// A session's engine lies in the session's own arena, and is reached through its row while the
 /// session is open and by no handle once it is closed, though a holder still keeps it. Turned red
 /// by an engine written anywhere but the place its plan laid out, or by a close that leaves its row
-/// held.
+/// held. A session whose tables take their memory on use holds its engine apart from its arena
+/// (`tests::on_use`), and is held here to its row alone.
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_sessions_engine_lies_in_its_own_arena_and_is_reached_until_it_closes() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
     assert!(engine.arena_holds(EngineHold::as_ptr(&engine).cast()));
     let handle = EngineHold::downgrade(&engine);
     assert!(handle

@@ -3808,7 +3808,9 @@ pub(crate) struct SessionArena {
 }
 
 /// Where a session's engine is written at its open ([`SessionArena::engine_place`]): a place of
-/// the arena lent to the engine alone, and the count of the arena's memory it takes one of.
+/// the arena lent to the engine alone, and the count of the arena's memory it takes one of. An
+/// engine whose tables take their memory on use lies in an allocation of its own instead.
+#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
 #[derive(Clone, Copy)]
 pub(crate) struct EnginePlace {
     pub(crate) at: NonNull<u8>,
@@ -3921,8 +3923,9 @@ impl SessionArena {
     }
 
     /// The count the arena's memory is kept by, lent from the arena on the first ask: the session
-    /// holds one, given back when it lets the arena go.
-    fn keep(&mut self) -> Result<NonNull<Kept>, LendRefused> {
+    /// holds one, given back when it lets the arena go, and an engine in an allocation of its own
+    /// takes one of its own (`SharedClaim::made_with`).
+    pub(crate) fn keep(&mut self) -> Result<NonNull<Kept>, LendRefused> {
         if let Some(kept) = self.kept {
             return Ok(kept);
         }
@@ -3957,6 +3960,7 @@ impl SessionArena {
     /// arena's alignment, and the count that keeps the arena's memory: the engine takes one of
     /// its own when it is written there, so the memory goes back once the engine's last holder
     /// lets go, whichever of them is last. Refused past what the arena has left.
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
     pub(crate) fn engine_place(&mut self, bytes: usize) -> Result<EnginePlace, LendRefused> {
         let (at, memory) = self.kept_span(bytes)?;
         Ok(EnginePlace { at, memory })

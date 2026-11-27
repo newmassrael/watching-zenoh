@@ -50,10 +50,13 @@ use crate::arena::CacheSpan;
 use crate::arena::HandedTable;
 #[cfg(feature = "runtime-plan")]
 use crate::arena::OpenPlan;
+// The place the arena lends the engine: none where the engine lies in an allocation of its own.
+#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+use crate::arena::EnginePlace;
 use crate::arena::{
-    ArenaMemory, ArenaPlan, ArenaRefused, ArenaRegion, ClaimedPlaces, DroppedOn, EnginePlace,
-    EntityKind, EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenPlaces,
-    OpenRegion, OpenStorage, PlaceTables, PlanFrom, SessionArena, SessionRows, TransportTables,
+    ArenaMemory, ArenaPlan, ArenaRefused, ArenaRegion, ClaimedPlaces, DroppedOn, EntityKind,
+    EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenPlaces, OpenRegion,
+    OpenStorage, PlaceTables, PlanFrom, SessionArena, SessionRows, TransportTables,
 };
 use crate::form::{CoopForm, Latch};
 use crate::form::{
@@ -68,6 +71,8 @@ use crate::round::RoundRows;
 use crate::round::{Round, RoundCounts};
 use crate::RowPolicy;
 use wz_runtime_coop::kept::Shared;
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+use wz_runtime_coop::kept::{Kept, SharedClaim};
 #[cfg(any(
     feature = "runtime-plan",
     all(not(wz_round), any(feature = "listen", feature = "group"))
@@ -810,7 +815,12 @@ struct LentApart {
     #[cfg(not(wz_round))]
     router: SessionReassembly,
     /// The place the engine is written at.
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
     engine: EnginePlace,
+    /// The count of the arena's memory the engine keeps, where it lies in an allocation of its own
+    /// (`SharedClaim`).
+    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    engine: NonNull<Kept>,
     handle_place: Option<HandlePlace>,
     lodgings: LodgingPlaces,
     #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
@@ -867,7 +877,12 @@ struct SessionLent {
     /// The span the session's runtime is placed in, and the count of the arena it is kept by.
     runtime: RuntimePlace,
     /// The place the session's engine is written at, and the count of the arena it is kept by.
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
     engine: EnginePlace,
+    /// The count of the arena the session's engine keeps, where the engine lies in an allocation of
+    /// its own (`SharedClaim`) and the arena lends it no place.
+    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    engine: NonNull<Kept>,
     /// The state the places of the session's own values and its keys lie in (`StateHold`): the
     /// region, which holds the registry too, or the session's own state where the tables take
     /// their memory on use. After the registry, which its handle drops in place where it lies in the
@@ -962,7 +977,11 @@ fn lend_session(
     }
     let OpenPlaces {
         runtime: runtime_bytes,
-        engine: engine_bytes,
+        #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+            engine: engine_bytes,
+        // The engine lies in an allocation of its own the open claimed (`SharedClaim`).
+        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+            engine: _,
     } = from.places();
     #[cfg(any(feature = "runtime-plan", feature = "tables-on-use"))]
     let mut arena = SessionArena::reserve(&plan, memory)?;
@@ -1222,13 +1241,23 @@ fn lend_session(
     let runtime = arena
         .runtime_place(runtime_bytes)
         .map_err(ArenaRefused::Lend)?;
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
     let engine = arena
         .engine_place(engine_bytes)
         .map_err(ArenaRefused::Lend)?;
-    // SAFETY: the span was lent above to the lodging places alone, and `engine.memory` is the count
-    // of the memory it lies in, held by the session's engine for as long as the engine lends from
-    // the places.
-    let lodgings = unsafe { lodgings.kept_by(engine.memory) };
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    let memory = engine.memory;
+    // An engine in an allocation of its own keeps the arena's memory by a count it takes of it, as
+    // the place the arena would lend it does: what the engine holds that lies in the arena (the
+    // lodgings, the handle's place) stands for as long as the engine does.
+    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    let engine = arena.keep().map_err(ArenaRefused::Lend)?;
+    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    let memory = engine;
+    // SAFETY: the span was lent above to the lodging places alone, and `memory` is the count of the
+    // memory it lies in, held by the session's engine for as long as the engine lends from the
+    // places.
+    let lodgings = unsafe { lodgings.kept_by(memory) };
     Ok(SessionLent {
         runtime,
         engine,
@@ -4703,6 +4732,8 @@ pub(crate) const fn lay_out_open<const ROWS: usize>(
         return Err(refused);
     }
     plan.lay_runtime(holds.runtime);
+    // An engine in an allocation of its own (`SharedClaim`) takes no place of the arena.
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
     plan.lay_engine(holds.engine);
     plan.lay_planes(holds.planes);
     #[cfg(feature = "link-admission")]
@@ -6857,6 +6888,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // The row the engine is reached through, taken before anything is reserved: an open that
         // finds no row, the fixed table full or the heap out of room, reserves nothing.
         let row = RowClaim::take().ok_or(OpenError::NoEngineRow)?;
+        // Where the tables take their memory on use, the engine lies in an allocation of its own,
+        // claimed here beside its row: an open the allocator has no room for reserves nothing.
+        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+        let claim =
+            SharedClaim::<Self>::try_new().ok_or(OpenError::Arena(ArenaRefused::NoMemory {
+                bytes: Shared::<Self>::layout().size(),
+            }))?;
         // The runtime's tables are placed in the arena, so its plan holds their span.
         #[cfg(wz_round)]
         let tables = RuntimeTables::of::<C>(&config);
@@ -7153,20 +7191,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             #[cfg(all(not(wz_round), feature = "listen"))]
             taken,
             row,
+            #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+            claim,
         ))
     }
 
-    /// The engine over `core`, written at the place the open lent it in the session's arena and
-    /// counted by its holders there, put in the row `row` the open claimed for it, which reaches
-    /// it without holding it ([`EngineHandle`]), with what the open lent apart from the state
-    /// (`apart`) and the read slots of the faces past the dial role's (`taken`). Out of line,
-    /// so the open's measure shows it apart.
+    /// The engine over `core`, written at the place the open lent it in the session's arena, or in
+    /// the allocation of its own the open claimed for it (`claim`) where the tables take their
+    /// memory on use, and counted by its holders there, put in the row `row` the open claimed for
+    /// it, which reaches it without holding it ([`EngineHandle`]), with what the open lent apart
+    /// from the state (`apart`) and the read slots of the faces past the dial role's (`taken`).
+    /// Out of line, so the open's measure shows it apart.
     #[inline(never)]
     fn engine_of(
         core: Core<L, C>,
         apart: LentApart,
         #[cfg(all(not(wz_round), feature = "listen"))] taken: direct::TakenFaces<L, C>,
         row: RowClaim,
+        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))] claim: SharedClaim<
+            Self,
+        >,
     ) -> EngineHold<Self> {
         // The place is a span of the arena, aligned as a span starts.
         const { assert!(Shared::<Self>::layout().align() <= wz_session_core::bounded::ARENA_ALIGN) };
@@ -7366,7 +7410,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // SAFETY: the place was lent to the engine alone, aligned as asserted above and as large as
         // `Shared::<Self>::layout`, in the arena `place.memory` keeps; the engine is read through
         // its place only once it is written.
-        EngineHold::of(unsafe { Shared::placed_with(place.at, place.memory, make) })
+        #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+        let engine = unsafe { Shared::placed_with(place.at, place.memory, make) };
+        // SAFETY: the claim is this open's alone; `place` is the count of the session's arena, live
+        // while the arena is held, which the engine's state holds; the engine is read through its
+        // place only once `make` has written it whole.
+        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+        let engine = unsafe { claim.made_with(place, make) };
+        EngineHold::of(engine)
     }
 
     /// Open the links of the engine [`Self::assemble`] built: the ports bound and the groups

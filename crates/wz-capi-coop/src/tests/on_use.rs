@@ -18,6 +18,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
 
 use super::{open, until, CatchAll, Command, Engine, Router};
+use crate::EngineHold;
 
 /// What the engine answers its objects' keys through.
 fn keys(engine: &Engine) -> &dyn SessionKeys {
@@ -121,6 +122,21 @@ fn a_subscriber_declared_after_the_open_is_told_and_handed_a_push() {
     });
     router.send(Command::Push("demo/a", b"hello"));
     until(&engine, "the push", || received.load(Ordering::SeqCst) == 1);
+}
+
+/// A session whose tables take their memory on use holds its engine in an allocation of its own,
+/// claimed beside its row before its arena is reserved, and not at a place of the arena, where the
+/// D12 forms' test of the same accessor in `tests::arena` finds theirs. Turned red by an open that
+/// writes the engine at a place the arena lends (`SessionArena::engine_place` and
+/// `Shared::placed_with` in `CoopEngine::engine_of`).
+#[test]
+fn an_on_use_engine_lies_apart_from_its_arena() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert!(
+        !engine.arena_holds(EngineHold::as_ptr(&engine).cast()),
+        "the engine lies apart from the arena"
+    );
 }
 
 /// A session whose tables take their memory on use takes the state its own values and its key
