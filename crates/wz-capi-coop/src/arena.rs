@@ -180,6 +180,7 @@ use crate::engine::ROOM_PLACE_BYTES;
 use crate::engine::{CoopTables, FACE_SET_BYTES, ROUTER_LEND_BYTES};
 #[cfg(all(wz_round, wz_lent))]
 use crate::form::CoopForm;
+#[cfg(any(not(wz_on_use), feature = "udp-listen"))]
 use crate::form::SessionLock;
 use crate::lodging::{LodgingRows, LodgingSpan};
 use crate::open_source::EndpointList;
@@ -1380,6 +1381,7 @@ pub struct TransportRows {
 
 /// The flag of a cell of the links' tables: the session's lock kind's
 /// (`wz_runtime_coop::sync::LockKind::Flag`), which the handles placed in it are counted by.
+#[cfg(any(not(wz_on_use), feature = "udp-listen"))]
 type LinkCellFlag = <SessionLock as wz_runtime_coop::sync::LockKind>::Flag;
 
 /// What the session's links take their buffers through: the source their kind names
