@@ -1504,15 +1504,17 @@ impl LentDeclaration<'_> {
     /// only while it counts. A declaration that cannot be composed counts as zero: its writer
     /// then refuses it with the same error.
     ///
-    /// With a heap it is counted by the one writer run into a count, so each kind's encoder is
-    /// compiled once; with none, by the codec's measure of the kind.
+    /// Where the writer writes through a transmit buffer a count can stand in for (a heap with
+    /// lent slots) it is counted by the one writer run into a count, so each kind's encoder is
+    /// compiled once. Where it does not, by the codec's measure of the kind: a build with no heap,
+    /// and a heap build with no lent slot, whose writer's sink is a vector that a count is not.
     #[inline(never)]
     pub fn encoded_len(&self) -> usize {
-        #[cfg(not(feature = "alloc"))]
+        #[cfg(not(all(feature = "alloc", feature = "transport-tx-lend")))]
         {
             self.compose(CountDeclaration)
         }
-        #[cfg(feature = "alloc")]
+        #[cfg(all(feature = "alloc", feature = "transport-tx-lend"))]
         {
             crate::tx_buf::encoded_len(self)
         }
@@ -1742,25 +1744,42 @@ trait DeclarationWith {
 }
 
 /// The bytes a declaration encodes to, zero for one that cannot be composed: the count of a build
-/// with no heap, which counts by the codec's measure.
+/// whose writer does not write through a count (no heap, or a heap with no lent slot, where the
+/// writer's sink is a vector), which counts by the codec's measure.
 #[cfg(all(
-    not(feature = "alloc"),
+    not(all(feature = "alloc", feature = "transport-tx-lend")),
+    feature = "codec-declare",
     any(
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "liveliness-token"
+        all(feature = "session-multicast", feature = "alloc"),
+        all(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            any(
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "liveliness-token"
+            )
+        )
     )
 ))]
 struct CountDeclaration;
 
 #[cfg(all(
-    not(feature = "alloc"),
+    not(all(feature = "alloc", feature = "transport-tx-lend")),
+    feature = "codec-declare",
     any(
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "liveliness-token"
+        all(feature = "session-multicast", feature = "alloc"),
+        all(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            any(
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "liveliness-token"
+            )
+        )
     )
 ))]
 impl DeclarationWith for CountDeclaration {
@@ -2695,6 +2714,8 @@ mod tests {
                     response_final(request_id, qos).encode_to_vec(),
                     "{request_id} {qos:?}"
                 );
+                // Counted by the writer where its sink is a transmit buffer a count stands in for.
+                #[cfg(feature = "transport-tx-lend")]
                 assert_eq!(crate::tx_buf::encoded_len(&writer), bytes.len());
             }
         }
