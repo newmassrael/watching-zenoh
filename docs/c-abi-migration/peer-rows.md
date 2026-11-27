@@ -548,8 +548,9 @@ another thread finds is what it finds today. Each decision is written before its
   engine's place as it does now. The chain buffers' share stays one a row read where it lies, so the
   chain table is unchanged; the engine's place shrinks by a face where the arena grows by one, which
   the explain reports read as the same bytes moved, not added. The cost gate's lists forbid
-  `link_turn` and `faces::OneFace` in every case once they are gone; a forbidden name no build can
-  link is held in the gate's table of pending controls, with why.
+  `link_turn` and `faces::OneFace` in every case once they are gone, for good: a name no build can
+  link has no control, so the gate names the case its step was counted in instead (`REMOVED`), not
+  a pending control.
 
 - **R4's handles: the row's owner keeps them, a handle counts nothing.** The kernel and the link
   state are reached by shared handles today (`crates/wz-session-core/src/session_actions.rs` @
@@ -565,7 +566,7 @@ another thread finds is what it finds today. Each decision is written before its
   then read through a field rather than through a counted handle: the same instructions or fewer a
   message.
 
-### 7.4 R2, landed so far, and what is left of it
+### 7.4 R2, landed
 
 - **One table of the faces' records** (`crates/wz-runtime-coop/src/faces.rs` @
   `pub struct FaceRows<S>(S);`): `OneFace` and `ManyFaces` are one table whose one parameter is
@@ -581,13 +582,49 @@ another thread finds is what it finds today. Each decision is written before its
   gone; the open and the client's read make their wait and hand it to `face_turn`, out of line in
   every build. Held by `a_client_reads_its_one_face_through_a_table_of_one_row` (one row, turned
   once a read through the body `Takes::face_turns` counts) and `a_read_turns_every_face_once`.
-- **Left of R2**, in this order: the read slots' table (`DirectFaces`'s field and table one
-  table, row 0 inline where the bound is 1 and laid with the table past it, section 7.3's plan
-  decision); the one read body (`read_dial` and `read_faces`, section 7.3's read decision); the
-  cost gate's forbidden names (`link_turn`, `faces::OneFace`), held in its table of pending
-  controls with why. `announce_on` is one source already
+- **The read slots' table** (`crates/wz-capi-coop/src/engine/direct.rs` @
+  `pub(super) struct DirectFaces<L: CoopLinks + 'static, C: ClockSource + 'static> {`): the dial
+  role's face and the faces past it are one table of rows, `FaceSlots`, whose storage is the
+  build's: `[DirectFace; 1]` inline in the engine's place without `listen`, and with it a table
+  lent from the session's arena, the dial role's row first (`DirectFaces::lent_in`, every row
+  made with a Router of its own, so the open's lent Router, `LentApart::router` and
+  `SessionLent::router`, is the inline build's alone). The plan lays every row where the table is
+  lent, row 0 among them (`ArenaPlan::lay_direct_faces`), and none where it is inline: the
+  engine's place shrinks by a face where the arena grows by one. Row 0 is reached with no bound
+  looked at (`DirectFaces::dial`: an irrefutable pattern over the inline row, an unchecked first
+  row of the lent table, which is made with one row at least), and its mark (`holds_face`) is set
+  for the table's life, so every walk reads every row alike; `face_at`, `hold_face` and the
+  walks index the one table. Held by `the_dial_roles_row_lies_where_the_faces_table_does` (the
+  dial role's row lies in the engine's place exactly where the session listens on no port; red
+  with a lent table of one row, or with a listening build that keeps row 0 in the engine) and by
+  `tests::arena`'s `each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own`
+  (with `listen`, the plan's row counts every face, the dial role's among them; without it, none).
+- **One read body** (`crates/wz-capi-coop/src/engine/direct.rs` @
+  `fn read_faces<const TASK: bool>(&self, most_ms: u32) -> Result<(), SessionClosed> {`):
+  `read_dial` is gone. The one body turns `DirectFaces::turned` in every build; what it holds
+  across its wait is the build's, as section 7.3 decided: without `listen` and `group` the dial
+  role's slot, taken once and kept to the read's end (`kept`), its due read from the slot
+  (`CoopEngine::wait_due`); elsewhere nothing, every slot tried before the wait, let go, and
+  tried again to turn it. The close at the read's end lets the pumps go through the kept slot or
+  through a try of each face's (`CoopEngine::read_ends`), and a wait refused by a close comes to
+  the same end. Held by `a_read_holds_its_slot_across_its_wait_exactly_where_one_row_is_read`
+  (`Takes::read_slot_takes`: one try a read without `listen` and `group`, two with either; red
+  if either build takes the other's way) and by the read tests over one table
+  (`a_read_turns_every_face_once`, `a_client_reads_its_one_face_through_a_table_of_one_row`).
+- **The cost gate's removed names** (`scripts/lib/capability_cost_gate.py` @ `REMOVED:`):
+  `LINK_TURN` and `ONE_FACE` are forbidden in every case that builds the cooperative engine, for
+  good, as the guard that turns red if a second body returns. No build links them, so none can be
+  their control: the table names, for each, the case its step was counted in
+  (`pico-client-coop-nostd`), and the selftest holds that case and every coop case to forbid it
+  and no case to require it. The matcher is pinned against each name's own symbol and against the
+  body that replaced it (`face_turn`, `FaceRows<OneRow>`) and its namesake
+  (`link_cells::OneFace`, `LinkTurn`).
+- **R2 is whole.** `announce_on` is one source
   (`crates/wz-capi-coop/src/engine/replay.rs` @ `fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(`),
-  and is now one body over `FaceRows` in each build.
+  one body over `FaceRows` in each build. What the explain reports should read: in the client
+  case, `read_direct` with the one body inlined where `read_dial` was, its arms the client's
+  alone; in the peer and api cases, `DirectFaces` a handle and a bound in the engine's place and
+  one more row in the arena, and no `once(dial).chain(..)` in the walks.
 
 ## 8. Where the cases end
 
