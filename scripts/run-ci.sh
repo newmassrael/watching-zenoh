@@ -15097,7 +15097,7 @@ layer_c1m_session_lwip() {
     # that does not block gives no read that waits, and a host stream link lends its buffer to its
     # owner's read.
     # 27 -> 24, printed on 20ee0c0a1: the iovec gathering and its tests left with send_parts (94a2820a6).
-    _runci_guarded_test "C1m posix tcp seam" 24 \
+    _runci_guarded_test "C1m posix tcp seam" 26 \
         cargo test -p wz-runtime-posix --lib stream:: --quiet || return 1
     # The host's multicast seam (`wz_runtime_posix::group`): the receivers of one host share the group's
     # port, a group that is not one is not joined, a member sends from a port of its own with the hop
