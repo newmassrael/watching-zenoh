@@ -3591,13 +3591,12 @@ pub unsafe extern "C" fn z_subscriber_keyexpr(
 pub unsafe extern "C" fn z_subscriber_id(
     subscriber: *const crate::pubsub::z_loaned_subscriber_t,
 ) -> crate::entity::z_entity_global_id_t {
-    entity_id_of(
-        crate::abi::handle_ref::<
-            crate::pubsub::z_loaned_subscriber_t,
-            crate::pubsub::SubscriberState,
-        >(subscriber)
-        .and_then(|s| Some((s.shared.zid(), s.id()?))),
-    )
+    entity_id_of(crate::pubsub::subscriber_at(subscriber).and_then(|state| {
+        // SAFETY: the caller's: a live loaned subscriber names a live state.
+        let engine = unsafe { crate::pubsub::subscriber_engine(state) };
+        // SAFETY: as above.
+        Some((engine.zid(), unsafe { (*state).id() }?))
+    }))
 }
 
 /// A queryable's global entity id (pico `z_queryable_id`).
