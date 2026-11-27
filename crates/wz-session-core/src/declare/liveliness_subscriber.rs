@@ -584,29 +584,6 @@ impl PeerTokens<crate::bounded::Lent> {
     }
 }
 
-#[cfg(all(feature = "storage-profile", feature = "alloc"))]
-impl PeerTokens<crate::bounded::OnUse> {
-    /// The tokens the peer declared, as a table of their own that holds them and their keys, each
-    /// key still counted against the session's key budget, held to the same quotas; this table is
-    /// left holding none and taking new tokens against the same budget, its refusals kept. What a
-    /// face that went still owes the liveliness subscribers, apart from the tables it held. The
-    /// rows lie in the table (`FixedIdMap`), so the tokens move with the table taken and nothing
-    /// is allocated. `None`, taking nothing, for a table that holds no token.
-    pub fn split_off(&mut self) -> Option<Self> {
-        if self.count() == 0 {
-            return None;
-        }
-        Some(Self {
-            table: self.table.split_off(),
-            quota: self.quota,
-            key_quota: self.key_quota,
-            oversize: 0,
-            keys: self.keys,
-            _policy: core::marker::PhantomData,
-        })
-    }
-}
-
 /// Tokens of a lost link waiting for their retraction to the liveliness subscribers, a `Delete`
 /// each: one peer's table ([`PeerTokens`]), or the relation of the tokens of the faces that went
 /// (`OwedTokens`). What a caller that retracts either with the same subscribers names.
@@ -3488,77 +3465,6 @@ mod tests {
         );
         assert!(!peer.take_lost(&mut news), "none left");
         assert_eq!(peer.count(), 0);
-    }
-
-    /// The tokens of a peer of the on-use policy split off whole into a table of their own, in
-    /// the order they were declared, their keys still counted against the session's budget; the
-    /// table they came from holds none and takes new tokens against the same budget, and the
-    /// table split off retracts what it holds. A table of no token splits off nothing. Turned red
-    /// by a split that leaves the tokens behind (`FixedIdMap::split_off` taking no rows), or one
-    /// that drops their keys or hands the new table no budget (the budget's count then moves).
-    #[cfg(feature = "storage-profile")]
-    #[test]
-    fn an_on_use_peers_tokens_split_off_whole_and_stay_counted() {
-        use crate::bounded::OnUse;
-        use crate::key_arena::block_bytes;
-        use crate::limits::SessionLimits;
-        use crate::on_use::KeyBudget;
-
-        let budget: &'static KeyBudget = Box::leak(Box::new(KeyBudget::new(
-            256,
-            SessionLimits::defaults().max_keyexpr_bytes_held(),
-        )));
-        let mut peer: PeerTokens<OnUse> = PeerTokens::default();
-        // SAFETY: the budget is leaked, so it outlives both tables and every key counted against
-        // it.
-        peer.keep_keys_in(unsafe { budget.keys() });
-        let mut news = TokenNews::default();
-        let declare = |id: u64, key: &str| {
-            DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(key)))
-        };
-        assert!(
-            peer.split_off().is_none(),
-            "CONTROL: a table of no token splits off nothing"
-        );
-        for (id, key) in [(4, "t/four"), (2, "t/two")] {
-            assert!(peer.take_token(&declare(id, key), &HashMap::new(), false, &mut news));
-        }
-        let held = block_bytes("t/four".len()).expect("short")
-            + block_bytes("t/two".len()).expect("short");
-        assert_eq!(budget.counts().used, held, "each key counted as its block");
-        let mut owed = peer.split_off().expect("the tokens held are split off");
-        assert_eq!(peer.count(), 0, "the table they came from holds none");
-        let owed_tokens: Vec<(u64, String)> = owed
-            .iter()
-            .map(|(id, keyexpr)| (id, keyexpr.to_string()))
-            .collect();
-        assert_eq!(
-            owed_tokens,
-            [(4, "t/four".to_string()), (2, "t/two".to_string())],
-            "in the order declared"
-        );
-        assert_eq!(budget.counts().used, held, "their keys stay counted");
-        assert!(
-            peer.take_token(&declare(5, "t/five"), &HashMap::new(), false, &mut news),
-            "the table they came from takes new tokens"
-        );
-        assert_eq!(
-            budget.counts().used,
-            held + block_bytes("t/five".len()).expect("short")
-        );
-        assert!(owed.take_lost(&mut news));
-        let sample = news.sample();
-        assert_eq!(
-            (sample.kind, sample.keyexpr.to_string(), sample.token_id),
-            (LivelinessSampleKind::Delete, "t/two".to_string(), 2)
-        );
-        drop(owed);
-        drop(peer);
-        assert_eq!(
-            budget.counts().used,
-            0,
-            "every key's bytes back with its last holder"
-        );
     }
 
     /// The tokens of faces that went are owed as rows of one relation keyed by face and id: a face
