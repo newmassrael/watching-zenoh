@@ -15,6 +15,8 @@ here (five lanes work beside each other). The size case is `pico-client-coop-nos
 | 6a residue | open, no bytes | the rows' types and the lend are in `wz-capi-coop`, not in the L0 crate (`wz-runtime-coop`); moving them is a file move, held for after 6b, which changes `TransportRows`' users least when done last |
 | 6b face lifecycle | partly in the tree before this lane | the life of a link is a sans-I/O value already: `UnicastLink` (`wz-session-core/src/link_life.rs`, machine `unicast_link.scxml`, `6b0a9f6d7e`) answers each input with `Effects`; `UnicastTransport` (`unicast_transport.rs`, `bd54e874cb`) holds a life, a receive and the timers as one value, but the cooperative engine builds it over `MadeLink` (no life) and keeps each face's life in the face record |
 | 6b-1 | this lane's first step, committed with this file | section 4 |
+| 6b-2 | built (commit "Carry a face life's effects in one carrier") | section 6.1 |
+| 6b-5 | built (commit "Hand a face life's wake back with its answer") | section 6.2 |
 | 6c sending, 6d session state | not this lane's first steps | 6d goes with phase 4 (lane arch-l3-rows) |
 
 ## 2. The layers that overlap in a face's lifecycle now
@@ -81,3 +83,97 @@ sample's path. A step whose rows do not move by its estimate is reverted.
   nothing a program reads changes.
 - Everything else is the same answer read from another place: the row the life stood at, and the
   deadline arm that alone gives a dial under way up.
+
+## 6. The steps as built
+
+Nothing below was built, run or measured by this lane: the main session builds the branch, runs
+the tests named and reads the case's explain report. A step whose rows do not move by its
+estimate is reverted (section 4).
+
+### 6.1 6b-2, one carrier of the effects
+
+`link_life::carry(io, effects, now_us)` holds the loop both interpreters held: the order of
+section 3's effects (a dial given up, the handshake ended, the link lost, the link brought up, the
+session's end, a taken face taken out, then the handshake begun or the next endpoint dialled), the
+I/O's answer told to the life as its next input, and the clock read after that I/O. The owner
+implements `LinkIo` over its own rows: `DirectLinkIo` (`engine/direct.rs`: the engine, the face,
+its slot and the session under its lock) and `RoundLinkIo` (`engine.rs`: the session, the face's
+row and id, the dial as the step read it, the refusal the pass ends with). `LinkIo::TAKES_FACES`
+is `cfg!(feature = "listen")` in both, so a build without `listen` compiles no removal, as the
+`#[cfg]` arm did. `CoopEngine::drive_link` and `Core::carry_out` keep their signatures and
+become the first input and one call.
+
+What moved with it, each the same answer read from one place:
+
+- A close is carried by no owner: the only input `Close` is told by the end of the session's
+  links (`LinkSupervisor::end_dials_and_ports`), which drops its effects. The carrier asserts it
+  in a debug build, as the direct read did, and the round's `let_go` arm, which no input reached,
+  is gone.
+- The round's give-up of an unanswered dial is its `give_up_dial`: before, `carry_out` asked
+  `end_dial` before the loop whenever the step's read had no refusal, and the only effects that
+  leave a dial in the face's record are the deadline's (`Effects::gives_up_dial`), so the refusal
+  is the same one at the same point. The step's own refusal (`Refusal::Link`) stays before the
+  carrier: it is the read's, not an effect.
+- `LinkIo::lose` says whether the session ends with the loss, and both owners keep
+  `Refusal::LinkLost` only then. The round wrote it at every loss; a pass that goes on after a
+  loss dials again, and every way that pass ends the session writes its own refusal over it, so
+  the reason a caller reads is unchanged.
+
+Tests (`wz-session-core`, `link_life::tests`), over a recording owner whose dials are refused,
+under way or made by row and whose clock moves 10 microseconds a read:
+
+- `the_carrier_feeds_each_answer_back_at_the_time_read_after_its_io`: a refused dial walks on, a
+  made one begins its handshake, whose deadline counts from the clock read after the dial. Red if
+  `carry` tells an input at the first input's time.
+- `the_carrier_ends_what_is_over_before_it_dials_and_stops_at_the_sessions_end`: a handshake's end
+  before the next dial, a dial given up before the next, `SessionEnded` at the end. Red if the
+  order moves or the `Err` is lost.
+- `the_carrier_brings_up_at_the_inputs_time_and_loses_before_it_dials_again`: the bring-up at
+  the input's time; the loss before the redial, or the loss as the end. Red if `lose` does not
+  say whether the session ends.
+- `the_carrier_takes_a_gone_face_out_only_where_faces_are_taken_and_stops_at_a_gone_face`: red if
+  a removal is asked of an owner whose `TAKES_FACES` is false, or an input told to a life the
+  owner no longer holds.
+
+The engines' own tests hold the two owners: `wz-capi-coop`'s direct read (default features) and
+the round (`threads`), `tests::dial_in_flight`, `tests::redial_heap` and the refusal tests of
+`tests.rs`.
+
+Expected: the case (direct read) about 0, -50 to +50 (one instance of the same loop, inlined into
+`drive_link`, which stays out of line); the round's build less `carry_out`'s copy of the loop and
+its `let_go` arm. Receive: 0, no look of an up link that brings nothing reaches `drive_link`.
+
+### 6.2 6b-5, the wake with the answer
+
+`Effects` carries `UnicastLink::wake_at` read at the input's time once the input moved the link
+(`Effects::wake_at`), an input that raised no event included (`UnicastLink::waits`), and `carry`
+returns the last answer's wake (`None` where a taken face went or the face is gone). The direct
+read writes `DirectSlot::life_due_us` from it inside `drive_link` (`u64::MAX` when the face is
+gone or the session ends), and the taken link's first input writes it from its answer, so
+`life_turn` asks the life no second time. The round keeps reading each face's wake when it plans
+its wait (`LinkSupervisor::idle_wait`) and drops the carrier's.
+
+Two readings change, each toward what `wake_at` documents:
+
+- a look whose life did not move (`moves_link` false, the bookkeeping run for the chains or the
+  ledger) keeps the look the last answer named; before, it asked the life again at this look's
+  time, which moved a dial's next look later at each such pass;
+- the open's first input notes the life's look too (`CoopEngine::open_links`' `drive_link`); before, the
+  slot kept `u64::MAX` until a later look's bookkeeping asked the life, so a dial under way at the
+  open was next looked at only when another wake came. A dial's next look is now counted from the
+  time read after the dial rather than the look's, a few microseconds later.
+
+Test: `link_life::tests::every_answer_names_the_lifes_next_look_as_wake_at_reads_it` (idle, a dial
+owed, under way, a tick with no event, made, a handshake, up, dialled again, a wait, closed), red
+if the wake is read before the input moved the link or left out of an answer with no event; the
+carrier's tests of 6.1 assert the wake each carrying returns.
+
+Expected: the case -50 to -100 (`life_turn`'s second `wake_at`, its record look and its match);
+`Effects` grows by an `Option<u64>`, free where `input` is inlined into its caller. Receive: 0.
+
+### 6.3 Not built in this pass
+
+6b-3 (the dial's endpoint as the life's row), 6b-4 (the walk's refusal in L2) and 6b-6 (the life in
+the transport value) are left in the order of section 4. 6b-3 touches `DialEndpoint`'s 82 uses
+(54 in `wz-runtime-coop/src/faces.rs`, 13 in `transport/state.rs`), so it is a build loop of its
+own; 6b-4 builds on it (the refusal names the life's row).
