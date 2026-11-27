@@ -168,7 +168,9 @@ const fn rows_in<T, const N: usize>(_table: *mut [T; N]) -> usize {
 
 impl<E: EngineHolder> Shared<E> {
     /// A subscriber of `engine` on `base_keyexpr` with no get in flight, made in `place`, where
-    /// it stays: its token holds a lock made in its place ([`CancellationToken::init_in`]).
+    /// it stays: its token holds a lock made in its place ([`CancellationToken::init_in`]), and
+    /// its machine is written by `state` in the place its lock holds it in
+    /// ([`State::write_in`]), since the machine holds the bytes its samples are held back in.
     ///
     /// # Safety
     /// `place` is valid for writes of a `Self`, aligned for it and holds none; what is made there
@@ -176,7 +178,7 @@ impl<E: EngineHolder> Shared<E> {
     unsafe fn write_in(
         place: NonNull<Self>,
         engine: E::Handle,
-        state: State,
+        state: impl FnOnce(&mut MaybeUninit<State>) -> &mut State,
         base_keyexpr: FixedKey,
         dest: Locality,
         timeout_ms: u32,
@@ -194,7 +196,7 @@ impl<E: EngineHolder> Shared<E> {
             for row in 0..rows_in(table) {
                 GetSlot::write_empty(gets.add(row));
             }
-            addr_of_mut!((*at).state).write(Mutex::new(state));
+            Mutex::init_at(NonNull::new_unchecked(addr_of_mut!((*at).state)), state);
             CancellationToken::init_in(NonNull::new_unchecked(addr_of_mut!((*at).token)));
             addr_of_mut!((*at).closing).write(AtomicBool::new(false));
             addr_of_mut!((*at).base_keyexpr).write(base_keyexpr);
@@ -725,7 +727,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         // SAFETY: `make` makes the whole shared part in the place it is handed. Refused, `make` is
         // dropped uncalled, and the callbacks with it.
         let shared = unsafe { Strong::try_boxed_in(make) }.map_err(|NoPlace| HostError::NoRoom)?;
-        Self::declare_over(engine, shared, options)
+        Self::declare_over(engine, shared, &options)
     }
 
     /// [`Self::declare_with`] with what the subscriber's callbacks and jobs share lodged in `core`,
@@ -766,14 +768,15 @@ impl<E: EngineHolder> EngineSubscriber<E> {
                 core.context,
             )
         };
-        Self::declare_over(engine, shared, options)
+        Self::declare_over(engine, shared, &options)
     }
 
-    /// Declare what `options` asks for over `shared`, the subscriber's shared part, made.
+    /// Declare what `options` asks for over `shared`, the subscriber's shared part, made. The
+    /// options are read where the caller holds them, as nothing declared keeps them.
     fn declare_over(
         engine: &E,
         shared: Strong<Shared<E>>,
-        options: AdvancedSubscriberOptions,
+        options: &AdvancedSubscriberOptions,
     ) -> Result<Self, HostError> {
         let zid = engine.session_zid();
         let recovery = options.recovery;
@@ -899,7 +902,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         };
 
         // The detection token, last: a subscriber advertises itself once it can receive.
-        let detection_token = declare_detection_token(engine, base, &options, id)?;
+        let detection_token = declare_detection_token(engine, base, options, id)?;
 
         Ok(Self {
             subscriber,
@@ -1043,21 +1046,24 @@ unsafe fn write_shared_part<E: EngineHolder>(
     misses: MissHandlers,
 ) {
     let history = options.history;
-    let state = State::delivering_to(on_sample, misses)
-        .with_retransmission(options.recovery.is_some())
-        .with_history(
-            usize::from(history.is_some()),
-            history
-                .as_ref()
-                .and_then(|h| h.sample_depth)
-                .unwrap_or(usize::MAX),
-        );
     // SAFETY: the caller's, which is `write_in`'s; the part is whole before its bounds are set.
     unsafe {
         Shared::write_in(
             place,
             E::downgrade(engine),
-            state,
+            |cell| {
+                State::write_in(
+                    cell,
+                    on_sample,
+                    misses,
+                    options.recovery.is_some(),
+                    usize::from(history.is_some()),
+                    history
+                        .as_ref()
+                        .and_then(|h| h.sample_depth)
+                        .unwrap_or(usize::MAX),
+                )
+            },
             base_keyexpr,
             options.get_locality,
             recovery_query_timeout_ms(options.query_timeout),

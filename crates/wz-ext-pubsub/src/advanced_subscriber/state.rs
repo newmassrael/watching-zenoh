@@ -946,6 +946,51 @@ impl State {
         self
     }
 
+    /// The state [`Self::delivering_to`] makes, its retransmission and history set as
+    /// [`Self::with_retransmission`] and [`Self::with_history`] set them, made in `place`: a state
+    /// holds the bytes its sources hold samples back in (`ADVANCED_SUBSCRIBER_PENDING_BYTES`), so a
+    /// host that keeps it in a place of its own writes it there rather than moving it there.
+    #[cfg(feature = "advanced-history")]
+    pub(crate) fn write_in(
+        place: &mut core::mem::MaybeUninit<Self>,
+        on_sample: OnSample,
+        miss_handlers: MissHandlers,
+        retransmission: bool,
+        global_pending_queries: usize,
+        max_history_depth: usize,
+    ) -> &mut Self {
+        let at = place.as_mut_ptr();
+        // SAFETY: each field is written once through a pointer to it, inside the place; the span
+        // the sources hold samples back in is written as zeroes, the empty ring
+        // `PendingSpan::empty` is.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).sequenced).write(Sources::new());
+            core::ptr::addr_of_mut!((*at).timestamped).write(Sources::new());
+            core::ptr::addr_of_mut!((*at).pending).write_bytes(0, 1);
+            core::ptr::addr_of_mut!((*at).on_sample).write(on_sample);
+            core::ptr::addr_of_mut!((*at).miss_handlers).write(miss_handlers);
+            core::ptr::addr_of_mut!((*at).retransmission).write(retransmission);
+            core::ptr::addr_of_mut!((*at).global_pending_queries).write(global_pending_queries);
+            core::ptr::addr_of_mut!((*at).max_history_depth).write(max_history_depth);
+        }
+        // Every field is named here, so a field added to the state and not written above fails
+        // to compile rather than leaving its place unwritten.
+        let _every_field_written = |state: &Self| {
+            let Self {
+                sequenced: _,
+                timestamped: _,
+                pending: _,
+                on_sample: _,
+                miss_handlers: _,
+                retransmission: _,
+                global_pending_queries: _,
+                max_history_depth: _,
+            } = state;
+        };
+        // SAFETY: every field was written above.
+        unsafe { place.assume_init_mut() }
+    }
+
     /// The listener registry, for declaring and retracting a listener.
     pub fn miss_handlers(&mut self) -> &mut MissHandlers {
         &mut self.miss_handlers

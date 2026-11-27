@@ -1561,7 +1561,9 @@ unsafe fn declare_subscriber_state(
     let declared = EngineSubscriber::declare_in(engine, ke, opts, on_sample, misses, core);
     match declared {
         Ok(subscriber) => {
-            (*state).subscriber = Some(subscriber);
+            // SAFETY: as above; the state was filled with no subscriber, so the write lets go of
+            // nothing in its place.
+            unsafe { core::ptr::addr_of_mut!((*state).subscriber).write(Some(subscriber)) };
             (*state).bind();
             Ok(state)
         }

@@ -163,6 +163,52 @@ fn recovery_buffers_forward_gap_and_drains_when_filled() {
     );
 }
 
+/// A state written in its place is the one the builder makes, whatever the place held before: a
+/// live sample is held back while the history get it was told of is out, a forward gap asks for
+/// its range, and both go on in order once their gets end. The place is filled with ones first,
+/// so a field `State::write_in` left unwritten (the span samples are held back in, above all) is
+/// read as it was left. Turned red by a field written at another value than the builder's.
+#[cfg(feature = "advanced-history")]
+#[test]
+fn a_state_written_in_its_place_is_the_one_the_builder_makes() {
+    let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let d = Arc::clone(&delivered);
+    let mut place = Box::<State>::new_uninit();
+    // SAFETY: the place is the box's, valid for writes of a `State`, and holds no state yet.
+    unsafe {
+        place
+            .as_mut_ptr()
+            .cast::<u8>()
+            .write_bytes(0xFF, core::mem::size_of::<State>());
+    }
+    let state = State::write_in(
+        &mut place,
+        OnSample::boxed(owned_samples(Box::new(move |s: Sample| {
+            d.lock().unwrap().push(s.payload[0])
+        }))),
+        MissHandlers::default(),
+        true,
+        1,
+        usize::MAX,
+    );
+    assert!(state.ingest(sequenced(0, 0xA0), true, NOW).is_none());
+    assert!(
+        delivered.lock().unwrap().is_empty(),
+        "held while the history get is out"
+    );
+    state.finish_history();
+    assert_eq!(*delivered.lock().unwrap(), [0xA0]);
+    let request = state
+        .ingest(sequenced(2, 0xA2), true, NOW)
+        .expect("a forward gap asks for its range");
+    assert_eq!(request.from_sn, 1);
+    let _ = state.ingest(sequenced(1, 0xA1), false, NOW);
+    state.finish_recovery(&(vec![0x02u8], 7u32));
+    assert_eq!(*delivered.lock().unwrap(), [0xA0, 0xA1, 0xA2]);
+    // SAFETY: the state was written in the place above, and is dropped once, here.
+    unsafe { place.assume_init_drop() };
+}
+
 /// R311y82 state-machine unit test: a hole the recovery GET does NOT fill
 /// surfaces a [`Miss`] at flush, and the buffered sample past it is still
 /// delivered (zenoh `flush_sequenced_source` miss arm).
