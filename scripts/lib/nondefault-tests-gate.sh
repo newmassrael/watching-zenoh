@@ -1515,6 +1515,36 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         tx-lend-only\
         |tx_deadline::tests::without_the_probe_stage_every_deadline_waits"
+    # The same build has no `link-wire-reports` (a default left out with the four: no driver of
+    # the cooperative engine queues its writes or carries a class apart), so the line mark and the
+    # keepalive's deadline are the inline driver's alone, which this filter holds. NOT YET
+    # MEASURED.
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_actions::bundle_tests::link_stamps::every_frame_handed_to_a_link_that_writes_inline_marks_its_line"
     # The COMPACT initial-sequence-number derivation, a row of its own because
     # `initial-sn-compact` is a selector, not an addition: it swaps the SHAKE
     # derivation for the FNV-1a and SplitMix64 one and compiles the tests of the

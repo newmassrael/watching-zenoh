@@ -956,24 +956,28 @@ where
 
     // The keepalive emitter measures the line from the live link's last write, so a
     // reconnecting session must pass the question on, as the writes themselves are.
+    #[cfg(feature = "link-wire-reports")]
     fn reports_wire_writes(&self) -> bool {
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).reports_wire_writes()
         })
     }
 
+    #[cfg(feature = "link-wire-reports")]
     fn ms_since_wire_write(&self) -> Option<u64> {
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).ms_since_wire_write()
         })
     }
 
+    #[cfg(feature = "link-wire-reports")]
     fn carries_apart(&self, class: Reliability) -> bool {
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).carries_apart(class)
         })
     }
 
+    #[cfg(feature = "link-wire-reports")]
     fn ms_since_wire_write_for(&self, class: Reliability) -> Option<u64> {
         R::with_mutex_mut(&self.inner, |sink| {
             R::link_driver(sink).ms_since_wire_write_for(class)
@@ -1283,18 +1287,22 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
         R::link_driver(&sink).tx_slot_claimable()
     }
 
+    #[cfg(feature = "link-wire-reports")]
     fn reports_wire_writes(&self) -> bool {
         R::link_driver(&self.inner.borrow()).reports_wire_writes()
     }
 
+    #[cfg(feature = "link-wire-reports")]
     fn ms_since_wire_write(&self) -> Option<u64> {
         R::link_driver(&self.inner.borrow()).ms_since_wire_write()
     }
 
+    #[cfg(feature = "link-wire-reports")]
     fn carries_apart(&self, class: Reliability) -> bool {
         R::link_driver(&self.inner.borrow()).carries_apart(class)
     }
 
+    #[cfg(feature = "link-wire-reports")]
     fn ms_since_wire_write_for(&self, class: Reliability) -> Option<u64> {
         R::link_driver(&self.inner.borrow()).ms_since_wire_write_for(class)
     }

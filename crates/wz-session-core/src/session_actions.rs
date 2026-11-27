@@ -7426,7 +7426,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // not the link's line speaking: the peer leases that carriage on its own, the driver
         // reports its writes per class, and a mark here would hold the link's own keepalive
         // back while its streams are silent.
-        #[cfg(feature = "transport-keepalive")]
+        #[cfg(all(feature = "transport-keepalive", feature = "link-wire-reports"))]
         {
             let driver = link.link_driver();
             if !driver.carries_apart(reliability)
@@ -7436,6 +7436,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     .store(true, core::sync::atomic::Ordering::Relaxed);
             }
         }
+        // Without `link-wire-reports` no driver has a queue or a carriage apart to report, so
+        // every frame handed over is the line speaking.
+        #[cfg(all(feature = "transport-keepalive", not(feature = "link-wire-reports")))]
+        link.spoke
+            .store(true, core::sync::atomic::Ordering::Relaxed);
 
         // R2371 (`transport-stats`) — charge ONE wire write to the counters, on
         // the side the driver's `LinkSendOutcome` puts it.
@@ -19106,7 +19111,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::send_keep_alive`] for the carriage that frames of `class` leave by, on a link
-    /// that carries that class apart ([`BoxedLinkDriver::carries_apart`]): upstream's companion
+    /// that carries that class apart (`BoxedLinkDriver::carries_apart`): upstream's companion
     /// link writes its own KeepAlive when its own tracker runs out
     /// (`io/zenoh-transport/src/unicast/universal/link.rs` @
     /// `let message: TransportMessage = KeepAlive.into();`), whatever its main link carries.

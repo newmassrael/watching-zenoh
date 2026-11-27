@@ -3648,6 +3648,143 @@ mod link_stamps {
             K::Emitted
         );
     }
+
+    /// A link that writes inline speaks at every hand-over: a frame of either class, at any
+    /// priority, marks the line, and the keepalive's deadline is the end of the tick that began at
+    /// the establishment. It holds with and without `link-wire-reports`, and a build without the
+    /// feature has no other kind of link. Turned red by a hand-over that leaves the line unmarked
+    /// (the mark compiled only with the feature), or by a deadline read from anything but the
+    /// establishment and the tick.
+    #[cfg(feature = "transport-keepalive")]
+    #[test]
+    fn every_frame_handed_to_a_link_that_writes_inline_marks_its_line() {
+        use crate::qos::Priority;
+        use crate::reliability::Reliability;
+        use core::sync::atomic::Ordering;
+        let (actions, link, interval) = keeping_alive();
+        let before = link.written.load(Ordering::SeqCst);
+        let frames = [
+            (Reliability::Reliable, Priority::DEFAULT),
+            (Reliability::BestEffort, Priority::DEFAULT),
+            (Reliability::BestEffort, Priority::Control),
+        ];
+        for (n, (class, priority)) in frames.into_iter().enumerate() {
+            actions.link.spoke.store(false, Ordering::Relaxed);
+            actions.emit_on_link(&actions.link, &[0x04], None, class, priority, false);
+            assert!(
+                actions.link.spoke.load(Ordering::Relaxed),
+                "frame {n} marks the line"
+            );
+        }
+        assert_eq!(
+            link.written.load(Ordering::SeqCst),
+            before + frames.len(),
+            "CONTROL: every frame reached the link"
+        );
+        assert_eq!(
+            crate::drive::keepalive_wake_deadline(&*actions),
+            Some(interval),
+            "the tick that began at the establishment ends one interval later"
+        );
+    }
+
+    /// A link with a writer queue that has written nothing yet, and a carriage of its own for
+    /// best-effort frames.
+    #[cfg(all(feature = "transport-keepalive", feature = "link-wire-reports"))]
+    #[derive(Default)]
+    struct QueuedLink {
+        /// How many writes the session handed the link.
+        written: core::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(all(feature = "transport-keepalive", feature = "link-wire-reports"))]
+    impl crate::link::BoxedLinkDriver for QueuedLink {
+        fn send_blocking(
+            &self,
+            _bytes: &[u8],
+            _reliability: crate::reliability::Reliability,
+        ) -> crate::link::LinkSendOutcome {
+            self.written
+                .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            crate::link::LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+
+        fn reports_wire_writes(&self) -> bool {
+            true
+        }
+
+        fn ms_since_wire_write(&self) -> Option<u64> {
+            None
+        }
+
+        fn carries_apart(&self, class: crate::reliability::Reliability) -> bool {
+            matches!(class, crate::reliability::Reliability::BestEffort)
+        }
+    }
+
+    /// With `link-wire-reports`, a link that queues its writes is marked by a control frame alone,
+    /// a frame of the class it carries apart marks nothing, and each carriage's keepalive falls due
+    /// by its own writes: one judge at the end of the first tick sends one keepalive on the link
+    /// and one on its companion. Turned red by a build with the feature that marks the line for a
+    /// queued data frame or for a frame carried apart, or that sends no companion keepalive.
+    #[cfg(all(feature = "transport-keepalive", feature = "link-wire-reports"))]
+    #[test]
+    fn a_link_that_reports_its_writes_keeps_each_carriage_by_its_own_writes() {
+        use crate::lease::KeepAliveCheckOutcome as K;
+        use crate::qos::Priority;
+        use crate::reliability::Reliability;
+        use core::sync::atomic::Ordering;
+        let link = alloc::sync::Arc::new(QueuedLink::default());
+        let sink: alloc::sync::Arc<dyn crate::link::BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            super::SessionLinkActions::<super::PlainRuntime, super::StillClock>::new_generic(
+                sink,
+                super::params(),
+                super::StillClock,
+            )
+            .expect("the heap has room");
+        actions.enter_established();
+        actions.link.arm_keepalive();
+        let interval = actions.keepalive_interval_ms();
+        let marks = |class, priority| {
+            actions.link.spoke.store(false, Ordering::Relaxed);
+            actions.emit_on_link(&actions.link, &[0x04], None, class, priority, false);
+            actions.link.spoke.load(Ordering::Relaxed)
+        };
+        assert!(
+            !marks(Reliability::Reliable, Priority::DEFAULT),
+            "a queued data frame is not the line speaking"
+        );
+        assert!(
+            marks(Reliability::Reliable, Priority::Control),
+            "a control frame is"
+        );
+        assert!(
+            !marks(Reliability::BestEffort, Priority::Control),
+            "a frame carried apart is not the link's line"
+        );
+        actions.link.spoke.store(false, Ordering::Relaxed);
+        let read = crate::drive::keepalive_deadlines(&*actions).expect("the worker runs");
+        assert_eq!(
+            read.earliest(),
+            Some(interval),
+            "both lines fall due together"
+        );
+        let before = link.written.load(Ordering::SeqCst);
+        assert_eq!(
+            crate::drive::judge_keepalive(&*actions, interval, read),
+            K::Emitted
+        );
+        assert_eq!(
+            link.written.load(Ordering::SeqCst),
+            before + 2,
+            "one keepalive on the link and one on its companion"
+        );
+    }
 }
 
 /// The inbound SN gates, kept in words of the runtime's: a frame is judged with no hold of a lock,
