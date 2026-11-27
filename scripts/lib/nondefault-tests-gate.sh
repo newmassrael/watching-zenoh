@@ -364,7 +364,7 @@ session::tests::a_declaration_event_names_the_peer_that_was_connected_when_it_ar
     # `transport-link-ws` select `engine-tokio`, and `src/lib.rs` refuses each beside the
     # crate's default `os-host` by name, so the same list over the default features is a
     # build that never compiles. The features are the crate's default list with `os-host`
-    # replaced by the tokio option's of deploy/wz-config.toml (`wz_config.py --bench-cargo-args
+    # replaced by the tokio option's of deploy/wz-config.toml (`wz_config.py --build-cargo-args
     # tokio` prints them), spelled out because a leg's field is cargo features. The cooperative
     # engine's serial and unixpipe links are the legs after this one; its admin space is the
     # `resource-snapshot,peer,query,admin-space` leg's.

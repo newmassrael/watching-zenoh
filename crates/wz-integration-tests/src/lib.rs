@@ -911,9 +911,9 @@ pub mod common {
         let coop = pico_engine_is_coop();
         let target = artifact("crates").join(if coop { PICO_COOP_TARGET_DIR } else { "target" });
         let features = if coop {
-            "$(python3 ../scripts/lib/wz_config.py --bench-cargo-args coop)"
+            "$(python3 ../scripts/lib/wz_config.py --build-cargo-args coop)"
         } else {
-            "$(python3 ../scripts/lib/wz_config.py --bench-cargo-args tokio transport-link-tls)"
+            "$(python3 ../scripts/lib/wz_config.py --build-cargo-args tokio transport-link-tls)"
         };
         find_pico_cdylib(&target, coop, || {
             format!(
