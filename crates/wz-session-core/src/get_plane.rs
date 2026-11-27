@@ -19,9 +19,9 @@
 //! A leg's end (its Final, its deadline, the loss of its link) is said when its entry is dropped,
 //! by a guard the sink owns; the get's end is said by whichever of its legs and its asker stands
 //! last, with the request id of the timeout that ended that leg when one did, as zenoh flushes a
-//! query at its last Final (`api/session.rs` @ `if query.nb_final == 0 {`). The deliveries hand it
-//! out with no lock held, once the round has handed every reply held before it: what the get held
-//! back, the timeout, and then the drop of its callback, which is how a
+//! query at its last Final (`zenoh/src/api/session.rs` @ `if query.nb_final == 0 {`). The
+//! deliveries hand it out with no lock held, once the round has handed every reply held before
+//! it: what the get held back, the timeout, and then the drop of its callback, which is how a
 //! program learns its get is over.
 //!
 //! The ends wait in a table of the plane's ([`EndedLegs`]), one for each get. An end is written
@@ -735,12 +735,13 @@ impl<C: GetCalls, U: UncapturedReplies<C>> ReplySink for LegSink<C, U> {
 
 /// What a consolidating get holds of its replies until its end: rows of the session's
 /// ([`GetPlane::take_due`]), tagged with the get's row, so every leg of the get holds back into one
-/// consolidation, as zenoh holds a query's replies over every Final (`api/session.rs` @
-/// `if query.nb_final == 0 {`), and a held reply is copied into the session's memory and takes
-/// none of its own. A full table refuses the reply, as a fixed room does, and counts it. A leg's
-/// Final or deadline makes nothing due by itself: what the get holds stays in its rows until its
-/// end ([`Ended`]), when it is handed to the get's callback from there with no lock held, so none
-/// of it is copied into the round of deliveries, which has no place for a part that lies in a row.
+/// consolidation, as zenoh holds a query's replies over every Final
+/// (`zenoh/src/api/session.rs` @ `if query.nb_final == 0 {`), and a held reply is copied into
+/// the session's memory and takes none of its own. A full table refuses the reply, as a fixed
+/// room does, and counts it. A leg's Final or deadline makes nothing due by itself: what the get
+/// holds stays in its rows until its end ([`Ended`]), when it is handed to the get's callback from
+/// there with no lock held, so none of it is copied into the round of deliveries, which has no
+/// place for a part that lies in a row.
 /// A get the session ends itself (cancelled) lets go of it ([`GetPlane::forget_due`]).
 pub struct LegHold<C: GetCalls> {
     row: LegId,

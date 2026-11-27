@@ -310,9 +310,9 @@ Read against the four things the fold reaches:
 - The consolidation. Each leg consolidates on its own: its sink holds the get's mode and its own
   held replies, flushed at that leg's end. A get of two legs in `Latest` hands its callback a
   reply of a key from each leg. zenoh consolidates over every Final of the query and flushes once,
-  at the last (`api/session.rs:3025-3029`, as `reply_sink.rs` reads it), and zenoh-pico holds one
-  pending query with its remaining Finals (`_z_pending_query_t._remaining_finals`). Per-leg
-  consolidation is right only for a get of one leg: a client's get of its one link, its own
+  at the last (`zenoh/src/api/session.rs` @ `if query.nb_final == 0 {`, as `reply_sink.rs`
+  reads it), and zenoh-pico holds one pending query with its remaining Finals
+  (`_z_pending_query_t._remaining_finals`). Per-leg consolidation is right only for a get of one leg: a client's get of its one link, its own
   queryables not asked.
 - The deadline index. A leaf per table, each table keeping its earliest deadline as entries come
   and go (`ReplyRegistry::due_ms`); an end is not told, a read raises a stale key (`DueIndex`).
@@ -670,11 +670,12 @@ part of the face's row: the merge of the two lanes is the main session's to orde
 `GetLegs` is the part of the face's row R3b names (its pending gets).
 
 **Whether an ABI shows a reply's request id: none does.** Read before the timeout takes the row's
-id. zenoh's `Reply` (`zenoh/src/api/query.rs` at the pin) holds its result and, behind
+id. zenoh's `Reply` (`zenoh/src/api/query.rs` @ `pub struct Reply {`) holds its result and, behind
 `unstable`, its replier's id; zenoh-c's accessors, as `crates/wz-capi-c/src/get.rs` implements
 them, are `z_reply_is_ok`, `z_reply_ok`, `z_reply_err`, `z_reply_replier_id` and the
 clone, loan, take and drop of a reply; zenoh-pico's `_z_reply_t` holds a `_z_reply_data_t` of
-`_result`, `replier_id` and `_tag` (`vendor/zenoh-pico/include/zenoh-pico/net/reply.h`), and
+`_result`, `replier_id` and `_tag` (`vendor/zenoh-pico/include/zenoh-pico/net/reply.h` @
+`typedef struct _z_reply_data_t {`), and
 `crates/wz-capi-pico/src/get.rs` keeps the same accessors. `ReplyView::rid` is read inside wz
 alone, by the tables that find a reply's get. So the timeout the deliveries hand out may name the
 row's id before any leg carries it, and H7c2b need not move the id: H7c2c makes it the one id every

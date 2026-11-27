@@ -1077,7 +1077,7 @@ impl<R: SessionRuntime> TxRoute<'_, R> {
     /// and the two callers differ on purpose, as zenoh's do: a keepalive goes
     /// at `crate::qos::Priority::Control` (zenoh's tx task writes it directly, ahead of any
     /// queued batch — `io/zenoh-transport/src/unicast/universal/link.rs`
-    /// @ `let n = link.send(&message, Some(crate::qos::Priority::Control)).await?;`), and a
+    /// @ `let n = link.send(&message, Some(Priority::Control)).await?;`), and a
     /// close at `Priority::Background`, BEHIND everything already queued, so
     /// the data a caller sent before closing leaves before the close does
     /// (`io/zenoh-transport/src/unicast/universal/transport.rs`
