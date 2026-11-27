@@ -127,22 +127,18 @@ mod lodging;
 // The state of a session whose shape the build fixes, one struct the allocator hands zeroed.
 #[cfg(not(feature = "runtime-plan"))]
 pub mod region;
-// The tables take their memory on use in a session whose shape the build fixes; a session whose
-// arena the open lays out from its config keeps its faces' tables in pools that arena lends. Each
+// The tables take their memory on use in a session whose shape the build fixes. Features add, so a
+// build may name `tables-on-use` beside `runtime-plan` (`listen` and `group` turn it on, and
+// `--all-features` names both): the session laid out at the open from its config wins, its faces'
+// tables kept in the pools that arena lends, and the build is the `runtime-plan` form whole. Each
 // item of the on-use form reads the feature beside `not(feature = "runtime-plan")`, and its twin
 // the negation of both (`region`, compiled only without `runtime-plan`, reads the feature alone),
-// so the refused build is the form that plans at the open and this is its one error.
-#[cfg(all(feature = "tables-on-use", feature = "runtime-plan"))]
-compile_error!(
-    "wz-capi-coop: `tables-on-use` is a form of the session whose shape the build fixes; a session \
-     laid out at the open from its config (`runtime-plan`, which `listen` and `group` turn on) \
-     takes its tables' memory at the open"
-);
+// so no item of the on-use form is compiled into that build (`form_precedence_tests`).
 /// The storage policy of the session's registry, named once so every table of it and the rows each
 /// is given agree on it: lent from the arena where the open lays the arena out from its config
 /// (`runtime-plan`), placed in the region the build lays out otherwise (`region`), and taken from
 /// the allocator at each table's first row where the tables take their memory on use
-/// (`tables-on-use`).
+/// (`tables-on-use` without `runtime-plan`).
 #[cfg(feature = "runtime-plan")]
 pub(crate) type RowPolicy = wz_session_core::bounded::Lent;
 /// See the form of a build with `runtime-plan`.
@@ -171,6 +167,25 @@ const _: () = assert!(
     ),
     "the session's tables take their memory at their first row"
 );
+// The precedence of the two forms above, held by name in the build that names both.
+#[cfg(all(test, feature = "tables-on-use", feature = "runtime-plan"))]
+mod form_precedence_tests {
+    use core::any::TypeId;
+
+    use wz_session_core::bounded::{Lent, Storage, Taken};
+
+    use crate::RowPolicy;
+
+    /// A build with `tables-on-use` and `runtime-plan` lends its tables from the arena its open
+    /// lays out (`Lent`), whose memory is taken at the open. Turned red by naming `OnUse` (or
+    /// any policy but `Lent`) as the `RowPolicy` of a build with both features, as a
+    /// `RowPolicy` read under `tables-on-use` alone would.
+    #[test]
+    fn a_build_of_both_forms_lays_its_tables_out_at_the_open() {
+        assert_eq!(TypeId::of::<RowPolicy>(), TypeId::of::<Lent>());
+        assert_eq!(<RowPolicy as Storage>::TAKEN, Taken::AtOpen);
+    }
+}
 // How the engine's calls stand to its threads, and the locks that choice decides.
 mod form;
 

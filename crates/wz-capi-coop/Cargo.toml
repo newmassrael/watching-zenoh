@@ -450,9 +450,11 @@ runtime-plan = []
 # docs/c-abi-migration/heap-native.md section 11): the registry is made by value, each table counted
 # from the limits the open resolved and holding no row, and the session's keys are counted against a
 # budget of its `KEY_ARENA_BYTES` that the region holds in place of its key arena. The region's other
-# places and the arena are still the open's. A session laid out at the open from its config
-# (`runtime-plan`, which `listen` and `group` turn on) is refused beside it by name. Off, every
-# table takes its memory at the open and none after (docs/upstream-parity.md, D12).
+# places and the arena are still the open's. Beside `runtime-plan` (which `listen` and `group`
+# turn on, and `--all-features` names) it yields, as features add: a session laid out at the open
+# from its config takes its tables' memory there, so a build of both is the `runtime-plan` form
+# (`src/lib.rs`, where `RowPolicy` is named). Off, every table takes its memory at the open and
+# none after (docs/upstream-parity.md, D12).
 tables-on-use = []
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside
