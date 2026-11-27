@@ -6283,6 +6283,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// waits in its own loop;
     /// and while no link is open, the next dial, for no longer either. zenoh-pico's read waits
     /// the same way, on a socket whose receive timeout is that long (`Z_CONFIG_SOCKET_TIMEOUT`).
+    /// Bounded at nothing, the wait is a look of no time where a step reads only what a wait found
+    /// ready, and none elsewhere.
     fn idle_wait(&mut self, most_ms: u32) -> IdleWait {
         // What is due other than input, the earliest of it in milliseconds of the session's clock:
         // a get whose deadline comes first is swept when it is due, not up to a whole wait late
@@ -6330,15 +6332,25 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             ),
             None => bound,
         };
+        // A group's burst waits for nothing: the move that ends it has each link read again
+        // (`LinkSupervisor::links_moved`).
+        #[cfg(feature = "group")]
+        if group_took {
+            return IdleWait::None;
+        }
         // A group whose stack gives no wait for its input is looked at on its tick.
         #[cfg(feature = "group")]
-        let most = if group_took {
-            0
-        } else if self.transport.group_unwaited() {
+        let most = if self.transport.group_unwaited() {
             most.min(group::GROUP_TICK_MS)
         } else {
             most
         };
+        // Bounded at nothing, the wait is still made where a step reads only what a wait found
+        // ready, as a look of no time: a port is asked for a connection once a wait found it ready,
+        // and the round passes over a link its last read found empty until a wait finds input
+        // there (`RoundGate`), so steps that made no wait would read neither again. Elsewhere a
+        // step reads every link and group as it is.
+        #[cfg(not(any(feature = "listen", all(wz_round, feature = "group"))))]
         if most == 0 {
             return IdleWait::None;
         }

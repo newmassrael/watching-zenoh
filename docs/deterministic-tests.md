@@ -73,26 +73,33 @@ All on main's tree, in the lane's form (`WZ_COOP_VALUE_LOCKS=off`, features
 | C | `for _ in 0..4 { SessionDrive::step_once(&*engine, 0).unwrap(); }` before `router.send(Command::Push(..))` | 50 red: the gate is `Quiet` before the push on every run |
 | D | none, default features (value locks, no round) | 0 red |
 
-On this branch the same mechanism is one deterministic test,
-`tests::step::a_step_bounded_at_nothing_reads_what_came_after_a_step_found_nothing`: green in every
-other form, and in the round's form with `listen` or `group` it is red on its first run under
-`-- --ignored` (it is ignored in exactly that form until the engine is fixed).
+The same mechanism is one deterministic test,
+`tests::step::a_step_bounded_at_nothing_reads_what_came_after_a_step_found_nothing`: red on its
+first run in the round's form with `listen` or `group` without the fix below, and run in every
+form.
 
-### The fix this note proposes (not in this step: it changes the shipped text)
+The same holds for a port a session listens on, in either form: once a wait has named the port
+(the open's own wait does, for a session that dials as well), the port is asked for a connection
+only after a wait found it ready (`LinkSupervisor::accept_at`), so a program that steps only
+bounded at nothing never asks it again.
 
-A read bounded at nothing still has to learn which stacks hold input. Either
+### The fix
 
-- in `Core::idle_wait`, when the caller's bound `most_ms` is zero, call
-  `self.transport.links.links_moved()` before returning `IdleWait::None` (under
-  `any(feature = "listen", feature = "group")`): each waited link is read once by the step, one
-  receive per link; or, preferred,
-- let a zero bound make a wait of no time, `IdleWait::Input { on, ms: 0 }`: the
-  `(false, _) if most > 0` arm of `LinkSupervisor::idle_wait` (`faces.rs:2947`) and the early
-  return in `Core::idle_wait` give it, and one poll of no time finds the ready links whatever
-  their count, which is what the gate is for. A group's burst (`group_took`), which sets the
-  bound to zero on purpose, keeps passing over.
+A wait of no time is still a wait: bounded at nothing, a read waits for no input, but it still
+looks at the links and ports, and what the look finds ready is told to them as any wait's is.
 
-Either flips the ignored test; its `cfg_attr(ignore)` goes in the same commit.
+- `LinkSupervisor::idle_wait` (`crates/wz-runtime-coop/src/faces.rs`) makes a wait bounded at
+  nothing `IdleWait::Input { on, ms: 0 }` over the same entries, one poll of no time whatever
+  their count; with nothing to wait on it is `IdleWait::None`, as before.
+- `Core::idle_wait` (`crates/wz-capi-coop/src/engine.rs`) hands a bound of nothing on where a
+  step reads only what a wait found ready: `listen` (the ports), and `group` in the round's
+  form (the gate). Elsewhere a step reads every link and group as it is, and the read makes no
+  wait, as before. A group's burst (`group_took`) still makes none: the move that ends it has
+  each link read again.
+
+Only a wait bounded at nothing changes. A read whose bound is above nothing (the read task's
+wait, the arm the receive measurements wait in) takes the same path as before, and a read that
+finds input held makes no wait before the bound is looked at, as before.
 
 ## 2. Census: where tests reach nondeterminism
 
@@ -320,4 +327,4 @@ lanes read the same as on its base.
 | A step is refused while the read task runs, and as closed after the close | `threads` test | same, in the world | a step beside a running read task |
 | A step of a closed session is refused, one thread too | test of every build | same | a closed session that steps |
 | Two steps at once hand each sample out once | host test | unchanged, moved to `tests::step_host` (system layer: two threads of the host) | a sample handed twice or lost |
-| (new) A step bounded at nothing reads what came after a step found nothing | not tested: it was the flake | `a_step_bounded_at_nothing_reads_what_came_after_a_step_found_nothing`, ignored in the round's form with `listen` or `group` until the fix of section 1 | a step that passes over a link its last read found empty |
+| (new) A step bounded at nothing reads what came after a step found nothing | not tested: it was the flake | `a_step_bounded_at_nothing_reads_what_came_after_a_step_found_nothing`, in every form (the fix of section 1) | a step that passes over a link its last read found empty |

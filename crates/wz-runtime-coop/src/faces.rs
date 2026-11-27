@@ -1691,7 +1691,7 @@ pub enum IdleWait {
     Input {
         /// The links, ports and wakes waited on.
         on: Vec<LinkWait>,
-        /// The longest the wait takes.
+        /// The longest the wait takes; `0` is a look that waits for nothing.
         ms: u32,
     },
     /// Nothing to wait on: the next dial, or the next look at a port that gives no wait, for at
@@ -2844,7 +2844,9 @@ impl<
     /// next look, a handshake at its deadline. `beside`, a wake of the stack's (the program's word
     /// that the session's clock moved on), ends whatever wait the links make, a sleep to the next
     /// dial among them; it makes no wait where they make none. `now_us` reads the clock, which
-    /// only a face with such a time asks, once. A read that finds another read waiting with the
+    /// only a face with such a time asks, once. Bounded at nothing, the wait is a look of no time
+    /// at the same entries, made all the same: what it finds ready is told to the links and ports
+    /// as any wait's is ([`Self::waited`]). A read that finds another read waiting with the
     /// session's buffer waits for it to be handed back instead, for `most` at the longest
     /// ([`IdleWait::Behind`]): the links are that read's, whose step reads what arrives on them,
     /// and a second wait on them would need a buffer of the heap.
@@ -2956,7 +2958,9 @@ impl<
             } else {
                 most
             }),
-            _ => None,
+            // Bounded at nothing, a look of no time: a step that reads only what a wait found ready
+            // reads the links and ports it finds so.
+            (false, _) => Some(0),
         };
         // A sleep a wake beside it ends is a wait on the wake.
         if let (Some(_), Some(wake)) = (ms, beside) {
@@ -5955,6 +5959,53 @@ mod tests {
         assert_eq!(asks_of_a_port(false), 7, "CONTROL: asked at every look");
     }
 
+    /// A port asked only when ready is asked for a connection once a read bounded at nothing found
+    /// it ready, as after any wait: the read looks at it for no time. CONTROL: a wait that found
+    /// nothing leaves it unasked. Turned red by a read bounded at nothing that makes no wait,
+    /// after which a program that steps so never asks the port again.
+    #[cfg(feature = "listen")]
+    #[test]
+    fn a_port_a_read_bounded_at_nothing_found_ready_is_asked() {
+        let asked = Rc::new(Cell::new(0));
+        let mut faces: Supervised<Ports> = LinkSupervisor::new(
+            Ports(asked.clone(), true),
+            TestFace {
+                life: idle_life(),
+                id: 100,
+                link: Link::Idle,
+            },
+            1,
+            2,
+        )
+        .expect("the heap holds two waits");
+        faces
+            .listen(
+                Locator::tcp(core::net::SocketAddr::from(([127, 0, 0, 1], 7447))),
+                None,
+            )
+            .expect("the port is bound");
+        assert!(matches!(faces.accept_at(0), Some(Accepted::Idle)));
+        let mut wait = faces.idle_wait(10, &mut || 0u64, [], None);
+        wait.wait(&NoneReady, |_| panic!("no sleep"));
+        faces.waited(wait);
+        assert!(matches!(faces.accept_at(0), Some(Accepted::Idle)));
+        assert_eq!(
+            asked.get(),
+            1,
+            "CONTROL: asked once before any wait, and not after one that found nothing"
+        );
+        let port = LinkWait::input(WaitOn::Socket(9));
+        let mut look = faces.idle_wait(0, &mut || 0u64, [], None);
+        assert!(
+            matches!(look, IdleWait::Input { ref on, ms: 0 } if *on == [port]),
+            "a read bounded at nothing looks at the port for no time"
+        );
+        look.wait(&crate::session_drive::NoWaits, |_| panic!("no sleep"));
+        faces.waited(look);
+        assert!(matches!(faces.accept_at(0), Some(Accepted::Idle)));
+        assert_eq!(asked.get(), 2, "the port the look found ready is asked");
+    }
+
     /// A port asked only when ready that the read has no room to wait on is asked at every look:
     /// no wait can find it ready, and the read does not grow its buffer for it. CONTROL: with room
     /// for its wait, a wait that found nothing ready leaves it unasked
@@ -6076,6 +6127,37 @@ mod tests {
             "the buffer handed back waits on the link again"
         );
         assert_eq!(made, 0, "the buffer handed back is the one reserved");
+    }
+
+    /// A read bounded at nothing waits on its links all the same, for no time, so what the look
+    /// finds ready is told to them as any wait's is; with nothing to look at it makes no wait.
+    /// CONTROL: a bound above nothing waits on the same link for that long. Turned red by a wait
+    /// bounded at nothing that is none (the last arm of `idle_wait`'s match on its waits answering
+    /// `None`): a link the round passed over is then read again only once the links move.
+    #[test]
+    fn a_read_bounded_at_nothing_looks_at_its_links_for_no_time() {
+        let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
+        let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
+        let link = LinkWait::input(WaitOn::Socket(3));
+        let mut faces = supervisor(Link::Wire(waited_wire(&local, WaitOn::Socket(3), false)), 1);
+        let bounded = faces.idle_wait(10, &mut || 0u64, [], None);
+        assert!(
+            matches!(bounded, IdleWait::Input { ref on, ms: 10 } if *on == [link]),
+            "CONTROL: a bound above nothing waits on the link for that long"
+        );
+        faces.waited(bounded);
+        let look = faces.idle_wait(0, &mut || 0u64, [], None);
+        assert!(
+            matches!(look, IdleWait::Input { ref on, ms: 0 } if *on == [link]),
+            "a read bounded at nothing looks at the link for no time"
+        );
+        faces.waited(look);
+
+        let mut idle = supervisor(Link::Idle, 1);
+        assert!(
+            matches!(idle.idle_wait(0, &mut || 0u64, [], None), IdleWait::None),
+            "nothing to look at makes no wait"
+        );
     }
 
     #[test]

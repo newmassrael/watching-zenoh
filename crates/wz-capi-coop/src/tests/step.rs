@@ -109,15 +109,10 @@ fn a_session_without_its_read_task_round_trips_by_its_steps_alone() {
 /// A step bounded at nothing reads what reached the session's link after earlier steps bounded
 /// at nothing found the link empty and the links settled. The CONTROL is the push waiting at the
 /// session's end before the steps. Turned red by a step that passes over a link its last read
-/// found empty with no wait to say the link has input again.
-// The round's gate of a session of several links (`wz_round` with `listen` or `group`) reads a
-// link again only once a wait finds input on it or the links move, and a step bounded at nothing
-// makes no wait: docs/deterministic-tests.md, "What the step test found".
+/// found empty with no wait to say the link has input again: in the round's form with `listen`
+/// or `group`, a read bounded at nothing that makes no wait (`Core::idle_wait`), whose gate
+/// reads a link again only once a wait finds input on it or the links move.
 #[test]
-#[cfg_attr(
-    all(wz_round, any(feature = "listen", feature = "group")),
-    ignore = "a step bounded at nothing passes over a link its last read found empty"
-)]
 fn a_step_bounded_at_nothing_reads_what_came_after_a_step_found_nothing() {
     let sim = Sim::new(SEED);
     let router = sim.stand_in(CatchAll::None);
