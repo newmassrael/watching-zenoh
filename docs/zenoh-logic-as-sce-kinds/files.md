@@ -886,6 +886,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/locator.rs` | S1 | |
 | `crates/wz-session-core/src/locator_directory.rs` | S1 | |
 | `crates/wz-session-core/src/locator_grammar.rs` | S1 | |
+| `crates/wz-session-core/src/machine_class_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/match_set.rs` | S2 | |
 | `crates/wz-session-core/src/metadata.rs` | S3 | |
 | `crates/wz-session-core/src/multicast_dispatch.rs` | S1 | |
