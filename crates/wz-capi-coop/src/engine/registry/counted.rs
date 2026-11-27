@@ -342,7 +342,7 @@ mod tests {
         // SAFETY: the budget outlives the registry, which is dropped first, and every key of it.
         let keys = unsafe { budget.keys() };
         let mut registry = many(&limits, keys, 3, true);
-        assert_eq!(registry.places(), 3);
+        assert_eq!(registry.face_places(), 3);
         assert_eq!(
             registry.sets.len(),
             1,
@@ -438,7 +438,7 @@ mod tests {
         let keys = unsafe { budget.keys() };
         let mut registry = many(&limits, keys, 1, false);
         assert_eq!(
-            registry.places(),
+            registry.face_places(),
             2,
             "the dial face's place and the face to come"
         );

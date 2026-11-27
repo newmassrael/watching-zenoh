@@ -168,3 +168,7 @@ The lane states the tables' policy once, in the build script (`wz_lent`,
   then read by the round's gate cell (`wz_round`) and by the laid-out link
   cells (`not(wz_on_use)`) alone, and carry that cfg; an on-use session that
   steps its links itself names neither.
+- `crates/wz-capi-coop/src/engine/registry/counted.rs`: heap-native's
+  on-use tests read the count of face places as `places()`, which peer-prop
+  renamed `face_places()` (`9a08b72f2a`), `places` being the registry's
+  description; the tests read the new name.
