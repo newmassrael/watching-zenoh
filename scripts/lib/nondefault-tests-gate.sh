@@ -1118,6 +1118,43 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         unixpipe,\
         ws\
         |"
+    # A stream link whose send writes each frame whole (`tx-stream-owed`, the crate's one default,
+    # left out, as the zenoh-pico preset builds the cooperative engine): the send waits for its
+    # stream until the frame is taken whole, the link has room while it has a slot and is never
+    # asked for the stream's, a failed write gives the frame's slot back, and a session over it
+    # writes a droppable or a blocking message on a full stream instead of dropping it or closing
+    # (`stream_link::tests` gated `not(feature = "tx-stream-owed")`). The row above without the
+    # crate's defaults, on its own module. NOT YET MEASURED.
+    "wz-runtime-coop|hook|\
+        -default,\
+        alloc,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        host-lock,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        keyexpr-wildcard-double,\
+        keyexpr-wildcard-single,\
+        listen,\
+        reassembly,\
+        resource-snapshot,\
+        rx-in-place,\
+        scouting-static,\
+        serial,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        switchboard,\
+        transport-batching,\
+        transport-keepalive,\
+        transport-qos,\
+        udp-listen,\
+        unixpipe,\
+        ws\
+        |stream_link::"
     # Fixed-memory step S6 -- the same crate under the SESSION-SLOT profile, a row of
     # its own because the selector swaps the task pool, the join handles, the local
     # set and the timer queue for their static forms (and drops the tests that build

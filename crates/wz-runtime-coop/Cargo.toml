@@ -91,8 +91,11 @@ feature-sets = [
 # `impl Runtime for CoopRuntime` surface that R311av lands; the
 # wz-runtime-core dep is feature-gated so the no-alloc build stays
 # trait-skeleton-free.
+#
+# The one default is a behaviour of the stream links (`tx-stream-owed`, below), which pulls no
+# dependency, so a build with default features still pulls only the sync primitives.
 [features]
-default = []
+default = ["tx-stream-owed"]
 # R311bb — alloc lane now pulls portable-atomic{,-util} so Arc /
 # AtomicBool / AtomicU64 stay available on thumbv6m (Cortex-M0+),
 # closing the M0+ alloc gap that R311av documented. Native-atomic
@@ -194,6 +197,18 @@ session-slot = ["session-unicast", "rx-in-place", "wz-session-core/session-slot"
 # carry no second kind of datagram link. The links it listens with are the session shell's
 # (`ip_stack`, `udp_link`), compiled with `session-unicast`, so it asks for that too.
 udp-listen = ["alloc", "session-unicast"]
+
+# `tx-stream-owed`: a stream link's send that never waits for its stream (`stream_link`). The
+# part of a frame the stream did not take is owed in the frame's slot and written by the next step
+# that finds the stream room, and a question of room waits for the stream within the message's
+# own wait, as zenoh's queue does. A behaviour zenoh-pico's link does not have: its write waits
+# for the socket until the batch is taken whole (`vendor/zenoh-pico/src/link/link.c` @
+# `z_result_t _z_link_send_wbuf(`). On in a build that names nothing; the pico ABI turns it on
+# through its capability of the same name (deploy/wz-config.toml), which the zenoh-pico preset
+# leaves off, so that preset's stream link writes each frame whole and links none of the owed
+# frames' code. A crate that takes this one without its defaults and has stream links names it
+# unless its own build is the switch's (`wz-capi-coop` forwards it).
+tx-stream-owed = []
 
 # Links over a serial line (`serial/` locators): the locator of one, read and written with the
 # session core's grammar, and the session core's serial framing the link reads and writes with.

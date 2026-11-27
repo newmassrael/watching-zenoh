@@ -332,8 +332,10 @@ adminspace-fixed = [
 # §5.P runtime tier: CoopRuntime<C> + CoopTime<C> + the Runtime /
 # TimeSource trait surface (with_mutex_mut, now_monotonic_ms). alloc +
 # session-unicast pull the SessionRuntime binding (Stage 4a) so
-# SessionLinkActions<CoopRuntime<C>, CoopTime<C>> composes.
-wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast"] }
+# SessionLinkActions<CoopRuntime<C>, CoopTime<C>> composes. Its stream links (`tcp`, `ws`) keep
+# what the stream did not take (`tx-stream-owed`), as they always have: no C library of the
+# zenoh-pico preset is built over this crate, so the switch is not this build's.
+wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast", "tx-stream-owed"] }
 # §5.C link tier: LwipUdpSocket / SessionRxSocket / bind_session_rx /
 # LwipLink. Empty without lwip_real_build (host/WZ_LWIP_PORT only).
 wz-link-lwip = { path = "../wz-link-lwip" }

@@ -526,6 +526,13 @@ config WZ_CAP_TX_HELD_WAIT
 	  A droppable message that finds its conduit or its session held by another send waits for room out of its own wait_before_drop, under zenoh's queue profile (wz-own). Off, it is dropped at once and its sender told under every profile, as zenoh-pico's dropping send is.
 	  Exported by: pico.
 
+config WZ_CAP_TX_STREAM_OWED
+	bool "tx-stream-owed"
+	default y
+	help
+	  A stream link's send that never waits for its stream: the part of a frame the stream did not take is owed in the frame's slot and written by a later step, and the link answers a question of room from its stream within the message's own wait, as zenoh's queue does. Off, each frame is written whole by a send that waits for its stream, as zenoh-pico's link write does, and the link has room whenever it has a slot.
+	  Exported by: pico.
+
 config WZ_CAP_TRANSPORT_COMPRESSION
 	bool "transport_compression"
 	default y

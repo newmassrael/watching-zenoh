@@ -85,11 +85,12 @@ default = [
     "conformance-digest",
     "device-requires",
     # The send's behaviours zenoh-pico's transport does not have (deploy/wz-config.toml,
-    # `tx-probe`, `tx-expiry-run`, `tx-fragment-credit`, `tx-held-wait`).
+    # `tx-probe`, `tx-expiry-run`, `tx-fragment-credit`, `tx-held-wait`, `tx-stream-owed`).
     "tx-probe",
     "tx-expiry-run",
     "tx-fragment-credit",
     "tx-held-wait",
+    "tx-stream-owed",
     "config-verdict",
     "transport_compression",
     "auth_usrpwd",
@@ -321,6 +322,10 @@ tx-probe = []
 tx-expiry-run = []
 tx-fragment-credit = []
 tx-held-wait = []
+# A stream link's send that never waits for its stream (`wz-capi-pico/tx-stream-owed`): this
+# engine's stream links write through their own queue whatever is named, so the feature only
+# carries the capability's name.
+tx-stream-owed = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

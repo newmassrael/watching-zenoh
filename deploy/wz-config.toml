@@ -1751,6 +1751,20 @@ implies = []
 help = "A droppable message that finds its conduit or its session held by another send waits for room out of its own wait_before_drop, under zenoh's queue profile (wz-own). Off, it is dropped at once and its sender told under every profile, as zenoh-pico's dropping send is."
 
 [[capability]]
+id = "tx-stream-owed"
+kconfig = "WZ_CAP_TX_STREAM_OWED"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's link write waits
+# in its socket's send until the batch is taken whole and keeps nothing for later, so its stream
+# link has no frame owed and no question of room. A behaviour of the cooperative engine's stream
+# link (wz-runtime-coop's feature of the same name), not a door; the tokio engine's stream links
+# write through their own queue whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "A stream link's send that never waits for its stream: the part of a frame the stream did not take is owed in the frame's slot and written by a later step, and the link answers a question of room from its stream within the message's own wait, as zenoh's queue does. Off, each frame is written whole by a send that waits for its stream, as zenoh-pico's link write does, and the link has room whenever it has a slot."
+
+[[capability]]
 id = "transport_compression"
 kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
 os_needs = []
