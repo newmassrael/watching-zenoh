@@ -145,7 +145,7 @@ What it shows:
 | # | fact | first holder | second holder | in the measured case | status |
 |---|---|---|---|---|---|
 | H1 | the id a declaration is numbered by | `SessionTables`'s `next_entity`, minted by `Declaring::mint` after the room and the key | none | no | gone (D1, D2) |
-| H2 | which row a subscriber is | the row's handle (`Declared::handle`, generation-checked, P10) | the entity id the port hands the door (`Declared<SubId>`), by which `undeclare_subscriber` walks the liveliness subscribers and then the subscribers, enumerated, comparing ids | yes | D4 |
+| H2 | which row an entity is | the row's handle (`Declared::handle`, generation-checked, P10), named across the port by the row's word (`EntityRow`) | none: the door keeps the row, and the entity id is read off the row (`SessionEngine::entity_id_of`) | no | gone (D4) |
 | H3 | the key's text while a retraction is written | the row's `EntityKey` | none | no | gone (D3, D3q, D3t) |
 | H4 | what keeps a key's declaration alive | the tables' count of the declaration (`KeyexprCount`) | the ABI's anchor in every callback row (`KeyAnchor` in `SubscriberRow`, `QueryableRow`, `LivelinessRow`), which the pico ABI fills only on its advanced plane (`wz-capi-pico/src/advanced_forms.rs`) | the field and its drop, never filled | D5 |
 | H5 | the callback protocol of a row | one record for every kind (`LatchedRow<S, A>` in `wz-capi-coop/src/engine.rs`) | none | no | gone (D6) |
@@ -177,7 +177,7 @@ reverted when its row does not move by its expectation.
 | D2 | H1, the queryable's and the liveliness subscriber's | landed | `declare_queryable_on_wire`, `declare_liveliness_subscriber_on_wire` | 0 (neither is built); -15 to -40 a kind where it is (`pico-client-coop`, the api case: the read of `next_entity` and its refusal branch) | 0 | `entity_tables::a_queryable_is_answered_the_id_its_row_was_numbered_by`, `a_full_queryables_table_is_answered_before_an_id_is_asked_for` and the two of the liveliness subscriber, one shared body each with the subscriber's (`CalledKind`) |
 | D3q | H3, the queryable's | landed | `undeclare_retracted`, `RetractedEntity` (`wz-session-core/src/session_tables.rs`); the engine's `undeclare_queryable` | 0 (not built); the api case -20 to -150, as D3 read it for the subscriber | 0 | `session_tables::tests::a_queryables_undeclaration_names_its_retraction_off_the_row_it_removes`, `a_queryable_undeclared_while_its_callback_runs_names_its_retraction_past_the_row` |
 | D3t | H3, the token's | landed | `RetractedEntity for TokenRow`, `undeclare_token`; the engine's `undeclare_liveliness_token` | 0 (not built); the api case 0 to -60 (the names are read once, in the tables; the row is no longer handed back whole) | 0 | `session_tables::tests::a_tokens_undeclaration_names_its_retraction_off_the_row_it_removes`; `tests/liveliness.rs` unchanged |
-| D4 | H2, every kind at once | with step 5 (`arch-l4-facade` F7) | the port's `Declared` answers the row (`EntityRow`, the handle's bits on this engine, the id on an engine that has no rows); `undeclare_subscriber`, `undeclare_queryable` and the liveliness kinds take it; the doors keep it; L3's undeclarations by handle are there already | -150 to -300 (the walk of two tables by id), more where liveliness is built | 0 | an undeclaration by a row of an earlier generation finds nothing; one of a liveliness subscriber reaches its own table |
+| D4 | H2, every kind at once | landed (6.4) | the port's `Declared` answers the row (`EntityRow`, the handle's bits on this engine, the id on an engine that has no rows); `undeclare_subscriber`, `undeclare_queryable` and the liveliness kinds take it; the doors keep it; L3's undeclarations by handle are there already | -150 to -300 (the walk of two tables by id), more where liveliness is built | 0 | an undeclaration by a row of an earlier generation finds nothing; one of a liveliness subscriber reaches its own table |
 | D5 | H4 | with S-SINK (`docs/win-budget/size.md` section 3.1) | the port's `KeyAnchor` as a type of no size where no ABI keeps an anchor | -100 to -200 text, 32 bytes a row of the region | 0 | the anchor test of `tests/liveliness.rs` kept on the build that keeps anchors; a size assertion of the row on one that does not |
 | D6 | H5 | landed | `wz-capi-coop/src/engine.rs` (`LatchedRow<S, A>`, `RowCall<S, A>`, one `RowCallback` impl), `engine/query.rs` and `engine/liveliness.rs` (`QueryableRow`, `LivelinessRow` its instances); the subscriber's timestamp choice is the row's `shown` field, so its row is laid out as before | 0: the measured case builds the subscriber's instance alone, whose layout, constructor (out of line) and calls are unchanged; the api case 0 (each kind is still its own instance) | 0 | `closure_drops`, `queryable`, `liveliness`, `round` unchanged |
 | D7 | H6 | with the driver lane, step 6d | the registry becomes the session core's (`wz-session-core`: the table set and the faces' sets, a face named by its set's handle) | -300 to -800; `pico-peer-coop` and the api case to be read (7,938 and 18,542 held now) | to be read: the receive's one look at its face's set is kept, and no call is added | the registry's tests move with it; `direct_receive`, `in_place` |
@@ -420,6 +420,54 @@ What landed of it:
 H7c changes what a program of a peer with two links sees of a `Latest` or `Monotonic` get: one
 reply of a key over both legs, where it is handed one from each now. That is the reference's
 behaviour, and the change is stated in its commit and held by a test of a get of two legs.
+
+### 6.4 D4, landed
+
+An entity of the session's tables of declarations is named across the port by its row. The port's
+`EntityRow` (`wz-capi-port/src/lib.rs`) is a word only the engine that wrote it reads: the
+cooperative engine writes the row's word in its tables (`DeclaredRow::to_bits`, its table's code
+above its handle's bits, `wz-session-core/src/session_tables.rs`), and an engine that keeps no rows
+(the tokio engine's port, the router node, a test host) writes the entity id
+(`EntityRow::by_id`, `Declared::by_id`). `declare_subscriber_on_wire`,
+`declare_queryable_on_wire`, `declare_liveliness_subscriber_on_wire` and their link-set forms
+answer `Declared<EntityRow>`, `declare_liveliness_token_on_wire` answers `EntityRow`, and
+`undeclare_subscriber`, `undeclare_queryable` and `undeclare_liveliness_token` take it. The doors
+keep the row (`DeclaredSubscriber::row`, `DeclaredQueryable::row`, `TokenState::row`,
+`PlainQueryable::row`, the advanced subscriber's `Subscription` and `Token`, the zenoh-c plane's
+cache queryable and token, the group node's held entities). The entity id is read off the row where
+an ABI names it (`SessionEngine::entity_id_of`: `z_subscriber_id`, `z_queryable_id`, an advanced
+subscriber's identity), so the door holds no copy of it; a closed session holds no row, and answers
+the null id there, which is zenoh-pico's answer under its session check
+(`vendor/zenoh-pico/src/api/api.c` @ `z_entity_global_id_t z_subscriber_id(`).
+
+It departs from `arch-l4-facade.md` F5 in one point: the row is a value type of the port, not an
+associated type of `SessionEngine`. The ABIs hold the engine as `Arc<dyn SessionEngine>` (the
+zenoh-c plane, the group node, the advanced subscriber's host, the router node's port tests), and an
+associated type would split that object type by engine; the word keeps one object type, and the
+façade that names L3's handles with step 5 reads the same word.
+
+On the cooperative engine an undeclaration reads its handle off the row's word
+(`entity_handle::<K>`), with no walk of a table: the subscriber's and the queryable's walks of their
+tables by id, enumerated for the row's rank, and the liveliness subscribers' walk ahead of the
+subscribers' in `undeclare_subscriber` are gone, the rank read at the handle
+(`Core::place_of`). A row of an earlier generation stands in no slot and retracts nothing; a row of
+another table is no handle of the kind asked (`DeclaredRow::handle`), so the liveliness
+subscriber's row reaches its own table (`CoopEngine::undeclare_liveliness_subscriber`) and no
+other. The write filters were named by their rows' bits already (`row_id`, `row_of`).
+
+Expected: client and peer -150 to -300 (the two enumerated walks of `undeclare_subscriber`, 1,721,
+for a decode of the word and one look); the api case -300 to -600 (the queryable's and the token's
+walks with them). Receive Ir 0: no read takes any of it. Tests:
+`session_tables::tests::a_rows_word_names_its_handle_in_its_own_table_alone` (red if the word leaves
+out its table, or a handle is read off a row of another table);
+`entity_tables::answers_the_id_its_row_was_numbered_by`, run for the subscriber, the queryable and
+the liveliness subscriber (now also red if a row of an earlier generation retracts the entity that
+took its slot, or the undeclared row still names an id);
+`entity_tables::a_liveliness_subscribers_row_reaches_its_own_table_alone` (red if the liveliness
+subscriber's row undeclares the subscriber holding the same handle's bits, or a queryable's
+undeclaration takes a row of another table); `liveliness::a_history_subscriber_undeclared_from_its_history_is_let_go_of_before_its_declaration_returns`
+(the callback finds its own row by the id the session hands out next); the router node's and the
+tokio port's tests unchanged in what they hold, their ids read through `EntityRow::as_id`.
 
 ## 7. The receive
 
