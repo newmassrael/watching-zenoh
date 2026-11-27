@@ -1,0 +1,16 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Write a subscriber's table of gets row by row and read the cache selector's
+numbers in one body (advanced lane, A1 and A2).
+'''
+changes = '''
+- ext-pubsub: GetSlot::write_empty per row; selector_u32 for _sn and _max.
+- docs/c-abi-migration/feat-adv.md: the pairing with zenoh-pico, A1-A10.
+'''
+verification = '''
+- size ledger pico-api-coop-nostd 930,535 -> 927,379 B (-3,156); client same.
+- ext-pubsub tests and clippy, engine-host and host-sync forms.
+'''
+carry = '''
+- none for this lane.
+'''
