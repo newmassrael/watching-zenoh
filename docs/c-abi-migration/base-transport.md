@@ -103,7 +103,7 @@ too: the preset's contract is zenoh-pico's.
 | W5 | T5 | work | the watch of the peer's initial declarations (its deadline in the lease, its expiry in `judge_lease`) | -250 to -400 | none | **built, changed** (section 6.2): form, not work; a feature only the tokio runtime names |
 | W2 | T3 | work | the node's admission of a link (`LinkAdmission`, `LinkLease`) and the `MaxLinks` close | -200 to -400 | none | **built** (section 6.3), under the capability `link-admission` |
 | B2 | T5 | form | the lease's deadlines read once, out of line, for `fire_due` and `next_due_ms` | -150 to -300 | must not rise: a call per turn is added, so only with a per-turn Ir reading | the perf matrix arm W |
-| W4 | T3 | work | the stray-message policy's replay of a held answer | -100 to -200 | none | as W1 |
+| W4 | T3 | work | the stray-message policy's replay of a held answer | -100 to -200 | none | **stopped** (section 6.4): already a switch, the policy's domain |
 | B5 | T6 | form | no Control barrier on one conduit | -60 to -150 | none | merging `sz-transport2` |
 | W3 | T3 | work | a dial's expected peer (the InitAck's zid against the node the dial was made for) | -80 to -150 | none | as W1 |
 
@@ -324,3 +324,27 @@ questions does not instantiate. The test is
 which states both builds and runs without the feature in a leg of
 `scripts/lib/nondefault-tests-gate.sh`; the engine's own tests of one face to a node and of a
 face per link are the peer lane's (`tests::one_face`, `tests::one_thread::listen`).
+
+### 6.4 W4, the replay of a held answer: stopped
+
+**Stopped, as the code has the switch already.** `ignore-and-replay` is a value of the
+`handshake-stray-message` policy, and a policy's values are build switches of their own: each is
+allowed by its Kconfig symbol (`deploy/Kconfig.policies`,
+`WZ_POLICY_HANDSHAKE_STRAY_MESSAGE_ALLOWS_IGNORE_AND_REPLAY`), and an allowance a build does not
+state keeps the default alone where nothing selects a policy after the build
+(`policy::policy_defaults_only`, no `policy-selection`). Where the domain leaves the value out the
+replay is compiled out already: the session holds no answer
+(`session_actions::HELD_ANSWER_SLOTS` is 0, so `held_answer` is an array of none and a lend-only
+writer holds nothing, `holds_answer`), `resend_held_answer` answers at once, and where the domain
+is the one value `fail` the policy is read as that constant (`policy_binding::Bound::get`), so
+`judge_handshake_step` folds to zenoh-pico's own verdict, the attempt ended on a message out of its
+step (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+`_Z_ERROR_RETURN(_Z_ERR_MESSAGE_UNEXPECTED);`), with neither `ignore` nor the replay reachable.
+
+The zenoh-pico preset selects no policy (its `config-policy` is off, the one door of the pico ABI
+that names `policy-selection`), so its domain is the default alone and the case links none of the
+replay; a release profile whose door selects policies (`host-peer-ext`, `config-policy`) keeps
+every value. A capability beside the allowance would be a second switch of the one value, so none
+is added. The row's estimate was read before this domain was: if the case's line reading still
+shows a body of the replay, the domain the case was built with is the thing to read, not a new
+switch.
