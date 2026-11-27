@@ -1351,6 +1351,20 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
     }
 }
 
+/// A stack whose set of links is open: the sink of each link it opens is read behind
+/// [`BoxedLinkDriver`]'s table ([`SharedPump::Sink`]), which is the driver a session of the
+/// heap profile's handle sends through ([`SessionHandle`] at its default driver, the handle
+/// [`spawn_session`] runs). A node that opens such sessions over whichever stack it is given asks
+/// its stack for this; a stack whose set is closed sends through its own type, and a session over
+/// it is one whose actions are keyed on that type.
+///
+/// Absent under `session-slot`, with [`SessionLinks`].
+#[cfg(not(feature = "session-slot"))]
+pub trait OpenSetLinks: SessionLinks<Pump: SharedPump<Sink = dyn BoxedLinkDriver>> {}
+
+#[cfg(not(feature = "session-slot"))]
+impl<L: SessionLinks<Pump: SharedPump<Sink = dyn BoxedLinkDriver>>> OpenSetLinks for L {}
+
 /// The accepting end of a stream protocol: a port a node listens on, and the links of the
 /// connections that arrive on it. It is a value the node holds and polls from its loop, like the
 /// slot profile's `Accept`; what it yields is the link of a connection already made, so a session

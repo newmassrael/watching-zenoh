@@ -512,6 +512,27 @@ mod tests {
         EitherLinks::Right(Owned)
     }
 
+    /// Either of two open stacks is an open set, so what is generic over one hands the sink of a
+    /// link it dials on as the driver's trait, the type a session of the heap profile's default
+    /// handle sends through. Turned red, by not compiling, by an either whose sink names a type of
+    /// its own, or by a bound on the open set that its users cannot read back.
+    #[test]
+    fn a_dial_over_an_open_set_hands_on_the_drivers_trait() {
+        fn sink_of<L: crate::session_drive::OpenSetLinks>(
+            links: &L,
+        ) -> Result<CellRc<dyn BoxedLinkDriver>, LinkOpenError> {
+            links
+                .open_initiator(Locator::udp(AT))
+                .map(|opened| opened.sink)
+        }
+        assert!(sink_of(&left()).is_ok(), "the first stack dials udp/");
+        assert_eq!(
+            sink_of(&right()).err(),
+            Some(LinkOpenError::Refused),
+            "the second stack refuses every dial"
+        );
+    }
+
     #[test]
     fn a_dial_is_made_and_refused_by_the_chosen_stack_alone() {
         let made = left()
