@@ -211,12 +211,15 @@ pub fn decimal_text(text: &str, out: &mut [u8; DECIMAL_TEXT]) -> Result<Decimal,
     let decimal = decimal_digits(text, out)?;
     let bytes = text.as_bytes();
     match decimal {
-        Decimal::Written(_) if bytes.len() < DECIMAL_TEXT => {
-            out[..bytes.len()].copy_from_slice(bytes);
-            out[bytes.len()] = 0;
-            Ok(Decimal::Written(bytes.len()))
-        }
-        decimal => Ok(decimal),
+        Decimal::Written(_) => match out.get_mut(..=bytes.len()).and_then(<[u8]>::split_last_mut) {
+            Some((nul, copy)) => {
+                copy.copy_from_slice(bytes);
+                *nul = 0;
+                Ok(Decimal::Written(bytes.len()))
+            }
+            None => Ok(decimal),
+        },
+        Decimal::Read(_) => Ok(decimal),
     }
 }
 
@@ -227,126 +230,162 @@ pub fn decimal_text(text: &str, out: &mut [u8; DECIMAL_TEXT]) -> Result<Decimal,
 /// `f64`s lies between the literal and what is written, so the two round alike.
 pub fn decimal_digits(text: &str, out: &mut [u8; DECIMAL_TEXT]) -> Result<Decimal, FloatError> {
     let bytes = text.as_bytes();
-    let (negative, rest) = match bytes.first() {
-        None => return Err(FloatError::Empty),
-        Some(b'-') => (true, &bytes[1..]),
-        Some(b'+') => (false, &bytes[1..]),
-        Some(_) => (false, bytes),
-    };
-    if rest.eq_ignore_ascii_case(b"inf") || rest.eq_ignore_ascii_case(b"infinity") {
+    if bytes.is_empty() {
+        return Err(FloatError::Empty);
+    }
+    let (negative, unsigned) = split_sign(bytes);
+    if unsigned.eq_ignore_ascii_case(b"inf") || unsigned.eq_ignore_ascii_case(b"infinity") {
         return Ok(Decimal::Read(if negative {
             f64::NEG_INFINITY
         } else {
             f64::INFINITY
         }));
     }
-    if rest.eq_ignore_ascii_case(b"nan") {
+    if unsigned.eq_ignore_ascii_case(b"nan") {
         return Ok(Decimal::Read(if negative { -f64::NAN } else { f64::NAN }));
     }
-    let mut at = usize::from(negative);
-    if negative {
-        out[0] = b'-';
+    let (integer, rest) = split_digits(unsigned);
+    let (fraction, rest) = match rest.split_first() {
+        Some((b'.', after)) => split_digits(after),
+        _ => (&[][..], rest),
+    };
+    if integer.is_empty() && fraction.is_empty() {
+        return Err(FloatError::Invalid);
     }
-    let first_digit = at;
-    // The literal is the integer of the digits kept times ten to `scale`.
+    let exponent = match rest.split_first() {
+        None => 0,
+        Some((b'e' | b'E', after)) => read_exponent(after)?,
+        Some(_) => return Err(FloatError::Invalid),
+    };
+
+    let mut sink = Sink { out, len: 0 };
+    if negative {
+        sink.push(b'-')?;
+    }
+    // The literal is the integer of the digits kept times ten to `scale`. Every step of `scale`
+    // is one byte of the literal, so it stays far inside an `i64` and the saturating forms are the
+    // exact ones.
     let mut scale: i64 = 0;
+    let mut kept = 0usize;
     let mut sticky = false;
-    let mut seen = false;
-    let mut i = 0;
-    let mut keep = |digit: u8, fraction: bool, at: &mut usize, scale: &mut i64| {
-        if *at == first_digit && digit == b'0' {
+    let digits = integer.iter().map(|digit| (*digit, false));
+    for (digit, fraction) in digits.chain(fraction.iter().map(|digit| (*digit, true))) {
+        if kept == 0 && digit == b'0' {
             // A leading zero: in the fraction it moves the point.
             if fraction {
-                *scale -= 1;
+                scale = scale.saturating_sub(1);
             }
-        } else if *at - first_digit < DECIMAL_DIGITS {
-            out[*at] = digit;
-            *at += 1;
+        } else if kept < DECIMAL_DIGITS {
+            sink.push(digit)?;
+            kept = kept.saturating_add(1);
             if fraction {
-                *scale -= 1;
+                scale = scale.saturating_sub(1);
             }
         } else {
             sticky |= digit != b'0';
             if !fraction {
-                *scale += 1;
+                scale = scale.saturating_add(1);
             }
         }
-    };
-    while let Some(&digit) = rest.get(i).filter(|b| b.is_ascii_digit()) {
-        keep(digit, false, &mut at, &mut scale);
-        seen = true;
-        i += 1;
     }
-    if rest.get(i) == Some(&b'.') {
-        i += 1;
-        while let Some(&digit) = rest.get(i).filter(|b| b.is_ascii_digit()) {
-            keep(digit, true, &mut at, &mut scale);
-            seen = true;
-            i += 1;
-        }
-    }
-    if !seen {
-        return Err(FloatError::Invalid);
-    }
-    let mut exponent: i64 = 0;
-    if matches!(rest.get(i), Some(b'e' | b'E')) {
-        i += 1;
-        let exponent_negative = match rest.get(i) {
-            Some(b'-') => {
-                i += 1;
-                true
-            }
-            Some(b'+') => {
-                i += 1;
-                false
-            }
-            _ => false,
-        };
-        let digits_from = i;
-        while let Some(&digit) = rest.get(i).filter(|b| b.is_ascii_digit()) {
-            exponent = (exponent * 10 + i64::from(digit - b'0')).min(i64::from(u32::MAX));
-            i += 1;
-        }
-        if i == digits_from {
-            return Err(FloatError::Invalid);
-        }
-        if exponent_negative {
-            exponent = -exponent;
-        }
-    }
-    if i != rest.len() {
-        return Err(FloatError::Invalid);
-    }
-    if at == first_digit {
+    if kept == 0 {
         return Ok(Decimal::Read(if negative { -0.0 } else { 0.0 }));
     }
     if sticky {
-        out[at] = b'1';
-        at += 1;
-        scale -= 1;
+        sink.push(b'1')?;
+        scale = scale.saturating_sub(1);
     }
-    let power = (scale + exponent).clamp(-DECIMAL_EXPONENT, DECIMAL_EXPONENT);
+    let power = scale
+        .saturating_add(exponent)
+        .clamp(-DECIMAL_EXPONENT, DECIMAL_EXPONENT);
     if power != 0 {
-        out[at] = b'e';
-        at += 1;
+        sink.push(b'e')?;
         if power < 0 {
-            out[at] = b'-';
-            at += 1;
+            sink.push(b'-')?;
         }
+        // At most `DECIMAL_EXPONENT`, five digits; the leading zeros of the five are not written,
+        // and `power` is not zero, so a digit is.
         let magnitude = power.unsigned_abs();
-        let mut divisor = 1;
-        while divisor * 10 <= magnitude {
-            divisor *= 10;
-        }
-        while divisor > 0 {
-            // A digit of the magnitude, below ten.
-            out[at] = b'0' + (magnitude / divisor % 10) as u8;
-            at += 1;
-            divisor /= 10;
+        let places = [
+            magnitude / 10_000 % 10,
+            magnitude / 1_000 % 10,
+            magnitude / 100 % 10,
+            magnitude / 10 % 10,
+            magnitude % 10,
+        ];
+        for place in places.into_iter().skip_while(|place| *place == 0) {
+            // An ASCII digit is `0x30` with its value, below ten, in the low four bits.
+            sink.push(b'0' | place as u8)?;
         }
     }
-    out[at] = 0;
-    Ok(Decimal::Written(at))
+    sink.end()
+}
+
+/// The bytes [`decimal_digits`] has written in its buffer.
+struct Sink<'a> {
+    out: &'a mut [u8; DECIMAL_TEXT],
+    len: usize,
+}
+
+impl Sink<'_> {
+    /// `byte` after the bytes written. [`DECIMAL_TEXT`] is the longest form written, NUL
+    /// included, so no byte is offered past the end; one would be refused, not cut, so a
+    /// [`Decimal::Written`] length always has its NUL after it.
+    fn push(&mut self, byte: u8) -> Result<(), FloatError> {
+        let slot = self.out.get_mut(self.len).ok_or(FloatError::Invalid)?;
+        *slot = byte;
+        // `len` indexed a byte of the buffer, so one more is still a length of it.
+        self.len = self.len.saturating_add(1);
+        Ok(())
+    }
+
+    /// The NUL after the bytes written, and their count.
+    fn end(mut self) -> Result<Decimal, FloatError> {
+        let len = self.len;
+        self.push(0)?;
+        Ok(Decimal::Written(len))
+    }
+}
+
+/// A sign at the front of `text`, if any, and the rest: whether it is `-`.
+fn split_sign(text: &[u8]) -> (bool, &[u8]) {
+    match text.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        Some((b'+', rest)) => (false, rest),
+        _ => (false, text),
+    }
+}
+
+/// The ASCII digits at the front of `text`, and the rest.
+fn split_digits(text: &[u8]) -> (&[u8], &[u8]) {
+    let count = text.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    (
+        text.get(..count).unwrap_or_default(),
+        text.get(count..).unwrap_or_default(),
+    )
+}
+
+/// The exponent of a literal, from the text after its `e`: a sign if any and one digit or more,
+/// with nothing after them. Its magnitude is held at `u32::MAX`: past it, as past
+/// [`DECIMAL_EXPONENT`], every power of ten is written alike.
+fn read_exponent(text: &[u8]) -> Result<i64, FloatError> {
+    let (negative, unsigned) = split_sign(text);
+    let (digits, rest) = split_digits(unsigned);
+    if digits.is_empty() || !rest.is_empty() {
+        return Err(FloatError::Invalid);
+    }
+    let magnitude = digits.iter().fold(0i64, |number, digit| {
+        // An ASCII digit's value is its low four bits.
+        number
+            .saturating_mul(10)
+            .saturating_add(i64::from(digit & 0x0f))
+            .min(i64::from(u32::MAX))
+    });
+    Ok(if negative {
+        magnitude.saturating_neg()
+    } else {
+        magnitude
+    })
 }
 
 /// Why a duration is refused.
@@ -972,6 +1011,8 @@ mod tests {
             "9007199254740993",
             "0.30000000000000004",
             "1e00000000000000000000003",
+            "1e99999999999999999999999",
+            "1e-99999999999999999999999",
             "0e999999999999",
             "0.000",
             "-0",
@@ -1028,6 +1069,23 @@ mod tests {
                 (a, b) => assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits), "{text:?}"),
             }
         }
+    }
+
+    /// The longest form [`decimal_digits`] writes (a sign, every digit kept, the sticky one and
+    /// the most negative power) fills [`DECIMAL_TEXT`] to its NUL. Turned red by a buffer a byte
+    /// short, where the form is refused, or a writer that cuts the form instead.
+    #[test]
+    fn the_longest_form_fills_the_buffer_to_its_nul() {
+        let text = std::format!("-{}e-200000", "1".repeat(DECIMAL_DIGITS + 32));
+        let mut out = [0xffu8; DECIMAL_TEXT];
+        assert_eq!(
+            decimal_digits(&text, &mut out),
+            Ok(Decimal::Written(DECIMAL_TEXT - 1))
+        );
+        let written = core::str::from_utf8(&out[..DECIMAL_TEXT - 1]).expect("ASCII");
+        assert!(written.starts_with("-1"), "{written:?}");
+        assert!(written.ends_with("11e-99999"), "{written:?}");
+        assert_eq!(out[DECIMAL_TEXT - 1], 0);
     }
 
     /// A duration's number is read by the reader the caller names, and refused in that reader's
