@@ -26,6 +26,15 @@
 [target.'cfg(unix)']
 rustflags = ["-C", "force-unwind-tables=no"]
 
+# An x86 or x64 library, on any host, aligns no innermost loop: LLVM puts the head of each at a
+# 16-byte boundary and fills the gap before it with no-ops, which the library carries and runs only
+# when a loop is entered by falling into it, so its instructions per message can only fall. The x64
+# release DLL of 2026-11-27 held 18,867 bytes of no-ops of two bytes or more
+# (docs/c-abi-migration/arch-win-ext.md, step W1). Innermost loops alone, as the x86 back end takes
+# that alignment as an option of its own; the table names the architectures whose back end reads it.
+[target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))']
+rustflags = ["-C", "llvm-args=-x86-experimental-pref-innermost-loop-alignment=0"]
+
 # A Windows build is linked by the toolchain's own linker (`rust-lld` as `lld-link`, which the
 # compiler finds in its own sysroot), with no library of Visual Studio or the Windows SDK: the
 # library defines the C runtime the compiler's code calls (`wz-msvc-runtime`), imports the C
