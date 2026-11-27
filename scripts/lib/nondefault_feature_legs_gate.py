@@ -84,11 +84,6 @@ class Exemption(NamedTuple):
 
 
 EXEMPT: dict[tuple[str, str], Exemption] = {
-    ("wz-capi-coop", "host-sys"): Exemption(
-        "forward",
-        "the host's lock and threads without `std`: wz-capi-port's `os-sys` and wz-runtime-coop's "
-        "`host-lock-sys`, each turned on by a leg of its own crate",
-    ),
     ("wz-session-mcu", "pool-monitor"): Exemption(
         "forward",
         "the high-water marks of the runtime's and the session core's tables, each turned on by a "
@@ -158,19 +153,6 @@ EXEMPT: dict[tuple[str, str], Exemption] = {
             (
                 "scripts/lib/nondefault-tests-gate.sh",
                 '"wz-capi-coop|hook|app-transport,group|tests::group::"',
-            ),
-        ),
-    ),
-    ("wz-runtime-coop", "listen"): Exemption(
-        "lane",
-        "the ports a session's transport state listens on and its say on a second "
-        "link to a node, which the cooperative engine forwards its `listen` to; the "
-        "engine's legs with it run the listening tests",
-        (
-            ("crates/wz-capi-coop/Cargo.toml", '"wz-runtime-coop/listen"'),
-            (
-                "scripts/lib/nondefault-tests-gate.sh",
-                '"wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats|"',
             ),
         ),
     ),

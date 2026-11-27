@@ -970,6 +970,16 @@ files::decl_watch_doors::"
     # host yet.
     "wz-capi-coop|hook|@env:WZ_COOP_VALUE_LOCKS=off,app-transport,group,listen,liveliness,local-subscriber,query,queryable|tests::round::"
     "wz-capi-coop|lane|@env:WZ_COOP_VALUE_LOCKS=off,app-transport,group,listen,liveliness,local-subscriber,query,queryable|"
+    # The crate over the host's own locks (`host-sys`: the port's `os-sys` and the runtime's
+    # `host-lock-sys`), the form the pico ABI's `os-host` library runs in without `std`. Beside
+    # `std`, which the tests need, the runtime builds that form and not `std`'s (its `cs`): its
+    # process section is reentrant by the thread's number, each value's lock is the host's one
+    # word, and no mark is kept against a wait on a face under the session's lock, which
+    # `tests::face_order::` reads (2; the second is built with `threads`, a default). The first
+    # row runs that module before a push; the second the whole suite over those locks, the tests
+    # the default build runs, scope `lane`: its seconds are not measured on a build host yet.
+    "wz-capi-coop|hook|host-sys|tests::face_order::"
+    "wz-capi-coop|lane|host-sys|"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
@@ -1167,6 +1177,16 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # end it cannot reach; an acceptor whose full handshake table leaves the next connection on the
     # port, and lets go of a handshake that runs out of time. The slot row above with the feature.
     "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast,ws|ws_link::slot::"
+    # The heap profile's udp ports in the form the cooperative C engine builds them
+    # (`udp-port-lent-only`, the selector its `listen` names): a port keeps only the rows and the
+    # read slots its session lent and makes none of its own, and links lent no rows or no slots
+    # refuse a `udp/` listener as exhausted. A row of its own because the selector compiles out the
+    # heap form's port tests, which the first row of this crate runs. The filter is the stem of
+    # the two tests only it reaches (2):
+    #   udp_link::tests::a_lent_only_port_keeps_what_its_session_lent_and_nothing_of_its_own
+    #   ip_stack::tests::a_lent_only_port_opens_over_the_rows_and_slots_its_session_lent_alone
+    # NOT YET MEASURED.
+    "wz-runtime-coop|hook|alloc,session-unicast,udp-listen,udp-port-lent-only|a_lent_only_port"
     # The links over a transport the program supplies (`app_link::`): a dial, a listener and its
     # accepted streams and sources, a datagram that goes whole or not at all, a group joined, read
     # by member and left, and a group's room answered from the table, inside the loop and out.
@@ -1600,6 +1620,17 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # filter is the module's path, so a compact test added later is claimed without
     # touching this row.
     "wz-session-core|hook|codec-open-body,initial-sn-compact|initial_sn::"
+    # The cookie MAC's SHA-256 compiled small (`sha256-compact`: `sha2`'s rolled compression in
+    # place of its unrolled one and of the SHA-NI form it picks at run time), which the pico ABI's
+    # `os-host` selects. It moves how the digest is computed and not its value, so no `cfg` of the
+    # crate reads it; what holds it is the published vectors, run in its form: RFC 4231's
+    # HMAC-SHA256 cases (`signing_key::tests::`, 17 of the module's 18, the one left being
+    # `session-fixed-storage`'s; cases 6 and 7 hash a key longer than a block) and FIPS 180-2's
+    # SHA-256 of the empty message and of "abc" (`credential_identity::tests::`, 5). The two rows
+    # share one feature set so they share one build; each filter is its module's path. NOT YET
+    # MEASURED.
+    "wz-session-core|hook|sha256-compact|signing_key::tests::"
+    "wz-session-core|hook|sha256-compact|credential_identity::tests::"
     # Open-debt item 900 — `session-unicast-open` and `session-unicast-accept`
     # join. 88fe33b9 added both features and the four `two_session_tests::`
     # (gated on them with `transport-multicast` and `codec-push`) and widened
