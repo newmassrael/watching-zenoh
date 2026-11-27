@@ -809,19 +809,21 @@ files::decl_watch_doors::"
     # the session on two faces, a second router dialled beside the first (`tests::face_table::`,
     # 4, compiled with `query`, `queryable` and `local-queryable`), and the session that listens,
     # taking two clients of its own engine over loopback (`tests::listen::`, 5, compiled with
-    # `listen`, `query` and `queryable`); the crate's own tests were 65 passed with all of them.
+    # `listen`, `query` and `queryable`, its `udp/` port's with `udp-listen`); the crate's own
+    # tests were 65 passed with all of them.
     # The `tls/` provider of a host (`tests/tls_provider.rs`, 8, compiled with `tls-mbedtls`) builds
     # the pinned Mbed TLS from its submodules, which is why the feature is a leg of its own cost.
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
-    "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats|"
+    "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats,udp-listen|"
     # The same suite in the form the C library ships for pico's single-threaded arm: no `threads`,
     # so the rows count their calls on the latch of one thread, a delivery is one flag and no read
     # task starts (`row_callback::OneThread`). The tests a read task or a second thread on one
     # session steps are `threads`' and leave this build; the rest must pass in it as they do above.
     # `tls-mbedtls` is the row above's cost and is not repeated. Matching listeners on a key stay
     # in (`key-matching-listener`, a default the row above has), so the suite's tests of them run
-    # in this form too.
+    # in this form too. It listens without `udp-listen`, as the zenoh-pico preset does, so a
+    # `udp/` endpoint to listen on is refused here (`tests::listen::`).
     "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
     # The declaration watch in the same form: a round of one thread tells a catch-up a declaration a
     # round with the links held, which the watch's tests prove only where they run in it.

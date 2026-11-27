@@ -1860,6 +1860,20 @@ abis = ["core", "pico"]
 implies = []
 help = "The replies a queryable's callbacks make wait in the face's open frame and leave with the query's Final in one send (wz-own). Off, each reply leaves as its callback makes it and the Final after the callbacks, possibly in a later frame, as zenoh-pico's are sent."
 
+[[capability]]
+id = "udp-listen"
+kconfig = "WZ_CAP_UDP_LISTEN"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's POSIX link
+# listens on no unicast `udp/` endpoint (`vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @
+# `static z_result_t _z_udp_posix_listen(`), so its peer accepts over `tcp/` alone. A behaviour of
+# the cooperative engine's links (wz-runtime-coop's feature of the same name, through
+# wz-capi-coop's), not a door; the tokio engine's runtime listens on `udp/` whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["peer"]
+help = "A unicast udp/ endpoint a peer listens on: one socket whose peers are told apart by the address each datagram came from, each a face of its own (wz-own). Off, a udp/ endpoint to listen on is refused by name as a scheme the links do not carry, as zenoh-pico's POSIX link has no such listener, and a peer accepts over tcp/ alone."
+
 # ## The upstream switches (a complete map: every upstream switch is classified)
 #
 # Every build switch of zenoh-pico (each `Z_FEATURE_*` its CMakeLists defines) and of zenoh-c

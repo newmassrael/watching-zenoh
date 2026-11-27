@@ -414,6 +414,7 @@ fn a_connection_that_never_speaks_is_let_go_when_the_bound_passes() {
 /// over the port's one socket: it hears what each publishes, and when one goes it keeps the other's
 /// face. The CONTROL is the listener before any client: bound to the port it states, holding no
 /// face.
+#[cfg(feature = "udp-listen")]
 #[test]
 fn a_udp_listener_takes_each_client_as_a_face_of_its_own() {
     let (listener, endpoint) =
@@ -478,6 +479,7 @@ fn a_udp_listener_takes_each_client_as_a_face_of_its_own() {
 
 /// A datagram that opens no session, sent to a `udp/` port, takes no face, and the port takes a
 /// client that dials after it. The CONTROL is that client.
+#[cfg(feature = "udp-listen")]
 #[test]
 fn a_stray_datagram_on_a_udp_port_takes_no_face() {
     let (listener, endpoint) =

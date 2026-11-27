@@ -120,6 +120,7 @@ default = [
     "query-replies-with-final",
     "advanced-source-retention",
     "advanced-node-clock",
+    "udp-listen",
 ]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
@@ -218,9 +219,10 @@ os-host = [
 # combined listen and connect and a second connect locator.
 #
 # Both engines take the roles, so it selects neither: the tokio engine accepts every link the
-# runtime has, and the cooperative engine the `tcp/` and `udp/` ones its stack listens on
-# (`wz-capi-coop`'s `listen`, `docs/capi-pico-on-coop-engine.md` step L4). What only the tokio
-# engine has (a group, the secure and the other links, gossip) selects it by its own feature.
+# runtime has, and the cooperative engine the `tcp/` ones its stack listens on, and the `udp/`
+# ones with `udp-listen` below (`wz-capi-coop`'s `listen`, `docs/capi-pico-on-coop-engine.md`
+# step L4). What only the tokio engine has (a group, the secure and the other links, gossip)
+# selects it by its own feature.
 # A session that may listen is laid out from its config at the open (`wz-capi-coop`'s
 # `runtime-plan`); a client build's arena is the region the build lays out when it is compiled.
 peer = ["scout", "wz-capi-core?/peer", "wz-capi-coop?/listen", "wz-capi-coop?/runtime-plan"]
@@ -719,6 +721,16 @@ advanced-source-retention = [
 # nothing, and the library links neither the clock nor its standing. The tokio engine holds the
 # clock with `advanced` whatever is named; `clock-source` brings its own.
 advanced-node-clock = ["wz-capi-core?/advanced-node-clock", "wz-node-time?/time-hlc"]
+# The peer's behaviours that zenoh-pico's peer does not have, each on in a build that names nothing
+# and off in the zenoh-pico preset (deploy/wz-config.toml), as the send's above.
+#
+# `udp-listen`: a unicast `udp/` endpoint a peer listens on, one socket whose peers are told apart
+# by the address each datagram came from, each a face of its own (`wz-capi-coop`'s
+# `udp-listen`). Off, a `udp/` endpoint to listen on is refused as a scheme the links do not
+# carry, as zenoh-pico's POSIX link has no such listener, and the library links no udp port, no
+# book of a port's peers and no datagram link of a port's peer. The tokio engine's runtime listens
+# on `udp/` whatever is named, so it selects neither engine.
+udp-listen = ["peer", "wz-capi-core?/udp-listen", "wz-capi-coop?/udp-listen"]
 # `config-document`: `zext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a

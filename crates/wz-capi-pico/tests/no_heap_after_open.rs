@@ -422,7 +422,7 @@ impl Round {
             Round::E2eSupervision => cfg!(feature = "e2e-supervision"),
             Round::MessagePayload => cfg!(feature = "message-payload"),
             Round::SharedKeyIds => cfg!(feature = "shared-key-ids"),
-            Round::LinkUdp => cfg!(all(feature = "link-udp", feature = "peer")),
+            Round::LinkUdp => cfg!(all(feature = "link-udp", feature = "udp-listen")),
             Round::TimeBaseAdvanced => cfg!(feature = "time-base"),
             Round::InstanceKey => {
                 cfg!(all(
@@ -2450,11 +2450,11 @@ impl Stage {
                 }
             }
             Stage::Udp => {
-                #[cfg(all(feature = "link-udp", feature = "peer"))]
+                #[cfg(all(feature = "link-udp", feature = "udp-listen"))]
                 {
                     Some(Open::Udp(UdpPair::open()))
                 }
-                #[cfg(not(all(feature = "link-udp", feature = "peer")))]
+                #[cfg(not(all(feature = "link-udp", feature = "udp-listen")))]
                 {
                     None
                 }
@@ -2482,7 +2482,7 @@ enum Open {
     Group(GroupPair),
     #[cfg(feature = "shared-key-ids")]
     SharedKeyIds(Pair),
-    #[cfg(all(feature = "link-udp", feature = "peer"))]
+    #[cfg(all(feature = "link-udp", feature = "udp-listen"))]
     Udp(UdpPair),
     #[cfg(feature = "time-base")]
     TimeBase(TimeBasePair),
@@ -2497,7 +2497,7 @@ impl Open {
             Open::Group(group) => group_put_and_hear(group),
             #[cfg(feature = "shared-key-ids")]
             Open::SharedKeyIds(pair) => pair_put_and_hear(pair),
-            #[cfg(all(feature = "link-udp", feature = "peer"))]
+            #[cfg(all(feature = "link-udp", feature = "udp-listen"))]
             Open::Udp(pair) => pair.put_and_hear(),
             #[cfg(feature = "time-base")]
             Open::TimeBase(pair) => pair.advance(),
@@ -2518,7 +2518,7 @@ impl Open {
             }
             #[cfg(feature = "shared-key-ids")]
             Open::SharedKeyIds(pair) => pair.close(),
-            #[cfg(all(feature = "link-udp", feature = "peer"))]
+            #[cfg(all(feature = "link-udp", feature = "udp-listen"))]
             Open::Udp(pair) => pair.close(),
             #[cfg(feature = "time-base")]
             Open::TimeBase(pair) => pair.close(),
@@ -2529,7 +2529,7 @@ impl Open {
 /// Whether every closure made with a context of `counts` was dropped within the bound.
 #[cfg(any(
     feature = "multicast-transport",
-    all(feature = "link-udp", feature = "peer")
+    all(feature = "link-udp", feature = "udp-listen")
 ))]
 fn closures_dropped(counts: &pipe_pair::Counts) -> bool {
     wait_for(WAIT_BOUND, || {
@@ -2603,7 +2603,7 @@ unsafe fn pair_put_and_hear(pair: &Pair) {
 /// Two sessions over the host's UDP sockets on the loopback, the listening one's subscriber counting
 /// what it hears: a unicast UDP link carried by the system's sockets, where the pipe pair's links
 /// are the program's transport.
-#[cfg(all(feature = "link-udp", feature = "peer"))]
+#[cfg(all(feature = "link-udp", feature = "udp-listen"))]
 struct UdpPair {
     counts: std::sync::Arc<pipe_pair::Counts>,
     listener: wz_capi_pico::z_owned_session_t,
@@ -2611,7 +2611,7 @@ struct UdpPair {
     dialler: wz_capi_pico::z_owned_session_t,
 }
 
-#[cfg(all(feature = "link-udp", feature = "peer"))]
+#[cfg(all(feature = "link-udp", feature = "udp-listen"))]
 impl UdpPair {
     /// The listener on a free loopback port, its subscriber declared, and the dialler, opened
     /// until a put of the dialler's is heard: the route is made before any round.

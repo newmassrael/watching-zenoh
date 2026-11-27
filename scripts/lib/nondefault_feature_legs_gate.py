@@ -156,6 +156,19 @@ EXEMPT: dict[tuple[str, str], Exemption] = {
             ),
         ),
     ),
+    ("wz-runtime-coop", "listen"): Exemption(
+        "lane",
+        "the ports a session's transport state listens on and its say on a second "
+        "link to a node, which the cooperative engine forwards its `listen` to; the "
+        "engine's legs with it run the listening tests",
+        (
+            ("crates/wz-capi-coop/Cargo.toml", '"wz-runtime-coop/listen"'),
+            (
+                "scripts/lib/nondefault-tests-gate.sh",
+                '"wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats,udp-listen|"',
+            ),
+        ),
+    ),
     ("wz-runtime-coop", "query"): Exemption(
         "lane",
         "the faces a get asks, read off a session's transport state, which the "

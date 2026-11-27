@@ -6768,7 +6768,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?
         };
         links.lend_buffers(lent.transport.links);
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "udp-listen")]
         links
             .lend_port_rows(lent.transport.port_rows)
             .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;

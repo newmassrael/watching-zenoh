@@ -567,7 +567,7 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
 /// A session that listens is lent the slots its udp ports share for their datagrams, each a
 /// link's batch long, with the links' tables; one that listens on nothing is lent none. Turned
 /// red by slots of anything but the links' batch, or slots reserved for a session with no port.
-#[cfg(feature = "listen")]
+#[cfg(feature = "udp-listen")]
 #[test]
 fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     let listening = ArenaPlan::of(
@@ -634,7 +634,7 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
 /// row is printed, so a run with `--nocapture` shows the bytes the tcp listener does not reserve.
 /// Turned red by port rows planned from the count of listeners rather than of the `udp/` ones,
 /// or laid out empty for a session with no port.
-#[cfg(feature = "listen")]
+#[cfg(feature = "udp-listen")]
 #[test]
 fn a_session_that_listens_on_tcp_alone_is_lent_no_port_slot() {
     let config = |listen: &[&str]| CoopConfig {

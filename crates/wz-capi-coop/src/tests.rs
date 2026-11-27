@@ -3885,6 +3885,37 @@ fn a_dial_refused_at_once_names_its_endpoint_and_its_cause() {
     }
 }
 
+/// A build that listens without the udp listener (`listen` without `udp-listen`, as the zenoh-pico
+/// preset builds a peer) refuses a `udp/` endpoint to listen on by name, as a scheme its links do
+/// not carry: zenoh-pico's POSIX link has no such listener either. The CONTROL is a `tcp/` endpoint
+/// in the same build, which opens. Turned red by a udp port bound in such a build, or by a refusal
+/// that loses the endpoint or its cause.
+#[cfg(all(feature = "listen", not(feature = "udp-listen")))]
+#[test]
+fn a_build_without_the_udp_listener_refuses_a_udp_endpoint_to_listen_on() {
+    use crate::{EndpointRefusal, OpenError, Refusal};
+    use wz_runtime_coop::session_drive::LinkOpenError;
+
+    let listening_on = |endpoint: &str| CoopConfig {
+        whatami: WhatAmI::Peer,
+        listen: vec![endpoint.to_owned()],
+        ..client_config()
+    };
+    let udp = "udp/127.0.0.1:0";
+    assert_eq!(
+        open_with_result(listening_on(udp)),
+        Some(OpenError::Listen(EndpointRefusal::new(
+            udp,
+            Refusal::Link(LinkOpenError::Unsupported)
+        )))
+    );
+    assert_eq!(
+        open_with_result(listening_on("tcp/127.0.0.1:0")),
+        None,
+        "CONTROL: a tcp/ endpoint opens"
+    );
+}
+
 /// The open writes each endpoint's text into a row of the session's arena: one longer than a row
 /// is refused by name, an endpoint to dial as unreachable and one to listen on as a port not
 /// listened on, and more endpoints than the build's rows refuse the arena. A face attached after

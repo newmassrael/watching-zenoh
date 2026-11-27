@@ -226,19 +226,30 @@ key-matching-listener = []
 # unsupported. Off, which is pico's client build, the engine is the dial role alone and its text
 # has no acceptor, no table of ports and no wait on one (the capability-cost gate measures it).
 # The session machine compiles its accepting role only under `session-unicast-accept`, so the
-# feature asks the runtime for it: without that an acceptor would start on no event. It asks the
-# runtime's `udp-listen` too, which gives the host's links a `udp/` listener, one socket whose
-# peers each take a face of their own. A face dialled beside the dial role's (`attach_face`) is
-# this build's too: every build of more faces than one shares the faces' rows in the session's
-# pools (`peer-row-pools`), so a face that goes gives its set back at once. The open lends every
-# udp port the rows of its peers and the slots of its datagrams (`CoopEngine::assemble`), so the
-# runtime's ports are compiled in that form alone (`udp-port-lent-only`).
+# feature asks the runtime for it: without that an acceptor would start on no event. A face
+# dialled beside the dial role's (`attach_face`) is this build's too: every build of more faces
+# than one shares the faces' rows in the session's pools (`peer-row-pools`), so a face that goes
+# gives its set back at once. The links listen on `tcp/`; a `udp/` endpoint is `udp-listen`'s
+# below, and without it the links refuse one as a scheme they do not carry.
 listen = [
     "interest-answer",
     "runtime-plan",
     "wz-runtime-coop/listen",
-    "wz-runtime-coop/udp-port-lent-only",
     "wz-session-core/peer-row-pools",
+]
+# `udp-listen`: the listening role on `udp/` too, the runtime's `udp-listen`, which gives the
+# host's links a `udp/` listener, one socket whose peers are told apart by the address each
+# datagram came from, each a face of its own. The open lends every udp port the rows of its peers
+# and the slots of its datagrams (`CoopEngine::assemble`), so the runtime's ports are compiled in
+# that form alone (`udp-port-lent-only`), and the session's plan lays those rows out for each
+# `udp/` endpoint it listens on. A behaviour zenoh-pico's peer does not have: its POSIX link
+# listens on no unicast `udp/` endpoint (`vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @
+# `static z_result_t _z_udp_posix_listen(`). The pico ABI's capability of the same name
+# (deploy/wz-config.toml) turns it on, which the zenoh-pico preset leaves off.
+udp-listen = [
+    "listen",
+    "wz-runtime-coop/udp-listen",
+    "wz-runtime-coop/udp-port-lent-only",
 ]
 # The answering end of a peer's Interest (`wz-session-core`'s `interest-answer`): what the
 # application registers after a peer asked is staged for that peer's face before each drain. A peer

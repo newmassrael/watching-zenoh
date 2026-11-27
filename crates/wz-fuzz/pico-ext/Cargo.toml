@@ -68,6 +68,7 @@ multicast-locator-keys = ["wz-capi-pico/multicast-locator-keys"]
 query-replies-with-final = ["wz-capi-pico/query-replies-with-final"]
 advanced-source-retention = ["wz-capi-pico/advanced-source-retention"]
 advanced-node-clock = ["wz-capi-pico/advanced-node-clock"]
+udp-listen = ["wz-capi-pico/udp-listen"]
 
 [dependencies]
 libfuzzer-sys = "0.4.10"

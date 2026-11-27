@@ -37,10 +37,10 @@
 //! With `remote-declaration-watch` or `declarations-synced-event` it tells a program's watch what
 //! the peers of its links declare and retract (`decl_watch`), as the tokio engine does.
 //!
-//! With `listen` it also listens: the ports `CoopConfig::listen` names take inbound `tcp/` and
-//! `udp/` links, each a face of its own beside the dial role's (`docs/capi-pico-on-coop-engine.md`,
-//! step L3); a `udp/` port is one socket whose peers the stack tells apart by the address each
-//! datagram came from.
+//! With `listen` it also listens: the ports `CoopConfig::listen` names take inbound `tcp/` links,
+//! and with `udp-listen` `udp/` ones, each a face of its own beside the dial role's
+//! (`docs/capi-pico-on-coop-engine.md`, step L3); a `udp/` port is one socket whose peers the
+//! stack tells apart by the address each datagram came from.
 //!
 //! ## Where it builds
 //!

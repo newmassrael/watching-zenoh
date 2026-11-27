@@ -48,8 +48,8 @@
 //! - with `group`, a receive buffer for each group the session may join, of the largest batch a
 //!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
 //!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
-//! - with `listen`, for a session that listens on a `udp/` endpoint, the slots its udp ports read
-//!   their datagrams into and hold them in until the links of their peers take them
+//! - with `udp-listen`, for a session that listens on a `udp/` endpoint, the slots its udp ports
+//!   read their datagrams into and hold them in until the links of their peers take them
 //!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
 //!   with the links' tables; one that listens on `tcp/` alone binds no port and holds none;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
@@ -124,7 +124,7 @@ use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::kept::Kept;
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
-#[cfg(feature = "listen")]
+#[cfg(feature = "udp-listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
 #[cfg(any(
@@ -520,8 +520,8 @@ const DIRECT_FACE_ROWS: usize = (!cfg!(wz_round) && cfg!(feature = "listen")) as
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the
-/// rows of the peers the ports took and of the datagrams sorted for them (`listen`).
-const PORT_RX_ROWS: usize = 4 * cfg!(feature = "listen") as usize;
+/// rows of the peers the ports took and of the datagrams sorted for them (`udp-listen`).
+const PORT_RX_ROWS: usize = 4 * cfg!(feature = "udp-listen") as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
 /// beside them (`listen` or `group`, in the work form, `wz_round`): a build of the dial face
 /// alone owes no other face, nor does one that sends each face its own leg (`direct`).
@@ -1352,10 +1352,10 @@ pub struct TransportRows {
     #[cfg(feature = "group")]
     group_rx: (usize, usize),
     /// The slots of the datagrams the session's udp ports hold: how many, and the bytes of each.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "udp-listen")]
     port_rx: (usize, usize),
     /// The rows of the peers the session's udp ports take, one for each link it may hold.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "udp-listen")]
     port_peers: usize,
 }
 
@@ -1381,7 +1381,7 @@ pub(crate) struct TransportTables {
     #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub(crate) handed: HandedTable,
     /// The rows the session's udp ports keep their peers and the datagrams sorted for them in.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "udp-listen")]
     pub(crate) port_rows: PortRows<Lent, LinkCellFlag>,
 }
 
@@ -1402,9 +1402,9 @@ impl TransportRows {
         handed_legs: 0,
         #[cfg(feature = "group")]
         group_rx: (0, 0),
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "udp-listen")]
         port_rx: (0, 0),
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "udp-listen")]
         port_peers: 0,
     };
 
@@ -1425,7 +1425,7 @@ impl TransportRows {
                 lend.byte_cells(self.link_bytes, self.handed_legs),
                 lend.table(self.handed_legs),
             ),
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "udp-listen")]
             port_rows: PortRows::over(lend.table(self.port_peers), lend.table(self.port_rx.0)),
         }
     }
@@ -1465,7 +1465,7 @@ impl TransportRows {
     /// `tables` with the slots the session's udp ports read their datagrams into and hold them in
     /// until the links of their peers take them, lent by `lend` after the groups' buffers: the
     /// ports share them, a slot of the links' batch each.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "udp-listen")]
     fn port_rx_from(
         &self,
         tables: LinkTables<LinkCellFlag>,
@@ -1479,8 +1479,8 @@ impl TransportRows {
         tables.with_port_rx(lend.byte_cells_of(bytes, slots))
     }
 
-    /// A build that listens on no port lends no port a slot.
-    #[cfg(not(feature = "listen"))]
+    /// A build that binds no udp port lends no port a slot.
+    #[cfg(not(feature = "udp-listen"))]
     fn port_rx_from(
         &self,
         tables: LinkTables<LinkCellFlag>,
@@ -1933,9 +1933,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             handed_legs: 0,
             #[cfg(feature = "group")]
             group_rx: (0, 0),
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "udp-listen")]
             port_rx: (0, 0),
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "udp-listen")]
             port_peers: 0,
         };
         // The largest message a link rejoins is decided before the lane that hands it on, so a
@@ -2041,8 +2041,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // The slots the udp ports of a session that listens read their datagrams into and hold
         // them in until the links of their peers take them, lent with the links' tables
         // (`TransportRows::links_from`): the ports share them, each a link's batch long. A
-        // session that listens on no `udp/` endpoint binds no port and holds none.
-        #[cfg(feature = "listen")]
+        // session that listens on no `udp/` endpoint binds no port and holds none, nor does a
+        // build without the udp listener (`udp-listen`), whose links refuse such an endpoint.
+        #[cfg(feature = "udp-listen")]
         {
             let slots = self.lent_to::<{ caps::UDP_PORT_SLOTS }>(
                 ArenaLimit::UdpPortSlots,
@@ -3456,8 +3457,9 @@ pub struct PlanShape {
     pub listens: usize,
     /// How many of those are `udp/` ones, each a udp port the stack binds, which read into the
     /// datagram slots the arena lends (`UDP_PORT_SLOTS`): a session that listens on `tcp/` alone
-    /// binds no port and is lent none.
-    #[cfg(feature = "listen")]
+    /// binds no port and is lent none. Only a build with the udp listener (`udp-listen`) binds
+    /// one.
+    #[cfg(feature = "udp-listen")]
     pub udp_listens: usize,
     /// The multicast groups it joins.
     pub groups: usize,
@@ -3482,7 +3484,7 @@ impl PlanShape {
         Self {
             dials: config.endpoints.count(),
             listens: config.listen.count(),
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "udp-listen")]
             udp_listens: config.listen.udp(),
             groups: config.groups.len(),
             max_faces: config.max_faces,
@@ -3514,7 +3516,7 @@ impl PlanShape {
         Self {
             dials,
             listens: 0,
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "udp-listen")]
             udp_listens: 0,
             groups: 0,
             max_faces: 0,
