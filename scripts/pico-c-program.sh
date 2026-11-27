@@ -71,6 +71,12 @@
 # passed. A failure to build is reported as NOT-MEASURED and is a non-zero exit too: a
 # step that could not compile its program has not shown that the program passes.
 #
+# A program may state lines its run prints, one `expect-line: <line>` each in its source's comment
+# (` * expect-line: ...`, crates/wz-capi-pico/examples/c/example_common.h): the run passes only when
+# it exits 0 AND prints each as a whole line of its output, so a program that exits 0 without having
+# done what it states fails. The roles' processes print together, so a program run with
+# WZ_PICO_PROGRAM_ROLES states no such line, and one that does is refused.
+#
 # PICO_C_PROGRAM_OUT=<path> builds the program to <path> and does not run it, on Linux and
 # macOS: for a caller that runs it itself, with arguments (scripts/app-plane-oracle.sh). The
 # header tree of the library's arm is left beside it, as <dir>/pico-arm-include-<name>, so
@@ -156,6 +162,16 @@ say() {
 
 if [ ! -f "$src" ]; then
     echo "pico-c-program: no such source: $src" >&2
+    exit 2
+fi
+# Read as bash 3.2 reads a list (no `mapfile`); [[:space:]] takes a CR of a source checked out
+# with CRLF line ends too.
+expected=()
+while IFS= read -r line; do
+    expected+=("$line")
+done < <(sed -n 's/^[[:space:]]*\*[[:space:]]*expect-line: \(.*[^[:space:]]\)[[:space:]]*$/\1/p' "$src")
+if [ -n "$roles" ] && [ "${#expected[@]}" -gt 0 ]; then
+    echo "pico-c-program: $src states the lines its run prints, which a run of roles does not read" >&2
     exit 2
 fi
 
@@ -365,7 +381,16 @@ fi
 
 result=FAIL
 if [ -z "$roles" ]; then
-    PATH="$lib_dir:$PATH" "$exe" && result=PASS
+    run_log="$temp/$(basename "${src%.c}").out"
+    PATH="$lib_dir:$PATH" "$exe" | tee "$run_log"
+    [ "${PIPESTATUS[0]}" -eq 0 ] && result=PASS
+    for line in ${expected[@]+"${expected[@]}"}; do
+        if ! tr -d '\r' < "$run_log" | grep -Fqx -- "$line"; then
+            echo "pico-c-program: the program printed no line \`$line\`, which its source states"
+            result=FAIL
+        fi
+    done
+    rm -f "$run_log"
 else
     # One loopback port for every process of the run, picked here as the session programs pick
     # theirs: a fixed number would collide with a second run on the same host.

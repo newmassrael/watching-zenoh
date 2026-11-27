@@ -11,6 +11,11 @@
  * linked against the wz library in place of libzenohpico (scripts/pico-c-program.sh), so
  * what it shows is what a pico program sees. Every example ends with ex_finish(), whose
  * status is 0 when every check held; the last line printed is the count either way.
+ *
+ * An example may state, in its leading comment, lines its run prints, one
+ * " * expect-line: <line>" each; scripts/pico-c-program.sh and the Windows package's test
+ * (scripts/lib/pico_windows_package.py --test) fail a run that exits 0 without printing each
+ * as a whole line of its output.
  */
 
 #ifndef WZ_EXAMPLE_COMMON_H

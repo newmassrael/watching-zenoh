@@ -5,7 +5,9 @@ a real-time executor) drives a session of the pico C ABI from that scheduler: it
 each cycle produced, takes what arrived since the last one, and keeps the session alive. This
 page states the calls it makes, in the order it makes them, and what each answers on each of
 the two engines and in each of zenoh-pico's two threading arms. The example that runs it is
-`crates/wz-capi-pico/examples/c/periodic.c`; the same order is written as a comment section
+`crates/wz-capi-pico/examples/c/periodic.c`, beside the read task; a session opened without it
+and stepped by the program, on a time base the program moves one period per cycle, is
+`crates/wz-capi-pico/examples/c/periodic_step.c`. The same order is written as a comment section
 of `crates/wz-capi-core/include/wz_ext.h` ("the periodic run API").
 
 ## The two arms are two builds
@@ -51,7 +53,9 @@ one library serves one arm. The wz library follows: the `multi-thread` feature o
       when the session sends a keep-alive.
    2. *Step* (single-threaded arm, or a session opened without its read task). `zp_spin_once`
       on the session; in the multi-threaded arm `zext_session_step`, whose bound says how
-      long it may wait for input (0: only what is ready).
+      long it may wait for input (0: only what is ready). Steps bounded by what is left of the
+      cycle, made until its deadline passes, are then the cycle's wait as well (4.4), and what
+      arrives during them is handed out at once.
    3. *Receive.* Try-receive on each channel until `Z_CHANNEL_NODATA`.
    4. *Wait.* Until the cycle's deadline, an absolute reading of the monotonic clock
       (`z_clock_now`, `z_clock_advance_ms`), with `z_condvar_wait_until` (multi-threaded; a

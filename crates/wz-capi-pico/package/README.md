@@ -124,7 +124,9 @@ through a ring or fifo channel and pulls them with the channel's `try_recv`. A p
 the single-threaded arm links a build of that arm, which this package is not: the two arms differ
 in the size of types a program allocates. The order a program with its own scheduler calls the
 run API in is written in `wz_ext.h`, in the section "the periodic run API", and
-`examples\periodic.c` runs it.
+`examples\periodic.c` runs it. A program that opens its session without the read task steps it
+itself, once a cycle or more, with `zext_session_step`, whose bound is how long the step may wait
+for input; `examples\periodic_step.c` does, on a time base the program moves (`zext_time_base_*`).
 
 A build on the cooperative engine (`os-host`) hands a put to the session's own subscribers
 inside the put, as zenoh-pico does. A subscriber's callback is called with no lock of the library
@@ -234,7 +236,9 @@ hands it four refused documents and checks that each leaves the config as it was
 
 Each example is one C file that exchanges between two sessions of one process, over the loopback
 or, in `own_transport.c` and `pico_app_transport.c`, over a stack the program implements, and
-exits 0 when every check held. Every example but `pico_app_transport.c` includes
+exits 0 when every check held. An example whose comment states `expect-line:` lines prints each as
+a line of its output, and the package's test holds its run to them. Every example but
+`pico_app_transport.c` includes
 `example_common.h` from the same directory. Build one as above, for instance
 `cl /std:c11 /DZENOH_WINDOWS /I include examples\e2e.c release\lib\wz_capi_pico.lib`.
 
@@ -248,6 +252,7 @@ exits 0 when every check held. Every example but `pico_app_transport.c` includes
 | `e2e.c` | end-to-end protection across a session: a sender, a receiver and its verdicts |
 | `supervision.c` | supervision of a periodic stream that stops |
 | `periodic.c` | a program's own periodic task over the run API |
+| `periodic_step.c` | a session opened without its read task and stepped by the program each cycle (`zext_session_step`), its timers on a time the program moves one period per cycle (`zext_time_base_*`) |
 | `keyed.c` | a keyed topic: two instances of one message on one key expression, told apart by a field of the payload, with the last value of each |
 | `history.c` | history for a late subscriber: the last frames a publisher sent, replayed oldest first, then the live ones, each judged by an end-to-end receiver |
 
