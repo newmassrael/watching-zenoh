@@ -17,7 +17,7 @@
 #[cfg(all(test, feature = "std", unix))]
 use alloc::sync::Arc;
 use core::ffi::c_int;
-use core::net::IpAddr;
+use core::net::Ipv4Addr;
 
 use wz_capi_port::ScoutAsk;
 use wz_runtime_coop::{ClockSource, CoopRuntime};
@@ -44,7 +44,7 @@ const IDLE_WAIT_MS: c_int = 2;
 /// The interface addresses a window asks by: the first IPv4 address of every interface that is up
 /// and can carry multicast (the host's own reading; none when it cannot be read, which is a window
 /// on the group socket alone).
-fn interface_addresses() -> Vec<IpAddr> {
+fn interface_addresses() -> Vec<Ipv4Addr> {
     wz_runtime_posix::interfaces::multicast_interface_addresses().unwrap_or_default()
 }
 

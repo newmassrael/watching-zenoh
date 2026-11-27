@@ -25,7 +25,7 @@
 
 use alloc::vec::Vec;
 use core::fmt;
-use core::net::IpAddr;
+use core::net::{IpAddr, Ipv4Addr};
 
 #[cfg(unix)]
 use alloc::string::String;
@@ -142,14 +142,14 @@ impl InterfaceTable {
     /// in the table's order: the addresses a scouting window asks by. A second socket on the same
     /// interface would reach no node the first does not, and a loopback has no `IFF_MULTICAST` on
     /// the hosts this crate is built for, so the flag test leaves it out.
-    pub fn multicast_interface_addresses(&self) -> Vec<IpAddr> {
+    pub fn multicast_interface_addresses(&self) -> Vec<Ipv4Addr> {
         let mut taken: Vec<&str> = Vec::new();
         let mut addresses = Vec::new();
         for row in &self.rows {
             if !Self::carries_multicast(row) || taken.contains(&row.name.as_str()) {
                 continue;
             }
-            if let Some(address @ IpAddr::V4(_)) = row.address {
+            if let Some(IpAddr::V4(address)) = row.address {
                 if !address.is_multicast() {
                     taken.push(&row.name);
                     addresses.push(address);
@@ -263,7 +263,7 @@ fn c_int_of(family: libc::sa_family_t) -> libc::c_int {
 /// The first IPv4 address of every interface that can carry multicast, read from the host's table
 /// now; `None` when it could not be read. See [`InterfaceTable::multicast_interface_addresses`].
 #[cfg(unix)]
-pub fn multicast_interface_addresses() -> Option<Vec<IpAddr>> {
+pub fn multicast_interface_addresses() -> Option<Vec<Ipv4Addr>> {
     Some(InterfaceTable::read()?.multicast_interface_addresses())
 }
 
@@ -312,7 +312,7 @@ pub fn interface_indices_of_address(address: IpAddr) -> Result<Vec<u32>, IfaceRe
 /// Windows lists no interface by flags here: a scouting window asks on its group socket alone, as
 /// the host crate's reading answers there.
 #[cfg(windows)]
-pub fn multicast_interface_addresses() -> Option<Vec<IpAddr>> {
+pub fn multicast_interface_addresses() -> Option<Vec<Ipv4Addr>> {
     None
 }
 
@@ -545,7 +545,7 @@ mod tests {
         fn a_window_asks_by_the_first_ipv4_of_each_multicast_interface() {
             assert_eq!(
                 table().multicast_interface_addresses(),
-                [ip("10.0.0.5"), ip("192.168.1.9")]
+                [Ipv4Addr::new(10, 0, 0, 5), Ipv4Addr::new(192, 168, 1, 9)]
             );
             assert!(InterfaceTable::default()
                 .multicast_interface_addresses()
@@ -618,7 +618,6 @@ mod tests {
         fn the_hosts_table_is_read_and_answers_by_the_same_rules() {
             let table = InterfaceTable::read().expect("getifaddrs reads the host's table");
             for address in table.multicast_interface_addresses() {
-                assert!(address.is_ipv4(), "{address}");
                 assert!(
                     !address.is_loopback() && !address.is_multicast(),
                     "{address}"

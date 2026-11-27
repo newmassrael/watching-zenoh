@@ -22,13 +22,12 @@
 
 use alloc::vec::Vec;
 use core::ffi::c_int;
-use core::net::{IpAddr, SocketAddr};
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_runtime_coop::udp_link::DatagramSocket;
-use wz_session_core::text_out::{FixedText, TextOut, IPV6_TEXT_LEN};
 
 use crate::group::MulticastSocket;
-use crate::multicast::{bind_joined, bind_sender, RxBind, SocketConfig};
+use crate::multicast::{bind_scout_asker, bind_scout_group};
 
 /// One socket of a window: where it reads, where the Scout goes from it, and whether it asks.
 pub struct ScoutMember<S> {
@@ -64,42 +63,22 @@ pub struct ScoutMembers<S> {
 
 impl<S: MulticastSocket> ScoutMembers<S> {
     /// Open the group socket on `group:port` and one ask socket for each address of `locals`
-    /// ([`Self::from_parts`] says what is kept when they fail). An address is the ask socket's
-    /// `#iface=`: it is bound and leaves by it.
-    pub fn open(group: IpAddr, port: u16, locals: &[IpAddr]) -> Self {
-        // `Group`, not the family's wildcard: a scouting socket reads on the group address itself
-        // where a socket may be bound to one, as upstream's does.
-        let group_member = bind_joined::<S>(group, port, &SocketConfig::default(), RxBind::Group)
+    /// ([`Self::from_parts`] says what is kept when they fail). An ask socket is bound to its
+    /// address and leaves by it; the address is handed to the socket layer as it was read from the
+    /// interface table, so a window writes and reads no address text.
+    pub fn open(group: IpAddr, port: u16, locals: &[Ipv4Addr]) -> Self {
+        let group_member = bind_scout_group::<S>(group, port)
             .ok()
             .map(|bound| ScoutMember::new(bound.socket, bound.peer, false));
         let mut asking = Vec::new();
         for local in locals {
-            let pinned = iface_text(*local);
-            // Every address's text fits; one that did not would name no interface to pin.
-            let Ok(iface) = pinned.finish() else {
-                continue;
-            };
-            let cfg = SocketConfig {
-                iface: Some(iface),
-                ..SocketConfig::default()
-            };
             // A refusal is the address's alone: it is left out and the others stand.
-            if let Ok(bound) = bind_sender::<S>(group, port, &cfg, false) {
+            if let Ok(bound) = bind_scout_asker::<S>(group, port, *local) {
                 asking.push(ScoutMember::new(bound.socket, bound.peer, true));
             }
         }
         Self::from_parts(group_member, asking)
     }
-}
-
-/// `local` as the `#iface=` text an ask socket is pinned by: what `Display` writes for it, written
-/// through [`TextOut::push_ip`]. A library whose only address text is a scout's then carries none
-/// of `core::fmt` (`Formatter::pad`, the addresses' `Display`, `fmt::write`), which a C library
-/// without `std` has no other caller of.
-fn iface_text(local: IpAddr) -> FixedText<IPV6_TEXT_LEN> {
-    let mut text = FixedText::new();
-    text.push_ip(local);
-    text
 }
 
 impl<S: DatagramSocket> ScoutMembers<S> {
@@ -195,8 +174,7 @@ impl<S: MulticastSocket> ScoutMembers<S> {
 mod tests {
     use super::*;
     use crate::net::PosixUdpSocket;
-    use alloc::string::ToString;
-    use core::net::{Ipv4Addr, Ipv6Addr};
+    use core::net::Ipv6Addr;
 
     fn loopback() -> PosixUdpSocket {
         PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("a loopback socket")
@@ -399,31 +377,35 @@ mod tests {
         assert!(members.is_empty(), "every member was lost");
     }
 
-    /// An ask socket is pinned by the text `Display` writes for its address, of either family, an
-    /// IPv4-mapped one and the longest an address's text is, and `#iface=` reads that text back as
-    /// the address.
+    /// A window asks from a socket bound to each address it is handed, and from none of an
+    /// address the group's family refuses: an IPv4 address for an IPv6 group asks nothing. Turned
+    /// red by an ask socket bound elsewhere than its address, or one made for the other family.
     #[test]
-    fn an_ask_socket_is_pinned_by_the_text_of_its_address() {
-        for local in [
-            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 254)),
-            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 1, 0, 0, 2)),
-            IpAddr::V6(Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped()),
-            IpAddr::V6(Ipv6Addr::new(
-                0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
-            )),
-        ] {
-            let shown = local.to_string();
-            let pinned = iface_text(local);
-            assert_eq!(pinned.finish(), Ok(shown.as_str()), "{shown}");
-            assert_eq!(
-                pinned
-                    .finish()
-                    .ok()
-                    .and_then(|text| text.parse::<IpAddr>().ok()),
-                Some(local),
-                "{shown}"
-            );
-        }
+    fn an_ask_socket_is_bound_to_the_address_it_is_handed() {
+        let group = IpAddr::V4(Ipv4Addr::new(239, 255, 91, 79));
+        let members = ScoutMembers::<PosixUdpSocket>::open(group, 47_479, &[Ipv4Addr::LOCALHOST]);
+        let askers: Vec<SocketAddr> = members
+            .members
+            .iter()
+            .filter(|member| member.asks)
+            .map(|member| member.socket.local())
+            .collect();
+        assert_eq!(
+            askers.len(),
+            1,
+            "one ask socket, the group socket listening"
+        );
+        assert_eq!(askers[0].ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+        let v6 = IpAddr::V6(Ipv6Addr::new(0xff05, 0, 0, 0, 0, 0, 0, 0x231));
+        let members = ScoutMembers::<PosixUdpSocket>::open(v6, 47_479, &[Ipv4Addr::LOCALHOST]);
+        assert!(
+            members
+                .members
+                .iter()
+                .all(|member| member.socket.local().ip() != IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            "no socket of an IPv4 address for an IPv6 group"
+        );
     }
 
     /// A host's window is opened on the scouting group: whatever the host lists, every member it
