@@ -2371,8 +2371,10 @@ fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
     use crate::reliability::Reliability;
     use wz_codecs::lent::{Push, Wireexpr, WireexprNonlocal, WireexprVariant};
 
+    // The Push carries a body this build delivers: `Push::default()` is a Put, and a build with
+    // `pubsub-delete` alone drops a Put before its key is read, so there it is a Del.
     let push_naming_ours = |id: ExprId| {
-        Push {
+        let push = Push {
             keyexpr: Wireexpr {
                 body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                     id,
@@ -2383,7 +2385,18 @@ fn the_tables_are_the_own_space_a_peers_alias_is_read_from() {
             ..Push::default()
         }
         .try_into_owned_in::<crate::wire::WireStorage>()
-        .unwrap()
+        .unwrap();
+        #[cfg(not(feature = "pubsub-put"))]
+        let push = {
+            let mut push = push;
+            push.body = crate::wire::PushOwnedVariant::CodecZenohMsgDel(
+                wz_codecs::lent::MsgDel::default()
+                    .try_into_owned_in::<crate::wire::WireStorage>()
+                    .unwrap(),
+            );
+            push
+        };
+        push
     };
     let mut tables = SessionTables::<Sinks>::new();
     let declared = tables.declare_keyexpr("ours/temp").unwrap();
