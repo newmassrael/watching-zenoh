@@ -1,0 +1,17 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+File the land loop's open findings as named debts, each with what opened
+it and what closes it, so the next round picks them from the register.
+'''
+changes = '''
+- debt-session-core-unbuilt-combinations, runtime-coop-doc-links.
+- coop-admission-held-for-drop, host-peer-advanced-comment-stale.
+- sce-compiled-machines-m9-unmeasured, windows-s3-stop-unverified.
+'''
+verification = '''
+- validate-workspace: T1 orphan 14, new +0; T3 warn 4; no local path.
+- each finding read on main df994d7913 or its lane on 2026-11-28.
+'''
+carry = '''
+- none for this lane.
+'''
