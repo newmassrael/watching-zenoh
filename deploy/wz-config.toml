@@ -1052,6 +1052,20 @@ abis = ["core", "pico"]
 implies = []
 help = "A scouting window also reads on a socket joined to the scouting group, and asks on it when no interface can be asked on (wz-own). Off, a window has its per-interface ask sockets alone, as zenoh-pico's scout does: a Hello sent to the group rather than to the asker is not heard, and a host that lists no interface finds nobody."
 
+# A scouting window's verdict on each datagram it does not take as a Hello. On in a build that names
+# nothing and off in the zenoh-pico preset: zenoh-pico's scout answers one error code for what it
+# does not take (`vendor/zenoh-pico/src/session/scout.c` @ `ret = _Z_ERR_MESSAGE_UNEXPECTED;`) and
+# logs one line. A behaviour of the window, not a door, so it implies nothing, as
+# `scout-group-socket`. The tokio engine classifies whatever is named.
+[[capability]]
+id = "scout-rx-verdicts"
+kconfig = "WZ_CAP_SCOUT_RX_VERDICTS"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "A scouting window classifies each datagram it does not take as a Hello (its own Scout looped back, another node's Scout, a Hello with no locator, an unknown message, bytes that do not decode), counts it by verdict and logs it at the verdict's severity (wz-own). Off, a window counts what it did not take in one count, as zenoh-pico's scout names one error; a datagram not taken is dropped either way."
+
 # A clock the application registers (the observation plane's time, a clock with a quality): a
 # hardware clock or a time
 # master the device has, which the node reads in place of the system clock. wz's own door, with no

@@ -111,6 +111,8 @@ default = [
     "advanced-node-clock",
     # A scouting window's socket joined to the group (deploy/wz-config.toml, `scout-group-socket`).
     "scout-group-socket",
+    # A scouting window's verdicts on what it does not take (`scout-rx-verdicts`).
+    "scout-rx-verdicts",
     # The peer's behaviours zenoh-pico's peer does not have (deploy/wz-config.toml, `udp-listen`).
     # The peer's behaviours zenoh-pico's peer does not have (deploy/wz-config.toml, `udp-listen`,
     # `interest-answer`).
@@ -389,6 +391,10 @@ advanced-node-clock = []
 # this engine's runtime scouts on the group whatever is named, so the feature only carries the
 # capability's name.
 scout-group-socket = []
+# A scouting window's verdicts on the datagrams it does not take
+# (`wz-capi-pico/scout-rx-verdicts`): this engine's runtime classifies them with its window
+# whatever is named, so the feature only carries the capability's name.
+scout-rx-verdicts = []
 # A unicast `udp/` endpoint a peer listens on (`wz-capi-pico/udp-listen`): this engine's runtime
 # listens on `udp/` whatever is named, so the feature only carries the capability's name.
 udp-listen = []

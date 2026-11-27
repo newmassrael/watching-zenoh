@@ -13,6 +13,7 @@ use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::scouting::ScoutMember;
 use wz_runtime_posix::PosixClock;
 use wz_session_core::caps;
+#[cfg(feature = "scout-rx-verdicts")]
 use wz_session_core::scout_initiator::ScoutRxIgnored;
 use wz_session_core::scouting_host::{
     decode_scouted_hello, HelloRow, HelloTable, LentTable, LentWindowState, ScoutWindow,
@@ -312,19 +313,27 @@ fn a_datagram_that_is_not_an_answer_is_named_and_the_window_goes_on() {
         Some("tcp/10.0.0.4:7447"),
         "the window went past all three and took the real answer"
     );
-    let ignored = actions.ignored_datagrams();
-    assert!(
-        ignored.contains(&ScoutRxIgnored::SelfEcho),
-        "our own Scout: {ignored:?}"
+    assert_eq!(
+        actions.ignored_counts().total(),
+        3,
+        "each datagram not taken is counted once, with or without its verdict"
     );
-    assert!(
-        ignored.contains(&ScoutRxIgnored::Undecodable),
-        "the truncated Hello: {ignored:?}"
-    );
-    assert!(
-        ignored.contains(&ScoutRxIgnored::LocatorlessHello),
-        "the Hello with no address: {ignored:?}"
-    );
+    #[cfg(feature = "scout-rx-verdicts")]
+    {
+        let ignored = actions.ignored_datagrams();
+        assert!(
+            ignored.contains(&ScoutRxIgnored::SelfEcho),
+            "our own Scout: {ignored:?}"
+        );
+        assert!(
+            ignored.contains(&ScoutRxIgnored::Undecodable),
+            "the truncated Hello: {ignored:?}"
+        );
+        assert!(
+            ignored.contains(&ScoutRxIgnored::LocatorlessHello),
+            "the Hello with no address: {ignored:?}"
+        );
+    }
     assert_eq!(
         actions.scouted_hellos().len(),
         1,
@@ -517,6 +526,7 @@ fn a_window_over_a_lent_table_holds_its_state_in_its_place() {
     window.datagram(&hello_datagram(1, &[0x44; 4], &["tcp/10.0.0.4:7447"]));
     let actions = window.actions();
     let counts = actions.ignored_counts();
+    #[cfg(feature = "scout-rx-verdicts")]
     assert_eq!((counts.self_echo, counts.undecodable), (1, 1));
     assert_eq!(
         counts.total(),

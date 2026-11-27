@@ -72,9 +72,9 @@ use wz_runtime_core::Runtime;
 use crate::caps;
 use crate::limits::{MaxLocatorLenHeld, RuntimeLimits};
 use crate::link::LostCause;
-pub use crate::scout_initiator::{
-    classify_ignored_scout_rx, hello_advances_window, ScoutRxIgnored,
-};
+pub use crate::scout_initiator::hello_advances_window;
+#[cfg(feature = "scout-rx-verdicts")]
+pub use crate::scout_initiator::{classify_ignored_scout_rx, ScoutRxIgnored};
 pub use crate::scout_params::ScoutParams;
 use crate::scout_trace::ScoutTrace;
 use crate::session_zid::SessionZid;
@@ -110,8 +110,8 @@ pub struct ScoutingActions<R: Runtime, K = HelloList<R>> {
     /// Where the window records the Hellos it takes, and what it keeps of the datagrams it does
     /// not; a host reads it through `record`.
     record: K,
-    /// How many datagrams the window observed and did not take as a Hello, by verdict: the count
-    /// every window keeps, whatever its record.
+    /// How many datagrams the window observed and did not take as a Hello, by verdict with
+    /// `scout-rx-verdicts`: the count every window keeps, whatever its record.
     ///
     /// Together with the Hellos the record holds (or counts as refused), it makes the handling of
     /// inbound datagrams CONSERVATIVE: every datagram the window receives lands in exactly one of
@@ -119,9 +119,10 @@ pub struct ScoutingActions<R: Runtime, K = HelloList<R>> {
     ignored_counts: R::Mutex<IgnoredCounts>,
 }
 
-/// Where a window records the Hellos it takes, and what it keeps of the datagrams it does not
-/// beyond the count every window keeps ([`ScoutingActions::ignored_counts`]). A host names its
-/// record as a type, so a window links the one it records in.
+/// Where a window records the Hellos it takes, and, with `scout-rx-verdicts`, what it keeps of
+/// the datagrams it does not beyond the count every window keeps
+/// ([`ScoutingActions::ignored_counts`]). A host names its record as a type, so a window links the
+/// one it records in.
 pub trait HelloRecord<R: Runtime>: Sized + 'static {
     /// `bytes`, a datagram of the Hello MID, decoded and staged for the machine's next
     /// `hello.received`: whether it is a Hello the window advances on ([`hello_advances_window`]).
@@ -137,6 +138,7 @@ pub trait HelloRecord<R: Runtime>: Sized + 'static {
     /// The staged Hello recorded after the others: the machine took it.
     fn record_staged(&self);
     /// One datagram the window observed and did not take as a Hello, already counted.
+    #[cfg(feature = "scout-rx-verdicts")]
     fn record_ignored(&self, why: ScoutRxIgnored);
     /// The first locator a recorded Hello advertised, the dial target: `None` until a Hello with
     /// a locator is recorded.
@@ -144,7 +146,7 @@ pub trait HelloRecord<R: Runtime>: Sized + 'static {
 }
 
 /// The record a host with a heap keeps, zenoh's: every Hello decoded onto the heap, with no bound,
-/// and every datagram not taken listed with its verdict.
+/// and with `scout-rx-verdicts` every datagram not taken listed with its verdict.
 pub struct HelloList<R: Runtime> {
     /// Set by [`HelloRecord::stage`] before the pump feeds `HelloReceived`: the DECODED inbound
     /// Hello, which `record_hello_and_emit` takes and records.
@@ -176,6 +178,7 @@ pub struct HelloList<R: Runtime> {
     /// A log line alone is the wrong instrument for "a datagram was dropped": a log needle dies
     /// two ways (the level is filtered, or the wording drifts) and a test that greps for one
     /// asserts on prose. So the verdict is recorded here as a value, and logged beside it.
+    #[cfg(feature = "scout-rx-verdicts")]
     pub ignored: R::Mutex<Vec<ScoutRxIgnored>>,
 }
 
@@ -186,6 +189,7 @@ impl<R: Runtime> HelloList<R> {
             pending_hello: R::new_mutex(None),
             discovered: R::new_mutex(None),
             hellos: R::new_mutex(Vec::new()),
+            #[cfg(feature = "scout-rx-verdicts")]
             ignored: R::new_mutex(Vec::new()),
         }
     }
@@ -224,6 +228,7 @@ impl<R: Runtime> HelloRecord<R> for HelloList<R> {
         R::with_mutex_mut(&self.hellos, |hellos| hellos.push(scouted));
     }
 
+    #[cfg(feature = "scout-rx-verdicts")]
     fn record_ignored(&self, why: ScoutRxIgnored) {
         R::with_mutex_mut(&self.ignored, |ignored| ignored.push(why));
     }
@@ -287,24 +292,42 @@ impl PartialEq<Vec<u8>> for ScoutFrame {
     }
 }
 
-/// How many datagrams a window observed and did not take as a Hello, by verdict
-/// ([`ScoutRxIgnored`]): the record a window over a lent table keeps in place of a list.
+/// How many datagrams a window observed and did not take as a Hello: the record a window over a
+/// lent table keeps in place of a list. By verdict (`ScoutRxIgnored`) with `scout-rx-verdicts`;
+/// without it in one count, as zenoh-pico's scout names one error for each
+/// (`vendor/zenoh-pico/src/session/scout.c` @ `ret = _Z_ERR_MESSAGE_UNEXPECTED;`), and no datagram
+/// is classified.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IgnoredCounts {
     /// [`ScoutRxIgnored::Undecodable`].
+    #[cfg(feature = "scout-rx-verdicts")]
     pub undecodable: usize,
     /// [`ScoutRxIgnored::SelfEcho`].
+    #[cfg(feature = "scout-rx-verdicts")]
     pub self_echo: usize,
     /// [`ScoutRxIgnored::ForeignScout`].
+    #[cfg(feature = "scout-rx-verdicts")]
     pub foreign_scout: usize,
     /// [`ScoutRxIgnored::UnknownMid`], whatever the MID.
+    #[cfg(feature = "scout-rx-verdicts")]
     pub unknown_mid: usize,
     /// [`ScoutRxIgnored::LocatorlessHello`].
+    #[cfg(feature = "scout-rx-verdicts")]
     pub locatorless_hello: usize,
+    /// Every datagram not taken, whatever it was.
+    #[cfg(not(feature = "scout-rx-verdicts"))]
+    not_taken: usize,
 }
 
 impl IgnoredCounts {
+    /// One more datagram not taken.
+    #[cfg(not(feature = "scout-rx-verdicts"))]
+    fn count_one(&mut self) {
+        self.not_taken = self.not_taken.saturating_add(1);
+    }
+
     /// One more datagram of the verdict `why`.
+    #[cfg(feature = "scout-rx-verdicts")]
     fn count(&mut self, why: &ScoutRxIgnored) {
         let slot = match why {
             ScoutRxIgnored::Undecodable => &mut self.undecodable,
@@ -318,11 +341,18 @@ impl IgnoredCounts {
 
     /// How many datagrams in all.
     pub fn total(&self) -> usize {
-        self.undecodable
-            .saturating_add(self.self_echo)
-            .saturating_add(self.foreign_scout)
-            .saturating_add(self.unknown_mid)
-            .saturating_add(self.locatorless_hello)
+        #[cfg(feature = "scout-rx-verdicts")]
+        {
+            self.undecodable
+                .saturating_add(self.self_echo)
+                .saturating_add(self.foreign_scout)
+                .saturating_add(self.unknown_mid)
+                .saturating_add(self.locatorless_hello)
+        }
+        #[cfg(not(feature = "scout-rx-verdicts"))]
+        {
+            self.not_taken
+        }
     }
 }
 
@@ -761,6 +791,7 @@ impl<R: Runtime> HelloRecord<R> for LentTable {
         unsafe { self.get() }.record_staged();
     }
 
+    #[cfg(feature = "scout-rx-verdicts")]
     fn record_ignored(&self, _why: ScoutRxIgnored) {}
 
     /// The first locator of the first row that kept one: the table's rows are what the window
@@ -793,6 +824,7 @@ impl<R: Runtime> ScoutingActions<R> {
 
     /// Every datagram this window observed and did not take as a Hello, with the reason, in
     /// arrival order. See [`HelloList::ignored`] for why the record is a value.
+    #[cfg(feature = "scout-rx-verdicts")]
     pub fn ignored_datagrams(&self) -> Vec<ScoutRxIgnored> {
         R::with_mutex_mut(&self.record.ignored, |ignored| ignored.clone())
     }
@@ -845,8 +877,9 @@ impl<R: Runtime, K: HelloRecord<R>> ScoutingActions<R, K> {
         self.record.discovered_locator()
     }
 
-    /// How many datagrams this window observed and did not take as a Hello, by verdict: the record
-    /// every window keeps, and the only one a window over a lent table keeps.
+    /// How many datagrams this window observed and did not take as a Hello, by verdict with
+    /// `scout-rx-verdicts`: the record every window keeps, and the only one a window over a lent
+    /// table keeps.
     pub fn ignored_counts(&self) -> IgnoredCounts {
         R::with_mutex_mut(&self.ignored_counts, |counts| *counts)
     }
@@ -859,6 +892,7 @@ impl<R: Runtime, K: HelloRecord<R>> ScoutingActions<R, K> {
     /// comes back, a second node scouting the same group is ordinary, and a peer that answers
     /// with no address is a peer. Logging those at pico's severity would put a warning on the
     /// window's own traffic once per cycle (see [`crate::scout_initiator`]).
+    #[cfg(feature = "scout-rx-verdicts")]
     fn record_ignored(&self, why: ScoutRxIgnored) {
         match &why {
             ScoutRxIgnored::Undecodable => {
@@ -883,6 +917,13 @@ impl<R: Runtime, K: HelloRecord<R>> ScoutingActions<R, K> {
         }
         R::with_mutex_mut(&self.ignored_counts, |counts| counts.count(&why));
         self.record.record_ignored(why);
+    }
+
+    /// Record one datagram the window observed and did not take as a Hello, in the one count a
+    /// window keeps without the verdicts.
+    #[cfg(not(feature = "scout-rx-verdicts"))]
+    fn count_not_taken(&self) {
+        R::with_mutex_mut(&self.ignored_counts, IgnoredCounts::count_one);
     }
 
     /// Idle -> Sending entering transition: encode one Scout frame and stage the datagram for the
@@ -1193,10 +1234,13 @@ pub fn window_datagram<R: Runtime, K: HelloRecord<R>, A: ActionsReach>(
         false
     };
     if !advanced {
+        #[cfg(feature = "scout-rx-verdicts")]
         actions.record_ignored(classify_ignored_scout_rx(
             actions.params.zid.as_deref().unwrap_or(&[]),
             bytes,
         ));
+        #[cfg(not(feature = "scout-rx-verdicts"))]
+        actions.count_not_taken();
     }
 }
 
