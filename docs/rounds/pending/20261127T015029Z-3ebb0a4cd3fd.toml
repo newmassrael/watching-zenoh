@@ -1,0 +1,19 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Keep the typed lock's and the kept count's uncontended steps in line and
+their slow steps cold, then count a kept value and drop a face's link
+through one body each, so the receive gets cheaper and the driver smaller.
+'''
+changes = '''
+- host-sync: lock fast paths inline, contended paths cold.
+- runtime-coop and capi-coop: kept count and drop_link each one body.
+- docs/win-budget/size.md 3.4 reads the steps.
+'''
+verification = '''
+- size ledger: total 218,139 B vs main 218,756 (-617); driver 29,395 B.
+- receive Ir W 2,987.2 vs main 3,078.1 (subprofile, callgrind).
+- runtime-coop kept, host-sync lib pass; capi-coop clippy clean after rebase.
+'''
+carry = '''
+- none for this lane.
+'''
