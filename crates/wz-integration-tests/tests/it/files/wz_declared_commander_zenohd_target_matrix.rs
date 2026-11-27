@@ -543,11 +543,11 @@ impl PassiveTarget for ImageTarget {
             }
             came = format!("{replies:?}\n--- z_get ---\n{text}");
         }
+        let console = self.console();
+        let router = read_captured(&mut self.router_out);
         panic!(
-            "{}: expected one reply to {key}, got {came}\n--- console ---\n{}\n--- zenohd ---\n{}",
-            self.name,
-            self.console(),
-            read_captured(&mut self.router_out)
+            "{}: expected one reply to {key}, got {came}\n--- console ---\n{console}\n--- zenohd ---\n{router}",
+            self.name
         );
     }
 
