@@ -275,7 +275,9 @@ and nothing of the session around it:
 - the limits a frame is cut by, per reliability class: the frame budget and the ring
   (`negotiated_tx_limits_for`), and the reassembly cap a chain is refused past;
 - the links the conduits route to: what `with_conduit_link`, `lease_on`, `emit_on_link`,
-  `send_wire` and the batch slots' records (`batch_slots`) read.
+  `send_wire` and the batch slots' records (`batch_slots`) read. Read before T3a, these are a
+  binding's and a link's and cannot be the component's own: the walk reaches them through a
+  borrow made for each send (section 9.6).
 
 Its methods are the walk, moved and not rewritten: `write_n_msg`, `emit_frame_or_fragments`,
 `emit_fragments_encoded`, `emit_fragment_chain`, `send_fragment`, the flush and drain of the
@@ -327,30 +329,57 @@ group's driver waits for the socket inside the send (`GroupTxPace::wait_writable
 nothing; on, it holds the refused datagram as above. Either way it is the driver's answer to
 `wait_for_room_for` and no line of the walk.
 
-### 9.4 What must be read before each step is written
+### 9.4 What was read before each step, and what it settles
 
-- **A push made while the conduits are held.** The stage keeps one today (`push_deferred`,
-  `Staged`): a reply the group's own dispatch stages while a producer waits for room inside the
-  host's pass. On the one component the conduit's lock is the coop runtime's
-  (`wz-runtime-coop/src/runtime_impl.rs` @ `fn with_mutex_mut<T, U>(`), which a second holder on the
-  same task would re-enter. The link answers the same question with its owner's deferral
-  (`send_deferral::DeferredSends`, heap builds that are not lend-only); a lend-only link has no
-  pass that dispatches while a sender waits. Which of the two the group takes (the deferral moved into
-  the component for both, or a group wait that does not step the group's own dispatch) is read from
-  the engine's group face (`crates/wz-capi-coop/src/engine/group.rs`) before T3b is written; both
-  keep a reply behind the push it was staged under.
+- **A push made while the conduits are held: settled, the group waits without stepping its own
+  dispatch.** The stage keeps one today (`push_deferred`, `Staged`): a reply the group's own
+  dispatch stages while a producer waits for room inside the host's pass. Read in the engine: a
+  wait for room on a group runs the session's tasks only in the round form
+  (`crates/wz-capi-coop/build.rs` @ `let round = threads && !value_locks;`), whose pace is the
+  local set (`crates/wz-capi-coop/src/engine/group.rs` @ `self.local.run_until_idle();`), and
+  the group's own task is one of those tasks. In every other form the pace is the clock
+  (`ClockPace`, whose `pass` is empty): the wait's pass writes the stage and waits on the stack
+  (`LinkWaits::wait_room`, which runs no task), a member's input is dispatched only by a read,
+  which is a call of its own on the program's thread, and a read task on another thread
+  (`threads` with value locks) reaches a group's values under the group's lock, which it waits
+  for and does not enter twice. So the pico builds, which have no `threads`, never push while
+  the conduits are held; the round form does, from the group's own task. On one component that
+  push would take the conduit's lock a second time on one task, which no lock kind of the coop
+  runtime allows (`wz-runtime-coop/src/runtime_impl.rs` @ `fn try_with_mutex_mut<T, U>(`:
+  under a critical section or an owner's lock there is never another holder).
+  The group takes the lend-only link's answer and not the heap link's deferral
+  (`send_deferral::DeferredSends`, which needs a heap and an owner that defers): there is no
+  pass that dispatches a group's input while a sender of that group holds one of its conduits.
+  The group's task reads the component's sender flags (`TxConduits::sender_flag`, the flags a
+  droppable sender reads already) before it reads its socket and, while one is up, leaves the
+  input where the socket holds it for its next step. That is one load a step, compiled in the
+  round form alone; nothing of the deferral enters the component. A reply then leaves after the
+  push it was asked under, as it does today; it waits in the socket and not in `Staged`, the
+  `VecDeque<StagedMessage>` T3b removes. Held by a round-form test with T3b: a member's ask that
+  arrives while a put waits for room is answered after the put's frame.
+- **D2's name: settled.** Capability `multicast-send-hold` (`WZ_CAP_MULTICAST_SEND_HOLD`), the
+  shape of `advanced-source-retention`: a behaviour and not a door, so it implies nothing; on in a
+  build that names nothing, which keeps today's send; `upstream_off = ["zenoh-pico"]`, as
+  zenoh-pico's group send blocks on the socket; `abis = ["core", "pico"]` (the zenoh-c ABI's
+  groups are the tokio engine's, whose group writer is a task of its own, T3c). Its Cargo feature
+  has the same name in `wz-capi-pico` and `wz-capi-coop`, and gates the hold in
+  `wz-session-mcu`'s group driver. Written with T3b, whose driver is what it gates; the
+  configuration and the manifests land with that code, and `wz_config.py --write` regenerates
+  what is derived from them.
 - **The tokio engine's group** (`wz_runtime_tokio::multicast_pipeline`) pushes through
   `multicast_tx_push` onto its own lanes. It moves to the component in a step of its own (T3c);
   until then `push_frame` stays compiled in the host builds that link it, and leaves the pico
   builds with T3b.
-- **The send Ir of the perf matrix's arm W** before and after T3a, which moves the walk and must
-  keep every `#[inline]` decision it has.
+- **The send Ir of the perf matrix's arm W** before and after each step of T3a, which moves the
+  walk and must keep every `#[inline]` decision it has: the main session's reading.
+- **What the walk reads besides the conduits and the numbers** (section 9.6): read before T3a,
+  and it refines 9.1's component into owned state and a borrow of it.
 
 ### 9.5 Steps
 
 | step | change | bytes, expected (`pico-api-coop-nostd`) | receive Ir | held by |
 |---|---|---|---|---|
-| T3a | `TransportTx<R>` out of `SessionLinkActions`: the conduits, the frame numbers, the limits and the routed links, the walk its methods; the session's prelude calls it | 0 to +500 (a field read through one more reference); client the same | none: the read is not the walk; the send's Ir held by arm W | every link test of the walk unchanged (`batch_tests`, the fragment, lend and window tests of `session_actions`) |
+| T3a | `TransportTx<R>` out of `SessionLinkActions` (section 9.6): T3a-1 the conduits and the frame numbers as one owned field of the core; T3a-2 onwards the walk, as methods of a borrow of it with the link it routes to and the emit's facts; the session's prelude calls it | 0 to +500 (a field read through one more reference); client the same | none: the read is not the walk; the send's Ir held by arm W | every link test of the walk unchanged (`batch_tests`, the fragment, lend and window tests of `session_actions`) |
 | T3b | the group holds a `TransportTx` over its datagram driver; the stage keeps D2, the quota's admission and the JOIN's numbers (T4 with it); `push_frame`, `MulticastBatch`, `StageQueue`, the lanes and the staged storage leave the pico builds | -20,000 to -30,000: section 2's framer 6,559 and stage 19,458, less the driver, 2,000 to 4,000 | none: the group's read is not touched; a group's put the link's one walk | the group's wire held to the link's for the same messages (one test feeding both a link and a group the same sends and comparing the frames); the stage's tests of a held datagram, the beacon's order and the quota moved onto the driver |
 | D2 | the capability of section 9.3, off in the zenoh-pico preset | 500 to 1,500 off | none | a group send on a full socket held (on) and waited (off) |
 | T3c | the tokio engine's group onto the component; `push_frame` and the owned items leave every build | host builds only | none | `wz-runtime-tokio`'s group pipeline tests |
@@ -358,6 +387,40 @@ nothing; on, it holds the refused datagram as above. Either way it is the driver
 
 T3a is first and alone: it changes the link's code and none of its behaviour, and it is the one
 step whose effect on the link's send Ir must be read before anything stands on it. T3b is the gain.
+
+### 9.6 T3a as the code reads it: owned state, and the walk over a borrow
+
+Section 9.1 put the routed links in the component. The code does not let a component the core
+holds own them:
+
+- The binding's own link is the binding's field (`SessionLinkActions::link`), not the core's,
+  and an aggregated session's other links are the core's set (`SessionCore::links`, under
+  `transport-multilink`) chosen per conduit by `select_link`. A core shared by several
+  bindings cannot hold one binding's link.
+- The walk's destination is a link's state and not its driver alone: the lent batch slots are
+  recorded on the link (`LinkState::batch_slots`, which `with_batch_holder` finds by where the
+  record is), the emit marks the link's keepalive (`spoke`), closes its send gate on a writer
+  that is gone (`transport_available`) and counts on its registry cell
+  (`crates/wz-session-core/src/session_actions.rs` @ `fn emit_on_link(`).
+- The emit reads facts of the session that are not a transmitter's state: the compression
+  outcome (`compresses_batches`), the counters (`stats`, `record_on_link`), the refusal
+  count (`refuse_tx`), and the walk reads the queue's waits (`params.tx_queue`), the fragment
+  pacing credit (`take_fragment_tx_credit`) and the reassembly cap.
+
+So the component is two things, both concrete in `R`, so the walk stays one body a build and no
+call is added on the link's path:
+
+- **`TransportTx<R>`, owned**: the conduits (`TxConduits<R>`) and the frame numbers
+  (`FrameTxConduits<R::Word>`), what zenoh-pico's `_z_transport_common_t` holds of a
+  transmitter. A field of the session's core, and of a group with T3b. Step T3a-1.
+- **The walk, over a borrow**: a value made for one send of the component, the link it routes to
+  (`&LinkState<R>`; the core's set under `transport-multilink`) and the emit's facts, whose
+  methods are the walk. A group makes the same value of its own component, its datagram driver's
+  `LinkState<R>` (its `R::LinkSink`, held as a link holds one) and its own facts, compression
+  off. Steps T3a-2 onwards, one method family a commit: the numbers and the flush, then
+  `write_n_msg`, then the fragment walk, then the emit. Whether the group's counters are the
+  session's counter type, or the facts carry a counter of each, is read before the emit's
+  commit.
 
 ## 10. The one writer of each control message, as landed
 
