@@ -102,6 +102,11 @@ UNRESOLVED_DECLARED: dict[tuple[str, str], str] = {
         "is a vendored foreign crate and this workspace's metadata cannot "
         "adjudicate its features"
     ),
+    ("docs/formal/README.md", "cli"): (
+        "the order of work builds SCE's own `sce-codegen` from the pin (`-p sce-build`, the "
+        "package of `vendor/sce`), a vendored foreign crate whose features this workspace's "
+        "metadata cannot adjudicate, the shape of the build-sce.sh row above"
+    ),
     ("scripts/kit-lane.sh", "get"): (
         "builds `deploy/host-slot-node`, the asking image's responder, which is a standalone "
         "workspace of its own (`[workspace]` in its manifest) outside `crates/`, so this "
