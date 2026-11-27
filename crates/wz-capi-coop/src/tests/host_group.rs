@@ -274,6 +274,10 @@ fn a_quiet_read_reads_a_face_and_a_group_in_one_run() {
     });
     let member = open_member_with(2, &endpoint, policy, slow_beacon);
     let port_endpoint = listener.listening().pop().expect("one port is bound");
+    // The client's open waits for the listener's answer, which only a read of the listener reads.
+    for engine in [&listener, &member] {
+        SessionDrive::start_read_task(&**engine).expect("the read task starts");
+    }
     let client = Engine::open_with_policy(
         host_links([0, 0, 0, 0], PosixTcpDial)
             .waited_by_owner()
@@ -288,9 +292,7 @@ fn a_quiet_read_reads_a_face_and_a_group_in_one_run() {
         policy,
     )
     .expect("the client dials the listener");
-    for engine in [&listener, &member, &client] {
-        SessionDrive::start_read_task(&**engine).expect("the read task starts");
-    }
+    SessionDrive::start_read_task(&*client).expect("the read task starts");
     eventually("the members to list each other", || {
         listener.group_member_zids() == [vec![2u8; 4]]
             && member.group_member_zids() == [vec![1u8; 4]]
