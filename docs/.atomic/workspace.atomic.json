@@ -9051,6 +9051,22 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4721": {
+      "decision_summary": "Pay the prose gate's red the C library's split and a new selftest left:\ntwo commands named features renamed away, one fixture was undeclared.",
+      "changes_bullets": [
+        "c-abi-size-diet: the C library's build and test commands by today's names.",
+        "prose gate: lane_digest's selftest fixture declared unresolvable."
+      ],
+      "verification_bullets": [
+        "prose_feature_gate --check: 1681 names exist, 16 sites declared; selftest."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
