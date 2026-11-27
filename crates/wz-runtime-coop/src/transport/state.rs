@@ -75,6 +75,11 @@ type LinkRuntime<T> =
 /// (`SharedPump::Sink`).
 type SinkOf<T> = <PumpOf<T> as SharedPump<CountOf<T>>>::Sink;
 
+/// What the pump of a link's session over the transport of `T` is built of, reading the link
+/// through `P` and sending through the type of the link's sink.
+pub type LinkFields<T, P> =
+    PumpFields<<T as TransportFaces>::Clock, P, SinkOf<T>, <T as TransportFaces>::Lock>;
+
 /// The session of a link over the transport of `T` whose pump its owner holds and steps itself
 /// ([`TransportState::place_link`]): it stages its fragments in the Router of the face it serves,
 /// lent through the place the link holds, as a task's pump does.
@@ -338,12 +343,13 @@ pub struct PlacedWire<
 }
 
 /// What the making of a link's session builds before the session runs
-/// ([`TransportState::build_wire`]); `R` is the type its pump reads the link as.
-struct WireBuilt<T: TransportFaces, D, S, R: ?Sized + DynLink> {
-    fields: PumpFields<T::Clock, CellRc<R, CountOf<T>>, SinkOf<T>, T::Lock>,
-    dispatch: D,
-    session: S,
-    link: CellRc<R, CountOf<T>>,
+/// ([`TransportState::build_wire`]), by the session's calls `K`: its pump reads the link as the
+/// type the gates read it as (`LinkCalls::Link`).
+struct WireBuilt<T: TransportFaces, K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, SinkOf<T>>> {
+    fields: LinkFields<T, CellRc<K::Link, CountOf<T>>>,
+    dispatch: K::Dispatch,
+    session: K::Session,
+    link: CellRc<K::Link, CountOf<T>>,
     input_wait: Option<WaitOn>,
     room_wait: Option<WaitOn>,
 }
@@ -522,7 +528,7 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn spawn_link<P, D>(
         &self,
         local: &CoopLocalSet<T::Clock>,
-        fields: PumpFields<T::Clock, P, SinkOf<T>, T::Lock>,
+        fields: LinkFields<T, P>,
         dispatch: D,
     ) -> Result<CoopLocalJoinHandle<DriverOutcome>, TransportRefusal>
     where
@@ -544,7 +550,7 @@ impl<T: TransportFaces> TransportState<T> {
         &self,
         place: &'p mut MaybeUninit<LinkPump<T, P>>,
         runtime: CoopRuntime<T::Clock, SinkOf<T>, T::Lock>,
-        fields: PumpFields<T::Clock, P, SinkOf<T>, T::Lock>,
+        fields: LinkFields<T, P>,
         lend: RouterLend<RouterOf<T>, T::RouterPlace>,
     ) -> Option<&'p mut LinkPump<T, P>>
     where
@@ -779,7 +785,7 @@ impl<T: TransportFaces> TransportState<T> {
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
         making: WireMaking<'_, T::Clock, SharedOf<T>>,
-    ) -> Result<WireBuilt<T, K::Dispatch, K::Session, K::Link>, TransportRefusal> {
+    ) -> Result<WireBuilt<T, K>, TransportRefusal> {
         let OpenedLink { sink, pump } = opened;
         let WireMaking {
             params,

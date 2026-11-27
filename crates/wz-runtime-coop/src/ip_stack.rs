@@ -136,6 +136,12 @@ pub type HeapLink<N = OneTask> = crate::link_cells::CellRc<dyn SessionDatagramLi
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub type SetPump<U, S, T, N, W, F> = <F as LinkSet<IpLink<U, S, T, N, W>, N>>::Pump;
 
+/// What the opening of a link of [`IpLinks`] over `U`, `S` and `T` answers: the link as the set
+/// `F` hands it to its session ([`SetPump`]), or why it was refused.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub type SetOpened<U, S, T, N, W, F> =
+    Result<OpenedLink<SetPump<U, S, T, N, W, F>, N>, LinkOpenError>;
+
 /// The links [`IpLinks`] over `U` and the streams the dials `D` and `L` open makes, as one type.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub type IpLinkOf<U, D, L, N, W> =
@@ -520,7 +526,7 @@ impl<N: CountKind> LinkPlace<N> {
         socket: S,
         rx: RxBuffer<N::Flag>,
         tx: TxBuffer<N::Flag>,
-    ) -> Result<OpenedLink<SetPump<U, S, T, N, W, F>, N>, LinkOpenError>
+    ) -> SetOpened<U, S, T, N, W, F>
     where
         U: DatagramSocket + 'static,
         S: StreamSocket + 'static,
@@ -545,7 +551,7 @@ impl<N: CountKind> LinkPlace<N> {
         channel: T,
         rx: RxBuffer<N::Flag>,
         tx: TxBuffer<N::Flag>,
-    ) -> Result<OpenedLink<SetPump<U, S, T, N, W, F>, N>, LinkOpenError>
+    ) -> SetOpened<U, S, T, N, W, F>
     where
         U: DatagramSocket + 'static,
         S: StreamSocket + 'static,
@@ -573,7 +579,7 @@ impl<N: CountKind> LinkPlace<N> {
         peer: Option<SocketAddr>,
         rx: RxBuffer<N::Flag>,
         tx: TxBuffer<N::Flag>,
-    ) -> Result<OpenedLink<SetPump<U, S, T, N, W, F>, N>, LinkOpenError>
+    ) -> SetOpened<U, S, T, N, W, F>
     where
         U: DatagramSocket + 'static,
         S: StreamSocket + 'static,
@@ -600,7 +606,7 @@ impl<N: CountKind> LinkPlace<N> {
         peer: SocketAddr,
         rx: RxBuffer<N::Flag>,
         tx: TxBuffer<N::Flag>,
-    ) -> Result<OpenedLink<SetPump<U, S, T, N, W, F>, N>, LinkOpenError>
+    ) -> SetOpened<U, S, T, N, W, F>
     where
         U: DatagramSocket + 'static,
         S: StreamSocket + 'static,
@@ -804,10 +810,7 @@ where
     /// the other end does not take is [`LinkOpenError::Refused`]; a protocol the links do not
     /// carry (a `tls/` dial on links given no secure channel) is [`LinkOpenError::Unsupported`],
     /// before any buffer is claimed; buffers claimed before a refusal go back with it.
-    pub fn dial(
-        &self,
-        to: Locator,
-    ) -> Result<OpenedLink<SetPump<U, D::Stream, L::Stream, N, W, F>, N>, LinkOpenError> {
+    pub fn dial(&self, to: Locator) -> SetOpened<U, D::Stream, L::Stream, N, W, F> {
         let Some(ip) = to.as_ip() else {
             return Err(LinkOpenError::Unsupported);
         };
@@ -1127,7 +1130,7 @@ where
     W: InputWaiter,
     F: LinkSet<IpLink<U, S, T, N, W>, N>,
 {
-    fn poll(&mut self) -> Option<Result<OpenedLink<SetPump<U, S, T, N, W, F>, N>, LinkOpenError>> {
+    fn poll(&mut self) -> Option<SetOpened<U, S, T, N, W, F>> {
         match &mut self.0 {
             IpDialing::Made(made) => made.poll(),
             IpDialing::Tcp(stream) => {
@@ -1184,6 +1187,14 @@ struct PendingStream<P: StreamSocket + 'static, N: CountKind> {
     place: LinkPlace<N>,
 }
 
+/// A stream made, with the buffers claimed for its link ([`PendingStream::connected`]).
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "dial-in-flight"
+))]
+type StreamMade<P, N> = (P, LinkBuffers<<N as CountKind>::Flag>);
+
 #[cfg(all(
     feature = "alloc",
     not(feature = "session-slot"),
@@ -1193,7 +1204,7 @@ impl<P: StreamSocket + 'static, N: CountKind> PendingStream<P, N> {
     /// The stream and the buffers of its link, once the stream is made; the refusal, once the other
     /// end or the stack refused it, the buffers given back; `None` while it is still being made, and
     /// after it has answered.
-    fn connected(&mut self) -> Option<Result<(P, LinkBuffers<N::Flag>), LinkOpenError>> {
+    fn connected(&mut self) -> Option<Result<StreamMade<P, N>, LinkOpenError>> {
         match self.socket.as_mut()?.connected() {
             Ok(false) => None,
             // The stack's own answer to the connect, or the channel's to its handshake: the other
@@ -1212,6 +1223,12 @@ impl<P: StreamSocket + 'static, N: CountKind> PendingStream<P, N> {
     }
 }
 
+/// The rest of a stack's links beside a port's own socket, which its listener holds none of and
+/// names, so that what it yields is a link of the stack: two of the stack's sockets' types (`A`,
+/// `B`), who waits for their input (`W`) and the set that reads them (`F`).
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+type StackBeside<A, B, W, F> = core::marker::PhantomData<fn() -> (A, B, W, F)>;
+
 /// The accepting end of the `udp/` port a stack listens on: the one socket every peer that opens
 /// a session sends to ([`UdpPort`]), which yields a link for each source whose `InitSyn` it takes,
 /// shaped as the stack's links are and run as an acceptor's. The link's socket is the peer's share
@@ -1227,7 +1244,7 @@ struct IpUdpListener<U: DatagramSocket, S, T, N: CountKind, W, F> {
     shape: LinkShape<N>,
     /// The stack's links (its streams `S` and `T`, who waits for their input, `W`), read as the
     /// set `F` reads them.
-    set: core::marker::PhantomData<fn() -> (S, T, W, F)>,
+    set: StackBeside<S, T, W, F>,
 }
 
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
@@ -1278,7 +1295,7 @@ struct IpTlsListener<U, S, T: StreamSocket, N: CountKind, W, F> {
     shape: LinkShape<N>,
     /// The stack's links (its datagram sockets `U`, its plain streams `S`, who waits for their
     /// input, `W`), read as the set `F` reads them.
-    set: core::marker::PhantomData<fn() -> (U, S, W, F)>,
+    set: StackBeside<U, S, W, F>,
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -1322,7 +1339,7 @@ struct IpListener<U, S: StreamSocket, T, N: CountKind, W, F> {
     shape: LinkShape<N>,
     /// The stack's links (its datagram sockets `U`, its secure channels `T`, who waits for their
     /// input, `W`), read as the set `F` reads them.
-    set: core::marker::PhantomData<fn() -> (U, T, W, F)>,
+    set: StackBeside<U, T, W, F>,
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
