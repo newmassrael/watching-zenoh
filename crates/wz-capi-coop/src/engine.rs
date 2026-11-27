@@ -2139,6 +2139,33 @@ struct Publication<'a> {
     plan: Option<FilterId>,
 }
 
+/// A put's write filter and what it answered (`CoopEngine::held_back_in`): asked once, by the
+/// first leg of the put that holds the session, so the legs after it send as that one was
+/// answered and none takes the session for an answer of its own, as zenoh-pico's put reads its
+/// filter once before it writes (`vendor/zenoh-pico/src/api/api.c` @
+/// `!_z_write_filter_active(&pub->_filter)`). `filter` is `None` for a publish no publisher made,
+/// which no filter holds back.
+struct Asked {
+    filter: Option<FilterId>,
+    held_back: core::cell::Cell<Option<bool>>,
+}
+
+impl Asked {
+    /// Filter `filter`, not asked yet.
+    fn new(filter: Option<FilterId>) -> Self {
+        Self {
+            filter,
+            held_back: core::cell::Cell::new(None),
+        }
+    }
+
+    /// Whether an earlier leg of the put was answered that the filter holds it back: this leg
+    /// sends nothing, and takes nothing to learn it.
+    fn was_held_back(&self) -> bool {
+        self.held_back.get() == Some(true)
+    }
+}
+
 /// One put as each of the session's links is sent it ([`CoopEngine::send_on_links`]): the key as
 /// the session's tables name it, and how it rides.
 struct LinkLeg<'a> {
@@ -8176,7 +8203,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// A publish's leg to the peers the session's faces reach, when its destination admits the
-    /// wire. A link that is down skips it, as a send over it would.
+    /// wire. A link that is down skips it, as a send over it would. The publisher's write filter
+    /// `asked` names is asked by the first leg that holds the session (`Asked`), and a leg after
+    /// one it held back sends nothing.
     // Out of line: the publish that calls it measured smaller with its link leg apart, the
     // held-session paths of the leg (`live_to_publish`, `hand_off`) then apart of it too.
     #[inline(never)]
@@ -8186,7 +8215,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         wire: &WireKey,
         payload: &[u8],
         opts: &PublishOptions,
-        plan: Option<FilterId>,
+        asked: &Asked,
     ) -> Result<usize, FanoutError> {
         if !opts.allowed_destination.allows_remote() {
             return Ok(0);
@@ -8201,14 +8230,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         {
             self.on_publish_legs(
                 droppable,
-                |tx| self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx),
-                |tx| self.publish_to_groups_on(keyexpr, wire, payload, opts, tx),
+                |tx| self.publish_to_link_on(keyexpr, wire, payload, opts, asked, tx),
+                |tx| self.publish_to_groups_on(keyexpr, wire, payload, opts, asked, tx),
             )
         }
         #[cfg(not(all(not(wz_round), feature = "group")))]
         {
             self.on_faces(droppable, |tx| {
-                self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx)
+                self.publish_to_link_on(keyexpr, wire, payload, opts, asked, tx)
             })
         }
     }
@@ -8228,8 +8257,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         wire: &WireKey,
         payload: &[u8],
         opts: &PublishOptions,
+        asked: &Asked,
         tx: LinkTx<'_, C>,
     ) -> Result<usize, FanoutError> {
+        if asked.was_held_back() {
+            return Ok(0);
+        }
         let meta = opts.push_metadata();
         let congestion = meta.qos.unwrap_or(QosLevel::DEFAULT).congestion();
         let droppable = face_send::droppable(opts.reliable_bool(), congestion);
@@ -8244,6 +8277,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 };
             }
         };
+        if Self::held_back_in(&core.0, asked) {
+            return Ok(0);
+        }
         if NamedKey::literal(keyexpr).is_none() {
             return Err(FanoutError::ExceedsCapacity);
         }
@@ -8272,9 +8308,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         wire: &WireKey,
         payload: &[u8],
         opts: &PublishOptions,
-        plan: Option<FilterId>,
+        asked: &Asked,
         tx: LinkTx<'_, C>,
     ) -> Result<usize, FanoutError> {
+        if asked.was_held_back() {
+            return Ok(0);
+        }
         let meta = opts.push_metadata();
         // zenoh's `is_droppable` (`face_send::droppable`). A message with no QoS of its own is sent
         // with the default's, as the send reads it.
@@ -8287,6 +8326,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // waits behind it.
         #[cfg(not(wz_round))]
         if !droppable && <CoopForm as ThreadForm>::OTHER_THREADS {
+            // The wait for room comes before the session is taken, so the filter is asked first,
+            // by a take of its own: a put the filter holds back waits for nothing.
+            if tx.alone_wire().is_some() && self.held_back_alone(asked) {
+                return Ok(0);
+            }
             match tx.wait_for_room(opts.priority_band()) {
                 Ok(wz_session_core::session_actions::WireRoom::Send) => {}
                 // The drop the send would have made past its wait, settled by the wait.
@@ -8306,8 +8350,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 faces,
                 told,
             } => {
+                // A put handed off is sent by a later holder, which asks no filter: one the filter
+                // holds back is not handed.
                 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
-                self.hand_off(keyexpr, payload, opts, faces);
+                if !self.held_back_alone(asked) {
+                    self.hand_off(keyexpr, payload, opts, faces);
+                }
                 return if told {
                     Err(FanoutError::HeldConduit)
                 } else {
@@ -8315,13 +8363,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 };
             }
         };
+        if Self::held_back_in(&core.0, asked) {
+            return Ok(0);
+        }
         let put = Publication {
             keyexpr,
             wire,
             payload,
             opts,
             meta: &meta,
-            plan,
+            plan: asked.filter,
         };
         // A blocking leg that holds its face alone is sent with that face's send place held and
         // nothing of the session, as zenoh-pico's blocking put sends under its transmit lock
@@ -8401,7 +8452,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// A publish to the session's links and its own subscribers
     /// (`SessionEngine::publish_on_wire_all`), of the publisher whose write filter is `plan` when
-    /// one made it ([`Publication::plan`]).
+    /// one made it ([`Publication::plan`]): `Suppressed`, with nothing sent to a link or to a
+    /// subscriber of the session, when that filter holds it back.
     #[inline(never)]
     fn publish_everywhere(
         &self,
@@ -8410,17 +8462,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         payload: &[u8],
         opts: &PublishOptions,
         plan: Option<FilterId>,
-    ) -> Result<usize, FanoutError> {
+    ) -> FilteredPut {
         // This engine numbers none of its links, offers no frame without waiting and reserves
         // none, so a publish that states a set of links, a retry or the all-or-none form is
-        // refused by name before anything is sent, to a link or to a subscriber of the session.
-        StatementNotHonoured::of_publish(opts)?;
+        // refused by name before anything is sent, to a link or to a subscriber of the session:
+        // a refusal of the call, whatever its filter answers.
+        if let Err(refused) = StatementNotHonoured::of_publish(opts) {
+            return FilteredPut::Sent(Err(refused.into()));
+        }
         // The link first, then the session's own subscribers, as zenoh-pico's `_z_write` does,
-        // and nothing local when the link refused it.
-        let sent = self.publish_to_link(keyexpr, wire, payload, opts, plan)?;
+        // and nothing local when the link refused it. The filter is asked by the link's first leg
+        // that holds the session, and here, by a take of its own, when no leg did.
+        let asked = Asked::new(plan);
+        let sent = self.publish_to_link(keyexpr, wire, payload, opts, &asked);
+        if self.held_back_alone(&asked) {
+            return FilteredPut::Suppressed;
+        }
+        let sent = match sent {
+            Ok(sent) => sent,
+            Err(error) => return FilteredPut::Sent(Err(error)),
+        };
         #[cfg(feature = "local-subscriber")]
-        let sent = sent.saturating_add(self.publish_to_subscribers(keyexpr, payload, opts)?);
-        Ok(sent)
+        let sent = match self.publish_to_subscribers(keyexpr, payload, opts) {
+            Ok(more) => sent.saturating_add(more),
+            Err(error) => return FilteredPut::Sent(Err(error)),
+        };
+        FilteredPut::Sent(Ok(sent))
     }
 
     /// Send `put` on from the face whose link found every outbound slot of the session held, and
@@ -10089,6 +10156,38 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         !Self::filters_left_unasked(core) && Self::filter_active_in(core, id)
     }
 
+    /// Whether the filter `asked` names holds its put back ([`Self::holds_back_in`]), read under
+    /// `core` by the first leg of the put that holds the session and kept for the legs after it.
+    fn held_back_in(core: &Core<L, C>, asked: &Asked) -> bool {
+        let Some(filter) = asked.filter else {
+            return false;
+        };
+        if let Some(held) = asked.held_back.get() {
+            return held;
+        }
+        let held = Self::holds_back_in(core, filter);
+        asked.held_back.set(Some(held));
+        held
+    }
+
+    /// [`Self::held_back_in`] by a take of its own: for a put none of whose legs held the session
+    /// (no link took it, its destination admits no peer, or it was dropped before), and for one
+    /// whose leg waits for its link's room before it takes the session. A closed session holds
+    /// nothing back, as `SessionEngine::write_filter_holds_back` answers.
+    fn held_back_alone(&self, asked: &Asked) -> bool {
+        let Some(filter) = asked.filter else {
+            return false;
+        };
+        if let Some(held) = asked.held_back.get() {
+            return held;
+        }
+        let held = self
+            .live()
+            .is_some_and(|core| Self::holds_back_in(&core.0, filter));
+        asked.held_back.set(Some(held));
+        held
+    }
+
     /// Whether the session holds a group the write filters do not ask, which is sent a write
     /// whatever a filter says ([`Self::holds_back_in`]).
     fn filters_left_unasked(core: &Core<L, C>) -> bool {
@@ -10550,7 +10649,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        self.publish_everywhere(keyexpr, wire, payload, opts, None)
+        match self.publish_everywhere(keyexpr, wire, payload, opts, None) {
+            FilteredPut::Sent(sent) => sent,
+            // A publish no publisher made has no filter to hold it back.
+            FilteredPut::Suppressed | FilteredPut::NotPlain => Ok(0),
+        }
     }
 
     #[inline(never)]
@@ -11085,17 +11188,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         opts: Option<&PublishOptions>,
     ) -> FilteredPut {
         if let Some(opts) = opts {
-            if self.write_filter_holds_back(filter) {
-                return FilteredPut::Suppressed;
-            }
-            // The publisher's plan writes the put where it is a plain one on the plan's key.
-            return FilteredPut::Sent(self.publish_everywhere(
-                keyexpr,
-                wire,
-                payload,
-                opts,
-                Some(filter),
-            ));
+            // The publisher's plan writes the put where it is a plain one on the plan's key, and
+            // its filter is asked under the take the put's first leg makes.
+            return self.publish_everywhere(keyexpr, wire, payload, opts, Some(filter));
         }
         // A write that brings nothing of its own goes in the plain form its filter's row keeps.
         self.put_through_filter(filter, keyexpr, wire, payload, None)

@@ -100,6 +100,58 @@ fn a_plain_put_through_a_write_filter_takes_the_session_once() {
     );
 }
 
+/// A put with options of a publisher asks its write filter under the take its own leg makes: held
+/// back, it takes the session once and sends nothing; let through, each takes it once and is sent.
+/// Turned red by a put with options that asks its filter by a take of its own before it publishes,
+/// or by one held back whose leg still sends.
+#[test]
+fn a_put_with_options_asks_its_filter_under_its_own_take() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let filter = filter_on(&engine, "demo/x");
+    until(&engine, "the router to see the Interest", || {
+        router.seen(|s| s.interests) > 0
+    });
+    let options = PublishOptions::put().with_attachment(b"a");
+
+    let before = takes(&engine);
+    assert_eq!(
+        engine.publish_filtered(filter, "demo/x", &WireKey::literal(), b"v", Some(&options)),
+        FilteredPut::Suppressed,
+        "no subscriber yet: the put is held back"
+    );
+    assert_eq!(
+        takes(&engine) - before,
+        1,
+        "a held-back put with options takes it once"
+    );
+
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(&engine, "the filter to open", || {
+        !engine.write_filter_active(filter)
+    });
+    let before = takes(&engine);
+    for _ in 0..3 {
+        assert!(matches!(
+            engine.publish_filtered(filter, "demo/x", &WireKey::literal(), b"v", Some(&options)),
+            FilteredPut::Sent(Ok(_))
+        ));
+    }
+    assert_eq!(
+        takes(&engine) - before,
+        3,
+        "one take a put with options that is sent"
+    );
+    until(&engine, "the router to receive the puts", || {
+        router.seen(|s| s.pushes) == 3
+    });
+    assert_eq!(
+        router.seen(|s| s.pushes),
+        3,
+        "and the held-back one was not sent"
+    );
+}
+
 /// How many times what the peers declared was searched since the open.
 fn looks(engine: &Engine) -> usize {
     engine.peer_looks()
