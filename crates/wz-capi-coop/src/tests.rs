@@ -3042,7 +3042,10 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
     use crate::arena::{AllocatorMemory, ArenaPlan, ArenaRefused};
     use crate::OpenKeyIds;
     use core::alloc::Layout;
-    use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+    #[cfg(not(wz_on_use))]
+    use wz_session_core::bounded::Arena;
+    use wz_session_core::bounded::ARENA_ALIGN;
+    #[cfg(not(wz_on_use))]
     use wz_session_core::byte_cells::LentByteCells;
     use wz_session_core::policy::SessionPolicy;
 
@@ -3068,12 +3071,17 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
     .expect("the session opens");
     let other = Router::start(CatchAll::None);
     let without = open(&other);
+    // Where the tables take their memory on use the place is an allocation of its own, and the
+    // arena is the same with it or without it.
+    #[cfg(not(wz_on_use))]
     let place_rows = Arena::span(LentByteCells::FLAG_BYTES)
         .and_then(|flag| Arena::span(layout.size()).map(|bytes| flag + bytes));
+    #[cfg(wz_on_use)]
+    let place_rows = Some(0);
     assert_eq!(
         Some(holding.arena_bytes()),
         place_rows.map(|rows| without.arena_bytes() + rows),
-        "the place is two spans of the arena"
+        "the place is two spans of the arena, or none of it on use"
     );
 
     let drive = Engine::into_drive(holding.clone());
@@ -3082,6 +3090,11 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         .expect("the open was asked for a place");
     assert!(place.bytes() >= layout.size());
     assert_eq!(place.as_ptr().as_ptr() as usize % ARENA_ALIGN, 0);
+    assert_eq!(
+        holding.arena_holds(place.as_ptr().as_ptr()),
+        cfg!(not(wz_on_use)),
+        "the place lies in the arena, or apart from it where the tables take their memory on use"
+    );
     // SAFETY: the place holds a `Handle`'s layout, nothing else uses it, and the engine stands.
     unsafe {
         place
@@ -3181,11 +3194,15 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
     assert_eq!(other.place_counts(EntityKind::Subscriber), (1, rows));
 
     let first = lent.pop().expect("a lent place");
+    #[cfg(not(wz_on_use))]
     let at = first.as_ptr();
     assert_eq!(one.give_back_place(first), Ok(()));
     let again = one
         .claim_place(EntityKind::Subscriber)
         .expect("a place given back is lent again");
+    // The arena's table lends the place again; on use a place is an allocation of its own, which
+    // the allocator need not hand out at the same address.
+    #[cfg(not(wz_on_use))]
     assert_eq!(again.as_ptr(), at);
     lent.push(again);
     for place in lent {

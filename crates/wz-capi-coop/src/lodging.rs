@@ -11,23 +11,47 @@
 //! no lock of the session held, so the head's mark is atomic. A value lodged may outlive the
 //! session, so each place lent holds a count of the memory the arena lies in, given back after
 //! the mark is cleared: the memory goes with the last of the session and the values lodged in it.
+//!
+//! Where the session's tables take their memory on use no table is laid out: each place is an
+//! allocation of its own, taken as it is lent and given back by the last count of what lies there,
+//! its head the cell's layout, so it is given back from any thread with nothing of the session
+//! read. A value lodged then keeps no memory of the session's.
 
 use core::alloc::Layout;
 use core::ffi::c_void;
 use core::ptr::NonNull;
+#[cfg(not(wz_on_use))]
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use wz_capi_port::lodge::LentBytes;
+#[cfg(not(wz_on_use))]
 use wz_runtime_coop::kept::Kept;
-use wz_session_core::bounded::{TableLender, ARENA_ALIGN};
+#[cfg(not(wz_on_use))]
+use wz_session_core::bounded::TableLender;
+use wz_session_core::bounded::ARENA_ALIGN;
 
 /// What lies before each place: whether it is lent, and the count of the memory the place lies
 /// in, one of which each place lent holds.
+#[cfg(not(wz_on_use))]
 #[repr(C)]
 struct PlaceHead {
     held: AtomicBool,
     keeper: NonNull<Kept>,
 }
+
+/// What lies before each place where the tables take their memory on use: the layout of the
+/// allocation the place lies in, which its give-back hands the allocator.
+#[cfg(wz_on_use)]
+#[repr(C)]
+struct OwnHead {
+    cell: Layout,
+}
+
+/// The head before each place, as the session's form keeps its places.
+#[cfg(not(wz_on_use))]
+type Head = PlaceHead;
+#[cfg(wz_on_use)]
+type Head = OwnHead;
 
 /// `bytes` rounded up to `align`, a power of two; `None` past the address space.
 const fn round_up(bytes: usize, align: usize) -> Option<usize> {
@@ -72,7 +96,7 @@ impl LodgingRows {
     /// A table of `count` places of `place`. `None` when a cell asks for more alignment than a
     /// span of the arena starts on, or the table is past the address space.
     pub(crate) const fn of(place: Layout, count: usize) -> Option<Self> {
-        let head_align = core::mem::align_of::<PlaceHead>();
+        let head_align = core::mem::align_of::<Head>();
         let cell_align = if place.align() > head_align {
             place.align()
         } else {
@@ -81,7 +105,7 @@ impl LodgingRows {
         if cell_align > ARENA_ALIGN {
             return None;
         }
-        let offset = match round_up(core::mem::size_of::<PlaceHead>(), place.align()) {
+        let offset = match round_up(core::mem::size_of::<Head>(), place.align()) {
             Some(offset) => offset,
             None => return None,
         };
@@ -144,6 +168,7 @@ impl LodgingRows {
 
     /// The span of the table, lent by `lend` ([`LodgingSpan::kept_by`] makes the table over
     /// it); a span of no place for a table of none, which lends nothing from the arena.
+    #[cfg(not(wz_on_use))]
     pub(crate) fn lent_from(&self, lend: &mut TableLender<'_>) -> LodgingSpan {
         if self.count == 0 {
             return LodgingSpan::default();
@@ -159,11 +184,13 @@ impl LodgingRows {
 }
 
 /// The span of an arena a table of lodging places lies in, its heads not written yet.
+#[cfg(not(wz_on_use))]
 pub(crate) struct LodgingSpan {
     first: NonNull<u8>,
     rows: LodgingRows,
 }
 
+#[cfg(not(wz_on_use))]
 impl Default for LodgingSpan {
     /// A span of no place.
     fn default() -> Self {
@@ -174,6 +201,7 @@ impl Default for LodgingSpan {
     }
 }
 
+#[cfg(not(wz_on_use))]
 impl LodgingSpan {
     /// The table over this span, every place free, each place lent holding a count of
     /// `keeper`, the count of the memory the span lies in.
@@ -204,6 +232,7 @@ impl LodgingSpan {
 
 /// The places an arena lent for lodged values ([`LodgingSpan::kept_by`]): a handle, copied into
 /// the engine that lends from it.
+#[cfg(not(wz_on_use))]
 #[derive(Clone, Copy)]
 pub(crate) struct LodgingPlaces {
     first: NonNull<u8>,
@@ -213,10 +242,13 @@ pub(crate) struct LodgingPlaces {
 // SAFETY: the table is an address in a session's memory and its shape; a place is taken and given
 // back through its head's atomic mark alone, so handing the table to another thread shares nothing
 // unsynchronised.
+#[cfg(not(wz_on_use))]
 unsafe impl Send for LodgingPlaces {}
 // SAFETY: as for `Send`.
+#[cfg(not(wz_on_use))]
 unsafe impl Sync for LodgingPlaces {}
 
+#[cfg(not(wz_on_use))]
 impl LodgingPlaces {
     /// The head of cell `at`, below the table's count.
     fn head(&self, at: usize) -> NonNull<PlaceHead> {
@@ -282,6 +314,7 @@ impl LodgingPlaces {
 /// # Safety
 /// `context` is the head of a place [`LodgingPlaces::lend`] lent, given back once, with nothing
 /// left in the place.
+#[cfg(not(wz_on_use))]
 unsafe fn give_back(context: *mut c_void) {
     let head = context.cast::<PlaceHead>();
     // Read before the mark is cleared: a lend after it owns the head, and the release after it may
@@ -294,32 +327,129 @@ unsafe fn give_back(context: *mut c_void) {
     unsafe { Kept::release(keeper) };
 }
 
+/// The places for lodged values where the tables take their memory on use: the table's shape, by
+/// which each place is an allocation of its own of a cell, taken as it is lent.
+#[cfg(wz_on_use)]
+#[derive(Clone, Copy)]
+pub(crate) struct LodgingPlaces {
+    rows: LodgingRows,
+}
+
+#[cfg(wz_on_use)]
+impl LodgingPlaces {
+    /// The places `rows` lays out, none taken.
+    pub(crate) const fn own(rows: LodgingRows) -> Self {
+        Self { rows }
+    }
+
+    /// A place of at least `layout`, an allocation of its own of one cell, given back by the last
+    /// count of what is lodged there, or at once when it is dropped unused; `None` when the plan
+    /// names no place, the places are smaller or less aligned than `layout`, or the allocator
+    /// refuses the cell. The places the ABI lodges are its session's own, one of each value, so
+    /// no count bounds them beyond the plan's layout.
+    pub(crate) fn lend(&self, layout: Layout) -> Option<LentBytes> {
+        let place = self.rows.place;
+        if self.rows.count == 0 || layout.size() > place.size() || layout.align() > place.align() {
+            return None;
+        }
+        let align = place.align().max(core::mem::align_of::<OwnHead>());
+        let cell = Layout::from_size_align(self.rows.stride(), align).ok()?;
+        // SAFETY: the cell holds a head, so its size is not zero.
+        let head = NonNull::new(unsafe { alloc::alloc::alloc(cell) })?.cast::<OwnHead>();
+        // SAFETY: the cell is aligned for its head and its place (`LodgingRows::of`), the head at
+        // its start and the place `offset` bytes in, inside the cell; the head is written once,
+        // here, and the place holds no value.
+        Some(unsafe {
+            head.as_ptr().write(OwnHead { cell });
+            LentBytes::new(
+                NonNull::new_unchecked(head.as_ptr().cast::<u8>().add(self.rows.offset)),
+                place,
+                give_back_own,
+                head.as_ptr().cast::<c_void>(),
+            )
+        })
+    }
+}
+
+/// Give back the cell whose head is at `context` to the allocator.
+///
+/// # Safety
+/// `context` is the head of a place [`LodgingPlaces::lend`] lent, given back once, with nothing
+/// left in the place.
+#[cfg(wz_on_use)]
+unsafe fn give_back_own(context: *mut c_void) {
+    // SAFETY: the caller's: the head was written by the lend and stands until this gives it back.
+    let cell = unsafe { context.cast::<OwnHead>().read() }.cell;
+    // SAFETY: the cell was taken by the lend for this layout, given back once, here.
+    unsafe { alloc::alloc::dealloc(context.cast::<u8>(), cell) };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(wz_on_use))]
     use core::sync::atomic::AtomicUsize;
     use wz_capi_port::lodge::{Lent, Strong};
+    #[cfg(not(wz_on_use))]
     use wz_session_core::bounded::Arena;
 
     /// How many times a test's memory was given back by its last count.
+    #[cfg(not(wz_on_use))]
     static GIVEN: AtomicUsize = AtomicUsize::new(0);
 
     /// The last count of a test's memory let go: counted, as there is nothing to give back.
+    #[cfg(not(wz_on_use))]
     unsafe fn count_given(_kept: NonNull<Kept>) {
         GIVEN.fetch_add(1, Ordering::Relaxed);
     }
 
     /// A buffer of the test's, aligned as an arena's spans start.
+    #[cfg(not(wz_on_use))]
     #[repr(C, align(16))]
     struct Buffer([u8; 512]);
 
+    #[cfg(not(wz_on_use))]
     const _: () = assert!(core::mem::align_of::<Buffer>() == ARENA_ALIGN);
+
+    /// Where the tables take their memory on use each place lent is a cell of its own, so two
+    /// lends of a table of one place both answer, a place past the plan's layout is refused, a
+    /// place is handed at the plan's layout, and one lodged goes back with its last count; a plan
+    /// of no place lends none. Turned red by a lend that shares one cell, takes a layout past the
+    /// plan's, or by a give-back that hands the allocator another layout than the cell's (an
+    /// allocator that checks it, or the interpreter, then fails).
+    #[cfg(wz_on_use)]
+    #[test]
+    fn an_on_use_lodging_place_is_a_cell_of_its_own_given_back_by_its_last_count() {
+        let layout = Lent::<u64>::LAYOUT;
+        let places = LodgingPlaces::own(LodgingRows::of(layout, 1).expect("a table of one place"));
+        let past = Layout::from_size_align(layout.size() + 1, 1).expect("a layout");
+        assert!(
+            places.lend(past).is_none(),
+            "a place past the plan's is refused"
+        );
+        let first = places.lend(layout).expect("a place");
+        assert_eq!(first.layout(), layout, "lent at the plan's layout");
+        let second = places
+            .lend(Layout::new::<u8>())
+            .expect("another place: each is a cell of its own");
+        drop(first);
+        let count = Strong::new_at(Lent::<u64>::of_bytes(second).expect("a lodging fits"), 7);
+        assert_eq!(Strong::strong_count(&count), 1);
+        drop(count);
+        assert!(
+            LodgingPlaces::own(LodgingRows::NONE)
+                .lend(Layout::new::<u8>())
+                .is_none(),
+            "a plan of no place lends none"
+        );
+    }
 
     /// Each place of a table is lent once until it is given back, every place lent refuses the
     /// next lend, a layout past the places is refused, and the memory's count is held by each
     /// place lent and let go of after its mark: the memory goes with the last of the session and
     /// the values lodged in it. Turned red by a mark that is not cleared, a lend that takes no
     /// count of the memory, or a give-back that releases no count.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn a_lodging_place_is_lent_once_and_keeps_the_memory_it_lies_in() {
         let layout = Lent::<u64>::LAYOUT;
@@ -392,6 +522,7 @@ mod tests {
     /// A table of no place asks the arena for nothing and lends nothing; one whose cell asks for
     /// more alignment than an arena's spans start on is no table. Turned red by a table of none
     /// that takes a span or lends, or an alignment let through.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn a_table_of_no_place_lends_nothing_and_a_misaligned_one_is_refused() {
         let past = Layout::from_size_align(8, ARENA_ALIGN * 2).expect("a layout");

@@ -201,7 +201,9 @@ use crate::engine::{CoopTables, FACE_SET_BYTES, ROUTER_LEND_BYTES};
 use crate::form::CoopForm;
 #[cfg(not(wz_on_use))]
 use crate::form::SessionLock;
-use crate::lodging::{LodgingRows, LodgingSpan};
+use crate::lodging::LodgingRows;
+#[cfg(not(wz_on_use))]
+use crate::lodging::LodgingSpan;
 use crate::open_source::EndpointList;
 #[cfg(all(wz_round, wz_lent))]
 use crate::round::CALLBACK_BYTES;
@@ -599,16 +601,19 @@ const ENTITY_ROWS: usize = 2 * cfg!(wz_lent) as usize;
 /// The links' cells, their gates', their sessions' actions' and the halves those hold, each a
 /// table of flags and cells ([`ArenaPlan::holding_cells`]).
 const CELL_ROWS: usize = 8;
-/// The ABI's handle's flag and place ([`ArenaPlan::holding`]).
-const HANDLE_ROWS: usize = 2;
+/// The ABI's handle's flag and place ([`ArenaPlan::holding`]): none where the tables take their
+/// memory on use, whose handle's place is an allocation of its own (`OwnHandle`).
+const HANDLE_ROWS: usize = 2 * !cfg!(wz_on_use) as usize;
 /// The flags and the places the ABI keeps its objects of the session's entities in, of each kind
 /// the session keeps rows of ([`ArenaPlan::holding`]): publishers, subscribers and queriers, and
 /// queryables (`queryable`), tokens and liveliness subscribers (`liveliness`), pending gets
 /// (`query`), pending liveliness gets (`liveliness-get`), matching listeners, declaration watches
 /// (`remote-declaration-watch` or `declarations-synced-event`), transport and link events
 /// listeners (`connectivity`) and advanced publishers and subscribers (`advanced`), as many as the
-/// ABI asks places of, at most these.
+/// ABI asks places of, at most these. None where the tables take their memory on use, whose
+/// places are each an allocation of their own, taken as the ABI claims it (`EntityPlaces`).
 const ENTITY_PLACE_ROWS: usize = 2
+    * !cfg!(wz_on_use) as usize
     * (4 + cfg!(feature = "queryable") as usize
         + 2 * cfg!(feature = "liveliness") as usize
         + cfg!(feature = "query") as usize
@@ -651,7 +656,7 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
 
 /// The places for values lodged by counts, the ABI's and the engine's, one table of cells that
 /// each carry their own mark ([`ArenaPlan::holding`]).
-const LODGING_ROWS: usize = 1;
+const LODGING_ROWS: usize = !cfg!(wz_on_use) as usize;
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
 /// (`advanced-cache`): none where the tables take their memory on use, whose ring takes its own
 /// bytes at the caches' first use.
@@ -678,6 +683,7 @@ const ADMISSION_ROWS: usize = cfg!(all(feature = "link-admission", not(wz_on_use
 pub use wz_capi_port::{EntityKind, EntityPlace, ENTITY_KINDS};
 
 /// The two parts of `kind`'s places, the flags and the places.
+#[cfg(not(wz_on_use))]
 const fn place_parts(kind: EntityKind) -> [ArenaPart; 2] {
     match kind {
         EntityKind::Publisher => [ArenaPart::PublisherPlaceFlags, ArenaPart::PublisherPlaces],
@@ -1736,6 +1742,7 @@ pub struct PlaceRows {
 }
 
 /// The places a session's arena lent the ABI ([`PlaceRows::lent_from`]).
+#[cfg(not(wz_on_use))]
 pub(crate) struct PlaceTables {
     /// The place of the ABI's handle, a table of one buffer, `None` for a plan with no place.
     pub(crate) handle: Option<LentByteCells>,
@@ -1755,9 +1762,16 @@ impl PlaceRows {
         lodging: LodgingRows::NONE,
     };
 
+    /// The places for values lodged by counts.
+    #[cfg(wz_on_use)]
+    pub(crate) const fn lodging(&self) -> LodgingRows {
+        self.lodging
+    }
+
     /// The places, lent by `lend` in the order the plan laid them out: the handle's first, then
     /// each kind's in the order of [`EntityKind::ALL`], a place for each row `rows` counts of
     /// the kind, the session's own count, which the plan reads rather than keeps a second copy of.
+    #[cfg(not(wz_on_use))]
     pub(crate) fn lent_from(&self, lend: &mut TableLender<'_>, rows: EntityRows) -> PlaceTables {
         let handle = (self.handle_bytes != 0).then(|| lend.byte_cells(self.handle_bytes, 1));
         let mut entities = EntityPlaces::NONE;
@@ -2530,6 +2544,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// holds one. The claim is never given back: what holds the buffer holds it until the session
     /// is let go, and a buffer dropped then would write its cell's flag into an arena given back
     /// before it. Refused as an arena with no room for a table lent no buffer.
+    #[cfg(not(wz_on_use))]
     pub(crate) fn claim_handle(
         &self,
         handle: Option<LentByteCells>,
@@ -2769,6 +2784,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             }
             if handle.size() != 0 && self.places.handle_bytes == 0 {
                 self.places.handle_bytes = handle.size();
+                // Where the tables take their memory on use the place is taken at the open apart
+                // from the arena (`OwnHandle`), and none is laid out.
+                #[cfg(not(wz_on_use))]
                 self.put_table(
                     [ArenaPart::SessionHandleFlag, ArenaPart::SessionHandle],
                     1,
@@ -2791,6 +2809,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             if place.size() == 0 || count == 0 || self.entity_bytes(kind) != 0 {
                 continue;
             }
+            // Where the tables take their memory on use each place is taken as it is claimed
+            // (`EntityPlaces::claim`), and none is laid out.
+            #[cfg(not(wz_on_use))]
             self.put_table(place_parts(kind), count, place.size());
             if let Some((_, [bytes, ..])) = self.places.entity_bytes.split_at_mut_checked(at) {
                 *bytes = place.size();
@@ -2813,6 +2834,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         };
         if rows.count() != 0 && self.places.lodging.count() == 0 {
             self.places.lodging = rows;
+            // Where the tables take their memory on use each place is taken as it is lent
+            // (`LodgingPlaces::lend`), and none is laid out.
+            #[cfg(not(wz_on_use))]
             self.put(ArenaPart::LodgingPlaces, rows.count(), rows.stride());
         }
         Ok(())
@@ -3845,11 +3869,13 @@ impl HandlePlace {
 /// The places a session's arena lent for the ABI's entities ([`HeldPlaces`]), a table of each kind
 /// it holds places of. A place is lent to the ABI by its address and given back by it, each under
 /// the session's lock, which every table of the arena is reached under.
+#[cfg(not(wz_on_use))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct EntityPlaces {
     cells: [Option<LentByteCells>; ENTITY_KINDS],
 }
 
+#[cfg(not(wz_on_use))]
 impl EntityPlaces {
     /// No place of any kind.
     pub(crate) const NONE: Self = Self {
@@ -3896,7 +3922,159 @@ impl EntityPlaces {
     }
 }
 
+/// One kind's places where the tables take their memory on use: the bytes of each, how many the
+/// session's limit of the kind admits, and how many are lent.
+#[cfg(wz_on_use)]
+#[derive(Debug, Default)]
+struct OwnKind {
+    bytes: usize,
+    count: usize,
+    lent: core::cell::Cell<usize>,
+}
+
+/// The ABI's places for the session's entities where the tables take their memory on use: each
+/// place an allocation of its own, taken as the ABI claims it and given back with it, as many of a
+/// kind at once as the session keeps rows of the kind, as the arena's table of the kind holds. A
+/// place starts [`ARENA_ALIGN`] bytes into its allocation, past the address of the table that
+/// lent it, so a place is taken back by the session that lent it alone. Lent and given back under
+/// the session's lock, as the arena's places are; the table lies in the session's state, which
+/// does not move while a place is lent.
+#[cfg(wz_on_use)]
+#[derive(Debug, Default)]
+pub(crate) struct EntityPlaces {
+    kinds: [OwnKind; ENTITY_KINDS],
+}
+
+#[cfg(wz_on_use)]
+impl EntityPlaces {
+    /// The places the plan names (`places`), as many of a kind as `rows` counts of it. Nothing
+    /// is taken now.
+    pub(crate) fn counted(places: &PlaceRows, rows: EntityRows) -> Self {
+        let mut made = Self::default();
+        for at in places.held.places() {
+            if let (Some(kind), Some(&bytes), Some(&count)) = (
+                made.kinds.get_mut(at),
+                places.entity_bytes.get(at),
+                rows.kinds.get(at),
+            ) {
+                kind.bytes = bytes;
+                kind.count = count;
+            }
+        }
+        made
+    }
+
+    /// The allocation of a place of `bytes`, with the owner's address before it.
+    fn layout(bytes: usize) -> Option<Layout> {
+        Layout::from_size_align(bytes.checked_add(ARENA_ALIGN)?, ARENA_ALIGN).ok()
+    }
+
+    /// The address a place's allocation records its lender by.
+    fn owner(&self) -> *const Self {
+        self
+    }
+
+    /// A place for an entity of `kind`, or `None` when as many as the session keeps rows of the
+    /// kind are lent, the plan names no place of it, or the allocator refuses it. The place is the
+    /// ABI's until it gives it back ([`Self::give_back`]).
+    pub(crate) fn claim(&self, kind: EntityKind) -> Option<EntityPlace> {
+        let of = self.kinds.get(kind as usize)?;
+        if of.bytes == 0 || of.lent.get() >= of.count {
+            return None;
+        }
+        let layout = Self::layout(of.bytes)?;
+        // SAFETY: the layout's size is not zero, the owner's address before the place.
+        let block = NonNull::new(unsafe { alloc::alloc::alloc(layout) })?;
+        // SAFETY: the block is aligned to `ARENA_ALIGN`, as a pointer's alignment divides, and
+        // the place starts `ARENA_ALIGN` bytes in, inside the block and aligned as it is.
+        let base = unsafe {
+            block.cast::<*const Self>().as_ptr().write(self.owner());
+            NonNull::new_unchecked(block.as_ptr().add(ARENA_ALIGN))
+        };
+        // Below the count, so below `usize::MAX`.
+        of.lent.set(of.lent.get().wrapping_add(1));
+        // SAFETY: the place at `base` was taken for `kind` just now, and this is its one token.
+        Some(unsafe { EntityPlace::lent(base, kind) })
+    }
+
+    /// Give back `place`, or hand it back when it is no place this table lent: one of another
+    /// session, which only that session takes back.
+    pub(crate) fn give_back(&self, place: EntityPlace) -> Result<(), EntityPlace> {
+        let Some(of) = self.kinds.get(place.kind() as usize) else {
+            return Err(place);
+        };
+        let Some(layout) = Self::layout(of.bytes) else {
+            return Err(place);
+        };
+        // SAFETY: an `EntityPlace` is a place a session lent and holds now; one this form lent
+        // starts `ARENA_ALIGN` bytes past its allocation, which records its lender first.
+        let block = unsafe { place.as_ptr().as_ptr().sub(ARENA_ALIGN) };
+        // SAFETY: as above: the word before the place is its lender's address.
+        let owner = unsafe { block.cast::<*const Self>().read() };
+        if owner != self.owner() || of.lent.get() == 0 {
+            return Err(place);
+        }
+        // SAFETY: the block was taken by `claim` for this kind's layout, and the place is
+        // consumed, so it goes back once; what the ABI kept there it let go of before.
+        unsafe { alloc::alloc::dealloc(block, layout) };
+        of.lent.set(of.lent.get().saturating_sub(1));
+        Ok(())
+    }
+
+    /// How many places of `kind` are lent, and how many the session keeps rows for.
+    #[cfg(test)]
+    pub(crate) fn counts(&self, kind: EntityKind) -> (usize, usize) {
+        self.kinds
+            .get(kind as usize)
+            .map_or((0, 0), |of| (of.lent.get(), of.count))
+    }
+}
+
+/// The place of the ABI's handle of the session where the tables take their memory on use: an
+/// allocation of its own of the plan's bytes, zeroed and aligned to [`ARENA_ALIGN`] as the arena's
+/// place is, taken at the open and given back when the session's state is let go.
+#[cfg(wz_on_use)]
+#[derive(Debug)]
+pub(crate) struct OwnHandle {
+    place: HandlePlace,
+}
+
+#[cfg(wz_on_use)]
+impl OwnHandle {
+    /// A place of `bytes`, `None` for no bytes; refused when the allocator has no room for it.
+    pub(crate) fn taken(bytes: usize) -> Result<Option<Self>, ArenaRefused> {
+        if bytes == 0 {
+            return Ok(None);
+        }
+        let layout =
+            Layout::from_size_align(bytes, ARENA_ALIGN).map_err(|_| ArenaRefused::TooLarge)?;
+        // SAFETY: the layout's size is not zero.
+        let base = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) })
+            .ok_or(ArenaRefused::NoMemory { bytes })?;
+        Ok(Some(Self {
+            place: HandlePlace { base, bytes },
+        }))
+    }
+
+    /// The place, which stands while this does.
+    pub(crate) fn place(&self) -> HandlePlace {
+        self.place
+    }
+}
+
+#[cfg(wz_on_use)]
+impl Drop for OwnHandle {
+    fn drop(&mut self) {
+        let HandlePlace { base, bytes } = self.place;
+        if let Ok(layout) = Layout::from_size_align(bytes, ARENA_ALIGN) {
+            // SAFETY: `taken` took the block for this layout, given back once, here.
+            unsafe { alloc::alloc::dealloc(base.as_ptr(), layout) };
+        }
+    }
+}
+
 /// The places an open claims from its arena for the session's life (`ArenaPlan::claim_handle`).
+#[cfg(not(wz_on_use))]
 pub(crate) struct ClaimedPlaces {
     /// The place of the ABI's handle, `None` for a plan with no place.
     pub(crate) handle: Option<HandlePlace>,
@@ -3904,6 +4082,7 @@ pub(crate) struct ClaimedPlaces {
 
 /// The one buffer of `cells`, a table of one buffer, claimed and never given back:
 /// its place and length, `None` for a table lent no buffer.
+#[cfg(not(wz_on_use))]
 fn claimed(cells: LentByteCells) -> Option<(NonNull<u8>, usize)> {
     let buffer = cells.claim()?;
     let (base, len) = buffer.raw();
@@ -4437,6 +4616,7 @@ mod tests {
     /// a place for it. The plan holds the rows of the build's kinds alone (`ENTITY_PLACE_ROWS`),
     /// so only those are given rows. Turned red by a count read at a neighbour's index, a kind's
     /// places laid out under another kind's part, or places laid out for a kind of no row.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn each_kinds_places_take_its_own_rows_and_part() {
         const NAMES: [&str; ENTITY_KINDS] = [
@@ -4487,6 +4667,7 @@ mod tests {
     /// of its kind; a layout past the arena's alignment is refused though kinds with none lie
     /// before it. Turned red by a walk of the kinds that stops at the first kind with no places,
     /// never reaches the last, or lends a kind's table at a neighbour's place.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn the_places_of_each_kind_named_are_laid_out_and_lent_past_the_kinds_with_none() {
         const NAMED: [EntityKind; 3] = [
@@ -4550,6 +4731,7 @@ mod tests {
     /// The ABI's handle is laid out on the plan where the plan lies, once: its flag before its
     /// place, and a second ask of the same place adds no row. Turned red by a place laid out
     /// again, or a plan the ask leaves without the place it laid.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn a_plan_lays_out_the_handle_it_holds_once_where_it_lies() {
         let mut plan = empty_plan();
@@ -4619,6 +4801,64 @@ mod tests {
             .map(|cells| cells.as_ref().map(|cells| (cells.size(), cells.capacity())))
             .collect();
         assert_eq!(held, [None, Some((48, 3)), None, Some((64, 3))]);
+    }
+
+    /// Where the tables take their memory on use the plan holds the ABI's places, the handle's bytes
+    /// and each kind's, and lays none out; each kind's places are counted to the rows the session
+    /// keeps of it, each lent an allocation of its own aligned as a span starts, none past the
+    /// count, a place given back lent again, a place another table lent refused; the handle's place
+    /// is taken zeroed at the plan's bytes, none for none. Turned red by a row laid out for them
+    /// (`ArenaPlan::lay_held`), a count read off another kind or limit (`EntityPlaces::counted`),
+    /// a give-back that takes another table's place, or a handle's place not zeroed.
+    #[cfg(wz_on_use)]
+    #[test]
+    fn an_on_use_plan_holds_the_abis_places_and_lends_each_of_its_own() {
+        let mut plan = empty_plan();
+        plan.session.entities.kinds[0] = 2;
+        let place = Layout::new::<[u64; 3]>();
+        let held = HeldPlaces::handle(place)
+            .with_entity(EntityKind::Publisher, place)
+            .with_entity(EntityKind::Token, place);
+        plan.holding(&held).expect("the places fit");
+        assert_eq!(plan.rows().count(), 0, "no row is laid out for them");
+        assert_eq!(plan.handle_bytes(), place.size());
+        assert_eq!(plan.entity_bytes(EntityKind::Publisher), place.size());
+
+        let places = EntityPlaces::counted(plan.places(), plan.entities());
+        assert_eq!(places.counts(EntityKind::Publisher), (0, 2));
+        assert_eq!(places.counts(EntityKind::Token), (0, 0), "a kind of no row");
+        assert!(places.claim(EntityKind::Token).is_none());
+        let first = places.claim(EntityKind::Publisher).expect("a place");
+        let second = places.claim(EntityKind::Publisher).expect("another place");
+        assert!(
+            places.claim(EntityKind::Publisher).is_none(),
+            "none past the rows"
+        );
+        assert_eq!(first.as_ptr().as_ptr() as usize % ARENA_ALIGN, 0);
+        assert_eq!(places.counts(EntityKind::Publisher), (2, 2));
+        let other = EntityPlaces::counted(plan.places(), plan.entities());
+        let first = other
+            .give_back(first)
+            .expect_err("a table takes back no place another lent");
+        assert_eq!(places.give_back(first), Ok(()));
+        assert_eq!(places.counts(EntityKind::Publisher), (1, 2));
+        let again = places
+            .claim(EntityKind::Publisher)
+            .expect("a place given back is lent again");
+        assert_eq!(places.give_back(again), Ok(()));
+        assert_eq!(places.give_back(second), Ok(()));
+        assert_eq!(places.counts(EntityKind::Publisher), (0, 2));
+
+        let handle = OwnHandle::taken(plan.handle_bytes())
+            .expect("the allocator answers")
+            .expect("a place of the plan's bytes");
+        let at = handle.place();
+        assert_eq!(at.bytes(), place.size());
+        assert_eq!(at.as_ptr().as_ptr() as usize % ARENA_ALIGN, 0);
+        // SAFETY: the place is this test's, `bytes` bytes long, and stands while `handle` does.
+        let bytes = unsafe { core::slice::from_raw_parts(at.as_ptr().as_ptr(), at.bytes()) };
+        assert!(bytes.iter().all(|byte| *byte == 0), "zeroed at its taking");
+        assert!(OwnHandle::taken(0).expect("nothing asked").is_none());
     }
 
     /// A mask walks the places set in it once each, the lowest first, the first bit and the last

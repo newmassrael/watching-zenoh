@@ -3355,6 +3355,9 @@ fn selecting(mut limits: SessionLimits, id: &str, value: usize) -> Option<Sessio
 /// of pending liveliness gets as many as its liveliness gets', each kind under its own limit; a
 /// build that asks no get, or no liveliness get, lays none of the kind. Turned red by places
 /// counted by another limit, or a kind laid out in a build that cannot ask for it.
+// The places are laid out where the arena holds them; on use each is counted by
+// `EntityPlaces::counted` (`arena::tests`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_places_of_pending_gets_are_the_rows_of_a_table_of_them() {
     use crate::arena::{EntityKind, HeldPlaces};
@@ -3388,6 +3391,9 @@ fn the_places_of_pending_gets_are_the_rows_of_a_table_of_them() {
 /// The ABI's places of matching listeners are as many as the rows of the engine's table of them,
 /// counted by `MAX_MATCHING_LISTENERS`, in every build. Turned red by places counted by another
 /// limit, or none laid out for the kind.
+// The places are laid out where the arena holds them; on use each is counted by
+// `EntityPlaces::counted` (`arena::tests`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_places_of_matching_listeners_are_the_rows_of_their_table() {
     use crate::arena::{EntityKind, HeldPlaces};
@@ -3410,6 +3416,9 @@ fn the_places_of_matching_listeners_are_the_rows_of_their_table() {
 /// The ABI's places of declaration watches are as many as `MAX_DECL_WATCHES` admits in a build
 /// with the watch, and none without it. Turned red by places counted by another limit, or laid
 /// out in a build that has no watch to hold.
+// The places are laid out where the arena holds them; on use each is counted by
+// `EntityPlaces::counted` (`arena::tests`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_places_of_declaration_watches_are_counted_by_their_limit() {
     use crate::arena::{EntityKind, HeldPlaces};
@@ -3439,6 +3448,9 @@ fn the_places_of_declaration_watches_are_counted_by_their_limit() {
 /// The ABI's places of transport events listeners are as many as
 /// `MAX_TRANSPORT_EVENTS_LISTENERS` admits in a build with `connectivity`, and none without it.
 /// Turned red by places counted by another limit, or laid out in a build with no listener to hold.
+// The places are laid out where the arena holds them; on use each is counted by
+// `EntityPlaces::counted` (`arena::tests`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_places_of_transport_events_listeners_are_counted_by_their_limit() {
     use crate::arena::{EntityKind, HeldPlaces};
@@ -3468,6 +3480,9 @@ fn the_places_of_transport_events_listeners_are_counted_by_their_limit() {
 /// The ABI's places of link events listeners are as many as `MAX_LINK_EVENTS_LISTENERS` admits in
 /// a build with `connectivity`, and none without it, apart from the transport events listeners'.
 /// Turned red by places counted by another limit, or laid out in a build with no listener to hold.
+// The places are laid out where the arena holds them; on use each is counted by
+// `EntityPlaces::counted` (`arena::tests`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_places_of_link_events_listeners_are_counted_by_their_limit() {
     use crate::arena::{EntityKind, HeldPlaces};

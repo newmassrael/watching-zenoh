@@ -54,10 +54,15 @@ use crate::arena::OpenPlan;
 #[cfg(not(wz_on_use))]
 use crate::arena::EnginePlace;
 use crate::arena::{
-    ArenaMemory, ArenaPlan, ArenaRefused, ArenaRegion, ClaimedPlaces, DroppedOn, EntityKind,
-    EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenPlaces, OpenRegion,
-    OpenStorage, PlaceTables, PlanFrom, SessionArena, SessionRows, TransportTables,
+    ArenaMemory, ArenaPlan, ArenaRefused, ArenaRegion, DroppedOn, EntityKind, EntityPlace,
+    EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenPlaces, OpenRegion, OpenStorage,
+    PlanFrom, SessionArena, SessionRows, TransportTables,
 };
+// The places the arena lends the ABI: none where each is an allocation of its own.
+#[cfg(wz_on_use)]
+use crate::arena::OwnHandle;
+#[cfg(not(wz_on_use))]
+use crate::arena::{ClaimedPlaces, PlaceTables};
 use crate::form::{CoopForm, Latch};
 use crate::form::{
     LinkCount, LockForm, SessionLock, SharedCount, StateGuard, StateLock, UnderCoreLock,
@@ -899,6 +904,10 @@ struct SessionLent {
     #[cfg(feature = "query")]
     pending_gets: Rows<PendingGet, { usize::MAX }>,
     handle_place: Option<HandlePlace>,
+    /// The allocation of the handle's place where the tables take their memory on use, which the
+    /// session's state holds (`Core`).
+    #[cfg(wz_on_use)]
+    handle_block: Option<OwnHandle>,
     places: EntityPlaces,
     /// The places for values lodged by counts, each of which keeps the arena's memory while lent.
     lodgings: LodgingPlaces,
@@ -1075,11 +1084,16 @@ fn lend_session(
         #[cfg(all(feature = "advanced-cache", not(wz_on_use)))]
         cache,
     } = plan.session().lent_from(&mut lend);
+    #[cfg(not(wz_on_use))]
     let PlaceTables {
         handle,
         entities: places,
         lodgings,
     } = plan.places().lent_from(&mut lend, plan.entities());
+    // Where the tables take their memory on use the ABI's places are laid out in no row: each is
+    // an allocation of its own, taken as it is claimed or lent, the handle's at the open.
+    #[cfg(wz_on_use)]
+    let places = EntityPlaces::counted(plan.places(), plan.entities());
     #[cfg(wz_lent)]
     let room_places: RoomPlaces = lend.table(plan.peers().sets());
     #[cfg(wz_lent)]
@@ -1134,7 +1148,12 @@ fn lend_session(
     // place made at its first hold of a wait (`LinkRooms::hold`).
     #[cfg(wz_on_use)]
     let room_places = RoomPlaces::counted(plan.peers().sets())?;
+    #[cfg(not(wz_on_use))]
     let claimed = plan.claim_handle(handle)?;
+    #[cfg(wz_on_use)]
+    let handle_block = OwnHandle::taken(plan.handle_bytes())?;
+    #[cfg(wz_on_use)]
+    let handle_place = handle_block.as_ref().map(OwnHandle::place);
     #[cfg(all(feature = "advanced-cache", not(wz_on_use)))]
     let cache = CacheRing::claimed(
         cache
@@ -1145,6 +1164,7 @@ fn lend_session(
     // taken at the caches' first use.
     #[cfg(all(feature = "advanced-cache", wz_on_use))]
     let cache = CacheRing::counted(plan.session().cache_bytes());
+    #[cfg(not(wz_on_use))]
     let ClaimedPlaces {
         handle: handle_place,
     } = claimed;
@@ -1297,12 +1317,13 @@ fn lend_session(
     // lodgings, the handle's place) stands for as long as the engine does.
     #[cfg(wz_on_use)]
     let engine = arena.keep().map_err(ArenaRefused::Lend)?;
-    #[cfg(wz_on_use)]
-    let memory = engine;
     // SAFETY: the span was lent above to the lodging places alone, and `memory` is the count of the
     // memory it lies in, held by the session's engine for as long as the engine lends from the
     // places.
+    #[cfg(not(wz_on_use))]
     let lodgings = unsafe { lodgings.kept_by(memory) };
+    #[cfg(wz_on_use)]
+    let lodgings = LodgingPlaces::own(plan.places().lodging());
     Ok(SessionLent {
         #[cfg(not(wz_on_use))]
         runtime,
@@ -1322,6 +1343,8 @@ fn lend_session(
         #[cfg(feature = "query")]
         pending_gets,
         handle_place,
+        #[cfg(wz_on_use)]
+        handle_block,
         places,
         lodgings,
         #[cfg(feature = "link-admission")]
@@ -3183,8 +3206,13 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// epoch, whenever each link came up.
     session_time: CoopTime<C>,
     /// The places the ABI keeps its objects of the session's entities in, lent from the arena at
-    /// the open ([`HeldPlaces`]) and to the ABI under this lock ([`PlaceLender::claim_place`]).
+    /// the open ([`HeldPlaces`]), or each taken of the allocator as it is claimed where the tables
+    /// take their memory on use, and to the ABI under this lock ([`PlaceLender::claim_place`]).
     places: EntityPlaces,
+    /// The allocation of the place of the ABI's handle where the tables take their memory on use:
+    /// it stands while the engine does, as the arena's place does. Held for its drop alone.
+    #[cfg(wz_on_use)]
+    _handle: Option<OwnHandle>,
     /// The places the session lends its registry and its Router in for a pass of its tasks: after
     /// every holder of a handle of them (the transport, the tasks, `registry_lend`). Held for its
     /// owner's drop alone: the session reaches the places through those handles.
@@ -7479,6 +7507,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             session_time,
             places: lent.places,
+            #[cfg(wz_on_use)]
+            _handle: lent.handle_block,
             _steps: lent.steps,
             #[cfg(feature = "link-admission")]
             _admission: admission,
