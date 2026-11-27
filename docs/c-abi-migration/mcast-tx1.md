@@ -581,3 +581,48 @@ Next in T3a-2, one family a commit: the routing of a send over a borrow of the t
 the links (`send_wire`, `with_conduit_link`, `lease_on`), the lent batch's holder
 (`with_batch_holder`, `close_lent_batch`, `send_lent_batch`), the flush (`flush_conduit`,
 `drain_conduits`), `write_n_msg`, the fragment walk.
+
+## 15. Step T3a-2, the walk over a borrow, as landed
+
+- **The borrow.** `transport_tx::TxRoute<'a, R>` is the transmit state with the links a send
+  leaves by: `tx` (the `TransportTx`), `own` (the binding's own `LinkState`) and, under
+  `transport-multilink`, `links` (the core's set). Its fields are public and it has no
+  constructor: no invariant binds the three, and a group builds one of its own state and its
+  datagram driver's link with T3b. The session makes it in `SessionLinkActions::route`
+  (`#[inline]`), gated as `TransportTx::emit_on_link` is, since every build that sends routes
+  a send through it.
+- **Moved onto it, bodies and `#[inline]` decisions unchanged**, in three commits: the routing
+  (`select_link`, `send_wire`, `send_wire_this_link`, `send_wire_urgent_this_link`,
+  `with_conduit_link`, `conduit_routes_to`); the lent batch and the flush (`with_batch_holder`,
+  `close_lent_batch`, `send_lent_batch`, `flush_conduit`, `drain_conduits`,
+  `send_open_lent_batches`, `lease_on`, `send_lent_on`, `send_lent`); the message's frame and
+  its fragments (`write_n_msg`, `congested_within`, `emit_frame_or_fragments`,
+  `emit_fragments_encoded`, `emit_fragment_chain`, `send_fragment`). The walk mints its numbers
+  on `tx.frame_sn` directly; the session keeps its public `next_outbound_frame_sn` for readers.
+- **The walk's last two session facts are the transmit state's.** The fragment credit
+  (`tx-fragment-credit`) leaves the session's facts row for a lock of its own on `TransportTx`
+  (`set_fragment_credit`, `fragment_credit`, `take_fragment_credit`); the session's public
+  `set_fragment_tx_budget` and `fragment_tx_budget` read it there. The lane bound a probe reads
+  before it begins a chain is the queue shape recorded on `TransportTx` when the send limits are
+  settled (`shape_lanes`, read by `lane_bytes`), where it was the session's parameters asked
+  again at each such probe; the check is compiled under `tx-probe`, where it ran before (under
+  `alloc` it read a probe flag that is constant `false` without `tx-probe`). Before the limits
+  are settled no lane is bounded; no data frame is sent then.
+- What the walk names of `session_actions` (the conduits' stage, the lend records, `Lend`,
+  `LentWrite`, `FrameEmit`, `UnicastPush`, `FrameLend`, `HeapStage`) is `pub(crate)` for it;
+  those types move into `transport_tx` with T3b, regated for a group.
+
+Expected: `pico-api-coop-nostd` and `pico-client-coop-nostd` 0 to +200 bytes (a borrow of two
+pointers made at each send and passed by reference to the out-of-line bodies, where they took the
+session; no body and no call added); receive Ir none (a send); arm W's send Ir: one or two stores
+a send, the main session's reading.
+
+Held by every test that sends, unchanged: `session_actions`' `conduit_tx_sn_tests`,
+`window_word_tests`, `window_join_tests`, `sender_inside_tests` and `bundle_tests`;
+`wz-runtime-tokio`'s frame, fragment and reopen tests, `layer3_reassembly_tx` (the fragment
+credit: red if a draw does not count down or a refill does not take) and the multilink tests (the
+routing). New: `bundle_tests::a_probe_reads_the_lane_the_established_queue_took` (red if a lane
+is bounded before the limits are settled, or the settle records another shape than the session's
+parameters give the link's queue).
+
+Next: the transmit types into `transport_tx`, regated for a group; then T3b with D2.
