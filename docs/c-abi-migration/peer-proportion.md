@@ -380,18 +380,18 @@ keeps in the session's pools is no line of a face's: the pools stay `PeerPools::
 
 Left, in order, each a step of its own over the same line:
 
-3. The registry's plan form as the region's: `RegistryOf::new` becomes `write_parts`, one
-   `lend_region` over the registry's description (the application's lines, the sets' table, the dial
-   face's set) and `bind`, the form `placed.rs` has; `lend_set` and `SpareSets` lend a set by the
-   set's description (`FaceTables::places`). The test the main session asked for belongs here: every
-   table of the registry laid through the shared description, no two meeting and each at the
-   offset the plan counted, under the release case's features and the peer case's.
-4. `ArenaPlan`'s count of the registry's rows read as the same lines summed (`seq_bytes`), so
-   `arena_bytes` of each type goes.
-5. A description static of the lines it uses (`RegionLines` sized by its lines, or a stride of 16
-   bits) so the 32-bit form does not carry `MAX` lines of 20 bytes; measured before it is chosen.
+3. Landed (section 9.5): the registry's plan form walks its own lines and the dial face's set at
+   the open; the sets of the places no face took yet are walked when a face first takes each.
+4. `ArenaPlan`'s count of the registry's rows read as the same lines summed (`seq_bytes` of
+   `RegistryOf::LINES` and `FaceTables::arena_bytes`), so `app_list_bytes`, the per-set
+   `PeerTables::arena_bytes` and `FaceGets::arena_bytes` and the `FACE_SET_BYTES` and
+   `HELD_SET_BYTES` rows go from the plan, and with them the last run-time readers of the per-type
+   description statics (`SlotObserverOf::LINES`, `PeerTables::LINES`, `Requesters::LINES`). The
+   plan's rows by part (`ArenaPart`) are a report other readers use; they are kept, each counted
+   from the lines of its part, so the step changes how they are counted and not what they say.
+5. The description statics on a 32-bit target (section 9.6); measured before it is chosen.
 
-What reading the registry for step 3 found, before any of it is written:
+What reading the registry for step 3 found, before any of it was written:
 
 - Not every set is a line of the open. `SpareSets::reserved` splits one span for the sets of the
   places no face took yet and builds each when a face first takes its place (`build_to`), so the
@@ -405,10 +405,60 @@ What reading the registry for step 3 found, before any of it is written:
   walk, as section 9.4 step 2 left them.
 - The set's description differs by form: `placed.rs`'s `FaceTables::places` lays the reply stage no
   rows (the region stages replies outside the session's lock) and lives only in the region build.
-  A plan-form `FaceTables::places` over `LaidOut` has the reply stage's two lines too, lent
-  `PeerRows::replies` (zero where the engine stages outside), so the two forms read one function
-  whose region rows struct leaves the reply rows out by its own type, not by a second description.
-- Order: the open lends the application, the pools, the owed table, the sets' table, the held
-  index, the dial set, the spare span, then the session's own gets. A walk that joins the
-  registry's lines moves the pools after them; the plan's total does not move (every span starts on
-  the arena's alignment), but the coop tests that read a row's offset must be read for it first.
+  Section 9.5 settles it the other way from the one first read here: the plan lends that stage no
+  row either (`arena::peer_rows` states `replies` and `reply_bytes` 0 for every build of this
+  engine), so the one description has no reply line, rather than a line lent zero rows.
+- Order: the open lent the application, the pools, the owed table, the sets' table, the held
+  index, the dial set, the spare span, then the session's own gets. The plan's total does not move
+  with the order (every span starts on the arena's alignment); section 9.5 gives the new one.
+
+### 9.5 F3 step 3: the registry lent by one walk of its description
+
+| commit | what it did | what its tests hold |
+|---|---|---|
+| `278ddeab46` | `engine/registry/described.rs` holds the descriptions both laid-out forms read. A set's (`FaceTables::places`): its peer's stagings, its Finals where the build answers queries, its gets where it asks them, and no reply stage. The registry's (`RegistryOf::places`): the application's lists (`SlotObserverOf::places::<0>`, the session's own tokens being rows of its table set) and tables (`SessionTables::places`), the sets' table (`RowCount::FaceSets`), the index of their holders where the form keeps one (`Holders::LINES`, counted `FaceSets`), the owed tokens' table where faces go (`RowCount::OwedTokens`) and the session's own gets. The region's description (`placed.rs`) is `RegistryOf::places` over its rows (`RegistryRowsAt`) and each set's `FaceTables::places`. `RegistryOf::new` lends the pools, the reserve of the sets to come, then the registry made of no rows (`SlotObserverOf::over(SessionTables::rowless())`, `Holders::rowless`) by one `lend_region` over `RegistryOf::LINES` under one `RowCounts` (the tables', the lists' by `SlotObserverOf::list_counts`, the gets', the sets', the owed tokens', joined by `RowCounts::and`), then holds the tables to the limits, names the index's rows (`Holders::hold_sets`) and lends the dial face's set. `FaceTables::lend` is one `lend_region` over the set's description and the row its peer's side composes keys in; `FaceTables::arena_bytes` is those summed, which `SpareSets::reserved` reads. `App::lent`, `Gets::lent`, the three `arena.lend` of the sets, the index and the owed table, `Holders::lent` and `PeerTables::lend_rows` leave the open. | `registry::tests::every_table_of_the_registry_lies_where_its_description_counts_it` (every line of the registry at the offset the count of the lines before it says, each table its count, no two sequences or row spans meet, `seq_bytes` of the lines what the walk took; the dial face's set from the first byte past the registry's rows; the reserve right before the registry's rows; a set built when a face comes laid as the dial face's). `a_registry_of_one_face_lies_where_its_description_counts_it` (the form of one face describes no index line, and lays out as described). `a_count_past_a_lines_room_refuses_the_open` (`liveliness`: one own token counted is `OverCeiling { rows: 1, ceiling: 0 }`, none is the CONTROL). `bounded::tests::joined_counts_state_each_parts_count`. The region's tests (`a_state_regions_lines_lie_inside_it_and_name_nothing_twice`, `placed::tests`) hold the region form over the shared functions. |
+
+The lines whose change turns each new test red: in `RegistryOf::places`, the sets' line counted
+other than `RowCount::FaceSets` or `.with(&H::LINES, ..)` left out (the first test: a table not at
+its counted offset, the index's rows not lent); `App::places::<0>` made `::<{ MAX_LOCAL_TOKENS }>`
+(the refusal test); the reserve split off after the walk in `RegistryOf::new` (the first test's
+reserve assertion); a holder line in `OneHolder::LINES` (the second test); `RowCounts::and` adding
+the two counts or keeping one side (its test).
+
+What changes for the engine: nothing a session sees. The open's spans lie in another order
+(pools, reserve, the registry's lines, the dial face's set and its compose row), the total the
+same. A face's reply stage and, without `queryable`, its Finals stage are no line now where they
+were lines lent zero rows; either is a stage of no room, which refuses and counts what it is handed
+as before. The registry's own tests lent a face one reply and one Final in every build; they lend
+no reply now, and `holds_one_final` asserts a stage of no room in a build that answers no query.
+
+Size, expected on `pico-api-coop-nostd` and `pico-peer-coop`: text -1,500 to -3,500 (the
+by-value observer `App::lent` built with a drop path after each table, the own gets' `Gets::lent`,
+three `arena.lend` and `Holders::lent` out of `RegistryOf<ManyHolders>::new`; `Gets::lent` by
+value and `PeerTables::lend_rows` out of `lend_set`), against +600 to +1,200 of read-only data
+for the two description statics the walks read (`RegistryOf::LINES`, `FaceTables::LINES`, each a
+`RegionLines<MAX>` of 20-byte lines and word-sized key offsets) while the per-type statics stay
+read by the plan's count until step 4. 0 on the on-use twin, which has no plan. Receive Ir: none,
+the open only.
+
+### 9.6 Step 5: the description statics on a 32-bit target, prepared for both readings
+
+A line (`SeqPlace`) is 20 bytes on every target, four `u32` and the count. A `RegionLines<MAX>`
+holds `MAX` lines and `MAX` key offsets (`usize`) and two counts whatever it uses, so each
+description static carries the unused tail of its bound; on a 32-bit target a line was 12 bytes
+before the line took its stride and count. The reading asked of the main session: the i686 build of
+`pico-api-coop-nostd`, the bytes of each `RegionLines` static (`nm -S --size-sort` on the
+library, the symbols of the `LINES` and `DESCRIPTION` consts), and the library's read-only data
+against the same build at `99c88e8372`.
+
+- If the statics are material there (their growth over the 12-byte form more than the text step 3
+  took out on that target): each description read at run time becomes a static of exactly the
+  lines and key offsets it uses. `RegionLines` gains `const fn trimmed<const SEQS: usize, const
+  KEYS: usize>(&self) -> Described<SEQS, KEYS>`, the counts read from the description itself
+  (`DESC.seq_lines().len()`, `DESC.key_lines().len()`) in the item that names it, key offsets
+  held as `u32` as the lines' are; `place_region` and `lend_region` take the trimmed form's
+  slices. The unused tail goes on every target, the 64-bit one too. Its test: each trimmed static
+  states the description's lines and key offsets in order, and a description of none is a static
+  of none.
+- If they are within the noise of that build: no change; the reading is recorded here and step 5
+  closes. Trimming the tail is then a size step of its own only where a 64-bit reading shows it.
