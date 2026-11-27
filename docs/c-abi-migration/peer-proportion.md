@@ -382,13 +382,14 @@ Left, in order, each a step of its own over the same line:
 
 3. Landed (section 9.5): the registry's plan form walks its own lines and the dial face's set at
    the open; the sets of the places no face took yet are walked when a face first takes each.
-4. `ArenaPlan`'s count of the registry's rows read as the same lines summed (`seq_bytes` of
-   `RegistryOf::LINES` and `FaceTables::arena_bytes`), so `app_list_bytes`, the per-set
+4. Landed (section 9.7): `ArenaPlan`'s count of the registry's rows reads the same lines the open
+   walks (`RegistryOf::LINES` and `FaceTables::LINES`), so `app_list_bytes`, the per-set
    `PeerTables::arena_bytes` and `FaceGets::arena_bytes` and the `FACE_SET_BYTES` and
    `HELD_SET_BYTES` rows go from the plan, and with them the last run-time readers of the per-type
-   description statics (`SlotObserverOf::LINES`, `PeerTables::LINES`, `Requesters::LINES`). The
-   plan's rows by part (`ArenaPart`) are a report other readers use; they are kept, each counted
-   from the lines of its part, so the step changes how they are counted and not what they say.
+   description statics (`SlotObserverOf::LINES`, `PeerTables::LINES`, `Requesters::LINES`, and
+   `SessionTables::LINES` through `CoopTables::arena_bytes`). The plan's rows by part
+   (`ArenaPart`) are a report other readers use; they are kept, each counted from the lines of its
+   part, so the step changes how they are counted and not what they say.
 5. The description statics on a 32-bit target (section 9.6); measured before it is chosen.
 
 What reading the registry for step 3 found, before any of it was written:
@@ -462,3 +463,44 @@ against the same build at `99c88e8372`.
   of none.
 - If they are within the noise of that build: no change; the reading is recorded here and step 5
   closes. Trimming the tail is then a size step of its own only where a 64-bit reading shows it.
+
+### 9.7 F3 step 4: the plan's rows of the registry read off its lines
+
+| commit | what it did | what its tests hold |
+|---|---|---|
+| `b77a6dda0c` | `ArenaPlan::lay_out` counts every row of the registry from the descriptions the open walks (`engine/registry/described.rs`): `registry_bytes(counts)` is `seq_bytes` of `RegistryOf::LINES` (the build's registry) under counts that state only the part's, every line of another count lent none; `registry_row_bytes(count)` is the stride of the registry's table lent by `count`, none where the build describes no such table; `set_get_bytes` and `set_peer_bytes` are a set's lines (`FaceTables::LINES`) of the gets' and of the peer's counts, the peer's with its compose row. The rows by part stay as they were: "declaration watchers" (1, the registry's lines of `DeclWatchers`), "pending gets" (a table for each face and the session's own, the set's gets' lines), "face tables", "held faces" and "owed tokens" (their table's count of rows of the line's stride, each only where the registry describes the line, so the "held faces" and "owed tokens" rows lose their `#[cfg]`s), "peer tables" (a table for each face, the set's peer's lines and compose row), "session tables" (1, the registry's lines of the table counts). The index of held sets is lent by a count of its own, `RowCount::HeldSets`, beside the sets' `FaceSets` (`held::ManyHolders::LINES`, `RegistryOf::new`'s counts), so each part is the lines of its counts. `app_list_bytes`, `FACE_SET_BYTES`, `HELD_SET_BYTES` and the plan's `FaceGets` go; the plan reads no `SlotObserverOf::arena_bytes`, `Requesters::arena_bytes`, `PeerTables::arena_bytes` or `SessionTables::arena_bytes`, so no run-time body of this crate reads those types' own description statics. `FaceTables::arena_bytes` is compiled only where sets are built after the open (`listen`, `group`, the tests). | `registry::tests::the_plans_parts_of_the_registry_are_the_lines_of_their_counts` (the build's registry, `BuildHolders`, of three faces where it takes faces and of one where not): the lists' part equals the engine's own observer's `App::arena_bytes(watchers, 0)`, the tables' part `CoopTables::arena_bytes`, the sets' row is `size_of::<FaceTables>()`, the index's `size_of::<FaceId>()` exactly where the build takes faces, the owed tokens' `size_of::<OwedTokens>()` exactly where faces go and peers declare tokens, the session's own gets the set's gets' lines with `local-queryable` and none without; the parts sum to what the open's walk lent; a set's peer part equals `PeerTables::arena_bytes` (its Finals only where the build answers queries), its gets part `Gets::arena_bytes`, and the two parts `FaceTables::arena_bytes`. `tests::arena::the_plan_lays_out_the_watcher_lists_the_limits_state` reads the watcher row against the registry's lines at the build's and a lowered limit. The plan's existing tests hold the rows' counts and bytes as before (`face tables` and `held faces` counts, `peer tables` against `PeerTables::arena_bytes`, `session tables` against `CoopTables::arena_bytes`, the owed tokens' count). |
+
+The lines whose change turns the new test red: `registry_bytes` reading other lines than
+`RegistryOf::LINES` of the build's holders (the parts no longer sum to the walk);
+`held::ManyHolders::LINES` counted `FaceSets` again (the index's row found nowhere and the parts a
+table short of the walk);
+`set_peer_bytes` without the compose row (unequal to `PeerTables::arena_bytes` in a build with
+`storage-profile`); `stride_of` answering the last line of a count rather than the first, or a
+line's room rather than its stride.
+
+What changes for the engine: nothing a session sees. Every row of the plan states the count and
+the bytes it stated before, so the plan's total, the order of its rows and the open's spans are
+unchanged; `RowCounts` holds one count more.
+
+Size, expected on `pico-api-coop-nostd` and `pico-peer-coop`: read-only data -700 to -1,200 on a
+64-bit target (the four per-type description statics the plan's count read at run time,
+`SessionTables::LINES` of 17 lines, `PeerTables::LINES` of 8, `SlotObserverOf::LINES` and
+`Requesters::LINES`, each a `RegionLines` of 20-byte lines and word-sized key offsets, or the
+strides an unrolled count folded into its text where the compiler did that instead), which takes
+back the growth section 9.5 expected; text -200 to +300 (four count bodies out of `lay_out`,
+three walks of the registry's lines under one-part counts and the stride lookup in, over statics
+the open already holds). `pico-client-coop-nostd` has no plan: 0. 0 on the on-use twin. Receive
+Ir: none, the open only.
+
+Verification (the main session's):
+
+- `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --lib --features listen the_plans_parts_of_the_registry`: 1 test.
+- `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --lib --features runtime-plan the_plans_parts_of_the_registry`: 1 test (one face, no index).
+- `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --lib --features listen,liveliness,local-queryable registry::tests`: the registry's tests over the new count.
+- `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --lib --features listen tests::arena`: the plan's tests, rows unchanged.
+- `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib bounded`.
+- Clippy of `wz-capi-coop` with its defaults, with `--features runtime-plan`, with `--features listen`,
+  with `--features group`, with `--no-default-features --features std,key-matching-listener,listen,query,queryable`;
+  of `wz-session-core` with its defaults.
+- Layer C1cs: `pico-api-coop-nostd` and `pico-peer-coop` read-only data lower, `nm -S` of the
+  library holding no symbol of the four per-type `LINES` consts.
