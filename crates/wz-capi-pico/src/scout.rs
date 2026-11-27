@@ -1380,9 +1380,14 @@ mod tests {
             (*(context as *const AtomicUsize)).fetch_add(1, Ordering::SeqCst);
         }
 
-        // A build whose every value the resolution admits holds no refused statement.
-        let Some(policies) = PolicyStatements::refused_by_the_resolution() else {
-            return;
+        use crate::config_policy::Against;
+        let policies = match PolicyStatements::against_the_resolution() {
+            Against::Refused(refused) => refused,
+            // A build whose every value the resolution admits refuses no statement to a scout.
+            Against::Admitted(admitted) => {
+                assert!(crate::session::resolve_policy(&admitted).is_ok());
+                return;
+            }
         };
         let cfg = ConfigState {
             policies,

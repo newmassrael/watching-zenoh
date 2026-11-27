@@ -11110,7 +11110,24 @@ layer_c1pc_capi_pico_engines() {
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     (cd crates && cargo clippy -p wz-capi-pico $tokio_args --features object-pool --test it \
         --quiet -- -D warnings) || return 1
-    _runci_lane_did C1pc 4 "test run(s) of wz-capi-pico, the crate and its it target per engine, each clippy-gated"
+    # The tests whose subject is what a build refuses have nothing to refuse in the builds above:
+    # the test build keeps every value of every policy (`policy-selection`, the crate's
+    # dev-dependency) and its tables grow: no statement is outside a domain and no count past a
+    # bound, and each asserts what that build does instead. They run again over a build whose
+    # policies keep their defaults alone (`WZ_POLICY_DOMAINS=defaults`) and whose tables are fixed
+    # (`wz-session-core/bounded-heapless`), where each reads its refusal. That build
+    # changes what every test selecting a policy value reads, so only these five run, in a target
+    # directory of their own.
+    _runci_guarded_test "C1pc wz-capi-pico, what a build refuses" 5 \
+        env WZ_POLICY_DOMAINS=defaults cargo test -p wz-capi-pico \
+        --lib --features wz-session-core/bounded-heapless \
+        --target-dir "$WZ_ARTIFACTS/crates/target/policy-defaults" -- \
+        a_count_past_the_builds_value_is_refused \
+        the_open_resolves_the_snapshots_the_record_of_origins_resolves \
+        a_refused_statement_fails_the_open_and_opens_nothing \
+        a_config_whose_policies_the_open_refuses_is_refused \
+        a_scout_refuses_a_config_whose_policies_the_open_refuses || return 1
+    _runci_lane_did C1pc 5 "test run(s) of wz-capi-pico, the crate and its it target per engine, each clippy-gated, and what a build refuses"
 }
 
 # ─── Layer C1x — routing-routes: the route cache the forwarders compute through ─

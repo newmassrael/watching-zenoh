@@ -345,10 +345,14 @@ mod tests {
     #[cfg(feature = "config-policy")]
     #[test]
     fn a_config_whose_policies_the_open_refuses_is_refused() {
-        // A build whose every value the resolution admits holds no refused statement.
-        let Some(refused) = crate::config_policy::PolicyStatements::refused_by_the_resolution()
-        else {
-            return;
+        use crate::config_policy::{Against, PolicyStatements};
+        let refused = match PolicyStatements::against_the_resolution() {
+            Against::Refused(refused) => refused,
+            // A build whose every value the resolution admits refuses no statement to the open.
+            Against::Admitted(admitted) => {
+                assert!(crate::session::resolve_policy(&admitted).is_ok());
+                return;
+            }
         };
         let mut cfg = config(&[(Z_CONFIG_CONNECT_KEY, "tcp/192.0.2.1:7447")]);
         cfg.policies = refused;

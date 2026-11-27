@@ -290,14 +290,18 @@ impl PolicyStatements {
         Ok(())
     }
 
-    /// Statements of the API layer that the set holds and the resolution refuses, for a test of
-    /// what the open does with them: a policy only the build decides, or a value the build's
-    /// domain leaves out. `None` for a build with neither; a policy or a value the build does not
-    /// have the set cannot hold.
+    /// Statements of the API layer for a test of what the open does with those it refuses: a
+    /// policy only the build decides, or a value the build's domain leaves out
+    /// ([`Against::Refused`]). The test build keeps every value of every policy
+    /// (`policy-selection`, the crate's dev-dependency) and has neither, so there it is the
+    /// statement of a second value of a policy whose domain keeps two, which the resolution admits
+    /// ([`Against::Admitted`]); Layer C1pc runs the tests again over a build whose policies keep
+    /// their defaults alone, where each is refused. A build that refuses nothing and keeps no
+    /// second value of any policy has nothing to state, and fails the test that asks.
     #[cfg(test)]
-    pub(crate) fn refused_by_the_resolution() -> Option<Self> {
+    pub(crate) fn against_the_resolution() -> Against {
         use wz_session_core::policy_binding::Binding;
-        let (policy, value) = POLICIES.iter().find_map(|entry| {
+        let refused = POLICIES.iter().find_map(|entry| {
             let value = if entry.binding() == Binding::Build {
                 entry.values().first().copied()
             } else {
@@ -308,11 +312,41 @@ impl PolicyStatements {
                     .find(|value| !entry.domain().contains(value))
             }?;
             Some((entry.id(), value))
-        })?;
+        });
+        let ((policy, value), refuses) = match refused {
+            Some(statement) => (statement, true),
+            None => {
+                let admitted = POLICIES.iter().find_map(|entry| {
+                    let mut allowed = entry.domain().iter();
+                    allowed.next()?;
+                    Some((entry.id(), allowed.next()?))
+                });
+                let admitted = admitted
+                    .expect("a build that refuses no statement keeps two values of a policy");
+                (admitted, false)
+            }
+        };
         let mut statements = Self::default();
-        statements.api.state(Statement::new(policy, value)).ok()?;
-        Some(statements)
+        statements
+            .api
+            .state(Statement::new(policy, value))
+            .expect("the set holds a statement of a policy of the build's own table");
+        if refuses {
+            Against::Refused(statements)
+        } else {
+            Against::Admitted(statements)
+        }
     }
+}
+
+/// What the open's resolution does with the statements [`PolicyStatements::against_the_resolution`]
+/// hands a test.
+#[cfg(test)]
+pub(crate) enum Against {
+    /// Statements the set holds and the resolution refuses.
+    Refused(PolicyStatements),
+    /// A statement the resolution admits, in a build that refuses none.
+    Admitted(PolicyStatements),
 }
 
 /// What the `zext` member of the document `zext_config_document` was handed states, read by the
@@ -1184,16 +1218,23 @@ mod tests {
             resolve_snapshots(&config.state().policies),
             Ok((recorded.policy, recorded.limits.session))
         );
-        // A build whose every value the resolution admits holds no refused statement.
-        let Some(refused) = PolicyStatements::refused_by_the_resolution() else {
-            return;
-        };
-        assert_eq!(
-            resolve_policy(&refused).map(|_| ()),
-            Err(Z_ERR_CONFIG_INVALID_VALUE),
-            "CONTROL: the record refuses it"
-        );
-        assert_eq!(resolve_snapshots(&refused), Err(Z_ERR_CONFIG_INVALID_VALUE));
+        match PolicyStatements::against_the_resolution() {
+            Against::Refused(refused) => {
+                assert_eq!(
+                    resolve_policy(&refused).map(|_| ()),
+                    Err(Z_ERR_CONFIG_INVALID_VALUE),
+                    "CONTROL: the record refuses it"
+                );
+                assert_eq!(resolve_snapshots(&refused), Err(Z_ERR_CONFIG_INVALID_VALUE));
+            }
+            // A build whose every value the resolution admits: the record admits it, and the
+            // open resolves what the record resolves.
+            Against::Admitted(admitted) => assert_eq!(
+                resolve_snapshots(&admitted),
+                resolve_policy(&admitted)
+                    .map(|resolved| (resolved.policy, resolved.limits.session))
+            ),
+        }
     }
 
     /// The policy door refuses what the build refuses, by the same code, and a refused statement
@@ -2126,9 +2167,16 @@ mod tests {
     /// opens nothing.
     #[test]
     fn a_refused_statement_fails_the_open_and_opens_nothing() {
-        // A build whose every value the resolution admits holds no refused statement.
-        let Some(refused) = PolicyStatements::refused_by_the_resolution() else {
-            return;
+        let refused = match PolicyStatements::against_the_resolution() {
+            Against::Refused(refused) => refused,
+            // A build whose every value the resolution admits refuses no statement to the open.
+            Against::Admitted(admitted) => {
+                assert!(
+                    resolve_policy(&admitted).is_ok(),
+                    "the resolution admits it"
+                );
+                return;
+            }
         };
         let mut config = Config::new();
         // SAFETY: the owned config is live and holds a `ConfigState`.
