@@ -163,6 +163,47 @@ fn recovery_buffers_forward_gap_and_drains_when_filled() {
     );
 }
 
+/// A registry lent one listener at declaration makes no map of listeners: a miss is the one call
+/// to the lent listener, and the map is made by the first registration, whose listener hears a
+/// miss after the lent one. Turned red by a map made with the registry (`MissHandlers::lent`),
+/// which a host whose listeners are its own would then link, or by the lent listener fired after
+/// the registered ones.
+#[test]
+fn a_lent_listener_alone_makes_no_map_and_is_heard_first() {
+    type Log = std::sync::Mutex<Vec<(u8, u32)>>;
+    unsafe fn heard(context: *mut c_void, miss: Miss) {
+        // SAFETY: the context is the test's log, which outlives the registry.
+        let log = unsafe { &*context.cast::<Log>() };
+        log.lock().unwrap().push((0, miss.nb()));
+    }
+    let log = std::sync::Arc::new(Log::new(Vec::new()));
+    let context = std::sync::Arc::as_ptr(&log).cast_mut().cast::<c_void>();
+    // SAFETY: `heard` reads the log, which outlives the registry, from any thread, and nothing is
+    // let go of.
+    let mut handlers = unsafe { MissHandlers::lent(heard, context, None) };
+    assert!(!handlers.holds_a_map());
+    let source = EntityGlobalId::new(&[0x02], 7).expect("a one-byte zid");
+    handlers.fire(Miss::for_test(source, 2));
+    assert_eq!(*log.lock().unwrap(), [(0, 2)]);
+
+    let registered = std::sync::Arc::clone(&log);
+    let id = handlers.register(Box::new(move |miss: Miss| {
+        registered.lock().unwrap().push((1, miss.nb()));
+    }));
+    assert!(handlers.holds_a_map());
+    handlers.fire(Miss::for_test(source, 3));
+    assert_eq!(*log.lock().unwrap(), [(0, 2), (0, 3), (1, 3)]);
+
+    handlers.unregister(id);
+    handlers.unregister(0);
+    handlers.fire(Miss::for_test(source, 4));
+    assert_eq!(
+        log.lock().unwrap().len(),
+        3,
+        "both listeners were retracted"
+    );
+}
+
 /// A state written in its place is the one the builder makes, whatever the place held before: a
 /// live sample is held back while the history get it was told of is out, a forward gap asks for
 /// its range, and both go on in order once their gets end. The place is filled with ones first,

@@ -99,11 +99,46 @@ impl Miss {
 /// engine's own callbacks take ([`Self::lent`]), keeps it beside the map rather than in it, so
 /// the declaration takes no memory for it. It is the first registered, so it fires first, which
 /// is the order the map would give it.
+///
+/// # The map is reached through its own operations
+///
+/// The listeners registered after the declaration lie in a map made by the first
+/// [`Self::register`] and reached through a table of its own operations: a host whose listeners
+/// are its own, as the pico C ABI's are (one lent listener that fires its own set), never
+/// registers one, so its build links no code of the map, and a miss is one call to that host's
+/// set.
 #[derive(Default)]
 pub struct MissHandlers {
     next_id: usize,
     first: Option<FirstListener>,
-    handlers: BTreeMap<usize, Box<dyn FnMut(Miss) + Send>>,
+    listeners: Option<Box<dyn Listeners>>,
+}
+
+/// What a registry does with the listeners registered after the declaration, in the order of
+/// their ids.
+trait Listeners: Send {
+    /// Hold `handler` under `id`.
+    fn hold(&mut self, id: usize, handler: Box<dyn FnMut(Miss) + Send>);
+    /// Let go of the handler held under `id`, if one is.
+    fn let_go(&mut self, id: usize);
+    /// Report `miss` to every handler held.
+    fn report(&mut self, miss: Miss);
+}
+
+impl Listeners for BTreeMap<usize, Box<dyn FnMut(Miss) + Send>> {
+    fn hold(&mut self, id: usize, handler: Box<dyn FnMut(Miss) + Send>) {
+        BTreeMap::insert(self, id, handler);
+    }
+
+    fn let_go(&mut self, id: usize) {
+        BTreeMap::remove(self, &id);
+    }
+
+    fn report(&mut self, miss: Miss) {
+        for handler in self.values_mut() {
+            handler(miss);
+        }
+    }
 }
 
 impl MissHandlers {
@@ -129,7 +164,7 @@ impl MissHandlers {
                     drop,
                 },
             }),
-            handlers: BTreeMap::new(),
+            listeners: None,
         }
     }
 
@@ -137,7 +172,9 @@ impl MissHandlers {
     pub fn register(&mut self, handler: Box<dyn FnMut(Miss) + Send>) -> usize {
         let id = self.next_id;
         self.next_id += 1;
-        self.handlers.insert(id, handler);
+        self.listeners
+            .get_or_insert_with(|| Box::new(BTreeMap::<usize, Box<dyn FnMut(Miss) + Send>>::new()))
+            .hold(id, handler);
         id
     }
 
@@ -147,7 +184,9 @@ impl MissHandlers {
             self.first = None;
             return;
         }
-        self.handlers.remove(&id);
+        if let Some(listeners) = self.listeners.as_mut() {
+            listeners.let_go(id);
+        }
     }
 
     /// Report one miss to every registered listener. A miss with no listener
@@ -159,9 +198,15 @@ impl MissHandlers {
             // which runs only when this registry lets it go.
             unsafe { (lent.call)(lent.context, miss) };
         }
-        for handler in self.handlers.values_mut() {
-            handler(miss);
+        if let Some(listeners) = self.listeners.as_mut() {
+            listeners.report(miss);
         }
+    }
+
+    /// Whether the registry made its map of listeners, which only a registration does.
+    #[cfg(test)]
+    fn holds_a_map(&self) -> bool {
+        self.listeners.is_some()
     }
 }
 
