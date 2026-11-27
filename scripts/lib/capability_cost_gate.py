@@ -1109,7 +1109,7 @@ CASES: tuple[Case, ...] = (
     # zenoh-pico's default build (the peer role, the multicast transport, the multi-threaded arm)
     # with the advanced plane, the unstable API and connectivity, so its planes are held as
     # pico-default's are.
-    Case("pico-api-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", None, None,
+    Case("pico-api-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", None, 1_056_200,
          forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK,
                  STD_RUNTIME),
          require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
