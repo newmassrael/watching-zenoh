@@ -545,7 +545,9 @@ LINE_BUDGET = 280
 #: a needle.
 #: 54 -> 53. The reply extension count was retaken at the 1.10.2 pin, and its bare
 #: mention of upstream's reply module became a needle on the struct it counts.
-BARE_BUDGET = 53
+#: 53 -> 52. S6 steps 3 to 5 removed the engine's POSIX shared-memory files, and a
+#: bare mention of upstream's segment module went with them.
+BARE_BUDGET = 52
 #: The root-less axis, after R2317 repaired the 49 citations that named a file
 #: gone at the pin. Same two-directional ratchet as LINE and BARE.
 #:
