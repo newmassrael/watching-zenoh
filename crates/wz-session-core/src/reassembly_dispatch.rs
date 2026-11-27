@@ -1370,25 +1370,27 @@ where
                 Err(judged) => return judged,
             };
         }
-        let admitted = match census.active {
-            Some(idx) => self.admit_continuation(idx, &frag, ring),
-            None => self
-                .admit_chain_start(&frag, census, now_ms)
-                .map_err(Judged::Outcome),
+        let (idx, starts) = match census.active {
+            Some(idx) => match self.admit_continuation(idx, &frag, ring) {
+                Ok(()) => (idx, false),
+                Err(judged) => return judged,
+            },
+            None => match self.admit_chain_start(&frag, census, now_ms) {
+                Ok(idx) => (idx, true),
+                Err(outcome) => return Judged::Outcome(outcome),
+            },
         };
-        match admitted {
-            Ok((idx, starts)) => self.drive_open_chain(idx, frag, starts, hand, deliver),
-            Err(judged) => judged,
-        }
+        self.drive_open_chain(idx, frag, starts, hand, deliver)
     }
 
     /// The `finalize_message` duty, the final payload staged: hand the completed chain in `idx`
     /// to `deliver` and raise `slot.release`, whose `reset_slot` reclaims the slot.
     ///
-    /// Lent or kept when `hand` asks it and the arena can: the Router slot is
-    /// released first (the chain's staging is no longer the Router's), then the
-    /// bytes are delivered. Otherwise borrowed: delivered while the staging is
-    /// still held, and released after, which is the only order a borrow allows.
+    /// Lent or kept when `hand` asks it and the arena can, the chain's staging
+    /// taken out of the slot first; otherwise borrowed while the staging is
+    /// still held. Either way the bytes are delivered and then the slot is
+    /// released, the one order a borrow allows: the delivery holds the Router
+    /// borrowed, so nothing it does can see the slot before its release.
     fn finish<F: FnOnce(ChainBytes<'_>)>(
         &mut self,
         idx: usize,
@@ -1419,10 +1421,6 @@ where
             },
             None => None,
         };
-        let released_first = handed_up.is_some();
-        if released_first {
-            slot.end(staging, SlotEnding::Release);
-        }
         // One call of `deliver` for both hands, so the delivery is compiled in here once.
         let bytes = handed_up.or_else(|| {
             held.as_ref()
@@ -1432,11 +1430,9 @@ where
         if let Some(bytes) = bytes {
             deliver(bytes);
         }
-        if !released_first {
-            slot.end(staging, SlotEnding::Release);
-            if let Some(chain) = held {
-                staging.release(chain);
-            }
+        slot.end(staging, SlotEnding::Release);
+        if let Some(chain) = held {
+            staging.release(chain);
         }
         IngestOutcome::Reassembled
     }
@@ -1693,8 +1689,8 @@ where
 
     /// Open a chain for `frag`, the first fragment of one: a slot found or made, the chain's
     /// staging reserved, and the chain set open in the slot before its machine is told of it, so
-    /// that [`Self::drive_open_chain`] drives a first fragment and a continuation alike. The slot
-    /// and that it starts a chain, or the outcome of a start refused before the machine is driven.
+    /// that [`Self::drive_open_chain`] drives a first fragment and a continuation alike. The slot,
+    /// or the outcome of a start refused before the machine is driven.
     /// `census` is the pool as the fragment's judgement left it: the peer's count and the free
     /// slot are read from it, not walked for again.
     fn admit_chain_start(
@@ -1702,7 +1698,7 @@ where
         frag: &Fragment<'_>,
         census: SlotCensus,
         now_ms: u64,
-    ) -> Result<(usize, bool), IngestOutcome> {
+    ) -> Result<usize, IngestOutcome> {
         // §5.M quota-first: the per-peer cap is checked before slot
         // availability, so a flood from one peer is refused on quota even
         // while free slots remain for honest peers.
@@ -1753,7 +1749,7 @@ where
             opened,
             chain,
         });
-        Ok((idx, true))
+        Ok(idx)
     }
 
     /// A slot for a chain start that found none free, by the pool's
@@ -1810,15 +1806,14 @@ where
         true
     }
 
-    /// Admit `frag` as the next fragment of the chain open in `idx`: the slot and that it does
-    /// not start a chain, or the outcome of a continuation the chain cannot take, the chain
-    /// ended. A slot that holds no chain is refused.
+    /// Admit `frag` as the next fragment of the chain open in `idx`, or answer the outcome of a
+    /// continuation the chain cannot take, the chain ended. A slot that holds no chain is refused.
     fn admit_continuation(
         &mut self,
         idx: usize,
         frag: &Fragment<'_>,
         ring: SnRing,
-    ) -> Result<(usize, bool), Judged> {
+    ) -> Result<(), Judged> {
         // The judge hands only the slot its key's open chain sits in. One that holds none is a
         // slot the Router lost track of, not a chain to continue or a place to start one, and
         // the fragment is refused with nothing opened.
@@ -1859,7 +1854,7 @@ where
                 AbortReason::CapacityOverflow,
             ));
         }
-        Ok((idx, false))
+        Ok(())
     }
 
     /// Drive the chunk of `frag` into the chain open in `idx` and do what its transition asked.
@@ -2728,7 +2723,8 @@ mod tests {
     /// Router's slot and the staging's place are free at once, the buffer stays out of the table
     /// until the delivery drops it, and a chain that starts meanwhile stages into another buffer.
     /// An arena that cannot keep (the heap one) hands the chain up borrowed, as before. Turned red
-    /// by a keep that copies the chain or gives its buffer back before the delivery drops it.
+    /// by a keep that copies the chain or gives its buffer back before the delivery drops it, or
+    /// by a kept chain whose slot is not released once the delivery returns.
     #[test]
     fn a_kept_chain_holds_its_buffer_until_the_delivery_drops_it() {
         use crate::chain_staging::LentStaging;
@@ -2751,6 +2747,11 @@ mod tests {
         let kept = kept.expect("the chain completed");
         assert_eq!(kept.as_slice(), b"aaaabbbb");
         assert_eq!(d.active_chains(), 0, "the Router's slot is free");
+        assert_eq!(
+            d.slots[0].engine.get_current_state(),
+            crate::reassembly_slot::ReassemblySlotState::Empty,
+            "the slot of a kept chain is released after the delivery, as a borrowed one's is"
+        );
         assert_eq!(cells.in_use(), 1, "the delivery holds the buffer");
         assert_eq!(
             d.ingest_keeping(frag(PEER_A, true, 3, 1, b"cccc"), MASK, 0, |_| {}),
