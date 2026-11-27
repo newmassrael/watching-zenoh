@@ -763,6 +763,52 @@ its CONTROL the open set's pump and sink naming the same field) and
 open set's tests of `IpLinks` are unchanged and cover `OpenSet`; `either_links`'s
 `a_pump_is_shared_as_its_own_stack_shares_it` now shares through `SharedPump`.
 
+### 9.6 Step 3's send half as built (not built or run by this lane)
+
+One commit, "Send through a closed stack's links as its type". The sink's type is named where the
+read's is, by the pump, and the actions are keyed on it as 9.2's step 3 says.
+
+- **`SharedPump::Sink`** (`session_drive.rs`) names the type a session's actions send through:
+  `OpenedLink<P, N>`'s sink is `CellRc<P::Sink, N>`, so `OpenedLink`, `PendingDial`,
+  `LinkListener` and `Dialled` are bounded by `P: SharedPump<N>`. A `CellRc<T>` or `Rc<T>` pump
+  names `dyn BoxedLinkDriver`, as before, so the simulated, Zephyr and MCU stacks keep their form.
+  `DynSink` (a blanket impl over every sized driver, and one for `dyn BoxedLinkDriver`, the same
+  coherence shape as `DynLink`) turns either into the table's handle where two stacks' sinks meet.
+- **The closed set's pump is `ClosedLink<E, N>`** (`ip_link.rs`), a newtype over the link's
+  `CellRc<E, N>` whose `Link` and `Sink` are both `E`: the blanket `SharedPump` of `CellRc`
+  keeps `Sink = dyn` for every other cell pump, so the closed set needs a pump of its own type.
+  `IpLink` states `BoxedLinkDriver` by one match a method over the set `IpDriver` forwards (the
+  sends, the slot calls, `wait_for_room`, the ends and the subject), and `LinkSet::opened` hands
+  both handles on: the open set the variant's, behind its tables, as before; the closed set the
+  whole link for both.
+- **The actions are keyed on the sink's type.** `spawn_session_with_router`,
+  `place_session_with_router`, `RouterSessionTask` and `router_session_task_bytes` take `D`; the
+  transport's `TransportSession<C, K, D>` and `LinkCalls<C, K, L, D>`; the state's `SinkOf<T>`.
+  `wz-capi-coop` keys its free items on `(C, D)` and reads `SinkOf<L>` inside the items generic
+  over the stack (`LinkGates<D>`, `AdmissionGate<P, C, K, D>`, `HeldLink<C>`, `cells_of<C, D>`).
+  `link_task_bytes` stays on `C` with `D = dyn`: the task holds the actions by a one-word handle,
+  and a `dyn` handle's two words are the upper bound, as its comment says.
+- **`EitherLinks` sends behind the table** (`EitherPump::Sink = dyn`): `left_link` and
+  `right_link` turn each side's sink through `DynSink`. A link made at once is no longer handed
+  back to the side that made it, whose sink may be its own type and cannot be had again from a
+  `dyn` one: `EitherDial<D, E, M>` holds it as `Made(Dialled)`, a dial answered already.
+
+Expected on the case: the variants' `BoxedLinkDriver` tables leave the closed build (the enum's
+is linked only where `EitherLinks` unsizes a sink, which the case does not build), and every
+send through the link, the slot calls of the lent frame included, loses its indirect call for a
+tag test and the variant's body; about -200 to -400 relocated by the tables, text by the bodies
+only those tables reached and the call sequences at each send site. Together with 9.5 this is
+9.2's step 3, so the pair is read against its -1,500 to -3,000. Send Ir lower by an indirect call
+a call on the link (a put makes three or more: acquire, storage, send); receive Ir unchanged by
+this half. Not measured.
+
+Tests: `ip_stack::tests::closed_links_are_read_as_the_stacks_one_type` now holds that the sink is
+the same handle on the whole link as the pump and that `batch_length_prefixed` through it answers
+as the variant (false for `Udp`, true for `Tcp`); red if the closed set sends through the
+variant behind its table, or the enum answers a send itself. `either_links`'s
+`a_link_made_at_once_is_a_dial_answered_already` holds that the made link is answered once,
+whichever stack made it; red if it is handed to a side's dial or answered twice.
+
 ## 10. Transport: the structure for what remains, and what SCE is asked for the machines
 
 Read from the same explain document as section 6 (2026-11-26, schema 5): transport 30,814 against
