@@ -91,13 +91,20 @@ impl FaceTold {
         })
     }
 
-    /// Note `listener` of `plane` told the row of `key` left: whether it was owed that.
-    fn tell_went(&mut self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+    /// Note `listener` of `plane` told the row of `key` left: the row as it was told it came,
+    /// when it was owed that.
+    fn tell_went(
+        &mut self,
+        plane: ToldPlane,
+        listener: usize,
+        key: &ToldKey,
+    ) -> Option<FaceLinkRow> {
         if !self.owes(plane, listener, key) {
-            return false;
+            return None;
         }
+        let row = self.tomb.as_ref().map(|tomb| tomb.row.clone());
         self.forget_tomb(plane, listener);
-        true
+        row
     }
 
     /// The row whose departure `listener` of `plane` is owed here.
@@ -140,11 +147,16 @@ fn standing_key<C: ClockSource + 'static, L: CoopLinks + 'static>(
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Note `listener` of `plane` told the row of `key` came (`SessionEngine::tell_came`):
-    /// whether it is to be told. A row it is still owed the departure of under that key is not
-    /// told again before that departure, so a reconnect reads as one, in order.
-    pub(super) fn tell_came(&mut self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+    /// the row it is to be told, as it stands. A row it is still owed the departure of under that
+    /// key is not told again before that departure, so a reconnect reads as one, in order.
+    pub(super) fn tell_came(
+        &mut self,
+        plane: ToldPlane,
+        listener: usize,
+        key: &ToldKey,
+    ) -> Option<FaceLinkRow> {
         if key.link != 0 || self.owes_departure(plane, listener, key) {
-            return false;
+            return None;
         }
         #[cfg(feature = "group")]
         if key.is_multicast {
@@ -152,14 +164,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .transport
                 .groups
                 .iter()
-                .any(|group| group.tell_came(plane, listener, key));
+                .find_map(|group| group.tell_came(plane, listener, key));
         }
         for face in self.transport.links.faces_mut() {
             if standing_key(face) == Some(*key) {
-                return face.told.bits.set(plane, listener);
+                if !face.told.bits.set(plane, listener) {
+                    return None;
+                }
+                return face.facts()?.standing_row().cloned();
             }
         }
-        false
+        None
     }
 
     /// The row at cursor `at` of the links of the faces that stand (`SessionEngine::face_link_at`),
@@ -234,29 +249,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Note `listener` of `plane` told the row of `key` left (`SessionEngine::tell_went`):
-    /// whether it is to be told, which it is only when a tomb of that key owes it the departure.
-    /// A departed face's place owed to no one more is let go of.
-    pub(super) fn tell_went(&mut self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+    /// the row as it was told it came, read from its tomb, which it is to be told left only when
+    /// a tomb of that key owes it the departure. A departed face's place owed to no one more is
+    /// let go of.
+    pub(super) fn tell_went(
+        &mut self,
+        plane: ToldPlane,
+        listener: usize,
+        key: &ToldKey,
+    ) -> Option<FaceLinkRow> {
         #[cfg(feature = "group")]
-        if self
+        if let Some(row) = self
             .transport
             .groups
             .iter()
-            .any(|group| group.tell_went(plane, listener, key))
+            .find_map(|group| group.tell_went(plane, listener, key))
         {
-            return true;
+            return Some(row);
         }
-        let Some(at) = self
+        let (at, row) = self
             .transport
             .links
             .places_mut()
             .placed_mut()
-            .find_map(|(at, face)| face.told.tell_went(plane, listener, key).then_some(at))
-        else {
-            return false;
-        };
+            .find_map(|(at, face)| Some((at, face.told.tell_went(plane, listener, key)?)))?;
         self.let_go_if_spent(at);
-        true
+        Some(row)
     }
 
     /// The first row whose departure `listener` of `plane` is owed
@@ -444,8 +462,16 @@ mod tests {
             face.first_gone(ToldPlane::Transports, 0).map(|row| row.zid),
             Some([1; 16])
         );
-        assert!(face.tell_went(ToldPlane::Transports, 0, &key));
-        assert!(!face.tell_went(ToldPlane::Transports, 0, &key), "told once");
+        assert_eq!(
+            face.tell_went(ToldPlane::Transports, 0, &key)
+                .map(|row| row.zid),
+            Some([1; 16]),
+            "the row as it was told it came"
+        );
+        assert!(
+            face.tell_went(ToldPlane::Transports, 0, &key).is_none(),
+            "told once"
+        );
         assert!(face.tomb.is_none(), "a tomb owed to no one is let go of");
     }
 

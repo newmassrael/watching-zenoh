@@ -156,53 +156,53 @@ impl ToldLedger {
     }
 
     /// Note `listener` of `plane` told of the row of `key`, which `stands` reads as the engine
-    /// holds it now (`None` when it does not stand): whether the listener is to be told. A row
-    /// that came and went before the listener was told it is not told; a row that was told already
-    /// is not told again.
+    /// holds it now (`None` when it does not stand): the row the listener is to be told came, as
+    /// it stands, or as the ledger keeps it for a row that went. A row that came and went before
+    /// the listener was told it is not told; a row that was told already is not told again.
     pub fn tell_came(
         &mut self,
         plane: ToldPlane,
         listener: usize,
         key: &ToldKey,
         stands: Option<FaceLinkRow>,
-    ) -> bool {
-        if let Some((_, bits)) = self
+    ) -> Option<FaceLinkRow> {
+        if let Some((kept, bits)) = self
             .rows
             .iter_mut()
             .find(|(row, _)| ToldKey::of_row(row) == *key)
         {
-            return bits.set(plane, listener);
+            return bits
+                .set(plane, listener)
+                .then(|| stands.unwrap_or_else(|| kept.clone()));
         }
-        let Some(row) = stands else {
-            return false;
-        };
+        let row = stands?;
         let mut bits = ToldBits::default();
-        let told = bits.set(plane, listener);
-        if told {
-            self.rows.push((row, bits));
+        if !bits.set(plane, listener) {
+            return None;
         }
-        told
+        self.rows.push((row.clone(), bits));
+        Some(row)
     }
 
-    /// Note `listener` of `plane` told that the row of `key` left: whether the listener is to
-    /// be told, which it is only when it was told the row came. A tombstone no listener is left
-    /// to tell is let go of.
-    pub fn tell_went(&mut self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        let Some(at) = self
+    /// Note `listener` of `plane` told that the row of `key` left: the row as the listener was
+    /// told it came, which it is to be told left; `None` when it was never told the row came. A
+    /// tombstone no listener is left to tell is let go of.
+    pub fn tell_went(
+        &mut self,
+        plane: ToldPlane,
+        listener: usize,
+        key: &ToldKey,
+    ) -> Option<FaceLinkRow> {
+        let at = self
             .rows
             .iter()
-            .position(|(row, bits)| ToldKey::of_row(row) == *key && bits.has(plane, listener))
-        else {
-            return false;
-        };
-        let Some((_, bits)) = self.rows.get_mut(at) else {
-            return false;
-        };
-        let told = bits.clear(plane, listener);
+            .position(|(row, bits)| ToldKey::of_row(row) == *key && bits.has(plane, listener))?;
+        let (row, bits) = self.rows.get_mut(at)?;
+        bits.clear(plane, listener);
         if bits.is_empty() {
-            self.rows.swap_remove(at);
+            return Some(self.rows.swap_remove(at).0);
         }
-        told
+        Some(row.clone())
     }
 
     /// The first row `listener` of `plane` was told that no longer stands, as `stands` says
@@ -263,16 +263,32 @@ mod tests {
     #[test]
     fn a_row_is_told_once_and_only_while_it_stands() {
         let mut ledger = ToldLedger::new();
-        assert!(ledger.tell_came(ToldPlane::Transports, 0, &key(1), Some(row(1, 0))));
-        assert!(!ledger.tell_came(ToldPlane::Transports, 0, &key(1), Some(row(1, 0))));
-        assert!(ledger.tell_came(ToldPlane::Transports, 1, &key(1), Some(row(1, 0))));
-        assert!(ledger.tell_came(ToldPlane::Links, 0, &key(1), Some(row(1, 0))));
+        assert_eq!(
+            ledger
+                .tell_came(ToldPlane::Transports, 0, &key(1), Some(row(1, 0)))
+                .map(|row| row.zid),
+            Some([1; 16]),
+            "the row as it stands"
+        );
+        assert!(ledger
+            .tell_came(ToldPlane::Transports, 0, &key(1), Some(row(1, 0)))
+            .is_none());
+        assert!(ledger
+            .tell_came(ToldPlane::Transports, 1, &key(1), Some(row(1, 0)))
+            .is_some());
+        assert!(ledger
+            .tell_came(ToldPlane::Links, 0, &key(1), Some(row(1, 0)))
+            .is_some());
         assert!(
-            !ledger.tell_came(ToldPlane::Transports, 0, &key(2), None),
+            ledger
+                .tell_came(ToldPlane::Transports, 0, &key(2), None)
+                .is_none(),
             "a row that came and went before it was told is not told"
         );
         assert!(
-            !ledger.tell_went(ToldPlane::Transports, 0, &key(2)),
+            ledger
+                .tell_went(ToldPlane::Transports, 0, &key(2))
+                .is_none(),
             "nor is it told it left"
         );
     }
@@ -300,7 +316,8 @@ mod tests {
     ///
     /// # Control
     ///
-    /// Letting go of the row at the first `tell_went` reds the second listener's `first_gone`.
+    /// Letting go of the row at the first `tell_went` reds the second listener's `first_gone`;
+    /// a departure told without the row it was told came as reds the first `tell_went`.
     #[test]
     fn a_tombstone_stays_until_every_listener_told_it_came_was_told_it_left() {
         let mut ledger = ToldLedger::new();
@@ -313,8 +330,24 @@ mod tests {
                 .map(|row| row.zid),
             Some([3; 16])
         );
-        assert!(ledger.tell_went(ToldPlane::Transports, 0, &key(3)));
-        assert!(!ledger.tell_went(ToldPlane::Transports, 0, &key(3)));
+        assert_eq!(
+            ledger
+                .tell_went(ToldPlane::Transports, 0, &key(3))
+                .map(|row| row.zid),
+            Some([3; 16]),
+            "the departure is told of the row as it was told it came"
+        );
+        assert!(ledger
+            .tell_went(ToldPlane::Transports, 0, &key(3))
+            .is_none());
+        assert_eq!(
+            ledger
+                .tell_went(ToldPlane::Links, 2, &key(3))
+                .map(|row| row.zid),
+            Some([3; 16]),
+            "the last listener owed it takes the tombstone"
+        );
+        ledger.tell_came(ToldPlane::Links, 2, &key(3), Some(row(3, 0)));
         assert_eq!(
             ledger
                 .first_gone(ToldPlane::Links, 2, gone)

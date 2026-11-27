@@ -595,15 +595,6 @@ impl ConnEvent {
         }
     }
 
-    /// Whether the event tells its row came.
-    fn came(&self) -> bool {
-        let kind = match self {
-            Self::Transport(event) => event.kind,
-            Self::Link(event) => event.kind,
-        };
-        kind == Z_SAMPLE_KIND_PUT
-    }
-
     /// The event as its plane's callback is handed it, for the length of one call.
     fn as_loaned(&mut self) -> *mut c_void {
         match self {
@@ -659,13 +650,29 @@ fn erase_link_call(call: Callback<z_loaned_link_event_t>) -> EventCall {
     })
 }
 
-/// What arrives while a history is replayed, waiting behind it in order, each event with the key
-/// of the row it is of, in [`REPLAY_ROWS`] rows reserved with the listener. What arrives of a row
-/// already waiting is folded into it, so a row holds at most two events, its DEL and then its PUT.
+/// A change of a row that arrived while a history is replayed: the row's key, and whether it
+/// came or left. What the listener is told of it is written when it is told, from the row the
+/// engine keeps as it notes the listener told (`SessionEngine::tell_came`,
+/// `SessionEngine::tell_went`), so a held change owns nothing and is the same for either plane.
+#[derive(Clone, Copy)]
+struct Held {
+    key: ToldKey,
+    came: bool,
+}
+
+// A queue row holds no event: the larger plane's event would size the rows of every listener's
+// place, whichever plane it is of.
+const _: () = assert!(
+    core::mem::size_of::<Option<Held>>() < core::mem::size_of::<z_loaned_transport_event_t>() * 2
+);
+
+/// What arrives while a history is replayed, waiting behind it in order, in [`REPLAY_ROWS`] rows
+/// reserved with the listener. What arrives of a row already waiting is folded into it, so a row
+/// waits at most twice, its DEL and then its PUT.
 struct Pending {
-    rows: [Option<(ConnEvent, ToldKey)>; REPLAY_ROWS],
+    rows: [Option<Held>; REPLAY_ROWS],
     len: usize,
-    /// An event found every row held: it and what follows it are not held, and the listener is
+    /// A change found every row held: it and what follows it are not held, and the listener is
     /// brought to the faces as they stand once what is held was delivered
     /// ([`Delivery::finish_replay`]).
     overflowed: bool,
@@ -674,37 +681,35 @@ struct Pending {
 impl Pending {
     fn new() -> Self {
         Self {
-            rows: core::array::from_fn(|_| None),
+            rows: [None; REPLAY_ROWS],
             len: 0,
             overflowed: false,
         }
     }
 
-    /// Hold `event` of the row of `key` behind what waits. A PUT still waiting and the DEL of
-    /// its row are neither told: the row came and went inside the replay. The same kind of event
-    /// again is told once. A DEL waiting and the PUT of its row are both told, in order: a
-    /// reconnect. An event that finds every row held is let go of.
-    fn hold(&mut self, mut event: ConnEvent, key: ToldKey) {
-        if !self.overflowed {
-            match self.last_of(&key) {
-                Some((at, true)) if !event.came() => self.remove(at),
-                Some((_, came)) if came == event.came() => {}
-                _ => match self.rows.get_mut(self.len) {
-                    Some(row) => {
-                        *row = Some((event, key));
-                        // The row just filled lies below the rows' count.
-                        self.len = self.len.saturating_add(1);
-                        return;
-                    }
-                    None => self.overflowed = true,
-                },
-            }
+    /// Hold the change of the row of `key`, which `came` or left, behind what waits. A PUT still
+    /// waiting and the DEL of its row are neither told: the row came and went inside the replay.
+    /// The same change again is told once. A DEL waiting and the PUT of its row are both told, in
+    /// order: a reconnect. A change that finds every row held is not held.
+    fn hold(&mut self, key: ToldKey, came: bool) {
+        if self.overflowed {
+            return;
         }
-        // SAFETY: the event is this frame's alone: it was not held.
-        unsafe { event.clear() };
+        match self.last_of(&key) {
+            Some((at, true)) if !came => self.remove(at),
+            Some((_, held)) if held == came => {}
+            _ => match self.rows.get_mut(self.len) {
+                Some(row) => {
+                    *row = Some(Held { key, came });
+                    // The row just filled lies below the rows' count.
+                    self.len = self.len.saturating_add(1);
+                }
+                None => self.overflowed = true,
+            },
+        }
     }
 
-    /// The row the last event of `key` waits in, and whether it tells its row came.
+    /// The row the last change of `key` waits in, and whether it tells its row came.
     fn last_of(&self, key: &ToldKey) -> Option<(usize, bool)> {
         self.rows
             .iter()
@@ -712,16 +717,15 @@ impl Pending {
             .enumerate()
             .rev()
             .find_map(|(at, row)| {
-                let (event, held) = row.as_ref()?;
-                (held == key).then(|| (at, event.came()))
+                let held = row.as_ref()?;
+                (held.key == *key).then_some((at, held.came))
             })
     }
 
-    /// Let go of the event at `at`, the ones after it moving up a row.
+    /// Let go of the change at `at`, the ones after it moving up a row.
     fn remove(&mut self, at: usize) {
-        if let Some((mut event, _)) = self.rows.get_mut(at).and_then(Option::take) {
-            // SAFETY: held events are owned by the queue.
-            unsafe { event.clear() };
+        if let Some(row) = self.rows.get_mut(at) {
+            *row = None;
         }
         if let Some(after) = self.rows.get_mut(at..self.len) {
             if !after.is_empty() {
@@ -731,8 +735,8 @@ impl Pending {
         self.len = self.len.saturating_sub(1);
     }
 
-    /// The first event waiting, taken out.
-    fn next(&mut self) -> Option<(ConnEvent, ToldKey)> {
+    /// The first change waiting, taken out.
+    fn next(&mut self) -> Option<Held> {
         let first = self.rows.first_mut()?.take()?;
         if let Some(held) = self.rows.get_mut(..self.len) {
             if !held.is_empty() {
@@ -743,18 +747,9 @@ impl Pending {
         Some(first)
     }
 
-    /// Whether an event found every row held since this was last asked.
+    /// Whether a change found every row held since this was last asked.
     fn take_overflow(&mut self) -> bool {
         core::mem::take(&mut self.overflowed)
-    }
-
-    /// Let go of every event waiting.
-    fn release(&mut self) {
-        while let Some((mut event, _)) = self.next() {
-            // SAFETY: held events are owned by the queue.
-            unsafe { event.clear() };
-        }
-        self.overflowed = false;
     }
 }
 
@@ -815,16 +810,18 @@ impl Delivery {
         }
     }
 
-    /// Deliver `event` of the row of `key`, or hold it while the history is being replayed.
-    fn deliver(&self, event: ConnEvent, key: ToldKey) {
+    /// Deliver the event `event` writes of the row of `key`, which `came` or left, or hold the
+    /// change while the history is being replayed: its event is written when it is told
+    /// ([`Self::finish_replay`]).
+    fn deliver(&self, key: ToldKey, came: bool, event: impl FnOnce() -> ConnEvent) {
         {
             let mut phase = lock(&self.phase);
             if let Phase::Replaying(pending) = &mut *phase {
-                pending.hold(event, key);
+                pending.hold(key, came);
                 return;
             }
         }
-        self.call(event);
+        self.call(event());
     }
 
     /// Call the closure with `event`, then release the event. A listener that
@@ -851,15 +848,16 @@ impl Delivery {
         unsafe { event.clear() };
     }
 
-    /// Deliver what arrived during the replay, in order, and go live. A held event is told only
-    /// when `tell` says the listener is to hear it, asked whether its row `came` and of which
-    /// row (`SessionEngine::tell_came`, `SessionEngine::tell_went`); once the queue is drained
-    /// after it ran out of rows, `converge` brings the listener to the faces as they stand. The
-    /// phase is switched only when the queue is found empty and whole under its lock, so an event
+    /// Deliver what arrived during the replay, in order, and go live. A held change is told
+    /// only when `tell`, asked whether its row `came` and of which row, writes its event, which
+    /// it does from the row the engine keeps when the listener is to hear it
+    /// (`SessionEngine::tell_came`, `SessionEngine::tell_went`); once the queue is drained after
+    /// it ran out of rows, `converge` brings the listener to the faces as they stand. The phase
+    /// is switched only when the queue is found empty and whole under its lock, so an event
     /// cannot be delivered ahead of one still held.
     fn finish_replay(
         &self,
-        mut tell: impl FnMut(bool, &ToldKey) -> bool,
+        mut tell: impl FnMut(bool, &ToldKey) -> Option<ConnEvent>,
         mut converge: impl FnMut(&Self),
     ) {
         loop {
@@ -878,12 +876,9 @@ impl Delivery {
                 }
             };
             match next {
-                Some((mut event, key)) => {
-                    if tell(event.came(), &key) {
+                Some(held) => {
+                    if let Some(event) = tell(held.came, &held.key) {
                         self.call(event);
-                    } else {
-                        // SAFETY: the event is this frame's alone: it is not told.
-                        unsafe { event.clear() };
                     }
                 }
                 None => converge(self),
@@ -896,13 +891,8 @@ impl Delivery {
     fn retire(&self) {
         let closure = lock(&self.gate).take();
         drop(closure);
-        // What was still held is released with the listener: a delivery kept in a place is never
-        // dropped, so nothing else would free it.
-        let mut phase = lock(&self.phase);
-        if let Phase::Replaying(pending) = &mut *phase {
-            pending.release();
-        }
-        *phase = Phase::Live;
+        // What was still held is told to no one: a held change owns nothing to let go of.
+        *lock(&self.phase) = Phase::Live;
     }
 }
 
@@ -1063,14 +1053,29 @@ unsafe fn count_closure(object: *const ListenerState) {
     }
 }
 
-/// Whether `listener` of `plane`, whose history is being replayed, is to be told an event that
-/// its row of `key` `came` or left ([`wz_capi_port::told`]).
-fn told(engine: &Engine, plane: ToldPlane, listener: usize, came: bool, key: &ToldKey) -> bool {
-    if came {
-        SessionEngine::tell_came(engine, plane, listener, key)
+/// The event `listener` of `plane`, whose history is being replayed, is told of its row of
+/// `key`, which `came` or left: written from the row the engine keeps as it notes the listener
+/// told ([`wz_capi_port::told`]), a member's starting at the session's `group`; `None` when the
+/// listener is not to be told.
+fn told(
+    engine: &Engine,
+    group: Option<&GroupText>,
+    (plane, listener): (ToldPlane, usize),
+    came: bool,
+    key: &ToldKey,
+) -> Option<ConnEvent> {
+    let (kind, row) = if came {
+        (
+            Z_SAMPLE_KIND_PUT,
+            SessionEngine::tell_came(engine, plane, listener, key)?,
+        )
     } else {
-        SessionEngine::tell_went(engine, plane, listener, key)
-    }
+        (
+            Z_SAMPLE_KIND_DELETE,
+            SessionEngine::tell_went(engine, plane, listener, key)?,
+        )
+    };
+    Some(event_of_row(plane, kind, &row, group))
 }
 
 /// The key of the row an event of `plane` of `row` is of: a transport is its face's first row.
@@ -1116,16 +1121,20 @@ fn converge(
     slot: usize,
     listener: &Listener,
 ) {
-    while let Some(row) = SessionEngine::first_told_gone(engine, plane, slot) {
-        if !SessionEngine::tell_went(engine, plane, slot, &key_of_row(plane, &row)) {
+    while let Some(gone) = SessionEngine::first_told_gone(engine, plane, slot) {
+        let Some(event) = told(
+            engine,
+            group,
+            (plane, slot),
+            false,
+            &key_of_row(plane, &gone),
+        ) else {
             break;
-        }
-        let event = event_of_row(plane, Z_SAMPLE_KIND_DELETE, &row, group);
+        };
         listener.delivery.call(event);
     }
     for row in rows(engine).filter(|row| listener.hears(row)) {
-        if SessionEngine::tell_came(engine, plane, slot, &key_of_row(plane, &row)) {
-            let event = event_of_row(plane, Z_SAMPLE_KIND_PUT, &row, group);
+        if let Some(event) = told(engine, group, (plane, slot), true, &key_of_row(plane, &row)) {
             listener.delivery.call(event);
         }
     }
@@ -1443,7 +1452,9 @@ impl Connectivity {
             if listener.wants(row) {
                 listener
                     .delivery
-                    .deliver(event_of_row(plane, kind, row, self.group()), key);
+                    .deliver(key, kind == Z_SAMPLE_KIND_PUT, || {
+                        event_of_row(plane, kind, row, self.group())
+                    });
             }
             drop(hold);
         }
@@ -1535,13 +1546,14 @@ impl Connectivity {
             let engine = crate::session::EngineHold::as_ref(engine);
             let group = hub.group();
             for row in rows(engine).filter(|row| listener.hears(row)) {
-                if SessionEngine::tell_came(engine, plane, slot, &key_of_row(plane, &row)) {
-                    let event = event_of_row(plane, Z_SAMPLE_KIND_PUT, &row, group);
+                if let Some(event) =
+                    told(engine, group, (plane, slot), true, &key_of_row(plane, &row))
+                {
                     listener.delivery.call(event);
                 }
             }
             listener.delivery.finish_replay(
-                |came, key| told(engine, plane, slot, came, key),
+                |came, key| told(engine, group, (plane, slot), came, key),
                 |_| converge(engine, group, plane, slot, listener),
             );
             SessionEngine::forget_told(engine, plane, slot);
@@ -2661,7 +2673,7 @@ pub(crate) mod tests {
             // when a callback undeclares its own listener; the replay is the one
             // window in which a delivery is queued and not called.
             if matches!(event.transport.zid.id[0], 1 | 2) {
-                delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, *arriving), key_of(*arriving));
+                arrive(delivery, Z_SAMPLE_KIND_PUT, *arriving);
             }
         }
     }
@@ -2749,6 +2761,25 @@ pub(crate) mod tests {
             kind,
             transport: transport_with_zid(first),
         })
+    }
+
+    /// Hand `delivery` the transport event `kind` of the peer whose zid starts with `first`, as
+    /// the hub hands it a change of a row.
+    fn arrive(delivery: &Delivery, kind: z_sample_kind_t, first: u8) {
+        delivery.deliver(key_of(first), kind == Z_SAMPLE_KIND_PUT, || {
+            event_of(kind, first)
+        });
+    }
+
+    /// The event a held change of the row of `key` is told by, as an engine that tells every
+    /// change writes it.
+    fn as_told(came: bool, key: &ToldKey) -> Option<ConnEvent> {
+        let kind = if came {
+            Z_SAMPLE_KIND_PUT
+        } else {
+            Z_SAMPLE_KIND_DELETE
+        };
+        Some(event_of(kind, key.zid[0]))
     }
 
     pub(crate) use crate::test_heap::allocations;
@@ -3142,7 +3173,7 @@ pub(crate) mod tests {
             "what arrives during the replay waits for it"
         );
 
-        delivery.finish_replay(|_, _| true, |_| {});
+        delivery.finish_replay(as_told, |_| {});
         assert_eq!(
             seen(log),
             ["transport PUT 1", "transport PUT 2", "transport PUT 9"],
@@ -3150,7 +3181,7 @@ pub(crate) mod tests {
         );
 
         // Live now: a further arrival goes straight through.
-        delivery.deliver(event_of(Z_SAMPLE_KIND_DELETE, 5), key_of(5));
+        arrive(&delivery, Z_SAMPLE_KIND_DELETE, 5);
         assert_eq!(
             seen(log).last().map(String::as_str),
             Some("transport DEL 5")
@@ -3168,11 +3199,11 @@ pub(crate) mod tests {
     fn a_transport_that_came_and_went_inside_the_replay_is_not_told() {
         let log = log();
         let delivery = replaying_delivery(log);
-        delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, 4), key_of(4));
-        delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, 3), key_of(3));
-        delivery.deliver(event_of(Z_SAMPLE_KIND_DELETE, 3), key_of(3));
-        delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, 6), key_of(6));
-        delivery.finish_replay(|_, _| true, |_| {});
+        arrive(&delivery, Z_SAMPLE_KIND_PUT, 4);
+        arrive(&delivery, Z_SAMPLE_KIND_PUT, 3);
+        arrive(&delivery, Z_SAMPLE_KIND_DELETE, 3);
+        arrive(&delivery, Z_SAMPLE_KIND_PUT, 6);
+        delivery.finish_replay(as_told, |_| {});
         assert_eq!(seen(log), ["transport PUT 4", "transport PUT 6"]);
     }
 
@@ -3188,10 +3219,10 @@ pub(crate) mod tests {
     fn a_reconnect_inside_the_replay_is_told_as_both_in_order() {
         let log = log();
         let delivery = replaying_delivery(log);
-        delivery.deliver(event_of(Z_SAMPLE_KIND_DELETE, 5), key_of(5));
-        delivery.deliver(event_of(Z_SAMPLE_KIND_DELETE, 5), key_of(5));
-        delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, 5), key_of(5));
-        delivery.finish_replay(|_, _| true, |_| {});
+        arrive(&delivery, Z_SAMPLE_KIND_DELETE, 5);
+        arrive(&delivery, Z_SAMPLE_KIND_DELETE, 5);
+        arrive(&delivery, Z_SAMPLE_KIND_PUT, 5);
+        delivery.finish_replay(as_told, |_| {});
         assert_eq!(seen(log), ["transport DEL 5", "transport PUT 5"]);
     }
 
@@ -3212,14 +3243,20 @@ pub(crate) mod tests {
             .map(|at| u8::try_from(at).expect("a few rows").saturating_add(10))
             .collect();
         for first in &firsts {
-            delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, *first), key_of(*first));
+            arrive(&delivery, Z_SAMPLE_KIND_PUT, *first);
         }
         // Past the rows: let go of, and what follows it too.
-        delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, 99), key_of(99));
+        arrive(&delivery, Z_SAMPLE_KIND_PUT, 99);
         let mut converged = 0;
         delivery.finish_replay(
             // The engine says the listener is not to hear the first row held.
-            |_, key| *key != key_of(firsts[0]),
+            |came, key| {
+                if *key == key_of(firsts[0]) {
+                    None
+                } else {
+                    as_told(came, key)
+                }
+            },
             |delivery| {
                 converged += 1;
                 delivery.call(event_of(Z_SAMPLE_KIND_PUT, 99));
@@ -3249,7 +3286,7 @@ pub(crate) mod tests {
         let held = allocations(|| {
             for at in 0..=REPLAY_ROWS {
                 let first = u8::try_from(at).unwrap_or(u8::MAX);
-                delivery.deliver(event_of(Z_SAMPLE_KIND_PUT, first), key_of(first));
+                arrive(&delivery, Z_SAMPLE_KIND_PUT, first);
             }
         });
         assert_eq!(held, 0, "the arrivals are held in place");
