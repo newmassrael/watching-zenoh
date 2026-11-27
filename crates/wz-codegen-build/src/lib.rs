@@ -31,9 +31,14 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+mod oracle_store;
 pub mod spawn;
 mod zenohd_oracle;
 
+pub use oracle_store::{
+    oracle_store_root, oracle_store_root_in, sce_codegen_store_entry, toolchain_channel,
+    ORACLE_STORE_ENV, SCE_CODEGEN_RECIPE,
+};
 pub use spawn::{judge, SceCodegen, SceResources, SpawnRefusal};
 pub use zenohd_oracle::{
     assert_zenohd_at_pin, zenohd_binary, zenohd_pin_in, zenohd_pin_verdict, zenohd_version_in,
@@ -111,10 +116,12 @@ pub fn artifact(rel: impl AsRef<Path>) -> PathBuf {
     artifact_dir(&checkout_root().join(rel))
 }
 
-/// Locate the vendored `sce-codegen` binary under `sce_workspace`
-/// (`<sce_workspace>/target/release/sce-codegen[.exe]`), accounting for the
-/// host executable suffix (`std::env::consts::EXE_SUFFIX` = `.exe` on Windows,
-/// empty on Unix). Panics with the `build-sce.sh` directive if absent.
+/// Locate the vendored `sce-codegen` binary of `sce_workspace`, accounting for
+/// the host executable suffix (`std::env::consts::EXE_SUFFIX` = `.exe` on
+/// Windows, empty on Unix): the machine's oracle store's build of the
+/// workspace's source state when it holds one, else
+/// `<sce_workspace>/target/release/sce-codegen[.exe]` ([`sce_codegen_build`]).
+/// Panics with the `build-sce.sh` directive if absent.
 ///
 /// R311y20 — the SINGLE source of the sce-codegen binary path for EVERY wz
 /// build script. The statechart [`Codegen::from_manifest`] AND the switchboard
@@ -125,36 +132,115 @@ pub fn artifact(rel: impl AsRef<Path>) -> PathBuf {
 /// still hardcoded the suffix-less path and would panic on Windows). Callers
 /// emit their own `cargo:rerun-if-changed` on the returned path.
 ///
-/// The binary is a PRODUCT of `sce_workspace`, so it is looked for where
-/// [`artifact_dir`] puts that workspace's products (`build-sce.sh` builds it
-/// there under the same rule); the provenance is still read from the source.
-///
 /// Crate-private: a caller that holds the binary's path can spawn it past the
 /// door that names its resources, so the public entry is [`SceCodegen`].
 pub(crate) fn locate_sce_codegen(sce_workspace: &Path) -> PathBuf {
-    let bin = sce_codegen_binary(sce_workspace);
-    if !bin.exists() {
+    let build = sce_codegen_build(sce_workspace);
+    if !build.binary.exists() {
         panic!(
             "sce-codegen binary not found at {}\n\
              run `scripts/build-sce.sh` from the wz workspace root to build it \
              (vendor pin: see vendor/sce HEAD).",
-            bin.display()
+            build.binary.display()
         );
     }
-    assert_sce_codegen_provenance(sce_workspace);
-    bin
+    assert_sce_codegen_provenance(sce_workspace, &build);
+    build.binary
 }
 
-/// Where the vendored `sce-codegen` of `sce_workspace` is, built or not.
+/// Where the vendored `sce-codegen` a consumer of `sce_workspace` runs is,
+/// built or not.
 pub(crate) fn sce_codegen_binary(sce_workspace: &Path) -> PathBuf {
+    sce_codegen_build(sce_workspace).binary
+}
+
+/// The name of the provenance stamp beside every built `sce-codegen`, in the
+/// checkout and in the store alike.
+const SCE_CODEGEN_STAMP_NAME: &str = ".sce-codegen.pin";
+
+/// A built `sce-codegen`, wherever it is, and the provenance stamp beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceCodegenBuild {
+    /// The binary, built or not.
+    pub binary: PathBuf,
+    /// Its provenance stamp, which `scripts/build-sce.sh` writes after a
+    /// successful build.
+    pub stamp: PathBuf,
+}
+
+impl SceCodegenBuild {
+    /// The build `dir` holds or would hold: `sce-codegen[.exe]` and its stamp.
+    pub fn in_dir(dir: &Path) -> Self {
+        Self {
+            binary: dir.join(format!("sce-codegen{}", std::env::consts::EXE_SUFFIX)),
+            stamp: dir.join(SCE_CODEGEN_STAMP_NAME),
+        }
+    }
+
+    /// What this build was built from, relative to the `vendor/sce` state
+    /// `sce_workspace` holds now (see [`sce_codegen_provenance`]).
+    pub fn provenance(&self, sce_workspace: &Path) -> Provenance {
+        let Some(want) = vendored_source_token(sce_workspace) else {
+            return Provenance::Unverifiable;
+        };
+        let have = read_stamp(&self.stamp);
+        if have.as_deref() == Some(want.as_str()) {
+            Provenance::Matches
+        } else {
+            Provenance::Mismatch { have, want }
+        }
+    }
+
+    /// The binary is there and its stamp names `want`. The store's publisher
+    /// renames the stamp into place after the binary, so an entry it left
+    /// half-written fails this.
+    fn holds(&self, want: &str) -> bool {
+        self.binary.is_file() && read_stamp(&self.stamp).as_deref() == Some(want)
+    }
+}
+
+/// The build in the checkout: where `scripts/build-sce.sh`'s cargo puts it, at
+/// the place [`artifact_dir`] gives the workspace's products.
+fn checkout_build(sce_workspace: &Path) -> SceCodegenBuild {
     let release = artifact_dir(sce_workspace).join("target/release");
-    release.join(format!("sce-codegen{}", std::env::consts::EXE_SUFFIX))
+    SceCodegenBuild::in_dir(&release)
+}
+
+/// Which `sce-codegen` a consumer of `sce_workspace` runs, with the store and
+/// the checkout whose recipe and toolchain name its entry explicit: the store's
+/// entry for the workspace's source state when it holds a build of that state,
+/// else the checkout's build. The shell door decides the same way
+/// (`sce_codegen_binary` in `scripts/lib/sce-codegen-oracle.sh`).
+pub fn sce_codegen_build_in(
+    store: Option<&Path>,
+    checkout: &Path,
+    sce_workspace: &Path,
+) -> SceCodegenBuild {
+    store
+        .and_then(|store| sce_codegen_store_entry(store, checkout, sce_workspace))
+        .map(|entry| SceCodegenBuild::in_dir(&entry))
+        .filter(|stored| {
+            vendored_source_token(sce_workspace).is_some_and(|want| stored.holds(&want))
+        })
+        .unwrap_or_else(|| checkout_build(sce_workspace))
+}
+
+/// [`sce_codegen_build_in`] for this process's oracle store and the checkout
+/// this crate was compiled from: the build every consumer here runs.
+pub fn sce_codegen_build(sce_workspace: &Path) -> SceCodegenBuild {
+    sce_codegen_build_in(
+        oracle_store_root().as_deref(),
+        &checkout_root(),
+        sce_workspace,
+    )
 }
 
 /// Path of the provenance stamp `scripts/build-sce.sh` writes beside the
-/// binary. Named here rather than inlined because several callers read it.
+/// binary it builds in the checkout. Named here rather than inlined because
+/// several callers read it; what a consumer grades is the stamp of the build it
+/// runs ([`sce_codegen_build`]).
 pub fn sce_codegen_stamp(sce_workspace: &Path) -> PathBuf {
-    artifact_dir(sce_workspace).join("target/release/.sce-codegen.pin")
+    checkout_build(sce_workspace).stamp
 }
 
 /// The one stamp filename every foreign-oracle output root under this tree's
@@ -285,8 +371,8 @@ impl Provenance {
     }
 }
 
-/// Grade the built `sce-codegen` against the `vendor/sce` state this tree
-/// carries.
+/// Grade the `sce-codegen` a consumer runs ([`sce_codegen_build`]: the oracle
+/// store's or the checkout's) against the `vendor/sce` state this tree carries.
 ///
 /// EXISTENCE IS NOT THE QUESTION. The binary is an untracked build product, so
 /// it survives a pin bump, a branch switch and a rebase without changing, and
@@ -303,17 +389,7 @@ impl Provenance {
 /// library's — see `scripts/lib/sce-codegen-oracle.sh` for the format and for
 /// why the digest is a `git hash-object` rather than an md5.
 pub fn sce_codegen_provenance(sce_workspace: &Path) -> Provenance {
-    let want = match vendored_source_token(sce_workspace) {
-        Some(t) => t,
-        None => return Provenance::Unverifiable,
-    };
-    let have = read_stamp(&sce_codegen_stamp(sce_workspace));
-
-    if have.as_deref() == Some(want.as_str()) {
-        Provenance::Matches
-    } else {
-        Provenance::Mismatch { have, want }
-    }
+    sce_codegen_build(sce_workspace).provenance(sce_workspace)
 }
 
 /// Refuse an `sce-codegen` that was built from a different `vendor/sce` state
@@ -342,17 +418,14 @@ pub fn sce_codegen_provenance(sce_workspace: &Path) -> Provenance {
 /// proceeds rather than inventing a verdict. Set `WZ_SCE_ORACLE_REQUIRE=1` —
 /// hosted CI does — to make that case a hard failure, where the submodule and
 /// the toolchain are always present and their absence means a broken runner.
-fn assert_sce_codegen_provenance(sce_workspace: &Path) {
+fn assert_sce_codegen_provenance(sce_workspace: &Path, build: &SceCodegenBuild) {
     // Emitted before the verdict, not after: a rebuild of sce-codegen rewrites
     // the stamp, and this is what makes cargo re-run the build script — and so
     // re-ask the question — instead of replaying a cached emit from the binary
     // that has just been replaced.
-    println!(
-        "cargo:rerun-if-changed={}",
-        sce_codegen_stamp(sce_workspace).display()
-    );
+    println!("cargo:rerun-if-changed={}", build.stamp.display());
 
-    match sce_codegen_provenance(sce_workspace) {
+    match build.provenance(sce_workspace) {
         Provenance::Matches => {}
         Provenance::Unverifiable => {
             let msg = Provenance::Unverifiable.explain();

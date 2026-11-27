@@ -50,11 +50,13 @@ case "$stage" in
         exit 2
         ;;
 esac
+# Cargo's own lines are left in: they are the progress of a build that takes long enough on one
+# core for a remote run that prints nothing to be ended as hung.
 if [ "$stage" != "--stage2" ]; then
-    cargo run --manifest-path xtask/Cargo.toml --quiet --no-default-features -- stage1
+    cargo run --manifest-path xtask/Cargo.toml --no-default-features -- stage1
 fi
 if [ "$stage" != "--stage1" ]; then
-    cargo run --manifest-path xtask/Cargo.toml --quiet -- switchboards
+    cargo run --manifest-path xtask/Cargo.toml -- switchboards
 fi
 
 echo "regen-codegen: done. Review + commit any out/** changes:"

@@ -435,7 +435,12 @@ local = "never"
 # - .debug: perf's build-id cache, content-addressed by build id.
 # - .local/mn: the pinned mnemosyne-cli, one directory per revision (scripts/install-mnemosyne-cli.sh).
 # - wz-kit-lane: scripts/kit-lane.sh's default KIT_LANE_HOME, built under KIT_LANE_LOCK.
-shared = [".debug", ".local/mn", "wz-kit-lane"]
+# - .cache/watching-zenoh/oracles/sce-codegen: the sce-codegen builds of scripts/build-sce.sh, an
+#   entry per SCE source state, recipe and toolchain, each written by renames under a lock of its
+#   own ("The store" in scripts/lib/sce-codegen-oracle.sh). Unshared, every slot built the pin
+#   again, one core for most of an hour. This is the store's default place; a run that sets
+#   WZ_ORACLE_STORE or XDG_CACHE_HOME keeps it where those name.
+shared = [".debug", ".local/mn", "wz-kit-lane", ".cache/watching-zenoh/oracles/sce-codegen"]
 
 [land]
 remote         = "origin"
