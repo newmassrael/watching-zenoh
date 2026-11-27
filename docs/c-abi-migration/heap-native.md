@@ -672,7 +672,62 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
 - D12: both are items no D12 build reaches (`FixedIdMap::split_off` is called by the on-use split
   alone, which no engine form calls yet). C1cs's readings are not expected to move.
 
+### 7.11 R1b, step 2: the owed relation
+
+- The decision: on `OnUse` the tokens of the faces that went are a relation whose rows are
+  tokens keyed by face and id (`FaceToken`, `OwedTokens`,
+  `crates/wz-session-core/src/declare/liveliness_subscriber.rs`), not a table of whole
+  `PeerTokens` tables. It is the relational form `peer-rows.md` section 5.4 and step R3 give every
+  peer declaration (the holding and the owing face a column over the face table), and it keeps no
+  table of tables. R3 generalises it: the row is `(face, id, key)`, and a face's own token table
+  becomes the rows of the same relation whose face holds them, owing being a face column that
+  names a face that went.
+- The bound: a row for each token the faces other than the dial role's may hold together
+  (`FacePeers::sets() - 1` faces at the per-face `MAX_REMOTE_DECLS` the session resolved,
+  `engine/registry/owed.rs` `Owed::counted`), taken whole when the first such face is admitted.
+  No pool bounds the faces' tokens on `OnUse`, so the bound is kept by the admission: a face is
+  admitted only while the rows left hold the tokens of every face held that may go and of the new
+  one (`OwedTokens::admits_face`, asked by `RegistryOf::add_face` before it builds anything); a
+  refusal is answered as a face past `max_faces` is (`FacesFull`). So `owed + held * per_face <=
+  rows` holds at every step (a face that goes moves at most `per_face` tokens and frees its
+  `per_face`; a retraction only shrinks `owed`), `owe` always finds its rows, and no
+  retraction is dropped. The residue: while retractions wait for room in the round, a face the
+  lent form would admit can be refused; without a pool that is the price of never losing one.
+- The lent form keeps its table of split tables, their rows in the session's token pool, which
+  bounds what the faces hold and owe together: D12's code, bytes and order do not move. R3 makes
+  it the pool's relation with the same face column.
+- The engine names both forms by one type (`Owed`, `crates/wz-capi-coop/src/engine/registry/owed.rs`),
+  so the registry's retraction, take and clear are one code over both
+  (`RegistryOf::retract_owed`, `take_lost_token`, `remove_accepted_faces`); the observer
+  retracts either through `LostTokens` (`SlotObserverOf::flush_tokens_on_link_loss_while`).
+- Tests: `declare::liveliness_subscriber::tests::the_tokens_of_faces_that_went_are_owed_as_one_relation_of_tokens`
+  (`storage-profile`): the admission of two faces of two tokens each and the refusal of a third
+  (the CONTROL), a face's tokens moved whole in ascending id after an earlier face's with their
+  keys still counted, the admission refused while those tokens hold the rows, a table that does
+  not fit moving none, and the retraction in the relation's order by `take_lost` and by a flush
+  that stops where `room` says no. Red if `admits_face` reads `held` for `held + 1`, if
+  `owe` leaves a token behind or moves part of a table that does not fit, if the rows come back
+  in another order, or if a key is let go of before its row. The lent arm is held by the
+  registry's `a_face_that_goes_owing_retractions_gives_its_set_back_at_once` and its neighbours,
+  unchanged. The engine's on-use arm compiles only where `listen` or `group` stands beside
+  `tables-on-use`, which `table_policy` does not name `OnUse` yet: its first build is R1b's
+  switch (`build.rs`, 11.1 R1b 7).
+- D12: the lent arm is the code it replaced, moved into `Owed`; C1cs's readings are not expected
+  to move. `PeerTokens::<OnUse>::split_off` (7.10) is called by no engine form now: the relation
+  moves tokens, not tables.
+
 ## 8. What the main session runs
+
+- R1b, step 2 (`8988bd43f3`, `3963ecf41d`), not built or run by this lane: `cargo test
+  --manifest-path crates/Cargo.toml -p wz-session-core --features codec-declare --lib
+  the_tokens_of_faces_that_went_are_owed_as_one_relation_of_tokens` 1; `cargo clippy
+  --manifest-path crates/Cargo.toml -p wz-session-core --all-targets -- -D warnings` and the same
+  with `--no-default-features` (no `alloc`: the relation is not compiled); the lent arm of
+  `Owed`: `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --all-features --lib
+  engine::registry` (the count of before) and `cargo clippy --manifest-path crates/Cargo.toml -p
+  wz-capi-coop --all-features --all-targets -- -D warnings`, the same with the crate's default
+  features and with `--features tables-on-use` (`Owed` is not compiled there, and
+  `flush_tokens_on_link_loss_while` now takes any `LostTokens`).
 
 - R1b, step 1 (`1063768725`), not built or run by this lane: `cargo test --manifest-path
   crates/Cargo.toml -p wz-session-core --lib a_split_off_fixed_table_takes_its_rows_whole` 1,
@@ -1140,8 +1195,9 @@ The steps, each a build of its own, the D12 forms' bytes and behaviour unchanged
        together, held by the registry as the pool's rows hold it on `Lent` (a token refused past
        it as a full table refuses it), which bounds the faces owing at once again; or an owed
        table of tokens rather than of tables (a row a token, its face's order kept), counted to
-       that same count, which also takes the memory of the tokens owed and no more. Either is a
-       change of the session core's token tables, and R1b's engine half waits for it;
+       that same count, which also takes the memory of the tokens owed and no more. Decided and
+       written (7.11): the relation of tokens, keyed by face and id, its bound kept by the faces'
+       admission rather than by a count of the tokens kept beside the tables;
     4. the rooms' places: `StatePlaces::room_places` holds `FACE_SETS` (one) places; a listening
        session holds one for each set (`plan.peers().sets()`), at most `MAX_FACE_SETS`: the field
        at that bound in the state, or a counted table of them;
