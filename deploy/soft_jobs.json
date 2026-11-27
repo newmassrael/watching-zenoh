@@ -109,6 +109,19 @@
       "note": "added before any hosted run of it; the scenarios were never run on either host when it was declared"
     },
     {
+      "workflow": ".github/workflows/platform.yml",
+      "job": "capi-examples",
+      "step": "example, a client that dials its lost link again (observed)",
+      "kind": "continue-on-error",
+      "why_soft": "a new example of the package's program set: a client whose listening node closes and is replaced by a new node on the same port, which must dial it again by itself and carry its put and its subscription over the new link; its timing on the hosted loopback of either host has not been read yet",
+      "gate_when": "the step reads green on two consecutive main runs on the Linux and the Windows row; then it drops continue-on-error like the other example steps of the job",
+      "promote_after_green": 2,
+      "allowed_consecutive_red": 1,
+      "declared": "2026-11-27",
+      "expires": "2027-01-26",
+      "note": "added before any hosted run of it; the package test and the sanitizer lanes run the same program from the examples directory"
+    },
+    {
       "workflow": ".github/workflows/release.yml",
       "job": "release",
       "step": "cargo publish --dry-run (zenoh-pico-sys)",
