@@ -1016,10 +1016,13 @@ tests::direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg"
     # measured on a build host yet.
     "wz-capi-coop|hook|tables-on-use|on_use"
     "wz-capi-coop|hook|liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use|on_use"
-    # A build that names both `tables-on-use` and `runtime-plan`, as `--all-features` does, is the
-    # form laid out at the open (`runtime-plan` wins, `src/lib.rs`): the one test of that build,
-    # which reads its row policy and its moment. Not measured on a build host yet.
+    # A build that names both `tables-on-use` and `runtime-plan` takes its tables' memory on use,
+    # their counts laid out from its config (the crate's build script, `TablePolicy`), but where it
+    # takes faces beside its dial role's (`listen`, `group`, which `--all-features` names), whose
+    # sets its arena still lends: the test of that build that reads its row policy and its moment,
+    # and the on-use tests over the plan laid out from the config. Not measured on a build host yet.
     "wz-capi-coop|hook|runtime-plan,tables-on-use|form_precedence_tests::"
+    "wz-capi-coop|hook|runtime-plan,tables-on-use|on_use"
     # The crate's whole suite in the build form the C library ships: a domain of
     # `declaration-sync-pacing` without `on`, where a link is told the session's declarations in
     # one lap when it comes up and the engine holds no code of paced turns

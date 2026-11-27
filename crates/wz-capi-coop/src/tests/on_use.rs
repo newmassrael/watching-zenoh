@@ -188,6 +188,53 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
     assert!(!laid(ArenaPart::LinkRooms), "the rooms lie apart");
 }
 
+/// A session whose tables take their memory on use lays out no row of the tables it counts in the
+/// plan an open lays out from its config, whether the build's plans are laid out at the open
+/// (`runtime-plan`) or not: none of the session's one table set, the key arena, the faces' sets, a
+/// peer's tables, the places of the rooms or of a step, the declaration watchers, the gets' tables,
+/// the held Finals or the round's tables, each counted from the plan and taking its memory at its
+/// first row; the CONTROL rows, the endpoints' texts and the links' receive buffers, are laid out.
+/// Turned red by a row of those tables put where the build lays its plans out at the open
+/// (`feature = "runtime-plan"`) rather than where the policy lends them (`wz_lent`), as
+/// `ArenaPlan::put_entities` was put, in a build of both features.
+#[test]
+fn an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts() {
+    use crate::arena::ArenaPlan;
+    let config = crate::CoopConfig {
+        endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
+        ..super::client_config()
+    };
+    let plan = ArenaPlan::of(&config, &config.limits).expect("the client's limits lay a plan out");
+    let laid = |part: &str| plan.rows().any(|row| row.part() == part);
+    assert!(
+        laid("endpoint texts") && laid("link receive buffers"),
+        "CONTROL: the transport's rows are laid out"
+    );
+    for part in [
+        "session tables",
+        "key arena",
+        "face tables",
+        "peer tables",
+        "room places",
+        "router lend",
+        "registry lend",
+        "declaration watchers",
+        "pending gets",
+        "ended legs",
+        "leg callbacks",
+        "pending legs",
+        "held replies",
+        "held finals",
+        "refused finals",
+        "delivery records",
+        "delivery callbacks",
+        "delivery keys",
+        "delivery round",
+    ] {
+        assert!(!laid(part), "{part} is counted, not laid out");
+    }
+}
+
 /// A session whose tables take their memory on use takes the state its own values and its key
 /// budget lie in from the allocator, apart from its arena: its memory is asked for one block, the
 /// arena its plan lays out and nothing before it, and every plane the state owns lies in that

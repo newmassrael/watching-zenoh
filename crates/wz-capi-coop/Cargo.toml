@@ -531,10 +531,12 @@ runtime-plan = []
 # session's own, one allocation the open takes from the allocator apart from its arena, and no
 # region is laid out; the engine lies in an allocation of its own the open claims first, which keeps
 # the arena's memory while it is held. The arena is still the open's for the rest. Beside
-# `runtime-plan` (which `listen` and `group` turn on, and `--all-features` names) it yields, as
-# features add: a session laid out at the open from its config takes its tables' memory there, so a
-# build of both is the `runtime-plan` form (`src/lib.rs`, where `RowPolicy` is named). Off, every
-# table takes its memory at the open and none after (docs/upstream-parity.md, D12).
+# `runtime-plan` the counts are the config's and the memory is still taken on use: the moment is
+# this feature's and where the counts come from is `runtime-plan`'s, two facts the build script
+# reads apart (`build.rs`, `TablePolicy`), but in a session that takes faces beside its dial role's
+# (`listen`, `group`), whose faces' sets are lent from the pools its arena lays out until they are
+# made on use, and which lends its tables at the open until then (`--all-features` is that form).
+# Off, every table takes its memory at the open and none after (docs/upstream-parity.md, D12).
 tables-on-use = []
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside

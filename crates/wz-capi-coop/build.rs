@@ -82,14 +82,18 @@ enum TablePolicy {
     OnUse,
 }
 
-/// The policy this build's features choose. A session laid out from its config takes its tables
-/// at the open, `tables-on-use` or not: its open has no form that takes them on use yet.
+/// The policy this build's features choose. `tables-on-use` takes the tables on use whichever way
+/// their counts come, the build's region or the config, but in a session that takes faces beside
+/// its dial role's (`listen`, `group`): the sets of those faces are lent from the pools its arena
+/// lays out, and are made on use by a form of its own, so such a session lends its tables at the
+/// open until then. Both turn `runtime-plan` on, so a build that names neither is the region's.
 fn table_policy() -> TablePolicy {
     let planned = set("CARGO_FEATURE_RUNTIME_PLAN");
-    let on_use = set("CARGO_FEATURE_TABLES_ON_USE");
+    let takes_faces = set("CARGO_FEATURE_LISTEN") || set("CARGO_FEATURE_GROUP");
+    let on_use = set("CARGO_FEATURE_TABLES_ON_USE") && !takes_faces;
     match (planned, on_use) {
-        (true, _) => TablePolicy::Lent,
-        (false, true) => TablePolicy::OnUse,
+        (_, true) => TablePolicy::OnUse,
+        (true, false) => TablePolicy::Lent,
         (false, false) => TablePolicy::Region,
     }
 }
