@@ -691,16 +691,6 @@ impl<D, M: CountKind> Drop for LineLease<D, M> {
     }
 }
 
-/// `link`, its handshake made, as the session shell holds a link.
-fn opened<D: SerialDevice + 'static, N: CountKind>(
-    link: SerialCellOf<D, N>,
-) -> OpenedLink<HeapLink<N>, N> {
-    OpenedLink {
-        sink: link.clone().into_sink(),
-        pump: link.into_link(),
-    }
-}
-
 /// What every serial link of a [`SerialLinks`] is given besides its line: the session's tables
 /// and cells when it lent them, the slots its frames are encoded into, and whether its owner
 /// waits.
@@ -776,7 +766,7 @@ where
     fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         let answer = self.link.as_ref()?.dial_step(self.opener.now_us())?;
         let link = self.link.take()?;
-        Some(answer.map(|()| opened(link)))
+        Some(answer.map(|()| OpenedLink::behind_tables(link)))
     }
 }
 

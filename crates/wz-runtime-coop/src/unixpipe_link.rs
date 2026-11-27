@@ -330,14 +330,16 @@ impl<N: CountKind> PipeShape<N> {
             self.tx_slots,
             self.tx_capacity,
         )?;
-        heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&pipe))?.open(|place| {
-            let link =
-                link_over_in::<_, _, _, crate::session_drive::WaitsInLoop>(place, pipe, rx, tx);
-            if self.owner_waits {
-                link.wait_by_owner();
-            }
-            link
-        })
+        let link =
+            heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&pipe))?.made(|place| {
+                let link =
+                    link_over_in::<_, _, _, crate::session_drive::WaitsInLoop>(place, pipe, rx, tx);
+                if self.owner_waits {
+                    link.wait_by_owner();
+                }
+                link
+            })?;
+        Ok(OpenedLink::behind_tables(link))
     }
 }
 

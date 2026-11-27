@@ -1069,6 +1069,25 @@ pub struct OpenedLink<
     pub pump: P,
 }
 
+/// A link of a stack whose set of links is open, as the session holds it: each handle reads the
+/// link behind the table of its trait.
+#[cfg(not(feature = "session-slot"))]
+impl<N: crate::link_cells::CountKind>
+    OpenedLink<crate::link_cells::CellRc<dyn SessionDatagramLink, N>, N>
+{
+    /// The two handles on `link`, the one cell they share: the sink the session's actions send
+    /// through behind [`BoxedLinkDriver`]'s table and the pump its loop reads behind
+    /// [`SessionDatagramLink`]'s, the last of them to go giving the cell back.
+    pub fn behind_tables<K: BoxedLinkDriver + SessionDatagramLink + 'static>(
+        link: crate::link_cells::CellRc<K, N>,
+    ) -> Self {
+        Self {
+            sink: link.clone().into_sink(),
+            pump: link.into_link(),
+        }
+    }
+}
+
 /// A link as a handle on its cell can be read behind the table of [`SessionDatagramLink`]: what
 /// keeps a link to wait on it reads it so whatever type the stack's links are read as by the session
 /// that pumps them (`crate::faces::Wire`).

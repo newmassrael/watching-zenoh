@@ -30,7 +30,7 @@ use wz_session_core::ws_link::{MaskKeys, KEY_LEN, MAX_HEAD_LEN};
 use super::handshake::{answer_request, client_keys, read_answer, send_request, OPEN_WAIT_US};
 use super::{WsFraming, WsSource, WS_MTU};
 use crate::group_transport::GroupTransport;
-use crate::ip_stack::HeapLink;
+use crate::ip_stack::{heap_link, HeapLink};
 use crate::link_cells::{CellRc, CountKind, OneTask};
 use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
@@ -135,13 +135,9 @@ impl<N: CountKind> WsPlace<N> {
         tx: TxBuffer<N::Flag>,
         framing: WsFraming,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
-        if !stream_ends_fit(&stream) {
-            return Err(LinkOpenError::Unsupported);
-        }
         let owner_waits = self.owner_waits;
-        let link = CellRc::<_, N>::claim_of(self.cells.as_ref())
-            .ok_or(LinkOpenError::Exhausted)?
-            .made(|place| {
+        let link =
+            heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&stream))?.made(|place| {
                 let link = StreamDriver::<_, _, _, _, crate::session_drive::WaitsInLoop>::framed_in(
                     place, stream, rx, held, tx, framing,
                 );
@@ -149,12 +145,8 @@ impl<N: CountKind> WsPlace<N> {
                     link.wait_by_owner();
                 }
                 link
-            })
-            .ok_or(LinkOpenError::Exhausted)?;
-        Ok(OpenedLink {
-            sink: link.clone().into_sink(),
-            pump: link.into_link(),
-        })
+            })?;
+        Ok(OpenedLink::behind_tables(link))
     }
 }
 

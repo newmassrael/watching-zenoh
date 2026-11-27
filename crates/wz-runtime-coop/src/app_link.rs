@@ -1349,8 +1349,11 @@ impl OwnerWaits {
         rx: RxBuffer<N::Flag>,
         tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
-        heap_link::<_, N>(cells, datagram_ends_fit(&socket, Some(peer)))?
-            .open(|place| self.datagram(place.write(UdpDriver::initiator_in(socket, peer, rx, tx))))
+        let link =
+            heap_link::<_, N>(cells, datagram_ends_fit(&socket, Some(peer)))?.made(|place| {
+                self.datagram(place.write(UdpDriver::initiator_in(socket, peer, rx, tx)))
+            })?;
+        Ok(OpenedLink::behind_tables(link))
     }
 
     /// The stream link over `stream`, placed as [`Self::place_datagram`] places a datagram link,
@@ -1363,8 +1366,9 @@ impl OwnerWaits {
         rx: RxBuffer<N::Flag>,
         tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
-        heap_link::<_, N>(cells, stream_ends_fit(&stream))?
-            .open(|place| self.stream(StreamDriver::over_in(place, stream, rx, tx)))
+        let link = heap_link::<_, N>(cells, stream_ends_fit(&stream))?
+            .made(|place| self.stream(StreamDriver::over_in(place, stream, rx, tx)))?;
+        Ok(OpenedLink::behind_tables(link))
     }
 }
 

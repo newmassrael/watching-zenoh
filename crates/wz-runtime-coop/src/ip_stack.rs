@@ -141,7 +141,7 @@ pub type SetPump<U, S, T, N, W, F> = <F as LinkSet<IpLink<U, S, T, N, W>, N>>::P
 pub type IpLinkOf<U, D, L, N, W> =
     IpLink<U, <D as StreamDial>::Stream, <L as StreamDial>::Stream, N, W>;
 
-/// The cell a link that opens now is made in (`LinkCell::open`), had once what the link is made
+/// The cell a link that opens now is made in (`LinkCell::made`), had once what the link is made
 /// of is: refused [`LinkOpenError::Unsupported`] when `fits` says the rows of the build do not name
 /// both its ends, read off what the driver is made of
 /// ([`stream_ends_fit`](crate::stream_link::stream_ends_fit), [`datagram_ends_fit`]), so a
@@ -169,25 +169,20 @@ pub(crate) fn heap_link<K, N: CountKind>(
 pub(crate) struct LinkCell<K, N: CountKind = OneTask>(CellClaim<K, N>);
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<K, N: CountKind> LinkCell<K, N>
-where
-    K: BoxedLinkDriver + SessionDatagramLink + 'static,
-{
-    /// The driver `make` writes in the cell's place, which it is handed, opened as the session
-    /// shell holds a link: the session's actions send through it and its loop pumps it, the one
-    /// object behind both, set there for its owner's wait when `make` sets it so.
+impl<K, N: CountKind> LinkCell<K, N> {
+    /// The link `make` writes in the cell's place, which it is handed, as a handle on the cell:
+    /// what a stack hands its session as the set of its links reads them, the stack's own type
+    /// where the set is closed ([`crate::ip_link::IpLink`]) and its traits' tables where it is
+    /// open ([`OpenedLink::behind_tables`]). [`LinkOpenError::Exhausted`] when `make` left the
+    /// link elsewhere, the cell given back unread.
     /// Inlined: what `make` captures is then written into the cell from where it lies, not first
     /// gathered into the maker on the stack.
     #[inline]
-    pub(crate) fn open(
+    pub(crate) fn made(
         self,
         make: impl FnOnce(&mut core::mem::MaybeUninit<K>) -> &mut K,
-    ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
-        let driver = self.0.made(make).ok_or(LinkOpenError::Exhausted)?;
-        Ok(OpenedLink {
-            sink: driver.clone().into_sink(),
-            pump: driver.into_link(),
-        })
+    ) -> Result<CellRc<K, N>, LinkOpenError> {
+        self.0.made(make).ok_or(LinkOpenError::Exhausted)
     }
 }
 

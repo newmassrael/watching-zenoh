@@ -22,6 +22,7 @@ use wz_session_core::link::{
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 
+use crate::ip_stack::heap_link;
 use crate::link_cells::{CellRc, CountKind};
 use crate::link_storage::{RxBuffer, TxBuffer};
 use crate::session_drive::{
@@ -183,21 +184,12 @@ where
         V: BoxedLinkDriver + SessionDatagramLink + 'static,
         F: LinkSet<Self, N>,
     {
-        if !fits {
-            return Err(LinkOpenError::Unsupported);
-        }
-        let claim = CellRc::<Self, N>::claim_of(cells).ok_or(LinkOpenError::Exhausted)?;
-        let whole = claim
+        let whole = heap_link::<Self, N>(cells, fits)?
             // SAFETY: the caller's contract, which is this call's.
-            .made(|place| unsafe { Self::write_variant(place, tag, make) })
-            .ok_or(LinkOpenError::Exhausted)?;
+            .made(|place| unsafe { Self::write_variant(place, tag, make) })?;
         Ok(F::opened(whole, |whole| {
             // SAFETY: the cell holds the variant `tag`, whose field is a `V` at that place.
-            let variant = unsafe { Self::variant::<V>(whole) };
-            OpenedLink {
-                sink: variant.clone().into_sink(),
-                pump: variant.into_link(),
-            }
+            OpenedLink::behind_tables(unsafe { Self::variant::<V>(whole) })
         }))
     }
 
