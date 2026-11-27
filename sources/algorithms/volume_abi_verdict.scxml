@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The compatibility gate of the storage volume ABI (wz-volume-abi): the gate of abi_gate_verdict.scxml
+  over the volume's call table, then the layout of the record a volume and its host pass each
+  other BY POINTER (`StoredEntry`), which a plugin's ABI has no need of:
+
+    0, 1, 2, 3  as abi_gate_verdict.scxml answers for the call table;
+    4           the table is compatible and the record's size or alignment differs at the same
+                declared ABI: a stale rebuild against an older record.
+
+  The record is checked last and only when the table passed, so a volume that fails both is named
+  by the table. Plain integers in and out, as for the plugin's gate, so the ABI crate keeps no
+  dependency. The predicate cannot fail.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="volume_abi_verdict"
+       version="1.0">
+  <sce:import kind="algorithm" src="abi_gate_verdict.scxml" as="abi_gate_verdict"/>
+  <sce:signature>
+    <sce:param name="host_major" type="uint32"/>
+    <sce:param name="volume_major" type="uint32"/>
+    <sce:param name="host_minor" type="uint32"/>
+    <sce:param name="volume_minor" type="uint32"/>
+    <sce:param name="host_vtable_size" type="uint32"/>
+    <sce:param name="volume_vtable_size" type="uint32"/>
+    <sce:param name="host_vtable_align" type="uint32"/>
+    <sce:param name="volume_vtable_align" type="uint32"/>
+    <sce:param name="host_entry_size" type="uint32"/>
+    <sce:param name="volume_entry_size" type="uint32"/>
+    <sce:param name="host_entry_align" type="uint32"/>
+    <sce:param name="volume_entry_align" type="uint32"/>
+    <sce:return type="uint8"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="table" type="uint8" init="abi_gate_verdict(host_major, volume_major, host_minor, volume_minor, host_vtable_size, volume_vtable_size, host_vtable_align, volume_vtable_align)"/>
+    <sce:if cond="table !== 0">
+      <sce:return expr="table"/>
+    </sce:if>
+    <sce:if cond="volume_entry_size !== host_entry_size || volume_entry_align !== host_entry_align">
+      <sce:return expr="4"/>
+    </sce:if>
+    <sce:return expr="0"/>
+  </sce:body>
+</scxml>

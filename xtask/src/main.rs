@@ -499,6 +499,7 @@ fn regen_codec_deployment(
 ///                      session_tx_pool_mcu, eth_rx_pool_mcu (buffer-pools)
 ///   wz-runtime-tokio : also accept_window_after (algorithm)
 ///   wz-plugin-abi    : abi_gate_verdict (algorithm)
+///   wz-volume-abi    : abi_gate_verdict, volume_abi_verdict (algorithms)
 fn regen_statecharts_and_pools(root: &Path) {
     // `Codegen::from_manifest` derives the SCE workspace as
     // <manifest>/../../vendor/sce; any crates/* dir resolves to repo/vendor/sce.
@@ -660,6 +661,11 @@ fn regen_statecharts_and_pools(root: &Path) {
         // what its host knows (wz-plugin-abi). Plain integers, so the ABI crate, which every
         // third-party plugin links, gains no dependency.
         ("abi_gate_verdict", "wz-plugin-abi"),
+        // The storage volume ABI's gate (wz-volume-abi): the same gate over the volume's call
+        // table, which it names as its sibling `super::abi_gate_verdict`, then the layout of the
+        // record a volume and its host pass by pointer.
+        ("abi_gate_verdict", "wz-volume-abi"),
+        ("volume_abi_verdict", "wz-volume-abi"),
     ];
     for (stem, krate) in crate_algorithms {
         let out = root.join("out").join(krate);
@@ -679,6 +685,7 @@ fn regen_statecharts_and_pools(root: &Path) {
         "wz-link-lwip",
         "wz-app-frame",
         "wz-plugin-abi",
+        "wz-volume-abi",
     ] {
         let _ = std::fs::remove_file(root.join("out").join(krate).join("sce_sourcemap.json"));
     }
