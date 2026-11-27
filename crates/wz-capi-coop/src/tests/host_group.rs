@@ -68,7 +68,17 @@ fn profile() -> GroupProfile {
 /// A peer of id `member` that dials nothing and joins `endpoint`, under `policy`, on the host's
 /// sockets.
 fn open_member(member: u8, endpoint: &str, policy: SessionPolicy) -> EngineHold<Engine> {
-    let config = CoopConfig {
+    open_member_with(member, endpoint, policy, |_| {})
+}
+
+/// [`open_member`], its config tuned by `tune` before the open.
+fn open_member_with(
+    member: u8,
+    endpoint: &str,
+    policy: SessionPolicy,
+    tune: impl FnOnce(&mut CoopConfig),
+) -> EngineHold<Engine> {
+    let mut config = CoopConfig {
         whatami: WhatAmI::Peer,
         zid: config_zid(member),
         groups: vec![GroupJoin {
@@ -79,6 +89,7 @@ fn open_member(member: u8, endpoint: &str, policy: SessionPolicy) -> EngineHold<
         }],
         ..client_config()
     };
+    tune(&mut config);
     let links = host_links([0, 0, 0, 0], PosixTcpDial)
         .waited_by_owner()
         .with_groups(HostGroups::<PosixUdpSocket>::of_policy(&policy));
@@ -221,4 +232,119 @@ fn two_members_of_one_thread_on_the_hosts_sockets_learn_each_other() {
     eventually("the first member to lose the second", || {
         first.call(|engine| engine.group_member_zids()).is_empty()
     });
+}
+
+/// A session that listens and joins a group reads its quiet client face and the group in one run
+/// of its read task: puts from its client and from another member of the group, in turn, each its
+/// own batch, are each heard, and cost the face a few turns between them, not one a batch. The
+/// CONTROL is the face found quiet beside the group, which a look refused while any group was
+/// joined. Turned red by a look that refuses a face for a joined group
+/// (`CoopEngine::quiet_until`), a run that refuses a group owing a whole read nothing
+/// (`GroupFace::in_run`), or a kept set that leaves the group's input out
+/// (`LinkSupervisor::run_waits`), whose datagrams would then wait for the run's deadline.
+#[cfg(all(
+    feature = "threads",
+    feature = "listen",
+    feature = "query",
+    feature = "queryable",
+    not(wz_round)
+))]
+#[test]
+#[ignore = "environment-dependent: needs a multicast route on this host (Layer M runs it)"]
+fn a_quiet_read_reads_a_face_and_a_group_in_one_run() {
+    const PUTS: usize = 40;
+    let port = UdpSocket::bind("0.0.0.0:0")
+        .and_then(|probe| probe.local_addr())
+        .expect("a free port")
+        .port();
+    let endpoint = format!("udp/239.255.77.14:{port}");
+    let mut policy = SessionPolicy::defaults();
+    let _ = policy.select_multicast_loopback(MulticastLoopback::On);
+    // Beacons a second apart, so the run's deadline is the look's and not the next JOIN's.
+    let slow_beacon = |config: &mut CoopConfig| {
+        for group in &mut config.groups {
+            group.profile.join_interval_ms = 1_000;
+        }
+    };
+    let listener = open_member_with(1, &endpoint, policy, |config| {
+        slow_beacon(config);
+        config.listen = vec!["tcp/127.0.0.1:0".to_owned()];
+        config.idle_wait_ms = 1_000;
+        config.lease_ms = 60_000;
+    });
+    let member = open_member_with(2, &endpoint, policy, slow_beacon);
+    let port_endpoint = listener.listening().pop().expect("one port is bound");
+    let client = Engine::open_with_policy(
+        host_links([0, 0, 0, 0], PosixTcpDial)
+            .waited_by_owner()
+            .with_groups(HostGroups::<PosixUdpSocket>::of_policy(&policy)),
+        PosixClock,
+        PosixEntropy,
+        CoopConfig {
+            endpoints: vec![port_endpoint],
+            zid: config_zid(3),
+            ..client_config()
+        },
+        policy,
+    )
+    .expect("the client dials the listener");
+    for engine in [&listener, &member, &client] {
+        SessionDrive::start_read_task(&**engine).expect("the read task starts");
+    }
+    eventually("the members to list each other", || {
+        listener.group_member_zids() == [vec![2u8; 4]]
+            && member.group_member_zids() == [vec![1u8; 4]]
+    });
+    let heard = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&heard);
+    listener
+        .declare_subscriber_on_wire("demo/run/**", WireKey::literal(), Locality::Any, None, {
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+        })
+        .expect("the listener declares the subscriber");
+    let heard_now = || heard.load(std::sync::atomic::Ordering::SeqCst);
+    let put = |from: &Engine| {
+        from.publish_on_wire_all(
+            "demo/run/x",
+            &WireKey::literal(),
+            b"r",
+            &PublishOptions::put().with_locality(Locality::Remote),
+        )
+        .expect("a put the link or the group carries");
+    };
+    let sources: [&Engine; 2] = [&client, &member];
+    for from in sources {
+        let before = heard_now();
+        eventually("a put heard once its sender knows the subscriber", || {
+            put(from);
+            std::thread::sleep(Duration::from_millis(10));
+            heard_now() > before
+        });
+    }
+    eventually("CONTROL: the face found quiet beside the group", || {
+        listener.quiet_faces() == 1
+    });
+    let from = heard_now();
+    let turns = listener
+        .takes
+        .face_turns
+        .load(std::sync::atomic::Ordering::SeqCst);
+    for n in 1..=PUTS {
+        put(sources[n % 2]);
+        eventually("the put heard", || heard_now() >= from + n);
+    }
+    let turns = listener
+        .takes
+        .face_turns
+        .load(std::sync::atomic::Ordering::SeqCst)
+        - turns;
+    assert!(
+        turns * 4 < PUTS,
+        "the face was turned {turns} times for {PUTS} batches beside the group"
+    );
+    for engine in [&client, &member, &listener] {
+        SessionDrive::close(&**engine);
+    }
 }

@@ -1599,9 +1599,8 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     #[cfg(any(feature = "listen", feature = "group"))]
     rests: AtomicBool,
     /// Whether the face's last look found it quiet (`CoopEngine::quiet_until`): its link up with
-    /// nothing owed, every other face at rest, and nothing of the session due before
-    /// `quiet_until_us`, so its read may read it alone until then. Written by the look alone,
-    /// with the face's read slot held.
+    /// nothing owed and nothing of the session due before `quiet_until_us`, so the quiet read may
+    /// read it until then. Written by the look alone, with the face's read slot held.
     #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
     quiet: AtomicBool,
     /// When the quiet read the face's last look allowed ends, on the session's clock in
@@ -2252,20 +2251,24 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// Read the faces the read that calls this turned, each of which its look found quiet
-    /// (`Self::quiet_until`), until the earliest of their looks' deadlines, as the read task's one
-    /// read: each pass waits on what the run keeps for its whole length (every face's link, each
-    /// port, the clock's wake; `LinkSupervisor::run_waits`) with nothing held, reads the clock and
-    /// asks whether the session owes anything under one take of its lock, then steps the pump of
-    /// each face whose link the wait found ready, or which holds input, with that face's slot held
-    /// alone and no look at its life, and hands out what each step left before the next face's
-    /// slot is taken. The faces' dues (the lease's, the keep-alive's, each pump's) are read by one
-    /// walk at the run's start and each step's own after it, as zenoh-pico's lease and keep-alive
-    /// tasks walk their list of peers. The run is entered only where every face a read turns but
-    /// those at rest was found quiet, and ends at the deadline, at a wait that found a port or the
-    /// wake ready, where a face owes a write, holds input it cannot read, ended or is due by its
-    /// pump, where a chain is staged in a face's Router, where the session owes its bookkeeping, a
-    /// job or a retraction, where another read holds a face's slot, and where the session closed
-    /// or the read task's run moved on: the next read is a whole one, which serves each of these.
+    /// (`Self::quiet_until`), and the session's groups, until the earliest of the looks' and the
+    /// groups' deadlines, as the read task's one read: each pass waits on what the run keeps for
+    /// its whole length (every face's link, each group's input, each port, the clock's wake;
+    /// `LinkSupervisor::run_waits`) with nothing held, reads the clock and asks whether the
+    /// session owes anything under one take of its lock, then steps the pump of each face whose
+    /// link the wait found ready, or which holds input, with that face's slot held alone and no
+    /// look at its life, and hands out what each step left before the next face's slot is taken;
+    /// where the wait found a group's input ready, the groups are stepped after the faces, as a
+    /// whole read steps them (`Self::step_groups_in_run`). The faces' dues (the lease's, the
+    /// keep-alive's, each pump's) are read by one walk at the run's start and each step's own
+    /// after it, as zenoh-pico's lease and keep-alive tasks walk their list of peers. The run is
+    /// entered only where every face a read turns but those at rest was found quiet and every
+    /// group owes a whole read nothing (`GroupFace::in_run`), and ends at the deadline, at a wait
+    /// that found a port or the wake ready, where a face owes a write, holds input it cannot read,
+    /// ended or is due by its pump, where a chain is staged in a face's Router, where a group
+    /// comes to owe a whole read, where the session owes its bookkeeping, a job or a retraction,
+    /// where another read holds a face's slot, and where the session closed or the read task's
+    /// run moved on: the next read is a whole one, which serves each of these.
     #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
     fn read_quiet(&self) {
         // A test that has every read find input held reads each through a whole turn.
@@ -2288,6 +2291,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         let count = faces.len();
         let faces: &[_] = &faces;
+        // What each group of the run receives by, which no face's row holds.
+        #[cfg(feature = "group")]
+        let mut groups = BoundedVec::<_, QUIET_RUN, Static>::new_static();
         // Each face's row is read off its slot, taken before the session's lock as a read takes
         // them, one slot at a time, and what the run waits on is gathered once under that lock.
         let (mut kept, mut now_us) = {
@@ -2316,12 +2322,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             #[cfg(not(feature = "time-base"))]
             let beside = None;
+            let now_us = core.now_us();
+            #[cfg(feature = "group")]
+            for group in &core.transport.groups {
+                let Some((input, due_us)) = group.in_run(now_us) else {
+                    return;
+                };
+                until_us = until_us.min(due_us);
+                if input.is_some_and(|on| groups.push(on).is_err()) {
+                    return;
+                }
+            }
             let rows = faces.iter().map(|&(at, _)| at);
-            let Some(kept) = core.transport.links.run_waits(rows, beside) else {
+            #[cfg(feature = "group")]
+            let inputs = groups.iter().copied();
+            #[cfg(not(feature = "group"))]
+            let inputs = core::iter::empty();
+            let Some(kept) = core.transport.links.run_waits(rows, inputs, beside) else {
                 return;
             };
-            (kept, core.now_us())
+            (kept, now_us)
         };
+        // Whether an entry of the kept set is a group's.
+        #[cfg(feature = "group")]
+        let of_group = |wait: &LinkWait| groups.contains(&wait.on);
+        #[cfg(not(feature = "group"))]
+        let of_group = |_: &LinkWait| false;
         let waits: &mut [LinkWait] = &mut kept;
         // Each face's own entry, in the order of the run, and none past it, which no wait names: a
         // wait moves the entries it found ready to its front.
@@ -2358,11 +2384,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 let Some(found) = waits.get(..ready) else {
                     return;
                 };
-                if found.iter().any(|wait| !owns.contains(&Some(wait.on))) {
+                if found
+                    .iter()
+                    .any(|wait| !owns.contains(&Some(wait.on)) && !of_group(wait))
+                {
                     return;
                 }
                 Some(found)
             };
+            let groups_ready = found.is_some_and(|found| found.iter().any(of_group));
             let now_ms = {
                 let Some(held) = self.live() else {
                     return;
@@ -2383,12 +2413,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 if core.session.registry.retracting() {
                     return;
                 }
+                #[cfg(feature = "group")]
+                if !Self::groups_stay_in_run(core, now_us, &mut until_us) {
+                    return;
+                }
                 core.session_time.ms_at(now_us)
             };
             for (&(_, face), own) in faces.iter().zip(owns) {
-                // A run of one face steps it after every wait, as the read of one face does: the
-                // wait found nothing but its link, or its deadline.
-                let ready = count == 1
+                // A run of one face steps it after every wait that found no group's input, as the
+                // read of one face does: the wait found nothing but its link, or its deadline.
+                let ready = (count == 1 && !groups_ready)
                     || found.is_some_and(|found| found.iter().any(|wait| Some(wait.on) == own))
                     || face.site.facts().read().holds_input;
                 if !ready {
@@ -2421,7 +2455,49 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     return;
                 }
             }
+            #[cfg(feature = "group")]
+            if groups_ready && !self.step_groups_in_run(now_us, &mut until_us) {
+                return;
+            }
         }
+    }
+
+    /// Whether every group of `core` stays in a quiet read's run at `now_us`
+    /// (`GroupFace::in_run`), `until_us` brought to the earliest of their dues.
+    #[cfg(all(feature = "threads", feature = "group"))]
+    fn groups_stay_in_run(core: &Core<L, C>, now_us: u64, until_us: &mut u64) -> bool {
+        core.transport
+            .groups
+            .iter()
+            .all(|group| match group.in_run(now_us) {
+                Some((_, due_us)) => {
+                    *until_us = (*until_us).min(due_us);
+                    true
+                }
+                None => false,
+            })
+    }
+
+    /// Step the groups of a quiet read's run once a wait found a group's input ready, at the
+    /// run's reading `now_us`, as a whole read steps them after its faces (`Self::step_groups`,
+    /// the dial role's read slot held across them so a callback's read reads nothing), and hand
+    /// out what the steps left; then ask each group again whether it stays in the run, `until_us`
+    /// brought to the earliest of their dues, as a step may have moved a group's beacon or left a
+    /// write on its stage. `false` where the run ends: another read holds the dial role's slot,
+    /// a group owes a whole read, or the session closed.
+    #[cfg(all(feature = "threads", feature = "group"))]
+    fn step_groups_in_run(&self, now_us: u64, until_us: &mut u64) -> bool {
+        {
+            let Some(_reading) = <CoopForm as LockForm>::try_lock(&self.direct.dial().slot) else {
+                return false;
+            };
+            self.step_groups(Some(now_us), None);
+        }
+        self.deliver();
+        let Some(held) = self.live() else {
+            return false;
+        };
+        Self::groups_stay_in_run(&held.0, now_us, until_us)
     }
 
     /// Step each group's session once (`Self::step_groups`) at `now_us`, the read's reading of
@@ -2942,7 +3018,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         let jobs_due_ms = core.jobs_due_at(now_us);
         #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
-        face.mark_quiet(self.quiet_until(
+        face.mark_quiet(Self::quiet_until(
             face,
             core,
             slot,
@@ -2969,26 +3045,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// the look owes the face nothing more (no end, no bring-up, no job due): `None` where the
     /// face is not quiet. A quiet face's link is up and established, with no dial, no opened link
     /// and no change of its send place owed; it holds no input, owes no write, waits for no buffer
-    /// and gives a wait of its own; no group is joined, no port is to be asked, no chain is staged
-    /// in its Router, and the bookkeeping owes nothing, a replay's next turn among it. What the
-    /// other faces are is theirs to say: the quiet read reads every face that does not rest, and
-    /// is entered only where each was found quiet by its own look (`Self::read_quiet`). The read then ends by the earliest of the bookkeeping's due, the next job and
-    /// the session's wait bound, which keeps every latency a read has. The face's own due is not
-    /// read here: the step after this look moves the pump's, and the read takes it from the slot
-    /// once that step is made (`Self::read_quiet`).
+    /// and gives a wait of its own; no port is to be asked, no chain is staged in its Router, and
+    /// the bookkeeping owes nothing, a replay's next turn among it. What the other faces and the
+    /// groups are is theirs to say: the quiet read reads every face that does not rest and every
+    /// group, and is entered only where each face was found quiet by its own look and each group
+    /// owes a whole read nothing (`Self::read_quiet`). The read then ends by the earliest of the
+    /// bookkeeping's due, the next job and the session's wait bound, which keeps every latency a
+    /// read has. The face's own due is not read here: the step after this look moves the pump's,
+    /// and the read takes it from the slot once that step is made (`Self::read_quiet`).
     #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
     fn quiet_until(
-        &self,
         face: &DirectFace<L, C>,
         core: &Core<L, C>,
         slot: &DirectSlot<L, C>,
         now_us: u64,
         settled: bool,
     ) -> Option<u64> {
-        #[cfg(feature = "group")]
-        if self.joins_groups {
-            return None;
-        }
         if slot.site_owed.is_some() {
             return None;
         }

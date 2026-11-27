@@ -569,6 +569,45 @@ fn awaited_input(rx: &(dyn GroupReceive + 'static)) -> Option<WaitOn> {
     }
 }
 
+/// What a quiet read's run reads of one group under the session's lock (`GroupFace::in_run`).
+#[cfg(all(feature = "threads", not(wz_round)))]
+#[derive(Clone, Copy)]
+struct RunFacts {
+    /// The join owes the group's row its session (`GroupFace::take_seat`).
+    seat_owed: bool,
+    /// The join is still to ask the group for its members' keyexprs.
+    ask_owed: bool,
+    /// The group's last step read to its bound, so its socket may hold more.
+    holds_input: bool,
+    /// The group's session runs.
+    runs: bool,
+    /// What a read waits on for the group's datagrams.
+    input: Option<WaitOn>,
+    /// When the group must next be looked at (`GroupFace::due_us`).
+    due_us: Option<u64>,
+}
+
+/// Whether a group whose facts are `facts` stays in a quiet read's run at `now_us`: what the run
+/// waits on for its datagrams (none for a group waiting to be joined again) and when it is due,
+/// `u64::MAX` for never. `None` where only a whole read serves the group: its row owed its
+/// session, its join owed an ask, its socket may hold what its last step left, something of it
+/// due by `now_us` (its end to read, its first step, a write its stage holds, its beacon, its
+/// join again), or a running session over a stack that gives no wait for its input.
+#[cfg(all(feature = "threads", not(wz_round)))]
+fn run_entry(facts: RunFacts, now_us: u64) -> Option<(Option<WaitOn>, u64)> {
+    if facts.seat_owed || facts.ask_owed || facts.holds_input {
+        return None;
+    }
+    let due_us = facts.due_us.unwrap_or(u64::MAX);
+    if due_us <= now_us {
+        return None;
+    }
+    if !facts.runs {
+        return Some((None, due_us));
+    }
+    Some((Some(facts.input?), due_us))
+}
+
 /// The receive of a transport whose halves are one: through the cell the face shares.
 #[cfg(not(wz_round))]
 struct ThroughCell(GroupLink<Watched>);
@@ -1389,6 +1428,25 @@ impl<W: LinkWaits> GroupFace<W> {
     #[cfg(not(wz_round))]
     pub(super) fn awaits(&self, wait: &LinkWait) -> bool {
         !self.has_ended() && self.awaited.is_some_and(|on| LinkWait::input(on) == *wait)
+    }
+
+    /// Whether the group stays in a quiet read's run at `now_us` (`CoopEngine::read_quiet`),
+    /// read under the session's lock: what the run waits on for its datagrams, and when it is
+    /// due (`run_entry`). Nothing is taken: the marks a whole read answers stay for it.
+    #[cfg(all(feature = "threads", not(wz_round)))]
+    pub(super) fn in_run(&self, now_us: u64) -> Option<(Option<WaitOn>, u64)> {
+        let runs = !self.has_ended();
+        run_entry(
+            RunFacts {
+                seat_owed: self.seat.is_some(),
+                ask_owed: runs && self.keyexpr_ask_owed.get(),
+                holds_input: self.holds_input(),
+                runs,
+                input: self.input,
+                due_us: self.due_us(),
+            },
+            now_us,
+        )
     }
 
     /// What this join owes the group's read slot, taken once by the holder of that slot, which
@@ -2946,6 +3004,110 @@ mod side_tests {
             !awaits(&Waiting(true), &LinkWait::input(WaitOn::Socket(8))),
             "another socket's input"
         );
+    }
+
+    /// The facts of a group that runs over a stack that gives its input a wait, due at 900.
+    #[cfg(feature = "threads")]
+    fn running() -> RunFacts {
+        RunFacts {
+            seat_owed: false,
+            ask_owed: false,
+            holds_input: false,
+            runs: true,
+            input: Some(WaitOn::Socket(7)),
+            due_us: Some(900),
+        }
+    }
+
+    /// A group stays in a quiet read's run with its input and its due, a group waiting to be
+    /// joined again with its due alone, and either with nothing due with no bound; a group that
+    /// owes a whole read anything keeps the run from being entered or ends it. Turned red by a run
+    /// that keeps a group whose row owes its session, whose join owes its ask, whose socket may
+    /// hold more, which is due, or whose stack gives its input no wait (`run_entry`): each is
+    /// served by a whole read alone, which the run would wait past.
+    #[cfg(feature = "threads")]
+    #[test]
+    fn a_group_stays_in_a_quiet_run_only_while_it_owes_a_whole_read_nothing() {
+        let input = Some(WaitOn::Socket(7));
+        assert_eq!(run_entry(running(), 100), Some((input, 900)));
+        assert_eq!(
+            run_entry(
+                RunFacts {
+                    due_us: None,
+                    ..running()
+                },
+                100
+            ),
+            Some((input, u64::MAX)),
+            "a running group with nothing due"
+        );
+        let ended = RunFacts {
+            runs: false,
+            input: None,
+            ..running()
+        };
+        assert_eq!(
+            run_entry(ended, 100),
+            Some((None, 900)),
+            "a group waiting to be joined again, its join's time its due"
+        );
+        assert_eq!(
+            run_entry(
+                RunFacts {
+                    due_us: None,
+                    ..ended
+                },
+                100
+            ),
+            Some((None, u64::MAX)),
+            "a group that is joined no more"
+        );
+        for (refused, what) in [
+            (
+                RunFacts {
+                    seat_owed: true,
+                    ..running()
+                },
+                "a row owed its session",
+            ),
+            (
+                RunFacts {
+                    ask_owed: true,
+                    ..running()
+                },
+                "a join owed its ask",
+            ),
+            (
+                RunFacts {
+                    holds_input: true,
+                    ..running()
+                },
+                "a socket that may hold more",
+            ),
+            (
+                RunFacts {
+                    due_us: Some(100),
+                    ..running()
+                },
+                "a group due now",
+            ),
+            (
+                RunFacts {
+                    due_us: Some(0),
+                    ..running()
+                },
+                "a group due at once",
+            ),
+            (
+                RunFacts {
+                    input: None,
+                    ..running()
+                },
+                "a stack that gives no wait",
+            ),
+        ] {
+            assert_eq!(run_entry(refused, 100), None, "{what}");
+        }
     }
 
     /// A group whose waits keep what `kept` says in turn, whose clock reads `clock` in turn, whose

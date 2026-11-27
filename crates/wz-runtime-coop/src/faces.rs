@@ -2923,16 +2923,17 @@ impl<
     }
 
     /// What a quiet read of the faces at the places `rows` waits on: each face's link's input
-    /// first, in the order of `rows`, then a connection on each port, then `beside` (a wake of
+    /// first, in the order of `rows`, then each of `inputs` (what the session's groups receive
+    /// by, which no face's row holds), then a connection on each port, then `beside` (a wake of
     /// the stack's). Made once for a run of such reads and kept for its whole length, none of it
     /// written anew a wait. `None` where a wait on these alone would miss what a wait over the
     /// whole session finds ([`Self::idle_wait`]): no row is named, a face's link is not
-    /// [`WireLook::Quiet`] or waits in its own loop, two of them or a port and a link give one
-    /// wait (a datagram port its faces share), a port gives no wait, or the entries are more than
-    /// [`LoneWaits`] holds.
+    /// [`WireLook::Quiet`] or waits in its own loop, two entries give one wait (a datagram port
+    /// its faces share), a port gives no wait, or the entries are more than [`LoneWaits`] holds.
     pub fn run_waits(
         &self,
         rows: impl IntoIterator<Item = usize>,
+        inputs: impl IntoIterator<Item = WaitOn>,
         beside: Option<LinkWait>,
     ) -> Option<LoneWaits> {
         let mut waits = LoneWaits::new_static();
@@ -2947,9 +2948,14 @@ impl<
             }
             waits.push(LinkWait::input(own)).ok()?;
         }
-        let links = waits.len();
-        if links == 0 {
+        if waits.is_empty() {
             return None;
+        }
+        for on in inputs {
+            if waits.iter().any(|wait| wait.on == on) {
+                return None;
+            }
+            waits.push(LinkWait::input(on)).ok()?;
         }
         #[cfg(feature = "listen")]
         for listening in &self.listeners {
@@ -2957,7 +2963,7 @@ impl<
                 .listener
                 .input_wait()
                 .filter(|_| listening.listener.asked_when_ready())?;
-            if waits.iter().take(links).any(|wait| wait.on == on) {
+            if waits.iter().any(|wait| wait.on == on) {
                 return None;
             }
             waits.push(LinkWait::input(on)).ok()?;
