@@ -935,36 +935,9 @@ impl crate::tx_buf::WireWrite for ItemBody<'_> {
     }
 }
 
-/// Encode `body` into `out`: the length written, or `None` when the encoder refuses the message
-/// or `out` is too short for it.
-#[cfg(all(feature = "alloc", feature = "codec-push"))]
-pub fn multicast_tx_encode_into(
-    body: &crate::frame_encode::BodyEncoder<'_>,
-    out: &mut [u8],
-) -> Option<usize> {
-    #[cfg(feature = "transport-tx-lend")]
-    {
-        let mut slot = crate::tx_buf::SliceTxBuf::new(out);
-        body.write_body(&mut crate::tx_buf::TxSink::new(&mut slot))
-            .ok()?;
-        Some(crate::tx_buf::TxBuf::len(&slot))
-    }
-    // A build whose encoders write a vector has no other buffer to write into: the bytes are
-    // copied out of one.
-    #[cfg(not(feature = "transport-tx-lend"))]
-    {
-        let mut bytes = Vec::new();
-        body.write_body(&mut crate::tx_buf::TxSink::new(&mut bytes))
-            .ok()?;
-        out.get_mut(..bytes.len())?.copy_from_slice(&bytes);
-        Some(bytes.len())
-    }
-}
-
 /// [`multicast_tx_push_encoded`] of a message whose framing was read off it before
 /// (`meta`) and whose body is `body`, at most `size` bytes.
-/// The group's own queue configuration (`params.tx_queue`) paces it, as it paces
-/// [`multicast_tx_push_staged`].
+/// The group's own queue configuration (`params.tx_queue`) paces it.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub fn multicast_tx_push_meta<M, Q>(
     meta: MulticastTxMeta,
@@ -984,37 +957,6 @@ where
             meta: meta.0,
             worst_case: size,
             body: crate::tx_buf::wire_body(body),
-        },
-        tx_sn,
-        params,
-        &params.tx_queue,
-        queue,
-        window,
-    )
-}
-
-/// [`multicast_tx_push_meta`] of a message whose body was encoded before, into `staged`
-/// ([`multicast_tx_encode_into`]): the bytes are the body the frame carries.
-#[cfg(all(feature = "alloc", feature = "codec-push"))]
-pub fn multicast_tx_push_staged<M, Q>(
-    meta: MulticastTxMeta,
-    staged: &[u8],
-    tx_sn: &mut M,
-    params: &crate::multicast_params::MulticastParams,
-    queue: &mut Q,
-    window: Option<&mut MulticastBatch>,
-) -> PushOutcome
-where
-    M: MulticastTxMint + ?Sized,
-    Q: MulticastTxQueue + ?Sized,
-{
-    use sce_forge_runtime::codec::SceSink;
-    let body = |sink: &mut crate::tx_buf::TxSink<'_>| sink.write_bytes(staged);
-    push_frame(
-        FramedBody {
-            meta: meta.0,
-            worst_case: staged.len(),
-            body,
         },
         tx_sn,
         params,
