@@ -2170,6 +2170,23 @@ impl<F, D> FacePlaces<F> for OneFace<F, D> {
     }
 }
 
+/// The one buffer a read's waits are gathered in ([`LinkSupervisor`]'s), reserved apart from the
+/// supervisor: a session's open reserves it while what its arena lent is still whole, so a heap that
+/// refuses it refuses the open before the links are handed their tables.
+pub struct WaitRoom {
+    waits: Vec<LinkWait>,
+}
+
+impl WaitRoom {
+    /// A room for `waits` waits a read makes at once, reserved now; `None` when the heap refuses
+    /// it.
+    pub fn reserved(waits: usize) -> Option<Self> {
+        let mut waits_room = Vec::new();
+        waits_room.try_reserve_exact(waits).ok()?;
+        Some(Self { waits: waits_room })
+    }
+}
+
 /// A session's faces, dials and ports over the network `L`, each face kept as the session's
 /// record `F` at a place of its own in the table `P`. The first place is the dial role's face's,
 /// which is never taken out.
@@ -2227,14 +2244,22 @@ impl<
     /// open answers as it answers an arena that cannot be reserved. The ports are the open's,
     /// taken as it listens (`listen`). Faces taken after are numbered from 1.
     pub fn new(links: L, dial: F, places: usize, waits: usize) -> Option<Self> {
-        let mut room = Vec::new();
-        room.try_reserve_exact(waits).ok()?;
-        Some(Self {
+        Some(Self::with_room(
+            links,
+            dial,
+            places,
+            WaitRoom::reserved(waits)?,
+        ))
+    }
+
+    /// [`Self::new`] over `room`, the wait room its maker reserved before: nothing here refuses.
+    pub fn with_room(links: L, dial: F, places: usize, room: WaitRoom) -> Self {
+        Self {
             links,
             faces: P::with_dial(dial, places),
             #[cfg(feature = "listen")]
             listeners: Vec::new(),
-            waits: Some(room),
+            waits: Some(room.waits),
             next_face: 1,
             moves: 0,
             generation: 0,
@@ -2243,7 +2268,7 @@ impl<
             records: core::marker::PhantomData,
             #[cfg(feature = "resource-snapshot")]
             receive_ledger: BuildReceiveLedger::new(),
-        })
+        }
     }
 
     /// The network the links are opened on.
@@ -3935,6 +3960,39 @@ mod tests {
         assert_eq!(aborted.get(), 0, "CONTROL: nothing ended the link yet");
         faces.end_faces(|_| {});
         assert_eq!(aborted.get(), 1, "the handle ended the link");
+    }
+
+    /// A supervisor made over a wait room reserved before it holds that room, empty, and reserves
+    /// none of its own; one made by `new` reserves a room for the waits it is told. Turned red by a
+    /// supervisor that gathers its waits anywhere but the room it was handed.
+    #[test]
+    fn a_supervisor_made_over_a_reserved_wait_room_holds_that_room() {
+        let dial = || TestFace {
+            id: 100,
+            link: Link::Idle,
+            life: idle_life(),
+        };
+        let room = WaitRoom::reserved(3).expect("the heap holds three waits");
+        let reserved = room.waits.as_ptr();
+        let faces: Supervised<Net> = LinkSupervisor::with_room(Net, dial(), 1, room);
+        let held = faces.waits.as_ref().expect("no read waits with the room");
+        assert!(held.is_empty(), "the room holds no wait");
+        assert!(
+            held.capacity() >= 3,
+            "the room holds the waits it was reserved for"
+        );
+        assert!(
+            core::ptr::eq(held.as_ptr(), reserved),
+            "the room handed, not one of its own"
+        );
+        let made: Supervised<Net> =
+            LinkSupervisor::new(Net, dial(), 1, 2).expect("the heap holds two waits");
+        assert!(
+            made.waits
+                .as_ref()
+                .is_some_and(|waits| waits.capacity() >= 2),
+            "CONTROL: `new` reserves the waits it is told"
+        );
     }
 
     /// The owner of what a confined face's place holds in the tests below: one test's thread.

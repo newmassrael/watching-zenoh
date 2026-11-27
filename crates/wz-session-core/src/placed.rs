@@ -64,6 +64,29 @@ impl<T> Placed<T> {
     }
 }
 
+/// A span of an [`Arena`] lent for one `T`, nothing written in it yet ([`Arena::vacant`]): what a
+/// maker reserves while what it would write the value from is still its own, and fills once nothing
+/// after it can refuse ([`Self::fill`]). It owns nothing: a span left vacant stays lent, unwritten,
+/// until the arena goes.
+pub struct Vacant<T> {
+    at: NonNull<T>,
+}
+
+impl<T> Vacant<T> {
+    /// The owner of the value `write` writes in the span, dropped there when the owner is.
+    ///
+    /// # Safety
+    /// `write` writes a whole valid `T` at the pointer it is given, which is aligned for `T` and
+    /// valid for writes of one.
+    pub unsafe fn fill(self, write: impl FnOnce(*mut T)) -> Placed<T> {
+        write(self.at.as_ptr());
+        Placed {
+            at: self.at,
+            _owns: PhantomData,
+        }
+    }
+}
+
 impl<T> Deref for Placed<T> {
     type Target = T;
 
@@ -160,6 +183,14 @@ impl Arena {
         &mut self,
         write: impl FnOnce(*mut T),
     ) -> Result<Placed<T>, LendRefused> {
+        let vacant = self.vacant::<T>()?;
+        // SAFETY: the caller's contract, handed on.
+        Ok(unsafe { vacant.fill(write) })
+    }
+
+    /// The next span of the arena, lent for one `T` and left unwritten ([`Vacant`]). Refused,
+    /// taking nothing, past what is left.
+    pub fn vacant<T>(&mut self) -> Result<Vacant<T>, LendRefused> {
         const {
             assert!(
                 core::mem::align_of::<T>() <= ARENA_ALIGN,
@@ -167,11 +198,8 @@ impl Arena {
             )
         };
         let (start, _) = self.lend_rows(1, 1, Self::table_bytes::<T>(1))?;
-        let at = start.cast::<T>();
-        write(at.as_ptr());
-        Ok(Placed {
-            at,
-            _owns: PhantomData,
+        Ok(Vacant {
+            at: start.cast::<T>(),
         })
     }
 }
@@ -276,6 +304,40 @@ mod tests {
         assert_eq!((handle.1, owner.1), (3, 3));
         drop(owner);
         assert_eq!(drops.get(), 1, "dropped once, by its owner");
+    }
+
+    /// A vacant span is lent from the arena and holds nothing until it is filled: what is written
+    /// in it then is read where the span lies and dropped once, by the owner the fill hands back,
+    /// and a span past what is left is refused, taking nothing. Turned red by a vacant span that
+    /// writes or drops a value before it is filled, or a fill that writes anywhere but the span.
+    #[test]
+    fn a_vacant_span_holds_nothing_until_it_is_filled() {
+        let mut memory = [Block {
+            _bytes: [0; ARENA_ALIGN],
+        }; 2];
+        let drops = Cell::new(0);
+        let bytes = core::mem::size_of_val(&memory);
+        // SAFETY: the blocks are aligned to `ARENA_ALIGN`, hold `bytes` bytes and outlive the
+        // arena and the value placed in it, which nothing else uses.
+        let mut arena = unsafe { Arena::over(NonNull::from(&mut memory).cast::<u8>(), bytes) };
+        let vacant = arena.vacant::<Counted<'_>>().unwrap();
+        let at = vacant.at;
+        assert_eq!(
+            drops.get(),
+            0,
+            "nothing is written or dropped while the span is vacant"
+        );
+        // SAFETY: the closure writes a whole value.
+        let placed = unsafe { vacant.fill(|at| at.write(Counted(&drops, 4))) };
+        assert!(
+            core::ptr::eq(&*placed, at.as_ptr()),
+            "the value lies where the span was lent"
+        );
+        assert_eq!(placed.1, 4);
+        drop(placed);
+        assert_eq!(drops.get(), 1, "dropped once, by its owner");
+        let refused = arena.vacant::<[u8; 64]>();
+        assert!(matches!(refused, Err(LendRefused::Exhausted { .. })));
     }
 
     /// Says a number, as the trait a handle is mapped to reads it.

@@ -478,13 +478,11 @@ pub(crate) struct OwnPlaced<T> {
 
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 impl<T> OwnPlaced<T> {
-    /// The value `write` writes at the place it is handed, in an allocation of its own. Refused,
-    /// having taken nothing and called nothing, when the allocator has no room for it.
-    ///
-    /// # Safety
-    /// `write` writes a whole valid `T` at the pointer it is given, which is aligned for `T` and
-    /// valid for writes of one.
-    pub(crate) unsafe fn written(write: impl FnOnce(*mut T)) -> Result<Self, ArenaRefused> {
+    /// An allocation of its own for one `T`, nothing written in it yet ([`OwnVacant`]): what the
+    /// open reserves while what it would write the value from is still whole, and fills once
+    /// nothing after it can refuse. Refused, having taken nothing, when the allocator has no room
+    /// for it.
+    pub(crate) fn vacant() -> Result<OwnVacant<T>, ArenaRefused> {
         const {
             assert!(
                 core::mem::size_of::<T>() != 0,
@@ -498,13 +496,7 @@ impl<T> OwnPlaced<T> {
                 bytes: layout.size(),
             },
         )?;
-        // SAFETY: the allocation is aligned and valid for writes of one `T`, which `write` writes
-        // whole (the caller's contract); it is reached through this owner and its handles alone,
-        // and is given back only after the value is dropped (`Drop`).
-        let value = unsafe { Placed::written_at(at, write) };
-        Ok(Self {
-            value: ManuallyDrop::new(value),
-        })
+        Ok(OwnVacant { at })
     }
 
     /// A handle of the value that counts nothing, as [`Placed::share`] hands one.
@@ -537,6 +529,45 @@ impl<T> Drop for OwnPlaced<T> {
             ManuallyDrop::drop(&mut self.value);
             alloc::alloc::dealloc(at.as_ptr(), Layout::new::<T>());
         }
+    }
+}
+
+/// An allocation of its own the allocator gave for one `T`, nothing written in it
+/// ([`OwnPlaced::vacant`]), as a span an arena lends is (`wz_session_core::placed::Vacant`), but
+/// owned: given back unwritten when it is dropped unfilled, so a refusal between its reservation
+/// and its fill leaves nothing taken.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+pub(crate) struct OwnVacant<T> {
+    at: NonNull<T>,
+}
+
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+impl<T> OwnVacant<T> {
+    /// The owner of the value `write` writes in the allocation, which drops it there and gives the
+    /// allocation back after it.
+    ///
+    /// # Safety
+    /// `write` writes a whole valid `T` at the pointer it is given, which is aligned for `T` and
+    /// valid for writes of one.
+    pub(crate) unsafe fn fill(self, write: impl FnOnce(*mut T)) -> OwnPlaced<T> {
+        // The allocation passes to the owner made here, so this one's drop does not give it back.
+        let at = ManuallyDrop::new(self).at;
+        // SAFETY: the allocation is aligned and valid for writes of one `T`, which `write` writes
+        // whole (the caller's contract); it is reached through the owner and its handles alone,
+        // and is given back only after the value is dropped (`OwnPlaced`'s `Drop`).
+        let value = unsafe { Placed::written_at(at, write) };
+        OwnPlaced {
+            value: ManuallyDrop::new(value),
+        }
+    }
+}
+
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+impl<T> Drop for OwnVacant<T> {
+    fn drop(&mut self) {
+        // SAFETY: the allocation is the one `OwnPlaced::vacant` took with this layout, holding no
+        // value (a filled one never reaches this drop), given back once, here.
+        unsafe { alloc::alloc::dealloc(self.at.as_ptr().cast::<u8>(), Layout::new::<T>()) }
     }
 }
 
@@ -631,6 +662,41 @@ mod tests {
         // SAFETY: as above; the table before is gone.
         let past = unsafe { StatePlaces::rooms(at, FACE_SETS + 1) };
         assert_eq!(past.free_slots(), FACE_SETS, "held to the region's sets");
+    }
+
+    /// An allocation of its own reserved vacant holds nothing until it is filled: what is written
+    /// in it then lies where it was reserved and is dropped once, by the owner the fill hands back,
+    /// and one dropped unfilled drops no value. Turned red by a fill that writes anywhere but the
+    /// allocation reserved, or by `OwnVacant`'s drop dropping a value in place before it gives the
+    /// allocation back.
+    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[test]
+    fn an_own_vacant_allocation_holds_nothing_until_it_is_filled() {
+        use core::cell::Cell;
+
+        struct Counted<'d>(&'d Cell<usize>, u32);
+        impl Drop for Counted<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let drops = Cell::new(0);
+        let unfilled = OwnPlaced::<Counted<'_>>::vacant().expect("the test allocator answers");
+        drop(unfilled);
+        assert_eq!(drops.get(), 0, "an unfilled allocation holds no value");
+        let vacant = OwnPlaced::<Counted<'_>>::vacant().expect("the test allocator answers");
+        let at = vacant.at;
+        // SAFETY: the closure writes a whole value.
+        let placed = unsafe { vacant.fill(|place| place.write(Counted(&drops, 4))) };
+        assert_eq!(drops.get(), 0, "nothing is dropped as the value is written");
+        assert!(
+            core::ptr::eq(&*placed, at.as_ptr()),
+            "the value lies where the allocation was reserved"
+        );
+        assert_eq!(placed.1, 4);
+        drop(placed);
+        assert_eq!(drops.get(), 1, "dropped once, by its owner");
     }
 
     /// The plain tables placed over a region's places take the rows the build's plan counts, which

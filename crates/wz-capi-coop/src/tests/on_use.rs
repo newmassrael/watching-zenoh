@@ -129,7 +129,7 @@ fn a_subscriber_declared_after_the_open_is_told_and_handed_a_push() {
 /// neither at a place of the arena, where the D12 forms' test of the same accessor in
 /// `tests::arena` finds their engine. Turned red by an open that writes the engine at a place the
 /// arena lends (`SessionArena::engine_place` and `Shared::placed_with` in `CoopEngine::engine_of`),
-/// or the rooms (`Arena::place_with` in `CoopEngine::assemble`).
+/// or the rooms (`Arena::vacant` in `CoopEngine::assemble`).
 #[test]
 fn an_on_use_engine_and_its_rooms_lie_apart_from_its_arena() {
     let router = Router::start(CatchAll::None);

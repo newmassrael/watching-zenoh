@@ -1,6 +1,7 @@
 # Structural lane sz-open: the session's open, line by line
 
-Status: the reading and the design of the lane, with its first step (O1) carried in beside it.
+Status: the reading and the design of the lane, with its steps carried in beside it as section 5
+onwards records them (O1, O2).
 Nothing here was built or measured by this lane: every byte figure is either **read** (from the
 size ledger's explain document of the case, from the case's shipped library, or from a line table
 named below) or an **estimate** from the code, to be read on the explain document after the merge.
@@ -133,3 +134,42 @@ hands `wire_zid` seventeen bytes whose last is zero. The existing
 
 What the main session reads to land it: the case's total, and `session_zid` and `wire_zid` in the
 explain document (`session_zid` 815 before); the receive at arm W, which should not move.
+
+## 6. O2 as carried
+
+`crates/wz-capi-coop/src/engine.rs` (`CoopEngine::assemble`): every step after `lend_session`
+that can refuse now runs while `SessionLent` is whole, in this order: the texts, the entropy's
+cell, the zid and the rooms' place (one refusal, as before), the faces past the dial role's
+(`listen`), the connectivity plane, the admission (`listen`), the wait room and the runtime. Only
+then do the tables leave it: the links are lent their buffers and cells, the rooms are written in
+their place, and the face table is made. So each refusal lets go of what was lent by the drop of
+`SessionLent` as a whole, nested under the drops of what the open made before it, and none drops a
+different remainder of it field by field.
+
+- The rooms' place is reserved by size and written after: `Arena::vacant` lends a span for one
+  value and writes nothing (`wz_session_core::placed::Vacant`), and `Vacant::fill` writes the
+  rooms there once nothing after them refuses; `Arena::place_with` is that pair. Where the tables
+  take their memory on use the rooms lie in an allocation of their own, reserved and filled at the
+  same two points: `OwnPlaced::vacant` takes it and writes nothing (`OwnVacant`, given back
+  unwritten if a step before the fill refuses), and `OwnVacant::fill` writes the rooms there and
+  hands back their owner (`Core::rooms`).
+- The wait room is reserved before the links are handed over: `wz_runtime_coop::faces::WaitRoom`
+  is reserved by the open and handed to `LinkSupervisor::with_room`, which cannot refuse;
+  `LinkSupervisor::new` is the two together.
+- The runtime is made from `SessionLent::runtime`, a span with nothing to drop, so the move of it
+  leaves the drop of the rest whole; it is made after every other step that refuses.
+- What stays: a build with `udp-listen` hands its ports' rows to the stack, whose book of them is a
+  cell of the heap (`lend_port_rows`), after the links' buffers; that refusal drops what is left
+  apart. The case builds no `udp-listen`.
+
+No refusal changed its value, and every input answers what it answered before. The test
+`an_open_refused_at_its_drawn_zid_gives_its_arena_back_once` (`tests/arena.rs`) refuses an open
+inside the one refusal of the three, once the entropy's cell is held, and reads the arena given back
+once and whole; `an_open_refused_after_its_lend_gives_its_arena_back_once` holds the text's
+refusal. `a_vacant_span_holds_nothing_until_it_is_filled` (`placed.rs`) and
+`a_supervisor_made_over_a_reserved_wait_room_holds_that_room` (`faces.rs`) and, with
+`tables-on-use`, `an_own_vacant_allocation_holds_nothing_until_it_is_filled`
+(`engine/state_places.rs`) hold the new makers.
+
+What the main session reads to land it: the case's total and `assemble` in the explain document
+(4,598 before), the receive at arm W, which should not move.

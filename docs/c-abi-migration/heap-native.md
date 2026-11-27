@@ -589,7 +589,7 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   value it never held; its CONTROL, a made value, is dropped by its last holder).
 - With `tables-on-use`, `tests::on_use::an_on_use_engine_and_its_rooms_lie_apart_from_its_arena`
   (red if the open writes the engine at a place the arena lends, `SessionArena::engine_place` and
-  `Shared::placed_with` in `CoopEngine::engine_of`, or the rooms, `Arena::place_with` in
+  `Shared::placed_with` in `CoopEngine::engine_of`, or the rooms, `Arena::vacant` in
   `CoopEngine::assemble`), and `tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms`
   (red if `lay_out_open` lays the engine's place, `ArenaPlan::lay_engine`, or the rooms',
   `ArenaPlan::lay_rooms`, in the on-use form; its CONTROL rows, the runtime's span and the count
@@ -609,7 +609,7 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   the rooms' row in the D12 forms and its absence in the on-use one.
 - Not tested: the open refused when the allocator has no room for the engine
   (`ArenaRefused::NoMemory` with the engine's bytes, before anything is reserved) or for the
-  rooms (`OwnBlock::take`); only a refusing allocator reaches either.
+  rooms (`OwnPlaced::vacant`); only a refusing allocator reaches either.
 - D12: every item added reads `all(feature = "tables-on-use", not(feature = "runtime-plan"))` or
   is the claim, which no D12 build instantiates; `SessionArena::keep` is `pub(crate)` with the
   body it had. The D12 cases' bytes are not expected to move: C1cs's reading of them is the check,

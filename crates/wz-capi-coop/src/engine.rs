@@ -137,7 +137,7 @@ use wz_runtime_coop::faces::OwingWaits;
 use wz_runtime_coop::faces::FaceWire;
 use wz_runtime_coop::faces::{
     DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, LendsSession, Link,
-    LinkSupervisor, DIAL_LOOK_MS,
+    LinkSupervisor, WaitRoom, DIAL_LOOK_MS,
 };
 use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{session_reassembly, SessionChains, SessionReassembly};
@@ -6959,36 +6959,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // for it: the session names an endpoint by its row from here, and a text that has no row
         // is refused here, before anything is bound or dialled.
         let written = endpoints.write_into(&mut lent.transport.endpoints);
-        // One refusal for the three, so what the arena lent is let go of on one path. The rooms
-        // lie in the row the plan laid out for them, a handle at each place a face may hold, the
-        // dial role's and each group's among them.
-        let (wire, entropy, rooms) = written.and_then(|()| {
+        // Every step from here that can refuse reads what the arena lent where `lent` holds it,
+        // and the runtime takes of it only its span, which has nothing to drop: a refusal lets go
+        // of what was lent whole, on the one path its drop takes. The tables leave it once nothing
+        // after them refuses but the heap's book of a udp port's rows (below). One refusal for the
+        // three below; the rooms lie in the row the plan laid out for them, or in an allocation of
+        // their own where the tables take their memory on use, reserved here and written once
+        // nothing after them refuses, a handle at each place a face may hold, the dial role's and
+        // each group's among them.
+        let (wire, entropy, rooms_at) = written.and_then(|()| {
             // A heap with no room for the source's cell is memory the open cannot be given.
             let mut entropy = SessionEntropy::<SharedCount>::try_held(entropy)
                 .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;
             let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
-            let (waits, places) = (links.waits(), lent.room_places);
-            // SAFETY: the arena hands a place aligned for the rooms and valid for writes of
-            // them, where they stay.
             #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
-            let rooms = unsafe {
-                lent.arena
-                    .arena_mut()
-                    .place_with(|at| LinkRooms::init_at(NonNull::new_unchecked(at), waits, places))
-            }
-            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+            let rooms_at = lent
+                .arena
+                .arena_mut()
+                .vacant::<LinkRooms<L::Waits>>()
+                .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
             // Where the tables take their memory on use, the rooms lie in an allocation of their
-            // own, which their owner (`Core::rooms`) gives back after it drops them.
-            // SAFETY: the owner hands a place aligned for the rooms and valid for writes of them,
-            // where they stay until it drops them.
+            // own, reserved here alike and filled at the same step: a refusal before the fill
+            // gives the allocation back unwritten, and once filled their owner (`Core::rooms`)
+            // gives it back after it drops them.
             #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-            let rooms = unsafe {
-                OwnPlaced::written(|at| {
-                    LinkRooms::init_at(NonNull::new_unchecked(at), waits, places)
-                })
-            }
-            .map_err(OpenError::Arena)?;
-            Ok((wire, entropy, rooms))
+            let rooms_at = OwnPlaced::<LinkRooms<L::Waits>>::vacant().map_err(OpenError::Arena)?;
+            Ok((wire, entropy, rooms_at))
         })?;
         // The read slots and send places of the faces past the dial role's, each with a Router of
         // its own over the session's chain buffers, lent to its pump in a cell of its own.
@@ -7001,31 +6997,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             lent.transport.face_chains,
         )
         .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
-        links.lend_buffers(lent.transport.links);
-        #[cfg(feature = "udp-listen")]
-        links
-            .lend_port_rows(lent.transport.port_rows)
-            .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;
-        if let Some(driver_cells) = lent.transport.cells.driver {
-            links.lend_cells(driver_cells);
-        }
-        // The task and timer tables and the session's local set, placed here once in the arena: no
-        // spawn and no sleep of the session takes memory after its open (`open_links` seals them).
-        let (runtime, local) =
-            tables
-                .runtime(clock.clone(), lent.runtime)
-                .ok_or(OpenError::Arena(ArenaRefused::Lend(
-                    LendRefused::Exhausted {
-                        asked: Some(runtime_bytes),
-                        left: 0,
-                    },
-                )))?;
-        // SAFETY: the runtime is the session's alone: it and its local set go into the `Core` made
-        // below and into no other value, the opening frame owns them until the `Core` is behind
-        // its `CoreLock`, and from then on every spawn, pass and handle of its tasks is reached
-        // under that lock (`UnderCoreLock`'s `ConfinedOwner`); this handle is dropped here.
-        unsafe { runtime.confine_tasks::<UnderCoreLock>() };
-        let session_time = CoopTime::new(&runtime);
         let wait_room = read_wait_room(&config);
         #[cfg(feature = "time-base")]
         let clock_wake = config.clock_moves.as_ref().and_then(|moves| {
@@ -7077,9 +7048,53 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let link_admission = unsafe { admission.share() }.map(as_link_admission::<C>);
         // The faces' links keep the places the registry lends their tables at: one table of them.
         let places = lent.registry.places();
-        // A place for each face the registry lent a set for, each face with its dial, and the waits
-        // a read makes at once, reserved here: none grows after.
-        let supervised = LinkSupervisor::new(
+        // The waits a read makes at once, reserved here while the links hold nothing of what was
+        // lent: none grows after.
+        let room = WaitRoom::reserved(wait_room).ok_or(OpenError::Arena(ArenaRefused::Lend(
+            LendRefused::Exhausted {
+                asked: Some(wait_room.saturating_mul(core::mem::size_of::<
+                    wz_runtime_coop::session_drive::LinkWait,
+                >())),
+                left: 0,
+            },
+        )))?;
+        // The task and timer tables and the session's local set, placed here once in the arena: no
+        // spawn and no sleep of the session takes memory after its open (`open_links` seals them).
+        let (runtime, local) =
+            tables
+                .runtime(clock.clone(), lent.runtime)
+                .ok_or(OpenError::Arena(ArenaRefused::Lend(
+                    LendRefused::Exhausted {
+                        asked: Some(runtime_bytes),
+                        left: 0,
+                    },
+                )))?;
+        // SAFETY: the runtime is the session's alone: it and its local set go into the `Core` made
+        // below and into no other value, the opening frame owns them until the `Core` is behind
+        // its `CoreLock`, and from then on every spawn, pass and handle of its tasks is reached
+        // under that lock (`UnderCoreLock`'s `ConfinedOwner`); this handle is dropped here.
+        unsafe { runtime.confine_tasks::<UnderCoreLock>() };
+        let session_time = CoopTime::new(&runtime);
+        // From here the tables leave what was lent: the links are handed theirs, and only a
+        // build whose udp ports share their peers' rows can still be refused, by the heap that
+        // holds the ports' book.
+        links.lend_buffers(lent.transport.links);
+        #[cfg(feature = "udp-listen")]
+        links
+            .lend_port_rows(lent.transport.port_rows)
+            .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;
+        if let Some(driver_cells) = lent.transport.cells.driver {
+            links.lend_cells(driver_cells);
+        }
+        let (waits, room_places) = (links.waits(), lent.room_places);
+        // SAFETY: the place reserved above, the arena's or the allocation of its own, was lent for
+        // the rooms alone, aligned for them and valid for writes of them, where they stay.
+        let rooms = unsafe {
+            rooms_at.fill(|at| LinkRooms::init_at(NonNull::new_unchecked(at), waits, room_places))
+        };
+        // A place for each face the registry lent a set for, each face with its dial, the room
+        // reserved above gathering the waits of every read: none grows after.
+        let supervised = LinkSupervisor::with_room(
             links,
             Face {
                 id: DIAL_FACE,
@@ -7095,16 +7110,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 told: FaceTold::default(),
             },
             places,
-            wait_room,
-        )
-        .ok_or(OpenError::Arena(ArenaRefused::Lend(
-            LendRefused::Exhausted {
-                asked: Some(wait_room.saturating_mul(core::mem::size_of::<
-                    wz_runtime_coop::session_drive::LinkWait,
-                >())),
-                left: 0,
-            },
-        )))?;
+            room,
+        );
         // Each field is made in the order its makers need: the config and policy are read before
         // they are moved.
         let core = Core {

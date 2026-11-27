@@ -3355,8 +3355,8 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
     assert_eq!(parts.len(), crate::arena::ARENA_ROWS, "a part named twice");
 }
 
-/// The allocator, counting what it gives and what it is given back. Only
-/// `an_open_refused_after_its_lend_gives_its_arena_back_once` reserves from it.
+/// The allocator, counting what it gives and what it is given back. Each value of it is reserved
+/// from by one test alone.
 struct Recorded {
     reserves: AtomicUsize,
     reserved: AtomicUsize,
@@ -3434,6 +3434,68 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
     let reserved = RECORDED.reserved.load(Ordering::SeqCst);
     assert!(reserved > 0, "the arena was reserved before the refusal");
     assert_eq!(RECORDED.released.load(Ordering::SeqCst), reserved);
+}
+
+/// What `an_open_refused_at_its_drawn_zid_gives_its_arena_back_once` reserves from.
+static RECORDED_AT_ZID: Recorded = Recorded {
+    reserves: AtomicUsize::new(0),
+    reserved: AtomicUsize::new(0),
+    releases: AtomicUsize::new(0),
+    released: AtomicUsize::new(0),
+};
+
+/// An open refused at its drawn zid (a source that gives nothing, for a config that states no zid),
+/// once its arena lent every table, its texts were written and its entropy's cell was taken, lets
+/// go of what it was lent whole: the cell, the tables, then the arena, given back once and every
+/// byte of it. Turned red by a refusal after the lend that keeps the arena past it, or gives it
+/// back twice.
+#[test]
+fn an_open_refused_at_its_drawn_zid_gives_its_arena_back_once() {
+    use crate::arena::{HeldPlaces, OpenStorage};
+    use wz_session_core::entropy::{EntropySource, EntropyUnavailable};
+    use wz_session_core::policy::ZidDerivation;
+
+    struct Dry;
+    impl EntropySource for Dry {
+        fn try_fill_bytes(&mut self, _buf: &mut [u8]) -> Result<(), EntropyUnavailable> {
+            Err(EntropyUnavailable)
+        }
+    }
+
+    let mut policy = SessionPolicy::defaults();
+    policy
+        .select_zid_derivation(ZidDerivation::Random)
+        .expect("a host build allows every value of the zid derivation");
+    let refused = Engine::open_made_in(
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        Dry,
+        || CoopConfig {
+            zid: None,
+            ..client_config()
+        },
+        policy,
+        OpenKeyIds::none(),
+        OpenStorage {
+            memory: &RECORDED_AT_ZID,
+            plan: crate::arena::PlanFrom::Config(&HeldPlaces::NONE),
+        },
+    )
+    .err();
+    assert_eq!(refused, Some(OpenError::EntropyUnavailable));
+    assert_eq!(
+        RECORDED_AT_ZID.reserves.load(Ordering::SeqCst),
+        1,
+        "one block, its region's and its arena's"
+    );
+    assert_eq!(
+        RECORDED_AT_ZID.releases.load(Ordering::SeqCst),
+        1,
+        "given back once"
+    );
+    let reserved = RECORDED_AT_ZID.reserved.load(Ordering::SeqCst);
+    assert!(reserved > 0, "the arena was reserved before the refusal");
+    assert_eq!(RECORDED_AT_ZID.released.load(Ordering::SeqCst), reserved);
 }
 
 /// A plan laid out when the build is compiled is the plan an open lays out at run time, row by
