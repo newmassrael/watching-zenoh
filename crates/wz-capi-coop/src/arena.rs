@@ -1424,7 +1424,8 @@ type LinkCellFlag = <SessionLock as wz_runtime_coop::sync::LockKind>::Flag;
 /// where the tables take their memory on use.
 type LinkSource = <crate::LinkCount as CountKind>::Buffers;
 
-/// The tables a session's transport is lent ([`TransportRows::lent_from`]).
+/// The tables a session's transport is lent (`TransportRows::lent_from`), or, where the tables take
+/// their memory on use, counted from its rows (`TransportRows::counted`).
 pub(crate) struct TransportTables {
     /// Where the links take their buffers (`SessionLinks::lend_buffers`): the tables of their
     /// buffers and, where the links share pools, their places; where the tables take their memory
@@ -1490,49 +1491,49 @@ impl TransportRows {
 
     /// The transport's tables, lent by `lend` in the order the plan laid them out: each made in
     /// its field of the value handed back, whose fields are made in the order they are written.
+    #[cfg(not(wz_on_use))]
     pub(crate) fn lent_from(&self, lend: &mut TableLender<'_>) -> TransportTables {
         let (dials, listens) = self.endpoint_rows;
         TransportTables {
-            #[cfg(not(wz_on_use))]
             links: Some(self.links_from(lend)),
-            // Laid out in no row: each link takes its own as it opens.
-            #[cfg(wz_on_use)]
-            links: HeapBuffers::sized(self.link_bytes, LINK_TX_SLOTS),
-            #[cfg(all(feature = "group", not(wz_on_use)))]
+            #[cfg(feature = "group")]
             groups: self.group_rx_from(lend),
-            // Laid out in no row: each group takes its buffer as it is joined.
-            #[cfg(all(feature = "group", wz_on_use))]
-            groups: self.groups_sized(),
-            #[cfg(all(feature = "udp-listen", not(wz_on_use)))]
+            #[cfg(feature = "udp-listen")]
             ports: self.ports_from(lend),
-            // Laid out in no row: the ports take their rows and buffers as they use them.
-            #[cfg(all(feature = "udp-listen", wz_on_use))]
-            ports: self.ports_sized(),
-            #[cfg(not(wz_on_use))]
             cells: self.cells_from(lend),
             // A chain's buffer is claimed when its first fragment arrives and given back when it
             // ends; the session holds the table for its life.
-            #[cfg(not(wz_on_use))]
             reassembly: LentChainTable::over(
                 lend.byte_cells(self.reassembly_bytes, self.reassembly_chains),
                 self.face_chains,
             ),
-            // Laid out in no row: each chain takes a buffer of its own at its first fragment.
-            #[cfg(wz_on_use)]
-            reassembly: HeapChains::sized(self.reassembly_bytes, self.face_chains),
-            #[cfg(not(wz_on_use))]
             endpoints: EndpointTexts::over(lend.table(dials), lend.table(listens)),
-            // Laid out in no row: each role's texts take their rows as the first is written.
-            #[cfg(wz_on_use)]
-            endpoints: EndpointTexts::counted(dials, listens),
-            #[cfg(all(wz_round, any(feature = "listen", feature = "group"), not(wz_on_use)))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             handed: HandedTable::over(
                 lend.byte_cells(self.link_bytes, self.handed_legs),
                 lend.table(self.handed_legs),
             ),
-            // Laid out in no row: the rows are taken at the first publish kept, each place a
-            // link's batch as it is first needed.
-            #[cfg(all(wz_round, any(feature = "listen", feature = "group"), wz_on_use))]
+        }
+    }
+
+    /// The transport's tables where they take their memory on use: each sized or counted to the
+    /// rows the plan counts and laid out in none, so no lender is asked. Each link takes its
+    /// buffers as it opens, each group its buffer as it is joined, the ports their rows and
+    /// buffers as they use them, each chain a buffer of its own at its first fragment, each
+    /// role's texts their rows as the first is written, and the kept publishes their rows at the
+    /// first kept, each place a link's batch as it is first needed.
+    #[cfg(wz_on_use)]
+    pub(crate) fn counted(&self) -> TransportTables {
+        let (dials, listens) = self.endpoint_rows;
+        TransportTables {
+            links: HeapBuffers::sized(self.link_bytes, LINK_TX_SLOTS),
+            #[cfg(feature = "group")]
+            groups: self.groups_sized(),
+            #[cfg(feature = "udp-listen")]
+            ports: self.ports_sized(),
+            reassembly: HeapChains::sized(self.reassembly_bytes, self.face_chains),
+            endpoints: EndpointTexts::counted(dials, listens),
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             handed: HandedTable::counted(self.link_bytes, self.handed_legs),
         }
     }

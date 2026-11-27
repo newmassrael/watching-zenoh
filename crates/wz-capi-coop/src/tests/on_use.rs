@@ -432,12 +432,12 @@ fn an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts() {
 /// A session whose tables take their memory on use hands each of its reassembly Routers the length
 /// of a chain's own buffer, the session's bound on a rejoined message, and the most chains one
 /// holds open at once, its share of the chains up to those a Router stages at once
-/// (`LENT_CHAINS`), and is lent no table for them: the transport's tables are lent with every row
-/// the plan laid out and no other. Turned red by a transport lent a table of chains on use
-/// (`TransportRows::lent_from`), or sized to another length or count than the plan's.
+/// (`LENT_CHAINS`), and is lent no table for them: the transport's tables are counted from the
+/// plan and asked of no lender. Turned red by a transport lent a table of chains on use, or sized
+/// to another length or count than the plan's (`TransportRows::counted`).
 #[test]
 fn an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table() {
-    use crate::arena::{AllocatorMemory, ArenaPlan, SessionArena};
+    use crate::arena::ArenaPlan;
     use wz_runtime_coop::reassembly_rx::{HeapChains, LENT_CHAINS};
 
     let config = crate::CoopConfig {
@@ -454,11 +454,7 @@ fn an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table() {
         plan.peers().sets()
     };
     let share = chains / faces;
-    let mut session =
-        SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
-    let mut lend = session.lender();
-    let transport = plan.transport().lent_from(&mut lend);
-    lend.finish().expect("the plan lays the transport out");
+    let transport = plan.transport().counted();
     assert_eq!(
         transport.reassembly,
         HeapChains::sized(bytes, share.min(LENT_CHAINS))
@@ -469,14 +465,12 @@ fn an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table() {
 /// buffers are taken, each link a receive buffer of the batch the session advertises and
 /// `LINK_TX_SLOTS` slots of it, as its tables would lend each link and as zenoh-pico's transport
 /// takes one buffer of each; a report of its memory reads that for each link it may hold, as no
-/// link shares a pool. Turned red by a transport lent tables on use (`TransportRows::lent_from`),
-/// by a source of another size than the plan's batch, or by a report that reads pools a session on
+/// link shares a pool. Turned red by a transport lent tables on use, by a source of another size
+/// than the plan's batch (`TransportRows::counted`), or by a report that reads pools a session on
 /// use holds none of (`LINKS_SHARE_POOLS`).
 #[test]
 fn an_on_use_sessions_links_take_their_batch_of_the_heap() {
-    use crate::arena::{
-        link_buffers, links_of, AllocatorMemory, ArenaPlan, SessionArena, LINK_TX_SLOTS,
-    };
+    use crate::arena::{link_buffers, links_of, ArenaPlan, LINK_TX_SLOTS};
     use wz_runtime_coop::link_storage::HeapBuffers;
 
     let config = crate::CoopConfig {
@@ -485,11 +479,7 @@ fn an_on_use_sessions_links_take_their_batch_of_the_heap() {
     };
     let plan = ArenaPlan::of(&config, &config.limits).expect("the client's limits lay a plan out");
     let batch = usize::from(config.batch_size);
-    let mut session =
-        SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
-    let mut lend = session.lender();
-    let transport = plan.transport().lent_from(&mut lend);
-    lend.finish().expect("the plan lays the transport out");
+    let transport = plan.transport().counted();
     assert_eq!(
         transport.links,
         HeapBuffers::sized(batch, LINK_TX_SLOTS),

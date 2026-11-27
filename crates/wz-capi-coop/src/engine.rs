@@ -1062,7 +1062,10 @@ fn lend_session(
     // Held whole to the end, as the value handed back holds it; the state's tables, which the
     // open moves into what it makes one by one, are taken apart at once instead: a table held as
     // a field of a set partly moved out would need its own drop on each refusal below.
+    #[cfg(not(wz_on_use))]
     let transport = plan.transport().lent_from(&mut lend);
+    #[cfg(wz_on_use)]
+    let transport = plan.transport().counted();
     // The key arena is the arena's where the open lends the registry from it, and the region's
     // otherwise, beside the registry whose tables keep their keys there.
     #[cfg(wz_lent)]
