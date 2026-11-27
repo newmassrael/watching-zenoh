@@ -29,7 +29,11 @@
 //!    intact frame. A frame of a sender no slot holds is
 //!    [`Status::Unslotted`] and is counted: a sender a bound list does not name,
 //!    or one more sender than the slots. A frame that is not intact and whose
-//!    sender holds no slot is [`Status::Integrity`] with no stream.
+//!    sender holds no slot is [`Status::Integrity`] with no stream. The rule is
+//!    the SCE `algorithm` document `sources/algorithms/e2e_sender_slot.scxml`,
+//!    and a bound list is bound one sender at a time by
+//!    `sources/algorithms/e2e_bind_sender.scxml`; both write the receiver's
+//!    table of senders, the map SCE ADR 0108 states, in place.
 //! 4. **The counter**, in that stream's judge: the first intact frame is
 //!    [`Status::First`], the baseline; then the step, reported as the profile's
 //!    `counter_errors` rule says.
@@ -39,13 +43,66 @@
 //! The streams are allocated once, by [`Receiver::new`], at the count the caller
 //! gives, and never grow. A fixed-memory image will take them from the static
 //! tables a generator writes from the deployment's catalogue.
+//!
+//! Under sender keying the slot of each sender is held in a map from the sender
+//! identity to its slot, kept on the heap as the streams are, which grows to
+//! the slots the caller gives and no further: the slot algorithms refuse a
+//! sender past them. A slot is never released, so the map only grows, and a
+//! slot's number is the place of its sender in the map's order.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use sce_portable_bytes::{BoundedMap, Heap, MapSeed};
+
 use crate::e2e_frame::{logical_value, open_view, BuildError, OpenedView, Values};
 use crate::e2e_judge::{CounterReason, CounterWidthError, Judge, JudgeConfig, Judgment};
 use crate::e2e_profile::{CounterErrors, Profile};
+
+mod generated {
+    // Emitted by the xtask (`regen_statecharts_and_pools`) into one directory, so each unit names
+    // the others it uses as `super::<unit>`.
+    macro_rules! generated {
+        ($($name:ident),* $(,)?) => {
+            $(
+                #[allow(dead_code, clippy::all)]
+                pub(super) mod $name {
+                    include!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../out/wz-app-frame/",
+                        stringify!($name),
+                        ".rs"
+                    ));
+                }
+            )*
+        };
+    }
+    generated!(
+        e2e_sender_slot_kind,
+        e2e_sender_slot_held,
+        e2e_sender_slot_result,
+        put_outcome,
+        e2e_sender_slot,
+        e2e_bind_sender,
+    );
+}
+
+use generated::e2e_sender_slot_result::E2eSenderSlotResult;
+
+/// The bound of the table of senders: half the numbers a map's slot holds, the largest bound
+/// whose index (twice the bound) a 32-bit target can still count. The table, in heap storage,
+/// takes its room as it fills, never this much up front, and holds no more senders than the
+/// receiver's slots, which [`Receiver::new`] holds below this.
+const SENDER_BOUND: usize = (u32::MAX / 2) as usize;
+
+/// The seed the table of senders hashes its keys under. A key anyone knows: the senders are
+/// chosen by whoever sends, and the table holds at most the receiver's slots, so a sender that
+/// chooses identities to crowd one chain of the index makes a look-up walk those few entries at
+/// most (SCE ADR 0108, D8).
+const SENDERS_SEED: MapSeed = MapSeed::from_halves(0, 0);
+
+/// Each sender that holds a slot, and its slot.
+type Senders = BoundedMap<u64, u32, SENDER_BOUND, Heap>;
 
 /// The CRC did not match.
 pub const FAILED_CRC: u8 = 1;
@@ -231,8 +288,6 @@ pub struct Counts {
 #[derive(Debug, Clone)]
 struct Stream {
     judge: Judge,
-    /// The sender that holds the slot, under sender keying.
-    sender: Option<u64>,
     /// The CRC of the frame that became the baseline, which the replay admission compares a
     /// reply carrying the baseline's counter with (`crate::replay_admission`).
     #[cfg(feature = "replay")]
@@ -250,6 +305,12 @@ pub struct Receiver {
     bound: bool,
     by_sender: bool,
     streams: Vec<Stream>,
+    /// Under sender keying, each sender that holds a slot and its slot; empty under indexed
+    /// keying.
+    senders: Senders,
+    /// Under sender keying, how many senders the table may hold: the slots asked for, at most
+    /// [`SENDER_BOUND`]; 0 under indexed keying.
+    capacity: u32,
     counts: Counts,
 }
 
@@ -299,29 +360,33 @@ impl Receiver {
             },
         };
         let rules = profile.counter_rules();
-        let fresh = |sender: Option<u64>| Stream {
+        let fresh = || Stream {
             judge: Judge::with_rules(config, rules),
-            sender,
             #[cfg(feature = "replay")]
             baseline_crc: None,
         };
+        let mut senders = Senders::with_seed(SENDERS_SEED);
+        let mut capacity = 0;
         let (streams, bound, by_sender): (Vec<Stream>, bool, bool) = match keying {
             Keying::Indexed { streams } => {
                 if streams == 0 {
                     return Err(NewError::NoStreams);
                 }
-                ((0..streams).map(|_| fresh(None)).collect(), false, false)
+                ((0..streams).map(|_| fresh()).collect(), false, false)
             }
             Keying::Senders { slots, bound } => {
                 if slots == 0 {
                     return Err(NewError::NoStreams);
                 }
-                if slots > slot_limit {
-                    return Err(NewError::TooManySlots {
-                        slots,
-                        limit: slot_limit,
-                    });
+                // No build allows more slots than the table of senders can hold.
+                let limit = slot_limit.min(SENDER_BOUND);
+                if slots > limit {
+                    return Err(NewError::TooManySlots { slots, limit });
                 }
+                let Ok(slots_held) = u32::try_from(slots) else {
+                    return Err(NewError::TooManySlots { slots, limit });
+                };
+                capacity = slots_held;
                 let Some(cell) = profile.cell() else {
                     return Err(NewError::NoSenderInCell);
                 };
@@ -331,17 +396,23 @@ impl Receiver {
                 let largest = profile.fields()[cell.field].parts[sender_part].max_value();
                 let table: Vec<Stream> = match &bound {
                     Some(list) => {
-                        let fits = !list.is_empty() && list.len() <= slots;
-                        let each_once = list
-                            .iter()
-                            .enumerate()
-                            .all(|(i, identity)| !list[..i].contains(identity));
-                        if !fits || !each_once || list.iter().any(|&identity| identity > largest) {
+                        if list.is_empty() {
                             return Err(NewError::BadBoundList);
                         }
-                        list.iter().map(|&identity| fresh(Some(identity))).collect()
+                        for &identity in list {
+                            let taken = generated::e2e_bind_sender::e2e_bind_sender(
+                                &mut senders,
+                                identity,
+                                capacity,
+                                largest,
+                            );
+                            if !taken {
+                                return Err(NewError::BadBoundList);
+                            }
+                        }
+                        list.iter().map(|_| fresh()).collect()
                     }
-                    None => (0..slots).map(|_| fresh(None)).collect(),
+                    None => (0..slots).map(|_| fresh()).collect(),
                 };
                 (table, bound.is_some(), true)
             }
@@ -352,6 +423,8 @@ impl Receiver {
             bound,
             by_sender,
             streams,
+            senders,
+            capacity,
             counts: Counts::default(),
         })
     }
@@ -375,7 +448,10 @@ impl Receiver {
     /// The sender that holds a slot, under sender keying; `None` for a free
     /// slot, a slot the receiver does not have, or indexed keying.
     pub fn slot_sender(&self, slot: usize) -> Option<u64> {
-        self.streams.get(slot).and_then(|s| s.sender)
+        self.senders
+            .iter()
+            .find(|&(_, &held)| held as usize == slot)
+            .map(|(&sender, _)| sender)
     }
 
     /// The frames judged in no slot so far.
@@ -407,9 +483,8 @@ impl Receiver {
         let slot = if self.by_sender {
             let (_, _, sender) = self.cell_values(&opened);
             let sender = sender?;
-            self.streams
-                .iter()
-                .position(|held| held.sender == Some(sender))?
+            // A `u32` widens into the `usize` of every target wz builds for.
+            *self.senders.get(&sender)? as usize
         } else {
             stream
         };
@@ -565,29 +640,29 @@ impl Receiver {
     }
 
     /// The slot a frame of `sender` is judged in: the one that holds it, or a
-    /// free one taken in arrival order by an intact frame. `Ok(None)` for a
-    /// frame that is not intact and whose sender holds no slot.
+    /// free one taken in arrival order by an intact frame
+    /// (`sources/algorithms/e2e_sender_slot.scxml`). `Ok(None)` for a frame
+    /// that is not intact and whose sender holds no slot.
     fn slot_for(&mut self, sender: Option<u64>, intact: bool) -> Result<Option<usize>, Unslotted> {
         // Sender keying was refused at `new` for a cell with no sender part,
         // so an opened frame always carries one here.
         let Some(sender) = sender else {
             return Ok(None);
         };
-        if let Some(slot) = self.streams.iter().position(|s| s.sender == Some(sender)) {
-            return Ok(Some(slot));
-        }
-        if self.bound {
-            return Err(Unslotted::NotListed);
-        }
-        if !intact {
-            return Ok(None);
-        }
-        match self.streams.iter().position(|s| s.sender.is_none()) {
-            Some(slot) => {
-                self.streams[slot].sender = Some(sender);
-                Ok(Some(slot))
-            }
-            None => Err(Unslotted::Full),
+        let answer = generated::e2e_sender_slot::e2e_sender_slot(
+            &mut self.senders,
+            sender,
+            intact,
+            self.bound,
+            self.capacity,
+        );
+        match answer {
+            // A slot is numbered below the streams `new` made, and a `u32` widens into the
+            // `usize` of every target wz builds for.
+            E2eSenderSlotResult::Slotted(held) => Ok(Some(held.slot as usize)),
+            E2eSenderSlotResult::NotListed => Err(Unslotted::NotListed),
+            E2eSenderSlotResult::Full => Err(Unslotted::Full),
+            E2eSenderSlotResult::NoClaim => Ok(None),
         }
     }
 

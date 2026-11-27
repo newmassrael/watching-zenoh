@@ -483,6 +483,11 @@ fn regen_codec_deployment(
 ///                      key_facts_schema, reset_peer_schema, take_generation_duplicate
 ///                      (event-schemas); take_generation_kind, put_outcome (enums);
 ///                      take_generation_result (union)
+///   wz-app-frame     : e2e_counter_step, e2e_counter_verdict, drop_report_due,
+///                      replay_reply_admission, e2e_sender_slot, e2e_bind_sender
+///                      (algorithms); e2e_sender_slot_held (event-schema);
+///                      e2e_sender_slot_kind, put_outcome (enums);
+///                      e2e_sender_slot_result (union)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
 ///                      session_rx_pool_ap_small, session_tx_pool_ap,
 ///                      session_tx_pool_ap_small (buffer-pools)
@@ -595,14 +600,25 @@ fn regen_statecharts_and_pools(root: &Path) {
     mkdir(&app_frame_out);
     // The replay cache's admission of a reply to that judge (wz-app-frame `replay_admission`):
     // whether a reply is judged, a duplicate of the baseline, or a frame the judge has passed.
+    // And the receiver's slots keyed by sender (`e2e_receiver`): the slot a frame of a sender is
+    // judged in, and a sender of a bound list bound to the next slot, each writing the table of
+    // senders the receiver lends in place.
     for stem in [
         "e2e_counter_step",
         "e2e_counter_verdict",
         "drop_report_due",
         "replay_reply_admission",
+        "e2e_sender_slot",
+        "e2e_bind_sender",
     ] {
         codegen.emit_algorithm(stem, &algorithms, &app_frame_out);
     }
+    // What `e2e_sender_slot` answers, its tag and its record, and the standard answer of a map's
+    // put, emitted beside it as the session core's are beside `take_generation`.
+    codegen.emit_event_schema("e2e_sender_slot_held", &algorithms, &app_frame_out);
+    codegen.emit_enum("e2e_sender_slot_kind", &algorithms, &app_frame_out);
+    codegen.emit_union("e2e_sender_slot_result", &algorithms, &app_frame_out);
+    codegen.emit_enum("put_outcome", &std_collection, &app_frame_out);
 
     // Buffer-pools — (stem, consuming-crate). All sourced from sources/network.
     let pools: &[(&str, &str)] = &[

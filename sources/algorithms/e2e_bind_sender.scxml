@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  One sender of a bound list given to a receiver of end-to-end protected frames keyed by sender
+  (wz-app-frame `e2e_receiver`, Keying::Senders with a list), bound to the next slot of the
+  table e2e_sender_slot.scxml reads: the slot numbered by how many senders the table held before
+  it, so the list's order is the slots' order.
+
+  The sender is refused, and the list with it, when it is a value the message cell's sender part
+  cannot hold (above `largest`), when the list named it already (the table holds it), or when the
+  table holds `capacity` senders already, the receiver's slots. An empty list is the host's to
+  refuse: it binds nothing here.
+
+  The table is the caller's, lent `inout` and written where it stands; its bound is the
+  caller's, at least `capacity`. The algorithm declares no may-fail: the put names its outcome.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="algorithm"
+       name="e2e_bind_sender"
+       version="1.0">
+  <sce:import kind="enum" src="sce:std/collection/put_outcome.scxml" as="PutOutcome"/>
+  <sce:signature>
+    <sce:param name="slots" type="map&lt;uint64, uint32&gt;" inout="true"/>
+    <sce:param name="sender" type="uint64"/>
+    <sce:param name="capacity" type="uint32"/>
+    <sce:param name="largest" type="uint64"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="sender &gt; largest">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="has(slots, sender)">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:if cond="len(slots) &gt;= capacity">
+      <sce:return expr="false"/>
+    </sce:if>
+    <sce:var name="next" type="uint32" init="len(slots)"/>
+    <sce:var name="stored" type="enum:PutOutcome" init="PutOutcome.inserted"/>
+    <sce:put target="slots" key="sender" expr="next" outcome="stored"/>
+    <sce:return expr="stored === PutOutcome.inserted"/>
+  </sce:body>
+</scxml>

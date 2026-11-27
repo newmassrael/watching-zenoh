@@ -139,11 +139,17 @@ BACKENDS=("rust" "cpp" "kotlin" "go" "c11" "python")
 #             lowers a map in an algorithm on Rust and C11 only (`ALGORITHM_MAP_BACKENDS` in
 #             vendor/sce/sce-build/src/forge/codegen_matrix.rs; docs/adr/0108, D10). wz builds
 #             it for Rust; C11 emits too.
+#   e2e_sender_slot, e2e_bind_sender -- the receiver's table of senders, a `map<uint64, uint32>`
+#             each takes `inout`, refused where take_generation's is for the same reason.
 declare -A UNLOWERED_ON=(
     [take_generation]="cpp kotlin go python"
+    [e2e_sender_slot]="cpp kotlin go python"
+    [e2e_bind_sender]="cpp kotlin go python"
 )
 declare -A UNLOWERED_BECAUSE=(
     [take_generation]="does not lower a map or a set in an algorithm yet (docs/adr/0108, D10)"
+    [e2e_sender_slot]="does not lower a map or a set in an algorithm yet (docs/adr/0108, D10)"
+    [e2e_bind_sender]="does not lower a map or a set in an algorithm yet (docs/adr/0108, D10)"
 )
 
 # sce-codegen Go backend wants an import-path prefix; supply a stable

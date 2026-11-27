@@ -36,7 +36,17 @@ default = ["alloc"]
 # `alloc`) and holds its fields in a `Vec`; the reader of such documents and the message catalog's
 # reader are `wz-app-schema`'s, behind its own `alloc`. Off, the crate is `e2e_crc`, `e2e_judge` and
 # the catalog's static tables, which link no allocator.
-alloc = ["dep:wz-session-core", "wz-session-core/alloc", "wz-app-schema/alloc"]
+#
+# The receiver's table of senders (`e2e_receiver`) is the map the SCE algorithms
+# `e2e_sender_slot` and `e2e_bind_sender` write in place (SCE ADR 0108), held on the heap as the
+# receiver's streams are, so `alloc` turns on the map's `Heap` storage.
+alloc = [
+    "dep:wz-session-core",
+    "wz-session-core/alloc",
+    "wz-app-schema/alloc",
+    "dep:sce-portable-bytes",
+    "sce-portable-bytes/alloc",
+]
 
 # The type tables of a payload's schema and their two readers' common part (`proto_types`), the
 # reader of the `FileDescriptorSet` `protoc` compiles a schema into (`proto_descriptor`), the typed
@@ -83,6 +93,10 @@ replay = ["alloc"]
 # are its, and its readers come in with `alloc`.
 wz-app-schema = { path = "../wz-app-schema", default-features = false }
 wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
+# The map the generated slot algorithms of `e2e_receiver` take, which they name by its crate
+# (`::sce_portable_bytes::BoundedMap`), so it is declared direct. Already in the graph through
+# the core under `alloc`; SCE's own runtime, vendored with the generator.
+sce-portable-bytes = { path = "../../vendor/sce/backends/rust/portable-bytes", default-features = false, optional = true }
 
 [lints]
 workspace = true

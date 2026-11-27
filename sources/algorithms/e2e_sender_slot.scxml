@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The slot a frame of a sender is judged in, under a receiver of end-to-end protected frames
+  keyed by sender (wz-app-frame `e2e_receiver`, Keying::Senders).
+
+  `slots` maps each sender identity that holds a slot to its slot, numbered from 0 in the order
+  the senders were bound by a list (e2e_bind_sender.scxml) or first arrived. A sender the table
+  holds is judged in its slot, whether its frame is intact or not. Otherwise:
+
+    - under a bound list, the sender is not one the list names: not_listed, counted;
+    - a frame that is not intact claims no slot: no_claim, judged in no stream and not counted,
+      so a damaged frame never takes a slot from the sender whose identity it was meant to carry;
+    - the table holds `capacity` senders already, the receiver's slots: full, counted;
+    - else the sender takes the next slot, the number of senders the table held before it.
+
+  A slot is never released: the table only grows, up to `capacity`, so a slot's number is its
+  place in the table's order. The table is the caller's, lent `inout` and written where it
+  stands; its bound is the caller's too, at least `capacity`. The algorithm declares no
+  may-fail: the put names its outcome, and the slot at the sender is read where `has` proves
+  the key present.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="algorithm"
+       name="e2e_sender_slot"
+       version="1.0">
+  <sce:import kind="enum" src="e2e_sender_slot_kind.scxml" as="SlotKind"/>
+  <sce:import kind="event-schema" src="e2e_sender_slot_held.scxml" as="Held"/>
+  <sce:import kind="union" src="e2e_sender_slot_result.scxml" as="SlotResult"/>
+  <sce:import kind="enum" src="sce:std/collection/put_outcome.scxml" as="PutOutcome"/>
+  <sce:signature>
+    <sce:param name="slots" type="map&lt;uint64, uint32&gt;" inout="true"/>
+    <sce:param name="sender" type="uint64"/>
+    <sce:param name="intact" type="bool"/>
+    <sce:param name="bound" type="bool"/>
+    <sce:param name="capacity" type="uint32"/>
+    <sce:return type="union:SlotResult"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="has(slots, sender)">
+      <sce:var name="held" type="union:SlotResult">
+        <sce:set name="kind" expr="SlotKind.slotted"/>
+        <sce:set name="slot" expr="slots[sender]"/>
+      </sce:var>
+      <sce:return expr="held"/>
+    </sce:if>
+    <sce:if cond="bound">
+      <sce:var name="not_listed" type="union:SlotResult">
+        <sce:set name="kind" expr="SlotKind.not_listed"/>
+      </sce:var>
+      <sce:return expr="not_listed"/>
+    </sce:if>
+    <sce:if cond="!intact">
+      <sce:var name="no_claim" type="union:SlotResult">
+        <sce:set name="kind" expr="SlotKind.no_claim"/>
+      </sce:var>
+      <sce:return expr="no_claim"/>
+    </sce:if>
+    <sce:var name="full" type="union:SlotResult">
+      <sce:set name="kind" expr="SlotKind.full"/>
+    </sce:var>
+    <sce:if cond="len(slots) &gt;= capacity">
+      <sce:return expr="full"/>
+    </sce:if>
+    <sce:var name="next" type="uint32" init="len(slots)"/>
+    <sce:var name="stored" type="enum:PutOutcome" init="PutOutcome.inserted"/>
+    <sce:put target="slots" key="sender" expr="next" outcome="stored"/>
+    <sce:if cond="stored === PutOutcome.full">
+      <sce:return expr="full"/>
+    </sce:if>
+    <sce:var name="taken" type="union:SlotResult">
+      <sce:set name="kind" expr="SlotKind.slotted"/>
+      <sce:set name="slot" expr="next"/>
+    </sce:var>
+    <sce:return expr="taken"/>
+  </sce:body>
+</scxml>

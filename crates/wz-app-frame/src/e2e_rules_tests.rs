@@ -760,6 +760,90 @@ fn slots_bound_by_a_list_judge_the_listed_and_count_the_rest() {
 }
 
 #[test]
+fn under_a_bound_list_a_damaged_frame_is_judged_by_whether_the_list_names_its_sender() {
+    let p = right();
+    let expected = right_values(ADDR_A);
+    let mut rx = Receiver::new(
+        p.clone(),
+        &expected,
+        Keying::Senders {
+            slots: 2,
+            bound: Some(vec![right_sender_id(ADDR_A)]),
+        },
+        None,
+        2,
+    )
+    .expect("made");
+    let damaged = |address, counter| {
+        let mut bytes = frame(&p, &right_values(address), counter, b"d");
+        bytes[0] ^= 1;
+        bytes
+    };
+    // The listed sender's slot is bound before any frame: a damaged one is judged in it.
+    let v = rx.receive(0, &damaged(ADDR_A, 1), 0).expect("judged");
+    assert_eq!(
+        (v.status, v.failed, v.stream, v.unslotted),
+        (Status::Integrity, FAILED_CRC, Some(0), None)
+    );
+    // A damaged frame of a sender the list does not name is counted as not listed, as an
+    // intact one is: the list is read before the frame's integrity.
+    let v = rx.receive(0, &damaged(ADDR_B, 1), 1).expect("judged");
+    assert_eq!(
+        (v.status, v.stream, v.unslotted),
+        (Status::Unslotted, None, Some(Unslotted::NotListed))
+    );
+    assert_eq!((rx.counts().not_listed, rx.counts().full), (1, 0));
+    // One slot per listed sender, and no other.
+    assert_eq!(rx.streams(), 1);
+    assert_eq!(rx.slot_sender(0), Some(right_sender_id(ADDR_A)));
+    assert_eq!(rx.slot_sender(1), None);
+}
+
+#[test]
+fn a_damaged_frame_of_a_new_sender_is_not_counted_full_and_takes_no_slot() {
+    let p = right();
+    let expected = right_values(ADDR_A);
+    let mut rx = Receiver::new(
+        p.clone(),
+        &expected,
+        Keying::Senders {
+            slots: 1,
+            bound: None,
+        },
+        None,
+        8,
+    )
+    .expect("made");
+    let of = |address, counter| frame(&p, &right_values(address), counter, b"f");
+    assert_eq!(
+        rx.receive(0, &of(ADDR_A, 7), 0).expect("judged").stream,
+        Some(0)
+    );
+    // Every slot is held. A damaged frame of another sender is judged nowhere and counted
+    // nowhere; an intact one is counted full.
+    let mut damaged = of(ADDR_B, 1);
+    damaged[0] ^= 1;
+    let v = rx.receive(0, &damaged, 1).expect("judged");
+    assert_eq!(
+        (v.status, v.stream, v.unslotted),
+        (Status::Integrity, None, None)
+    );
+    assert_eq!(rx.counts().full, 0);
+    let v = rx.receive(0, &of(ADDR_B, 1), 2).expect("judged");
+    assert_eq!(
+        (v.status, v.stream, v.unslotted),
+        (Status::Unslotted, None, Some(Unslotted::Full))
+    );
+    assert_eq!(rx.counts().full, 1);
+    // The slot stays the first sender's: it is never released.
+    assert_eq!(rx.slot_sender(0), Some(right_sender_id(ADDR_A)));
+    assert_eq!(
+        rx.receive(0, &of(ADDR_A, 8), 3).expect("judged").status,
+        Status::Ok
+    );
+}
+
+#[test]
 fn a_receiver_is_refused_by_name_when_it_cannot_judge_what_it_is_asked() {
     let one = || Keying::Indexed { streams: 1 };
     let left_new = |gap| Receiver::new(left(), &left_values(ADDR_A), one(), gap, 8).err();
