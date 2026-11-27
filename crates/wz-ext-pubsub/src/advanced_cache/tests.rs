@@ -953,6 +953,34 @@ fn a_record_is_its_header_and_its_parts_padded_to_eight() {
     assert_eq!(10 * 168 + ring::RING_HEAD_BYTES, 1712);
 }
 
+/// A sample made on the heap and pushed into a cache in the ring is copied into a record, as a
+/// put's is, and the ring's depth bounds it. Turned red by a push that reaches the heap's form for
+/// a store in the ring, or leaves the sample out.
+#[test]
+fn a_sample_pushed_into_a_cache_in_the_ring_is_kept_as_a_record() {
+    let ring = test_ring::HeapRing::new(1024);
+    let store = ring_store(&ring, 2);
+    for sn in 0..3u32 {
+        store.cache_sample(CachedSample::new(
+            "demo/k",
+            vec![sn as u8],
+            Some(SourceInfo::new(&[0x07], 9, sn)),
+            TimestampHint::new(u64::from(sn) << 32, &[1]).unwrap(),
+            SampleKind::Put,
+        ));
+    }
+    assert_eq!(store.len(), 2, "the oldest went for the third");
+    let mut replies = Rec::default();
+    store.query_handler(|| 0)(&query(None), &mut replies);
+    assert_eq!(
+        replies.keyed,
+        vec![
+            ("demo/k".to_string(), vec![1]),
+            ("demo/k".to_string(), vec![2])
+        ]
+    );
+}
+
 /// A cache in the ring answers as one on the heap does: its newest samples of its depth, oldest
 /// first, each with its key, payload, number, encoding and attachment.
 #[test]

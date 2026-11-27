@@ -202,7 +202,13 @@ impl AdvancedPublisherPlane for PicoPlane {
     /// refuses the cache. On the heap on an engine that keeps none.
     fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
         if SessionEngine::cache_bytes(&*self.session.engine).is_none() {
+            // The tokio engine's sessions keep no ring, and its build keeps a cache's heap form
+            // (`cache-heap`); the cooperative engine's always keep one, and its library links no
+            // heap form beside it.
+            #[cfg(feature = "engine-tokio")]
             return Ok(CacheStore::new(config));
+            #[cfg(not(feature = "engine-tokio"))]
+            return Err(AdvancedPublisherError::CacheRingUnavailable);
         }
         CacheStore::in_ring(
             config,

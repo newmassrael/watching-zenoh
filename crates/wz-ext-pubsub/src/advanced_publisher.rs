@@ -542,12 +542,19 @@ pub trait AdvancedPublisherPlane: Send + Sync + 'static {
     ) -> Result<Self::Queryable, AdvancedPublisherError>;
 
     /// The store a cache of `config` keeps its samples in, made before anything is declared. On
-    /// the heap by default ([`CacheStore::new`]); a host whose session keeps a ring of cached
+    /// the heap by default (`CacheStore::new`); a host whose session keeps a ring of cached
     /// samples in the memory it reserved at its open answers a store in it
     /// ([`CacheStore::in_ring`]), and refuses the cache when the ring holds no record.
+    #[cfg(any(test, feature = "cache-heap"))]
     fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
         Ok(CacheStore::new(config))
     }
+
+    /// The store a cache of `config` keeps its samples in, made before anything is declared: in a
+    /// build with no heap form of a cache (`cache-heap`), the host names it, in the ring of
+    /// cached samples its session reserved at its open ([`CacheStore::in_ring`]).
+    #[cfg(not(any(test, feature = "cache-heap")))]
+    fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError>;
 
     /// Declare the `@adv` liveliness token.
     fn declare_token(&self, keyexpr: &str) -> Result<Self::Token, AdvancedPublisherError>;
