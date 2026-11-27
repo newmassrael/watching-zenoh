@@ -9175,6 +9175,21 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4728": {
+      "decision_summary": "Tighten the size ledger's rows that the landed lanes moved under their\nratchets, as the gate asks once a ratio falls past its tolerance.",
+      "changes_bullets": [
+        "size_ledger.json: seven area rows of three cases, as --check printed."
+      ],
+      "verification_bullets": [
+        "size_ledger_gate --check printed each row on main 239ec7d4d7."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
