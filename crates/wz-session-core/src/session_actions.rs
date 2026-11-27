@@ -1048,7 +1048,7 @@ pub struct TxConduits<R: SessionRuntime> {
     /// Control conduit's lock when that frame is taken: raised with nothing open costs the next
     /// sender one flush of an empty conduit, while lowered with a frame open would let data pass
     /// a declaration staged before it, which is the order this is kept for.
-    #[cfg(feature = "transport-batching")]
+    #[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
     control_open: R::Flag,
     conduits: [R::Mutex<BatchTx>; TX_CONDUITS],
     /// Per conduit, whether a SENDER holds it: one staging its message, writing its frame or
@@ -1142,6 +1142,12 @@ impl<F: crate::runtime_cell::FlagCell> Drop for SenderInside<'_, F> {
 /// an MCU no-alloc one); the OFF build keeps the single conduit it always had.
 /// Named where a link reads it too ([`crate::link::SESSION_TX_SLOTS`]).
 const TX_CONDUITS: usize = crate::link::SESSION_TX_CONDUITS;
+
+// The Control barrier of the send and its `control_open` mark are compiled with `transport-qos`
+// alone: on one conduit a control message and the data staged around it share one frame order,
+// so there is no other conduit to drain ahead of it and no frame of its own to follow out.
+#[cfg(not(feature = "transport-qos"))]
+const _: () = assert!(TX_CONDUITS == 1);
 
 /// The entry of `rows`, one per conduit, that `priority` rides: its own under `transport-qos`,
 /// where the wire priority is the conduit, and the single one otherwise. Gated as its readers
@@ -1343,7 +1349,7 @@ impl<R: SessionRuntime> TxConduits<R> {
         Self {
             #[cfg(feature = "transport-batching")]
             window: <R::Word as crate::runtime_cell::WordCell>::new(0),
-            #[cfg(feature = "transport-batching")]
+            #[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
             control_open: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
             // A blocking sender keeps its conduit while it waits for room (a chain's fragments
             // keep their sequence numbers), and a probe takes it without waiting
@@ -1544,6 +1550,7 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// emit chokepoint only, and lowered by the drain of the Control conduit.
     #[cfg(all(
         feature = "transport-batching",
+        feature = "transport-qos",
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -1569,6 +1576,7 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// `control_open` mark).
     #[cfg(all(
         feature = "transport-batching",
+        feature = "transport-qos",
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -1591,7 +1599,7 @@ impl<R: SessionRuntime> TxConduits<R> {
 
     /// Lower the `control_open` mark: called with the Control conduit's lock held, as its open
     /// frame is taken.
-    #[cfg(feature = "transport-batching")]
+    #[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
     fn control_taken(&self) {
         crate::runtime_cell::FlagCell::store(
             &self.control_open,
@@ -1609,7 +1617,7 @@ impl<R: SessionRuntime> TxConduits<R> {
         for conduit in &self.conduits {
             R::with_mutex_mut(conduit, BatchTx::reset);
         }
-        #[cfg(feature = "transport-batching")]
+        #[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
         self.control_taken();
     }
 }
@@ -13097,10 +13105,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // frame, as upstream's pipeline batches a declaration, which is not express
         // (`commons/zenoh-protocol/src/network/mod.rs` @ `Self::new(Priority::Control, CongestionControl::DEFAULT_DECLARE, false);`,
         // `io/zenoh-transport/src/common/pipeline.rs` @ `if !self.batching || $msg.is_express() {`).
-        // On one conduit there is nothing to drain: the frame's order is the staging order.
-        #[cfg(feature = "transport-batching")]
+        // On one conduit there is nothing to drain: the frame's order is the staging order, so a
+        // build without `transport-qos` compiles neither half of the barrier.
+        #[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
         let control = TxConduits::<R>::conduit_index(Priority::Control);
-        #[cfg(feature = "transport-batching")]
+        #[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
         if priority == Priority::Control && self.tx_conduits.is_auto() {
             // A conduit's lock is held across its sender's wait for room, so a send that may not
             // wait does not wait for it either: it goes ahead only when it can drain every
@@ -13115,7 +13124,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // The barrier's second half: a message staged on another conduit than the Control one
         // follows the control messages left open there, which leave first. A control message
         // that left none costs the data path one atomic load.
-        #[cfg(feature = "transport-batching")]
+        #[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
         if self.tx_conduits.control_left_open()
             && TxConduits::<R>::conduit_index(priority) != control
         {
@@ -13269,6 +13278,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // on another conduit, whichever is first (the barrier's second half, above). Marked
             // once its conduit's lock is let go: a drain that took the frame in between leaves the
             // mark raised over an empty conduit, which costs the next sender an empty drain.
+            #[cfg(feature = "transport-qos")]
             if priority == Priority::Control && matches!(push, Ok(UnicastPush::Pushed)) {
                 self.tx_conduits.leave_control_open();
             }
@@ -14315,6 +14325,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn flush_conduit(&self, idx: usize, priority: Priority, batch: &mut BatchTx) {
         // Lowered before the frame is taken, under the lock that keeps a control message from
         // being staged in between: whatever control message the mark stood for leaves here.
+        #[cfg(feature = "transport-qos")]
         if idx == TxConduits::<R>::conduit_index(Priority::Control) {
             self.tx_conduits.control_taken();
         }

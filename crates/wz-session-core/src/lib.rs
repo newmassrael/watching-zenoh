@@ -2663,6 +2663,10 @@ pub mod unicast_link {
 #[cfg(feature = "session-unicast")]
 pub mod link_life;
 
+// The class of the machines a unicast client session runs, held against their generated tables.
+#[cfg(all(test, feature = "session-unicast"))]
+mod machine_class_tests;
+
 /// The host of the peer machines, written once for every profile (decision D5 of
 /// `docs/session-lifecycle-intent.md`): the bookkeeping of which face a dial
 /// opened, which peer each held face is held for and which retry timer is still its

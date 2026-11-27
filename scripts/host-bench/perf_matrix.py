@@ -46,7 +46,23 @@ committed rows.
         the code of LIBRARY (the run's lib-W or lib-P copy) each role of arm ARM (W by default) held
         resident in the run whose perf.json is RESULT, made with PERF_SMAPS=1: the present pages of its
         executable mapping, named by the crate of each text symbol on them and by the planes a perf run
-        never calls (docs/win-budget/rss.md, R3); exit 3 when the run printed no page map of it
+        never calls (docs/win-budget/rss.md, R3); for a library a run-text list laid out (its .text.run), the
+        pages each role held outside the fault-around windows of that code, named by crate (section 5.4); exit 1
+        when a role held any (a function the list does not place ran: the list is stale), 3 when the run printed
+        no page map of it
+    perf_matrix.py run-text LIBRARY SCRIPT TRACE...
+        the functions of LIBRARY (the run's lib-W or lib-P copy) the callgrind profiles TRACE (a run with
+        --trace-text) say ran, by the bytes of text they are and the fault-around windows they span laid
+        out together, and for SCRIPT (crates/wz-capi-pico/link/run-text.ld; `-` writes nothing) the linker
+        script's statement that lays them out together ahead of the rest of the text, its head kept
+        (docs/win-budget/rss.md, section 5.4); exit 2 when an input was refused, 3 when no profile names a
+        text symbol of LIBRARY. `scripts/pico-compare.sh run-text` runs the traced run and this for both arms
+    perf_matrix.py run-text-order SCRIPT LISTING OUT
+        lld-link's order file (`/ORDER:@OUT`) of the functions the run-text list SCRIPT places, made of the
+        names a listing of a Windows link holds (LISTING: the last word of each line, as a list of names, `nm`
+        and lld-link's `/lldmap` with `/demangle:no` write one), a name placed when its patterns are a line of
+        the list whatever its hash (docs/win-budget/rss.md, section 5.4); exit 2 when an input was refused, 3
+        when no name of LISTING is one the list places
     perf_matrix.py external-record OUT [WHY]
         the record of arm X written to OUT: with WHY, not measured for that reason; without, built from
         the library and the headers WZ_PERF_EXTERNAL_LIB and WZ_PERF_EXTERNAL_INCLUDE name (its label,
@@ -54,9 +70,11 @@ committed rows.
     perf_matrix.py run --bin-dir DIR --run DIR [--reps 3] [--sizes 8,64,1024] [--transports ...]
                        [--batching off,on] [--workloads rtt,thr] [--client-cpus 4-7] [--server-cpus 8-11]
                        [--pings 20000] [--warmup-ms 3000] [--window-s 5] [--timeout-ms 100]
-                       [--reference-record FILE] [--external-record FILE]
+                       [--reference-record FILE] [--external-record FILE] [--trace-text DIR]
         the matrix; DIR (--bin-dir) holds perf_probe_P, perf_probe_W and perf_probe_Wapp, and perf_probe_X
-        when the external record says arm X was built
+        when the external record says arm X was built. With --trace-text every probe runs under callgrind
+        (TEXT_TRACE_TOOL), its profile written to DIR by cell, role and pid, for `run-text`: the figures of
+        such a run are the tracer's, its record says so (`text_trace`) and the gate refuses it
     perf_matrix.py --gate RESULT [--table TABLE] [--external-table FILE] [--without-external]
         the gate over a run's perf.json: every cell of W over P held to its row of TABLE (by default the
         committed table of the run's platform, PLATFORMS: deploy/pico_perf_ceiling.json for a run on
@@ -198,6 +216,7 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 from nodrop import FOREIGN_LIMIT, MAX_RUNS, busy_seconds, cpu_list  # noqa: E402
 from parity import BALLAST_MIB, CHILD_MIB, Lost, Process  # noqa: E402
 from kit_compare import bootstrap_ratio  # noqa: E402
+import elf_facts  # noqa: E402
 
 SCHEMA = "wz-pico-perf/1"
 TRANSPORTS = ("tcp", "udp", "multicast", "program")
@@ -527,51 +546,327 @@ def resident_text(symbols: list[tuple[int, int, str]], base: int, pages: set[int
     return out
 
 
-def role_pages(doc: dict, arm: str, library: str) -> dict[str, tuple[set[int], int]]:
-    """The present pages of `library`'s executable mapping (its file name) in each role of arm `arm` of a
-    run's result, by `<transport> <workload> <client|server>`, the union over that role's cells, with the
-    pages of the mapping; a role whose probes printed no page map is absent."""
-    out: dict[str, tuple[set[int], int]] = {}
+def library_regions(doc: dict, arm: str, library: str) -> list[tuple[str, dict]]:
+    """Each executable mapping of `library` (its file name) with a page map that a probe of arm `arm` printed in a
+    run's result, with the role it was read in, `<transport> <workload> <client|server>`."""
+    out: list[tuple[str, dict]] = []
     for cell in doc.get("cells", []):
         if cell.get("arm") != arm:
             continue
         for side in ("client", "server"):
             reading = (cell.get("figures") or {}).get(f"smaps_{side}") or {}
             for region in reading.get("regions", []):
-                if pathlib.Path(region.get("name", "")).name != library or not region.get("page_map"):
-                    continue
-                key = f"{cell.get('transport')} {cell.get('workload')} {side}"
-                pages, count = out.get(key, (set(), 0))
-                pages |= present_pages(region["page_map"], region.get("pages", 0))
-                out[key] = (pages, max(count, region.get("pages", 0)))
+                if pathlib.Path(region.get("name", "")).name == library and region.get("page_map"):
+                    out.append((f"{cell.get('transport')} {cell.get('workload')} {side}", region))
+    return out
+
+
+def role_pages(doc: dict, arm: str, library: str) -> dict[str, tuple[set[int], int]]:
+    """The present pages of `library`'s executable mapping (its file name) in each role of arm `arm` of a
+    run's result, by `<transport> <workload> <client|server>`, the union over that role's cells, with the
+    pages of the mapping; a role whose probes printed no page map is absent."""
+    out: dict[str, tuple[set[int], int]] = {}
+    for key, region in library_regions(doc, arm, library):
+        pages, count = out.get(key, (set(), 0))
+        pages |= present_pages(region["page_map"], region.get("pages", 0))
+        out[key] = (pages, max(count, region.get("pages", 0)))
+    return out
+
+
+def run_section(data: bytes) -> tuple[int, int] | None:
+    """The address and size of the code a run-text list laid out together (RUN_TEXT_SECTION) in an ELF library;
+    None when its link wrote no such section (no list, or a list that placed nothing). A file whose section
+    headers do not read is refused (Refused)."""
+    try:
+        found = [section for section in elf_facts.sections(data) if section.name == RUN_TEXT_SECTION]
+    except (elf_facts.ElfError, struct.error) as why:
+        raise Refused(f"its section headers do not read: {why}") from None
+    return (found[0].addr, found[0].size) if found else None
+
+
+def outside_run(pages: set[int], start: int, base: int, run_end: int) -> set[int]:
+    """Of the present `pages` of a library's executable mapping, those in no fault-around window that reaches the
+    run's laid-out code. The mapping starts at the virtual address `start` with the page of the file's address
+    `base`, and what lies from there to `run_end` (the file's address RUN_TEXT_SECTION ends at) is the code
+    ahead of `.text`, the PLT among it, and the list's functions. A fault maps pages only inside the window of
+    FAULT_AROUND_BYTES of the address space that holds it, so a page present past the window of the run's last
+    byte was mapped by a fault past it: code ran there that the list does not place."""
+    last = (start + run_end - base - 1) // FAULT_AROUND_BYTES
+    return {page for page in pages if (start + page * PAGE_BYTES) // FAULT_AROUND_BYTES > last}
+
+
+def role_outside_run(doc: dict, arm: str, library: str, base: int, run_end: int) -> dict[str, set[int]]:
+    """For each role of `role_pages`, the pages of `library` its processes held outside the windows of the run's
+    laid-out code (`outside_run`, each process by the address its own mapping started at, since the windows are
+    the address space's and each process maps the library elsewhere), the union over them. A page map with no
+    start address is refused (Refused): its windows cannot be told."""
+    out: dict[str, set[int]] = {}
+    for key, region in library_regions(doc, arm, library):
+        try:
+            start = int(region.get("start", ""), 16)
+        except ValueError:
+            raise Refused(f"a page map of {library} in role {key} has no start address") from None
+        pages = present_pages(region["page_map"], region.get("pages", 0))
+        out.setdefault(key, set()).update(outside_run(pages, start, base, run_end))
     return out
 
 
 def cmd_resident_text(result: pathlib.Path, library: pathlib.Path, arm: str) -> int:
     """Each role's resident code of `library` in a run made with PERF_SMAPS=1, named by crate and by the planes
-    a run never calls (rss.md R3): exit 0 when it named some, 2 when an input was refused, 3 when the run
+    a run never calls (rss.md R3), and for a library whose text a run-text list laid out (`run_section`) the
+    pages each role held outside the windows of that code, named by crate (`role_outside_run`, rss.md section
+    5.4): exit 0 when it named some and none lay outside, 1 when a role held code outside the laid-out run (a
+    function the list does not place ran: the list is stale), 2 when an input was refused, 3 when the run
     printed no page map of that library for arm `arm`."""
     try:
         doc = json.loads(result.read_text(encoding="utf-8"))
-        vaddr, _ = exec_segment(library.read_bytes())
+        data = library.read_bytes()
+        vaddr, _ = exec_segment(data)
+        span = run_section(data)
         listing = subprocess.run(["nm", "--defined-only", "-S", "-C", str(library)], capture_output=True,
                                  text=True, check=True).stdout
     except (OSError, ValueError, struct.error, subprocess.CalledProcessError, Refused) as why:
         print(f"perf-matrix: resident-text refused: {why}", file=sys.stderr, flush=True)
         return 2
-    roles = role_pages(doc, arm, library.resolve().name)
+    name = library.resolve().name
+    roles = role_pages(doc, arm, name)
     if not roles:
         print(f"perf-matrix: resident-text NOT-MEASURED, {result} holds no page map of {library.name} for arm "
               f"{arm} (a run with PERF_SMAPS=1 prints one)", flush=True)
         return 3
     symbols = text_symbols(listing)
     base = vaddr - vaddr % PAGE_BYTES
+    try:
+        outside = {} if span is None else role_outside_run(doc, arm, name, base, span[0] + span[1])
+    except Refused as why:
+        print(f"perf-matrix: resident-text refused: {why}", file=sys.stderr, flush=True)
+        return 2
     for role, (pages, mapped) in sorted(roles.items()):
         named = resident_text(symbols, base, pages)
         print(f"resident-text {arm} {role}: {len(pages)} of {mapped} page(s) present", flush=True)
         for kind in ("crates", "groups"):
             for key, row in sorted(named[kind].items(), key=lambda item: (-item[1]["resident"], item[0])):
                 print(f"  {kind[:-1]} {key}: {row['resident']} of {row['text']} byte(s) resident", flush=True)
+        if span is not None:
+            held = outside.get(role, set())
+            print(f"  outside the laid-out run: {len(held)} page(s)", flush=True)
+            stray = resident_text(symbols, base, held)["crates"]
+            for key, row in sorted(stray.items(), key=lambda item: (-item[1]["resident"], item[0])):
+                if row["resident"]:
+                    print(f"    crate {key}: {row['resident']} byte(s) resident", flush=True)
+    if span is None:
+        print(f"perf-matrix: resident-text {library.name} has no {RUN_TEXT_SECTION}: its text lies in the "
+              "linker's own order", flush=True)
+        return 0
+    stale = sorted(role for role, held in outside.items() if held)
+    if stale:
+        print(f"perf-matrix: resident-text STALE, {len(stale)} role(s) held code of {library.name} outside its "
+              f"laid-out run ({'; '.join(stale)}): a function the list does not place ran, so the list is made "
+              "again (scripts/pico-compare.sh run-text)", flush=True)
+        return 1
+    print(f"perf-matrix: resident-text every role held the code of {library.name} inside the windows of its "
+          f"laid-out run ({span[1]} byte(s) of {RUN_TEXT_SECTION})", flush=True)
+    return 0
+
+
+# -- the code a run executes, laid out in one place (docs/win-budget/rss.md, section 5.4) ----------------------
+
+#: What a run with --trace-text starts each probe under: callgrind counts every function a process executes, a
+#: path run once (the open, the handshake) as surely as the loop, where a sampling profile misses what runs
+#: rarely; the names stay mangled, as the library's sections are named.
+TEXT_TRACE_TOOL = ("valgrind", "-q", "--tool=callgrind", "--demangle=no")
+#: The window a read fault on a file mapping maps around it from the page cache (the kernel's
+#: `fault_around_bytes`, 65536 unless an administrator changed it): the unit in which a library's text becomes
+#: resident.
+FAULT_AROUND_BYTES = 65536
+#: The hash a legacy-mangled Rust name's path ends in, which changes with the build while the path does not; a
+#: suffix the compiler gives a copy of the function (`.llvm.<n>`) may follow it.
+RUST_NAME_HASH = re.compile(r"17h[0-9a-f]{16}E(?=\.|$)")
+#: What the hash is matched by in a section pattern: any sixteen characters.
+RUST_HASH_PATTERN = "17h" + "?" * 16 + "E"
+#: The characters a GNU ld input section pattern takes unquoted that a legacy-mangled Rust name or a C name holds;
+#: a function of a name with any other is left in the linker's own order.
+SECTION_NAME = re.compile(r"[A-Za-z0-9_.$]+")
+#: The output section the script lays the run's code in, ahead of `.text` in the same executable segment.
+RUN_TEXT_SECTION = ".text.run"
+#: The script the library's link reads (crates/.cargo/capi-run-text.toml): its head comment is written by hand and
+#: kept, its SECTIONS statement written by `run-text`.
+RUN_TEXT_SCRIPT = ROOT / "crates" / "wz-capi-pico" / "link" / "run-text.ld"
+#: Where the script's statement starts: the first line that is the word alone.
+RUN_TEXT_START = re.compile(r"^SECTIONS\n", re.MULTILINE)
+#: How the statement lists one function: the patterns of its sections inside `*( )`.
+RUN_TEXT_LINE = re.compile(r"    \*\((.+)\)")
+
+
+def traced_command(program: list[str], out: pathlib.Path) -> list[str]:
+    """`program` started under callgrind (TEXT_TRACE_TOOL), its profile written to `out` and the process's pid, so
+    a cell run again writes a profile of its own."""
+    return [*TEXT_TRACE_TOOL, f"--callgrind-out-file={out}.%p", *program]
+
+
+def traced_functions(text: str, library: str) -> set[str]:
+    """The functions of the object whose file name is `library` that a callgrind profile says ran: each `fn=` under
+    an `ob=` of it, and each `cfn=` whose `cob=` is it, or that has no `cob=` and is called from it. Callgrind
+    names a string once with its id, `(3) name`, and by `(3)` alone after, objects and functions each in a table
+    of their own; a name it marks with a recursion depth (`'2`) is the function's."""
+    objects: dict[str, str] = {}
+    functions: dict[str, str] = {}
+
+    def named(table: dict[str, str], value: str) -> str:
+        found = re.fullmatch(r"\((\d+)\)(?: (.*))?", value.strip())
+        if found is None:
+            return value.strip()
+        if found.group(2) is not None:
+            table[found.group(1)] = found.group(2).strip()
+        return table.get(found.group(1), "")
+
+    out: set[str] = set()
+    ob = ""
+    cob: str | None = None
+    for line in text.splitlines():
+        key, eq, value = line.partition("=")
+        if not eq:
+            continue
+        if key == "ob":
+            ob = named(objects, value)
+        elif key == "cob":
+            cob = named(objects, value)
+        elif key in ("fn", "cfn"):
+            name = re.sub(r"'\d+$", "", named(functions, value))
+            where = ob if key == "fn" or cob is None else cob
+            if key == "cfn":
+                cob = None
+            if name and pathlib.PurePath(where).name == library:
+                out.add(name)
+    return out
+
+
+def section_patterns(name: str) -> str | None:
+    """The GNU ld input section patterns that match the function `name` where the compiler put it: its own section
+    (`.text.<name>`, one a function) and the one of a function the compiler judged cold (`.text.unlikely.<name>`),
+    a Rust name's hash matched by any (RUST_HASH_PATTERN), so the pattern holds across builds while the function's
+    path does; None for a name a pattern does not take unquoted."""
+    if not SECTION_NAME.fullmatch(name):
+        return None
+    stem = RUST_NAME_HASH.sub(RUST_HASH_PATTERN, name)
+    return f".text.{stem} .text.unlikely.{stem}"
+
+
+def run_text_body(patterns: list[str]) -> str:
+    """The script's SECTIONS statement: one output section, RUN_TEXT_SECTION, of the functions `patterns` name (a
+    line each, in the order given), inserted before `.text`, so the run's code lies together ahead of the rest and
+    every function no line names keeps the linker's own order. With no line the section is empty, and the linker
+    writes none."""
+    lines = "".join(f"    *({pattern})\n" for pattern in patterns)
+    return f"SECTIONS\n{{\n  {RUN_TEXT_SECTION} :\n  {{\n{lines}  }}\n}}\nINSERT BEFORE .text;\n"
+
+
+def run_text_parts(script: str) -> tuple[str, list[str]]:
+    """A run-text script's head (everything before its SECTIONS statement) and the patterns its statement lists; a
+    script with no statement, or with one `run_text_body` does not write, is refused (Refused)."""
+    found = RUN_TEXT_START.search(script)
+    if found is None:
+        raise Refused("it holds no SECTIONS statement at the start of a line")
+    head, body = script[:found.start()], script[found.start():]
+    patterns = [m.group(1) for line in body.splitlines() if (m := RUN_TEXT_LINE.fullmatch(line))]
+    if run_text_body(patterns) != body:
+        raise Refused("its SECTIONS statement is not one `run-text` writes")
+    return head, patterns
+
+
+def run_text_plan(traced: set[str], sizes: dict[str, int]) -> tuple[list[str], list[str], list[str]]:
+    """Of the `traced` names, the functions the library defines a text symbol of (`sizes`, by name), the ones of
+    them a pattern places, and the script's lines for those, each list sorted, so a list made again differs by what
+    changed."""
+    ran = sorted(name for name in traced if name in sizes)
+    placed = [name for name in ran if section_patterns(name) is not None]
+    lines = sorted({pattern for name in placed if (pattern := section_patterns(name)) is not None})
+    return ran, placed, lines
+
+
+def cmd_run_text(library: pathlib.Path, script: pathlib.Path, traces: list[pathlib.Path]) -> int:
+    """The functions of `library` the callgrind profiles `traces` say ran, and the SECTIONS statement of `script`
+    (none for `-`) that lays them out together, its head kept (rss.md section 5.4): exit 0 when read, 2 when an
+    input was refused, 3 when no profile names a text symbol of `library`."""
+    writes = str(script) != "-"
+    try:
+        _, text_bytes = exec_segment(library.read_bytes())
+        listing = subprocess.run(["nm", "--defined-only", "-S", str(library)], capture_output=True, text=True,
+                                 check=True).stdout
+        head, before = run_text_parts(script.read_text(encoding="utf-8")) if writes else ("", [])
+        traced: set[str] = set()
+        for trace in traces:
+            traced |= traced_functions(trace.read_text(encoding="utf-8", errors="replace"), library.resolve().name)
+    except (OSError, ValueError, struct.error, subprocess.CalledProcessError, Refused) as why:
+        print(f"perf-matrix: run-text refused: {why}", file=sys.stderr, flush=True)
+        return 2
+    sizes = {name: size for _, size, name in text_symbols(listing)}
+    ran, placed, lines = run_text_plan(traced, sizes)
+    if not ran:
+        print(f"perf-matrix: run-text NOT-MEASURED, none of {len(traces)} profile(s) names a text symbol of "
+              f"{library.name} (a run with --trace-text writes them)", flush=True)
+        return 3
+    ran_bytes = sum(sizes[name] for name in ran)
+    placed_bytes = sum(sizes[name] for name in placed)
+    windows = -(-placed_bytes // FAULT_AROUND_BYTES) + 1
+    print(f"perf-matrix: run-text {library.name}: {len(ran)} function(s) ran, {ran_bytes} of the {text_bytes} "
+          f"byte(s) of its executable segment; {len(placed)} placed by {len(lines)} line(s), {placed_bytes} "
+          f"byte(s), which laid out together span at most {windows} window(s) of {FAULT_AROUND_BYTES} bytes; "
+          f"{len(ran) - len(placed)} left in the linker's order by their name; {len(traced) - len(ran)} traced "
+          f"name(s) of no text symbol it defines", flush=True)
+    if writes:
+        script.write_text(head + run_text_body(lines), encoding="utf-8")
+        added, dropped = list_change(before, lines)
+        print(f"perf-matrix: run-text wrote {script}: {added} line(s) added and {dropped} dropped against the list "
+              "it replaced", flush=True)
+    return 0
+
+
+def list_change(before: list[str], after: list[str]) -> tuple[int, int]:
+    """The lines a list made again adds, and the lines it drops, against the list it replaces."""
+    return len(set(after) - set(before)), len(set(before) - set(after))
+
+
+def order_names(lines: list[str], names: list[str]) -> list[str]:
+    """The `names` the run-text list `lines` places, for a linker that orders functions by their exact names
+    (lld-link's `/ORDER:@file`, rss.md section 5.4): a name is placed when its own patterns (`section_patterns`)
+    are a line of the list, so a build whose hashes are another target's is placed by the lines a Linux trace
+    made. In the list's order and by name within a line, each name once."""
+    rank = {line: at for at, line in enumerate(lines)}
+    keyed = {(rank[pattern], name) for name in names
+             if (pattern := section_patterns(name)) is not None and pattern in rank}
+    return [name for _, name in sorted(keyed)]
+
+
+def link_names(text: str) -> list[str]:
+    """The symbol names a listing holds: the last word of each line, where a list of names, `nm`'s output and
+    lld-link's map (`/lldmap` with `/demangle:no`) each write one; a word that is no function's name places
+    nothing (`order_names`)."""
+    return [words[-1] for line in text.splitlines() if (words := line.split())]
+
+
+def cmd_run_text_order(script: pathlib.Path, listing: pathlib.Path, out: pathlib.Path) -> int:
+    """lld-link's order file of the functions the run-text list of `script` places, of the names the link listing
+    `listing` holds (`link_names`), one a line, written to `out` (rss.md section 5.4): exit 0 when written, 2
+    when an input was refused, 3 when no name of the listing is one the list places, and nothing is written."""
+    try:
+        _, lines = run_text_parts(script.read_text(encoding="utf-8"))
+        names = link_names(listing.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, Refused) as why:
+        print(f"perf-matrix: run-text-order refused: {why}", file=sys.stderr, flush=True)
+        return 2
+    ordered = order_names(lines, names)
+    if not ordered:
+        print(f"perf-matrix: run-text-order NOT-MEASURED, none of the {len(names)} name(s) of {listing} is a "
+              f"function the {len(lines)} line(s) of {script} place", flush=True)
+        return 3
+    try:
+        out.write_text("".join(f"{name}\n" for name in ordered), encoding="utf-8")
+    except OSError as why:
+        print(f"perf-matrix: run-text-order refused: {why}", file=sys.stderr, flush=True)
+        return 2
+    print(f"perf-matrix: run-text-order wrote {out}: {len(ordered)} name(s), placed by "
+          f"{len({section_patterns(name) for name in ordered})} of the list's {len(lines)} line(s)", flush=True)
     return 0
 
 
@@ -1021,8 +1316,10 @@ class Matrix:
 
     def start(self, binary: str, role: str, argv: list[str], side: str, tag: str) -> Process:
         cpus = self.args.client_cpus if side == "client" else self.args.server_cpus
-        return Process([str(pathlib.Path(self.args.bin_dir) / binary), role, *argv], cpus,
-                       self.run / f"{tag}.{role}.out", {})
+        program = [str(pathlib.Path(self.args.bin_dir) / binary), role, *argv]
+        if self.args.trace_text:
+            program = traced_command(program, pathlib.Path(self.args.trace_text) / f"{tag}.{role}")
+        return Process(program, cpus, self.run / f"{tag}.{role}.out", {})
 
     def place(self, transport: str) -> tuple[list[str], list[str]]:
         self.serial += 1
@@ -1234,6 +1531,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
     if "X" not in arms:
         print(f"perf-matrix: arm X NOT-MEASURED, {record['external'].get('why', 'no reason given')}", flush=True)
+    if args.trace_text:
+        if shutil.which(TEXT_TRACE_TOOL[0]) is None:
+            print(f"perf-matrix: NOT-MEASURED, --trace-text runs the probes under {TEXT_TRACE_TOOL[0]}, which this "
+                  "host has not", flush=True)
+            return 2
+        pathlib.Path(args.trace_text).mkdir(parents=True, exist_ok=True)
+        record["text_trace"] = True
     run = pathlib.Path(args.run)
     run.mkdir(parents=True, exist_ok=False)
     record["started"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -2034,6 +2338,9 @@ def cmd_gate(args: argparse.Namespace) -> int:
         doc = json.loads(pathlib.Path(args.result).read_text(encoding="utf-8"))
         if doc.get("schema") != SCHEMA:
             raise Refused(f"{args.result} is not a result of schema {SCHEMA}")
+        if (doc.get("record") or {}).get("text_trace"):
+            raise Refused(f"{args.result} is a run whose probes ran under a tracer (--trace-text): its figures are "
+                          "the tracer's, not the libraries'")
         cells = doc["cells"]
         engine = doc.get("record", {}).get("engine")
         if engine not in ENGINES:
@@ -2419,6 +2726,118 @@ def cmd_selftest() -> int:
            and named["groups"] == {"advanced": {"text": 0x20, "resident": 0x10}})
     expect("no present page leaves nothing resident",
            all(row["resident"] == 0 for row in resident_text(symbols, 0x1000, set())["crates"].values()))
+    profile = ("version: 1\ncmd: perf_probe_W sub -l tcp/127.0.0.1:1 a=b\nevents: Ir\n"
+               "ob=(1) /r/lib-W/libwz_capi_pico.so\nfl=(1) ???\nfn=(1) z_open\n0 12\n"
+               "cob=(2) /usr/lib/libc.so.6\ncfi=(2) ???\ncfn=(2) malloc\ncalls=1 0\n0 30\n"
+               "cfn=(3) _ZN14wz_session_core4open17h0123456789abcdefE\ncalls=1 0\n0 40\n"
+               "fn=(4) _ZN9wz_codecs5frame4read17hfedcba9876543210E'2\n0 5\n"
+               "ob=(2)\nfn=(2)\n0 7\nfn=(5) free\n0 2\nob=(1)\nfn=(1)\n0 1\n")
+    expect("a callgrind profile names the functions of one object that ran, a name by its id after its first",
+           traced_functions(profile, "libwz_capi_pico.so")
+           == {"z_open", "_ZN14wz_session_core4open17h0123456789abcdefE",
+               "_ZN9wz_codecs5frame4read17hfedcba9876543210E"}
+           and traced_functions(profile, "libc.so.6") == {"malloc", "free"}
+           and traced_functions(profile, "libzenohpico.so") == set() and traced_functions("", "x") == set())
+    hashed = "_ZN14wz_session_core4open17h0123456789abcdefE"
+    stem = "_ZN14wz_session_core4open17h" + "?" * 16 + "E"
+    expect("a function's sections are matched by its name, a Rust name's hash by any, a C name as it is",
+           section_patterns(hashed) == f".text.{stem} .text.unlikely.{stem}"
+           and section_patterns("z_open") == ".text.z_open .text.unlikely.z_open"
+           and section_patterns("_ZN4core3ptr13drop_in_place$LT$u8$GT$17h0000000000000000E")
+           == ".text._ZN4core3ptr13drop_in_place$LT$u8$GT$17h" + "?" * 16 + "E"
+           + " .text.unlikely._ZN4core3ptr13drop_in_place$LT$u8$GT$17h" + "?" * 16 + "E"
+           and section_patterns("_ZN3foo3bar17h0123E")
+           == ".text._ZN3foo3bar17h0123E .text.unlikely._ZN3foo3bar17h0123E")
+    expect("a name a pattern does not take unquoted is not placed",
+           section_patterns("z_open@plt") is None and section_patterns("a b") is None and section_patterns("") is None)
+    body = run_text_body([".text.a .text.unlikely.a", ".text.b .text.unlikely.b"])
+    expect("the script's statement is one section inserted before .text with a line a function, and reads back",
+           body == ("SECTIONS\n{\n  .text.run :\n  {\n    *(.text.a .text.unlikely.a)\n"
+                    "    *(.text.b .text.unlikely.b)\n  }\n}\nINSERT BEFORE .text;\n")
+           and run_text_parts("/* head */\n" + body) == ("/* head */\n", [".text.a .text.unlikely.a",
+                                                                         ".text.b .text.unlikely.b"])
+           and run_text_parts(run_text_body([])) == ("", []))
+    expect("a script with no statement, or with a statement run-text does not write, is refused",
+           refused_call(lambda: run_text_parts("/* SECTIONS\n */\n"))
+           and refused_call(lambda: run_text_parts(body.replace("BEFORE", "AFTER")))
+           and refused_call(lambda: run_text_parts(body + "/* more */\n")))
+    committed = RUN_TEXT_SCRIPT.read_text(encoding="utf-8")
+    try:
+        committed_head, committed_lines = run_text_parts(committed)
+    except Refused:
+        committed_head, committed_lines = "", None
+    expect("the committed run-text script is one run-text writes, under a head that carries the license",
+           committed_lines is not None and "SPDX-License-Identifier:" in committed_head
+           and committed_head + run_text_body(committed_lines) == committed)
+    ran, placed, lines = run_text_plan({"z_put", hashed, "z_open@plt", "not_in_it"},
+                                       {"z_put": 16, hashed: 64, "z_open@plt": 8, "other": 4})
+    expect("the plan keeps the traced names the library defines, places those a pattern takes, a line each",
+           ran == sorted([hashed, "z_open@plt", "z_put"]) and placed == sorted([hashed, "z_put"])
+           and lines == sorted([f".text.{stem} .text.unlikely.{stem}", ".text.z_put .text.unlikely.z_put"]))
+    expect("two builds of one function are one line",
+           run_text_plan({hashed, hashed.replace("0123456789abcdef", "fedcba9876543210")},
+                         {hashed: 1, hashed.replace("0123456789abcdef", "fedcba9876543210"): 1})[2]
+           == [f".text.{stem} .text.unlikely.{stem}"])
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        no_library = cmd_run_text(ROOT / "no-such-library.so", RUN_TEXT_SCRIPT, [])
+    expect("run-text refuses a library it cannot read, and writes no script",
+           no_library == 2 and RUN_TEXT_SCRIPT.read_text(encoding="utf-8") == committed)
+    expect("a traced probe runs under callgrind, its profile named by its cell, its role and its pid",
+           traced_command(["/b/perf_probe_W", "sub", "-l", "x"], pathlib.Path("/t/r1.sub"))
+           == [*TEXT_TRACE_TOOL, "--callgrind-out-file=/t/r1.sub.%p", "/b/perf_probe_W", "sub", "-l", "x"])
+    suffixed = "_ZN3foo3bar17h" + "?" * 16 + "E.llvm.42"
+    expect("a hash a suffix of the compiler's follows is matched by any, the suffix as it is, and a hash inside a "
+           "path is not one",
+           section_patterns("_ZN3foo3bar17h0123456789abcdefE.llvm.42") == f".text.{suffixed} .text.unlikely.{suffixed}"
+           and section_patterns("_ZN3foo3bar17h0123456789abcdefEx")
+           == ".text._ZN3foo3bar17h0123456789abcdefEx .text.unlikely._ZN3foo3bar17h0123456789abcdefEx")
+    expect("a list made again counts the lines it adds and the lines it drops",
+           list_change(["a", "b"], ["b", "c", "d"]) == (2, 1) and list_change([], []) == (0, 0))
+    linux = ["z_put", hashed, "_ZN9wz_codecs5frame4read17hfedcba9876543210E"]
+    listed = run_text_plan(set(linux), dict.fromkeys(linux, 8))[2]
+    windows = ["_ZN9wz_codecs5frame4read17h1111111111111111E", "z_put", "z_other",
+               "_ZN14wz_session_core4open17h2222222222222222E", "z_put", "a b"]
+    ordered = ["_ZN14wz_session_core4open17h2222222222222222E", "_ZN9wz_codecs5frame4read17h1111111111111111E",
+               "z_put"]
+    expect("lld-link's order is the other build's own names of the functions the list places, in the list's order",
+           order_names(listed, windows) == ordered
+           and order_names(listed, ["z_other"]) == [] and order_names([], windows) == [])
+    expect("a listing's names are the last word of each line: a list's, nm's, a map's",
+           link_names("z_put\n0000000000001000 T z_open\n\n  140001000 00000010 16  _ZN3foo3bar17h0123456789abcdefE\n")
+           == ["z_put", "z_open", "_ZN3foo3bar17h0123456789abcdefE"])
+    with tempfile.TemporaryDirectory() as scratch:
+        where = pathlib.Path(scratch)
+        (where / "run-text.ld").write_text("/* head */\n" + run_text_body(listed), encoding="utf-8")
+        (where / "map.txt").write_text("\n".join(windows[:4]) + "\n", encoding="utf-8")
+        (where / "other.txt").write_text("z_other\n", encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            wrote = cmd_run_text_order(where / "run-text.ld", where / "map.txt", where / "order.txt")
+            unplaced = cmd_run_text_order(where / "run-text.ld", where / "other.txt", where / "none.txt")
+            unread = cmd_run_text_order(where / "missing.ld", where / "map.txt", where / "missing.txt")
+        expect("run-text-order writes the order file of a listing, and nothing when no name is placed or an input "
+               "is refused",
+               wrote == 0 and (where / "order.txt").read_text(encoding="utf-8") == "".join(f"{n}\n" for n in ordered)
+               and unplaced == 3 and not (where / "none.txt").exists()
+               and unread == 2 and not (where / "missing.txt").exists())
+    code = (".text", elf_facts.SHT_PROGBITS, b"\x90" * 16, None)
+    expect("a library's laid-out run is its .text.run section, a library without one has none, and a file that is "
+           "no ELF is refused",
+           run_section(elf_facts.build_elf([code, (RUN_TEXT_SECTION, elf_facts.SHT_PROGBITS, b"\x90" * 48, None)]))
+           == (0, 48)
+           and run_section(elf_facts.build_elf([code])) is None
+           and refused_call(lambda: run_section(b"MZ" + bytes(80))))
+    expect("a page lies outside the laid-out run when its fault-around window in the address space is past the "
+           "window of the run's last byte",
+           outside_run({0, 13, 28, 29, 40}, 0x53000, 0x1000, 0xF000) == {29, 40}
+           and outside_run({0, 13, 15, 16}, 0x50000, 0x1000, 0xF000) == {16}
+           and outside_run(set(), 0x50000, 0x1000, 0xF000) == set())
+    import capability_cost_gate as cost
+
+    expect("the size gate reads the script and the section run-text writes, and counts the lines it writes",
+           (cost.CRATES / cost.RUN_TEXT_SCRIPT).resolve() == RUN_TEXT_SCRIPT.resolve()
+           and cost.RUN_TEXT_SECTION == RUN_TEXT_SECTION
+           and cost.run_text_lines(run_text_body([".text.a .text.unlikely.a", ".text.b .text.unlikely.b"])) == 2
+           and cost.run_text_lines("/* head */\n" + run_text_body([])) == 0)
     run_doc = {"cells": [
         {"arm": "W", "transport": "tcp", "workload": "thr", "figures": {
             "smaps_client": {"regions": [{"name": "/r/lib-W/libwz_capi_pico.so", "pages": 6, "page_map": "12"},
@@ -2434,6 +2853,16 @@ def cmd_selftest() -> int:
                                                               "tcp thr server": ({0}, 6)}
            and role_pages(run_doc, "P", "libzenohpico.so.1") == {"tcp thr client": ({0, 1}, 2)}
            and role_pages(run_doc, "X", "libwz_capi_pico.so") == {})
+    library = "/r/lib-W/libwz_capi_pico.so"
+    laid_doc = {"cells": [{"arm": "W", "transport": "tcp", "workload": "rtt", "figures": {
+        "smaps_client": {"regions": [{"name": library, "pages": 48, "page_map": "00001", "start": "50000"}]},
+        "smaps_server": {"regions": [{"name": library, "pages": 48, "page_map": "00001", "start": "53000"}]}}}]}
+    expect("each process's pages outside the laid-out run are read by where its own mapping started",
+           role_outside_run(laid_doc, "W", "libwz_capi_pico.so", 0x1000, 0xF000)
+           == {"tcp rtt client": {16}, "tcp rtt server": set()}
+           and role_outside_run(laid_doc, "P", "libwz_capi_pico.so", 0x1000, 0xF000) == {})
+    expect("a page map with no start address is refused, since its windows cannot be told",
+           refused_call(lambda: role_outside_run(run_doc, "W", "libwz_capi_pico.so", 0x1000, 0xF000)))
     expect("a program that printed no rollup has no resident set by part",
            smaps_of("perf_probe usage peak_rss_kib=3100\n") is None)
     by_part = process_figures(Usage(1.0, 0.5, 4000, read_smaps), Usage(0.25, 0.125, 6000, read_smaps))
@@ -2926,6 +3355,9 @@ def cmd_selftest() -> int:
     expect("a table of W/X inside the repository is refused",
            gate(x_cells, built_x, locked, external_table=str(ROOT / "deploy" / "x.json")) == 2)
     expect("a result of another schema is refused", gate(run_cells, no_x, locked, schema="wz-other/1") == 2)
+    expect("a run whose probes ran under the tracer is refused, one that says it did not is judged",
+           gate(run_cells, dict(no_x, text_trace=True), locked, without=True) == 2
+           and gate(run_cells, dict(no_x, text_trace=False), locked, without=True) == 0)
     # The engine: a run states the one arm W was built on and a table the one its rows were filled from, and
     # a run is judged only against rows of its own engine.
     expect("a run of the engine its table was filled from is judged",
@@ -3169,6 +3601,10 @@ def main(argv: list[str]) -> int:
         return cmd_preset_arm(pathlib.Path(asked.out), asked.original, asked.stdlib)
     if len(argv) in (4, 5) and argv[1] == "resident-text":
         return cmd_resident_text(pathlib.Path(argv[2]), pathlib.Path(argv[3]), argv[4] if len(argv) == 5 else "W")
+    if len(argv) == 5 and argv[1] == "run-text-order":
+        return cmd_run_text_order(pathlib.Path(argv[2]), pathlib.Path(argv[3]), pathlib.Path(argv[4]))
+    if len(argv) >= 5 and argv[1] == "run-text":
+        return cmd_run_text(pathlib.Path(argv[2]), pathlib.Path(argv[3]), [pathlib.Path(a) for a in argv[4:]])
     if len(argv) == 4 and argv[1] == "pin-sides":
         return cmd_pin_sides(argv[2:])
     if 2 <= len(argv) <= 4 and argv[1] == "idle-cpus":
@@ -3198,6 +3634,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--timeout-ms", type=int, default=100)
     parser.add_argument("--reference-record", default="")
     parser.add_argument("--external-record", default="")
+    parser.add_argument("--trace-text", default="")
     return cmd_run(parser.parse_args(argv[2:]))
 
 

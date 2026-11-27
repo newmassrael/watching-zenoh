@@ -217,18 +217,21 @@ mangled when it cannot.
 ## Where it runs
 
 Layer C1cs, as the leg after the cost gate, whose builds it reads; it builds nothing of its own.
-With `--shards N --shard K` a case is read only on the shard the cost gate deals it to, and every
-shard checks the ledger itself, which needs no build. `--per-feature` builds a library and a
-reference for each step, so it is run by hand on one host and in no layer. Layer C0 runs
-`--selftest`, which holds the readers, the rules and the ratchet on synthetic input and the
+With `--shards N --shard K`, or the part of the fleet that names that shard (`--part shard-K-of-N`,
+capability_cost_gate.py "The parts of the fleet"), a case is read only on the shard the cost gate
+deals it to, and every shard checks the ledger itself, which needs no build. A case is read from its
+own target directory (`capability_cost_gate.case_target`), where the cost gate built it and no other
+case builds. `--per-feature` builds a library and a reference for each step, one after another in
+the directory of the ledger's base case, so it is run by hand on one host and in no layer. Layer C0
+runs `--selftest`, which holds the readers, the rules and the ratchet on synthetic input and the
 committed ledger to its own rules.
 
 Usage:
-    size_ledger_gate.py --check [--shards N --shard K] [ID...]
+    size_ledger_gate.py --check [--shards N --shard K | --part P] [ID...]
                                read each case (or the named ones), grade every area against its row
-    size_ledger_gate.py --measure [--shards N --shard K] [ID...]
+    size_ledger_gate.py --measure [--shards N --shard K | --part P] [ID...]
                                read the same and print each table and the rows to commit
-    size_ledger_gate.py --explain [--shards N --shard K] [ID...]
+    size_ledger_gate.py --explain [--shards N --shard K | --part P] [ID...]
                                --measure, then what holds each area's bytes, kept as JSON
     size_ledger_gate.py --per-feature [ID...]
                                step from the base case to each case, one feature at a time
@@ -2668,17 +2671,19 @@ def object_symbols(objects_dir: pathlib.Path) -> dict[str, set[str]]:
 
 
 def read_case(case: cost.Case, env: Mapping[str, str],
-              prefixes: build_normalization.Prefixes) -> tuple[CaseRead | None, list[str]]:
+              prefixes: build_normalization.Prefixes,
+              target_dir: pathlib.Path | None = None) -> tuple[CaseRead | None, list[str]]:
     """Build the case and its zenoh-pico reference as Layer C1cs does (both are the cost gate's
     builds, so a run after it builds nothing again) and read the symbols and the line spans of
     each build, whose file without debug information is the one the cost gate measured; or say
-    why a figure read from them would be none."""
-    got = cost.build(case, env, prefixes)
+    why a figure read from them would be none. The case is built in `target_dir`, its own
+    directory (`capability_cost_gate.case_target`) when not given."""
+    got = cost.build(case, env, prefixes, target_dir=target_dir)
     asked = wz_config.pico_reference(wz_config.load_decl(), cost.case_features(case))
     link, cflags = cost.reference_build(got.link_args)
     ref = cost.pico_reference_build(asked, env, prefixes, link, cflags)
     work, _, _ = cost.pico_reference_tree(asked, env, link, cflags)
-    wz_lib = cost.case_build(case, env).lib
+    wz_lib = cost.case_build(case, env, prefixes=prefixes, target_dir=target_dir).lib
     reference = f"{case.id} (its zenoh-pico reference)"
     findings = (cost.purity_findings(case.id, got.leaked) + cost.link_findings(case.id, got)
                 + cost.purity_findings(reference, ref.leaked) + cost.link_findings(reference, ref))
@@ -3096,7 +3101,9 @@ def cmd_per_feature(only: Iterable[str]) -> int:
                            features=",".join(features), features_from=None)
             print(f"  size-ledger per-feature: reading {step.id}")
             try:
-                read, refused = read_case(step, env, prefixes)
+                # The steps build one after another, all in the base case's directory: one of
+                # each step's own would build every dependency again for each step.
+                read, refused = read_case(step, env, prefixes, cost.case_target(base))
             except READ_ERRORS as e:
                 print(f"  size-ledger FAIL: {step.id}: the build or its reference could not be "
                       f"read: {e}", file=sys.stderr)
@@ -4209,17 +4216,28 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog=f"size_ledger_gate.py {argv[1]}", add_help=False)
     parser.add_argument("--shards", type=int)
     parser.add_argument("--shard", type=int)
+    parser.add_argument("--part")
     parser.add_argument("ids", nargs="*")
     try:
         args = parser.parse_intermixed_args(argv[2:])
     except SystemExit:
         return 2
     shard = None
-    if args.shards is not None or args.shard is not None:
-        if argv[1] == "--per-feature":
-            print("  size-ledger: --per-feature reads its chains on one host, not on a shard",
-                  file=sys.stderr)
+    if argv[1] == "--per-feature" and (args.part is not None or args.shards is not None
+                                       or args.shard is not None):
+        print("  size-ledger: --per-feature reads its chains on one host, not on a shard",
+              file=sys.stderr)
+        return 2
+    if args.part is not None:
+        if args.shards is not None or args.shard is not None:
+            print("  size-ledger: give a part or --shards N --shard K, not both", file=sys.stderr)
             return 2
+        try:
+            shard = cost.part_shard(args.part)
+        except ValueError as e:
+            print(f"  size-ledger: {e}", file=sys.stderr)
+            return 2
+    elif args.shards is not None or args.shard is not None:
         if args.shards is None or args.shard is None or not 0 <= args.shard < args.shards:
             print("  size-ledger: give --shards N and --shard K with 0 <= K < N", file=sys.stderr)
             return 2

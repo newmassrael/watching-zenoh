@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The library without `std` on Linux with the code a traced run executed laid out together ahead of
+# the rest of its text (`wz-capi-pico/link/run-text.ld`, docs/win-budget/rss.md section 5.4). Named
+# on the command line after the configuration that discards the unwind tables, which names GNU ld,
+# with the host's own target, from `crates/`:
+#
+#   cargo build -p wz-capi-pico-lib --no-default-features --features abi/os-host,abi/link-udp \
+#       --profile capi-nostd --config .cargo/capi-nostd.toml \
+#       --config .cargo/capi-discard-unwind-tables.toml --config .cargo/capi-run-text.toml \
+#       --target x86_64-unknown-linux-gnu
+#
+# The script moves where functions lie and not what they are, so the bytes are the same and a size
+# reading moves by alignment alone. The script's path is from `crates/`, the directory cargo runs the
+# linker in for a member of this workspace; the library's build script reruns when the script
+# changes, so a new list relinks the library (`wz-capi-pico-lib/build.rs`). The order is wz's own,
+# so the zenoh-pico reference of a ratio is not linked with it (`capability_cost_gate.reference_build`).
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,-T,wz-capi-pico/link/run-text.ld"]

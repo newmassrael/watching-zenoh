@@ -41,6 +41,9 @@ pub enum Refusal {
     /// No place was lent for what the call keeps past it: the heap, or the place its holder lends
     /// from, had no room.
     NoRoom,
+    /// What the call sends went out on no link: every link it was sent on was down or did not
+    /// take it. A property of the moment: the same call made once a link takes it goes out.
+    Unavailable,
 }
 
 impl From<StatementNotHonoured> for Refusal {
@@ -84,6 +87,7 @@ impl core::fmt::Display for Refusal {
             Self::ExceedsCapacity => "the request is larger than the session's codec carries",
             Self::KeyHoldsFull => "a declaration the key names has no room for one more holder",
             Self::NoRoom => "no place was lent for what the call keeps",
+            Self::Unavailable => "no link took what the call sends",
         })
     }
 }
@@ -109,6 +113,7 @@ mod tests {
             Refusal::ExceedsCapacity,
             Refusal::KeyHoldsFull,
             Refusal::NoRoom,
+            Refusal::Unavailable,
         ];
         let texts: Vec<_> = all.iter().map(ToString::to_string).collect();
         for (at, text) in texts.iter().enumerate() {

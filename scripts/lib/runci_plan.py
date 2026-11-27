@@ -157,6 +157,11 @@ at its positions in the list of all of them, so one mutant added anywhere moves 
 later one to another shard, and no shard's counts can be held to a row run after run.
 A scope's row is held in the unit that measures the whole scope.
 
+Layer C1cs is the third. Its parts are shards of its cases dealt by their measured seconds
+(`capability_cost_gate.py --parts`, `shard-K-of-N`), the way its hosted matrix deals them. A
+part builds its cases side by side on its machine, as many at once as the unit's grant allows, so
+the parts divide the lane between machines and each machine's cores divide its part.
+
 ## A lane a schedule runs
 
 A lane is wired when a step of a hosted workflow runs it, and the hosted workflows are
@@ -305,6 +310,7 @@ LANE_PACKAGES: dict[str, list[str]] = {
 PARTED_LANES: dict[str, tuple[str, list[str]]] = {
     "Qzk": ("WZ_QZK_PART", ["bash", "scripts/kit-lane.sh", "parts"]),
     "Cmut": ("WZ_CMUT_PART", ["python3", "scripts/lib/mutation_ratchet_gate.py", "--parts"]),
+    "C1cs": ("WZ_C1CS_PART", ["python3", "scripts/lib/capability_cost_gate.py", "--parts"]),
 }
 
 # A part's name as a unit's name and an argument carry it: no space and no separator of either.
@@ -747,6 +753,7 @@ def selftest() -> int:
             raise AssertionError(f"parts of {what} were planned instead of refused")
     assert PARTED_LANES["Qzk"][0] == "WZ_QZK_PART", PARTED_LANES
     assert PARTED_LANES["Cmut"][0] == "WZ_CMUT_PART", PARTED_LANES
+    assert PARTED_LANES["C1cs"][0] == "WZ_C1CS_PART", PARTED_LANES
     cases += 1
     # A lane of the nightly workflow: wired by it alone, planned from its job there (the
     # tool installer before it, its own workflow's env, the matrix-chosen part dropped),

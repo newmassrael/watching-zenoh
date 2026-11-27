@@ -758,7 +758,10 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// ([`Refusal::TableFull`]; where some found room, the legs that found it are issued); the
     /// query states what this engine does not carry out ([`Refusal::NotHonoured`]: a set of links,
     /// or the one node it is addressed to, which asked of every link would widen it); or the engine
-    /// has no requesting end in this build ([`Refusal::NotBuilt`], the provided answer).
+    /// has no requesting end in this build ([`Refusal::NotBuilt`], the provided answer). A get
+    /// whose request no link took, where a link was up to send it on, issued no leg either: its
+    /// legs were ended at once, and it answers [`Refusal::Unavailable`], or
+    /// [`Refusal::ExceedsCapacity`] for a request larger than the session sends.
     fn get_on_wire(
         &self,
         keyexpr: &str,

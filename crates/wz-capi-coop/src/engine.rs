@@ -3951,6 +3951,38 @@ fn issued_so_far(issued: usize) -> Result<usize, Declined> {
     }
 }
 
+/// What a get comes to once its legs are issued: the count of those that went out; when none
+/// did, a refusal for the legs no pending table held (`unheld`), else the refusal of a leg whose
+/// request no link took (`unsent`), else `0`, a get that reached nobody and is over at once.
+#[cfg(feature = "query")]
+pub(crate) fn get_outcome(
+    issued: usize,
+    unheld: usize,
+    unsent: Option<Declined>,
+) -> Result<usize, Declined> {
+    if issued > 0 {
+        return Ok(issued);
+    }
+    if unheld > 0 {
+        return Err(Declined::TableFull);
+    }
+    unsent.map_or(Ok(0), Err)
+}
+
+/// The refusal of a get's leg whose request the link did not take, by the send's error: a request
+/// past what the session's codec or reassembly carries is the request's own, and any other the
+/// link's, which is down or did not take it now (`None`: the face's place held no link). zenoh-pico
+/// answers a get whose send failed with that send's error
+/// (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `_Z_CLEAN_RETURN_IF_ERR(ret, _z_unregister_pending_query(zn, qid));`).
+#[cfg(feature = "query")]
+pub(crate) fn unsent_refusal(why: Option<SendWireError>) -> Declined {
+    match why.map(PublishError::from) {
+        Some(PublishError::ExceedsCapacity) => Declined::ExceedsCapacity,
+        _ => Declined::Unavailable,
+    }
+}
+
 /// The deadline of a leg asked at `now_us` that waits `timeout_ms`, in milliseconds on the
 /// session's clock, rounded up so a sweep that reads whole milliseconds never ends the leg before
 /// its timeout. A clock of microseconds read in milliseconds leaves room past it for any timeout a
@@ -4403,7 +4435,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 /// The gates a link's pump runs behind on this engine, for a session on the clock `C`, which the
 /// session places in the link's cell of its table (`TransportState::gate_cells`): the round's, and with
 /// `listen` the admission's under it, which carries the clock; where the read hands each record
-/// out as it is read, the link alone.
+/// out as it is read, the link alone, which takes no cell (`HeldGate`).
 trait LinkGates {
     /// The gates.
     type Gate;
@@ -4424,6 +4456,23 @@ impl<C: ClockSource + 'static> LinkGates for C {
 
 /// The gates of a link of a session on the clock `C` ([`LinkGates`]).
 type LinkGate<C> = <C as LinkGates>::Gate;
+
+/// The gates of a link as its session and its pump hold them (`LinkCalls::Gate`): a handle on
+/// their cell of the session's table where the round holds the link back, and where nothing does
+/// the link's own handle, which the pump reads the link through with no cell of gates between.
+#[cfg(wz_round)]
+type HeldGate<C> = CellRc<LinkGate<C>, LinkCount>;
+/// The gates of a link as its session and its pump hold them (`LinkCalls::Gate`): a handle on
+/// their cell of the session's table where the round holds the link back, and where nothing does
+/// the link's own handle, which the pump reads the link through with no cell of gates between.
+#[cfg(not(wz_round))]
+type HeldGate<C> = LinkGate<C>;
+
+/// The table of cells a link's gates are placed in where they hold the link back
+/// (`TransportState::gate_cells`).
+type GateCells = wz_session_core::byte_cells::LentByteCells<
+    <LinkCount as wz_runtime_coop::link_cells::CountKind>::Flag,
+>;
 
 /// The two halves the actions of a link of a session on the clock `C` hold, which the session
 /// places together in the link's cell of its table (`TransportState::halves_cells`): the link's
@@ -4789,7 +4838,7 @@ struct LinkMaking<'a> {
 }
 
 impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
-    type Gate = LinkGate<C>;
+    type Gate = HeldGate<C>;
     #[cfg(wz_round)]
     type Dispatch = FaceDispatch<C>;
     // What the read hands each step of the link it steps itself (`direct`).
@@ -4828,15 +4877,21 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         let _ = key_form;
     }
 
-    // Each record is handed out as it is read, so nothing holds the link back: the link is the
-    // pump.
+    // Each record is handed out as it is read, so nothing holds the link back: the link is its own
+    // gate, read through its own table, and takes no cell of the gates.
     #[cfg(not(wz_round))]
     fn gate(
         &self,
         pump: CellRc<dyn SessionDatagramLink, LinkCount>,
         _actions: &LinkHandle<C>,
-    ) -> LinkGate<C> {
-        pump
+        _cells: Option<&GateCells>,
+    ) -> Option<HeldGate<C>> {
+        Some(pump)
+    }
+
+    #[cfg(not(wz_round))]
+    fn gated_link(gate: &HeldGate<C>) -> CellRc<dyn SessionDatagramLink, LinkCount> {
+        gate.clone()
     }
 
     #[cfg(wz_round)]
@@ -4844,7 +4899,8 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         &self,
         pump: CellRc<dyn SessionDatagramLink, LinkCount>,
         actions: &LinkHandle<C>,
-    ) -> LinkGate<C> {
+        cells: Option<&GateCells>,
+    ) -> Option<HeldGate<C>> {
         // The session is handed a record of a link only while its round of deliveries has the room
         // one record can take (decision Q4), and with `listen` only once the engine admitted it:
         // the link gives the session nothing between its handshake and the face table's decision
@@ -4854,33 +4910,27 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
             { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
         >(self.limits);
         #[cfg(feature = "listen")]
-        {
-            // SAFETY: a link is made under the session's lock, and its gate asked by the step
-            // alone; the gate is held by the link's cells, which the session's transport holds,
-            // dropped before its state (`Core`'s fields), whose round's owner changes it no more.
-            unsafe {
-                RoundGate::new(
-                    AdmissionGate::new(pump, actions.clone()),
-                    self.session.lane.share(),
-                    record_room,
-                )
-            }
-        }
-        #[cfg(all(not(feature = "listen"), any(feature = "threads", feature = "group")))]
-        {
-            let _ = actions;
-            // SAFETY: a link is made under the session's lock, and its gate asked by the step
-            // alone; the gate is held by the link's cells, which the session's transport holds,
-            // dropped before its state (`Core`'s fields), whose round's owner changes it no more.
-            unsafe { RoundGate::new(pump, self.session.lane.share(), record_room) }
-        }
+        let pump = AdmissionGate::new(pump, actions.clone());
+        #[cfg(not(feature = "listen"))]
+        let _ = actions;
+        // SAFETY: a link is made under the session's lock, and its gate asked by the step alone;
+        // the gate is held by the link's cells, which the session's transport holds, dropped
+        // before its state (`Core`'s fields), whose round's owner changes it no more.
+        let gate = unsafe { RoundGate::new(pump, self.session.lane.share(), record_room) };
+        CellRc::<_, LinkCount>::in_cells_of(cells, gate).ok()
+    }
+
+    // The gates' cell, read as the link it gates.
+    #[cfg(wz_round)]
+    fn gated_link(gate: &HeldGate<C>) -> CellRc<dyn SessionDatagramLink, LinkCount> {
+        gate.clone().into_link()
     }
 
     fn wire_parts(
         &self,
         face: FaceId,
         actions: LinkHandle<C>,
-        gate: &CellRc<LinkGate<C>, LinkCount>,
+        gate: &HeldGate<C>,
     ) -> (Self::Dispatch, LinkSession<C>) {
         #[cfg(feature = "queryable")]
         let generation = self.session.plane.next_generation();
@@ -7310,6 +7360,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             core::ptr::from_ref::<FacePlane>(&self.faces).cast::<u8>(),
         ]
         .to_vec()
+    }
+
+    /// How many cells of the session's table of links' gates hold a link's gates now: `None` for
+    /// a session whose plan laid out no such table.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn link_gates_in_use(&self) -> Option<usize> {
+        self.core
+            .lock()
+            .0
+            .transport
+            .gate_cells
+            .as_ref()
+            .map(LentByteCells::in_use)
     }
 
     /// How many cells of the session's table of links' halves hold a link's halves now: `None`
@@ -11559,6 +11622,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // The legs refused for want of a row in their face's table of pending gets: a get that
         // issued none, and found no room for one, is refused whole.
         let mut unheld = 0usize;
+        // Why the last leg whose face was up did not go out: a get that issued none is refused
+        // with it, as zenoh-pico's get answers the error of the send that failed.
+        let mut unsent: Option<Declined> = None;
         // The faces whose links are up, each asked once in the order of their ids: the walk keeps
         // the last face it asked and holds the faces and the session for each, holding no list of
         // them; it ends with the face after which none is up, read in that face's hold, so none is
@@ -11632,6 +11698,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 // The link names the key as its own key-wire form says, and the query is written
                 // from the options where they lie, with nothing copied.
                 let abi = abi_names(wire, keyexpr);
+                let refused = core::cell::Cell::new(None);
                 let sent = core.up_wire(face).and_then(|link| {
                     send_through(link, tx, &|actions: &LinkActions<C>| {
                         get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
@@ -11643,16 +11710,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                                             key,
                                             query: request,
                                         })
+                                        .map_err(|why| refused.set(Some(why)))
                                         .is_ok()
                                 })
                         })
                     })
                 }) == Some(true);
                 if !sent {
-                    // Nothing went out: the entry and the leg go, and the leg is over.
+                    // Nothing went out: the entry and the leg go, and the leg is over. The get is
+                    // told why when no other leg goes out, not ended as one that reached nobody.
                     if let Some(tables) = core.session.registry.face_mut(face) {
                         tables.gets.replies.unregister(rid);
                     }
+                    unsent = Some(unsent_refusal(refused.get()));
                     return LegTurn::Ended(leg_id);
                 }
                 if !core.session.note_pending(PendingGet {
@@ -11820,11 +11890,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 LegHeld::NoRoom | LegHeld::Gone => unheld = unheld.saturating_add(1),
             }
         }
-        // Asked of someone and held by none, with nothing sent: refused whole.
-        if issued == 0 && unheld > 0 {
-            return Err(Declined::TableFull);
-        }
-        Ok(issued)
+        get_outcome(issued, unheld, unsent)
     }
 
     #[cfg(feature = "liveliness-get")]

@@ -279,7 +279,8 @@ reliability when none is open, write in place, on no room flush once and retry, 
 than a batch to one cold fragment body). The second share is the session's machine: 8,200 bytes of
 SCE runtime against pico's 2,300 of hand-written handshake. Its design is SCE's (X3: the runtime's
 operations one body each, the machine's tables as data), proposed through `docs/sce-proposals/`
-and measured in text plus rodata. Section 6 reads both again on the writer as it landed.
+and measured in text plus rodata. Section 6 reads both again on the writer as it landed, and
+section 10 is the structure for what remains.
 
 ### 3.4 Driver: what a pico library's links never run, and the bodies a lock is taken through
 
@@ -617,3 +618,226 @@ without its queryable drops a query (`vendor/zenoh-pico/src/session/rx.c` @
 `_Z_DEBUG("_Z_REQUEST_QUERY dropped, queryables not supported");`), and hands a declared queryable
 or token to its interests' processing whatever its features (`vendor/zenoh-pico/src/session/rx.c` @
 `case _Z_DECL_QUERYABLE:`), which keeps it only for an interest the session declared.
+
+## 9. Driver: a link's calls over the build's closed set of links
+
+Read from the RSS lane's reading of this preset's relocated data (`rss.md`, section 5.3, R3.1) and
+from the code: `BoxedLinkDriver` holds 112 slots of the library's tables and
+`SessionDatagramLink` 75, one table for each type a link of the build is unsized from. The stack
+of this preset is `IpLinks<PosixUdpSocket, PosixTcpDial>`, whose links are of two types known
+when the library is compiled (`UdpDriver` and the TCP stream's `StreamDriver`): a closed set, held
+behind `dyn` as if it were open. zenoh-pico's link is one record of function pointers
+(`text.md` R1), one indirect call a datagram.
+
+### 9.1 What a call on the link costs now: two tables, not one
+
+In a build whose read hands each record out as it is read (no `threads`, so no `wz_round`: this
+preset), nothing holds a link back, and the engine answered the link's own handle as its gate
+(`LinkCalls::gate`). The transport then placed that handle, a `CellRc<dyn SessionDatagramLink>`,
+in a cell of the gates' table and read the link through the cell (`gate.clone().into_link()` in
+`TransportState::build_wire`): the pump the read steps held a handle on a cell holding a handle
+on the driver. Every call the read makes on the link (its service, `takes_input`, `recv_with`,
+`take_rx_dropped`, `lost`, `keep`) was an indirect call into the forwarding implementation of
+the trait for `CellRc` (`crates/wz-runtime-coop/src/session_drive.rs` @
+`impl<T: SessionDatagramLink + ?Sized, N: crate::link_cells::CountKind> SessionDatagramLink`),
+which read the inner handle, worked out where its value lies from the table's alignment, and made
+the second indirect call into the driver. The forwarder's 19 bodies and its table were in the
+build for that one use, and each link took a cell of the gates' table it did not need.
+
+### 9.2 The design: one dispatch a call, and where the set is closed, none
+
+The textbook form of a set of variants known when the program is compiled is a sum type matched
+where it is used; a trait object is the form of a set a caller extends. `wz-runtime-coop` already
+holds the slot profile's links so (`IpDriver` and its `either!` match in `ip_stack.rs`); the
+heap profile, which this preset builds, gets the same shape in three steps, each removing a layer
+of dispatch, never adding one.
+
+1. **A link nothing holds back is its own gate** (landed with this section). `LinkCalls::Gate` is
+   what the link's session and its pump hold, and `LinkCalls::gate` places the gates in a cell of
+   the table it is handed only where they hold the link back (the round's, with `listen` the
+   admission's under it); `LinkCalls::gated_link` answers the handle the pump and the face read
+   the link through: the gates' cell unsized, or, with no gate, the link's own handle. The direct
+   read's link is then one handle on the driver and every call on it one indirect call.
+2. **The stack's links as one closed type.** `IpLinks` places every link it opens in its cell as
+   one enum over the stack's protocols (`Udp`, the `udp/` port's peer under `udp-listen`, `Tcp`,
+   `Tls`), stating both traits by one match a method as `IpDriver` does; its copying receive and
+   its byte send call `copied_receive` and `copied_send` with the enum itself, so no variant is
+   unsized and the variants' bodies are inlined into their arms. One table a trait for the stack.
+   Not landed alone: under `dyn` it adds a tag test to each call.
+3. **The stack's link type reaches the read and the send.** `SessionLinks` names the type its
+   shared link is (`type Link: SessionDatagramLink + ?Sized`; every stack but `IpLinks` states
+   `dyn SessionDatagramLink` and keeps its form), the transport's `LinkOf<T>` and
+   `LinkCalls::gate` take `CellRc<L::Link>`, and the direct read's pump is
+   `LinkPump<_, CellRc<L::Link>>`: the read calls the enum's methods directly, a tag test and the
+   variant's body, and a method only a table reached (each driver's copying `try_recv`, which a
+   read in place never calls) is not linked. The send
+   half is the same change on the sink: `SessionHandle<C, D, K>` is generic over its driver
+   already, and the engine's `LinkRuntime`, `LinkActions`, `LinkHandle` and `LinkHalves`, keyed
+   on the clock today, are keyed on the stack. The faces' waits keep `dyn` (`input_wait`,
+   `waits_for_buffer` are asked per wait, not per message), so one table of the enum stays.
+
+`text.md` R1 (lane T-LINK) folds the three link traits into one record of a socket's operations:
+the form for a set the build does not close (a program's own links, `app-transport`), whose one
+indirect call a datagram is what zenoh-pico pays. The closed set is the case where the build knows
+better than a table, and the two compose: the enum is the record of the closed set. The driver
+lane's designs (the owner's wait as the stack's type, the stream's send, the dial's open) are
+inside the drivers and do not cross these steps; step 3 carries the stack's type to where that
+lane's owner's wait is read.
+
+| step | text, expected | relocated data, expected | instructions |
+|------|---------------:|-------------------------:|--------------|
+| 1 | -400 to -900: the forwarder's 19 bodies the table kept, the direct build's gate placement in `build_wire` (a cell's claim, its refusal, the cell's drop) | -176 (one table of 19 slots and 3 words) | each call on the link loses one indirect call and the forwarder's offset sum, about 8; the read makes five or more a step |
+| 2 | about 0 (variants' bodies inlined into one match each; the per-type copies of the default methods fold) | about -900 (the stack's drivers' tables to one a trait) | +2 a call under `dyn` (the tag test), which is why it lands with 3 |
+| 3 | -1,500 to -3,000 (bodies only a table reached, the indirect call sequences at every call site) | the rest of the drivers' tables but the faces' | no indirect call on the link on the receive or the put: a tag test and the variant's body |
+
+The direct build's gate table stays laid out by the arena (`link_cells`, a cell a link); its bytes
+go to zero where `wz_round` is off with the open's `cells_of` of lane S-OPEN, which owns that
+function, so the step does not touch it twice.
+
+### 9.3 The relocated names (RSS R3.2 and R3.3): spans, not ends
+
+`rss.md` section 5.3.2 took back the limits' ids and the encodings' names as offsets into one
+string: each grew the size ledger's text (+113 and +264) because the readers walked a list of
+`u16` ends to find a name, a loop where a slice of `&str` was one load. The form that keeps the
+read as it is: each name a span, `(start: u16, len: u8)`, into one string, three bytes beside each
+row, and the string and the spans made by a `const fn` from the one table of names, so nothing is
+transcribed twice. A read is the span's load and one slice of the string: the two loads a `&str`
+was, from `.rodata` and not from a relocated word. The reverse lookup (name to id) stays the scan
+it is, comparing lengths first. Expected: the encodings' names -848 of relocated data for about
+160 of `.rodata` and text 0 to +40; the limits' table -5,040 relocated, its rows in `.rodata`,
+which the generator writes (`wz_config.py --emit rust-limit-snapshots`), so that change is the
+generator's owner's. Neither moves this case's text, which is this note's grade, so neither lands
+with this section; their reading is `rss.md`'s pages.
+
+### 9.4 Measuring step 1
+
+On the case's explain report: the driver and transport rows; the symbols of
+`<CellRc<dyn SessionDatagramLink, _> as SessionDatagramLink>` (gone where nothing else
+unsizes such a handle) and `TransportState::build_wire`'s lines in the engine's link placing
+(`CoopEngine::place_link_session`). On the receive: `ir-receive.md`'s count of instructions a
+message, which falls by the forwarder's share of each call on the link. The test is
+`wz-capi-coop`'s `tests::arena::a_link_nothing_holds_back_takes_no_cell_of_the_gates`.
+
+## 10. Transport: the structure for what remains, and what SCE is asked for the machines
+
+Read from the same explain document as section 6 (2026-11-26, schema 5): transport 30,814 against
+pico's 13,951. Bytes are each side's in the area; the jobs are grouped by the owners of the
+report, so a body inlined across two owners is counted where its owner is.
+
+| job | wz | zenoh-pico | gap | lever, and whose |
+|-----|---:|-----------:|----:|------------------|
+| the three machines' runtime (`sce_rust_runtime`: engine 4,574, microstep 1,316, event queue 1,071, tables 557, state set 548, run store 154, the rest about 100) | about 8,300 | the hand-written handshake, `vendor/zenoh-pico/src/transport/unicast/transport.c` @ `static z_result_t _z_unicast_handshake_open(`, the file 2,324 | about +6,000 | 10.3, SCE |
+| the send: dispatch, writer, fragment chain, control writes, lease of the slot (`session_actions` 10,647, `tx_buf` 1,167, `tx_lease` 743, `tx_deadline` 378) | about 12,900 | `vendor/zenoh-pico/src/transport/common/tx.c` @ `z_result_t _z_send_n_msg(_z_session_t *zn,`, the file 3,483 | about +9,400 | 10.2 (landed), 10.5 (preset decisions) |
+| the receive: units, control read, fragment rejoin (`drive` 4,657 with its sub-owners, `reassembly_dispatch` 2,111, `unicast_rx` 330, `sn`, `link_admission`, the handshake extensions) | about 7,900 | `unicast/rx.c` 1,820, `unicast/read.c` 1,010, `common/rx.c` 502 | about +4,600 | 10.4, T-RX |
+| timers (`transport_timers` 786; `keepalive_deadlines`, `due_ms`, `service_due` are counted in the receive row by their owners) | 786 | `unicast/lease.c` 626 | +160 | 10.4 |
+| pico's manager, peer and transport files, which wz holds in sessions and driver | 0 | about 3,700 | -3,700 | none |
+
+Two of the levers `text.md` X1 named are already the code: the one frame writer (section 6.1)
+and the fragment chain as one cold body (`emit_fragment_chain` is `#[cold]`, the lent entry
+`emit_fragments_encoded` only measures and hands over, and `send_fragment` is the one write of a
+fragment and of the stop marker). What is left of the send is the dispatch's admission jobs and
+the chain's credit and stop marker, which are behaviours (section 6.1), and the writers of each
+message kind, each one encoder behind the one `&dyn WireWrite`.
+
+### 10.1 Why this is the textbook structure
+
+The send keeps pico's shape (one writer into one batch) and the machines keep the SCXML source:
+what a structure can still remove is code the preset's build compiles but cannot reach, and the
+part of the SCE runtime's general turn that no document of this image uses. Both are removed the
+way P8 and SCE ADR 0135 already remove code (a capability the build lacks, a procedure no table
+names), not by folding bodies, of which this preset has one instance each (section 1).
+
+### 10.2 The step landed with this section: no Control barrier on one conduit
+
+The barrier of `dispatch_network_message_in` keeps a control message from being overtaken by data
+staged on another conduit: its first half drains the other conduits before a control message, its
+second half drains the Control conduit before data when a control message was left open there, and
+the `control_open` mark connects the two (raised after a control message is staged, lowered in
+`flush_conduit`). A build without `transport-qos` has one conduit (`link::SESSION_TX_CONDUITS`),
+so the first half drains nothing, the second half's test is `0 != 0`, and the mark is read by
+nothing; the frame order there is the staging order. The barrier, the mark, its field and its three
+accessors are now compiled with `transport-qos` alone, and a const assertion beside
+`TX_CONDUITS` holds the premise (one conduit without `transport-qos`). The link's own fence
+(`tx_fence`) is unchanged: it orders the link's queue, not the session's conduits.
+
+Expected on the case: `dispatch_network_message_in::<false>` loses the drain call and its closure,
+the mark's load and compare, and the mark's store after the stage; `flush_conduit` loses its
+store; about -60 to -150 in transport. Instructions: per message sent one sequentially consistent
+load and a branch fewer, per frame flushed one atomic store fewer; the receive is not touched. A
+build with `transport-qos` compiles what it compiled before.
+
+### 10.3 The machines: what wz has ready, and what SCE is asked
+
+What wz holds so that a change of the runtime's turn needs no wz change but the pin:
+
+- each machine is handed its events through one body: the session machine through
+  `drive::deliver_session_event` (section 6.3), the link machine through `UnicastLink::input`,
+  the slot machine through `reassembly_dispatch::turn_slot_engine`;
+- the class the requests below rely on is held against the generated tables of the build that
+  links them (`wz-session-core`'s `machine_class_tests`): no `<history>`, no `<parallel>`, no
+  transition of more than one target, selection by rows, every `<final>` at the top level and no
+  eventless transition. The link and slot machines and the session machine of a build that only
+  opens are of it; the session machine of a build that accepts is not (the step from SentOpenAck
+  to Established is eventless), and the test says so, so that build keeps the general turn;
+- every one of the three declares an internal queue the generator proves empty
+  (`INTERNAL_QUEUE_BOUND = Some(0)`), and none has an `<invoke>`, a `<finalize>` or an
+  autoforward.
+
+The requests, for an SCE session, graded by text plus rodata (`text.md` O4) on this case's
+transport row and by the callgrind of one handshake and one fragmented message (cell M9):
+
+1. **A reactive turn.** For a policy whose tables are of the class above, whose internal queue is
+   proven empty and which has no invoke, finalize, autoforward or inbox, `Engine::run_turn` calls
+   a second shared body (`Turn::run_reactive`) instead of `Turn::run`: enter the initial
+   configuration when asked; then, while the external queue holds an event and the call's budget
+   lasts, take it, select from its state's cells, take the microstep it selects, and on a top-level
+   final exit the interpreter. The choice is an associated constant of the policy (computed by a
+   `const fn` over `TABLES` and the policy's bounds, or written by the generator per build arm,
+   since the class depends on the arm), not a cargo feature, so an image whose machines are all of
+   the class links no `Turn::run`, `complete_macrostep`, `take_eventless_transitions`, internal
+   queue drain or invoke start, and an image with one general machine links both bodies once. The
+   observable order is the general turn's for every document of the class, which the differential
+   test of ADR 0129 decision 4 holds over seeded sequences for both turns. Expected: `Turn::run`
+   1,296, `take_event` 129 and the internal queue's half of `event_queue` to one body of about
+   400, -1,000 to -1,500 of text and no rodata; per transport event one eventless selection and
+   the internal queue's checks fewer, never per sample.
+2. **Exit paths beside the entry paths**, section 6.4 item 3: -600 to -800.
+3. **`process_event` out of line and the per-machine monomorphs folded**, section 6.4 items 1
+   and 2: -400 to -600.
+
+Together about -2,000 to -2,900 of the transport row, which leaves the runtime at about 5,500
+against pico's 2,324 of handshake: the rest is the interpreter's walk itself, which is what the
+SCXML source costs and which the machines pay once for every engine.
+
+### 10.4 The receive and the timers (lane T-RX)
+
+The receive's large bodies are cold already: `fragment_in_place` (2,062, of which 1,336 is the
+reassembly Router inlined) is `#[cold]`, and `read_control_in_place` (2,034) is out of line with
+`decide_admitted` (`#[inline(always)]`) inlined into it. Each has one instance, so the
+lever is what they do, not their form: before a design, cell M13 reads the inlined attribution of
+both bodies (which of `decide_admitted`'s arms, the extension readers and the Router's ingest
+hold the bytes) against pico's `_z_unicast_handle_fragment_inner` 825 and
+`_z_unicast_handshake_open` 873. `text.md` X4's one deadline table stays the timers' design, with
+rule 4 of its section 7: `keepalive_deadlines` runs at every turn, so its form changes only if
+its instructions fall.
+
+### 10.5 What form cannot close: behaviours beyond the preset
+
+With 6.3, 10.2 and 10.3 the transport row is expected at about 26,500 to 27,800 against 13,951. The
+send's remainder is behaviour pico's transport does not have: the probe stage, the run of expiries
+that closes a session (`tx_expiry_close_after`), the fragment chain's credit and stop marker, the
+held-conduit wait of a droppable message. Each is a parity contract of the zenoh preset, and each
+can leave the pico preset only by P8 (off in `configs/zenoh-pico_defconfig`, its key path refused
+by `BuildCapabilities`), which is an owner decision per behaviour; cell M14 reads the bytes each
+holds in this case before one is asked for.
+
+### 10.6 Measuring
+
+- The case's explain report: the transport row, and the bodies
+  `SessionLinkActions::dispatch_network_message_in::<false>` and `SessionLinkActions::flush_conduit`
+  for 10.2.
+- The per-put send callgrind and the per-message receive callgrind (3,078 Ir): the send lower or
+  equal, the receive equal.
+- `cargo test -p wz-session-core --features session-unicast,reassembly machine_class_tests` (four
+  tests) and the same with `session-unicast-accept` added (four tests, the accepting one in place
+  of the opening one).

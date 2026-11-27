@@ -58,7 +58,8 @@ A case may read its features from a registered profile (`Case.features_from`) wh
 builds a library from that profile: `pico-api-coop-nostd` is the Linux twin of the Windows
 like-for-like library (`pico_windows_package.LIKE_PROFILE`), built with the features that lane
 builds it with, resolved from the same profile when the case is built, so the two lanes hold one
-list and not two.
+list and not two. It is built in the release client's form, which both cases take from one
+definition (`NOSTD_RELEASE_FORM`), so the twin and the client differ by their features alone.
 
 ## Where and when the build ran
 
@@ -135,25 +136,57 @@ the reference's, by its row in `deploy/pico_host_ceiling.json`:
   of both (`ceiling_cases`), so a Windows row is checked for its shape on every tree, wherever it
   is graded.
 
+## The builds at once
+
+The cases are independent builds, and each ends in a fat LTO link that runs on one core: built one
+after another, a run granted 22 cores used 1.5 of them on average and took 985 s. So a run builds
+them side by side, as many at once as its cores and its memory allow (`build_width`): the cores
+and the memory are what bx granted the run (`BX_GRANT_CORES`, `BX_GRANT_MEM_MB`), else the
+process's CPU affinity and the memory the kernel calls available, each build held to
+`CASE_BUILD_MB`, and each cargo given its share of the cores as `CARGO_BUILD_JOBS`. The builds
+start heaviest first by the seconds of `c1cs_case_weights.tsv`, and are graded and printed in the
+order of `CASES` and then `STATEMENT_CASES` whatever order they end in: what a build's commands
+print is held (`run_held`) and shown when its case is graded, so the log and the verdict read as
+they did when the builds ran in turn.
+
+Each size case builds in a target directory of its own (`case_target`), and each statement case in
+one of its own: two cargo processes on one target directory wait on its lock, and a case of the same
+profile replaced the library the last one left there. The cost is that each directory builds the
+dependencies the cases used to share. The paths a size case's build writes under its directory are
+mapped to the shared directory's (`build_normalization.relocated_env`), so a library reads the
+same bytes whichever directory built it. Two cases can share a zenoh-pico reference, which is built
+and read with its directory locked (`reference_held`).
+
 ## The hosted shards
 
-The cases are release builds run one after another, and their clock is the job's: run
-45051019628 read 1,013 s of the lane and 1,114 s of the job against its 1200 s budget (92 percent),
-and every case added since the eight the budget was sized for (378 s) put it nearer. The hosted
-lane is therefore a matrix, and `--shards N --shard K` builds the cases (size and statement alike)
-that `census_shard_plan.plan` deals to shard K over the seconds of `c1cs_case_weights.tsv`, in
-the order of `CASES` and then `STATEMENT_CASES`. Every shard computes the same plan from the
+Built one after another, the cases took the job's clock: run 45051019628 read 1,013 s of the lane
+and 1,114 s of the job against its 1200 s budget (92 percent), and every case added since the eight
+the budget was sized for (378 s) put it nearer. The hosted lane is therefore a matrix, and
+`--shards N --shard K` builds the cases (size and statement alike) that `census_shard_plan.plan`
+deals to shard K over the seconds of `c1cs_case_weights.tsv`, in the order of `CASES` and then
+`STATEMENT_CASES`. Every shard computes the same plan from the
 same tree, so the shards partition the cases whatever the weights say: they decide the balance,
 never which case is built. A case with no row is planned at the median and named on stderr. Each
-case prints its seconds (`<id>: <N>s`), which is what the table is refreshed from. The checks of
-the committed ceiling table itself are run by every shard, since they build nothing.
+case prints its seconds (`<id>: <N>s`), which is what the table is refreshed from; they are read
+with the run's other builds beside the case, so they weigh the cases against each other and do not
+add up to the run's. The checks of the committed ceiling table itself are run by every shard, since
+they build nothing.
+
+## The parts of the fleet
+
+The fleet's planner of the whole gate (`scripts/lib/runci_plan.py`, `PARTED_LANES`) gives this
+lane to the build machines as parts, each a unit a machine runs by itself: `--parts` lists them,
+`shard-K-of-N` for the `FLEET_PARTS` shards, and `--part shard-K-of-N` builds the shard it names,
+as `--shards N --shard K` does. A part builds its cases at once on its machine (above), so the
+parts divide the work between machines and the grant divides it on each.
 
 Usage:
-    capability_cost_gate.py --check [--shards N --shard K] [ID...]
+    capability_cost_gate.py --check [--shards N --shard K | --part P] [ID...]
                                build every case (or the shard's, or the named ones), grade it
-    capability_cost_gate.py --measure [--shards N --shard K] [ID...]
+    capability_cost_gate.py --measure [--shards N --shard K | --part P] [ID...]
                                build the same and print what was measured, with each pico
                                case's ceiling row to commit
+    capability_cost_gate.py --parts        the lane's parts, one a line, for the fleet's planner
     capability_cost_gate.py --selftest     grade the grader on synthetic input
 """
 
@@ -161,6 +194,8 @@ from __future__ import annotations
 
 import datetime
 import argparse
+import concurrent.futures
+import contextlib
 import functools
 import hashlib
 import importlib
@@ -171,8 +206,10 @@ import re
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
-from collections.abc import Mapping
+import types
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -204,6 +241,13 @@ CASE_WEIGHTS = census_shard_plan.CASE_WEIGHTS
 # artifact root would put paths no mapping covers into the library, and the gate would read a
 # library from here that cargo wrote elsewhere.
 TARGET = artifact("crates/target")
+# Each size case builds in a target directory of its own under this one (`case_target`), so that
+# the cases of a run build at the same time (module doc, "The builds at once"): two cargo processes
+# on one target directory wait on its lock, and a case of the same profile would replace the
+# library another case left there. The paths a case's build writes under its directory are mapped
+# to `TARGET`'s (`build_normalization.relocated_env`), so its bytes do not depend on which
+# directory built it.
+CASE_TARGETS = TARGET / "capability-cost"
 
 # The features every pico build has, read from the one place that states them, the declaration's
 # `[base] pico`, so a feature the crate's default gains (or loses) reaches the cases from there
@@ -275,6 +319,31 @@ RELR_VERSION_NEED = "GLIBC_ABI_DT_RELR"
 DISCARD_UNWIND_CONFIG = ".cargo/capi-discard-unwind-tables.toml"
 DISCARD_UNWIND_SCRIPT = "wz-capi-pico/link/discard-unwind-tables.ld"
 DISCARD_UNWIND_LINK = f"-Wl,-T,{DISCARD_UNWIND_SCRIPT}"
+# The library without `std` on Linux with the code a traced run of the perf matrix executed laid out
+# together ahead of the rest of its text (`crates/.cargo/capi-run-text.toml`,
+# docs/win-budget/rss.md section 5.4): where functions lie, not what they are, so a size reading
+# moves by alignment alone. The order is wz's own: its zenoh-pico reference is not linked with the
+# script (`reference_build` passes on no argument it does not name).
+RUN_TEXT_CONFIG = ".cargo/capi-run-text.toml"
+RUN_TEXT_SCRIPT = "wz-capi-pico/link/run-text.ld"
+RUN_TEXT_LINK = f"-Wl,-T,{RUN_TEXT_SCRIPT}"
+# The output section the script lays the run's code in, and a line of its list, one a function
+# (`run_text_lines`): a library linked with a list that places functions and holding no such
+# section placed none of them (`link_findings`).
+RUN_TEXT_SECTION = ".text.run"
+RUN_TEXT_LIST_LINE = re.compile(r"^    \*\(.+\)$", re.MULTILINE)
+# How the gate builds the library a release ships without `std` on Linux, as `Case` fields: the
+# profile and configuration of that name, the relocations packed, the unwind tables discarded and
+# the run's code laid out (the files above), and the names such a library leaves undefined and
+# needs (pico-client-coop-nostd's note says why). One definition, taken by the release client's
+# case and by the Linux twin of the Windows like-for-like library, so the two differ by their
+# features alone and a link choice the release gains reaches both.
+NOSTD_RELEASE_FORM: Mapping[str, object] = types.MappingProxyType({
+    "profile": "capi-nostd",
+    "cargo_configs": (NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG, RUN_TEXT_CONFIG),
+    "forbid_undefined": (r"^rust_eh_personality$", r"^_Unwind_Resume(@|$)"),
+    "require_needed": (r"^libc\.so",),
+})
 # The C compiler's like of `-C force-unwind-tables=no`: code with no unwind tables, the
 # asynchronous ones GCC writes by default on x86_64 included.
 NO_UNWIND_CFLAGS = ("-fno-asynchronous-unwind-tables", "-fno-unwind-tables")
@@ -863,11 +932,8 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
-         forbid_undefined=(r"^rust_eh_personality$", r"^_Unwind_Resume(@|$)"),
-         require_needed=(r"^libc\.so",),
          # 443 exports: `zext_callbacks_refused` (d80d315d1).
-         exports=443, profile="capi-nostd",
-         cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG),
+         exports=443, **NOSTD_RELEASE_FORM,
          note="Linked with its relative relocations packed, as pico-client-coop is, and so is "
               "its zenoh-pico reference: 1,590 relative relocations (38,160 bytes of "
               "`.rela.dyn`) in the form read on 2026-11-22, a packed table of 440. Linked "
@@ -1113,13 +1179,10 @@ CASES: tuple[Case, ...] = (
          forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK,
                  STD_RUNTIME),
          require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
-         forbid_undefined=(r"^rust_eh_personality$", r"^_Unwind_Resume(@|$)"),
-         require_needed=(r"^libc\.so",),
-         profile="capi-nostd",
-         cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG),
-         features_from=pico_windows_package.LIKE_PROFILE,
-         note="pico-client-coop-nostd's form (profile, configuration files and the names it "
-              "defines) with the features of the library pico_windows_package.py --size-features "
+         **NOSTD_RELEASE_FORM, features_from=pico_windows_package.LIKE_PROFILE,
+         note="pico-client-coop-nostd's form (NOSTD_RELEASE_FORM: the profile, the configuration "
+              "files, the run-text layout among them, and the names it leaves undefined and "
+              "needs) with the features of the library pico_windows_package.py --size-features "
               "builds first, so the two lanes build one feature set, each on its own platform. No "
               "budget and no ceiling row until the first reading: --measure prints both"),
     # 2026-11-03 -- `pico-peer` 2,946,185 on hosted run 41481900203, 185 over its budget of
@@ -1702,6 +1765,9 @@ class Measured:
     # The executable sections the file measured does not hold as its build does
     # (`wz_package.strip_debug`).
     code_moved: tuple[str, ...] = ()
+    # Whether the library holds the section a run-text list lays a run's code out in
+    # (`RUN_TEXT_SECTION`).
+    run_text: bool = False
 
 
 # The conformance digest as the library stores it: a C string, so the NUL is part of the match and
@@ -1832,17 +1898,26 @@ def case_limits(case: Case | StatementCase) -> dict[str, str]:
     return dict(original_limits(abi)) if abi is not None else {}
 
 
-def build_statement_case(case: StatementCase, base: Mapping[str, str]) -> tuple[str, ...]:
-    """Build a statement case and return the conformance digests its library carries."""
-    subprocess.run(statement_cmd(case), cwd=CRATES, env=statement_env(case, base), check=True)
-    return digests_in((STATEMENT_TARGET / statement_profile_dir(case) / case.lib).read_bytes())
+def build_statement_case(case: StatementCase, base: Mapping[str, str],
+                         held: list[tuple[str, str]] | None = None) -> tuple[str, ...]:
+    """Build a statement case and return the conformance digests its library carries; what cargo
+    prints is added to `held` when one is given (`run_held`)."""
+    run_held(statement_cmd(case), statement_env(case, base), held)
+    return digests_in((statement_target(case) / statement_profile_dir(case) / case.lib).read_bytes())
+
+
+def statement_target(case: StatementCase) -> pathlib.Path:
+    """The target directory a statement case builds in: one of its own, so the two build at the
+    same time (module doc, "The builds at once"). It is graded on its digest alone, which holds no
+    path, so its directory is not mapped as a size case's is."""
+    return STATEMENT_TARGET / case.id
 
 
 def statement_cmd(case: StatementCase) -> list[str]:
     """The cargo command (from `crates/`) that builds a statement case's C library."""
     return ["cargo", "build", "--profile", case.profile, "-p", artifact_package(case.package), "--quiet",
             "--no-default-features", "--features", artifact_features(case.package, case.features),
-            "--target-dir", str(STATEMENT_TARGET)]
+            "--target-dir", str(statement_target(case))]
 
 
 def statement_profile_dir(case: StatementCase) -> str:
@@ -2164,15 +2239,29 @@ def has_unwind_tables(data: bytes) -> bool:
     return bool({s.name for s in elf_facts.sections(data)} & {".eh_frame", ".eh_frame_hdr"})
 
 
+def has_run_text(data: bytes) -> bool:
+    """Whether an ELF file has the section a run-text list lays a run's code out in."""
+    return any(s.name == RUN_TEXT_SECTION for s in elf_facts.sections(data))
+
+
+def run_text_lines(script: str) -> int:
+    """The functions a run-text script's list places: the lines of its SECTIONS statement, one a
+    function, as `perf_matrix.py run-text` writes them; a line of the head comment is not one."""
+    found = re.search(r"^SECTIONS$", script, re.MULTILINE)
+    return 0 if found is None else len(RUN_TEXT_LIST_LINE.findall(script, found.end()))
+
+
 def discards_unwind_tables(link: tuple[str, ...]) -> bool:
     """Whether linker arguments name the script that discards the unwind tables, by its path from
     `crates/` (a wz library) or by its absolute path (a reference)."""
     return any(a.startswith("-Wl,-T,") and a.endswith(DISCARD_UNWIND_SCRIPT) for a in link)
 
 
-def link_findings(subject: str, lib: Measured | Reference) -> list[str]:
+def link_findings(subject: str, lib: Measured | Reference,
+                  run_text_listed: int | None = None) -> list[str]:
     """What is wrong with how a library was linked, against the linker arguments it was linked
-    with; empty when it was linked as asked."""
+    with; empty when it was linked as asked. `run_text_listed` is the number of functions the
+    run-text list places, the committed script's (`run_text_lines`) when not given."""
     findings: list[str] = []
     if lib.code_moved:
         findings.append(f"{subject}: taking its debug information off changed its executable "
@@ -2188,6 +2277,16 @@ def link_findings(subject: str, lib: Measured | Reference) -> list[str]:
                         f"still has an `.eh_frame`: the linker ({lib.linker}) kept them, so its "
                         f"text is that of the form with tables. GNU ld honours the script's "
                         f"discard; lld keeps .eh_frame under it and mold refuses it.")
+    if RUN_TEXT_LINK in lib.link_args and not lib.run_text:
+        listed = (run_text_lines((CRATES / RUN_TEXT_SCRIPT).read_text(encoding="utf-8"))
+                  if run_text_listed is None else run_text_listed)
+        if listed:
+            findings.append(f"{subject}: linked with the run-text script, whose list places "
+                            f"{listed} function(s), and holds no `{RUN_TEXT_SECTION}`: no function "
+                            f"of this build matched a line of the list, so the list names another "
+                            f"build's functions (make it again: scripts/pico-compare.sh run-text) "
+                            f"or the linker ({lib.linker}) did not apply the script, and its text "
+                            f"lies in the linker's own order.")
     if PACKED_RELOCS_LINK not in lib.link_args:
         return findings
     if not lib.relr:
@@ -2288,8 +2387,15 @@ def inherits_from(profile: str, base: str, profiles: Mapping[str, Mapping[str, s
     return False
 
 
+def case_target(case: Case) -> pathlib.Path:
+    """The target directory a size case builds in, its own (`CASE_TARGETS`)."""
+    return CASE_TARGETS / case.id
+
+
 def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
-               cfg: set[str] | None = None, limits: Mapping[str, str] | None = None) -> CaseBuild:
+               cfg: set[str] | None = None, limits: Mapping[str, str] | None = None,
+               prefixes: build_normalization.Prefixes | None = None,
+               target_dir: pathlib.Path | None = None) -> CaseBuild:
     """The build of `case` in `env` (the gate's, `build_env`), under `limits` (`case_limits` when
     not given) and none of the limits and policies `env` states (`limit_env`), with its line
     tables as the shipping entry builds a release (`wz_package.ship_debug_env` of the case's
@@ -2298,11 +2404,16 @@ def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
     given), so their flags reach the library's crates and not the build scripts. A linker they
     name for that target goes in the variable cargo reads that key from (`target_linker_env`),
     which outranks every configuration file, the caller's among them, as the key named with
-    `--config` would, and reaches the build scripts as the key does."""
+    `--config` would, and reaches the build scripts as the key does. The build is made in
+    `target_dir`, the case's own target directory (`case_target`) when not given, whose paths read
+    as `TARGET`'s under `prefixes` (the gate's, `build_env`; this host's when not given). A
+    directory is given where builds run one after another and would otherwise each build every
+    dependency again (the size ledger's `--per-feature` steps)."""
     stated = case_limits(case) if limits is None else dict(limits)
+    target = case_target(case) if target_dir is None else target_dir
     cmd = ["cargo", "build", "--profile", case.profile, "-p", artifact_package(case.package), "--quiet",
-           "--target-dir", str(TARGET)]
-    lib_dir = TARGET / case.profile
+           "--target-dir", str(target)]
+    lib_dir = target / case.profile
     flags = list(GATE_RUSTFLAGS)
     linker: dict[str, str] = {}
     if case.cargo_configs:
@@ -2313,13 +2424,16 @@ def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
         if config_link is not None:
             linker[target_linker_env(triple)] = config_link
         cmd += ["--target", triple]
-        lib_dir = TARGET / triple / case.profile
+        lib_dir = target / triple / case.profile
     features = feature_list(case)
     if features is not None:
         cmd += ["--no-default-features"]
         if features:
             cmd += ["--features", artifact_features(case.package, features)]
-    return CaseBuild(tuple(cmd), {**with_rustflags(limit_env(env, stated), flags),
+    placed = build_normalization.relocated_env(
+        limit_env(env, stated), str(target), str(TARGET),
+        build_normalization.resolve_prefixes() if prefixes is None else prefixes)
+    return CaseBuild(tuple(cmd), {**with_rustflags(placed, flags),
                                   **wz_package.ship_debug_env(case.profile), **linker},
                      lib_dir / case.lib, tuple(link_args(flags)),
                      tuple(f"{k}={v}" for k, v in stated.items()))
@@ -2334,13 +2448,30 @@ def strip_tool() -> pathlib.Path:
         raise RuntimeError(str(e)) from e
 
 
+def run_held(cmd: list[str], env: Mapping[str, str], held: list[tuple[str, str]] | None) -> None:
+    """Run a cargo command from `crates/`. With `held`, its output is kept instead of shown: its
+    standard output and its standard error are added to the list as a pair, and a failure raises
+    `subprocess.CalledProcessError` carrying both, so builds that run at the same time print in
+    the order they are graded and not as their lines arrive."""
+    if held is None:
+        subprocess.run(cmd, cwd=CRATES, env=dict(env), check=True)
+        return
+    proc = subprocess.run(cmd, cwd=CRATES, env=dict(env), capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, proc.stdout, proc.stderr)
+    held.append((proc.stdout, proc.stderr))
+
+
 def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes,
-          limits: Mapping[str, str] | None = None) -> Measured:
-    """Build `case` (`case_build`, under `limits`) and measure the build without its debug
-    information, the file a deployer receives, written to `SHIPPED_TARGET`/<case>/; cargo's own
-    file keeps its line tables."""
-    plan = case_build(case, env, limits=limits)
-    subprocess.run(list(plan.cmd), cwd=CRATES, env=dict(plan.env), check=True)
+          limits: Mapping[str, str] | None = None,
+          held: list[tuple[str, str]] | None = None,
+          target_dir: pathlib.Path | None = None) -> Measured:
+    """Build `case` (`case_build`, under `limits`, in `target_dir`) and measure the build
+    without its debug information, the file a deployer receives, written to
+    `SHIPPED_TARGET`/<case>/; cargo's own file keeps its line tables. What cargo prints is kept in
+    `held` when one is given (`run_held`)."""
+    plan = case_build(case, env, limits=limits, prefixes=prefixes, target_dir=target_dir)
+    run_held(list(plan.cmd), plan.env, held)
     lib = SHIPPED_TARGET / case.id / plan.lib.name
     lib.parent.mkdir(parents=True, exist_ok=True)
     moved = wz_package.strip_debug(plan.lib, lib, None, strip_tool())
@@ -2369,7 +2500,8 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
                     needed=needed, linker=linker_of(lib), link_args=plan.link_args,
                     relr=any("(RELR)" in line for line in dynamic_section),
                     relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
-                    eh_frame=has_unwind_tables(data), code_moved=tuple(moved))
+                    eh_frame=has_unwind_tables(data), code_moved=tuple(moved),
+                    run_text=has_run_text(data))
 
 
 @dataclass(frozen=True)
@@ -2392,8 +2524,9 @@ class Reference:
     eh_frame: bool = False
     # The C compiler flags it was built with beyond the rule's (`reference_build`).
     cflags: tuple[str, ...] = ()
-    # What `Measured` holds of the strip.
+    # What `Measured` holds of the strip, and of the run's laid-out code.
     code_moved: tuple[str, ...] = ()
+    run_text: bool = False
 
 
 @functools.cache
@@ -2500,9 +2633,24 @@ def reference_args(asked: dict[str, int], link: tuple[str, ...] = ()) -> list[st
     return args
 
 
+@contextlib.contextmanager
+def reference_held(work: pathlib.Path) -> Iterator[None]:
+    """Hold the reference directory `work` while it is built or read: two cases of a run can ask
+    for the same reference at once (module doc, "The builds at once"), and another program on this
+    host (the performance matrix) can ask for it while this gate runs. A lock on a file beside the
+    directory, which the kernel releases with the process that held it."""
+    import fcntl  # POSIX only, and imported here: wz_config imports this module on every host
+
+    work.parent.mkdir(parents=True, exist_ok=True)
+    with open(work.parent / f"{work.name}.lock", "w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
 def pico_reference_tree(asked: dict[str, int], env: Mapping[str, str],
                         link: tuple[str, ...] = (),
-                        cflags: tuple[str, ...] = ()) -> tuple[pathlib.Path, str, str]:
+                        cflags: tuple[str, ...] = (),
+                        jobs: int | None = None) -> tuple[pathlib.Path, str, str]:
     """Build zenoh-pico with `asked` set, from an export of the pinned submodule (pico's CMake
     writes a header into its source tree, which must not dirty the submodule), in `env` (the
     gate's, `build_env`), unless that build is there already. Returns its directory (`src` the
@@ -2510,7 +2658,8 @@ def pico_reference_tree(asked: dict[str, int], env: Mapping[str, str],
     (`scripts/host-bench/perf_matrix.py`) links this same build, asked for in the environment of
     `build_env` too, so the library it times is the one whose size this gate prints. `link` and
     `cflags` are what `reference_build` adds; the C flags join the rule's in `CFLAGS`, which
-    CMake reads when it first configures the tree and the key holds."""
+    CMake reads when it first configures the tree and the key holds. `jobs` is how many compilers
+    its build runs at once, every core of the host when not given."""
     if cflags:
         env = {**env, "CFLAGS": " ".join(f for f in (env.get("CFLAGS", ""), *cflags) if f)}
     pin = subprocess.run(["git", "-C", str(PICO_SOURCE), "rev-parse", "HEAD"], capture_output=True,
@@ -2519,60 +2668,73 @@ def pico_reference_tree(asked: dict[str, int], env: Mapping[str, str],
     flags = reference_args(asked, link)
     work = PICO_BUILDS / reference_key(pin, toolchain, flags, env)
     lib = work / "build" / "lib" / "libzenohpico.so"
-    if not lib.exists():
-        archive = subprocess.run(["git", "-C", str(PICO_SOURCE), "archive", "--format=tar", "HEAD"],
-                                 capture_output=True, check=True).stdout
-        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-            tar.extractall(work / "src", filter="data")
-        run_quiet(["cmake", "-S", str(work / "src"), "-B", str(work / "build"),
-                   "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON",
-                   "-DBUILD_EXAMPLES=OFF", "-DBUILD_TESTING=OFF", *flags], env)
-        run_quiet(["cmake", "--build", str(work / "build"), "--parallel", str(os.cpu_count() or 1)],
-                  env)
+    with reference_held(work):
+        if not lib.exists():
+            archive = subprocess.run(["git", "-C", str(PICO_SOURCE), "archive", "--format=tar",
+                                      "HEAD"], capture_output=True, check=True).stdout
+            with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+                tar.extractall(work / "src", filter="data")
+            run_quiet(["cmake", "-S", str(work / "src"), "-B", str(work / "build"),
+                       "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON",
+                       "-DBUILD_EXAMPLES=OFF", "-DBUILD_TESTING=OFF", *flags], env)
+            run_quiet(["cmake", "--build", str(work / "build"), "--parallel",
+                       str(jobs or os.cpu_count() or 1)], env)
     return work, pin, toolchain
 
 
 def pico_reference_build(asked: dict[str, int], env: Mapping[str, str],
                          prefixes: build_normalization.Prefixes,
                          link: tuple[str, ...] = (),
-                         cflags: tuple[str, ...] = ()) -> Reference:
+                         cflags: tuple[str, ...] = (),
+                         jobs: int | None = None) -> Reference:
     """zenoh-pico built with `asked` set, compiled with `cflags` and linked with `link` under
-    `env` ([`pico_reference_tree`]), measured without its debug information (`SHIPPED_PICO` in
-    its directory, as a case is in `build`), and searched for the build path prefixes `env`
-    maps."""
-    work, pin, toolchain = pico_reference_tree(asked, env, link, cflags)
+    `env` ([`pico_reference_tree`], `jobs` compilers at once), measured without its debug
+    information (`SHIPPED_PICO` in its directory, as a case is in `build`), and searched for the
+    build path prefixes `env` maps. The file without debug information is written and read with
+    the directory held (`reference_held`), since two cases can share the reference."""
+    work, pin, toolchain = pico_reference_tree(asked, env, link, cflags, jobs)
     lib = work / SHIPPED_PICO
-    lib.parent.mkdir(exist_ok=True)
-    moved = wz_package.strip_debug(work / "build" / "lib" / "libzenohpico.so", lib, None,
-                                   strip_tool())
-    dynamic_section = subprocess.run(
-        ["readelf", "-d", str(lib)], capture_output=True, text=True, check=True
-    ).stdout.splitlines()
-    data = lib.read_bytes()
-    header = (work / "build" / "include" / "zenoh-pico" / "config.h").read_text()
-    size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
+    with reference_held(work):
+        lib.parent.mkdir(exist_ok=True)
+        moved = wz_package.strip_debug(work / "build" / "lib" / "libzenohpico.so", lib, None,
+                                       strip_tool())
+        dynamic_section = subprocess.run(
+            ["readelf", "-d", str(lib)], capture_output=True, text=True, check=True
+        ).stdout.splitlines()
+        data = lib.read_bytes()
+        header = (work / "build" / "include" / "zenoh-pico" / "config.h").read_text()
+        size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True,
+                                  check=True).stdout
+        linker = linker_of(lib)
     return Reference(text=int(size_out.splitlines()[1].split()[0]), pin=pin[:12],
                      toolchain=toolchain, refused=tuple(refused_switches(asked, header)),
                      leaked=tuple(build_normalization.leaked(data, prefixes)),
-                     linker=linker_of(lib), link_args=link,
+                     linker=linker, link_args=link,
                      relr=any("(RELR)" in line for line in dynamic_section),
                      relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
                      eh_frame=has_unwind_tables(data), cflags=cflags, code_moved=tuple(moved))
 
 
-def report_reference(case: Case, got: Measured, env: Mapping[str, str],
-                     prefixes: build_normalization.Prefixes) -> tuple[Reference | None, list[str]]:
-    """Print the case's size against zenoh-pico built as the same build, and return that build
-    with the finding for it when it holds a build path. Only the pico ABI's cases have one here:
-    zenoh-c's original is a Rust build of its own the lanes that install the oracle provision, and
-    this lane does not."""
+def case_reference(case: Case, got: Measured, env: Mapping[str, str],
+                   prefixes: build_normalization.Prefixes,
+                   jobs: int | None = None) -> Reference | None:
+    """zenoh-pico built as the same build as the case whose library is `got`, or None for a case
+    that has none here. Only the pico ABI's cases have one: zenoh-c's original is a Rust build of
+    its own the lanes that install the oracle provision, and this lane does not."""
     if case.package != "wz-capi-pico":
-        print(f"  capability-cost: {case.id}: no same-build reference in this lane (zenoh-c's is "
-              f"provisioned only where the oracle is installed)")
-        return None, []
+        return None
     asked = wz_config.pico_reference(wz_config.load_decl(), case_features(case))
     link, cflags = reference_build(got.link_args)
-    ref = pico_reference_build(asked, env, prefixes, link, cflags)
+    return pico_reference_build(asked, env, prefixes, link, cflags, jobs)
+
+
+def report_reference(case: Case, got: Measured, ref: Reference | None) -> list[str]:
+    """Print the case's size against its zenoh-pico reference (`case_reference`), and return the
+    findings for that reference when it holds a build path or was not linked as asked."""
+    if ref is None:
+        print(f"  capability-cost: {case.id}: no same-build reference in this lane (zenoh-c's is "
+              f"provisioned only where the oracle is installed)")
+        return []
     print(f"  capability-cost: {case.id}: zenoh-pico {ref.pin} as the same build: text "
           f"{ref.text}; wz is {got.text / ref.text:.2f} times it ({ref.toolchain})")
     print(f"  capability-cost: {case.id}: wz linked by {got.linker} with the linker arguments "
@@ -2582,7 +2744,7 @@ def report_reference(case: Case, got: Measured, env: Mapping[str, str],
         print(f"  capability-cost: {case.id}: pico built {', '.join(ref.refused)} otherwise than "
               f"asked, so the two builds differ there")
     subject = f"{case.id} (its zenoh-pico reference)"
-    return ref, purity_findings(subject, ref.leaked) + link_findings(subject, ref)
+    return purity_findings(subject, ref.leaked) + link_findings(subject, ref)
 
 
 # ── the pico ceiling of the host libraries (docs/upstream-parity.md D9) ────────────────────────
@@ -2592,7 +2754,7 @@ def report_reference(case: Case, got: Measured, env: Mapping[str, str],
 
 
 def ceiling_cases() -> list[str]:
-    """The cases the ceiling holds: every pico case of this gate, the ones `report_reference`
+    """The cases the ceiling holds: every pico case of this gate, the ones `case_reference`
     builds a reference for, and the release DLL of each width of Windows with the like-for-like
     library and each door over it, which the Windows package lane builds and grades
     (`pico_windows_package.CEILING_CASES`, `pico_windows_package.FEATURE_CASES`). This gate holds
@@ -2626,18 +2788,195 @@ def shard_cases(shards: int, shard: int, weights: dict[str, int], notes: list[st
     return [i for i in ids if i in planned]
 
 
+# The parts the fleet's planner cuts this lane into (`scripts/lib/runci_plan.py`, `PARTED_LANES`):
+# the cases dealt to this many shards by their seconds, as the hosted matrix deals them (module
+# doc, "The parts of the fleet").
+FLEET_PARTS = 2
+PART_NAME = re.compile(r"shard-(0|[1-9][0-9]*)-of-([1-9][0-9]*)")
+
+
+def fleet_parts(parts: int = FLEET_PARTS) -> list[str]:
+    """The names of the lane's parts, one a shard: what `--parts` prints for the planner."""
+    return [f"shard-{k}-of-{parts}" for k in range(parts)]
+
+
+def part_shard(name: str) -> tuple[int, int]:
+    """The shards and the shard (`--shards N --shard K`) a part's name says; a ValueError naming
+    the parts for a name that is none."""
+    found = PART_NAME.fullmatch(name)
+    if found is None or int(found.group(1)) >= int(found.group(2)):
+        raise ValueError(f"{name!r} is no part of Layer C1cs: a part is shard-K-of-N with K under "
+                         f"N, as `--parts` lists them ({', '.join(fleet_parts())})")
+    return int(found.group(2)), int(found.group(1))
+
+
+# The memory one build is held to when a run decides how many of its builds run at once
+# (`build_width`). An estimate, not a reading: no run of this gate has recorded the peak of one
+# build, so it is set above what a fat LTO link of the largest library (the C ABI default, about
+# 9 MB of text) is expected to take. Each run prints it beside its width; the peak bx records for a
+# run is the measurement that replaces it.
+CASE_BUILD_MB = 4096
+GRANT = re.compile(r"[1-9][0-9]*")
+
+
+def available_cpus() -> int:
+    """The CPUs this process may run on."""
+    try:
+        return len(os.sched_getaffinity(0)) or 1
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
+def available_mb(meminfo: pathlib.Path = pathlib.Path("/proc/meminfo")) -> int | None:
+    """The memory the kernel calls available, in MB, or None where it does not say."""
+    try:
+        text = meminfo.read_text(encoding="ascii")
+    except OSError:
+        return None
+    found = re.search(r"^MemAvailable:\s+(\d+) kB$", text, re.MULTILINE)
+    return int(found.group(1)) // 1024 if found else None
+
+
+def granted(env: Mapping[str, str], cpus: int, available: int | None) -> tuple[int, int | None, str]:
+    """The cores and the memory in MB the builds of a run share, and where each was read: what bx
+    granted the run (`BX_GRANT_CORES`, `BX_GRANT_MEM_MB`), else `cpus` (`available_cpus`) and
+    `available` (`available_mb`, None when unknown). A grant that is no positive whole number is
+    read as none."""
+    cores_given = env.get("BX_GRANT_CORES", "")
+    memory_given = env.get("BX_GRANT_MEM_MB", "")
+    if GRANT.fullmatch(cores_given):
+        cores, cores_from = int(cores_given), "BX_GRANT_CORES"
+    else:
+        cores, cores_from = max(1, cpus), "the CPU affinity"
+    memory: int | None
+    if GRANT.fullmatch(memory_given):
+        memory, memory_from = int(memory_given), "BX_GRANT_MEM_MB"
+    else:
+        memory, memory_from = available, "MemAvailable"
+    shown = f"{memory} MB by {memory_from}" if memory is not None else "the memory unknown"
+    return cores, memory, f"{cores} core(s) by {cores_from}, {shown}"
+
+
+def build_width(builds: int, cores: int, memory: int | None,
+                per_build: int = CASE_BUILD_MB) -> tuple[int, int]:
+    """How many of `builds` independent builds run at once on `cores` cores and `memory` MB
+    (None: unknown, which bounds nothing), and the cargo jobs each is given: no more at once than
+    there are builds, cores, or builds of `per_build` MB in the memory, and at least one; the
+    cores shared among them, rounded up, as Layer G shares them among its targets. A fat LTO link
+    runs on one core, so builds side by side are what keeps the cores busy."""
+    width = max(1, min(builds, cores))
+    if memory is not None:
+        width = min(width, max(1, memory // per_build))
+    return width, max(1, -(-cores // width))
+
+
+def build_order(ids: list[str], weights: Mapping[str, int]) -> list[str]:
+    """The order a run starts its builds in: heaviest first by `weights` (the seconds of
+    `c1cs_case_weights.tsv`), so the longest build does not start last; ties, and builds with no
+    weight, after them in the order given."""
+    return sorted(ids, key=lambda i: -weights.get(i, 0))
+
+
+@dataclass(frozen=True)
+class SizeRun:
+    """What the build of a size case left for its grading: its library, its zenoh-pico reference,
+    the seconds of both, and what its commands printed (`run_held`)."""
+
+    got: Measured
+    ref: Reference | None
+    seconds: int
+    held: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class StatementRun:
+    """What the build of a statement case left for its grading: its digests, its seconds, and what
+    its command printed."""
+
+    digests: tuple[str, ...]
+    seconds: int
+    held: tuple[tuple[str, str], ...]
+
+
+def run_case(case: Case, env: Mapping[str, str], prefixes: build_normalization.Prefixes,
+             limits: Mapping[str, str], jobs: int) -> SizeRun:
+    """Build a size case and its zenoh-pico reference with `jobs` compilers at once each, their
+    output held. Its seconds are read while the run's other builds run beside it."""
+    started = time.monotonic()
+    held: list[tuple[str, str]] = []
+    got = build(case, {**env, "CARGO_BUILD_JOBS": str(jobs)}, prefixes, limits, held)
+    ref = case_reference(case, got, env, prefixes, jobs)
+    return SizeRun(got, ref, round(time.monotonic() - started), tuple(held))
+
+
+def run_statement(case: StatementCase, env: Mapping[str, str], jobs: int) -> StatementRun:
+    """Build a statement case with `jobs` compilers at once, its output held."""
+    started = time.monotonic()
+    held: list[tuple[str, str]] = []
+    got = build_statement_case(case, {**env, "CARGO_BUILD_JOBS": str(jobs)}, held)
+    return StatementRun(got, round(time.monotonic() - started), tuple(held))
+
+
+def _shown(text: str | bytes | None) -> str:
+    return text.decode(errors="replace") if isinstance(text, bytes) else (text or "")
+
+
+def show_held(held: tuple[tuple[str | bytes | None, str | bytes | None], ...]) -> None:
+    """Print what a build's commands printed, each stream to its own."""
+    for out, err in held:
+        if out:
+            sys.stdout.write(_shown(out))
+            sys.stdout.flush()
+        if err:
+            sys.stderr.write(_shown(err))
+
+
+class Builds:
+    """The builds of a run, `width` at a time, each on a thread that waits on its cargo or CMake
+    process, read back in the order the gate grades them. Leaving it cancels the builds not yet
+    started and waits for the ones running, so a failure that ends the run waits for no build
+    queued after it."""
+
+    def __init__(self, width: int) -> None:
+        self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=width)
+        self._runs: dict[str, concurrent.futures.Future] = {}
+
+    def __enter__(self) -> Builds:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._pool.shutdown(wait=True, cancel_futures=True)
+
+    def start(self, key: str, run: Callable[[], SizeRun | StatementRun]) -> None:
+        self._runs[key] = self._pool.submit(run)
+
+    def result(self, key: str) -> SizeRun | StatementRun:
+        """The build of `key` once it has ended, what its commands printed shown first; a command
+        that failed has its output shown, and its error raised."""
+        try:
+            run = self._runs[key].result()
+        except subprocess.CalledProcessError as e:
+            show_held(((e.stdout, e.stderr),))
+            raise
+        show_held(run.held)
+        return run
+
+
 def cmd_check(measure_only: bool, only: list[str], shard: tuple[int, int] | None = None) -> int:
     unknown = [i for i in only if i not in {c.id for c in CASES} | {c.id for c in STATEMENT_CASES}]
     if unknown:
         print(f"  capability-cost: no such case: {unknown}", file=sys.stderr)
         return 2
+    try:
+        weights = census_shard_plan.read_weights(CASE_WEIGHTS.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"  capability-cost: {CASE_WEIGHTS.relative_to(ROOT)}: {e}", file=sys.stderr)
+        if shard is not None:
+            return 2
+        # Unsharded, the seconds only order the builds' start.
+        weights = {}
     planned: set[str] | None = None
     if shard is not None:
-        try:
-            weights = census_shard_plan.read_weights(CASE_WEIGHTS.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            print(f"  capability-cost: {CASE_WEIGHTS.relative_to(ROOT)}: {e}", file=sys.stderr)
-            return 2
         notes: list[str] = []
         ids = shard_cases(*shard, weights, notes)
         for note in notes:
@@ -2655,12 +2994,14 @@ def cmd_check(measure_only: bool, only: list[str], shard: tuple[int, int] | None
     except ValueError as e:
         print(f"  capability-cost: {e}", file=sys.stderr)
         return 2
+    sized = [case for case in CASES if chosen(case.id)]
+    stating = [case for case in STATEMENT_CASES if chosen(case.id)]
     try:
-        limits_of = {case.id: case_limits(case) for case in CASES if chosen(case.id)}
-        # Resolved before any build, so a profile that does not resolve stops the run here.
-        for case in CASES:
-            if chosen(case.id):
-                feature_list(case)
+        limits_of = {case.id: case_limits(case) for case in sized}
+        # Resolved here, before any build, so that a profile that does not resolve ends the run
+        # with its reason; a build's thread reads the list this resolved (`profile_features`).
+        for case in sized:
+            feature_list(case)
     except wz_config.PresetError as e:
         print(f"  capability-cost: the limits of an ABI's own preset, or the features of a case's "
               f"profile, did not resolve (scripts/provision-kconfiglib.sh provisions the "
@@ -2674,6 +3015,10 @@ def cmd_check(measure_only: bool, only: list[str], shard: tuple[int, int] | None
         return 2
     print(f"  capability-cost: every library and zenoh-pico reference is linked by {linker} "
           f"(cc {GNU_LD})")
+    cores, memory, read_from = granted(os.environ, available_cpus(), available_mb())
+    width, jobs = build_width(len(sized) + len(stating), cores, memory)
+    print(f"  capability-cost: {len(sized) + len(stating)} build(s), {width} at a time with {jobs} "
+          f"cargo job(s) each ({read_from}; {CASE_BUILD_MB} MB held for a build)")
     table = load_ceiling()
     rows = ceiling_rows(table)
     if not measure_only:
@@ -2683,77 +3028,80 @@ def cmd_check(measure_only: bool, only: list[str], shard: tuple[int, int] | None
     today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     measured_rows: dict[str, dict] = {}
     ceilinged = 0
-    for case in CASES:
-        if not chosen(case.id):
-            continue
-        started = time.monotonic()
-        limits = limits_of[case.id]
-        got = build(case, env, prefixes, limits)
-        stated = stated_digest(case, case_features(case), limits)
-        door = digest_door(case, case_features(case))
-        print(f"  capability-cost: {case.id}: built under {len(limits)} limit and policy value(s) "
-              f"of its ABI's own preset")
-        budget = (f"of no budget yet ({budget_for(got.text)} is the one it sets)"
-                  if case.max_text is None
-                  else f"of {case.max_text} ({100 * got.text // case.max_text}%)")
-        print(f"  capability-cost: {case.id}: text {got.text} {budget}, {got.exports} exports, "
-              f"conformance digest "
-              f"{', '.join(got.digests) or 'none'} "
-              f"({f'statement {stated}' if door else f'no door: {DIGEST_CAPABILITY} is off'})")
-        ref, ref_findings = report_reference(case, got, env, prefixes)
-        # The case's seconds, its build and its reference's: what c1cs_case_weights.tsv holds.
-        print(f"  capability-cost: {case.id}: {round(time.monotonic() - started)}s")
-        # In either mode: a figure read from a library that holds a path is no figure, so it is
-        # neither graded against a ceiling row nor printed as one.
-        own = purity_findings(case.id, got.leaked) + link_findings(case.id, got)
-        for finding in own + ref_findings:
-            print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
-            rc = 1
-        reading = case_reading(got, ref, today)
-        row = rows.get(case.id)
-        if reading is not None:
-            debt = row.get("debt") if isinstance(row, dict) else None
-            measured_rows[case.id] = ceiling_row(reading, debt if isinstance(debt, str) else None)
-        if measure_only:
-            continue
-        for finding in grade(case, got, stated, door):
-            print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
-            rc = 1
-        if reading is None:
-            continue
-        if row is None:
-            print(f"  capability-cost: {case.id}: the row to add: "
-                  f"{format_row(case.id, measured_rows[case.id])}")
-            continue
-        if row_findings(case.id, row):
-            continue  # named by table_findings above
-        ceilinged += 1
-        findings, notes = grade_ceiling(case.id, row, reading, measure_command(case.id))
-        for note in notes:
-            print(f"  capability-cost: {note}")
-        for finding in findings:
-            print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
-            rc = 1
-    statements = 0
-    for case in STATEMENT_CASES:
-        if not chosen(case.id):
-            continue
-        statements += 1
-        started = time.monotonic()
-        features = case_features(case)
-        got = build_statement_case(case, env)
-        print(f"  capability-cost: {case.id}: {round(time.monotonic() - started)}s")
-        stated = stated_digest(case, features)
-        unstated = wz_config.env_statement(wz_config.load_decl(), case_abi(case), sorted(features),
-                                           {}, {})["digest"]
-        print(f"  capability-cost: {case.id}: conformance digest {', '.join(got) or 'none'} "
-              f"(statement {stated}, with nothing stated {unstated})")
-        if measure_only:
-            continue
-        for finding in grade_statement(case, got, stated, unstated, digest_door(case, features)):
-            print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
-            rc = 1
-    sized = sum(1 for c in CASES if chosen(c.id))
+    with Builds(width) as builds:
+        starts: dict[str, Callable[[], SizeRun | StatementRun]] = {
+            case.id: functools.partial(run_case, case, env, prefixes, limits_of[case.id], jobs)
+            for case in sized}
+        starts.update({case.id: functools.partial(run_statement, case, env, jobs)
+                       for case in stating})
+        for case_id in build_order(list(starts), weights):
+            builds.start(case_id, starts[case_id])
+        for case in sized:
+            run: SizeRun = builds.result(case.id)
+            got, ref = run.got, run.ref
+            limits = limits_of[case.id]
+            stated = stated_digest(case, case_features(case), limits)
+            door = digest_door(case, case_features(case))
+            print(f"  capability-cost: {case.id}: built under {len(limits)} limit and policy "
+                  f"value(s) of its ABI's own preset")
+            budget = (f"of no budget yet ({budget_for(got.text)} is the one it sets)"
+                      if case.max_text is None
+                      else f"of {case.max_text} ({100 * got.text // case.max_text}%)")
+            print(f"  capability-cost: {case.id}: text {got.text} {budget}, {got.exports} "
+                  f"exports, conformance digest "
+                  f"{', '.join(got.digests) or 'none'} "
+                  f"({f'statement {stated}' if door else f'no door: {DIGEST_CAPABILITY} is off'})")
+            ref_findings = report_reference(case, got, ref)
+            # The case's seconds, its build and its reference's: what c1cs_case_weights.tsv holds.
+            print(f"  capability-cost: {case.id}: {run.seconds}s")
+            # In either mode: a figure read from a library that holds a path is no figure, so it is
+            # neither graded against a ceiling row nor printed as one.
+            own = purity_findings(case.id, got.leaked) + link_findings(case.id, got)
+            for finding in own + ref_findings:
+                print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
+                rc = 1
+            reading = case_reading(got, ref, today)
+            row = rows.get(case.id)
+            if reading is not None:
+                debt = row.get("debt") if isinstance(row, dict) else None
+                measured_rows[case.id] = ceiling_row(reading,
+                                                     debt if isinstance(debt, str) else None)
+            if measure_only:
+                continue
+            for finding in grade(case, got, stated, door):
+                print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
+                rc = 1
+            if reading is None:
+                continue
+            if row is None:
+                print(f"  capability-cost: {case.id}: the row to add: "
+                      f"{format_row(case.id, measured_rows[case.id])}")
+                continue
+            if row_findings(case.id, row):
+                continue  # named by table_findings above
+            ceilinged += 1
+            findings, notes = grade_ceiling(case.id, row, reading, measure_command(case.id))
+            for note in notes:
+                print(f"  capability-cost: {note}")
+            for finding in findings:
+                print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
+                rc = 1
+        for case in stating:
+            stated_run: StatementRun = builds.result(case.id)
+            features = case_features(case)
+            digests = stated_run.digests
+            print(f"  capability-cost: {case.id}: {stated_run.seconds}s")
+            stated = stated_digest(case, features)
+            unstated = wz_config.env_statement(wz_config.load_decl(), case_abi(case),
+                                               sorted(features), {}, {})["digest"]
+            print(f"  capability-cost: {case.id}: conformance digest {', '.join(digests) or 'none'} "
+                  f"(statement {stated}, with nothing stated {unstated})")
+            if measure_only:
+                continue
+            for finding in grade_statement(case, digests, stated, unstated,
+                                           digest_door(case, features)):
+                print(f"  capability-cost FAIL: {finding}", file=sys.stderr)
+                rc = 1
     if measured_rows:
         print(f"  capability-cost: the rows this run reads for {HOST_CEILING.relative_to(ROOT)} "
               f"`cases` (each replaces the row of its case; a ratchet's `debt` is the open-debt "
@@ -2761,10 +3109,10 @@ def cmd_check(measure_only: bool, only: list[str], shard: tuple[int, int] | None
         for n, (case_id, row) in enumerate(measured_rows.items(), 1):
             print(f"    {format_row(case_id, row)}{',' if n < len(measured_rows) else ''}")
     if rc == 0 and not measure_only:
-        print(f"  capability-cost: {sized} case(s) within budget, absent where absent, present "
+        print(f"  capability-cost: {len(sized)} case(s) within budget, absent where absent, present "
               f"where present, each carrying its statement's digest where it has the door and "
               f"none where it has not; {ceilinged} pico case(s) "
-              f"under their zenoh-pico ceiling; {statements} build(s) with stated limits, "
+              f"under their zenoh-pico ceiling; {len(stating)} build(s) with stated limits, "
               f"policies or arm carrying theirs")
     return rc
 
@@ -2978,6 +3326,32 @@ def cmd_selftest() -> int:
     expect("the script the discard names is in the tree, as the linker reads it from crates/",
            (CRATES / DISCARD_UNWIND_SCRIPT).is_file()
            and DISCARD_UNWIND_LINK.split(",")[-1] == DISCARD_UNWIND_SCRIPT)
+    run_text = (CRATES / RUN_TEXT_CONFIG).read_text(encoding="utf-8")
+    expect("the run-text file links a Linux library with its script and nothing else, and the "
+           "script is in the tree",
+           config_rustflags(run_text, "x86_64-unknown-linux-gnu", linux_gnu)
+           == ["-C", f"link-arg={RUN_TEXT_LINK}"]
+           and config_rustflags(run_text, "x86_64-pc-windows-msvc", windows_msvc) == []
+           and (CRATES / RUN_TEXT_SCRIPT).is_file()
+           and RUN_TEXT_LINK.split(",")[-1] == RUN_TEXT_SCRIPT)
+    expect("a library linked with a run-text list that places functions and holding no laid-out "
+           "run is a finding; one that holds it, an empty list and a library linked without the "
+           "script are not",
+           len(found := link_findings("t", Measured(900, [], 3, link_args=(RUN_TEXT_LINK,),
+                                                    linker="GNU ld 2.42"),
+                                      run_text_listed=4)) == 1
+           and RUN_TEXT_SECTION in found[0] and "4 function(s)" in found[0]
+           and link_findings("t", Measured(900, [], 3, link_args=(RUN_TEXT_LINK,), run_text=True),
+                             run_text_listed=4) == []
+           and link_findings("t", Measured(900, [], 3, link_args=(RUN_TEXT_LINK,)),
+                             run_text_listed=0) == []
+           and link_findings("t", Measured(900, [], 3), run_text_listed=4) == [])
+    expect("a run-text list is counted by the lines of its statement and not of its head",
+           run_text_lines("/*\n    *(.text.head)\n */\nSECTIONS\n{\n  .text.run :\n  {\n"
+                          "    *(.text.a .text.unlikely.a)\n    *(.text.b .text.unlikely.b)\n"
+                          "  }\n}\nINSERT BEFORE .text;\n") == 2
+           and run_text_lines("SECTIONS\n{\n  .text.run :\n  {\n  }\n}\nINSERT BEFORE .text;\n") == 0
+           and run_text_lines("") == 0)
     expect("only the library without std, which never unwinds, discards the unwind tables",
            all(c.profile == "capi-nostd" and NOSTD_CONFIG in c.cargo_configs
                for c in CASES if DISCARD_UNWIND_CONFIG in c.cargo_configs)
@@ -2991,14 +3365,37 @@ def cmd_selftest() -> int:
     expect("every library the gate builds is linked by GNU ld through cc",
            link_args(GATE_RUSTFLAGS) == [GNU_LD] and "linker=cc" in GATE_RUSTFLAGS)
     # The plan of a case's build, which the performance matrix builds its arm W by.
-    plain = case_build(Case("t", "wz-capi-pico", "libt.so", "a,b", 1), {}, limits={})
-    expect("a case of no configuration file is built for the default target, by the gate's linker",
+    here = build_normalization.Prefixes(str(ROOT), str(TARGET.parents[1]), "/opt/cargo")
+    plain = case_build(Case("t", "wz-capi-pico", "libt.so", "a,b", 1), {}, limits={},
+                       prefixes=here)
+    stands = f"{CASE_TARGETS / 't'}={build_normalization.WORKSPACE_TO}/crates/target"
+    expect("a case of no configuration file is built for the default target, by the gate's linker, "
+           "in its own target directory read as the shared one",
            plain.cmd[:6] == ("cargo", "build", "--profile", SHIP_PROFILE, "-p", "wz-capi-pico-lib")
            and plain.cmd[-3:] == ("--no-default-features", "--features", "abi/a,abi/b")
-           and "--target" not in plain.cmd and plain.lib == TARGET / SHIP_PROFILE / "libt.so"
+           and plain.cmd[plain.cmd.index("--target-dir") + 1] == str(CASE_TARGETS / "t")
+           and "--target" not in plain.cmd
+           and plain.lib == CASE_TARGETS / "t" / SHIP_PROFILE / "libt.so"
            and plain.link_args == (GNU_LD,)
-           and plain.env == {build_normalization.ENCODED_RUSTFLAGS: "\x1f".join(GATE_RUSTFLAGS),
+           and plain.env == {build_normalization.ENCODED_RUSTFLAGS:
+                             "\x1f".join([f"--remap-path-prefix={stands}", *GATE_RUSTFLAGS]),
+                             "CFLAGS": f"-ffile-prefix-map={stands}",
+                             "CXXFLAGS": f"-ffile-prefix-map={stands}",
                              **wz_package.ship_debug_env(SHIP_PROFILE)})
+    # A case that reads its features from a profile is planned only where the profile resolves
+    # (the pinned Kconfig interpreter); its directory is its own all the same.
+    planned_here = [c for c in CASES
+                    if c.features_from is None or wz_config.kconfiglib_module() is not None]
+    expect("two cases build in two target directories, and their libraries are apart",
+           len({case_target(c) for c in CASES}) == len(CASES)
+           and len({case_build(c, {}, "x86_64-unknown-linux-gnu", linux_gnu, limits={},
+                               prefixes=here).lib for c in planned_here}) == len(planned_here))
+    stepped = case_build(Case("t+c", "wz-capi-pico", "libt.so", "a,b,c", 1), {}, limits={},
+                         prefixes=here, target_dir=CASE_TARGETS / "t")
+    expect("a build given another case's directory is made there and read as that case's build is",
+           stepped.cmd[stepped.cmd.index("--target-dir") + 1] == str(CASE_TARGETS / "t")
+           and stepped.cmd[-1] == "abi/a,abi/b,abi/c"
+           and stepped.lib == plain.lib and stepped.env == plain.env)
     expect("a package that is its own C library is built as it is named, its features as given",
            artifact_package("wz-capi-c") == "wz-capi-c"
            and artifact_features("wz-capi-c", "a, b") == "a,b"
@@ -3012,6 +3409,10 @@ def cmd_selftest() -> int:
            and statement_profile_dir(pico_statement) == "capi-nostd"
            and statement_cmd(capic_statement)[2:6] == ["--profile", "dev", "-p", "wz-capi-c"]
            and statement_profile_dir(capic_statement) == "debug")
+    expect("each statement case builds in a target directory of its own",
+           [statement_cmd(s)[-2:] for s in STATEMENT_CASES]
+           == [["--target-dir", str(STATEMENT_TARGET / s.id)] for s in STATEMENT_CASES]
+           and len({statement_target(s) for s in STATEMENT_CASES}) == len(STATEMENT_CASES))
     expect("a case of the crate's default features names none",
            "--features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd
            and "--no-default-features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd)
@@ -3035,7 +3436,8 @@ def cmd_selftest() -> int:
     expect("a case of configuration files is built for the target named, their flags the library's",
            bare_build.cmd[bare_build.cmd.index("--target") + 1] == "x86_64-unknown-linux-gnu"
            and bare_build.lib
-           == TARGET / "x86_64-unknown-linux-gnu" / "capi-nostd" / "libwz_capi_pico.so"
+           == CASE_TARGETS / "pico-client-coop-nostd" / "x86_64-unknown-linux-gnu" / "capi-nostd"
+           / "libwz_capi_pico.so"
            and "force-unwind-tables=no"
            in bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
            and NOSTD_LOOP_ALIGNMENT
@@ -3043,6 +3445,11 @@ def cmd_selftest() -> int:
            and discards_unwind_tables(bare_build.link_args)
            and PACKED_RELOCS_LINK in bare_build.link_args
            and not any(k.endswith("_LINKER") for k in bare_build.env))
+    expect("the pico client without std is laid out by the run-text script, and its reference is not",
+           RUN_TEXT_CONFIG in by_case["pico-client-coop-nostd"].cargo_configs
+           and RUN_TEXT_LINK in bare_build.link_args
+           and not any(RUN_TEXT_SCRIPT in arg for arg in reference_build(bare_build.link_args)[0])
+           and discards_unwind_tables(reference_build(bare_build.link_args)[0]))
     win_build = case_build(by_case["pico-client-coop-nostd"],
                            {target_linker_env(win): "link.exe"}, win, windows_msvc, limits={})
     expect("a case built for a target its file names a linker for is linked by it, over the caller's",
@@ -3181,7 +3588,9 @@ def cmd_selftest() -> int:
            "lane's profile and is built in the release client's form",
            twin.features is None and twin.features_from == pico_windows_package.LIKE_PROFILE
            and (twin.package, twin.lib, twin.profile, twin.cargo_configs)
-           == (release.package, release.lib, release.profile, release.cargo_configs))
+           == (release.package, release.lib, release.profile, release.cargo_configs)
+           and all(getattr(case, name) == value for case in (twin, release)
+                   for name, value in NOSTD_RELEASE_FORM.items()))
     expect("only a pico case reads its features from a profile, and it states none of its own",
            all(c.package == "wz-capi-pico" and c.features is None
                for c in CASES if c.features_from is not None))
@@ -3194,9 +3603,19 @@ def cmd_selftest() -> int:
             pico_windows_package.resolve_profile(
                 wz_config.load_decl(), pico_windows_package.LIKE_PROFILE)["features"],
             wz_config.manifest_features(wz_config.MANIFESTS["pico"]))
-        twin_build = case_build(twin, {}, "x86_64-unknown-linux-gnu", linux_gnu, limits={})
-        expect("the twin is built with the features the Windows lane builds its library with",
+        twin_build = case_build(twin, {}, "x86_64-unknown-linux-gnu", linux_gnu, limits={},
+                                prefixes=here)
+        release_build = case_build(release, {}, "x86_64-unknown-linux-gnu", linux_gnu, limits={},
+                                   prefixes=here)
+        expect("the twin is built with the features the Windows lane builds its library with, "
+               "and linked as the release client is, in a directory of its own",
                feature_list(twin) == ",".join(like)
+               and twin_build.link_args == bare_build.link_args == release_build.link_args
+               and twin_build.env
+               == {k: v.replace(str(case_target(release)), str(case_target(twin)))
+                   for k, v in release_build.env.items()}
+               and twin_build.lib
+               == case_target(twin) / "x86_64-unknown-linux-gnu" / twin.profile / twin.lib
                and twin_build.cmd[-3:] == ("--no-default-features", "--features",
                                            artifact_features(twin.package, ",".join(like)))
                and {"os-host", "peer"} <= case_features(twin))
@@ -3435,28 +3854,87 @@ def cmd_selftest() -> int:
     expect("a shard builds its cases in the gate's order",
            all(ids == [i for i in every if i in set(ids)]
                for ids in (shard_cases(2, k, weights, []) for k in range(2))))
+    # The parts of the fleet, and the builds at once.
+    expect("the parts the planner is given are the shards, each read back as the shard it names",
+           fleet_parts() == [f"shard-{k}-of-{FLEET_PARTS}" for k in range(FLEET_PARTS)]
+           and [part_shard(p) for p in fleet_parts()]
+           == [(FLEET_PARTS, k) for k in range(FLEET_PARTS)]
+           and sorted(i for p in fleet_parts() for i in shard_cases(*part_shard(p), weights, []))
+           == sorted(every))
+
+    def no_part(name: str) -> bool:
+        try:
+            part_shard(name)
+        except ValueError as e:
+            return "shard-0-of-" in str(e)
+        return False
+
+    expect("a name that is no part is refused, naming the parts",
+           all(no_part(n) for n in ("shard-2-of-2", "shard-0-of-0", "shard-01-of-2", "shard-0",
+                                    "part-0-of-2", "shard-0-of-2 ")))
+    expect("the builds run as many at once as there are builds, cores and memory for, and one at "
+           "least, the cores shared among them",
+           build_width(24, 22, 32768, 4096) == (8, 3)
+           and build_width(24, 22, None, 4096) == (22, 1)
+           and build_width(3, 22, None, 4096) == (3, 8)
+           and build_width(24, 4, 14000, 4096) == (3, 2)
+           and build_width(24, 22, 1000, 4096) == (1, 22)
+           and build_width(0, 4, None, 4096) == (1, 4))
+    expect("the cores and the memory are bx's grant, else the affinity and the available memory",
+           granted({"BX_GRANT_CORES": "22", "BX_GRANT_MEM_MB": "32768"}, 64, 100000)[:2]
+           == (22, 32768)
+           and granted({}, 6, 12000)[:2] == (6, 12000)
+           and granted({}, 0, None)[:2] == (1, None)
+           and granted({"BX_GRANT_CORES": "0", "BX_GRANT_MEM_MB": "4G"}, 6, 900)[:2] == (6, 900)
+           and "BX_GRANT_CORES" in granted({"BX_GRANT_CORES": "2"}, 6, None)[2]
+           and "the memory unknown" in granted({"BX_GRANT_CORES": "2"}, 6, None)[2])
+    with tempfile.TemporaryDirectory() as tmp:
+        meminfo = pathlib.Path(tmp) / "meminfo"
+        meminfo.write_text("MemTotal:       65536000 kB\nMemAvailable:   32768000 kB\n",
+                           encoding="ascii")
+        read = available_mb(meminfo)
+        meminfo.write_text("MemTotal:       65536000 kB\n", encoding="ascii")
+        expect("the available memory is read from the kernel's line, and is unknown without it",
+               read == 32000 and available_mb(meminfo) is None
+               and available_mb(pathlib.Path(tmp) / "absent") is None)
+    expect("the builds start heaviest first, the rest in the order given",
+           build_order(["a", "b", "c", "d"], {"b": 5, "c": 9, "d": 5}) == ["c", "b", "d", "a"])
     print(f"  capability-cost selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2 or argv[1] not in ("--check", "--measure", "--selftest") or (
-        argv[1] == "--selftest" and len(argv) != 2
+    if len(argv) < 2 or argv[1] not in ("--check", "--measure", "--selftest", "--parts") or (
+        argv[1] in ("--selftest", "--parts") and len(argv) != 2
     ):
         print(__doc__, file=sys.stderr)
         return 2
     if argv[1] == "--selftest":
         return cmd_selftest()
+    if argv[1] == "--parts":
+        print("\n".join(fleet_parts()))
+        return 0
     parser = argparse.ArgumentParser(prog=f"capability_cost_gate.py {argv[1]}", add_help=False)
     parser.add_argument("--shards", type=int)
     parser.add_argument("--shard", type=int)
+    parser.add_argument("--part")
     parser.add_argument("ids", nargs="*")
     try:
         args = parser.parse_intermixed_args(argv[2:])
     except SystemExit:
         return 2
     shard = None
-    if args.shards is not None or args.shard is not None:
+    if args.part is not None:
+        if args.shards is not None or args.shard is not None:
+            print("  capability-cost: give a part or --shards N --shard K, not both",
+                  file=sys.stderr)
+            return 2
+        try:
+            shard = part_shard(args.part)
+        except ValueError as e:
+            print(f"  capability-cost: {e}", file=sys.stderr)
+            return 2
+    elif args.shards is not None or args.shard is not None:
         if args.shards is None or args.shard is None or not 0 <= args.shard < args.shards:
             print("  capability-cost: give --shards N and --shard K with 0 <= K < N",
                   file=sys.stderr)
