@@ -167,7 +167,6 @@ impl wz_session_core::round::RoundTally for Handed {
 /// before it shares any.
 #[cfg(test)]
 pub(crate) fn leaked_placed(events: usize) -> &'static mut Placed<Round> {
-    use crate::arena::{AllocatorMemory, SessionArena};
     use wz_session_core::bounded::ARENA_ALIGN;
     use wz_session_core::caps;
 
@@ -182,14 +181,12 @@ pub(crate) fn leaked_placed(events: usize) -> &'static mut Placed<Round> {
         + counts.key_bytes::<crate::form::CoopForm>()
         + core::mem::size_of::<Round>()
         + 4 * ARENA_ALIGN;
-    let arena: &'static mut SessionArena = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        SessionArena::of_bytes(bytes, &AllocatorMemory).expect("the host has the memory"),
-    ));
+    let arena = crate::arena::leaked_arena(bytes);
     #[cfg(not(wz_on_use))]
-    let rows = RoundRows::lent(arena.arena_mut(), counts).expect("the arena has the rows");
+    let rows = RoundRows::lent(arena, counts).expect("the arena has the rows");
     #[cfg(wz_on_use)]
     let rows = RoundRows::counted(counts);
-    let placed = Round::placed_over(arena.arena_mut(), rows).expect("the arena has the round");
+    let placed = Round::placed_over(arena, rows).expect("the arena has the round");
     alloc::boxed::Box::leak(alloc::boxed::Box::new(placed))
 }
 

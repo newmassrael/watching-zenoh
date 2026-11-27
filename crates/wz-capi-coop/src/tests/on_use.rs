@@ -6,7 +6,7 @@
 //! declaration's key as the block the key arena would give it, given back with the declaration;
 //! the keys the program's objects hold are copies of their own; a subscriber declared after the
 //! open is told to the router and handed what it pushes; and the state the session's own values and
-//! its key budget lie in is taken from the allocator apart from its arena.
+//! its key budget lie in is the one block its open reserves of the memory it is handed: no arena.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -18,7 +18,6 @@ use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
 
 use super::{open, until, CatchAll, Command, Engine, Router};
-use crate::EngineHold;
 
 /// What the engine answers its objects' keys through.
 fn keys(engine: &Engine) -> &dyn SessionKeys {
@@ -122,26 +121,6 @@ fn a_subscriber_declared_after_the_open_is_told_and_handed_a_push() {
     });
     router.send(Command::Push("demo/a", b"hello"));
     until(&engine, "the push", || received.load(Ordering::SeqCst) == 1);
-}
-
-/// A session whose tables take their memory on use holds its engine and its faces' rooms each in an
-/// allocation of its own, the engine's claimed beside its row before its arena is reserved, and
-/// neither at a place of the arena, where the D12 forms' test of the same accessor in
-/// `tests::arena` finds their engine. Turned red by an open that writes the engine at a place the
-/// arena lends (`SessionArena::engine_place` and `Shared::placed_with` in `CoopEngine::engine_of`),
-/// or the rooms (`Arena::vacant` in `CoopEngine::assemble`).
-#[test]
-fn an_on_use_engine_and_its_rooms_lie_apart_from_its_arena() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
-    assert!(
-        !engine.arena_holds(EngineHold::as_ptr(&engine).cast()),
-        "the engine lies apart from the arena"
-    );
-    assert!(
-        !engine.arena_holds(engine.rooms_place()),
-        "the rooms lie apart from the arena"
-    );
 }
 
 /// A session whose tables take their memory on use makes the read slot of a face past its dial
@@ -276,31 +255,14 @@ fn an_on_use_session_makes_no_room_place_its_faces_do_not_hold() {
     assert_eq!(made, 0, "a datagram link names no wait for room: no place");
 }
 
-/// A session whose tables take their memory on use holds the admission its links ask while their
-/// handshakes run in an allocation of its own, apart from its arena. Turned red by an open that
-/// places the admission in the arena (`Arena::place` in `CoopEngine::assemble`).
-#[cfg(feature = "link-admission")]
-#[test]
-#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
-fn an_on_use_sessions_link_admission_lies_apart_from_its_arena() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
-    let admission = engine.link_admission();
-    let at: *const dyn wz_session_core::link_admission::LinkAdmission = &*admission;
-    assert!(
-        !engine.arena_holds(at.cast()),
-        "the admission lies apart from the arena"
-    );
-}
-
-/// The plan of a session whose tables take their memory on use lays out no place for its engine,
-/// its faces' rooms or its runtime, which lie in allocations of their own, and no table of its
-/// links' cells, whose parts are made on the heap as each link opens, while the CONTROL row,
-/// the count the arena is kept by, is laid out as the D12 plan lays it beside the runtime's span.
-/// Turned red by `lay_out_open` laying the engine's place (`ArenaPlan::lay_engine`), a place of
-/// the rooms (`ArenaPlan::lay_rooms`, of any bytes) or the runtime's span
-/// (`ArenaPlan::lay_runtime`) in the on-use form, whose holds name none of their bytes, or by one
-/// that leaves the count out with the span (`ArenaPlan::lay_keep`).
+/// The plan of a session whose tables take their memory on use lays out no row at all once the
+/// open has laid out its holds: no place for its engine, its faces' rooms or its runtime, which
+/// lie in allocations of their own, no table of its links' cells, whose parts are made on the heap
+/// as each link opens, and no count of an arena, which the open reserves none of; the CONTROL is
+/// the plan's count of the chains, which sizes the chains' table on use. Turned red by
+/// `lay_out_open` laying the engine's place (`ArenaPlan::lay_engine`), a place of the rooms
+/// (`ArenaPlan::lay_rooms`, of any bytes) or a count of the arena in the on-use form, or by any
+/// table of the plan laid out on use.
 #[test]
 fn an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime() {
     use crate::arena::{ArenaPart, ArenaPlan, HeldPlaces, PlanShape};
@@ -318,11 +280,12 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime() {
         },
     )
     .expect("the holds lay out");
-    let laid = |part: ArenaPart| plan.rows().any(|row| row.part() == part.part());
     assert!(
-        laid(ArenaPart::ArenaKeep),
-        "CONTROL: the count the arena is kept by is laid out"
+        plan.reassembly().1 > 0,
+        "CONTROL: the plan counts the chains"
     );
+    let laid = |part: ArenaPart| plan.rows().any(|row| row.part() == part.part());
+    assert!(!laid(ArenaPart::ArenaKeep), "no arena is kept");
     assert!(!laid(ArenaPart::RuntimeState), "the runtime lies apart");
     assert!(!laid(ArenaPart::EngineState), "the engine lies apart");
     assert!(!laid(ArenaPart::LinkRooms), "the rooms lie apart");
@@ -334,6 +297,8 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime() {
     ] {
         assert!(!laid(cells), "a link's parts lie on the heap");
     }
+    assert_eq!(plan.rows().count(), 0, "no row is laid out");
+    assert_eq!(plan.reserved_bytes(), Some(0), "and no byte of an arena");
 }
 
 /// A session whose tables take their memory on use makes each part of a link on the heap as the
@@ -503,15 +468,15 @@ fn an_on_use_sessions_links_take_their_batch_of_the_heap() {
     );
 }
 
-/// A session whose tables take their memory on use takes the state its own values and its key
-/// budget lie in from the allocator, apart from its arena: its memory is asked for one block, the
-/// arena its plan lays out and nothing before it, and every plane the state owns lies in that
-/// state and not in the arena. Turned red by an open that lays the state at the head of the
-/// arena's block (`SessionArena::reserve_after`), which asks the memory for the state's bytes too,
-/// or by a plane placed anywhere but the state.
+/// A session whose tables take their memory on use reserves no arena: the one block its open asks
+/// the memory it is handed for is the state its own values and its key budget lie in, and every
+/// plane the state owns lies in that block; the session reports no byte of an arena. Turned red by
+/// an open that reserves an arena on use (`SessionArena::reserve` in `lend_session`), which asks
+/// the memory for a second block, by a state taken of the allocator and not of the open's memory
+/// (`OwnBlock::take`), which asks it for none, or by a plane placed anywhere but the state.
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
-fn an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart() {
+fn an_on_use_open_asks_its_memory_for_its_state_alone() {
     use super::{host_links, LOOPBACK};
     use crate::arena::{
         AllocatorMemory, ArenaMemory, ArenaRegion, HeldPlaces, OpenRegion, OpenStorage, PlanFrom,
@@ -519,19 +484,20 @@ fn an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart(
     };
     use wz_runtime_posix::stream::PosixTcpDial;
     use wz_runtime_posix::{PosixClock, PosixEntropy};
-    use wz_session_core::bounded::ARENA_ALIGN;
 
-    /// The allocator, counting its reservations and keeping the bytes it was last asked for.
+    /// The allocator, counting its reservations and keeping the address of the first it gave.
     struct Counted {
         reserves: AtomicUsize,
-        last: AtomicUsize,
+        first: AtomicUsize,
     }
 
     impl ArenaMemory for Counted {
         fn reserve(&self, layout: core::alloc::Layout) -> Option<core::ptr::NonNull<u8>> {
-            self.reserves.fetch_add(1, Ordering::SeqCst);
-            self.last.store(layout.size(), Ordering::SeqCst);
-            AllocatorMemory.reserve(layout)
+            let base = AllocatorMemory.reserve(layout)?;
+            if self.reserves.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.first.store(base.as_ptr() as usize, Ordering::SeqCst);
+            }
+            Some(base)
         }
 
         unsafe fn release(&self, base: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
@@ -543,7 +509,7 @@ fn an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart(
 
     static BLOCK: Counted = Counted {
         reserves: AtomicUsize::new(0),
-        last: AtomicUsize::new(0),
+        first: AtomicUsize::new(0),
     };
     let router = Router::start(CatchAll::None);
     let config = super::config(&router);
@@ -571,16 +537,16 @@ fn an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart(
     assert_eq!(
         BLOCK.reserves.load(Ordering::SeqCst),
         1,
-        "one block, the arena's"
+        "one block, the state's"
     );
-    assert_eq!(
-        BLOCK.last.load(Ordering::SeqCst),
-        engine.arena_bytes().max(ARENA_ALIGN),
-        "the block is the plan's arena alone"
-    );
+    assert_eq!(engine.arena_bytes(), 0, "no arena is reserved");
+    let first = BLOCK.first.load(Ordering::SeqCst) as *const u8;
+    assert!(!first.is_null(), "the block was given");
     #[cfg(any(feature = "queryable", feature = "query", feature = "connectivity"))]
-    for at in engine.plane_places() {
-        assert!(engine.state_holds(at), "the plane lies in the state");
-        assert!(!engine.arena_holds(at), "and not in the arena");
+    {
+        assert!(engine.state_holds(first), "the block is the state");
+        for at in engine.plane_places() {
+            assert!(engine.state_holds(at), "the plane lies in the state");
+        }
     }
 }

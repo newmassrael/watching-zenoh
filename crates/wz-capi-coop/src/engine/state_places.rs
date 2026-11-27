@@ -11,9 +11,9 @@
 //!
 //! Where the tables take their memory at their first row (`tables-on-use`), the same places lie
 //! in a state of the session's own (`OwnState`), beside the budget its keys are counted against:
-//! one allocation the open takes from the allocator apart from its arena, held by `OwnBlock`,
-//! which gives it back after every owner written in it. The rows of the plain tables and of the
-//! round are not among those places: each of those tables takes its own at its first row
+//! the one block the open reserves from the memory it is handed, which reserves no arena, held by
+//! `OwnBlock`, which gives it back after every owner written in it. The rows of the plain tables
+//! and of the round are not among those places: each of those tables takes its own at its first row
 //! (`PlacedTables::counted`, `RoundRows::counted`).
 
 #[cfg(wz_on_use)]
@@ -74,7 +74,7 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::on_use::{BudgetKeys, KeyBudget};
 
 #[cfg(wz_on_use)]
-use crate::arena::ArenaRefused;
+use crate::arena::{ArenaMemory, ArenaRefused};
 
 /// The legs a region keeps a row of each table of for: one for each get its tables of pending gets
 /// hold, the dial role's face's and, with `local-queryable`, the session's own
@@ -534,34 +534,43 @@ impl<T> Drop for OwnVacant<T> {
     }
 }
 
-/// The zeroed `T` in an allocation of its own the allocator gave, every field of it empty
-/// (`ZeroEmpty`) until its owner writes it, dropped in place and given back when this is. It
-/// holds the pointer and never a reference to the whole `T`: what lies in it is reached by
-/// fields projected from [`Self::as_ptr`], as a region's block is reached.
+/// The zeroed `T` in a block of its own the open's memory gave ([`ArenaMemory`]), every field of it
+/// empty (`ZeroEmpty`) until its owner writes it, dropped in place and given back to that memory
+/// when this is. It holds the pointer and never a reference to the whole `T`: what lies in it is
+/// reached by fields projected from [`Self::as_ptr`], as a region's block is reached.
 #[cfg(wz_on_use)]
 pub(crate) struct OwnBlock<T: ZeroEmpty> {
     at: NonNull<T>,
+    /// The memory the block was reserved from, which it goes back to.
+    memory: &'static dyn ArenaMemory,
 }
 
 #[cfg(wz_on_use)]
 impl<T: ZeroEmpty> OwnBlock<T> {
-    /// A `T` of all zero bytes in an allocation of its own. Refused, having taken nothing, when
-    /// the allocator has no room for it.
-    pub(crate) fn take() -> Result<Self, ArenaRefused> {
+    /// A `T` of all zero bytes in a block of its own reserved from `memory`: as the block lies
+    /// where the memory gives its blocks zero (`ArenaMemory::reserves_zeroed`), so a page of it
+    /// the session never writes is never written, and written zero where it does not. Refused,
+    /// having taken nothing, when the memory has no room for it.
+    pub(crate) fn take(memory: &'static dyn ArenaMemory) -> Result<Self, ArenaRefused> {
         const {
             assert!(
                 core::mem::size_of::<T>() != 0,
-                "an allocation of its own holds some bytes"
+                "a block of its own holds some bytes"
             )
         };
         let layout = Layout::new::<T>();
-        // SAFETY: the layout's size is not zero (above).
-        let at = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) }.cast::<T>()).ok_or(
-            ArenaRefused::NoMemory {
-                bytes: layout.size(),
-            },
-        )?;
-        Ok(Self { at })
+        // The layout's size is not zero (above), which the memory's contract asks.
+        let base = memory.reserve(layout).ok_or(ArenaRefused::NoMemory {
+            bytes: layout.size(),
+        })?;
+        if !memory.reserves_zeroed() {
+            // SAFETY: the memory gave `layout.size()` bytes at `base` to this call alone.
+            unsafe { base.as_ptr().write_bytes(0, layout.size()) };
+        }
+        Ok(Self {
+            at: base.cast::<T>(),
+            memory,
+        })
     }
 
     /// Where the `T` lies, aligned and of all zero bytes until its owner writes it.
@@ -571,7 +580,7 @@ impl<T: ZeroEmpty> OwnBlock<T> {
 }
 
 // SAFETY: the block owns the `T` at its pointer, which nothing else reaches, as a `Box` owns its
-// value.
+// value; the memory it goes back to is `Sync` (`ArenaMemory`).
 #[cfg(wz_on_use)]
 unsafe impl<T: ZeroEmpty + Send> Send for OwnBlock<T> {}
 // SAFETY: a shared block hands out nothing but its pointer, as above.
@@ -582,11 +591,12 @@ unsafe impl<T: ZeroEmpty + Sync> Sync for OwnBlock<T> {}
 impl<T: ZeroEmpty> Drop for OwnBlock<T> {
     fn drop(&mut self) {
         // SAFETY: the block holds a `T` (zero bytes are one, and every write since kept one),
-        // dropped once, here, in place; the allocation is given back after it with the layout it
-        // was taken with, and nothing reaches it after.
+        // dropped once, here, in place; the block is given back after it to the memory that
+        // reserved it, with the layout it was reserved for, and nothing reaches it after.
         unsafe {
             core::ptr::drop_in_place(self.at.as_ptr());
-            alloc::alloc::dealloc(self.at.as_ptr().cast::<u8>(), Layout::new::<T>());
+            self.memory
+                .release(self.at.cast::<u8>(), Layout::new::<T>());
         }
     }
 }
@@ -768,7 +778,8 @@ mod tests {
         use wz_session_core::bounded::KeyMaker;
         use wz_session_core::key_arena::block_bytes;
         use wz_session_core::row_pool::PeerSlot;
-        let state = OwnBlock::<OwnState>::take().expect("the test allocator answers");
+        let state = OwnBlock::<OwnState>::take(&crate::arena::AllocatorMemory)
+            .expect("the test allocator answers");
         let limits = SessionLimits::BUILD;
         // SAFETY: the state is zeroed, aligned and this test's alone, and is given back after the
         // last key counted against its budget.
@@ -803,5 +814,81 @@ mod tests {
             "the places lie in the state"
         );
         drop(state);
+    }
+
+    /// A state's block is reserved from the memory the open is handed and given back to it: as
+    /// the block lies where the memory gives its blocks zero, so the take writes none of it, and
+    /// written zero where it does not. The CONTROL is the memory not said zero, whose block reads
+    /// zero though the memory marked it. Turned red by a block taken of the allocator and not of the
+    /// memory (its counts stay at none), by a take that writes the block of a memory said zero, or
+    /// by one that leaves the block of any other as it lay.
+    #[cfg(wz_on_use)]
+    #[test]
+    fn an_on_use_state_block_is_reserved_from_the_opens_memory_and_given_back_to_it() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        /// The byte [`Marking`] writes over what it reserves.
+        const MARK: u8 = 0x5a;
+
+        /// The allocator, its blocks written over with [`MARK`] and counted as they come and go.
+        struct Marking {
+            zeroed: bool,
+            reserves: AtomicUsize,
+            releases: AtomicUsize,
+        }
+
+        impl ArenaMemory for Marking {
+            fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+                self.reserves.fetch_add(1, Ordering::SeqCst);
+                let base = crate::arena::AllocatorMemory.reserve(layout)?;
+                // SAFETY: the allocator gave `layout.size()` bytes at `base` to this call alone.
+                unsafe { base.as_ptr().write_bytes(MARK, layout.size()) };
+                Some(base)
+            }
+
+            fn reserves_zeroed(&self) -> bool {
+                self.zeroed
+            }
+
+            unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+                self.releases.fetch_add(1, Ordering::SeqCst);
+                // SAFETY: the caller's contract, handed on to the allocator that reserved it.
+                unsafe { crate::arena::AllocatorMemory.release(base, layout) }
+            }
+        }
+
+        static SAID_ZERO: Marking = Marking {
+            zeroed: true,
+            reserves: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+        };
+        static PLAIN: Marking = Marking {
+            zeroed: false,
+            reserves: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+        };
+        // SAFETY: the block holds 64 bytes, any of which is a byte, read while the block stands.
+        let bytes = |block: &OwnBlock<[u8; 64]>| unsafe { *block.as_ptr().as_ptr() };
+        let said_zero = OwnBlock::<[u8; 64]>::take(&SAID_ZERO).expect("the memory answers");
+        assert!(
+            bytes(&said_zero).iter().all(|byte| *byte == MARK),
+            "a block of a memory said zero is written by none of the take"
+        );
+        let plain = OwnBlock::<[u8; 64]>::take(&PLAIN).expect("the memory answers");
+        assert!(
+            bytes(&plain).iter().all(|byte| *byte == 0),
+            "CONTROL: a block of any other memory is written zero"
+        );
+        drop((said_zero, plain));
+        for memory in [&SAID_ZERO, &PLAIN] {
+            assert_eq!(
+                (
+                    memory.reserves.load(Ordering::SeqCst),
+                    memory.releases.load(Ordering::SeqCst)
+                ),
+                (1, 1),
+                "one block of the memory, given back to it"
+            );
+        }
     }
 }

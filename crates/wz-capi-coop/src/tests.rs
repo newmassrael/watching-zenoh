@@ -3090,10 +3090,12 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         .expect("the open was asked for a place");
     assert!(place.bytes() >= layout.size());
     assert_eq!(place.as_ptr().as_ptr() as usize % ARENA_ALIGN, 0);
-    assert_eq!(
+    // Where the tables take their memory on use no arena is reserved, and the place is an
+    // allocation of its own.
+    #[cfg(not(wz_on_use))]
+    assert!(
         holding.arena_holds(place.as_ptr().as_ptr()),
-        cfg!(not(wz_on_use)),
-        "the place lies in the arena, or apart from it where the tables take their memory on use"
+        "the place lies in the arena"
     );
     // SAFETY: the place holds a `Handle`'s layout, nothing else uses it, and the engine stands.
     unsafe {

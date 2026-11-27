@@ -139,6 +139,7 @@ use core::ptr::NonNull;
 use wz_runtime_coop::faces::EndpointTexts;
 #[cfg(all(feature = "group", wz_on_use))]
 use wz_runtime_coop::group_transport::HeapGroups;
+#[cfg(not(wz_on_use))]
 use wz_runtime_coop::kept::Kept;
 use wz_runtime_coop::link_cells::CountKind;
 #[cfg(wz_on_use)]
@@ -158,9 +159,11 @@ use wz_runtime_coop::udp_link::{LentPorts, PortPeerRow, PortRows, QueuedDatagram
 use wz_runtime_coop::RuntimePlace;
 #[cfg(wz_lent)]
 use wz_session_core::bounded::Lent;
+#[cfg(not(wz_on_use))]
+use wz_session_core::bounded::TableLender;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 use wz_session_core::bounded::ZeroEmpty;
-use wz_session_core::bounded::{Arena, LendRefused, TableLender, ARENA_ALIGN};
+use wz_session_core::bounded::{Arena, LendRefused, ARENA_ALIGN};
 #[cfg(wz_on_use)]
 use wz_session_core::byte_cells::HeapByteCells;
 use wz_session_core::byte_cells::LentByteCells;
@@ -669,8 +672,9 @@ const CACHE_RING_ROWS: usize = 2 * cfg!(all(feature = "advanced-cache", not(wz_o
 /// the arena lends them (`runtime-plan`); a region holds them otherwise.
 const FINAL_ROWS: usize = 2 * cfg!(all(feature = "queryable", wz_lent)) as usize;
 /// The count the arena is kept by and the span the session's runtime is placed in
-/// ([`ArenaPlan::holding_runtime`]).
-const RUNTIME_ROWS: usize = 2;
+/// (`ArenaPlan::holding_runtime`): none where the tables take their memory on use, which reserves
+/// no arena.
+const RUNTIME_ROWS: usize = 2 * !cfg!(wz_on_use) as usize;
 /// The place the session's engine lies in ([`ArenaPlan::holding_engine`]).
 const ENGINE_STATE_ROWS: usize = 1;
 /// The planes the session's queryables, gets and watchers of its faces share, each where its
@@ -752,7 +756,9 @@ impl Default for HeldPlaces {
 /// Where an open's arena comes from and where its rows come from
 /// ([`CoopEngine::open_made_in`](crate::CoopEngine::open_made_in)).
 pub struct OpenStorage {
-    /// The memory the session's arena is reserved from.
+    /// The memory the session's one block is reserved from: its arena, after the region where the
+    /// build fixes the session's shape, or, where the tables take their memory on use, the state
+    /// its own values lie in, the tables taking theirs of the allocator at their first row.
     pub memory: &'static dyn ArenaMemory,
     /// Where the rows of the session's tables, and those of the places held after them, come
     /// from.
@@ -1888,7 +1894,9 @@ pub struct ArenaPlan<const ROWS: usize = ARENA_ROWS> {
     /// The rows of the ABI's places.
     places: PlaceRows,
     /// The bytes of the span the session's runtime is placed in, `0` for none
-    /// ([`Self::holding_runtime`]).
+    /// ([`Self::holding_runtime`]). None where the tables take their memory on use, whose runtime
+    /// is made of the allocator.
+    #[cfg(not(wz_on_use))]
     runtime_bytes: usize,
 }
 
@@ -1908,6 +1916,7 @@ impl ArenaPlan {
             transport: TransportRows::NONE,
             session: SessionRows::NONE,
             places: PlaceRows::NONE,
+            #[cfg(not(wz_on_use))]
             runtime_bytes: 0,
         }
     }
@@ -1957,6 +1966,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             transport: TransportRows::NONE,
             session: SessionRows::NONE,
             places: PlaceRows::NONE,
+            #[cfg(not(wz_on_use))]
             runtime_bytes: 0,
         }
     }
@@ -1989,6 +1999,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             transport,
             session,
             places,
+            #[cfg(not(wz_on_use))]
             runtime_bytes,
         } = laid;
         let rows = {
@@ -2005,6 +2016,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             transport: *transport,
             session: *session,
             places: *places,
+            #[cfg(not(wz_on_use))]
             runtime_bytes: *runtime_bytes,
         };
         // Made apart and stored whole, as `clone_from` stores a plan, so that no byte of the plan
@@ -2920,28 +2932,22 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// table lie in the arena, and the arena's memory is given back once the session and the
     /// runtime's last holder (a waker or a join handle kept past the session among them) have let
     /// go. Laid out after every other row, once; a size of `0` adds none. The plan is laid out
-    /// where it lies; a refused one is no plan to open by.
+    /// where it lies; a refused one is no plan to open by. None where the tables take their memory
+    /// on use: no arena is reserved, and the runtime is made of the allocator.
+    #[cfg(not(wz_on_use))]
     pub fn holding_runtime(&mut self, bytes: usize) -> Result<(), ArenaRefused> {
         self.lay_runtime(bytes);
         self.settled()
     }
 
     /// The span and the count of `Self::holding_runtime`, the plan not settled.
+    #[cfg(not(wz_on_use))]
     pub(crate) const fn lay_runtime(&mut self, bytes: usize) {
         if bytes != 0 && self.runtime_bytes == 0 {
             self.runtime_bytes = bytes;
             self.put(ArenaPart::ArenaKeep, 1, core::mem::size_of::<ArenaKept>());
             self.put(ArenaPart::RuntimeState, 1, bytes);
         }
-    }
-
-    /// Lay out the count the arena is kept by alone (`SessionArena::keep`), for an open whose
-    /// runtime and engine are made of the allocator: the engine keeps the arena by it for what of
-    /// the arena it holds (the lodgings, the handle's place). Laid out after every other row, once,
-    /// at the open; the plan not settled.
-    #[cfg(wz_on_use)]
-    pub(crate) const fn lay_keep(&mut self) {
-        self.put(ArenaPart::ArenaKeep, 1, core::mem::size_of::<ArenaKept>());
     }
 
     /// Lay out the place of `bytes` the session's engine lies in, counted by its holders, which
@@ -3851,6 +3857,21 @@ impl ArenaMemory for AllocatorMemory {
     }
 }
 
+/// An arena of `bytes` over memory of the allocator the test leaks, so it outlives every table and
+/// value lent from it: what a test of the round lends from where no session's arena is at hand, in
+/// every form, a session whose tables take their memory on use reserving none.
+#[cfg(all(test, wz_round))]
+pub(crate) fn leaked_arena(bytes: usize) -> &'static mut Arena {
+    let layout =
+        Layout::from_size_align(bytes.max(ARENA_ALIGN), ARENA_ALIGN).expect("a test's arena");
+    let base = AllocatorMemory
+        .reserve(layout)
+        .expect("the host has the memory");
+    // SAFETY: the allocator gave `layout` to this call alone, aligned as an arena's spans start
+    // and at least `bytes` long; it is never given back, so it outlives everything lent from it.
+    alloc::boxed::Box::leak(alloc::boxed::Box::new(unsafe { Arena::over(base, bytes) }))
+}
+
 /// The place a session's arena lends the ABI's handle of the session in
 /// ([`ArenaPlan::holding`]): `bytes` bytes aligned to [`ARENA_ALIGN`], zeroed at the open, which
 /// the engine never reads or writes. It stands while the engine does, so whatever the ABI keeps
@@ -4147,7 +4168,9 @@ impl CacheSpan {
 }
 
 /// A session's arena: the memory its open reserved by its plan, given back when the session is let
-/// go.
+/// go. None where the tables take their memory on use: each takes its own at its first row, and
+/// the open reserves the session's state alone (`crate::engine`'s `OwnBlock`).
+#[cfg(not(wz_on_use))]
 pub(crate) struct SessionArena {
     arena: Arena,
     base: NonNull<u8>,
@@ -4171,6 +4194,7 @@ pub(crate) struct EnginePlace {
 
 /// The count a session's arena is kept by, and what its last holder gives back: lent from the arena
 /// itself, the count first, so a pointer to the count is a pointer to the whole.
+#[cfg(not(wz_on_use))]
 #[repr(C)]
 struct ArenaKept {
     kept: Kept,
@@ -4183,6 +4207,7 @@ struct ArenaKept {
 ///
 /// # Safety
 /// `kept` is the count of an `ArenaKept` `SessionArena::keep` placed, which no holder is left of.
+#[cfg(not(wz_on_use))]
 unsafe fn give_arena_back(kept: NonNull<Kept>) {
     let held = kept.cast::<ArenaKept>().as_ptr();
     // SAFETY: the caller's: the count's place is read whole before the memory that holds it goes,
@@ -4193,10 +4218,11 @@ unsafe fn give_arena_back(kept: NonNull<Kept>) {
     }
 }
 
+#[cfg(not(wz_on_use))]
 impl SessionArena {
     /// Reserve the arena `plan` lays out from `memory`. Refused, having taken nothing, when the
     /// arena is past the address space or the memory has none to give.
-    #[cfg(any(feature = "runtime-plan", feature = "tables-on-use", test))]
+    #[cfg(any(feature = "runtime-plan", test))]
     pub(crate) fn reserve<const ROWS: usize>(
         plan: &ArenaPlan<ROWS>,
         memory: &'static dyn ArenaMemory,
@@ -4221,7 +4247,7 @@ impl SessionArena {
 
     /// Reserve an arena of `bytes` from `memory`. Refused, having taken nothing, when the memory has
     /// none to give.
-    #[cfg(any(feature = "runtime-plan", feature = "tables-on-use", test))]
+    #[cfg(any(feature = "runtime-plan", test))]
     pub(crate) fn of_bytes(
         bytes: usize,
         memory: &'static dyn ArenaMemory,
@@ -4275,8 +4301,8 @@ impl SessionArena {
     }
 
     /// The count the arena's memory is kept by, lent from the arena on the first ask: the session
-    /// holds one, given back when it lets the arena go, and an engine in an allocation of its own
-    /// takes one of its own (`SharedClaim::made_with`).
+    /// holds one, given back when it lets the arena go, and each value placed in the arena that
+    /// may outlive the session takes one of its own (`Self::runtime_place`, `Self::engine_place`).
     pub(crate) fn keep(&mut self) -> Result<NonNull<Kept>, LendRefused> {
         if let Some(kept) = self.kept {
             return Ok(kept);
@@ -4300,7 +4326,6 @@ impl SessionArena {
     /// the arena's alignment, and the count that keeps the arena's memory for it: the memory goes
     /// back once the session lets the arena go and the runtime's last holder lets go, whichever
     /// is last. Refused past what the arena has left.
-    #[cfg(not(wz_on_use))]
     pub(crate) fn runtime_place(&mut self, bytes: usize) -> Result<RuntimePlace, LendRefused> {
         let (at, memory) = self.kept_span(bytes)?;
         // SAFETY: the span is `bytes` of the arena's memory, lent to the runtime alone, and the
@@ -4313,7 +4338,6 @@ impl SessionArena {
     /// arena's alignment, and the count that keeps the arena's memory: the engine takes one of
     /// its own when it is written there, so the memory goes back once the engine's last holder
     /// lets go, whichever of them is last. Refused past what the arena has left.
-    #[cfg(not(wz_on_use))]
     pub(crate) fn engine_place(&mut self, bytes: usize) -> Result<EnginePlace, LendRefused> {
         let (at, memory) = self.kept_span(bytes)?;
         Ok(EnginePlace { at, memory })
@@ -4323,7 +4347,6 @@ impl SessionArena {
     /// memory for what is placed there. Refused past what the arena has left. Out of line: the
     /// runtime's place and the engine's are both lent by it, and a copy in each would carry the
     /// placing of the count twice.
-    #[cfg(not(wz_on_use))]
     #[inline(never)]
     fn kept_span(&mut self, bytes: usize) -> Result<(NonNull<u8>, NonNull<Kept>), LendRefused> {
         let memory = self.keep()?;
@@ -4344,9 +4367,7 @@ impl SessionArena {
     }
 
     /// The arena, to lend from: by the open, where it lends the arena more than its lender's
-    /// tables, and by the tests that lend its rows. A session whose tables take their memory on use
-    /// lends it none of those.
-    #[cfg(any(not(wz_on_use), test))]
+    /// tables, and by the tests that lend its rows.
     pub(crate) fn arena_mut(&mut self) -> &mut Arena {
         &mut self.arena
     }
@@ -4362,6 +4383,7 @@ impl SessionArena {
     }
 }
 
+#[cfg(not(wz_on_use))]
 impl Drop for SessionArena {
     fn drop(&mut self) {
         match self.kept {
@@ -4447,6 +4469,7 @@ mod tests {
     }
 
     /// The bytes of the block `arena` was reserved in.
+    #[cfg(not(wz_on_use))]
     fn block_of(arena: &SessionArena) -> &[u8] {
         // SAFETY: the block is the arena's, `layout.size()` bytes from `base`, read while the
         // arena holds it and lends nothing.
@@ -4454,6 +4477,7 @@ mod tests {
     }
 
     /// Whether every byte of the block `arena` was reserved in is still [`MARK`].
+    #[cfg(not(wz_on_use))]
     fn still_marked(arena: &SessionArena) -> bool {
         block_of(arena).iter().all(|byte| *byte == MARK)
     }
@@ -4463,6 +4487,7 @@ mod tests {
     /// gave it. The CONTROL is the same reservation from a memory that does not say so, whose head
     /// is written zero and whose arena after it is not. Turned red by a reservation that writes
     /// the block of a zeroed memory, or by one that leaves the head of any other as it lay.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn an_arena_of_zeroed_memory_is_written_by_none_of_its_reservation() {
         let head = Layout::new::<[u8; 41]>();
@@ -4499,6 +4524,7 @@ mod tests {
     /// lend writes none of their flags or bytes, so a buffer no link claims is never written.
     /// Turned red by the arena made over its block as memory not said to be zero (`Arena::over`),
     /// whose lend writes them.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn a_session_arena_lends_its_buffers_without_writing_them() {
         let (mut arena, _) = SessionArena::of_bytes_after(Layout::new::<()>(), 4096, &Marked)

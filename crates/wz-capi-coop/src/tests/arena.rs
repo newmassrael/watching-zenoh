@@ -27,9 +27,9 @@ use super::entity_tables::{lowered, open_under};
 use super::{
     client_config, config, open, open_with, until, CatchAll, Command, Engine, Router, LOOPBACK,
 };
-use crate::arena::{
-    AllocatorMemory, ArenaLimit, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena,
-};
+#[cfg(not(wz_on_use))]
+use crate::arena::SessionArena;
+use crate::arena::{AllocatorMemory, ArenaLimit, ArenaMemory, ArenaPlan, ArenaRefused};
 #[cfg(wz_round)]
 use crate::round::RoundRowCounts;
 use crate::{CoopConfig, OpenError, OpenKeyIds};
@@ -165,7 +165,9 @@ fn row(plan: &ArenaPlan, part: &str) -> crate::arena::ArenaRow {
 
 /// The arena is the sum of its rows' spans, and lending every row from it brings its high-water
 /// mark to its size: the plan the open reserves by is exactly what the rows take. The client
-/// dials an endpoint, whose text is a row as every other part is.
+/// dials an endpoint, whose text is a row as every other part is. A session whose tables take
+/// their memory on use reserves no arena (`tests::on_use`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_reservation_is_the_plan_and_lending_every_row_fills_it() {
     let plan = ArenaPlan::of(
@@ -211,7 +213,10 @@ fn an_open_reserves_the_arena_its_plan_lays_out() {
 /// An open asked to hold the ABI's handle reserves the plan the open lays out with the handle's
 /// place, and one asked for none the plan without it: the places are laid out on the one plan the
 /// open reserves by. Turned red by an open that reserves a plan other than the one it lends from,
-/// or lays the places out apart from it.
+/// or lays the places out apart from it. A session whose tables take their memory on use holds the
+/// handle's place in an allocation of its own and reserves no arena
+/// (`tests::an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena`).
+#[cfg(not(wz_on_use))]
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_open_holding_the_handle_reserves_the_plan_with_its_place() {
@@ -3573,6 +3578,7 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         .expect("the build's limits lay the rooms out");
     plan.holding(&held)
         .expect("the build's limits lay the places out");
+    #[cfg(not(wz_on_use))]
     plan.holding_runtime(64)
         .expect("the build's limits lay the runtime's span out");
     plan.holding_engine(64)

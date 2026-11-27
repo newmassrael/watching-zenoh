@@ -619,14 +619,8 @@ fn a_given_back_group_buffer_is_kept_while_a_record_reads_in_it() {
 
 /// A key arena of 256 bytes the test leaks, so it outlives every key and round of the test.
 fn key_space() -> KeySpace {
-    use crate::arena::{AllocatorMemory, SessionArena};
-
     let bytes = KeySpace::span_bytes(256).expect("a small arena");
-    let arena: &'static mut SessionArena = Box::leak(Box::new(
-        SessionArena::of_bytes(bytes, &AllocatorMemory).expect("the host has the memory"),
-    ));
-    arena
-        .arena_mut()
+    crate::arena::leaked_arena(bytes)
         .lend_keys(256, SessionLimits::defaults().max_keyexpr_bytes_held())
         .expect("the arena holds the key arena")
 }
