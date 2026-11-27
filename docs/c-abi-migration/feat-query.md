@@ -113,7 +113,7 @@ bytes): Q3 and Q4 together take 10,474, not their sum.
 | **Q2 (landed)** | the rest of the walk out of the face kind: the lent query's pin, its owned projection and the first queryable's pin in engine methods, the face kind keeping the three calls that read it (`hold_replies`, `owe_final`, `release_replies`) and `owe_finals`' loop over the registry's Finals | -1,500 to -2,500 | 0 | none: the read's dispatch of a record that is not a Request is not touched | the two tests of Q1; `tests::queryable`'s Final tests |
 | **Q3 (landed)** | arch-mono M5 for these messages: a reply's length from the direct layout for every reply (the window writer writes a timestamp, an attachment and a source info too, and `GENERIC_REACHABLE` is `transport-fragmentation` alone), a Request counted by `RequestWriter::measured` alone | -4,000 to -8,300 | 0 | none: nothing of the receive changes, and a reply's count is arithmetic where it was a pass of the encoder | `lent_response`'s direct-against-generic tests, which keep `encode_generic` as their reference |
 | **Q4 (landed)** | one form of each sent message: the group's reply stage writes through the lent `ResponseWriter`, as a link's does, and no path of a cooperative build sends an owned `Request`; the owned encoders over `Heap` stay the tests' reference | -4,000 to -5,800 (the 5,791 of owned forms, less what the stage's window writer adds) | 0: the client's own `MsgPutWire::write_source::<MsgPutIn<Heap>, TxSink>` is its put's and stays | none: a put does not take the stage's path | `tests::group::asked` (both tests); `lent_response`'s owned-against-lent tests |
-| Q5 | one Put body reader: a Reply's Put and Del read by the reader a Push's body is read with (`push_read`), as zenoh-pico's `_z_reply_decode` calls `_z_push_body_decode` | -600 to -1,500, to measure: the saving is `MsgPutView::read_with` less the out-of-line instance the Reply calls | 0 bytes and 0 Ir: the Push keeps its reader where `read_push` has it, and the Reply's is a second instance only if the Push's is inlined | none on a Push | `network_message`'s tests of the lent Response (`a_reply_put_payload_is_a_range_of_the_lent_frame`, `a_response_and_its_err_read_a_repeated_extension_by_its_last_entry`) |
+| **Q5 (landed)** | one Put body reader: a Reply's Put and Del, and a Request's, read by the reader a Push's body is read with (`network_message/body_read.rs`), as zenoh-pico's `_z_reply_decode` and `_z_request_decode` call `_z_push_body_decode`; the Response and the Request read by readers of their own that judge each chain as they read it (section 3.1) | -1,500 to -3,000, to measure: `MsgPutView::read_with`, `ReplyView::read_with`, the generated envelopes and the admission's walks after the read, less the two readers and their instances of the chain and Put readers | 0 bytes and 0 Ir: no `codec-request` or `codec-response` there | none on a Push: its instances of the body readers keep their one caller each, and `read_key` is held in place | `network_message::response_read::tests` and `network_message::request_read::tests` (every shape, a reused binding, every cut and every damaged byte against the generated decode and its admission; a Reply's Put against a Push's of the same bytes), and `push_read`'s tests as before |
 | Q6 | gates by role: `query` alone does not turn on `declare-queryable`, the Query half of the Request's reader (pending O3) or the group's reply stage; `codec-request` and `codec-response` split into a read and a write half; the get's cancellation fan under `unstable-api` | `pico-api-coop-nostd` 0 (every role is on); a build that only asks (`query` without `queryable`, zenoh-pico's `Z_FEATURE_QUERY` 1 and `Z_FEATURE_QUERYABLE` 0) -12,000 to -16,000 | 0 | none | the C1h feature matrix compiling each half alone; a requester-only build's test that a peer's Query is answered as O3 decides |
 | Q7 | one reply method: `ReplyOut` takes one record of the reply's parts (key, payload, encoding, timestamp, attachment, source info, Put or Del) where it has a method for each combination, the C doors filling the record as zenoh-pico's fill `_z_send_reply`'s arguments | -3,000 to -4,500 | 0 | none: a reply is built once a call either way | `query_sink::reply_out_contract_covers_del_err_and_responder_roundtrip` and the doors' reply tests, each combination one case |
 | Q8 | read the unread rows (Q-a, Q-i, R-b's doors, R-c) body by body from the line tables, as arch-mono read `run`, on the API twin's explain report once `--explain pico-api-coop-nostd` reads one | none | | | |
@@ -150,10 +150,24 @@ estimates, to be read by the cost gate.
   generation and the five calls that read its kind (the key forms a query names, the staged Finals,
   the query's Final, the hold of the replies and its release); the pins and the walk are the
   engine's, once. Expected: -1,500 to -2,500.
-- **Q5** and **Q7** are not landed. Q5 needs the Response's reader written by hand around
-  `push_read::read_put`, error for error with the generated `ResponseView::decode_into`; Q7
-  changes the `ReplyOut` contract every runtime and test sink implements. Each is a lane of its
-  own.
+- **Q5** went one record past its row. Every build with `query` or `queryable` turns on
+  `request-put-del` (`wz-capi-coop/Cargo.toml`), whose Request the generated `RequestView` reads
+  with `MsgPutView::read_with` too, so a Reply's Put read by the Push's reader alone would have
+  left that body in the build and saved a few hundred bytes at most. So the Request is read as
+  the Response is: each by a reader of its own (`network_message/request_read.rs`,
+  `network_message/response_read.rs`) that judges each chain as it reads it, as the Push's does,
+  the Query and the Err by the codec's own readers, the Put and the Del by the Push's. The key,
+  the chains and the Put and Del bodies are the Push's readers moved out of `push_read.rs` into
+  `network_message/body_read.rs`; a build without `request-put-del` reads a Request by the
+  codec, as before. Out of the build go `MsgPutView::read_with` (1,905), `ReplyView::read_with`
+  (560), the generated envelopes and the walks the admission made after the read
+  (`response_view_admission`, `request_view_admission` and `judge_put_view` are the tests'
+  reference now); in come the two readers and one instance each of `read_chain` and `read_put`
+  for them. Their sink (`body_read::InPlace`) is a type of its own, so the Push's instances keep
+  the one caller each has, and `read_key` is held in place in every reader: the walk of a Push
+  is compiled as before. Expected: `pico-api-coop-nostd` -1,500 to -3,000, to measure;
+  `pico-client-coop-nostd` byte for byte.
+- **Q7** is not landed: it changes the `ReplyOut` contract every runtime and test sink implements.
 
 ## 4. Owner decisions: each behaviour zenoh-pico does not have is a switch
 
@@ -198,5 +212,13 @@ before its Final), as the send's switches are held (`scripts/lib/nondefault-test
 - Q2: the Q1 tests, and `tests::group::asked`.
 - O2: `wz_config.py --write` then `--check`; `cargo test -p wz-session-core --lib --features transport-batching,action-trace the_reply_hold_is_raised_only_with_its_switch`
   and the row of `nondefault-tests-gate.sh` that builds the session core without the switch.
+- Q5: `cargo test -p wz-session-core --lib --features codec-push,codec-request,codec-response network_message::`
+  (the Push's, the Request's and the Response's readers against the codec), and again with
+  `--no-default-features --features codec-push,codec-request,codec-response,request-put-del,rx-push,rx-response`;
+  clippy of `wz-session-core` with `--no-default-features` and each of `codec-response,rx-response,session-unicast`,
+  `codec-request,request-put-del,session-unicast`, `codec-request,session-unicast` and
+  `codec-push,rx-push,session-unicast` (each reader alone, and the Request without `request-put-del`),
+  and `--no-default-features --features alloc,codec-response --all-targets`. In the library of
+  `pico-api-coop-nostd`, no `MsgPutView::read_with` or `ReplyView::read_with` body.
 - `pico-api-coop-nostd` lower by the steps' sums; `pico-client-coop-nostd` byte for byte and its
   receive Ir as before (no step reaches the client's put or its receive).

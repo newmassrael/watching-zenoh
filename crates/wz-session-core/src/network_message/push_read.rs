@@ -10,13 +10,9 @@
 //! What it reads, and how it refuses what it does not, is the generated `PushView::decode`'s,
 //! error for error, and its verdict is the one the rule gives the view it reads (the Push's own
 //! chain, then its body's); the tests hold it to both over every shape a Push takes and over
-//! damaged and cut bytes. It reads the envelope, the key and the Put body itself: a number of one
-//! byte, which nearly every id and length a stream carries is, is read inline; a chain is decoded
-//! once and judged as it is decoded, not walked again for the verdict; and the body of a Put and
-//! the body of a tag no arm names, which the codec reads as a Put, are one body of code. What it
-//! shares with every other reader it calls: an extension entry (`ExtEntryView::decode`, which
-//! every walk of a chain decodes), a timestamp, an encoding, a shared-memory slice, a Del body,
-//! and a number longer than a byte.
+//! damaged and cut bytes. It reads the envelope here, and the key and the body by the readers a
+//! Reply's body is read with too (`super::body_read`), so a Put is read by one body of code
+//! whichever record carries it.
 //!
 //! Each entry of a chain and each slice it decodes goes to a sink (`EntrySink`) as it is decoded.
 //! A walk that lends the record keeps there the entries its delivery reads (`PushExts`), so the
@@ -25,20 +21,19 @@
 //! decode of each entry and not from a second walk of the view. A build without an allocator has
 //! no owned parse, and links the lending reading alone.
 
-use sce_forge_runtime::codec::{Bounded, Chain, CodecError, ListView, SceCursor, Without};
-use wz_codecs::encoding::EncodingView;
-use wz_codecs::ext_entry::{ExtEntryView, ExtEntryWalk};
+use sce_forge_runtime::codec::{CodecError, SceCursor};
+use wz_codecs::ext_entry::ExtEntryView;
 use wz_codecs::msg_del::MsgDelView;
-use wz_codecs::msg_put::{MsgPutExtensionsHas0x12, MsgPutExtensionsHas0x12Key, MsgPutView};
+use wz_codecs::msg_put::MsgPutView;
 use wz_codecs::push::{PushUnknownTag, PushView, PushViewVariant};
-use wz_codecs::timestamp::TimestampView;
-use wz_codecs::wireexpr::WireexprViewVariant;
 use wz_codecs::zbuf_slice::ZbufSliceView;
 
 #[cfg(feature = "alloc")]
-use sce_forge_runtime::codec::{Entries, HoldsList, Placed, SceList};
+use sce_forge_runtime::codec::{Bounded, Chain, Entries, HoldsList, Placed, SceList};
 #[cfg(feature = "alloc")]
 use wz_codecs::ext_entry::ExtEntryOwned;
+#[cfg(any(test, feature = "alloc"))]
+use wz_codecs::msg_put::MsgPutExtensionsHas0x12;
 #[cfg(feature = "alloc")]
 use wz_codecs::msg_put::{MsgPutExtensionsField, MsgPutIn, MsgPutSlicesField};
 #[cfg(feature = "alloc")]
@@ -46,81 +41,9 @@ use wz_codecs::push::{PushExtensionsField, PushIn, PushVariantIn};
 #[cfg(feature = "alloc")]
 use wz_codecs::zbuf_slice::ZbufSliceOwned;
 
+use super::body_read::{self, EntrySink, Judge, FLAG_Z, TAG_DEL, TAG_PUT};
 use super::PushExts;
-use crate::ext_admit::{ExtAdmission, ExtCarrier, NetworkEnvelope, ZenohBody};
-
-/// The Push's `N` flag: a key suffix follows the id.
-const FLAG_N: u8 = 0x20;
-/// The Push's `M` flag: the id is in the sender's mapping, the codec's `WireexprLocal` arm.
-const FLAG_M: u8 = 0x40;
-/// The `Z` flag of a Push's or a Put's header: an extension chain follows.
-const FLAG_Z: u8 = 0x80;
-/// The Put's `T` flag: a timestamp follows its header.
-const PUT_FLAG_T: u8 = 0x20;
-/// The Put's `E` flag: an encoding follows the timestamp.
-const PUT_FLAG_E: u8 = 0x40;
-/// The body's tag, the low five bits of its header: a Put.
-const TAG_PUT: u8 = 0x01;
-/// The body's tag: a Del.
-const TAG_DEL: u8 = 0x02;
-/// The low seven bits of the shared-memory marker's header: a Put whose chain carries it lays
-/// its payload out as slices.
-const SHM_MARKER: u8 = 0x12;
-/// The longest key suffix the codec reads (`WireexprLocal` and `WireexprNonlocal`).
-const SUFFIX_MAX: u64 = 65_535;
-/// The longest inline payload the codec reads (`MsgPut`).
-const PAYLOAD_MAX: u64 = 4_294_967_295;
-
-/// The next byte, read past.
-#[inline(always)]
-fn byte(cursor: &mut SceCursor<'_>) -> Result<u8, CodecError> {
-    let byte = cursor.peek_u8()?;
-    cursor.advance(1)?;
-    Ok(byte)
-}
-
-/// A `vle_u64` field: one byte read here, any longer number by the runtime's reader, which
-/// answers for it what the codec answers.
-#[inline(always)]
-fn vle_u64(cursor: &mut SceCursor<'_>) -> Result<u64, CodecError> {
-    match cursor.peek_u8() {
-        Ok(byte) if byte & 0x80 == 0 => {
-            cursor.advance(1)?;
-            Ok(u64::from(byte))
-        }
-        _ => cursor.read_vle_u64(),
-    }
-}
-
-/// A `vle_u16` field, as `vle_u64` reads one.
-#[inline(always)]
-fn vle_u16(cursor: &mut SceCursor<'_>) -> Result<u16, CodecError> {
-    match cursor.peek_u8() {
-        Ok(byte) if byte & 0x80 == 0 => {
-            cursor.advance(1)?;
-            Ok(u16::from(byte))
-        }
-        _ => cursor.read_vle_u16(),
-    }
-}
-
-/// Where the reader puts what it decodes of a Push's lists, each part once, in the order of the
-/// wire: the entries of the Push's own chain, the entries of its Put's chain with the place of
-/// that chain's first shared-memory marker, and the Put's slices.
-pub(crate) trait EntrySink<'f> {
-    /// The next entry of the Push's own chain.
-    fn push_entry(&mut self, entry: &ExtEntryView<'f>) -> Result<(), CodecError>;
-    /// The next entry of the Put's chain other than its first shared-memory marker.
-    fn put_entry(&mut self, entry: &ExtEntryView<'f>) -> Result<(), CodecError>;
-    /// The Put chain's first shared-memory marker, after the entries before it: the codec holds
-    /// it as the place it stands among the others, not as one of them.
-    fn put_marker(&mut self);
-    /// The next slice of a Put whose payload is laid out as slices.
-    fn slice(&mut self, slice: &ZbufSliceView<'f>) -> Result<(), CodecError>;
-    /// The next entry of a Del's chain, as the rule judges it: a chain the rule refuses is
-    /// handed over up to the entry it refuses.
-    fn del_entry(&mut self, _entry: &ExtEntryView<'f>) {}
-}
+use crate::ext_admit::{ExtAdmission, ExtCarrier, NetworkEnvelope};
 
 /// The sink of a reading that keeps nothing, the view holding each list as the bytes it lies in:
 /// the plain lane's.
@@ -229,85 +152,6 @@ impl<'f> PushExts<'f> {
     }
 }
 
-/// The admission rule over a chain read one entry at a time: what
-/// [`judge_ext_entries`](crate::ext_admit::judge_ext_entries) answers for the whole chain, its
-/// first offender, without a second walk of the chain to find it. Each entry goes through the
-/// rule's inline screen and, when the screen cannot pass it, the rule's one body
-/// (`crate::ext_admit::judge_one`), so the reader links no copy of the rule of its own. The
-/// carriers it judges are always named, so a chain read through is admissible.
-struct Judge {
-    carrier: ExtCarrier,
-    verdict: ExtAdmission,
-}
-
-impl Judge {
-    fn new(carrier: ExtCarrier) -> Self {
-        Self {
-            carrier,
-            verdict: ExtAdmission::Admissible,
-        }
-    }
-
-    /// The next entry: its header, and the body of an extension the carrier declares.
-    fn entry(&mut self, entry: &ExtEntryView<'_>) {
-        if self.verdict == ExtAdmission::Admissible {
-            self.verdict = crate::ext_admit::judge_one(self.carrier, entry)
-                .unwrap_or(ExtAdmission::Admissible);
-        }
-    }
-
-    /// The shared-memory marker a Put holds as a place: a unit, judged by its header alone.
-    fn marker(&mut self) {
-        if self.verdict == ExtAdmission::Admissible {
-            self.verdict = crate::ext_admit::judge_one_header(
-                self.carrier,
-                MsgPutExtensionsHas0x12Key::named().header,
-            )
-            .unwrap_or(ExtAdmission::Admissible);
-        }
-    }
-}
-
-/// The extension chain at the cursor, to the entry whose `Z` flag is clear, as the list the
-/// codec's view holds it as: the bytes from its first entry to the end of the frame, and how many
-/// entries it has. Each entry is judged in order, and each entry goes to `sink` as it is
-/// decoded. A Put's chain (`shm`) is judged with the shared-memory marker's own header at the
-/// place of its first entry of that kind, as the rule reads a Put that holds the marker as a
-/// place, and says whether it carried one; the Push's own chain is the one with no `shm`.
-fn read_chain<'f, S: EntrySink<'f>>(
-    cursor: &mut SceCursor<'f>,
-    judge: &mut Judge,
-    sink: &mut S,
-    mut shm: Option<&mut bool>,
-) -> Result<Bounded<ListView<'f, ExtEntryWalk, 0>, { usize::MAX }, 1>, CodecError> {
-    let rest = cursor.peek_slice(cursor.remaining())?;
-    let mut count: u32 = 0;
-    loop {
-        let entry = ExtEntryView::decode(cursor)?;
-        match shm.as_deref_mut() {
-            Some(seen) if !*seen && entry.header & 0x7f == SHM_MARKER => {
-                *seen = true;
-                judge.marker();
-                sink.put_marker();
-            }
-            Some(_) => {
-                judge.entry(&entry);
-                sink.put_entry(&entry)?;
-            }
-            None => {
-                judge.entry(&entry);
-                sink.push_entry(&entry)?;
-            }
-        }
-        // An entry is a byte at least, so no frame holds `u32::MAX` of them.
-        count = count.saturating_add(1);
-        if !entry.z() {
-            break;
-        }
-    }
-    Bounded::new(ListView::new(rest, count, [])).ok_or(CodecError::TooManyElements)
-}
-
 /// The Push at the cursor, read into `out`, and the verdict on its chains: its own, then its
 /// body's. Each entry of a chain and each slice goes to `sink` as it is decoded. The cursor is
 /// past the record on success; on an error neither `out` nor `sink` is to be read.
@@ -323,18 +167,18 @@ pub(crate) fn read_push_view<'f, S: EntrySink<'f>>(
 /// The envelope of the Push at the cursor, read into `out`: its header, its key and its own
 /// chain, and the verdict on that chain. The cursor is at the body's header after it. The plain
 /// lane reads the envelope alone: what it keeps of a record's prefix ends at that header, and the
-/// body of a plain Put is the header and the payload `read_payload` reads.
+/// body of a plain Put is the header and the payload `body_read::read_payload` reads.
 #[inline(always)]
 pub(crate) fn read_envelope<'f, S: EntrySink<'f>>(
     cursor: &mut SceCursor<'f>,
     out: &mut PushView<'f>,
     sink: &mut S,
 ) -> Result<ExtAdmission, CodecError> {
-    let header = byte(cursor)?;
-    read_key(cursor, header, &mut out.keyexpr.body)?;
+    let header = body_read::byte(cursor)?;
+    body_read::read_key(cursor, header, &mut out.keyexpr.body)?;
     let mut own = Judge::new(ExtCarrier::Network(NetworkEnvelope::Push));
     out.extensions = if header & FLAG_Z != 0 {
-        Some(read_chain(cursor, &mut own, sink, None)?)
+        Some(body_read::read_chain(cursor, &mut own, sink, None)?)
     } else {
         None
     };
@@ -368,143 +212,11 @@ fn read_body<'f, S: EntrySink<'f>>(
     }
     let body = match &mut out.body {
         PushViewVariant::CodecZenohMsgPut(put) | PushViewVariant::Default { body: put, .. } => {
-            read_put(cursor, put, sink)?
+            body_read::read_put(cursor, put, sink)?
         }
-        PushViewVariant::CodecZenohMsgDel(del) => {
-            MsgDelView::decode_into(cursor, del)?;
-            // The codec's Del reader decodes the chain; the one walk of it is the rule's, which
-            // hands each entry to `sink` as it judges it.
-            super::judge_entries(
-                ExtCarrier::Zenoh(ZenohBody::Del),
-                del.extensions.as_ref().map(|chain| {
-                    crate::ext_view::walked(Some(chain)).inspect(|entry| sink.del_entry(entry))
-                }),
-            )
-        }
+        PushViewVariant::CodecZenohMsgDel(del) => body_read::read_del(cursor, del, sink)?,
     };
     Ok(super::then_judge(own, || body))
-}
-
-/// The key of a Push whose header is `header`: its id, and with `N` its suffix, in the arm its
-/// `M` flag names.
-fn read_key<'f>(
-    cursor: &mut SceCursor<'f>,
-    header: u8,
-    out: &mut WireexprViewVariant<'f>,
-) -> Result<(), CodecError> {
-    let id = vle_u16(cursor)?;
-    let (suffix_len, suffix) = if header & FLAG_N != 0 {
-        let length = vle_u64(cursor)?;
-        if length > SUFFIX_MAX {
-            return Err(CodecError::LengthOutOfRange);
-        }
-        // At most `SUFFIX_MAX`, which every `usize` holds.
-        let length_bytes = length as usize;
-        let text = core::str::from_utf8(cursor.peek_slice(length_bytes)?)
-            .map_err(|_| CodecError::InvalidUtf8)?;
-        cursor.advance(length_bytes)?;
-        (
-            Some(length),
-            Some(Bounded::new(text).ok_or(CodecError::LengthOutOfRange)?),
-        )
-    } else {
-        (None, None)
-    };
-    *out = if header & FLAG_M != 0 {
-        WireexprViewVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
-            id,
-            suffix_len,
-            suffix,
-        })
-    } else {
-        WireexprViewVariant::WireexprNonlocal(wz_codecs::wireexpr_nonlocal::WireexprNonlocal {
-            id,
-            suffix_len,
-            suffix,
-        })
-    };
-    Ok(())
-}
-
-/// The Put body at the cursor, read into `put`, and the verdict on its chain. The entries of its
-/// chain and its slices go to `sink` as they are decoded.
-fn read_put<'f, S: EntrySink<'f>>(
-    cursor: &mut SceCursor<'f>,
-    put: &mut MsgPutView<'f>,
-    sink: &mut S,
-) -> Result<ExtAdmission, CodecError> {
-    let header = byte(cursor)?;
-    if header & PUT_FLAG_T != 0 {
-        TimestampView::decode_into(cursor, put.timestamp.insert(TimestampView::default()))?;
-    } else {
-        put.timestamp = None;
-    }
-    if header & PUT_FLAG_E != 0 {
-        EncodingView::decode_into(cursor, put.encoding.insert(EncodingView::default()))?;
-    } else {
-        put.encoding = None;
-    }
-    let mut judge = Judge::new(ExtCarrier::Zenoh(ZenohBody::Put));
-    let mut sliced = false;
-    let extensions = if header & FLAG_Z != 0 {
-        Some(read_chain(cursor, &mut judge, sink, Some(&mut sliced))?)
-    } else {
-        None
-    };
-    if sliced {
-        let count = cursor.read_vle_u32()?;
-        let rest = cursor.peek_slice(cursor.remaining())?;
-        for _ in 0..count {
-            let slice = ZbufSliceView::decode(cursor)?;
-            sink.slice(&slice)?;
-        }
-        let slices =
-            Bounded::new(ListView::new(rest, count, [])).ok_or(CodecError::TooManyElements)?;
-        // The marker was found in the chain, so there is one, and it holds an entry of its kind.
-        let chain = extensions.ok_or(CodecError::PresentIfMismatch)?;
-        put.extensions_has_0x12 = MsgPutExtensionsHas0x12::Has0x12 {
-            extensions: sce_forge_runtime::codec::place_first_in::<
-                _,
-                MsgPutExtensionsHas0x12Key,
-                { usize::MAX },
-            >(chain.into_inner())
-            .map_err(|_| CodecError::PresentIfMismatch)?,
-            slices,
-        };
-        put.payload_len = None;
-        put.slice_count = Some(count);
-    } else {
-        let (length, payload) = read_payload(cursor)?;
-        // A chain with no marker is one the arm with an inline payload holds.
-        let extensions = match extensions {
-            Some(chain) => Some(
-                Chain::new(Without::whole(chain.into_inner()))
-                    .ok_or(CodecError::PresentIfMismatch)?,
-            ),
-            None => None,
-        };
-        put.extensions_has_0x12 = MsgPutExtensionsHas0x12::NotHas0x12 {
-            extensions,
-            payload: Bounded::new(payload).ok_or(CodecError::LengthOutOfRange)?,
-        };
-        put.payload_len = Some(length);
-        put.slice_count = None;
-    }
-    put.header = header;
-    Ok(judge.verdict)
-}
-
-/// The payload of a Put that carries it inline: its length, and that many bytes, where they lie.
-#[inline(always)]
-pub(crate) fn read_payload<'f>(cursor: &mut SceCursor<'f>) -> Result<(u64, &'f [u8]), CodecError> {
-    let length = vle_u64(cursor)?;
-    if length > PAYLOAD_MAX {
-        return Err(CodecError::LengthOutOfRange);
-    }
-    let length_bytes = usize::try_from(length).map_err(|_| CodecError::NeedMoreBytes)?;
-    let payload = cursor.peek_slice(length_bytes)?;
-    cursor.advance(length_bytes)?;
-    Ok((length, payload))
 }
 
 /// The lent record at the heap's capacity, which the owned parse projects its owned message from.
@@ -670,6 +382,10 @@ impl<'f> PutKept<'f> {
 mod tests {
     use super::super::{judge_entries, judge_put_view, then_judge};
     use super::*;
+    use crate::ext_admit::ZenohBody;
+    use sce_forge_runtime::codec::{ListView, Without};
+    use wz_codecs::ext_entry::ExtEntryWalk;
+    use wz_codecs::wireexpr::WireexprViewVariant;
 
     /// What the reader reads from `bytes`: the view, how far it read and the verdict.
     fn reading(bytes: &[u8]) -> Result<(PushView<'_>, usize, ExtAdmission), CodecError> {

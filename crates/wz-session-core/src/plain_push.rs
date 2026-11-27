@@ -17,7 +17,7 @@
 //! borrow and a frame's records are one small vector.
 
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
-use crate::network_message::push_read;
+use crate::network_message::{body_read, push_read};
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 use sce_forge_runtime::codec::SceCursor;
 
@@ -82,7 +82,7 @@ fn read_to(frame: &[u8], cursor: &SceCursor<'_>) -> usize {
 /// The envelope is the Push reader's (`push_read::read_envelope`). Its verdict is the rule's on
 /// the QoS extension alone, which no participant refuses (the tests hold it so), and a record
 /// that carries any other extension is declined. The body of a plain Put is its header and its
-/// payload, which the reader's payload part reads (`push_read::read_payload`).
+/// payload, which the reader's payload part reads (`body_read::read_payload`).
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 #[inline]
 fn read_plain_put<'f>(frame: &'f [u8], cursor: &mut SceCursor<'f>) -> Option<Read<'f>> {
@@ -115,7 +115,7 @@ fn read_plain_put<'f>(frame: &'f [u8], cursor: &mut SceCursor<'f>) -> Option<Rea
     }
     cursor.advance(1).ok()?;
     let prefix_end = read_to(frame, cursor);
-    let (_, payload) = push_read::read_payload(cursor).ok()?;
+    let (_, payload) = body_read::read_payload(cursor).ok()?;
     let (id, sender_mapping, suffix) = match &view.keyexpr.body {
         WireexprViewVariant::WireexprLocal(key) => (
             key.id,
@@ -204,7 +204,7 @@ pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
             };
             if same_prefix {
                 cursor.advance(prefix_len).ok()?;
-                let (_, payload) = push_read::read_payload(&mut cursor).ok()?;
+                let (_, payload) = body_read::read_payload(&mut cursor).ok()?;
                 // The suffix lies at the same distance from the start of the record.
                 let moved = |range: (u32, u32)| {
                     let to_at = |position: u32| {

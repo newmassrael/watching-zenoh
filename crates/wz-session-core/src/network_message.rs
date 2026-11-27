@@ -382,7 +382,7 @@ impl NetworkMessage {
 /// [`ExtAdmission::Admissible`](crate::ext_admit::ExtAdmission::Admissible) for a
 /// message that has none.
 // The union of its callers: the owned message (`alloc`), the Declare verdict,
-// the Response read where its frame lies (`response_view_admission`,
+// the Response read where its frame lies (`response_read`,
 // whose verdict the owned message shares), and the views read where a slot
 // profile's frame lies. The Request verdict is `alloc`'s alone, so it adds
 // nothing. Each item below is gated on the union of ITS callers, because the
@@ -428,8 +428,9 @@ fn judge_chain<E: crate::ext_view::ExtEntryView>(
 /// message refuse the same chains.
 // [`judge_chain`]'s union, which it serves and which holds the Put verdict's
 // (`judge_put_chain`) and the Response read where its frame lies
-// (`response_view_admission`), and the Request read where its frame lies
-// (`request_view_admission`), which walks its chains and calls this alone.
+// (`response_read`), and the Request read where its frame lies
+// (`request_read`, and `request_view_admission` in a build without `request-put-del`), which
+// call this alone.
 #[cfg(any(
     feature = "alloc",
     all(feature = "codec-declare", feature = "rx-control"),
@@ -775,22 +776,14 @@ fn judge_put_chain<S: wz_codecs::msg_put::MsgPutStorage>(
 
 /// The verdict on the chain of a Put read as its view, its shared-memory marker included at the
 /// place it stands: the rule of `judge_put_chain` over the chain walked where the frame lies. The
-/// Request read where its frame lies judges the Put it carries here; the Push reader judges its
-/// Put's chain as it reads it (`push_read`), and its tests hold that verdict to this one.
+/// readers of a Push, a Request and a Response judge the chain of the Put they carry as they read
+/// it (`body_read::read_put`); this is the verdict their tests hold that one to.
 #[cfg(all(
+    test,
     feature = "codec-frame",
     any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
-    ),
-    any(
         all(feature = "codec-request", feature = "request-put-del"),
-        all(
-            test,
-            feature = "codec-push",
-            any(feature = "alloc", feature = "rx-push")
-        )
+        all(feature = "codec-push", any(feature = "alloc", feature = "rx-push"))
     )
 ))]
 fn judge_put_view(put: &wz_codecs::msg_put::MsgPutView<'_>) -> crate::ext_admit::ExtAdmission {
@@ -816,7 +809,7 @@ fn judge_put_view(put: &wz_codecs::msg_put::MsgPutView<'_>) -> crate::ext_admit:
 /// The chain a Request's body carries, for [`judge_request_chains`]: a Put's, already judged
 /// ([`judge_put_chain`], which reads its shared-memory marker at its place), a Del's (generic
 /// entries, `E`) or a Query's (the Query's own entries, `Q`). The owned message's; the Request
-/// read where its frame lies walks its chains (`request_view_admission`).
+/// read where its frame lies judges its chains as it reads them (`request_read`).
 ///
 /// The Put and Del are the arms of the `request-put-del` feature (zenoh takes only a Query as a
 /// request body, zenoh-pico all three). Without it the generic `E` would name no field, so
@@ -837,8 +830,8 @@ enum RequestBodyChain<'c, E, Q> {
 }
 
 /// The verdict on a Request: its own chain, then its body's. The same order
-/// `request_view_admission` judges the Request read where its frame lies in, over chains it
-/// walks and does not hold.
+/// the reader of a Request read where its frame lies (`request_read`) judges it in, over chains
+/// it reads and does not hold.
 #[cfg(all(feature = "alloc", feature = "codec-request"))]
 fn judge_request_chains<E: crate::ext_view::ExtEntryView, Q: crate::ext_view::ExtEntryView>(
     outer: Option<&[E]>,
@@ -859,8 +852,8 @@ fn judge_request_chains<E: crate::ext_view::ExtEntryView, Q: crate::ext_view::Ex
 /// The chains a Response's body carries, for [`judge_response_chains`]: a
 /// Reply's own and its data body's (a Put's or a Del's), or an Err's.
 ///
-/// The owned message's only: a Response read where its frame lies walks its chains
-/// (`response_view_admission`) and holds none.
+/// The owned message's only: a Response read where its frame lies judges its chains as it reads
+/// them (`response_read`) and holds none.
 #[cfg(all(feature = "alloc", feature = "codec-response"))]
 enum ResponseBodyChain<'c, E> {
     /// A Reply's own chain, and the verdict on its data body's: a Put's is judged by
@@ -874,7 +867,7 @@ enum ResponseBodyChain<'c, E> {
 
 /// The verdict on a Response: its own chain, then its body's, a Reply's own
 /// before its data's. The rule of the owned message, which the Response read
-/// where its frame lies keeps over chains it walks (`response_view_admission`).
+/// where its frame lies keeps over the chains it reads (`response_read`).
 #[cfg(all(feature = "alloc", feature = "codec-response"))]
 fn judge_response_chains<E: crate::ext_view::ExtEntryView>(
     outer: Option<&[E]>,
@@ -889,10 +882,13 @@ fn judge_response_chains<E: crate::ext_view::ExtEntryView>(
     })
 }
 
-/// [`NetworkMessage::ext_admission`] for a Request read where its frame lies.
+/// [`NetworkMessage::ext_admission`] for a Request read where its frame lies: the verdict of a
+/// build that reads no Put or Del a Request carries, and the reference the tests hold the reader
+/// of one that does to (`request_read`), which judges each chain as it reads it.
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-request",
+    any(test, not(feature = "request-put-del")),
     any(
         test,
         feature = "session-unicast",
@@ -932,8 +928,11 @@ fn request_view_admission(
     )
 }
 
-/// [`NetworkMessage::ext_admission`] for a Response read where its frame lies.
+/// [`NetworkMessage::ext_admission`] for a Response read where its frame lies: the reference the
+/// tests hold the reader of a Response to (`response_read`), which judges each chain as it
+/// reads it.
 #[cfg(all(
+    test,
     feature = "codec-frame",
     feature = "codec-response",
     any(
@@ -2602,6 +2601,49 @@ fn admit_lent(
     }
 }
 
+/// The readers of the parts of a body that a Push, a Request and a Response carry alike: a Put's
+/// or a Del's body, a key and an extension chain. The union of the gates of their readers.
+#[cfg(any(
+    all(
+        feature = "codec-frame",
+        feature = "codec-request",
+        feature = "request-put-del",
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    ),
+    all(
+        feature = "codec-frame",
+        feature = "codec-push",
+        any(
+            feature = "alloc",
+            all(
+                feature = "rx-push",
+                any(test, feature = "session-unicast", feature = "session-multicast")
+            )
+        )
+    ),
+    all(
+        feature = "codec-frame",
+        feature = "codec-response",
+        any(
+            all(
+                feature = "alloc",
+                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+            ),
+            feature = "rx-response"
+        ),
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    )
+))]
+pub(crate) mod body_read;
+
 /// The reader of a Push: on the walks that lend one (`lend_push`), and on the owned parse
 /// (`decode_one_record`), which a build with an allocator has.
 #[cfg(all(
@@ -2616,6 +2658,40 @@ fn admit_lent(
     )
 ))]
 pub(crate) mod push_read;
+
+/// The reader of a Request read where its frame lies (`read_request`) in a build that reads the
+/// Put and the Del a Request carries, which it reads by the readers of a Push's body.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-request",
+    feature = "request-put-del",
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+mod request_read;
+
+/// The reader of a Response read where its frame lies (`read_response`), whose Reply's Put or Del
+/// is read by the readers of a Push's body.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "codec-response",
+    any(
+        all(
+            feature = "alloc",
+            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+        ),
+        feature = "rx-response"
+    ),
+    any(
+        test,
+        feature = "session-unicast",
+        all(feature = "session-multicast", not(feature = "alloc"))
+    )
+))]
+mod response_read;
 
 // Each kind is read by a function of its own, never inlined, into a binding its caller holds: a
 // decoded record is a wide value (inline extension chains), and kept out of line its decode
@@ -2669,10 +2745,19 @@ fn read_request<'f>(
     request: &mut wz_codecs::request::RequestView<'f>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
     // Read as its view, where the eager record is over a kilobyte (its extension vectors are
-    // inline, sized for their declared maximum), so the walk of a chain afterwards cannot fail.
-    wz_codecs::request::RequestView::decode_into(cursor, request)
+    // inline, sized for their declared maximum). A build that reads the Put and the Del a Request
+    // carries reads them by the reader of a Push's body, judging each chain as it reads it; one
+    // that does not has no Put body reader of the codec's to share, and walks the chains after.
+    #[cfg(feature = "request-put-del")]
+    let admission = request_read::read_request_view(cursor, request)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
-    admit_lent(request_view_admission(request))
+    #[cfg(not(feature = "request-put-del"))]
+    let admission = {
+        wz_codecs::request::RequestView::decode_into(cursor, request)
+            .map_err(crate::parse_error::InboundParseError::Codec)?;
+        request_view_admission(request)
+    };
+    admit_lent(admission)
 }
 
 #[cfg(all(
@@ -2696,9 +2781,11 @@ fn read_response<'f>(
     cursor: &mut SceCursor<'f>,
     response: &mut wz_codecs::response::ResponseView<'f>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    wz_codecs::response::ResponseView::decode_into(cursor, response)
+    // Read as its view by a reader that judges each chain as it reads it, and reads the Reply's
+    // Put or Del by the reader of a Push's body: one reader of a Put body for both records.
+    let admission = response_read::read_response_view(cursor, response)
         .map_err(crate::parse_error::InboundParseError::Codec)?;
-    admit_lent(response_view_admission(response))
+    admit_lent(admission)
 }
 
 #[cfg(all(
