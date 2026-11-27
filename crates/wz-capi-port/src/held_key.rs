@@ -12,12 +12,14 @@
 //! as a [`HeldKey`], whose text it reads with no lock and no branch (the bytes of a held block are
 //! written once, before its first holder, and never again while it is held), and asks the engine
 //! to hold, share or let go of a block through one call ([`SessionKeys::key`]), which the engine
-//! answers under the lock in one body.
+//! answers under the lock in one body. Sharing a block and letting it go take the proof of a hold
+//! of that lock ([`KeysLocked`]), which only the engine's hold of it makes, so a path that would
+//! touch the counts outside the lock does not compile.
 
 use alloc::boxed::Box;
 use core::ptr::NonNull;
 
-use wz_session_core::key_arena::{KeyRef, KeySpace};
+use wz_session_core::key_arena::{KeyRef, KeysLocked};
 
 /// Why an engine kept no key for an object of the C ABI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,9 +40,9 @@ const OWN: u32 = u32::MAX - 1;
 /// it, one of the block's holders; or a copy of its own ([`Self::own`]).
 ///
 /// A key of an arena is not shared or given back by itself: [`SessionKeys::key`] does that, under
-/// the session's lock. One dropped without being let go of leaves its block taken until the
-/// session's arena is given back, which is a block of the arena and never memory read after it is
-/// freed; a copy of its own is freed by [`Self::free_own`].
+/// the session's lock, whose hold it is handed ([`KeysLocked`]). One dropped without being let go
+/// of leaves its block taken until the session's arena is given back, which is a block of the arena
+/// and never memory read after it is freed; a copy of its own is freed by [`Self::free_own`].
 pub struct HeldKey {
     /// The first byte of the key's text, read with no lock.
     text: NonNull<u8>,
@@ -51,9 +53,9 @@ pub struct HeldKey {
 }
 
 // SAFETY: a key's count and its arena's state are touched only through `share` and `release`,
-// whose callers hold the lock of the session the arena belongs to, and a copy of its own is
-// touched only by its one owner's `free_own`; what any thread reads with no lock is the text,
-// which no one writes while a holder of it lives.
+// which take the proof of a hold of the lock of the session the arena belongs to, and a copy of
+// its own is touched only by its one owner's `free_own`; what any thread reads with no lock is the
+// text, which no one writes while a holder of it lives.
 unsafe impl Send for HeldKey {}
 // SAFETY: as `Send`: a shared reference reads the text alone.
 unsafe impl Sync for HeldKey {}
@@ -123,11 +125,12 @@ impl HeldKey {
         });
     }
 
-    /// Another holder of this key's block, counted.
+    /// Another holder of this key's block, counted, under the hold of the session's lock `keys`
+    /// proves.
     ///
     /// # Safety
-    /// The lock of the session whose key arena `keys` is, which made this key, is held.
-    pub unsafe fn share(&self, keys: &KeySpace) -> Self {
+    /// `self` is a key of the arena whose lock `keys` proves held.
+    pub unsafe fn share(&self, keys: &KeysLocked<'_>) -> Self {
         // SAFETY: the caller's contract; the key adopted is this holder, kept apart again below.
         let key = unsafe { keys.adopt(self.at, self.len) };
         let shared = Self::of(key.clone());
@@ -135,11 +138,12 @@ impl HeldKey {
         shared
     }
 
-    /// Let go of this holder: the block goes back with its last.
+    /// Let go of this holder, under the hold of the session's lock `keys` proves: the block goes
+    /// back with its last.
     ///
     /// # Safety
     /// As [`Self::share`].
-    pub unsafe fn release(self, keys: &KeySpace) {
+    pub unsafe fn release(self, keys: &KeysLocked<'_>) {
         // SAFETY: the caller's contract; the key adopted is this holder, which ends here.
         drop(unsafe { keys.adopt(self.at, self.len) });
     }
@@ -188,7 +192,7 @@ pub trait SessionKeys {
 mod tests {
     use super::*;
     use wz_session_core::bounded::{Arena, ARENA_ALIGN};
-    use wz_session_core::key_arena::block_bytes;
+    use wz_session_core::key_arena::{block_bytes, KeySpace};
 
     /// One block of an arena's memory in a test, aligned as an arena's spans start.
     #[derive(Clone, Copy)]
@@ -230,15 +234,17 @@ mod tests {
         assert!(!held.is_own());
         let block = block_bytes("demo/held/key".len()).expect("short");
         assert_eq!(keys.counts().used, block);
-        // SAFETY: the test is the session's one thread, and the arena is leaked.
-        let shared = unsafe { held.share(&keys) };
+        // SAFETY: no lock guards the arena, which the test, its one thread, holds alone.
+        let locked = unsafe { KeysLocked::vouched(&keys) };
+        // SAFETY: the key is of the arena `locked` proves held, which is leaked.
+        let shared = unsafe { held.share(&locked) };
         assert_eq!(keys.counts().used, block, "a share takes no block");
         // SAFETY: as above.
-        unsafe { held.release(&keys) };
+        unsafe { held.release(&locked) };
         assert_eq!(shared.as_str(), "demo/held/key", "the share still reads it");
         assert_eq!(keys.counts().used, block);
         // SAFETY: as above.
-        unsafe { shared.release(&keys) };
+        unsafe { shared.release(&locked) };
         assert_eq!(keys.counts().used, 0, "the last holder gave the block back");
     }
 
@@ -252,8 +258,10 @@ mod tests {
         // hands the copy to the arena.
         let copy = unsafe { held.uncounted() };
         assert_eq!(copy.as_str(), "demo/uncounted");
-        // SAFETY: the test is the session's one thread, and the arena is leaked.
-        unsafe { held.release(&keys) };
+        // SAFETY: no lock guards the arena, which the test, its one thread, holds alone.
+        let locked = unsafe { KeysLocked::vouched(&keys) };
+        // SAFETY: the key is of the arena `locked` proves held, which is leaked.
+        unsafe { held.release(&locked) };
         assert_eq!(keys.counts().used, 0, "the copy held nothing");
     }
 

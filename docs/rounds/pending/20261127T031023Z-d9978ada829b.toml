@@ -1,0 +1,19 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"]
+decision = '''
+Pay a data race the release engine carried: in its threaded form the read
+task and the sending threads reached a stream link's send half with no
+lock, so a blocking put could vanish while answered as sent.
+'''
+changes = '''
+- runtime-coop stream_link: the send half is reached only through TxHold.
+- capi-coop: a put no link lent a slot for is answered as failed.
+- session-core: a held-apart key is shared only under a lock hold; a stress test.
+'''
+verification = '''
+- TSan program lane 12/12 (periodic and keyed raced before); stress 10/10.
+- runtime-coop 141, capi-coop 280, session-core key_arena and round pass.
+- size +130 B and receive Ir +6 per message: a correctness fix first.
+'''
+carry = '''
+- none for this lane.
+'''

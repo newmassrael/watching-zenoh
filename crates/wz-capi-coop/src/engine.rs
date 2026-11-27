@@ -73,11 +73,11 @@ use wz_runtime_coop::kept::Shared;
     all(not(wz_round), any(feature = "listen", feature = "group"))
 ))]
 use wz_session_core::bounded::Arena;
-use wz_session_core::bounded::{KeyMaker, KeyUnkept, LendRefused, TableLender};
+use wz_session_core::bounded::{KeyUnkept, LendRefused, TableLender};
 use wz_session_core::caps;
 #[cfg(all(feature = "liveliness", wz_round))]
 use wz_session_core::key_arena::KeyRef;
-use wz_session_core::key_arena::{KeySpace, LentKeys};
+use wz_session_core::key_arena::{KeySpace, KeysLocked};
 use wz_session_core::placed::{Placed, PlacedRef};
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_hold::HeldReplies;
@@ -1672,6 +1672,15 @@ struct CoreGuard<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
 }
 
 impl<'a, L: CoopLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
+    /// The proof that this hold holds the lock that guards the session's key arena, for as long as
+    /// the hold is borrowed: what a key an object of the C ABI holds apart is shared and let go of
+    /// through, and nothing else makes one.
+    fn keys_locked(&self) -> KeysLocked<'_> {
+        // SAFETY: this guard holds the session's lock from its taking to its drop, the lock that
+        // guards the arena (`CoreLock::init_at`), and the proof borrows the guard.
+        unsafe { KeysLocked::vouched(&self.guard.0.session.keys) }
+    }
+
     fn taken(
         guard: StateGuard<'a, Confined<Core<L, C>>>,
         held: wz_capi_port::sync::SessionHeld,
@@ -2511,6 +2520,13 @@ struct LiveCore<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
     core: core::mem::ManuallyDrop<CoreGuard<'a, L, C>>,
     #[cfg(wz_round)]
     lane: &'a Round,
+}
+
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> LiveCore<'_, L, C> {
+    /// The proof of the hold this is ([`CoreGuard::keys_locked`]).
+    fn keys_locked(&self) -> KeysLocked<'_> {
+        self.core.keys_locked()
+    }
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> Deref for LiveCore<'_, L, C> {
@@ -4023,6 +4039,14 @@ fn face_ended(stands: bool, established: bool) -> bool {
 /// What one send's failure means for a publish: a link that is down skips it, anything else is
 /// a message no link could have carried.
 fn leg_outcome(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
+    // A link that lent no slot for the frame refused it before a byte left. Read as a link that is
+    // down, as its publish error reads it, a blocking put would be answered as sent and never
+    // reach the peer; it is a send that failed, as the refusal of a declaration is.
+    #[cfg(feature = "tx-lend-only")]
+    if let Err(SendWireError::LinkRefused(wz_session_core::link::LinkDropCause::NoTxSlot)) = result
+    {
+        return Err(FanoutError::ExceedsCapacity);
+    }
     match result.map_err(PublishError::from) {
         Ok(()) => Ok(0),
         Err(PublishError::TransportUnavailable | PublishError::RequiresUnicast) => Ok(0),
@@ -11808,20 +11832,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for C
                 KeyAsk::Release(_) => Ok(None),
             };
         };
-        let core = &core.0;
+        let keys = core.keys_locked();
         match ask {
             // A text the arena keeps already, whoever holds it, is that block shared, so a key the
             // session's declarations and the program's objects name alike takes one block.
-            KeyAsk::Hold(text) => match LentKeys::from(core.session.keys).shared(text) {
+            KeyAsk::Hold(text) => match keys.shared(text) {
                 Ok(key) => Ok(Some(HeldKey::of(key))),
                 Err(KeyUnkept::TooLong) => Err(KeyNotHeld::TooLong),
                 Err(KeyUnkept::NoRoom) => Err(KeyNotHeld::NoRoom),
             },
-            // SAFETY: the session's lock is held (`core`), and the key is its arena's.
-            KeyAsk::Share(key) => Ok(Some(unsafe { key.share(&core.session.keys) })),
+            // SAFETY: the key is of the arena whose lock `keys` proves held: the session's.
+            KeyAsk::Share(key) => Ok(Some(unsafe { key.share(&keys) })),
             KeyAsk::Release(key) => {
                 // SAFETY: as a share.
-                unsafe { key.release(&core.session.keys) };
+                unsafe { key.release(&keys) };
                 Ok(None)
             }
         }
@@ -12678,6 +12702,39 @@ mod hand_back_tests {
         let back = made();
         back.handed_back();
         assert_eq!(*lock(&back.handed), 0);
+    }
+}
+
+#[cfg(test)]
+mod leg_outcome_tests {
+    //! What a publish's leg answers for each way its send ended.
+    use super::leg_outcome;
+    use wz_session_core::send_wire_error::SendWireError;
+
+    /// A send the link refused for want of a slot is a failed send, where a link that is down is
+    /// skipped and a sent frame is sent. Turned red by a `leg_outcome` that answers the refusal
+    /// as it answers a link that is down (`Ok(0)`), which a blocking put reads as sent.
+    #[cfg(feature = "tx-lend-only")]
+    #[test]
+    fn a_frame_the_link_lent_no_slot_for_is_a_failed_send() {
+        use wz_capi_port::FanoutError;
+        use wz_session_core::link::LinkDropCause;
+        assert_eq!(
+            leg_outcome(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot))),
+            Err(FanoutError::ExceedsCapacity)
+        );
+        assert_eq!(
+            leg_outcome(Err(SendWireError::LinkRefused(LinkDropCause::WriterGone))),
+            Ok(0),
+            "CONTROL: a link whose writer is gone is down, and skipped"
+        );
+    }
+
+    /// A sent frame and a link that is not there are no failure of the publish.
+    #[test]
+    fn a_sent_frame_and_a_link_that_is_down_are_no_failure() {
+        assert_eq!(leg_outcome(Ok(())), Ok(0));
+        assert_eq!(leg_outcome(Err(SendWireError::TransportUnavailable)), Ok(0));
     }
 }
 

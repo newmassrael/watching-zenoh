@@ -63,7 +63,7 @@ use crate::bounded::{
 use crate::byte_cells::{ByteBuf, KeptBytes};
 use crate::caps;
 use crate::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
-use crate::key_arena::{KeyRef, KeySpace};
+use crate::key_arena::{KeyRef, KeySpace, KeysLocked};
 use crate::placed::Placed;
 use crate::plane_lock::LockFamily;
 use crate::qos::CongestionControl;
@@ -1115,8 +1115,14 @@ impl<C: RoundCalls> Table<C> {
     /// Hold nothing, for the next round: the count each record holds of a block of the session's
     /// key arena handed back, and every row and part let go of. The
     /// lock holder's, once the calls are ended ([`Self::end_calls`]).
-    fn clear(&mut self) {
+    ///
+    /// # Safety
+    /// The caller holds the session's lock, which guards the key arena the table reads its keys in
+    /// (`Round::reads_keys_in`), or holds that arena alone, the session being let go of.
+    unsafe fn clear(&mut self) {
         if let Some(space) = self.key_space {
+            // SAFETY: the caller's contract, for the rest of this call.
+            let locked = unsafe { KeysLocked::vouched(&space) };
             for entry in self.entries.iter() {
                 let key = match &entry.what {
                     Held::Sample { head, .. } => head.key,
@@ -1132,7 +1138,7 @@ impl<C: RoundCalls> Table<C> {
                 if key.place == Place::Held {
                     // SAFETY: the record took one count of the block when it was written
                     // (`Self::hold_key`), handed back here once, under the lock.
-                    drop(unsafe { space.adopt(key.at, key.len) });
+                    drop(unsafe { locked.adopt(key.at, key.len) });
                 }
             }
         }
@@ -1583,7 +1589,8 @@ impl<C: RoundCalls> Round<C> {
         match self.state.load(Ordering::Acquire) {
             EMPTY => {
                 // SAFETY: an empty table is the lock holder's, and the caller holds the lock and
-                // no other borrow of it; `kept` is written under that lock alone.
+                // no other borrow of it, which is also what the clear asks; `kept` is written under
+                // that lock alone.
                 unsafe {
                     let table = &mut *self.table.get();
                     if table.spent {
@@ -2554,7 +2561,9 @@ impl<C: RoundCalls> Round<C> {
         let table = unsafe { &mut *self.table.get() };
         table.end_calls(&self.released);
         // The counts of the session's key arena the records hold go back before the arena does.
-        table.clear();
+        // SAFETY: the caller's contract: no delivery runs and the session's last handle is being
+        // let go of, so its owner holds the arena alone.
+        unsafe { table.clear() };
         drop(core::mem::take(&mut table.entries));
         drop(core::mem::take(&mut table.callbacks));
         drop(core::mem::take(&mut table.keys));

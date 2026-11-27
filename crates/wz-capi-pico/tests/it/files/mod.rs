@@ -17,6 +17,7 @@ mod closed_session_declarations;
 mod connect_group_roundtrip;
 mod connectivity_events;
 mod coop_tcp_teardown;
+mod coop_threads_share_a_session;
 mod decl_watch_doors;
 mod e2e_doors;
 mod ext_handles_across_threads;
