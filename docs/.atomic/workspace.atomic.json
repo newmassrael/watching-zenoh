@@ -8701,6 +8701,25 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4701": {
+      "decision_summary": "Name the customer-facing surface by its contract: the header of the zext\ndoors is zext.h, a document's extension member is zext (the old wz member\nis refused by name), the original profile is standard, and version and",
+      "changes_bullets": [
+        "capi: zext.h with guard ZEXT_H; no compatibility header.",
+        "config: zext member with version, transport and owned-address; wz refused.",
+        "profile upstream renamed standard; comments and docs follow."
+      ],
+      "verification_bullets": [
+        "session-core, runtime-tokio, capi-pico, capi-core, capi-c, capi-coop pass.",
+        "zenoh API 200 and wz-ap-demo pass; clippy clean per crate.",
+        "wz_config, drop-in header, census, release-proof, policy-read gates pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
