@@ -1266,7 +1266,55 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   `tables-on-use`; red if the plan lays a port row out on use or sizes the source to other
   counts).
 
+### 7.23 R3, 3c (c): a group's receive buffer through its kind's source
+
+- `339c959c64`: read first, each joiner's own buffer when its session lends none: the host's
+  (`HostGroupTransport`, `wz-runtime-posix`) `UDP_RX_CAPACITY` (65,535 bytes), `app_link`'s
+  `DATAGRAM_MAX`, `raweth_group`'s `MAX_ETH_FRAME_SIZE`, where the arena lends each group the
+  plan's group batch. Not lending on use would have each group take the widest datagram's buffer,
+  so the on-use source hands the joiner the batch instead. The source is the links' kind's
+  (`CountKind::Groups`, a `GroupSource` in `group_transport.rs`): `Option<LentByteCells>` for
+  the kinds that lend (a claim of the table, a group past it `Exhausted` before the joiner is
+  asked, `None` the transport's own as before), `HeapGroups::sized(batch)` for `OnHeap`.
+  `SessionLinks::lend_group_rx(table)` became `lend_groups(N::Groups)`; a joiner is handed a
+  `GroupBuffer` (`Lent`, `Sized(bytes)`, `Unsized`) in place of `Option<ByteBuf>`, and makes
+  its buffer by `GroupRx::given` (`GroupRx::of_heap` for a `Vec`), which answers a heap's refusal
+  as a value: the join is `Exhausted` before a socket is bound or the program asked
+  (`HostGroups::join` in capi-coop over `HostGroupTransport::with_rx`, `AppGroupTransport`,
+  `RawEthGroup::new` now `Option`). `HostGroupTransport::new` keeps its `Option<ByteBuf>` form
+  for hosts outside a session. The stacks' `counted_by` reset the source with the kind and assert
+  none was lent before.
+- The plan: the group count and batch are kept in both forms (`TransportRows::group_rx`); D12
+  lays out and lends the buffers (`group_rx_from`), on use none is laid out and the source is
+  `HeapGroups::sized(batch)` (`groups_sized`); the engine hands it with `lend_groups`.
+- Tests: `group_transport::a_group_buffer_is_the_one_its_session_gave` (red if a `Sized` buffer is
+  made at the widest length, or an own buffer the maker refused is held) and
+  `a_heap_source_hands_each_group_its_sized_length` (red if `HeapGroups` hands no length);
+  `ip_stack::on_use_links_hand_each_group_the_length_its_session_sized` (red if `open_group`
+  hands the joiner no length on use); the lent paths' tests (`heap_links_lent_group_buffers_...`,
+  `app_link::links_lent_group_buffers_give_each_group_one`, the lent-buffer tests of `app_link`,
+  `raweth_group` and capi-coop `host_group`) read the new seam unchanged in what they assert.
+  capi-coop `tests::arena`: the D12 test of the groups' table is `not(wz_on_use)`, and
+  `an_on_use_session_sizes_its_groups_buffers_and_lays_out_none` (new, `group` with
+  `tables-on-use`; red if the plan lays a group buffer out on use or sizes another length).
+
 ## 8. What the main session runs
+
+- R3, 3c (c), the groups (`339c959c64`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast --lib
+  group_transport` (two more), `... --lib ip_stack` (one more), `--features app-link,host-lock --lib
+  app_link::` and `--features raweth,reassembly,keyexpr-wildcard-double --lib raweth_group::`
+  unchanged in count; `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-posix --lib
+  multicast` unchanged; wz-capi-coop `--features group --lib tests::arena` unchanged, `--features
+  group,tables-on-use --lib tests::arena` one more and one fewer, `--features group-host --lib
+  host_group` unchanged. Clippy of wz-runtime-coop (its sets `heap`, `slot`), wz-runtime-posix
+  (the defaults and `host-multicast`), and wz-capi-coop with `--features group`, `--features
+  group,tables-on-use`, `--features app-transport,group,multicast-declarations,liveliness,tables-on-use`
+  and `--features group-host`; the Windows build of wz-runtime-posix is untouched (its group test
+  calls `HostGroupTransport::new`, kept). Size: D12 a few bytes either way (the joiner's own arm
+  takes a length; the stack's claim is one call); an on-use build with groups smaller by the
+  groups' buffers of its arena. Receive Ir: unchanged (the group's read is the same over a buffer
+  of any origin).
 
 - R3, 3c (c), the ports (`5c5f545604`), not built or run by this lane. `cargo test
   --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast,udp-listen
@@ -1784,7 +1832,9 @@ The order that builds at each step:
      compiled for the kinds that name it. The groups: on use the plan lays out a receive buffer for each group it counts and
      lends them; not lending leaves each joiner to make its own (`GroupRx::lent_or_own`), whose
      length each joiner (`host_group`, `app_link`) must be read for before the plan drops the
-     rows, so the on-use source hands the joiner the plan's group batch. The kept publishes:
+     rows, so the on-use source hands the joiner the plan's group batch. Written for the groups
+     (7.23): the joiners' own lengths read, the source the kind's (`HeapGroups` on use). The kept
+     publishes:
      `HandedTable` (`HandedLegs` over `byte_cells` and a table, `wz_round` with `listen` or
      `group`) needs a form of its own memory counted to `handed_legs`.
 4. N4 (3.7): the doors' objects from the allocator, counted against their kinds, so the places the
