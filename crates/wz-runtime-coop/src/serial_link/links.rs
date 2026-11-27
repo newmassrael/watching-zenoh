@@ -888,7 +888,11 @@ where
         };
         match step {
             Ok(false) => Ok(None),
-            Ok(true) => Ok(self.waiting.borrow_mut().take().map(opened)),
+            Ok(true) => Ok(self
+                .waiting
+                .borrow_mut()
+                .take()
+                .map(OpenedLink::behind_tables)),
             // A line that failed is let go, kept or not, and opened again by the next call.
             Err(_) => {
                 self.waiting.borrow_mut().take();
