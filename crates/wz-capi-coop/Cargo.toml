@@ -421,6 +421,9 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "request-put-del",
     "declare-queryable",
 ] }
+# The tests hand the engine their own closures as callbacks (`shared-sinks`), which the C library
+# over this engine never does.
+wz-capi-port = { path = "../wz-capi-port", default-features = false, features = ["shared-sinks"] }
 
 [lints]
 workspace = true

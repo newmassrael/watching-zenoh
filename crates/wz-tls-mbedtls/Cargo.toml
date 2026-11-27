@@ -73,7 +73,8 @@ rcgen = "0.13"
 # The cooperative engine, listening and dialling over the channel: two sessions of it meet over
 # `tls/` (`tests/engine_tls.rs`). It names no secure channel itself; the links it is given do.
 wz-capi-coop = { path = "../wz-capi-coop", features = ["listen", "runtime-plan"] }
-wz-capi-port = { path = "../wz-capi-port" }
+# The test's subscriber is its own closure (`shared-sinks`).
+wz-capi-port = { path = "../wz-capi-port", features = ["shared-sinks"] }
 
 [features]
 # `wz-runtime-coop`'s session tier needs a form of its task pool, and the two forms are mutually

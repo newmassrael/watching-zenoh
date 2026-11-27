@@ -165,8 +165,9 @@ wz-capi-core = { path = "../wz-capi-core", optional = true, features = ["transpo
 # names them.
 wz-session-core = { path = "../wz-session-core", optional = true, default-features = false, features = ["alloc", "rx-shared-bytes", "session-extshm"] }
 # The vocabulary of the port the engine is run through: the query a queryable keeps and answers
-# later, which the engine's crate does not re-export.
-wz-capi-port = { path = "../wz-capi-port", optional = true }
+# later, which the engine's crate does not re-export. `shared-sinks`: a matching listener's
+# callback is the program's closure.
+wz-capi-port = { path = "../wz-capi-port", optional = true, features = ["shared-sinks"] }
 wz-runtime-tokio = { path = "../wz-runtime-tokio", optional = true, default-features = false, features = [
     "routing-accept",
     "routing-router-hat",

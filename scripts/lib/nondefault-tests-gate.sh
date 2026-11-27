@@ -691,6 +691,10 @@ files::decl_watch_doors::"
     # How an Interest names its key on a link of each key-wire form, the rule both engines take
     # from the port (`interest_on_link`): its unit tests compile only with `shared-key-ids`.
     "wz-capi-port|hook|shared-key-ids|link_form_tests::"
+    # A Rust program's own closure as a subscriber's or a matching listener's callback, which an
+    # engine with a Rust API hands the port and a C library never does (`shared-sinks`): the call
+    # through each arm and the hold let go with the sink (`shared_sink_tests::`).
+    "wz-capi-port|hook|shared-sinks|shared_sink_tests::"
     # The port's `os` made of the host's own calls (`os-sys`, `wz-host-sync`), which a host library
     # without `std` runs its read task and holds its locks on: a test build with `std` compiles the
     # module beside `std`'s for its own tests (`os::sys::tests::`), a spawned thread's identity and

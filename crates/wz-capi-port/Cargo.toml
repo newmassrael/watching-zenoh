@@ -70,6 +70,13 @@ time-base = ["dep:wz-node-time", "wz-node-time/time-base"]
 # built without `std`, which runs threads and must export nothing but its C ABI. Beside `std` it
 # changes nothing: a `std` build answers the same names with the same calls.
 os-sys = ["dep:wz-host-sync", "wz-node-time?/host-sync"]
+# A Rust program's own closure as a subscriber's or a matching listener's callback, shared by a
+# count (`SubscriberSink::shared`, `MatchingSink::shared`): the form an engine with a Rust API
+# hands the port (`wz-capi-core`, `wz-zenoh`, and `wz-capi-c`'s matching, whose one closure every
+# face's watch calls). A C library over the cooperative engine hands plain functions alone, so a
+# build without it holds and calls a sink in that form only, and a row's call and drop carry no
+# shared arm.
+shared-sinks = []
 
 [dependencies]
 # The lock of a build without `std` (src/sync.rs): the image links the implementation, as it does

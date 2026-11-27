@@ -383,7 +383,8 @@ wz-session-core = { path = "../wz-session-core", default-features = false }
 # (`advanced`), for the doors of the observation plane, and for the counts a cancellation token
 # and a get's registration on it are shared by (`lodge::Strong`). Already in the graph through
 # `wz-capi-core`; named here because those doors are this crate's own and use it directly.
-wz-capi-port = { path = "../wz-capi-port" }
+# `shared-sinks`: a matching listener's C closure is shared by every face's watch.
+wz-capi-port = { path = "../wz-capi-port", features = ["shared-sinks"] }
 wz-ext-pubsub = { path = "../wz-ext-pubsub", optional = true }
 # `query-reply-err` is DECLARED rather than inherited from the default set, and
 # R311y568 is why: `z_query_reply_err` routes through
