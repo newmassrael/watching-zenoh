@@ -1,7 +1,10 @@
 # Feature lane feat-mcast: what `multicast-transport` costs, beside zenoh-pico
 
 Status: the reading of the feature, the pairing of its work with zenoh-pico's, the steps that take
-out what is shape, and the owner's decision items for what is work; step F1 lands beside this note.
+out what is shape, and the owner's decision items for what is work; step F1 landed beside this note,
+and steps F2a and F8a and the decisions of section 4.1 land after it. Steps F4, F5 and F7 (the
+group's shell and its transmit pipeline) and the decision item D2 they keep are the transmit lane's;
+F3 follows F4, as the one sink it leaves is read by the group face F4 makes.
 Nothing here was built or measured by this lane: every byte figure is **read** from the libraries
 the size ledger's `--per-feature` run kept (section 1), or is an **estimate** from the code, and
 says which. It extends `docs/c-abi-architecture.md` and the lanes beside it
@@ -88,13 +91,15 @@ and each step says what it does to the receive of a group and of a link in a bui
 | step | change | bytes, expected (`pico-api-coop-nostd`) | receive Ir | held by |
 |---|---|---|---|---|
 | **F1 (landed)** | the walk of a group datagram steps past an Init, an Open or an id no view reads by the session's in-place reader of a control message (`inbound::read_control`) where the build has it, instead of the owned decoder | -5,000 to -8,200 (codec, language): the owned decoder's 7,771 and its frame's drop glue 705, less the 290 the Init and Open views take back inlined once they have one caller again; the range is `read_control`, which had one caller and now has two, kept out of line (one call more on a link's control message, never on a data message) or inlined into both (its handshake arms twice, up to 3,000) | client: none (not compiled); a group's frame: none (the walk answers a Frame from its id, before this) | `multicast_rx::control_extent_tests`: three new tests, an Init and an Open stepped over as far as their decode reads and a refused or cut one ending the walk, and an id no reader takes ending it; `inbound::control_read_tests` holds the reader to the decoder |
-| F2 | one encoder form for what the group sends: its put, declaration, interest and reply written by the lent writers the links use, and counted as a link counts (`tx_buf::try_encoded_len`), not through the heap encoders with a count copy and a write copy; the rule of `arch-mono.md`'s M4 and M5, for the group's items | -6,000 to -10,000 (codec) | none on the read; a group's put is one write, not a count and a write | the counted-equals-written tests of each item, and the group's item bytes held to the link's writer's |
+| **F2a (landed)** | the count half of F2: in a lend-only build (`tx-lend-only`, which the C library's `os-host` names) a group's item and reply are counted by their one writer run into a count (`ItemBody`, and `ReplyBody` for a reply, both written once in `wz-session-core`), as a link counts what it sends, not by the codec's `measure`, which compiles each encoder a second time over a counting sink; `MulticastTxReply::with_body` hands on `ReplyBody` where it built a closure per kind in the caller's crate | -3,500 to -7,000 (codec): the counting copies of the declaration's, the response's, the interest's, the request's and the final's encoders, with the put and extension bodies they reach (about half of the 11,815 of row E's heap encoders), and the reply encoders the stage's crate compiled for its own closures | none: a group's datagram is never counted on the read; a reply is counted by the writer that then writes it, no call more | `multicast_tx::push_tests::an_item_and_a_reply_count_for_what_the_codec_measures`: each kind's count is the codec's measure, through `multicast_tx_bytes`, `MulticastTxReply::bytes` and each writer run into a count |
+| F2b | the write half of F2: the group's declaration, interest and reply written from their parts by the lent writers the links use (`lent_control`), not kept owned (`MulticastTxItem::Declare`, `DeclareReply`, `Interest`, `Response`) and written by the heap encoders; the stage that keeps an item until its conduit is free keeps its encoded bytes, which F7 decides | -2,500 to -5,000 (codec), after F7 | none on the read | the group's item bytes held to the link's writer's for the same message |
 | F3 | one sink from the group's walk to the engine: the member scope a field the engine's sink reads, the pump's gate a word it reads, so a record of the group reaches the engine as a link's does (`hand_lent_push`) | -3,000 to -6,000 (sessions, transport), read by line first | a group's record: two sink layers fewer; none added | the engine's group tests of delivery, of a member's departure and of the gate; the dispatcher's member scope tests |
 | F4 | one shell for a group: the engine's group face steps the session core's dispatcher and the stage itself, as it steps a link's session, and the MCU loop (`MulticastPump`, `HeldSession`, `MulticastSessionPlace`, its executor task) stays the MCU image's | -15,000 to -25,000 (driver, sessions) | a group's datagram: the task hop out; none added | the engine's group tests (join, rejoin, leave, the first step's refusal), the MCU loop's own tests unchanged |
 | F5 | the open builds the group's state where it lies: `Core::join_group` (17,669) read by line first, then each part placed in its slot, not moved through the open's frame | -5,000 to -12,000 (sessions), read by line first | none: the open | the engine's open tests with a group, and the stack bound's reading of the open |
 | F6 | the group's leg of an operation under the held faces out of line: one non-generic call each operation makes, not the leg inlined into each of the 12 copies of `HeldOperation::run` | -3,000 to -4,500 (sessions) | none: an operation under the held faces is a declaration, an undeclaration, a query or a reply, never the read, and a publication's legs do not run through it | `direct::held_operation_tests`, the engine's declaration tests with a group |
 | F7 | the group's send through the links' writer: framing, batching and fragmenting by `session_actions`' writer, the stage keeping only what D2 decides (the held datagram and its order behind the beacon) | -8,000 to -15,000 (transport, codec), after F2, F4 and D2 | none on the read; a group's put the link's writer's one pass | the group's wire held to the link's for the same items; the stage's tests of a held datagram |
-| F8 | the containers of the group's path in the session's bounded rows: a member's declarations in the peer rows' pools (`peer-row-pools`) rather than three `BTreeSet<u64>` and a collect, the stage's queue and cells in the arena, after F3, F4 and D3 | -4,000 to -8,000 (language, sessions) | none | the member scope's retraction tests, the stage's tests |
+| **F8a (landed)** | the member scope's containers: what a member holds declared is one sorted vector of its raw ids, each under its kind (`MemberDeclarations::held`), not three `BTreeSet<u64>`, and a member that leaves is kept whole until its retractions are handed (`MulticastDispatcher::departed`), not collected through a chain of three iterators into a vector of retractions; the retractions are the same and in the same order (subscribers, queryables, tokens, each by raw id, then the keyexprs) | -4,000 to -6,000 (language, sessions): the B-tree's bodies 3,144, the chained collect 2,471 and the drop glue of the three sets, less a vector's insert, remove and search of `u64` (300 to 600) | none: a member's record is scoped as before, its id now noted by a binary search of a vector | `multicast_member_scope::tests`: the order of a departed member's retractions, a redeclared id held once, an undeclared id not retracted; the dispatcher's tests of a member's departure |
+| F8b | the stage's queue and cells in the session's arena (`VecDeque<StagedMessage>`, `Rc<RefCell>`), after F4 and F7 | -1,500 to -2,500 (language) | none | the stage's tests |
 
 F1 is first because it changes one function of the walk, keeps every extent and every refusal the
 walk had (the reader answers the decoder's, by `inbound::control_read_tests`), and touches no
@@ -109,6 +114,22 @@ large ones and are designed with the line reading in hand.
 | D2 | a group send never blocks the session: a datagram the socket has no room for is held, and the beacon waits behind it (`GroupTxStage::push_deferred`, `StageQueue::wait_for_room`) | a blocking send on the group's socket, the caller waiting (`vendor/zenoh-pico/src/transport/common/tx.c` @ `_z_link_send_wbuf(ztc->_link, &ztc->_wbuf, NULL)`) | the cooperative engine steps every face on one thread, so a full socket would stall every link of the session until it drains; the cost is what F7 cannot take out of the stage | 8,000 to 12,000 |
 | D3 | what a departed member declared on the group (its subscribers, queryables, tokens) is retracted when it leaves or is dropped (`multicast_member_scope::MemberDeclarations`, `retract_departed`) | the departed peer is removed and the session's interests are told its connection dropped (`vendor/zenoh-pico/src/transport/multicast/lease.c` @ `_z_interest_peer_disconnected(s, &peer->common);`), which is what a write filter forgets it by; what it declared is not retracted (`vendor/zenoh-pico/src/transport/multicast/rx.c` @ `TODO: cleanup here should also be done on mappings/subs/etc...`) | as in zenoh-pico, what a member that left declared stays declared at this node until the session ends: a liveliness subscriber does not hear its tokens go, and its queryables are still asked | 7,000 to 10,000 |
 | D4 | a JOIN judged by either of two rules (`GroupJoinRule::Zenoh` asks for room before the terms, `::Pico` reads the terms first), each member a state machine of its own | one rule, the terms first (`vendor/zenoh-pico/src/transport/multicast/rx.c` @ `_z_multicast_handle_join_inner`), a member a row of a list | the pico preset could compile its own rule alone; nothing of zenoh-pico's behaviour is lost | under 1,500 |
+
+### 4.1 The decisions, by the owner's ruling of 2026-11-27
+
+The ruling: what zenoh-pico does not do is a capability of its own, behaviour by behaviour, off in
+the zenoh-pico preset (`deploy/wz-config.toml`, `upstream_off = ["zenoh-pico"]`, as
+`tx-probe` and `tx-stream-owed` are). A capability of a behaviour, not of a door, stays on in the
+host profiles (`host-peer`, `host-peer-ext`, `host-peer-raweth`), as the send's behaviours do,
+so the release keeps what it had; its bytes are read on a build of the zenoh-pico defconfig with
+the multicast transport, not on `pico-api-coop-nostd`, which reads `host-peer`.
+
+| item | decision | why | bytes, estimate, in the zenoh-pico preset |
+|---|---|---|---:|
+| D1 | landed: a capability, `multicast-locator-keys`: off, a group's `#ttl=`, `#bind=` and `#dscp=` are refused by name (`GroupLocatorError::KeyNotCarried`) and no socket is given a hop limit, a bound address or a traffic class | zenoh-pico reads `iface` and `join` alone. The egress pin is zenoh-pico's as well: it binds its send socket to the interface's address and names it the multicast interface (`vendor/zenoh-pico/src/link/transport/udp/udp_multicast_posix.c` @ `IP_MULTICAST_IF`), so it is no part of the switch; nor is `parse_dscp_value`, which a unicast locator's `#dscp=` reads (`locator::parse_socket_options`) | 500 to 2,000 |
+| D2 | the transmit lane's, with F7 | the stage F7 reduces is what D2 keeps; the two are one change | - |
+| D3 | no capability: kept in every build | zenoh-pico does the part that costs: a member whose lease runs out is told to every interest of the session (`vendor/zenoh-pico/src/transport/multicast/lease.c` @ `_z_interest_peer_disconnected(s, &peer->common);`), and a write filter and a matching listener forget its targets by it (`vendor/zenoh-pico/src/net/filtering.c` @ `case _Z_INTEREST_MSG_TYPE_CONNECTION_DROPPED: {`). wz's filter forgets a member's subscriber only by its retraction, so a build without D3 would keep a departed member's subscriber in this node's filters where zenoh-pico's forget it. What zenoh-pico does not do (a liveliness subscriber told the tokens went, a Close read as a departure) is the same retraction, a branch of it; its containers are F8a's | - |
+| D4 | not yet a capability | the pico ABI opens every group under the Pico rule (`crates/wz-capi-pico/src/session.rs`, the group's `MulticastParams`); the Zenoh rule is two compares on the group's parameters (`multicast_join::judge_join` and the walk's room-first branch), and a member is one machine under either rule | under 300 |
 
 ## 5. Step F1, as landed
 
@@ -141,3 +162,25 @@ so does the walk: what changed is which reader says where they end.
 - The perf matrix's receive Ir of `pico-client-coop-nostd` as its last reading.
 - For F3 to F8: `python3 scripts/lib/size_ledger_gate.py --explain pico-api-coop-nostd` once
   `size-per-feature` lands, the line reading of the bodies of section 2.
+- F2a: `cargo test -p wz-session-core --lib --features
+  session-multicast,codec-frame,storage-profile,codec-push,codec-declare,codec-response,codec-response-final
+  an_item_and_a_reply_count_for_what_the_codec_measures`: 1 test; the same with `tx-lend-only`
+  added, 1. Build and clippy of `wz-session-core` with the group's set with and without
+  `tx-lend-only`, and without `codec-push`. In `pico-api-coop-nostd`'s library no
+  `write_source` of the declaration, response, interest, request or final encoder over
+  `CountSink` (`nm -C -S`); `pico-client-coop-nostd` unchanged to the byte.
+- D1: `cargo test -p wz-session-core --lib group_locator` with the crate's defaults, and the
+  same without `multicast-locator-keys` (the row `nondefault-tests-gate.sh` adds:
+  `a_build_without_the_locator_keys_refuses_them_by_name` in place of
+  `every_key_is_read_into_its_field`); build and clippy of `wz-capi-coop` with `group-host`
+  with and without `multicast-locator-keys`; `wz_config.py --check` after
+  `wz_config.py --write` regenerates `crates/wz-conformance-build/statement_vectors.json` for the
+  new capability, which this lane could not run.
+- F8a: `cargo test -p wz-session-core --lib --features session-multicast,codec-declare
+  multicast_member_scope`, and the same with the lent group's set
+  (`session-unicast,rx-lent-control` added); the dispatcher's departure tests
+  (`multicast_dispatch`), and `wz-capi-coop`'s group tests
+  (`two_members_declarations_of_one_id_read_in_place_stay_apart`,
+  `a_member_that_leaves_takes_its_keyexprs_and_the_other_keeps_its_own`). In
+  `pico-api-coop-nostd`'s library no `BTreeSet<u64>` body and no
+  `Vec<Retraction>::extend_trusted`.
