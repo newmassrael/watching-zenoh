@@ -757,6 +757,14 @@ impl GroupTxStage {
         outcome
     }
 
+    /// Whether a push of the session's, or a flush of the batch window, holds the conduits now. A
+    /// message pushed meanwhile could take its sequence number only once they are let go, so the
+    /// holder of the group's session reads no input while this answers `true`, and what its
+    /// dispatch would answer waits in the socket.
+    pub fn sending(&self) -> bool {
+        self.inner.conduits.try_borrow_mut().is_err()
+    }
+
     /// Count a message whose push answered `outcome` into the counters attached (`attach_stats`),
     /// one network message of `tally`'s class, when it entered the stage: put on its lane, or
     /// kept while the conduits are held.
@@ -2162,6 +2170,22 @@ mod tests {
             put(&mut ring, 4, 10),
             "an empty storage takes a run of its whole length"
         );
+    }
+
+    /// The stage says it is sending for exactly as long as a push holds its conduits, which is
+    /// what keeps the group's session from reading inside that push's wait.
+    #[test]
+    fn the_stage_is_sending_while_a_push_holds_its_conduits() {
+        let stage = GroupTxStage::new(&params());
+        assert!(
+            !stage.sending(),
+            "nothing holds the conduits of a new stage"
+        );
+        {
+            let _held = stage.inner.conduits.borrow_mut();
+            assert!(stage.sending(), "a push holds them");
+        }
+        assert!(!stage.sending(), "let go once the push is done");
     }
 
     /// A message lent for the call is put on its lane as an owned one is; one pushed while another
