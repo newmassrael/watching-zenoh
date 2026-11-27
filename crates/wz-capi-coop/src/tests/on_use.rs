@@ -144,6 +144,51 @@ fn an_on_use_engine_and_its_rooms_lie_apart_from_its_arena() {
     );
 }
 
+/// The plan of a session whose tables take their memory on use lays out no place for its engine or
+/// its faces' rooms, which lie in allocations of their own, while the CONTROL rows, the runtime's
+/// span and the count the arena is kept by, are laid out as the D12 plan lays them. Turned red by
+/// `lay_out_open` laying the engine's place (`ArenaPlan::lay_engine`) or the rooms'
+/// (`ArenaPlan::lay_rooms`) in the on-use form.
+#[test]
+fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
+    use crate::arena::{ArenaPart, ArenaPlan, HeldPlaces, LinkCells, PlanShape};
+    let mut plan = ArenaPlan::planned(
+        PlanShape::dial_only(1, 1024, &wz_session_core::policy::SessionPolicy::defaults()),
+        &SessionLimits::BUILD,
+    )
+    .expect("the build's client");
+    crate::engine::lay_out_open(
+        &mut plan,
+        &crate::engine::OpenHolds {
+            cells: LinkCells {
+                driver: 64,
+                gate: 64,
+                actions: 64,
+                halves: 64,
+            },
+            rooms: 64,
+            held: &HeldPlaces::NONE,
+            runtime: 64,
+            engine: 64,
+            planes: crate::engine::SessionPlanes::OF_BUILD,
+            #[cfg(not(wz_round))]
+            direct_face: Engine::DIRECT_FACE_BYTES,
+        },
+    )
+    .expect("the holds lay out");
+    let laid = |part: ArenaPart| plan.rows().any(|row| row.part() == part.part());
+    assert!(
+        laid(ArenaPart::RuntimeState),
+        "CONTROL: the runtime's span is laid out"
+    );
+    assert!(
+        laid(ArenaPart::ArenaKeep),
+        "CONTROL: so is the count the arena is kept by"
+    );
+    assert!(!laid(ArenaPart::EngineState), "the engine lies apart");
+    assert!(!laid(ArenaPart::LinkRooms), "the rooms lie apart");
+}
+
 /// A session whose tables take their memory on use takes the state its own values and its key
 /// budget lie in from the allocator, apart from its arena: its memory is asked for one block, the
 /// arena its plan lays out and nothing before it, and every plane the state owns lies in that
