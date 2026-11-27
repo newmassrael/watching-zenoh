@@ -306,6 +306,44 @@ written in place), the other `tx_lease` tests over the cursor, and the joins of
 `a_put_the_open_frame_has_no_room_for_sends_it_once_and_opens_the_next`, whose second put is the
 message written in place and rolled back in place. Expected as 5.4 says; not measured.
 
+### 5.6 B4 read on the case, and B4a's premise corrected (not built)
+
+The case's explain report (`explain-pico-client-coop-nostd.json`, 2026-11-27, pin `6a881c21dad1`)
+gives each inlined byte to the source file, the owner, of the line it came from, and no finer: it
+splits a body by file, not by line. What it gives of the receive's fragment path:
+
+| where | bytes |
+|-------|------:|
+| `drive::fragment_in_place`, by the file of its lines: `reassembly_dispatch.rs` (the Router) 1,199, `drive.rs` 699, `chain_staging.rs` 625 (counted in the sessions area), `session_drive.rs` 111, `sn.rs` 103, `byte_cells.rs` 96, its own 61, `peer_init_caps.rs` 38, `driver_loop.rs` 33, `runtime_cell.rs` 26, `qos.rs` 24 | 3,015 |
+| the Router out of line: `ReassemblyDispatcher::init_in` 187, `Slot::end` 148 (and 70 of the staging's), `abort_rejected_channel` 67 and 7 | 479 |
+| the slot machine: the SCE engine of `ReassemblySlotPolicy` (`run_turn` 151, `new_in_place` 111, `initialize` 66), `turn_slot_engine` 24, 46 and 57, `start_slot_engine` 26 and 31 | 512 |
+
+So the case's Router is 1,199 bytes inside the fragment path, not the 2,594 of the threaded build of
+5.2: its `ManyPeers` lines and its lock are not in the case, as 5.2 expected.
+
+**B4a as 5.3 states it is not built: its premise does not hold.** Under `OnePeer` a chain is still
+keyed by its channel, the reliability and the priority (`ChainKey::matches`): a session that
+negotiated QoS interleaves the fragments of two priorities of one reliability, each on its own
+sequence numbers, as zenoh's transport keeps a defragmenter per channel. The slot cannot be the
+reliability's index without ending one priority's chain when the other opens, a behaviour the
+preset's peer (a router with QoS) can reach. zenoh-pico keys by reliability alone because it
+negotiates no QoS; wz does, so that cut would be a narrower behaviour, not a smaller form.
+
+**B4a, corrected: one walk of the slots answers the three questions.** `judge` walks the slots for
+the open chain of the fragment's channel (`find_active`); a first fragment walks them again for the
+peer's count (`peer_chain_count`) and a third time for a free slot (`Iterator::position(Slot::is_free)`
+in `admit_chain_start`). One pass over the same slots gives all three: the slot of the channel's
+open chain, the first free slot, and the count of open chains of the peer (under `OnePeer` the open
+slots, `OnePeer::is` being constant). `judge` takes that answer, and `admit_chain_start` takes the
+free slot and the count from it instead of walking. The quota stays first (§5.M), the eviction of
+`make_room` stays `ManyPeers`'s alone. Expected -80 to -150 of the Router's 1,199; receive Ir: a
+first fragment walks once instead of three times (the cold path). Tests: the existing quota, pool
+and continuation tests of `reassembly_dispatch` hold the behaviour; a new one counts, over a
+`OnePeer` Router of two slots, that a continuation finds its chain with the other slot free and a
+start refused on quota leaves both slots as they were.
+
+**B4b** stands as 5.3 states it, after the corrected B4a.
+
 ## 6. The work steps as built
 
 Each work step follows the owner's ruling of section 3 and the shape of the send's four
