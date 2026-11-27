@@ -20,12 +20,12 @@
 //! four must still discover. The rules of the window itself (what a Scout says, which datagrams
 //! answer it, when it is over) are the session's, pumped over these sockets by the engine.
 
-use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::ffi::c_int;
 use core::net::{IpAddr, SocketAddr};
 
 use wz_runtime_coop::udp_link::DatagramSocket;
+use wz_session_core::text_out::{FixedText, TextOut, IPV6_TEXT_LEN};
 
 use crate::group::MulticastSocket;
 use crate::multicast::{bind_joined, bind_sender, RxBind, SocketConfig};
@@ -67,9 +67,13 @@ impl<S: MulticastSocket> ScoutMembers<S> {
             .map(|bound| ScoutMember::new(bound.socket, bound.peer, false));
         let mut asking = Vec::new();
         for local in locals {
-            let pinned = local.to_string();
+            let pinned = iface_text(*local);
+            // Every address's text fits; one that did not would name no interface to pin.
+            let Ok(iface) = pinned.finish() else {
+                continue;
+            };
             let cfg = SocketConfig {
-                iface: Some(&pinned),
+                iface: Some(iface),
                 ..SocketConfig::default()
             };
             // A refusal is the address's alone: it is left out and the others stand.
@@ -79,6 +83,16 @@ impl<S: MulticastSocket> ScoutMembers<S> {
         }
         Self::from_parts(group_member, asking)
     }
+}
+
+/// `local` as the `#iface=` text an ask socket is pinned by: what `Display` writes for it, written
+/// through [`TextOut::push_ip`]. A library whose only address text is a scout's then carries none
+/// of `core::fmt` (`Formatter::pad`, the addresses' `Display`, `fmt::write`), which a C library
+/// without `std` has no other caller of.
+fn iface_text(local: IpAddr) -> FixedText<IPV6_TEXT_LEN> {
+    let mut text = FixedText::new();
+    text.push_ip(local);
+    text
 }
 
 impl<S: DatagramSocket> ScoutMembers<S> {
@@ -176,7 +190,8 @@ impl<S: MulticastSocket> ScoutMembers<S> {
 mod tests {
     use super::*;
     use crate::net::PosixUdpSocket;
-    use core::net::Ipv4Addr;
+    use alloc::string::ToString;
+    use core::net::{Ipv4Addr, Ipv6Addr};
 
     fn loopback() -> PosixUdpSocket {
         PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("a loopback socket")
@@ -278,6 +293,33 @@ mod tests {
             ]
         );
         assert!(!members.is_empty(), "no member was lost");
+    }
+
+    /// An ask socket is pinned by the text `Display` writes for its address, of either family, an
+    /// IPv4-mapped one and the longest an address's text is, and `#iface=` reads that text back as
+    /// the address.
+    #[test]
+    fn an_ask_socket_is_pinned_by_the_text_of_its_address() {
+        for local in [
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 254)),
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 1, 0, 0, 2)),
+            IpAddr::V6(Ipv4Addr::new(10, 0, 0, 1).to_ipv6_mapped()),
+            IpAddr::V6(Ipv6Addr::new(
+                0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+            )),
+        ] {
+            let shown = local.to_string();
+            let pinned = iface_text(local);
+            assert_eq!(pinned.finish(), Ok(shown.as_str()), "{shown}");
+            assert_eq!(
+                pinned
+                    .finish()
+                    .ok()
+                    .and_then(|text| text.parse::<IpAddr>().ok()),
+                Some(local),
+                "{shown}"
+            );
+        }
     }
 
     /// A host's window is opened on the scouting group: whatever the host lists, every member it
