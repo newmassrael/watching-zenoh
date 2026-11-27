@@ -9406,6 +9406,25 @@
         "wz decisions open: the variant of the feature model a C11 deployment builds, clock_quality's shadowed sync.lost transition, a machine for the two links in deploy, the pools' trap on an MCU.",
         "No wz statechart has a replay scenario, so none runs under QEMU yet."
       ]
+    },
+    "Round 4740": {
+      "decision_summary": "Start wz's formal verification on SCE's levels: a promise module of what a querier relies on about the query's Final, refined by a protocol model of the FinalHolds table, with a must-fail configuration for each part; the judge stays SCE's.",
+      "changes_bullets": [
+        "docs/formal/QueryFinalService.tla (level 1) and QueryFinals.tla (level 2, Refines), each taken-as-given fact cited in wz and the pinned upstream.",
+        "Nine configurations: the whole model, its liveness, liveness without fairness, and six with one part taken out; docs/formal/models.json in the manifest form of SCE's formal judge.",
+        "docs/formal/README.md: the plan, and why the judge at the pin cannot read a consumer manifest (models.py fixes its manifest path) until SCE lands sce-codegen formal (queue item 446)."
+      ],
+      "verification_bullets": [
+        "SANY parses both modules; TLC 1.7.4 (the digest SCE pins), run directly per configuration:",
+        "whole model and liveness hold (12343 and 426 distinct states); without hold or reply-keep NothingAfterFinal breaks, without sticky or owed refusal RefusedSilent, without refusal Bounded; without fairness the temporal property breaks."
+      ],
+      "impact_refs": [
+        "watching-zenoh/build-and-verify"
+      ],
+      "carry_forward_bullets": [
+        "The state counts, the promise check of each part and NoRowHeld (AG EF) are the judge's: run sce-codegen formal models --record once SCE item 446 lands and wz pins it, then register the lane.",
+        "Whether a refused query owing no Final belongs in the promise or stays an invariant matching pico is open."
+      ]
     }
   },
   "inventory_entries": {
