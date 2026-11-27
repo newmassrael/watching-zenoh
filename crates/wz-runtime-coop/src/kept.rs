@@ -329,6 +329,24 @@ impl<T> Shared<T> {
         }
     }
 
+    /// The last holder of a value [`SharedClaim::made_with`] made let go: the value is dropped, its
+    /// memory of the heap given back, and then the count of the memory it kept.
+    ///
+    /// # Safety
+    /// `kept` is the count of a `Held<T>` a claim made, which no holder is left of.
+    unsafe fn last_kept_boxed(kept: NonNull<Kept>) {
+        let held = kept.cast::<Held<T>>().as_ptr();
+        // SAFETY: the caller's: the value is live and dropped once, here; the count of the memory
+        // it kept is read before the heap's memory that holds it goes, and given back after both,
+        // as the memory may go with it.
+        unsafe {
+            let memory = (*held).head.memory;
+            ptr::drop_in_place(ptr::addr_of_mut!((*held).value));
+            free_boxed(kept.cast(), Self::layout());
+            give_back(memory);
+        }
+    }
+
     /// The last holder of a placed value let go: the value is dropped where it lies, and the count
     /// of the memory it held is given back.
     ///
@@ -367,6 +385,62 @@ impl<T> Deref for Shared<T> {
     fn deref(&self) -> &T {
         // SAFETY: this holder keeps the value alive.
         unsafe { &self.at.as_ref().value }
+    }
+}
+
+/// Memory of the heap for one held value of `T`, its head written and its value not yet: what an
+/// owner that is not to be refused once it has begun takes first ([`Self::try_new`]), and makes
+/// its value in where it stays ([`Self::made_with`]). The value keeps a count of the memory it
+/// was made with while it lives, as a placed value keeps the memory it lies in, so what the value
+/// holds that lies in that memory outlives none of it. A claim let go of before its value is made
+/// gives its memory back and drops nothing.
+pub struct SharedClaim<T> {
+    at: NonNull<Held<T>>,
+}
+
+impl<T> SharedClaim<T> {
+    /// The memory of one held `T`, or `None` when the heap refuses it.
+    pub fn try_new() -> Option<Self> {
+        let head = box_head(Shared::<T>::layout(), Shared::<T>::last_kept_boxed)?;
+        Some(Self { at: head.cast() })
+    }
+
+    /// The value `make` writes in the claimed memory, where it stays, holding a count of
+    /// `memory` until its last holder lets go: the value is dropped then, its memory given back,
+    /// and the count of `memory` after them.
+    ///
+    /// # Safety
+    /// `memory` is a live count; `make` writes a whole `T` at the place it is handed, and
+    /// nothing is read through that place until this returns, as it holds no value before.
+    pub unsafe fn made_with(
+        self,
+        memory: NonNull<Kept>,
+        make: impl FnOnce(NonNull<T>),
+    ) -> Shared<T> {
+        let at = self.at;
+        // The memory is the value's from here: the claim's own drop gives none of it back.
+        core::mem::forget(self);
+        let held = at.as_ptr();
+        // SAFETY: `at` holds a `Held<T>` whose head `box_head` wrote, this claim's alone, so the
+        // place of its value lies inside it and is not null; no reference to the unwritten value
+        // is made. The caller's: `memory` is live, so a count of it is taken before the head
+        // names it.
+        let value_at = unsafe {
+            memory.as_ref().retain();
+            ptr::addr_of_mut!((*held).head.memory).write(Some(memory));
+            NonNull::new_unchecked(ptr::addr_of_mut!((*held).value))
+        };
+        make(value_at);
+        Shared { at }
+    }
+}
+
+impl<T> Drop for SharedClaim<T> {
+    fn drop(&mut self) {
+        // SAFETY: the claim holds the memory `box_head` allocated for `Shared::<T>::layout`, whose
+        // value was never written and whose head holds no count of any memory: given back once,
+        // here, and nothing reaches it after.
+        unsafe { free_boxed(self.at.cast(), Shared::<T>::layout()) };
     }
 }
 
@@ -584,6 +658,109 @@ mod tests {
             MOST_HOLDERS + 1,
             "the count past the bound was given back"
         );
+    }
+
+    /// What the memory's last count does in the claims' test: it records that it ran, apart from
+    /// the count the placed value's test reads.
+    static CLAIM_GIVEN_BACK: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+
+    unsafe fn record_claim_given_back(_kept: NonNull<Kept>) {
+        CLAIM_GIVEN_BACK.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// A claimed value is made where its claim's memory lies and keeps a count of the memory it is
+    /// made with: it is dropped once, by its last holder, and the memory's count is given back after
+    /// it, so the memory stands until both its own holder and the value's last have let go. Turned
+    /// red by a value written elsewhere than the claim's memory, by a `made_with` that takes no
+    /// count of the memory (the count reads one), or by a last holder that gives none back
+    /// (`last_boxed` in place of `last_kept_boxed` in `SharedClaim::try_new`).
+    #[test]
+    fn a_claimed_value_keeps_the_memory_it_was_made_with_until_its_last_holder() {
+        let drops = Cell::new(0);
+        let memory = NonNull::from(Box::leak(Box::new(Kept::new(record_claim_given_back))));
+        let claim = SharedClaim::<Counted<'_>>::try_new().expect("the heap has room");
+        let handed = Cell::new(None);
+        // SAFETY: the memory is live, and the maker writes a whole value at the place it is
+        // handed.
+        let made = unsafe {
+            claim.made_with(memory, |at: NonNull<Counted<'_>>| {
+                handed.set(Some(at));
+                at.as_ptr().write(Counted(&drops));
+            })
+        };
+        assert_eq!(
+            handed.get(),
+            Some(Shared::as_ptr(&made)),
+            "made where it lies"
+        );
+        // SAFETY: the memory is live: its own holder and the made value hold a count each.
+        assert_eq!(
+            unsafe { memory.as_ref() }.count.load(Ordering::Relaxed),
+            2,
+            "the value took a count of the memory"
+        );
+        let held = made.clone();
+        // SAFETY: the memory's own holder lets go first; the value's count keeps it.
+        unsafe { Kept::release(memory) };
+        assert_eq!(
+            CLAIM_GIVEN_BACK.load(core::sync::atomic::Ordering::SeqCst),
+            0,
+            "the made value keeps the memory"
+        );
+        drop(made);
+        assert_eq!(drops.get(), 0, "a holder is left");
+        drop(held);
+        assert_eq!(drops.get(), 1, "dropped once, by the last");
+        assert_eq!(
+            CLAIM_GIVEN_BACK.load(core::sync::atomic::Ordering::SeqCst),
+            1,
+            "the last holder gives the memory's count back"
+        );
+        // SAFETY: the count gave its place up; the box is taken back once, here.
+        drop(unsafe { Box::from_raw(memory.as_ptr()) });
+    }
+
+    /// Counted in `NOTED_DROPS` when dropped, whatever bytes it lies in: it has none.
+    struct Noted;
+
+    static NOTED_DROPS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+    impl Drop for Noted {
+        fn drop(&mut self) {
+            NOTED_DROPS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// A claim let go of before its value is made drops no value; the CONTROL, a claim whose value
+    /// is made, has that value dropped by its last holder. Turned red by a claim's drop that drops
+    /// the value it never held in place (`ptr::drop_in_place` before `free_boxed` in
+    /// `SharedClaim`'s drop): the count then reads one before the control.
+    #[test]
+    fn a_claim_let_go_of_before_its_value_is_made_drops_no_value() {
+        let claim = SharedClaim::<Noted>::try_new().expect("the heap has room");
+        drop(claim);
+        assert_eq!(
+            NOTED_DROPS.load(core::sync::atomic::Ordering::SeqCst),
+            0,
+            "nothing was made, so nothing was dropped"
+        );
+        let memory = NonNull::from(Box::leak(Box::new(Kept::new(given_back_unseen))));
+        let claim = SharedClaim::<Noted>::try_new().expect("the heap has room");
+        // SAFETY: the memory is live, and the maker writes a whole value at the place it is
+        // handed.
+        let made =
+            unsafe { claim.made_with(memory, |at: NonNull<Noted>| at.as_ptr().write(Noted)) };
+        drop(made);
+        assert_eq!(
+            NOTED_DROPS.load(core::sync::atomic::Ordering::SeqCst),
+            1,
+            "CONTROL: a made value is dropped by its last holder"
+        );
+        // SAFETY: the memory's own holder lets go, its last.
+        unsafe { Kept::release(memory) };
+        // SAFETY: the count gave its place up; the box is taken back once, here.
+        drop(unsafe { Box::from_raw(memory.as_ptr()) });
     }
 
     /// What the memory's last count does where another test reads `GIVEN_BACK`: nothing.
