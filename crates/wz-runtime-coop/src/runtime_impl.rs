@@ -105,6 +105,8 @@ use wz_runtime_core::Runtime;
 #[cfg(not(feature = "session-slot"))]
 use wz_runtime_core::RuntimeError;
 
+#[cfg(not(feature = "session-slot"))]
+use crate::const_layout;
 #[cfg(feature = "session-slot")]
 use crate::executor::TaskTable;
 use crate::executor::{ExecutorState, TaskJoin};
@@ -366,7 +368,7 @@ impl PlacedParts {
     /// The parts of a runtime of `rows` and `form` on the clock `C`, one after another; `None`
     /// past the address space. The one reckoning of the span, for its size and for its placing.
     #[inline(always)]
-    fn of<C: ClockSource>(rows: RuntimeRows, form: RuntimeForm) -> Option<Self> {
+    const fn of<C: ClockSource>(rows: RuntimeRows, form: RuntimeForm) -> Option<Self> {
         let laid = match form {
             RuntimeForm::ForOne => StoreLayout::of::<true>(rows.tasks, Some(rows.task_bytes)),
             // Laid as a table of one cell that holds none, so a runtime of no task spans what one
@@ -377,13 +379,25 @@ impl PlacedParts {
             }
         };
         let layout = kept::Shared::<RuntimeInner<C>>::layout();
-        let (layout, store) = layout.extend(kept::Shared::<TaskStore>::layout()).ok()?;
-        let (layout, block) = layout.extend(laid.layout()).ok()?;
-        let timer_entries = Layout::array::<TimerSlot>(rows.timers).ok()?;
-        let (layout, timers) = layout.extend(timer_entries).ok()?;
-        let (layout, set) = layout
-            .extend(crate::local::CoopLocalSet::<C>::owner_layout())
-            .ok()?;
+        let Some((layout, store)) =
+            const_layout::extend(layout, kept::Shared::<TaskStore>::layout())
+        else {
+            return None;
+        };
+        let Some((layout, block)) = const_layout::extend(layout, laid.layout()) else {
+            return None;
+        };
+        let Some(timer_entries) = const_layout::array::<TimerSlot>(rows.timers) else {
+            return None;
+        };
+        let Some((layout, timers)) = const_layout::extend(layout, timer_entries) else {
+            return None;
+        };
+        let Some((layout, set)) =
+            const_layout::extend(layout, crate::local::CoopLocalSet::<C>::owner_layout())
+        else {
+            return None;
+        };
         Some(Self {
             inner: 0,
             store,
@@ -391,7 +405,7 @@ impl PlacedParts {
             timers,
             set,
             laid,
-            layout: layout.pad_to_align(),
+            layout: const_layout::pad_to_align(layout),
         })
     }
 }
@@ -399,10 +413,14 @@ impl PlacedParts {
 #[cfg(not(feature = "session-slot"))]
 impl<C: ClockSource> CoopRuntime<C> {
     /// The bytes of the span [`Self::placed`] places a runtime of `rows` and `form` in, and the
-    /// alignment it starts on; `None` past the address space.
+    /// alignment it starts on; `None` past the address space. A `const fn`, so a plan of a session
+    /// laid out when the build is compiled holds the span.
     #[inline(always)]
-    pub fn placed_layout(rows: RuntimeRows, form: RuntimeForm) -> Option<Layout> {
-        PlacedParts::of::<C>(rows, form).map(|parts| parts.layout)
+    pub const fn placed_layout(rows: RuntimeRows, form: RuntimeForm) -> Option<Layout> {
+        match PlacedParts::of::<C>(rows, form) {
+            Some(parts) => Some(parts.layout),
+            None => None,
+        }
     }
 
     /// The runtime [`Self::try_reserved`], [`Self::try_reserved_for_one`] or [`Self::try_opening`] makes,

@@ -10,8 +10,8 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use wz_capi_coop::arena::{
-    admitted_faces, admitted_handshakes, ArenaMemory, ArenaRegion, HeldPlaces, OpenStorage,
-    PlanFrom, PlanShape,
+    admitted_faces, admitted_handshakes, ArenaMemory, ArenaRegion, HeldPlaces, OpenRegion,
+    OpenStorage, PlanFrom, PlanShape,
 };
 use wz_capi_coop::{CoopConfig, CoopEngine, EngineHold, OpenError, OpenKeyIds, RowClaim};
 use wz_runtime_posix::stream::PosixTcpDial;
@@ -82,9 +82,10 @@ fn config() -> CoopConfig {
 /// An open of [`config`] by the region its config lays out, its arena from [`Counting`].
 fn open() -> Result<EngineHold<Engine>, OpenError> {
     let config = config();
-    let region: &'static ArenaRegion = Box::leak(Box::new(
-        ArenaRegion::of(PlanShape::of(&config), SessionLimits::defaults())
-            .expect("the build lays the config out"),
+    let rows = ArenaRegion::of(PlanShape::of(&config), SessionLimits::defaults())
+        .expect("the build lays the config out");
+    let region: &'static OpenRegion = Box::leak(Box::new(
+        Engine::open_region(rows, HeldPlaces::NONE).expect("the engine's places lay out"),
     ));
     Engine::open_made_in(
         wz_runtime_posix::links::PosixLinks::new(LOOPBACK, PosixTcpDial)
@@ -97,7 +98,6 @@ fn open() -> Result<EngineHold<Engine>, OpenError> {
         OpenKeyIds::none(),
         OpenStorage {
             memory: &Counting,
-            held: HeldPlaces::NONE,
             plan: PlanFrom::Region(region),
         },
     )

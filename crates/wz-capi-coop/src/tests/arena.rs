@@ -197,8 +197,7 @@ fn an_open_holding_the_handle_reserves_the_plan_with_its_place() {
         OpenKeyIds::none(),
         OpenStorage {
             memory: &AllocatorMemory,
-            held,
-            plan: crate::arena::PlanFrom::Config,
+            plan: crate::arena::PlanFrom::Config(Box::leak(Box::new(held))),
         },
     )
     .expect("the session opens");
@@ -252,7 +251,7 @@ fn held_plan(
         &mut plan,
         &crate::engine::OpenHolds {
             cells: crate::engine::link_cells::<PosixClock>(&links),
-            rooms: crate::engine::link_rooms_bytes(&links),
+            rooms: crate::engine::link_rooms_bytes::<crate::tests::PosixLinks>(),
             held,
             runtime,
             engine: wz_runtime_coop::kept::Shared::<Engine>::layout().size(),
@@ -1068,7 +1067,7 @@ fn the_plan_lays_out_the_faces_rooms_and_their_places() {
     );
     let open = host_plan(&config).expect("the build's limits lay an arena out");
     let rooms = row(&open, "link rooms");
-    let bytes = crate::engine::link_rooms_bytes(&host_links(super::LOOPBACK, PosixTcpDial));
+    let bytes = crate::engine::link_rooms_bytes::<crate::tests::PosixLinks>();
     assert!(bytes > 0, "CONTROL: the rooms take bytes");
     assert_eq!((rooms.count, rooms.entry_bytes), (1, bytes));
 }
@@ -3279,8 +3278,7 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
         OpenKeyIds::none(),
         OpenStorage {
             memory: &RECORDED,
-            held: HeldPlaces::NONE,
-            plan: crate::arena::PlanFrom::Config,
+            plan: crate::arena::PlanFrom::Config(&HeldPlaces::NONE),
         },
     )
     .err();
@@ -3360,15 +3358,24 @@ fn a_plan_laid_out_when_the_build_is_compiled_is_the_one_an_open_lays_out() {
     assert_eq!(PRESET_PLAN.as_ref(), Ok(at_open));
 }
 
-/// The region of a client of the pico preset that dials as many endpoints as the build admits and
-/// advertises a batch of 1024 bytes, as a build of fixed limits lays it out when it is compiled.
-static PRESET_REGION: crate::arena::ArenaRegion = match crate::arena::ArenaRegion::of(
-    crate::arena::PlanShape::dial_only(caps::MAX_STATIC_CONNECT, 1024, &SessionPolicy::defaults()),
-    SessionLimits::PICO_PRESET,
-) {
-    Ok(region) => region,
-    Err(_) => panic!("the preset lays a client out"),
-};
+/// The rows of a client of the pico preset that dials as many endpoints as the build admits and
+/// advertises a batch of 1024 bytes, as a build of fixed limits lays them out when it is compiled.
+const fn preset_rows() -> crate::arena::ArenaRegion {
+    match crate::arena::ArenaRegion::of(
+        crate::arena::PlanShape::dial_only(
+            caps::MAX_STATIC_CONNECT,
+            1024,
+            &SessionPolicy::defaults(),
+        ),
+        SessionLimits::PICO_PRESET,
+    ) {
+        Ok(region) => region,
+        Err(_) => panic!("the preset lays a client out"),
+    }
+}
+
+/// [`preset_rows`] as a build states its region.
+static PRESET_REGION: crate::arena::ArenaRegion = preset_rows();
 
 /// A client of [`PRESET_REGION`]'s shape and limits that dials `dials` endpoints.
 fn preset_client(dials: usize) -> CoopConfig {
@@ -3468,6 +3475,60 @@ fn a_region_lays_out_its_rows_for_its_own_shape_and_limits_alone() {
     );
 }
 
+/// A region laid out with the engine's places holds every row an open over a config of its shape
+/// lays out at the open, the links' cells, the rooms, the ABI's places, the runtime's span and the
+/// engine's place after the tables included, so an open by it takes the plan whole and lays out
+/// no row. Turned red by a region that leaves a place out (`OpenRegion::laid` laying none) or
+/// sizes one by anything but the engine's types and the ABI's constants.
+#[test]
+fn a_region_with_the_engines_places_holds_every_row_an_open_lays_out() {
+    use crate::arena::HeldPlaces;
+
+    let held = HeldPlaces::handle(core::alloc::Layout::from_size_align(40, 8).expect("a layout"));
+    let config = preset_client(caps::MAX_STATIC_CONNECT);
+    let region = Engine::open_region(preset_rows(), held).expect("the engine's places lay out");
+    let at_open = held_plan(&config, &held).expect("the preset lays a client out");
+    let mut taken = ArenaPlan::vacant();
+    region
+        .rows()
+        .lay_out_on(&mut taken, &config)
+        .expect("the region admits its own");
+    let tables = ArenaPlan::planned(
+        crate::arena::PlanShape::dial_only(
+            caps::MAX_STATIC_CONNECT,
+            1024,
+            &SessionPolicy::defaults(),
+        ),
+        &SessionLimits::PICO_PRESET,
+    )
+    .expect("the preset lays a client out");
+    assert!(
+        region.reserved_bytes() > tables.reserved_bytes(),
+        "CONTROL: the places take bytes past the tables"
+    );
+    assert_eq!(taken, at_open);
+    assert_eq!(region.reserved_bytes(), at_open.reserved_bytes());
+}
+
+/// A place of the ABI's that asks for more alignment than a span of the arena starts on refuses
+/// the region when it is laid out, as it refuses an open over a config, and leaves no region to
+/// open by. Turned red by a region laid out past the refusal of its places.
+#[test]
+fn a_region_whose_places_the_arena_cannot_hold_is_refused() {
+    use crate::arena::HeldPlaces;
+    use wz_session_core::bounded::ARENA_ALIGN;
+
+    let over = core::alloc::Layout::from_size_align(8, ARENA_ALIGN * 2).expect("a layout");
+    assert_eq!(
+        Engine::open_region(preset_rows(), HeldPlaces::handle(over)).err(),
+        Some(ArenaRefused::TooLarge)
+    );
+    assert!(
+        Engine::open_region(preset_rows(), HeldPlaces::NONE).is_ok(),
+        "CONTROL: the region of no place of the ABI's lays out"
+    );
+}
+
 /// An open whose rows come from a region reserves the arena an open of the same config lays out
 /// from the config, and an open of limits the region was not laid out for is refused before
 /// anything is dialled. Turned red by an open that reads the region apart from the config, or
@@ -3475,9 +3536,9 @@ fn a_region_lays_out_its_rows_for_its_own_shape_and_limits_alone() {
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_open_by_a_region_reserves_the_plan_its_config_lays_out_and_no_other() {
-    use crate::arena::{ArenaRegion, HeldPlaces, OpenStorage, PlanFrom, PlanShape};
+    use crate::arena::{ArenaRegion, HeldPlaces, OpenRegion, OpenStorage, PlanFrom, PlanShape};
 
-    let open_by = |config: CoopConfig, region: &'static ArenaRegion| {
+    let open_by = |config: CoopConfig, region: &'static OpenRegion| {
         Engine::open_made_in(
             host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
             PosixClock,
@@ -3487,16 +3548,20 @@ fn an_open_by_a_region_reserves_the_plan_its_config_lays_out_and_no_other() {
             OpenKeyIds::none(),
             OpenStorage {
                 memory: &AllocatorMemory,
-                held: HeldPlaces::NONE,
                 plan: PlanFrom::Region(region),
             },
         )
     };
+    let laid = |rows: ArenaRegion| -> &'static OpenRegion {
+        Box::leak(Box::new(
+            Engine::open_region(rows, HeldPlaces::NONE).expect("the engine's places lay out"),
+        ))
+    };
     let router = Router::start(CatchAll::None);
-    let own: &'static ArenaRegion = Box::leak(Box::new(
+    let own = laid(
         ArenaRegion::of(PlanShape::of(&config(&router)), config(&router).limits)
             .expect("the build's limits lay an arena out"),
-    ));
+    );
     let engine = open_by(config(&router), own).expect("the session opens");
     let plan = host_plan(&config(&router)).expect("the build's limits lay an arena out");
     assert_eq!(Some(engine.arena_bytes()), plan.reserved_bytes());
@@ -3508,7 +3573,7 @@ fn an_open_by_a_region_reserves_the_plan_its_config_lays_out_and_no_other() {
             limits: other_than_preset(),
             ..preset_client(0)
         },
-        &PRESET_REGION,
+        laid(preset_rows()),
     )
     .err();
     assert_eq!(

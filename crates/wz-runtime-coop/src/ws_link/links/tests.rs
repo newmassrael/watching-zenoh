@@ -179,9 +179,7 @@ impl SessionLinks for CelledLinks {
         Err(LinkOpenError::Unsupported)
     }
 
-    fn link_cell_bytes(&self) -> usize {
-        wz_session_core::bounded::ARENA_ALIGN
-    }
+    const LINK_CELL_BYTES: usize = wz_session_core::bounded::ARENA_ALIGN;
 }
 
 fn stack() -> (WsLinks<NoLinks, Open>, Rc<Dial>) {

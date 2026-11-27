@@ -104,7 +104,7 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-capi-core/src/open_plan.rs", "resolve_snapshot", "creator: the snapshots the document's wz member resolved, else the build defaults"),
     ("crates/wz-capi-pico/src/config_policy.rs", "resolve", "creator: the process runtime's limits the runtime document's rows state, resolved over the build defaults before any session exists; the document may state no policy"),
     ("crates/wz-capi-pico/src/session.rs", "compose_snapshots", "creator: the policy snapshot a config's doors compose over the build defaults, the one composition an open and each change a door checks share"),
-    ("crates/wz-capi-pico/src/session.rs", "PRESET", "creator: the arena a build that states no policy lays out when it is compiled; no document reaches it, so the build's policy is the one its sessions open under"),
+    ("crates/wz-capi-pico/src/session.rs", "preset_over", "creator: the region a build that states no policy lays out when it is compiled, over each of its links; no document reaches it, so the build's policy is the one its sessions open under"),
     ("crates/wz-capi-pico/src/stream_supervision.rs", "resolve_policy", "creator: a reception supervisor the program makes with no session resolves its snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-capi-port/src/observation/supervision.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-mcu-multicast-e2e/src/lib.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),

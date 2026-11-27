@@ -597,6 +597,17 @@ impl<K> CellRc<K> {
     }
 }
 
+/// The larger of two cells' bytes: what a table whose cells each hold a value of either size is
+/// laid out with. A `const fn`, as a stack's cells are a constant of its type
+/// (`crate::session_drive::SessionLinks::LINK_CELL_BYTES`).
+pub const fn larger_cell(one: usize, other: usize) -> usize {
+    if one > other {
+        one
+    } else {
+        other
+    }
+}
+
 /// A cell claimed for a value of `K` and not yet written ([`CellRc::claim`]). The cell is had
 /// before its value's maker is formed, so what the value is made of goes into the cell from where
 /// it lies, and a refused cell lets go of it there, never gathered into a maker first. Let go of

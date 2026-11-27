@@ -239,6 +239,11 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
     // resolver answers none.
     const RESOLVES: bool = A::RESOLVES || B::RESOLVES;
 
+    // A cell of either stack's holds a link of the one chosen; the chosen value answers its own
+    // (`link_cell_bytes`), so a session's cells are laid out for it alone.
+    const LINK_CELL_BYTES: usize =
+        crate::link_cells::larger_cell(A::LINK_CELL_BYTES, B::LINK_CELL_BYTES);
+
     fn resolve(
         &self,
         name: &crate::locator_text::NamedHost<'_>,
@@ -429,9 +434,7 @@ mod tests {
                 _ => Err(LinkOpenError::Unsupported),
             }
         }
-        fn link_cell_bytes(&self) -> usize {
-            64
-        }
+        const LINK_CELL_BYTES: usize = 64;
         fn share_pump(pump: SharedPump) -> Option<SharedPump> {
             Some(pump)
         }
@@ -454,9 +457,7 @@ mod tests {
         fn open_initiator(&self, _to: Locator) -> Result<OpenedLink<Tagged>, LinkOpenError> {
             Err(LinkOpenError::Refused)
         }
-        fn link_cell_bytes(&self) -> usize {
-            128
-        }
+        const LINK_CELL_BYTES: usize = 128;
         fn open_listener(
             &self,
             at: Locator,
@@ -577,6 +578,20 @@ mod tests {
         assert_eq!(
             [left().link_cell_bytes(), right().link_cell_bytes()],
             [64, 128]
+        );
+    }
+
+    /// The type's cells are the larger of its two stacks', so a cell laid out by the type alone
+    /// holds a link of either; each value still answers its chosen stack's. Turned red by a
+    /// constant read off one stack only.
+    #[test]
+    fn the_types_cells_hold_a_link_of_either_stack() {
+        assert_eq!(
+            [
+                <EitherLinks<Shared, Owned<true>> as SessionLinks>::LINK_CELL_BYTES,
+                <EitherLinks<Owned<true>, Shared> as SessionLinks>::LINK_CELL_BYTES,
+            ],
+            [128, 128]
         );
     }
 

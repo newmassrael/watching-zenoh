@@ -1116,11 +1116,17 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
         let _ = tables;
     }
 
-    /// The bytes of a cell that holds any link the stack opens (`crate::link_cells`): what a
-    /// session's arena lays the cells of its link table out with. The default, `0`, is a stack
-    /// that places each link on the heap.
+    /// The bytes of a cell that holds any link a stack of this type opens (`crate::link_cells`), a
+    /// constant of the type: what a session's arena lays the cells of its link table out with, read
+    /// where no stack is at hand, as by a plan laid out when the build is compiled. The default,
+    /// `0`, is a stack that places each link on the heap.
+    const LINK_CELL_BYTES: usize = 0;
+
+    /// The bytes of a cell that holds any link this stack opens: [`Self::LINK_CELL_BYTES`], and for
+    /// a stack that chooses one of two at run time (`crate::either_links::EitherLinks`) the chosen
+    /// one's.
     fn link_cell_bytes(&self) -> usize {
-        0
+        Self::LINK_CELL_BYTES
     }
 
     /// The cells every link the stack opens from now on is placed in, for the session the links

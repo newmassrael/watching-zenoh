@@ -491,6 +491,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-routing-graph/src/versioned.rs` | S4 | |
 | `crates/wz-runtime-coop/src/app_link.rs` | S12 | |
 | `crates/wz-runtime-coop/src/atomic.rs` | S5 | |
+| `crates/wz-runtime-coop/src/const_layout.rs` | S5 | |
 | `crates/wz-runtime-coop/src/cs.rs` | S5 | |
 | `crates/wz-runtime-coop/src/dial.rs` | S5 | |
 | `crates/wz-runtime-coop/src/either_links.rs` | S5 | |

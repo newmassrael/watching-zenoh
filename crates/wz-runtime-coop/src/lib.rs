@@ -190,6 +190,9 @@ pub mod executor;
 // holding them came from (the heap, or a span of a session's arena).
 #[cfg(feature = "runtime")]
 pub mod join_handle;
+// The layouts a `const fn` reckons, on the workspace's oldest compiler.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+mod const_layout;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub mod kept;
 // The `!Send` view of the task pool: the same table, through a set that is itself `!Send` —

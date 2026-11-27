@@ -2973,8 +2973,9 @@ fn an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena() {
         OpenKeyIds::none(),
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
-            held: crate::arena::HeldPlaces::handle(layout),
-            plan: crate::arena::PlanFrom::Config,
+            plan: crate::arena::PlanFrom::Config(Box::leak(Box::new(
+                crate::arena::HeldPlaces::handle(layout),
+            ))),
         },
     )
     .expect("the session opens");
@@ -3048,8 +3049,7 @@ fn an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena() {
             OpenKeyIds::none(),
             crate::arena::OpenStorage {
                 memory: &AllocatorMemory,
-                held,
-                plan: crate::arena::PlanFrom::Config,
+                plan: crate::arena::PlanFrom::Config(Box::leak(Box::new(held))),
             },
         )
         .expect("the session opens")
@@ -3135,8 +3135,7 @@ fn a_place_given_back_under_its_sessions_lock_fails_instead_of_waiting() {
         OpenKeyIds::none(),
         OpenStorage {
             memory: &AllocatorMemory,
-            held,
-            plan: crate::arena::PlanFrom::Config,
+            plan: crate::arena::PlanFrom::Config(Box::leak(Box::new(held))),
         },
     )
     .expect("the session opens");
@@ -3889,8 +3888,7 @@ fn a_config_made_inside_the_open_is_refused_as_the_config_handed_in() {
         OpenKeyIds::none(),
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
-            held: crate::arena::HeldPlaces::NONE,
-            plan: crate::arena::PlanFrom::Config,
+            plan: crate::arena::PlanFrom::Config(&crate::arena::HeldPlaces::NONE),
         },
     )
     .err();
@@ -3934,8 +3932,7 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
         OpenKeyIds::none(),
         crate::arena::OpenStorage {
             memory: &AllocatorMemory,
-            held: crate::arena::HeldPlaces::NONE,
-            plan: crate::arena::PlanFrom::Config,
+            plan: crate::arena::PlanFrom::Config(&crate::arena::HeldPlaces::NONE),
         },
     )
     .expect("a listener opens once it is bound");

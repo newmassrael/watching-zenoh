@@ -508,8 +508,7 @@ fn open_counted(source: impl OpenSource) -> u64 {
             OpenKeyIds::none(),
             crate::arena::OpenStorage {
                 memory: &AllocatorMemory,
-                held: crate::arena::HeldPlaces::NONE,
-                plan: crate::arena::PlanFrom::Config,
+                plan: crate::arena::PlanFrom::Config(&crate::arena::HeldPlaces::NONE),
             },
         )
         .err();

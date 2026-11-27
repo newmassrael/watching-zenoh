@@ -746,20 +746,19 @@ where
 
     /// The largest cell any link of these takes: a datagram link, a link of a `udp/` port's
     /// peer, a plain stream's and a secure channel's.
-    fn link_cell_bytes(&self) -> usize {
+    const LINK_CELL_BYTES: usize = {
         let datagram = CellRc::<UdpDriver<U, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes();
         #[cfg(feature = "udp-listen")]
-        let datagram = datagram.max(CellRc::<
-            UdpDriver<PortPeer<U, N::Shared>, RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
-        >::cell_bytes());
-        datagram
-            .max(CellRc::<
-                <D::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
-            >::cell_bytes())
-            .max(CellRc::<
-                <L::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
-            >::cell_bytes())
-    }
+        let datagram = crate::link_cells::larger_cell(
+            datagram,
+            CellRc::<UdpDriver<PortPeer<U, N::Shared>, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
+        );
+        let stream = crate::link_cells::larger_cell(
+            CellRc::<<D::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
+            CellRc::<<L::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
+        );
+        crate::link_cells::larger_cell(datagram, stream)
+    };
 
     /// Every link these links open from now on, dialled or taken off a port that is listened on
     /// after this, is placed in a cell of `cells`.
