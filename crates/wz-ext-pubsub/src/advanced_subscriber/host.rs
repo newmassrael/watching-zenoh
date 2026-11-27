@@ -795,58 +795,17 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         )?;
         let id = identity_of(zid, subscriber.entity.id, forms.as_ref());
 
-        // The retention sweep and the periodic re-ask: jobs the engine runs. The sweep is a build's
-        // that lets go of the sources that went away (`advanced-retention`).
+        // The retention sweep and the periodic re-ask: jobs the engine runs, over one body
+        // (`start_job`). The sweep is a build's that lets go of the sources that went away
+        // (`advanced-retention`).
         #[cfg(feature = "advanced-retention")]
-        let retention = match recovery.map(|c| c.retention_period()) {
-            Some(period) => {
-                let weak = Strong::downgrade(&shared);
-                let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-                Some(
-                    Ticker::start_on(
-                        E::clone(engine),
-                        period_ms,
-                        Arc::new(move || {
-                            let Some(shared) = weak.upgrade() else {
-                                return false;
-                            };
-                            if shared.is_closing() {
-                                return false;
-                            }
-                            let now = shared.now_ms();
-                            shared.lock().reclaim_expired_sources(now, period);
-                            true
-                        }),
-                    )
-                    .map_err(HostError::of("the engine runs no periodic jobs"))?,
-                )
-            }
-            None => None,
-        };
-        let periodic = match recovery.and_then(|c| c.periodic_queries()) {
-            Some(period) => {
-                let weak = Strong::downgrade(&shared);
-                let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-                Some(
-                    Ticker::start_on(
-                        E::clone(engine),
-                        period_ms,
-                        Arc::new(move || {
-                            let Some(shared) = weak.upgrade() else {
-                                return false;
-                            };
-                            if shared.is_closing() {
-                                return false;
-                            }
-                            run_periodic_tick(&shared);
-                            true
-                        }),
-                    )
-                    .map_err(HostError::of("the engine runs no periodic jobs"))?,
-                )
-            }
-            None => None,
-        };
+        let retention = recovery
+            .map(|c| start_job(engine, &shared, c.retention_period(), sweep_tick::<E>))
+            .transpose()?;
+        let periodic = recovery
+            .and_then(|c| c.periodic_queries())
+            .map(|period| start_job(engine, &shared, period, periodic_tick::<E>))
+            .transpose()?;
 
         // The startup get, after the live subscription, so a live sample that arrives during it
         // is held until the history is in.
@@ -1414,6 +1373,46 @@ fn mark_alive(state: &mut State, zid: &[u8], eid: Option<u32>) {
     state.set_source_alive(zid, eid, true);
     #[cfg(not(feature = "advanced-retention"))]
     let _ = (state, zid, eid);
+}
+
+/// Start a job of the subscriber on its engine: every `period`, `run` with the subscriber and the
+/// period, until the subscriber is gone or closing. The one body of both of its jobs, so a build
+/// with the two carries one job closure and one ticker start.
+fn start_job<E: EngineHolder>(
+    engine: &E,
+    shared: &Strong<Shared<E>>,
+    period: core::time::Duration,
+    run: fn(&Strong<Shared<E>>, core::time::Duration),
+) -> Result<Ticker<E>, HostError> {
+    let weak = Strong::downgrade(shared);
+    let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
+    Ticker::start_on(
+        E::clone(engine),
+        period_ms,
+        Arc::new(move || {
+            let Some(shared) = weak.upgrade() else {
+                return false;
+            };
+            if shared.is_closing() {
+                return false;
+            }
+            run(&shared, period);
+            true
+        }),
+    )
+    .map_err(HostError::of("the engine runs no periodic jobs"))
+}
+
+/// The retention sweep's tick: the sources nobody heard from for `period` are let go of.
+#[cfg(feature = "advanced-retention")]
+fn sweep_tick<E: EngineHolder>(shared: &Strong<Shared<E>>, period: core::time::Duration) {
+    let now = shared.now_ms();
+    shared.lock().reclaim_expired_sources(now, period);
+}
+
+/// The periodic re-ask's tick, which reads no period: [`run_periodic_tick`].
+fn periodic_tick<E: EngineHolder>(shared: &Strong<Shared<E>>, _period: core::time::Duration) {
+    run_periodic_tick(shared);
 }
 
 /// One periodic recovery tick: collect each source's `_sn=last+1..` request under the state lock,
