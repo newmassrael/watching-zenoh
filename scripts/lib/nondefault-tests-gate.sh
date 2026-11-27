@@ -1634,10 +1634,6 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
     # the cooperative engine queues its writes or carries a class apart), so the line mark and the
     # keepalive's deadline are the inline driver's alone, which this filter holds. NOT YET
     # MEASURED.
-    # The query plane's reply hold left out (`query-replies-with-final`, a default of the crate), as
-    # the zenoh-pico preset builds the session core: the rows' features above with the batching
-    # window the hold lives in. The hold raises nothing, so each reply leaves as it is made.
-    # NOT YET MEASURED.
     "wz-session-core|hook|\
         -default,\
         alloc,\
@@ -1664,7 +1660,36 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         transport-keepalive,\
         tx-lend-only\
         |session_actions::bundle_tests::link_stamps::every_frame_handed_to_a_link_that_writes_inline_marks_its_line"
+    # The query plane's reply hold left out (`query-replies-with-final`, a default of the crate), as
+    # the zenoh-pico preset builds the session core: the rows' features above with the batching
+    # window the hold lives in. The hold raises nothing, so each reply leaves as it is made.
+    # NOT YET MEASURED.
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
         transport-batching,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
         |session_actions::bundle_tests::the_reply_hold_is_raised_only_with_its_switch"
     # The COMPACT initial-sequence-number derivation, a row of its own because
     # `initial-sn-compact` is a selector, not an addition: it swaps the SHAKE
