@@ -14,6 +14,8 @@ use crate::tests::host_links;
 use wz_capi_port::{SessionEngine, WireKey};
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
+// The arena's spans and the lent tables' sizes are read where an open reserves an arena.
+#[cfg(not(wz_on_use))]
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::limit_binding::{LimitValue, Quota, UnlentRows};
