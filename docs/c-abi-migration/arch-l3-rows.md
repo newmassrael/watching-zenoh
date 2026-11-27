@@ -1063,6 +1063,33 @@ Expected size and Ir: the hand-out takes the lock it took (`live`'s check of the
 `released` is read under the lock instead), so a get's end costs about the same; no Push path
 changes, and the pico-compare cases do not move.
 
+**A get's end noted in every dispatch's hold** (`fix(capi-coop): Note a get its Final ends in
+every dispatch's hold`). The direct form noted a get its Final ended (`note_ended_gets`) after a
+lent ResponseFinal's dispatch, after a lost link and after the look's sweep, but not after the
+planes' dispatch of a face's other records, where a snapshot's DeclFinal ends its leg
+(`Registry::take_answers_of`, `end_snapshot_leg`). The snapshot then ended on its row while the
+engine's word of ended gets stayed unset, so the read's delivery handed nothing out, and the end
+waited for the next look at the face that notes (`life_turn`), which a face that brings nothing
+more makes only when its life or the snapshot's deadline comes due: past the five seconds a test
+reads for, so the tests read it as never. This is the red of `tests::snapshot` in the direct form
+(`query,liveliness-get` and `query,liveliness-get,tables-on-use`). Every planes' dispatch of
+the direct read now goes through `CoopEngine::dispatch_records`, which notes in the hold it
+dispatches under: the declaration's (`hand_lent_declare`), the frame's (`FramePayload`, whose
+owned records may carry a Final or a DeclFinal) and the rest's. Of the three only the first is
+reached by a Final in a build of this crate: its receive lends every record (`rx-in-place`,
+`rx-lent-control`), so a frame carries no owned record, and the arms ahead of the rest's take
+every lent Final (the reply arm a ResponseFinal, the declaration arm a DeclFinal). The other two
+note so that the fact holds by the one path, not by what the receive happens to hand them; no
+receive of this crate brings them a Final, so no test reaches them with one. Test:
+`tests::snapshot::a_snapshot_its_final_ends_is_handed_out_by_the_read_that_read_the_final` (after
+every read no ended get is owed; red if `note_ended_gets` leaves `dispatch_records`), with the
+four snapshot tests of the red as its wider net.
+
+Expected size and Ir: a Push, a plain-put frame and a reply take none of these arms, so the
+receive of samples does not move. A record of the other arms (a declaration, an interest, an empty
+frame) reads the tables' count of ended gets once more in a build of `query`; the pico-compare
+cases move by those few instructions where they read such a record.
+
 ## 7. The receive
 
 None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message
