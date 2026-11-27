@@ -36,12 +36,19 @@ pub struct ScoutMember<S> {
     /// Where the Scout is written from this member: the group, or in a test the responder.
     peer: SocketAddr,
     asks: bool,
+    /// A read of the socket failed in this drain: the drain drops the member as it ends.
+    lost: bool,
 }
 
 impl<S> ScoutMember<S> {
     /// A member reading `socket`, which writes its Scout to `peer` when it `asks`.
     pub fn new(socket: S, peer: SocketAddr, asks: bool) -> Self {
-        Self { socket, peer, asks }
+        Self {
+            socket,
+            peer,
+            asks,
+            lost: false,
+        }
     }
 }
 
@@ -143,15 +150,14 @@ impl<S: DatagramSocket> ScoutMembers<S> {
     }
 
     /// Read every datagram that is waiting into `buffer`, handing each to `on_datagram`, and say
-    /// whether any was. A member whose read fails is dropped.
+    /// whether any was. A member whose read fails is dropped, and the others keep their order.
     pub fn drain(&mut self, buffer: &mut [u8], mut on_datagram: impl FnMut(&[u8])) -> bool {
         let mut any = false;
-        let mut gone = Vec::new();
         let count = self.members.len();
         for step in 0..count {
-            let at = (self.cursor + step) % count;
+            let member = &mut self.members[(self.cursor + step) % count];
             loop {
-                match self.members[at].socket.try_recv(buffer) {
+                match member.socket.try_recv(buffer) {
                     Ok(Some((len, _from))) => {
                         any = true;
                         on_datagram(&buffer[..len]);
@@ -159,7 +165,7 @@ impl<S: DatagramSocket> ScoutMembers<S> {
                     Ok(None) => break,
                     Err(error) => {
                         wz_session_core::diag_debug!("scout: a member was lost: {error:?}");
-                        gone.push(at);
+                        member.lost = true;
                         break;
                     }
                 }
@@ -168,10 +174,9 @@ impl<S: DatagramSocket> ScoutMembers<S> {
         if count > 0 {
             self.cursor = (self.cursor + 1) % count;
         }
-        gone.sort_unstable();
-        for at in gone.into_iter().rev() {
-            self.members.remove(at);
-        }
+        // Each lost member is marked where it lies, so one pass in order drops them all, with no
+        // list of their places to sort first: the reads began at the cursor, not at the front.
+        self.members.retain(|member| !member.lost);
         any
     }
 }
@@ -293,6 +298,105 @@ mod tests {
             ]
         );
         assert!(!members.is_empty(), "no member was lost");
+    }
+
+    /// A member's socket for the window's reads alone: it hands out what the test queued, and
+    /// fails every read once it is broken.
+    struct Scripted {
+        queued: core::cell::RefCell<Vec<&'static str>>,
+        broken: core::cell::Cell<bool>,
+    }
+
+    impl DatagramSocket for Scripted {
+        type Error = ();
+
+        wz_runtime_coop::with_heap_link_seams! {
+            type Waits = wz_runtime_coop::session_drive::NoWaits;
+        }
+
+        fn bind(_at: SocketAddr) -> Result<Self, ()> {
+            Err(())
+        }
+
+        fn local(&self) -> SocketAddr {
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
+        }
+
+        fn send_to(&self, _to: SocketAddr, _bytes: &[u8]) -> Result<(), ()> {
+            Ok(())
+        }
+
+        fn wait_readable(&self, _timeout_ms: c_int) {}
+
+        fn times_out(&self) -> bool {
+            false
+        }
+
+        fn recv_waiting(&self, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, ()> {
+            self.try_recv(buf)
+        }
+
+        fn try_recv(&self, buf: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, ()> {
+            if self.broken.get() {
+                return Err(());
+            }
+            let Some(datagram) = self.queued.borrow_mut().pop() else {
+                return Ok(None);
+            };
+            let bytes = datagram.as_bytes();
+            let len = bytes.len().min(buf.len());
+            buf[..len].copy_from_slice(&bytes[..len]);
+            Ok(Some((len, self.local())))
+        }
+    }
+
+    /// A member whose read fails is dropped as the drain ends and the others stay in their order,
+    /// whichever member the drain began at, every datagram of a live member still handed on; a
+    /// window whose every member was lost is empty. Turned red by a drain that keeps a lost
+    /// member, drops a live one or moves one, as removing by swap does.
+    #[test]
+    fn a_member_whose_read_fails_is_dropped_and_the_rest_keep_their_order() {
+        let at = |port: u16| SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let member = |port: u16, broken: bool, queued: &[&'static str]| {
+            let socket = Scripted {
+                queued: core::cell::RefCell::new(queued.to_vec()),
+                broken: core::cell::Cell::new(broken),
+            };
+            ScoutMember::new(socket, at(port), true)
+        };
+        let peers = |members: &ScoutMembers<Scripted>| -> Vec<SocketAddr> {
+            members.members.iter().map(|member| member.peer).collect()
+        };
+        let mut members = ScoutMembers::from_parts(
+            None,
+            alloc::vec![
+                member(1, true, &[]),
+                member(2, false, &["two"]),
+                member(3, true, &[]),
+                member(4, false, &["four"]),
+                member(5, true, &[]),
+                member(6, false, &[]),
+            ],
+        );
+        let mut buffer = [0u8; 16];
+        let mut seen = Vec::new();
+        assert!(members.drain(&mut buffer, |datagram| seen.push(datagram.to_vec())));
+        assert_eq!(seen, [b"two".to_vec(), b"four".to_vec()]);
+        assert_eq!(peers(&members), [at(2), at(4), at(6)]);
+
+        // The cursor moved on by one, so this drain begins at the member at 4 and comes to the
+        // one at 2 last: both ends are lost, out of the order the reads met them in.
+        members.members[0].socket.broken.set(true);
+        members.members[1].socket.queued.borrow_mut().push("again");
+        members.members[2].socket.broken.set(true);
+        seen.clear();
+        assert!(members.drain(&mut buffer, |datagram| seen.push(datagram.to_vec())));
+        assert_eq!(seen, [b"again".to_vec()]);
+        assert_eq!(peers(&members), [at(4)]);
+
+        members.members[0].socket.broken.set(true);
+        assert!(!members.drain(&mut buffer, |_| panic!("no member reads")));
+        assert!(members.is_empty(), "every member was lost");
     }
 
     /// An ask socket is pinned by the text `Display` writes for its address, of either family, an
