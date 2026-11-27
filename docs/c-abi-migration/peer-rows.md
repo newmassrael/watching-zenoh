@@ -347,7 +347,7 @@ constant.
 
 | step | change | client / peer / api, B (estimate) | basis | receive Ir | held by |
 |---|---|---|---|---|---|
-| R1 | the Router's peers chosen by the fact, as F1 chose the runtime's form: a row's Router holds that row's chains alone in every direct build (`not(wz_round)`), so `SessionPeers` is `OnePeer` there; `ManyPeers` stays the round form's, whose session shares one Router among its links | 0 / -800 to -1,500 / -500 to -1,200 | `fragment_in_place` over `ManyPeers` 3,967 (peer) and 3,581 (api) against over `OnePeer` 3,146, and the peer key's lines inlined elsewhere | none: only a fragment reaches a Router; it compares no peer key | a constant assertion beside the type that a direct build's `SessionPeers` is not keyed (red if the choice returns to `listen`); the per-row quota held to the row's slots, as the client's form asserts today; the fragment tests over two faces (each face's chains rejoined, neither ending the other's) |
+| R1 | the Router's peers chosen by the fact, as F1 chose the runtime's form: a row's Router holds that row's chains alone in every direct build (`not(wz_round)`), so `SessionPeers` is `OnePeer` there; `ManyPeers` stays the round form's, whose session shares one Router among its links | 0 / -800 to -1,500 / -500 to -1,200 | `fragment_in_place` over `ManyPeers` 3,967 (peer) and 3,581 (api) against over `OnePeer` 3,146, and the peer key's lines inlined elsewhere | none, with the abort of a dropped frame's chain kept a call (section 7.2): the receive body is compiled once a Router type, and only a fragment or a dropped frame runs its Router's arms; a fragment compares no peer key | a constant assertion beside the type that a direct build's `SessionPeers` is not keyed (red if the choice returns to `listen`); the per-row quota held to the row's slots, as the client's form asserts today; the fragment tests over two faces (each face's chains rejoined, neither ending the other's) |
 | R2 | one face table: the dial role's face its row 0 (`DirectFaces`'s field and table one table), one `FacePlaces` form bounded by the build's limit, one turn body (`link_turn` and `face_turn`), one `announce_on` | +300 to +1,200 / -500 to -1,500 / -500 to -1,500 | the client's `link_turn` 4,656 against `face_turn` 4,842, `announce_on` 144 against 737, less what folds for a bound of 1; the peer's two initialisations (`taken_in` 859 and the dial's) and the dial-or-table choice at each row access | client: none (the bound is the constant 1, the row's address a constant); peer and api: none | `a_client_reads_its_one_face_through_a_table_of_one_row` (the face table's bound is 1 in a client build, its read turns row 0, `Takes::face_turns` one a read); the cost gate FORBIDS `link_turn` and `OneFace` in every case |
 | R3 | what the peers declared as relations with the face as a column, the holders a bit mask over the face table; the registry's sets, `ManyHolders`, `OneHolder`, the per-face table builders and the give-back go | -500 to +500 / -3,000 to -6,000 / -5,000 to -10,000 | `RegistryOf<ManyHolders>::new` 4,925, `add_face` 321 (api 1,133), `give_back` 547 (821), `PeerTables::init_in` and `keep_rows_in` 988 (1,241), `hold_table` 523, `entity_rows` 311 (745), `declares` 507 (1,362); counted beyond the share the on-use preset takes (`peer-proportion.md` section 4), not with it | none: a received sample is matched against the session's own subscribers, not the faces'; a put's filter reads one relation by key where it read a table per face | `a_face_that_goes_takes_its_rows_and_only_its_rows_from_every_relation` (red if a row of its own stays or another face's goes); `the_holders_of_a_declaration_are_the_faces_that_declared_it` |
 | R4 | the link's session as the row's fields: kernel and link state by value (the session slot's shape) for every face, the machine built in the row, the binding reaching the row through a `PlacedRef`; `place_link_session` and `start_wire` one constructor in place | -500 to -1,500 / -1,500 to -3,500 / -2,000 to -4,000 | `place_link_session` 2,980 / 4,593 / 5,061, the handles' counts and drops, the per-face share of `lend_session` (4,290 / 5,968 / 7,885) | none, or fewer: a record's sequence number and gate are read through a field rather than through a handle | the handshake, lease and close tests over several faces (`crates/wz-capi-coop/src/tests/listen.rs`); the cost gate FORBIDS the kernel handle's drop in the pico cases |
@@ -356,10 +356,11 @@ constant.
 | R7 | sinks and crates as data: `arch-mono.md`'s M3 to M5 (a counted message counted by the encoder that writes it, an instance compiled in its owner, the wait of an undeclaration over one enum of rows) | 0 / 0 to -500 / -5,000 to -9,000 | `arch-mono.md` section 5, read on `pico-default`; the api twin's 11,663 bytes of `write_wire` to be read by body before it is promised | none on the read or the put | `arch-mono.md` section 5's tests |
 | R8 | the walks of rows for the driving: the read of many rows (`peer-proportion.md`'s F5, section 8.14's Q5) and the lease and keep-alive dues read by one walk, as zenoh-pico's tasks walk their list | counted in `peer-proportion.md` F5 | | as Q5 | section 8.14.7's tests |
 
-Order: R1a, then R1 (section 7.1: R1a makes the premise R1 rests on true in every build); R2
-and R4 next, as R3 and R5 write into the table they make; R6 with `peer-proportion.md`'s F2; R5
-after `feat-mcast.md`'s F4, which makes the group face R5 puts in the table; S1 whenever SCE
-lands it, after R4.
+Order: R1a, the abort of a dropped frame's chain kept a call, then R1 (section 7.1: R1a makes the
+premise R1 rests on true in every build; section 7.2: the call keeps R1's change out of the body
+every message runs); R2 and R4 next, as R3 and R5 write into the table they make; R6 with
+`peer-proportion.md`'s F2; R5 after `feat-mcast.md`'s F4, which makes the group face R5 puts in
+the table; S1 whenever SCE lands it, after R4.
 
 ### 7.1 R1's premises, read in the code, and the step before it
 
@@ -414,12 +415,14 @@ chooses (`SessionPeers` by `listen` is gone): its Router is generic in its peers
 peers through `TransportFaces::Peers`. A direct build whose Router is keyed fails to compile
 (`crates/wz-capi-coop/src/engine.rs` @ `const _: () = assert!(!<RouterPeers as ChainPeers>::KEYED);`).
 
-**Receive Ir.** The client case's is unchanged: its Router was `OnePeer` already, the same type and
-so the same code; R1a changes which cell a handle names, not the instructions that use it
+**Receive Ir.** R1a changes which cell a handle names, not the instructions that use it
 (`StepLend::lend_for` and `StepLend::with` load the handle from the slot and from the pump as
 before, and neither cell's address was a constant the compiler could fold before or is now). The
 peer and api cases' fragments no longer copy or compare a peer key (`PeerKey::new`,
-`PeerKey::is`); a message that is not fragmented never reaches a Router.
+`PeerKey::is`). A message that is not fragmented runs none of its Router's arms, but it does not
+pass the Router by: every datagram is dispatched with the Router taken out of its lend, by a body
+compiled for the Router's type, so a change of the Router's peers is a change of the body every
+message runs. Section 7.2 reads what that did to R1 and the step that keeps it out of the body.
 
 **Memory.** Each face grows by one cell, a pointer (8 B on a 64-bit host, 4 B on a 32-bit MCU). The
 session's cell (`StepPlaces::router`) is lent in by the round's tasks alone now; the direct form
@@ -438,7 +441,67 @@ chain of one face by a peer key none of them named (red with `ManyPeers` in that
 in every build with `alloc` and `session-unicast`, not one of them a build; `wz-session-core`'s
 `a_handle_of_a_value_held_in_place_reads_it_where_it_lies` holds `PlacedRef::of_place`.
 
-### 7.2 Why R2 and R4 wait for R1 to be built
+### 7.2 R1's receive instructions: what moved them, and the step that keeps them
+
+**Read** (the main session's runs of 2026-11-27, `scripts/pico-compare.sh subprofile 8 12000 10000`,
+its W arm: the shipped direct form, with `threads`, `listen` and `group`): instructions a received
+message, main 3017.3, 3021.1 and 3020.9; R1a alone 3020.4 and 3020.7; R1 on R1a 3025.9 and 3025.3.
+No step adds receive instructions (owner), and R1 added about six (5.8 on the means).
+
+**Where.** The same runs' callgrind tables, each function's own instructions, the window of 12,000
+messages less the window of 2,000, over the 10,000 between (main's three runs, R1's two): every
+function reads the same to within 0.25 a message but one, the receive of a datagram
+(`crates/wz-session-core/src/unicast_rx.rs` @
+`pub fn dispatch_datagram<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(`), at 198.0 in
+each of main's runs and 204.0 in each of R1's. The six are no piece of work. By source line they
+are spread over the frame path (in `frame_in_place`, the frame head's fields, its gates and the
+call of `admit_head_in_place`, +5 and -1; the walk of a datagram's units and the read of a unit's
+head, +1 each; the function's entry, -1), over the library's helpers inlined in it (`Option`,
+slices, integers, `mem`: +3 and -1 by line) and over the instructions the compiler gives no source
+line (+5 under `option.rs`, -5 under `drive.rs`, -3 under `result.rs`, +1 under two others):
+moves, spills and jumps, the same work allocated another way. `step_pump` and the rest of the read
+read the same.
+
+**Why.** Every datagram is dispatched with the Router taken out of its lend for the length of the
+dispatch (`crates/wz-session-core/src/unicast_rx.rs` @
+`router.dispatch_in_place(unit, actions, engine, reader, now_ms, on_event)`), and the dispatch
+(`dispatch_datagram_reassembling` and what it inlines) is compiled into that one receive body once
+for each Router type. Its frame path is the same source whatever the Router's peers but for one
+arm: a `Frame` the SN gate drops ends its channel's chain (`abort_rejected_channel`), which over
+`ManyPeers` reads the peer's zid from the facts and compares keys, and over `OnePeer` does
+neither. The shipped libraries of the two runs (`nm -S`, `objdump -d`) show what the compiler made
+of each. Main's receive body is 1,989 bytes, 437 instructions, and calls
+`abort_rejected_channel`, a symbol of its own (303 bytes). R1's is 2,104 bytes, 462 instructions;
+it has no `abort_rejected_channel` symbol and calls `Slot::end` from inside the body. The
+`OnePeer` arm was small enough to be inlined, and with it in the body the frame path around it,
+which every message takes and which is the same source in both, came out with other registers and
+another block order (the call of the cold `fragment_in_place` moved from the body's end to its
+middle). That `RouterOf` and `TransportFaces::Peers` changed the pump's code is not borne out:
+they name the same concrete type, and `step_pump` reads the same. The client case (no `listen`,
+`OnePeer` before R1 as after) has carried the inlined arm all along: its explain report
+(`size_ledger_gate.py --explain`) holds no `abort_rejected_channel` symbol.
+
+**The step** (`crates/wz-session-core/src/drive.rs` @
+`fn abort_rejected_channel<R, T, const SLOTS: usize, const CAP: usize, S, P>(`): the arm is
+`#[inline(never)]`, as `fragment_in_place`, the other arm of the dispatch whose body follows the
+Router's peers, already is. The receive body then holds a call where each Router's arm lies, and
+nothing in it varies with the Router's peers but the callee, so R1's change of them does not reach
+it. The step lands before R1, on its own, and changes no behaviour. It is not `#[cold]` as well:
+over `ManyPeers` the compiler already kept the arm a call, so `#[inline(never)]` alone leaves main's
+W body as it is built today, where `#[cold]` would move its block order too, a change to measure on
+its own.
+
+**What the main session reads** (predictions, not readings):
+
+- the W arm at the step alone: main's figure, the body being a call there already; at R1 on the
+  step: main's figure, the receive body 198 a message as main's;
+- the client case's receive arm (the perf matrix on `pico-client-coop-nostd`): its body now calls
+  the arm it held inline, the same or fewer, read before R1 is judged;
+- the bytes: the W build's receive body back to about main's 1,989 from R1's 2,104, beside an
+  `abort_rejected_channel` over `OnePeer` of its own (about 100 to 200); about even in every case
+  whose Router is `OnePeer`, read in the explain reports.
+
+### 7.3 Why R2 and R4 wait for R1 to be built
 
 Both are wider than one crate's feature matrix can be written for without a compiler in the loop,
 and each holds a decision the code does not settle yet.
