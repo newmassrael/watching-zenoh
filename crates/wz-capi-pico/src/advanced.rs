@@ -2418,6 +2418,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "engine-tokio")]
     use alloc::sync::Arc;
 
     use super::*;
