@@ -12682,21 +12682,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopDriv
 }
 
 /// What the builders of [`IpLinks`](wz_runtime_coop::ip_stack::IpLinks) turn links into: the links
-/// `with_tls` makes over a secure channel `S`, and those `with_groups` makes joining groups by
-/// `J`. An ABI names with it the links it opens its sessions over, and so the engine's type,
-/// whatever its build adds to the host's.
+/// `with_tls` makes over a secure channel `S`, those `with_groups` makes joining groups by `J`,
+/// and those `waited_by_owner` makes, whose owner waits for their input. An ABI names with it the
+/// links it opens its sessions over, and so the engine's type, whatever its build adds to the
+/// host's.
 pub trait ComposedLinks {
     /// The links `with_tls` makes.
     type WithTls<S>;
     /// The links `with_groups` makes.
     type WithGroups<J>;
+    /// The links `waited_by_owner` makes.
+    type WaitedByOwner;
 }
 
-impl<U, D, L, G, N: wz_runtime_coop::link_cells::CountKind> ComposedLinks
-    for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G, N>
+impl<U, D, L, G, N: wz_runtime_coop::link_cells::CountKind, W> ComposedLinks
+    for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G, N, W>
 {
-    type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G, N>;
-    type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J, N>;
+    type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G, N, W>;
+    type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J, N, W>;
+    type WaitedByOwner = wz_runtime_coop::ip_stack::IpLinks<
+        U,
+        D,
+        L,
+        G,
+        N,
+        wz_runtime_coop::session_drive::WaitedByOwner,
+    >;
 }
 
 #[cfg(all(feature = "queryable", wz_round))]

@@ -1279,6 +1279,9 @@ impl DatagramSocket for PosixUdpSocket {
 
     const CAN_SET_RECEIVE_TIMEOUT: bool = true;
 
+    // Every socket of this type is a descriptor it opened, which `input_wait` names.
+    const NAMES_INPUT_WAIT: bool = true;
+
     fn set_receive_timeout(&self, ms: c_int) -> bool {
         set_receive_timeout_ms(self.fd, ms).is_ok()
     }

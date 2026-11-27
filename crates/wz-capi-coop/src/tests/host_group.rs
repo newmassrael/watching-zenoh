@@ -18,6 +18,7 @@ use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
 use wz_capi_port::SessionDrive;
 use wz_capi_port::{PeerLists, SessionEngine, SubscriberSink, WireKey};
 use wz_runtime_coop::ip_stack::IpLinks;
+use wz_runtime_coop::session_drive::WaitedByOwner;
 use wz_runtime_coop::stream_link::NoDial;
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::PosixTcpDial;
@@ -36,9 +37,15 @@ use crate::host_group::HostGroups;
 use crate::{CoopConfig, CoopEngine};
 
 /// The host's links, joining groups on the host's sockets, counted as the engine counts the links
-/// it opens over (`host_links` hands them so).
-type Links =
-    IpLinks<PosixUdpSocket, PosixTcpDial, NoDial, HostGroups<PosixUdpSocket>, crate::LinkCount>;
+/// it opens over (`host_links` hands them so) and waited for by their owner.
+type Links = IpLinks<
+    PosixUdpSocket,
+    PosixTcpDial,
+    NoDial,
+    HostGroups<PosixUdpSocket>,
+    crate::LinkCount,
+    WaitedByOwner,
+>;
 
 type Engine = CoopEngine<Links, PosixClock>;
 

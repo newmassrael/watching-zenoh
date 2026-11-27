@@ -53,7 +53,10 @@ use crate::session_drive::WaitOn;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::session_drive::{Dialled, LinkListener, OpenedLink, PendingDial, SessionLinks};
+use crate::session_drive::{
+    Dialled, InputWaiter, LinkListener, OpenedLink, PendingDial, SessionLinks, WaitedByOwner,
+    WaitsInLoop,
+};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::session_drive::{LinkOpenError, LinkProto, Locator};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
@@ -363,9 +366,11 @@ where
 /// links given none join no group.
 ///
 /// `N` is how the sessions the links serve count the handles on a link
-/// (`crate::link_cells::CountKind`), which the cells they are lent are flagged by.
+/// (`crate::link_cells::CountKind`), which the cells they are lent are flagged by. `W` is who
+/// waits for the input of the links they make ([`InputWaiter`]): each link in its own loop, until
+/// [`IpLinks::waited_by_owner`] makes it their owner.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub struct IpLinks<U, D, L = NoDial, G = NoGroups, N: CountKind = OneTask> {
+pub struct IpLinks<U, D, L = NoDial, G = NoGroups, N: CountKind = OneTask, W = WaitsInLoop> {
     local: IpAddr,
     dial: D,
     tls: L,
@@ -376,6 +381,7 @@ pub struct IpLinks<U, D, L = NoDial, G = NoGroups, N: CountKind = OneTask> {
     #[cfg(feature = "udp-listen")]
     ports: Option<crate::udp_link::SharedBook<N::Shared>>,
     datagrams: core::marker::PhantomData<fn() -> U>,
+    waiter: core::marker::PhantomData<fn() -> W>,
 }
 
 /// What every link of a stack is given besides its socket: the buffers its frames are encoded
@@ -499,10 +505,11 @@ impl<N: CountKind> LinkPlace<N> {
     /// The datagram link over `socket`, over the buffers `rx` and `tx`, as the stack opens it:
     /// its replies go to `peer` (a dial's end, a port's source), or to whoever first opens a
     /// session when there is none (an acceptor's); refused when the build's rows do not name both
-    /// its ends, made in a cell when the stack was lent some, and waited on by its owner when the
-    /// stack says so. Left to the compiler to inline: a build that only dials has one caller, and
-    /// a body of its own there would add a call and save nothing.
-    fn datagram<U: DatagramSocket + 'static>(
+    /// its ends, made in a cell when the stack was lent some, of the type that says who waits for
+    /// its input (`W`, the stack's), and waited on by its owner when the stack says so. Left to the
+    /// compiler to inline: a build that only dials has one caller, and a body of its own there would
+    /// add a call and save nothing.
+    fn datagram<U: DatagramSocket + 'static, W: InputWaiter>(
         &self,
         socket: U,
         peer: Option<SocketAddr>,
@@ -510,7 +517,7 @@ impl<N: CountKind> LinkPlace<N> {
         tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         heap_link::<_, N>(self.cells.as_ref(), datagram_ends_fit(&socket, peer))?.open(|place| {
-            let link = place.write(UdpDriver::with_peer(socket, peer, rx, tx));
+            let link = place.write(UdpDriver::<U, _, _, W>::with_peer(socket, peer, rx, tx));
             if self.owner_waits {
                 link.wait_by_owner();
             }
@@ -550,12 +557,13 @@ where
             #[cfg(feature = "udp-listen")]
             ports: None,
             datagrams: core::marker::PhantomData,
+            waiter: core::marker::PhantomData,
         }
     }
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<U, D, L, G, N: CountKind> IpLinks<U, D, L, G, N>
+impl<U, D, L, G, N: CountKind, W: InputWaiter> IpLinks<U, D, L, G, N, W>
 where
     U: DatagramSocket + 'static,
     D: StreamDial,
@@ -567,7 +575,7 @@ where
     /// The same links, for sessions that count the handles on a link as `M` does
     /// ([`SessionLinks`]'s `N`): asked before a session is opened over them, which is when it
     /// lends them its cells.
-    pub fn counted_by<M: CountKind>(self) -> IpLinks<U, D, L, G, M> {
+    pub fn counted_by<M: CountKind>(self) -> IpLinks<U, D, L, G, M, W> {
         #[cfg(feature = "udp-listen")]
         debug_assert!(
             self.ports.is_none(),
@@ -582,11 +590,12 @@ where
             #[cfg(feature = "udp-listen")]
             ports: None,
             datagrams: self.datagrams,
+            waiter: self.waiter,
         }
     }
 
     /// The same links, whose `tls/` links run over the secure channels `tls` opens.
-    pub fn with_tls<S: StreamDial>(self, tls: S) -> IpLinks<U, D, S, G, N> {
+    pub fn with_tls<S: StreamDial>(self, tls: S) -> IpLinks<U, D, S, G, N, W> {
         IpLinks {
             local: self.local,
             dial: self.dial,
@@ -596,12 +605,13 @@ where
             #[cfg(feature = "udp-listen")]
             ports: self.ports,
             datagrams: self.datagrams,
+            waiter: self.waiter,
         }
     }
 
     /// The same links, which join the multicast groups `groups` joins
     /// ([`SessionLinks::open_group`]).
-    pub fn with_groups<J: GroupJoiner>(self, groups: J) -> IpLinks<U, D, L, J, N> {
+    pub fn with_groups<J: GroupJoiner>(self, groups: J) -> IpLinks<U, D, L, J, N, W> {
         IpLinks {
             local: self.local,
             dial: self.dial,
@@ -611,16 +621,30 @@ where
             #[cfg(feature = "udp-listen")]
             ports: self.ports,
             datagrams: self.datagrams,
+            waiter: self.waiter,
         }
     }
 
-    /// Links whose owner waits for their input ([`SessionDatagramLink::input_wait`]): what holds a
-    /// session behind a lock and waits for it outside the lock. Each link whose socket can be
-    /// waited on that way does not wait in its loop; one whose socket cannot still does.
+    /// The same links, whose owner waits for their input ([`SessionDatagramLink::input_wait`]):
+    /// what holds a session behind a lock and waits for it outside the lock. Each link whose socket
+    /// can be waited on that way does not wait in its loop; one whose socket cannot still does. The
+    /// owner's wait is the links' type ([`WaitedByOwner`]), so a datagram link over a socket that
+    /// always names its wait ([`DatagramSocket::NAMES_INPUT_WAIT`]) is made with no wait of its own.
     #[must_use]
-    pub fn waited_by_owner(mut self) -> Self {
-        self.shape.place.owner_waits = true;
-        self
+    pub fn waited_by_owner(self) -> IpLinks<U, D, L, G, N, WaitedByOwner> {
+        let mut shape = self.shape;
+        shape.place.owner_waits = true;
+        IpLinks {
+            local: self.local,
+            dial: self.dial,
+            tls: self.tls,
+            groups: self.groups,
+            shape,
+            #[cfg(feature = "udp-listen")]
+            ports: self.ports,
+            datagrams: self.datagrams,
+            waiter: core::marker::PhantomData,
+        }
     }
 
     /// Links that lend the session `slots` buffers of `bytes` each to encode its frames into, as
@@ -665,7 +689,9 @@ where
                 let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
                 // Port 0 has the stack choose a free one, one per initiator session.
                 let socket = U::bind(dial_bind(self.local, ip.at)).map_err(bind_refused::<U>)?;
-                self.shape.place.datagram(socket, Some(ip.at), rx, tx)
+                self.shape
+                    .place
+                    .datagram::<_, W>(socket, Some(ip.at), rx, tx)
             }
             LinkProto::Tcp if !D::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Tcp => {
@@ -692,7 +718,7 @@ pub(crate) const fn opens_ipv6<U: DatagramSocket, D: StreamDial, L: StreamDial>(
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<U, D, L, G, N: CountKind> SessionLinks<N> for IpLinks<U, D, L, G, N>
+impl<U, D, L, G, N: CountKind, W: InputWaiter> SessionLinks<N> for IpLinks<U, D, L, G, N, W>
 where
     U: DatagramSocket + 'static,
     D: StreamDial,
@@ -731,7 +757,7 @@ where
         let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = U::bind(SocketAddr::new(self.local, port)).map_err(bind_refused::<U>)?;
-        self.shape.place.datagram(socket, None, rx, tx)
+        self.shape.place.datagram::<_, W>(socket, None, rx, tx)
     }
 
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump, N>, LinkOpenError> {
@@ -747,11 +773,12 @@ where
     /// The largest cell any link of these takes: a datagram link, a link of a `udp/` port's
     /// peer, a plain stream's and a secure channel's.
     const LINK_CELL_BYTES: usize = {
-        let datagram = CellRc::<UdpDriver<U, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes();
+        let datagram =
+            CellRc::<UdpDriver<U, RxBuffer<N::Flag>, TxBuffer<N::Flag>, W>>::cell_bytes();
         #[cfg(feature = "udp-listen")]
         let datagram = crate::link_cells::larger_cell(
             datagram,
-            CellRc::<UdpDriver<PortPeer<U, N::Shared>, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
+            CellRc::<UdpDriver<PortPeer<U, N::Shared>, RxBuffer<N::Flag>, TxBuffer<N::Flag>, W>>::cell_bytes(),
         );
         let stream = crate::link_cells::larger_cell(
             CellRc::<<D::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
@@ -804,7 +831,7 @@ where
                 let socket = U::bind(dial_bind(self.local, ip.at)).map_err(bind_refused::<U>)?;
                 self.shape
                     .place
-                    .datagram(socket, Some(ip.at), rx, tx)
+                    .datagram::<_, W>(socket, Some(ip.at), rx, tx)
                     .map(IpDial::from)
             }
             LinkProto::Tcp => Ok(IpDial(IpDialing::Tcp(PendingStream {
@@ -857,9 +884,10 @@ where
                     #[cfg(feature = "udp-port-lent-only")]
                     None => return Err(LinkOpenError::Exhausted),
                 };
-                Ok(Box::new(IpUdpListener {
+                Ok(Box::new(IpUdpListener::<U, N, W> {
                     port: CellRc::try_on_heap(port).ok_or(LinkOpenError::Exhausted)?,
                     shape: self.shape,
+                    waiter: core::marker::PhantomData,
                 }))
             }
             LinkProto::Tcp if D::CARRIED => {
@@ -994,16 +1022,18 @@ impl<P: StreamSocket + 'static, N: CountKind> PendingDial<HeapLink<N>, N> for Pe
 /// tables when it lent the stack some; the port's own read buffer and the datagrams it sorts for
 /// each peer are the heap's either way.
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-struct IpUdpListener<U: DatagramSocket, N: CountKind> {
+struct IpUdpListener<U: DatagramSocket, N: CountKind, W = WaitsInLoop> {
     /// The port, shared by the listener and every peer's link, which may be held by faces on
     /// several threads: counted as what the links share is.
     port: CellRc<UdpPort<U, N::Shared>, N::Shared>,
     shape: LinkShape<N>,
+    /// Who waits for the input of the links taken off the port: the stack's.
+    waiter: core::marker::PhantomData<fn() -> W>,
 }
 
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-impl<U: DatagramSocket + 'static, N: CountKind> LinkListener<HeapLink<N>, N>
-    for IpUdpListener<U, N>
+impl<U: DatagramSocket + 'static, N: CountKind, W: InputWaiter> LinkListener<HeapLink<N>, N>
+    for IpUdpListener<U, N, W>
 {
     fn local(&self) -> Locator {
         Locator::udp(self.port.local())
@@ -1025,7 +1055,7 @@ impl<U: DatagramSocket + 'static, N: CountKind> LinkListener<HeapLink<N>, N>
         let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
         self.shape
             .place
-            .datagram(share, Some(peer), rx, tx)
+            .datagram::<_, W>(share, Some(peer), rx, tx)
             .map(Some)
     }
 
@@ -2968,6 +2998,7 @@ mod tests {
                 port: CellRc::try_on_heap(UdpPort::new(socket, 2048).expect("the heap has room"))
                     .expect("the heap has room"),
                 shape: LinkShape::default(),
+                waiter: core::marker::PhantomData,
             };
             (listener, queued, sent)
         }

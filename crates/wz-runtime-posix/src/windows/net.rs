@@ -379,6 +379,9 @@ impl DatagramSocket for WindowsUdpSocket {
 
     const RESOLVES: bool = true;
 
+    // Every socket of this type is a `SOCKET` it opened, which `input_wait` names.
+    const NAMES_INPUT_WAIT: bool = true;
+
     fn resolve(
         name: &wz_runtime_coop::locator_text::NamedHost<'_>,
         found: &mut [SocketAddr],

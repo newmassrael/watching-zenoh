@@ -47,6 +47,7 @@ type Links = IpLinks<
     TlsDial<PosixTcpDial>,
     wz_runtime_coop::group_transport::NoGroups,
     wz_capi_coop::LinkCount,
+    wz_runtime_coop::session_drive::WaitedByOwner,
 >;
 type Engine = CoopEngine<Links, PosixClock>;
 

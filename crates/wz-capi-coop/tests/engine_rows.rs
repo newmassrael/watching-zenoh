@@ -25,8 +25,9 @@ use wz_session_core::WhatAmI;
 
 const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
 
-/// The host's links, counted as the engine's sessions count the parts of a link.
-type PosixLinks = wz_runtime_posix::links::PosixLinks<wz_capi_coop::LinkCount>;
+/// The host's links, counted as the engine's sessions count the parts of a link and waited for by
+/// their owner, as the engine opens over them.
+type PosixLinks = <wz_runtime_posix::links::PosixLinks<wz_capi_coop::LinkCount> as wz_capi_coop::ComposedLinks>::WaitedByOwner;
 type Engine = CoopEngine<PosixLinks, PosixClock>;
 
 /// The arenas the allocator gave and was not given back.

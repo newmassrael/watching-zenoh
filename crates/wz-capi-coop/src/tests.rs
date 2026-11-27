@@ -45,13 +45,18 @@ use wz_session_mcu::app_layer::dispatch_to;
 
 use crate::{CoopConfig, CoopEngine};
 
-/// The host's links, counted as the engine's sessions count the parts of a link
-/// ([`crate::LinkCount`]).
-pub(crate) type PosixLinks = wz_runtime_posix::links::PosixLinks<crate::LinkCount>;
+/// The host's links an engine opens over: counted as its sessions count the parts of a link
+/// ([`crate::LinkCount`]), and waited for by their owner, as [`host_links`] made
+/// `waited_by_owner` are.
+pub(crate) type PosixLinks =
+    <wz_runtime_posix::links::PosixLinks<crate::LinkCount> as crate::ComposedLinks>::WaitedByOwner;
 
 /// The host's links bound on `local`, whose `tcp/` dial is `dial`, counted as the engine's
 /// sessions count a link's parts.
-pub(crate) fn host_links(local: impl Into<std::net::IpAddr>, dial: PosixTcpDial) -> PosixLinks {
+pub(crate) fn host_links(
+    local: impl Into<std::net::IpAddr>,
+    dial: PosixTcpDial,
+) -> wz_runtime_posix::links::PosixLinks<crate::LinkCount> {
     wz_runtime_posix::links::PosixLinks::new(local, dial).counted_by::<crate::LinkCount>()
 }
 

@@ -824,6 +824,9 @@ impl DatagramSocket for ZephyrUdpSocket {
 
     const CAN_SET_RECEIVE_TIMEOUT: bool = true;
 
+    // Every socket of this type is a descriptor it opened, which `input_wait` names.
+    const NAMES_INPUT_WAIT: bool = true;
+
     // The image's Kconfig (`CONFIG_NET_IPV6`, read by build.rs): without it Zephyr refuses an
     // IPv6 socket, so what reads an endpoint for this stack reads IPv4 alone.
     const IPV6: bool = cfg!(wz_net_ipv6);

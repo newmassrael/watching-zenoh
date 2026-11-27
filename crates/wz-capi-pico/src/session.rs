@@ -940,12 +940,17 @@ type SocketLinks = <SecuredLinks as wz_capi_coop::ComposedLinks>::WithGroups<Hos
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "multicast-transport")))]
 type SocketLinks = SecuredLinks;
 
+/// [`SocketLinks`] as the read task waits for them, with the session free ([`open_on_coop`]):
+/// a datagram link of these has no wait of its own.
+#[cfg(not(feature = "engine-tokio"))]
+type WaitedSocketLinks = <SocketLinks as wz_capi_coop::ComposedLinks>::WaitedByOwner;
+
 /// The links a cooperative session opens over the host's network: its sockets', and WebSocket
 /// links over its TCP beside them where the build has them (`transport-link-ws`).
 #[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-ws"))]
-type NetLinks = crate::coop_host::WithWs<SocketLinks>;
+type NetLinks = crate::coop_host::WithWs<WaitedSocketLinks>;
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "transport-link-ws")))]
-type NetLinks = SocketLinks;
+type NetLinks = WaitedSocketLinks;
 
 /// The links a cooperative session opens over the host's network and lines: its network's, and
 /// its ttys' beside them where the build has serial links (`transport-link-serial`).

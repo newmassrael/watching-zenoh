@@ -74,7 +74,9 @@ use crate::link_storage::{RxStore, TxLender, TxStore};
 use crate::session_drive::Locator;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Bind, DriverPump, LinkOpenError, SlotStack};
-use crate::session_drive::{IpLocator, LinkProto, SessionDatagramLink, LONGEST_IP_LOCATOR_LEN};
+use crate::session_drive::{
+    InputWaiter, IpLocator, LinkProto, SessionDatagramLink, WaitsInLoop, LONGEST_IP_LOCATOR_LEN,
+};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::{LinkWaits, NoWaits, WaitOn};
 
@@ -164,6 +166,13 @@ pub trait DatagramSocket: Sized {
     fn input_wait(&self) -> Option<WaitOn> {
         None
     }
+
+    /// Whether every socket of this type names a wait its link's owner can make for its input
+    /// (`input_wait` answers one for each socket opened). A constant, so that a link over such a
+    /// socket, made by a stack whose owner waits for every link ([`InputWaiter`]), is compiled with
+    /// no wait of its own. The provided answer is no: a link over the socket then asks it when the
+    /// link is made.
+    const NAMES_INPUT_WAIT: bool = false;
 
     /// Whether a datagram for this socket's link was taken off the stack already, by another
     /// reader of a socket the link shares (a listener's, `PortPeer`), and waits to be read: the
@@ -396,7 +405,12 @@ pub fn datagram_ends_fit<S: DatagramSocket>(socket: &S, peer: Option<SocketAddr>
 /// datagrams only; what anyone else sends is discarded and counted ([`Self::foreign`]). UDP is
 /// connectionless, so `open_blocking` / `close_blocking` are no-ops: the zenoh handshake and Close
 /// frame are the session's open and close.
-pub struct UdpDriver<S: DatagramSocket, B: RxStore, T: TxStore> {
+///
+/// `W` is who waits for the link's input ([`InputWaiter`]), as the stack that made it says: a
+/// link of a stack whose owner waits for every link, over a socket that always names its wait
+/// ([`DatagramSocket::NAMES_INPUT_WAIT`]), has no wait of its own, and its service reads what is
+/// queued and nothing else.
+pub struct UdpDriver<S: DatagramSocket, B: RxStore, T: TxStore, W = WaitsInLoop> {
     socket: S,
     binding: PeerBinding<SocketAddr>,
     rx_buf: RefCell<B>,
@@ -431,6 +445,8 @@ pub struct UdpDriver<S: DatagramSocket, B: RxStore, T: TxStore> {
     /// Whether the link's owner waits on its socket ([`Self::waited_by_owner`]), so its loop does
     /// not.
     owner_waits: bool,
+    /// Who waits for the link's input, as the stack that made it says.
+    waiter: core::marker::PhantomData<fn() -> W>,
 }
 
 /// The fixed-memory profile's driver: its receive buffer and the buffer its frames are built in
@@ -507,9 +523,11 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
     pub fn initiator_in(socket: S, peer: SocketAddr, rx_buf: B, tx: T) -> Self {
         Self::with_peer(socket, Some(peer), rx_buf, tx)
     }
+}
 
-    /// [`Self::initiator_in`] when `peer` is known, [`Self::acceptor_in`] when it is not: what
-    /// a stack that opens both from one body asks.
+impl<S: DatagramSocket, B: RxStore, T: TxStore, W: InputWaiter> UdpDriver<S, B, T, W> {
+    /// [`UdpDriver::initiator_in`] when `peer` is known, [`UdpDriver::acceptor_in`] when it is
+    /// not, its input waited for as `W` says: what a stack that opens both from one body asks.
     pub(crate) fn with_peer(socket: S, peer: Option<SocketAddr>, mut rx_buf: B, tx: T) -> Self {
         let rx_len = rx_buf.capacity();
         Self {
@@ -530,6 +548,7 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
             idle_wait_ms: SERVICE_WAIT_MS as u32,
             armed_wait_ms: Cell::new(SERVICE_WAIT_MS),
             owner_waits: false,
+            waiter: core::marker::PhantomData,
         }
     }
 
@@ -549,6 +568,14 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub fn wait_by_owner(&mut self) {
         self.owner_waits = self.socket.input_wait().is_some();
+    }
+
+    /// Whether the link's owner waits on its socket, so its loop does not: always for a link of a
+    /// stack whose owner waits for every link, over a socket that always names its wait, so no wait
+    /// of the loop's is compiled into it; otherwise as the link was set when it was made
+    /// (`wait_by_owner`).
+    fn owner_waits_input(&self) -> bool {
+        (W::OWNER && S::NAMES_INPUT_WAIT) || self.owner_waits
     }
 
     /// Let this link wait up to `ms` milliseconds for a datagram when its session has nothing due
@@ -624,7 +651,13 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
     }
 }
 
-impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> UdpDriver<S, B, T> {
+impl<S, B, T, W> UdpDriver<S, B, T, W>
+where
+    S: DatagramSocket + 'static,
+    B: RxStore + 'static,
+    T: TxStore + 'static,
+    W: InputWaiter,
+{
     /// Wait on the socket for a datagram, for as long as it is armed to wait.
     ///
     /// On a socket whose reads time out, the wait is the read: the datagram is taken into
@@ -679,8 +712,12 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Ud
     }
 }
 
-impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> BoxedLinkDriver
-    for UdpDriver<S, B, T>
+impl<S, B, T, W> BoxedLinkDriver for UdpDriver<S, B, T, W>
+where
+    S: DatagramSocket + 'static,
+    B: RxStore + 'static,
+    T: TxStore + 'static,
+    W: InputWaiter,
 {
     // The bytes are copied into a slot the link lends and sent as one, so the socket's send has
     // one caller. UDP is unreliable; the session's reliable channel recovers a drop.
@@ -793,12 +830,16 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Bo
     }
 }
 
-impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> SessionDatagramLink
-    for UdpDriver<S, B, T>
+impl<S, B, T, W> SessionDatagramLink for UdpDriver<S, B, T, W>
+where
+    S: DatagramSocket + 'static,
+    B: RxStore + 'static,
+    T: TxStore + 'static,
+    W: InputWaiter,
 {
     fn service(&self) {
         // A link its owner waits on reads what is queued and does not wait here.
-        if self.owner_waits {
+        if self.owner_waits_input() {
             return;
         }
         // The loop's thread owes the network stack the CPU while it has nothing to do. It gives
@@ -824,7 +865,7 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
         // Something is due now (a deadline, a query left for the application's layer): a wait
         // of the tick would be the whole of what the thing costs. The receive that follows reads
         // what is queued without waiting. A link its owner waits on never waits here.
-        if max_wait_ms == 0 || self.owner_waits {
+        if max_wait_ms == 0 || self.owner_waits_input() {
             return;
         }
         // The most this link may wait: what its session has due, and what its image allows. At
@@ -888,7 +929,7 @@ impl<S: DatagramSocket + 'static, B: RxStore + 'static, T: TxStore + 'static> Se
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn input_wait(&self) -> Option<WaitOn> {
-        if self.owner_waits {
+        if self.owner_waits_input() {
             self.socket.input_wait()
         } else {
             None
@@ -1542,6 +1583,9 @@ impl<S: DatagramSocket, N: CountKind> DatagramSocket for PortPeer<S, N> {
     const CARRIED: bool = S::CARRIED;
 
     const IPV6: bool = S::IPV6;
+
+    // The wait it names is its port's socket's.
+    const NAMES_INPUT_WAIT: bool = S::NAMES_INPUT_WAIT;
 
     fn bind(_at: SocketAddr) -> Result<Self, Self::Error> {
         Err(PortPeerError::Unbound)
@@ -2940,6 +2984,95 @@ mod tests {
         assert!(driver(arming_socket())
             .with_idle_wait_ms(1000)
             .uses_wake_budget());
+    }
+
+    /// A link of a stack whose owner waits for every link, over a socket that always names its
+    /// wait, waits in no loop of its own though nothing was set on it when it was made: its service
+    /// and its service within a deadline leave the socket unasked, and it names its owner the
+    /// socket's wait. The CONTROL is the same link of a stack whose links wait in their own loop,
+    /// whose service waits the tick on its socket and which names its owner no wait. Turned red by
+    /// a link that reads its stack's type as a loop's (`owner_waits_input` without
+    /// `W::OWNER && S::NAMES_INPUT_WAIT`).
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_link_of_a_stack_its_owner_waits_for_has_no_wait_of_its_own() {
+        use crate::session_drive::WaitedByOwner;
+
+        /// The test's queues, as a socket that always names its wait for its link's owner.
+        struct Named(Loop);
+
+        impl DatagramSocket for Named {
+            type Error = Refused;
+            type Waits = crate::session_drive::NoWaits;
+            const NAMES_INPUT_WAIT: bool = true;
+            const CAN_SET_RECEIVE_TIMEOUT: bool = true;
+            fn bind(_at: SocketAddr) -> Result<Self, Refused> {
+                Ok(Named(Loop::default()))
+            }
+            fn local(&self) -> SocketAddr {
+                self.0.local()
+            }
+            fn send_to(&self, to: SocketAddr, bytes: &[u8]) -> Result<(), Refused> {
+                self.0.send_to(to, bytes)
+            }
+            fn wait_readable(&self, timeout_ms: c_int) {
+                self.0.wait_readable(timeout_ms);
+            }
+            fn times_out(&self) -> bool {
+                self.0.times_out()
+            }
+            fn set_receive_timeout(&self, ms: c_int) -> bool {
+                self.0.set_receive_timeout(ms)
+            }
+            fn recv_waiting(&self, buf: &mut [u8]) -> Result<Option<Received>, Refused> {
+                self.0.recv_waiting(buf)
+            }
+            fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, Refused> {
+                self.0.try_recv(buf)
+            }
+            fn input_wait(&self) -> Option<WaitOn> {
+                Some(WaitOn::Socket(5))
+            }
+        }
+
+        let waiting = Loop {
+            timeouts: true,
+            can_arm: true,
+            ..Loop::default()
+        };
+        let waited = UdpDriver::<_, Vec<u8>, HeapTx, WaitedByOwner>::with_peer(
+            Named(waiting),
+            Some(PEER),
+            vec![0u8; 64],
+            HeapTx::new(2, 32),
+        )
+        .with_idle_wait_ms(1000);
+        waited.service();
+        waited.service_within(1000);
+        assert_eq!(waited.socket.0.waits.get(), 0, "no wait on the socket");
+        assert_eq!(waited.socket.0.waiting_reads.get(), 0, "no read that waits");
+        assert!(waited.socket.0.arms.borrow().is_empty(), "no timeout armed");
+        assert!(
+            matches!(waited.input_wait(), Some(WaitOn::Socket(5))),
+            "the owner waits on the socket"
+        );
+
+        let looped = UdpDriver::<_, Vec<u8>, HeapTx, WaitsInLoop>::with_peer(
+            Named(Loop::default()),
+            Some(PEER),
+            vec![0u8; 64],
+            HeapTx::new(2, 32),
+        );
+        looped.service();
+        assert_eq!(
+            looped.socket.0.waits.get(),
+            1,
+            "CONTROL: a link of a stack whose links wait in their loop waits the tick"
+        );
+        assert!(
+            looped.input_wait().is_none(),
+            "CONTROL: and names its owner no wait"
+        );
     }
 
     #[test]

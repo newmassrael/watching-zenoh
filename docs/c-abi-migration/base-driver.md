@@ -136,3 +136,32 @@ gated on the feature; five run without it (`nondefault-tests-gate.sh`, the `-def
 Measured by the main session on the case's explain report: the driver row and the
 `wz_runtime_coop::stream_link` owner line (2,755 now); the step is reverted if the area does not
 fall by at least 1,000.
+
+## 5. Step S2: who waits for a datagram link's input, as the stack's type
+
+`IpLinks` takes a sixth parameter, `W: InputWaiter` (`wz_runtime_coop::session_drive`), which is
+`WaitsInLoop` by default; `waited_by_owner` is the conversion to `WaitedByOwner`, and the stack
+makes each datagram link a `UdpDriver<_, _, _, W>`. A socket type says whether every socket of it
+names its owner's wait (`DatagramSocket::NAMES_INPUT_WAIT`: the POSIX, Windows and Zephyr
+sockets do, a port's peer as its port's socket). A link of a `WaitedByOwner` stack over such a
+socket answers `service` and `service_within` with nothing, so `UdpDriver::wait_for_datagram`
+(276), `arm` and the waits of `service_within` (362) and `service` (149) are not in its build.
+`recv_with` is the same body, called where it was.
+
+| case | before | after |
+|---|---|---|
+| owner waits, socket names its wait (the pico library's host sockets) | a flag set at the open, read at each service | the type says so: no flag read, no wait of the loop's compiled |
+| owner waits, socket names no wait (the tests' sockets, the program's transport) | the flag from `input_wait` at the open | the same |
+| the links wait in their own loop | the tick, or the deadline the image allows | the same |
+
+The pico library names the waited links in its chain of link types (`WaitedSocketLinks` in
+`crates/wz-capi-pico/src/session.rs`, through `ComposedLinks::WaitedByOwner`), as the cooperative
+engine's tests do (`PosixLinks` in `crates/wz-capi-coop/src/tests.rs`). Test:
+`udp_link::tests::a_link_of_a_stack_its_owner_waits_for_has_no_wait_of_its_own`.
+
+Left for a step of its own: the stream link's share (about 120 bytes of `StreamDriver::service`).
+A stream link's type is its stream's (`StreamSocket::Link`), so carrying `W` there touches each
+stream family and the secure channel's.
+
+Measured on the case's explain report: the driver row and the `wz_runtime_coop::udp_link` owner
+line; expected -700 to -790, the receive's instructions a message unchanged or fewer.

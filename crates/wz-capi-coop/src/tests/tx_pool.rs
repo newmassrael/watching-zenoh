@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use wz_capi_port::{SessionDrive, SessionEngine, SubscriberSink, WireKey};
 use wz_runtime_coop::group_transport::NoGroups;
 use wz_runtime_coop::ip_stack::IpLinks;
-use wz_runtime_coop::session_drive::LinkOpenError;
+use wz_runtime_coop::session_drive::{LinkOpenError, WaitedByOwner};
 use wz_runtime_coop::stream_link::{NoDial, StreamDial};
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::{PosixTcpDial, PosixTcpSocket};
@@ -71,8 +71,10 @@ impl StreamDial for SlowReader {
     }
 }
 
-/// The slow peer's links: the host's, their streams dialled by [`SlowReader`].
-type SlowLinks = IpLinks<PosixUdpSocket, SlowReader, NoDial, NoGroups, crate::LinkCount>;
+/// The slow peer's links: the host's, their streams dialled by [`SlowReader`], waited for by their
+/// owner.
+type SlowLinks =
+    IpLinks<PosixUdpSocket, SlowReader, NoDial, NoGroups, crate::LinkCount, WaitedByOwner>;
 
 /// The slow peer: a client session of [`SlowLinks`] that dials `endpoint`.
 fn open_slow(endpoint: String) -> EngineHold<CoopEngine<SlowLinks, PosixClock>> {

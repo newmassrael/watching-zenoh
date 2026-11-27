@@ -270,6 +270,34 @@ pub trait SessionDatagramLink {
     }
 }
 
+/// Who waits for the input of the links a stack makes: each link in its own loop
+/// ([`WaitsInLoop`]), or the owner of every link, with nothing of the session held
+/// ([`WaitedByOwner`]). A type of the stack's, carried by the links it makes, so that a link whose
+/// owner waits for it, over a socket that always names its wait
+/// (`DatagramSocket::NAMES_INPUT_WAIT`), is compiled with no wait of its own.
+pub trait InputWaiter: 'static {
+    /// Whether the owner of every link waits for its input.
+    const OWNER: bool;
+}
+
+/// Each link waits for its input in its own loop, unless the stack that made it was told when it
+/// opened the link that its owner waits.
+#[derive(Debug, Clone, Copy)]
+pub struct WaitsInLoop;
+
+impl InputWaiter for WaitsInLoop {
+    const OWNER: bool = false;
+}
+
+/// The owner of every link waits for its input, with nothing of the session held: what a stack's
+/// `waited_by_owner` makes it.
+#[derive(Debug, Clone, Copy)]
+pub struct WaitedByOwner;
+
+impl InputWaiter for WaitedByOwner {
+    const OWNER: bool = true;
+}
+
 /// What a wait on a link names: the link's handle in the stack that made it, a value copied into
 /// a wait set that holds nothing of the link. A handle whose link has gone may name another by
 /// the time it is waited on (a descriptor number a close freed for a new socket), so what a wait
