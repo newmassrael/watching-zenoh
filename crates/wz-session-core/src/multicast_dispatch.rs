@@ -969,10 +969,11 @@ pub struct MulticastDispatcher<const MAX_PEERS: usize, Grow: TableGrowth = Fixed
     /// their declarations apart ([`Self::scope_member_declarations`]); `None` while it does not.
     #[cfg(all(feature = "alloc", feature = "codec-declare"))]
     member_tags: Option<crate::multicast_member_scope::MemberTags>,
-    /// The undeclarations of what departed members held, until the host takes them
-    /// ([`Self::take_member_retractions`]).
+    /// The members that left holding declarations, kept whole until the host takes their
+    /// undeclarations ([`Self::take_member_retractions`]): each departure is one row moved here,
+    /// and its undeclarations are read off it when they are handed.
     #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-    member_retractions: alloc::vec::Vec<crate::multicast_member_scope::Retraction>,
+    departed: alloc::vec::Vec<crate::multicast_member_scope::MemberDeclarations>,
 }
 
 /// The predicate a host installs on a [`MulticastDispatcher`] to admit or drop each inbound
@@ -1030,7 +1031,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
                 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
                     member_tags: _,
                 #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-                    member_retractions: _,
+                    departed: _,
             } = dispatcher;
         };
         // SAFETY: `at` points at storage for one dispatcher that holds no value. Each field is
@@ -1070,7 +1071,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
                     .then(crate::multicast_member_scope::MemberTags::new),
             );
             #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-            addr_of_mut!((*at).member_retractions).write(alloc::vec::Vec::new());
+            addr_of_mut!((*at).departed).write(alloc::vec::Vec::new());
             &mut *at
         };
         // W3C SCXML 3.3: enter the initial `Idle` leaf.
@@ -1127,18 +1128,21 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     /// for the session's observer, or `None` when there are none.
     #[cfg(all(feature = "alloc", feature = "codec-declare"))]
     pub fn take_member_retractions(&mut self) -> Option<crate::driver_loop::DriverLoopOutcome> {
-        if self.member_retractions.is_empty() {
+        if self.departed.is_empty() {
             return None;
+        }
+        let mut messages = alloc::vec::Vec::new();
+        for member in self.departed.drain(..) {
+            messages.extend(
+                member
+                    .retracted()
+                    .map(crate::multicast_member_scope::Retraction::owned),
+            );
         }
         Some(crate::driver_loop::DriverLoopOutcome::FramePayload {
             reliable: true,
             sn: 0,
-            messages: crate::driver_loop::frame_records(
-                self.member_retractions
-                    .drain(..)
-                    .map(crate::multicast_member_scope::Retraction::owned)
-                    .collect(),
-            ),
+            messages: crate::driver_loop::frame_records(messages),
             has_ext: false,
             extensions: alloc::vec::Vec::new(),
             priority: crate::qos::Priority::DEFAULT,
@@ -1149,8 +1153,12 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     /// [`Self::take_member_retractions`]; the slot is about to be freed.
     #[cfg(all(feature = "alloc", feature = "codec-declare"))]
     fn retire_member(&mut self, idx: usize) {
-        if let Some(member) = self.peers.get_mut(idx).and_then(|peer| peer.member.take()) {
-            self.member_retractions.extend(member.retracted());
+        let departing = self.peers.get_mut(idx).and_then(|peer| peer.member.take());
+        // A member that holds nothing is let go of with its row: it owes no undeclaration.
+        if let Some(member) =
+            departing.filter(crate::multicast_member_scope::MemberDeclarations::owes_retractions)
+        {
+            self.departed.push(member);
         }
     }
 
@@ -1192,17 +1200,19 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     where
         E: crate::driver_loop::EventSink + ?Sized,
     {
-        for retraction in self.member_retractions.drain(..) {
-            let declare = retraction.lent();
-            sink.record(
-                crate::driver_loop::InPlaceRecord::declare_of_frame(
-                    &declare,
-                    true,
-                    0,
-                    crate::qos::Priority::DEFAULT,
-                )
-                .sent_by(retraction.sender()),
-            );
+        for member in self.departed.drain(..) {
+            for retraction in member.retracted() {
+                let declare = retraction.lent();
+                sink.record(
+                    crate::driver_loop::InPlaceRecord::declare_of_frame(
+                        &declare,
+                        true,
+                        0,
+                        crate::qos::Priority::DEFAULT,
+                    )
+                    .sent_by(retraction.sender()),
+                );
+            }
         }
     }
 
@@ -2297,8 +2307,12 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             }
             on_evict(idx);
             #[cfg(all(feature = "alloc", feature = "codec-declare"))]
-            if let Some(member) = slot.member.take() {
-                self.member_retractions.extend(member.retracted());
+            if let Some(member) = slot
+                .member
+                .take()
+                .filter(crate::multicast_member_scope::MemberDeclarations::owes_retractions)
+            {
+                self.departed.push(member);
             }
             // The address is read before the eviction clears it.
             if let Some(src) = slot.src {

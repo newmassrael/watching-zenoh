@@ -29,7 +29,7 @@
 //! A member holds at most `MAX_MEMBER_KEYEXPRS` of them, in rows of its own, so one member cannot
 //! take the room of the others.
 
-use alloc::collections::BTreeSet;
+use alloc::vec::Vec;
 
 use crate::transport_profile::owned::DeclareOwnedVariant;
 
@@ -57,9 +57,7 @@ impl MemberTags {
         };
         MemberDeclarations {
             tag,
-            subscribers: BTreeSet::new(),
-            queryables: BTreeSet::new(),
-            tokens: BTreeSet::new(),
+            held: Vec::new(),
             #[cfg(all(
                 feature = "session-unicast",
                 feature = "rx-lent-control",
@@ -78,9 +76,10 @@ impl MemberTags {
 #[derive(Debug)]
 pub(crate) struct MemberDeclarations {
     tag: u64,
-    subscribers: BTreeSet<u64>,
-    queryables: BTreeSet<u64>,
-    tokens: BTreeSet<u64>,
+    /// The raw ids the member holds declared, each under its kind's rank in the high half
+    /// ([`DeclKind::rank`]), in ascending order: one vector for the three kinds, read kind by kind
+    /// and id by id when the member leaves.
+    held: Vec<u64>,
     #[cfg(all(
         feature = "session-unicast",
         feature = "rx-lent-control",
@@ -197,28 +196,36 @@ impl MemberDeclarations {
         if raw == 0 || raw > u64::from(u32::MAX) {
             return None;
         }
-        let held = match kind {
-            DeclKind::Subscriber => &mut self.subscribers,
-            DeclKind::Queryable => &mut self.queryables,
-            DeclKind::Token => &mut self.tokens,
-            // A keyexpr is held in the member's own table (`MemberKeyexprs`), by its own id under
-            // the member's tag, and is not an entity id this scopes.
-            #[cfg(all(
-                feature = "session-unicast",
-                feature = "rx-lent-control",
-                any(not(feature = "transport-stats"), feature = "reassembly"),
-                not(feature = "routing-namespace"),
-                not(feature = "multicast-declarations"),
-                not(feature = "multicast-ingress-gate")
-            ))]
-            DeclKind::Keyexpr => return None,
-        };
-        if declared {
-            held.insert(raw);
-        } else {
-            held.remove(&raw);
+        // A keyexpr is held in the member's own table (`MemberKeyexprs`), by its own id under the
+        // member's tag, and is not an entity id this scopes.
+        let rank = kind.rank()?;
+        let key = (rank << 32) | raw;
+        match (self.held.binary_search(&key), declared) {
+            (Err(at), true) => self.held.insert(at, key),
+            (Ok(at), false) => {
+                let _ = self.held.remove(at);
+            }
+            // A redeclared id is held already, and an id never held has nothing to let go of.
+            (Ok(_), true) | (Err(_), false) => {}
         }
         Some((self.tag << 32) | raw)
+    }
+
+    /// Whether the member holds anything a departure retracts: an entity id, or, where its
+    /// records are lent, a keyexpr id.
+    pub(crate) fn owes_retractions(&self) -> bool {
+        #[cfg(all(
+            feature = "session-unicast",
+            feature = "rx-lent-control",
+            any(not(feature = "transport-stats"), feature = "reassembly"),
+            not(feature = "routing-namespace"),
+            not(feature = "multicast-declarations"),
+            not(feature = "multicast-ingress-gate")
+        ))]
+        if !self.keyexprs.held().is_empty() {
+            return true;
+        }
+        !self.held.is_empty()
     }
 
     /// Put every subscriber, queryable and token id `messages` declare or retract under this
@@ -324,19 +331,10 @@ impl MemberDeclarations {
             ))]
             sender: self.tag,
         };
-        let subscribers = self
-            .subscribers
-            .iter()
-            .map(move |&id| entity(DeclKind::Subscriber, id));
-        let queryables = self
-            .queryables
-            .iter()
-            .map(move |&id| entity(DeclKind::Queryable, id));
-        let tokens = self
-            .tokens
-            .iter()
-            .map(move |&id| entity(DeclKind::Token, id));
-        let entities = subscribers.chain(queryables).chain(tokens);
+        let entities = self.held.iter().filter_map(move |&key| {
+            let kind = DeclKind::of_rank(key >> 32)?;
+            Some(entity(kind, key & u64::from(u32::MAX)))
+        });
         #[cfg(all(
             feature = "session-unicast",
             feature = "rx-lent-control",
@@ -385,6 +383,37 @@ pub(crate) enum DeclKind {
         not(feature = "multicast-ingress-gate")
     ))]
     Keyexpr,
+}
+
+impl DeclKind {
+    /// The rank a held id of this kind is kept under (`MemberDeclarations::held`), in the order a
+    /// departure retracts the kinds; `None` for a keyexpr, which the member's own rows hold.
+    const fn rank(self) -> Option<u64> {
+        match self {
+            Self::Subscriber => Some(0),
+            Self::Queryable => Some(1),
+            Self::Token => Some(2),
+            #[cfg(all(
+                feature = "session-unicast",
+                feature = "rx-lent-control",
+                any(not(feature = "transport-stats"), feature = "reassembly"),
+                not(feature = "routing-namespace"),
+                not(feature = "multicast-declarations"),
+                not(feature = "multicast-ingress-gate")
+            ))]
+            Self::Keyexpr => None,
+        }
+    }
+
+    /// The kind a held id's rank names.
+    const fn of_rank(rank: u64) -> Option<Self> {
+        match rank {
+            0 => Some(Self::Subscriber),
+            1 => Some(Self::Queryable),
+            2 => Some(Self::Token),
+            _ => None,
+        }
+    }
 }
 
 /// The undeclaration of one declaration a member that left still held, by the id it reached the
@@ -547,6 +576,52 @@ mod tests {
         member.scope(&mut undeclared);
         assert_eq!(subscriber_id(&undeclared[0]), subscriber_id(&declared[0]));
         assert!(member.retracted().next().is_none());
+        assert!(!member.owes_retractions());
+    }
+
+    /// What a departed member retracts comes kind by kind (its subscribers, its queryables, its
+    /// tokens), each kind's ids in ascending order, an id declared twice once and an id it
+    /// undeclared not at all; a member that holds nothing owes nothing. Turned red by a held
+    /// vector kept out of order (`note`'s insert at its search's place), a rank out of the
+    /// retraction's order (`DeclKind::rank`), or a redeclared id held twice.
+    #[test]
+    fn a_departed_member_retracts_kind_by_kind_in_id_order() {
+        use crate::declare_build::{
+            build_declare_queryable, build_declare_token, build_undeclare_queryable,
+        };
+        let declare = |message: crate::transport_profile::owned::DeclareOwned| {
+            NetworkMessage::Declare(alloc::boxed::Box::new(message))
+        };
+        let mut member = MemberTags::new().admit();
+        assert!(
+            !member.owes_retractions(),
+            "CONTROL: an admitted member holds nothing"
+        );
+        let mut messages = [
+            declare(build_declare_token(4, 0, Some("demo/mc/t")).expect("a token")),
+            declare_subscriber(5),
+            declare(build_declare_queryable(3, 0, Some("demo/mc/q")).expect("a queryable")),
+            declare_subscriber(2),
+            declare_subscriber(5),
+            declare(build_declare_queryable(1, 0, Some("demo/mc/q")).expect("a queryable")),
+            declare(build_undeclare_queryable(3)),
+        ];
+        member.scope(&mut messages);
+        assert!(member.owes_retractions());
+        let scoped = |id: u64| (member.tag << 32) | id;
+        let retracted: Vec<(DeclKind, u64)> = member
+            .retracted()
+            .map(|retraction| (retraction.kind, retraction.id))
+            .collect();
+        assert_eq!(
+            retracted,
+            [
+                (DeclKind::Subscriber, scoped(2)),
+                (DeclKind::Subscriber, scoped(5)),
+                (DeclKind::Queryable, scoped(1)),
+                (DeclKind::Token, scoped(4)),
+            ]
+        );
     }
 
     /// The lent Declare a frame read in place carries for `declare`.
