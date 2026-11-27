@@ -4504,6 +4504,7 @@ dependencies = [
  "tokio-serial",
  "tokio-tungstenite",
  "tokio-vsock",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "walkdir",

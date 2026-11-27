@@ -150,9 +150,9 @@ mod tests {
         }
     }
 
-    /// The node's write permit, which names no subject.
+    /// The node's write permit, a grant to anyone.
     impl wz_session_core::lifecycle_monitor::Policy for Counting {
-        fn write_permission(&self, _verb: Verb) -> bool {
+        fn grants_anyone(&self, _verb: Verb) -> bool {
             self.permit
         }
         fn each_grant(

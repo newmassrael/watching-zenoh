@@ -38,9 +38,10 @@ pub type Zid = [u8; CREDENTIAL_ZID_BYTES];
 
 /// One of the verbs a node may serve, for the node to say which it permits.
 ///
-/// Four permissions rather than one, because "may be asked to hold a peer", "may close every
-/// session", "may cycle a session" and "may learn which peers the node holds" are permissions a
-/// policy can mean to grant apart (least privilege, and a node refuses by default).
+/// Five permissions rather than one, because "may be asked to hold a peer", "may close every
+/// session", "may cycle a session", "may learn which peers the node holds" and "may write the
+/// node's configuration" are permissions a policy can mean to grant apart (least privilege, and a
+/// node refuses by default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verb {
     /// Hold a peer by its zid.
@@ -51,6 +52,10 @@ pub enum Verb {
     Reset,
     /// Read what the node holds for a peer.
     Status,
+    /// Write a key of the node's own configuration through its admin space. Its object is the
+    /// node and the key written, not a peer, so no lifecycle command carries it: the admin write
+    /// asks the monitor for it directly.
+    Configure,
 }
 
 /// Who asks a verb of the node (decision D12): the authority is a function of the commander, per

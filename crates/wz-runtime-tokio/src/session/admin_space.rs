@@ -201,7 +201,7 @@ pub fn apply_admin_config_write(
         parse_admin_config_write, AdminConfigWriteBody, AdminConfigWriteOutcome,
     };
 
-    let permitted = crate::admin_write_permit(&admin_permissions_of(config));
+    let permitted = crate::admin_write_permitted(sample.keyexpr(), &admin_permissions_of(config));
     match parse_admin_config_write(
         space,
         sample.keyexpr(),

@@ -78,10 +78,10 @@ impl Recording {
     }
 }
 
-/// The node's write permit, as the case states it: it names no subject, so every transport's
+/// The node's write permit, as the case states it: a grant to anyone, so every transport's
 /// commander is judged alike.
 impl Policy for Recording {
-    fn write_permission(&self, _verb: Verb) -> bool {
+    fn grants_anyone(&self, _verb: Verb) -> bool {
         self.permitted
     }
 

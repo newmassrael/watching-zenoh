@@ -122,9 +122,9 @@ impl Recording {
     }
 }
 
-/// The node's write permit, which names no subject.
+/// The node's write permit, a grant to anyone.
 impl Policy for Recording {
-    fn write_permission(&self, _verb: Verb) -> bool {
+    fn grants_anyone(&self, _verb: Verb) -> bool {
         self.permitted
     }
 
@@ -531,6 +531,7 @@ mod verbs {
                 Verb::Close => self.0.close,
                 Verb::Reset => self.0.reset,
                 Verb::Status => self.0.status,
+                Verb::Configure => false,
             };
             if granted {
                 visit(Grant {

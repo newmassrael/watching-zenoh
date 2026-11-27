@@ -3,7 +3,8 @@
 
 //! The reference monitor of the lifecycle verbs (decision D16 of
 //! `docs/session-lifecycle-intent.md`): one function judges every request to open, close, reset
-//! or read a session with a peer, on both profiles, and refuses by default.
+//! or read a session with a peer, or to write the node's configuration, on both profiles, and
+//! refuses by default.
 //!
 //! A request is the access matrix's triple and its context (Lampson, 1971): the subject is the
 //! [`Commander`] that asks, the verb is the [`Verb`], the object is what the verb acts on (the
@@ -37,12 +38,14 @@ pub enum Channel {
 /// so a refusal never depends on what else is wrong with the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Object<'a> {
-    /// The peer the verb acts on, spelled as a key carries a zid.
+    /// The peer the verb acts on, spelled as a key carries a zid; for [`Verb::Configure`], the
+    /// node whose configuration the key names.
     pub peer: &'a str,
     /// The generation of a reset, as the text the request carried; `None` for every other verb.
     pub generation: Option<&'a str>,
     /// The key expression the request arrived on, when it came as one: what a grant narrowed to
-    /// a key expression is judged by. `None` on the pipe.
+    /// a key expression is judged by. `None` on the pipe. For [`Verb::Configure`] it is the key
+    /// written, so a grant of the verb narrowed to a key expression names the keys it may write.
     pub key: Option<&'a str>,
 }
 
@@ -57,6 +60,34 @@ pub struct Request<'a> {
     pub object: Object<'a>,
     /// Over what it was asked.
     pub channel: Channel,
+}
+
+impl<'a> Request<'a> {
+    /// A write of the node's configuration, asked by `asker` on the key it carries: the verb
+    /// [`Verb::Configure`], whose object is the node that key names (its zid chunk, as the key
+    /// spells it) and the key itself. The value written is no part of the object: no grant is
+    /// narrowed to a value and a record of fixed size could not keep one, and the admin write reads
+    /// it only once the monitor has permitted the write.
+    pub fn configure(asker: Asker<'a>) -> Self {
+        Self {
+            subject: asker.commander,
+            verb: Verb::Configure,
+            object: Object {
+                peer: asker.key.map_or("", configured_node),
+                generation: None,
+                key: asker.key,
+            },
+            channel: asker.channel,
+        }
+    }
+}
+
+/// The zid chunk of a key of the admin space (`@/<zid>/<whatami>/config/...`), or the empty text
+/// for a key that does not start with one.
+fn configured_node(key: &str) -> &str {
+    key.strip_prefix("@/")
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or("")
 }
 
 /// Who asks and over what, as a transport knows it before it reads the command: the part of a
@@ -99,6 +130,17 @@ impl<'a> Asker<'a> {
             key: Some(key),
         }
     }
+
+    /// A write of the node's configuration that arrived in its admin space on `key`. A write
+    /// arrives as a sample, and a sample carries no proof of who wrote it, so it is asked by
+    /// nobody shown, whatever link it came over.
+    pub const fn admin_write(key: &'a str) -> Self {
+        Self {
+            commander: Commander::Unproven,
+            channel: Channel::AdminWrite,
+            key: Some(key),
+        }
+    }
 }
 
 /// Why a request was permitted.
@@ -111,10 +153,12 @@ pub enum Grounds {
     /// A grant names the subject for this verb, narrowed to a key expression that includes the
     /// key the request arrived on.
     GrantedForKey,
-    /// The write permission of the node's configuration, which names no subject: the authority
-    /// of a node that holds no secure channel to prove one (decision D12, step 4, is what
-    /// replaces it).
-    WritePermission,
+    /// A grant of this verb to every subject, proven or not, which the node's policy states: the
+    /// grant of a node that holds no channel to prove a subject, for the verbs it cannot judge
+    /// otherwise. The write permission of a node's configuration is one
+    /// ([`WritePermission`]): it grants [`Verb::Configure`] to anyone, as upstream's
+    /// `adminspace.permissions.write` does.
+    GrantedToAnyone,
 }
 
 /// Why a request was refused.
@@ -173,9 +217,10 @@ pub trait Policy {
         false
     }
 
-    /// Whether the write permission of the node's configuration grants `verb` to any subject.
-    /// Refused by default; only a node whose authority predates a proven subject states it.
-    fn write_permission(&self, _verb: Verb) -> bool {
+    /// Whether the policy grants `verb` to every subject, proven or not. A grant as the others
+    /// are, stated per verb and read after them, and refused by default: only a node with no
+    /// channel that proves its subjects states it, for the verbs it takes from them.
+    fn grants_anyone(&self, _verb: Verb) -> bool {
         false
     }
 
@@ -188,13 +233,28 @@ impl<P: Policy + ?Sized> Policy for &P {
         (**self).pipe_commands(verb)
     }
 
-    fn write_permission(&self, verb: Verb) -> bool {
-        (**self).write_permission(verb)
+    fn grants_anyone(&self, verb: Verb) -> bool {
+        (**self).grants_anyone(verb)
     }
 
     fn each_grant(&self, verb: Verb, visit: &mut dyn FnMut(Grant<'_>) -> bool) {
         (**self).each_grant(verb, visit);
     }
+}
+
+/// The policy of a write of a node's configuration: its write permission
+/// (`adminspace.permissions.write`), which grants [`Verb::Configure`] to anyone and no other
+/// verb. A write proves no writer (it arrives as a sample), so a grant to anyone is the one grant
+/// that can permit it; with the permission off, every write is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WritePermission(pub bool);
+
+impl Policy for WritePermission {
+    fn grants_anyone(&self, verb: Verb) -> bool {
+        self.0 && verb == Verb::Configure
+    }
+
+    fn each_grant(&self, _verb: Verb, _visit: &mut dyn FnMut(Grant<'_>) -> bool) {}
 }
 
 /// The policy that grants nothing: every request is refused.
@@ -211,8 +271,8 @@ impl Policy for NoGrants {
 /// node does not bind is refused; the pipe's owner is what the node says of its pipe; a zid a key
 /// proved, by a channel or by a sealed command, is looked for in the grants of the verb, and a
 /// grant narrowed to a key expression permits only a request that arrived on a key it includes;
-/// what no grant permits, the write permission of the configuration may; everything else is
-/// refused, with the reason.
+/// what no grant names its subject for, a grant of the verb to anyone may permit; everything else
+/// is refused, with the reason.
 pub fn decide<P: Policy + ?Sized>(policy: &P, bound: bool, request: &Request<'_>) -> Decision {
     if !bound {
         return Decision::Deny(Refusal::NotBound);
@@ -234,8 +294,8 @@ pub fn decide<P: Policy + ?Sized>(policy: &P, bound: bool, request: &Request<'_>
         }
         Commander::Unproven => Refusal::Unproven,
     };
-    if policy.write_permission(verb) {
-        return Decision::Permit(Grounds::WritePermission);
+    if policy.grants_anyone(verb) {
+        return Decision::Permit(Grounds::GrantedToAnyone);
     }
     Decision::Deny(refusal)
 }
@@ -491,6 +551,7 @@ impl VerbSet {
             Verb::Close => 0b0010,
             Verb::Reset => 0b0100,
             Verb::Status => 0b1000,
+            Verb::Configure => 0b1_0000,
         }
     }
 
@@ -616,9 +677,15 @@ mod heap {
                 let repeated = grants.iter().take(at).any(|earlier| {
                     earlier.commander == grant.commander
                         && earlier.key == grant.key
-                        && [Verb::Open, Verb::Close, Verb::Reset, Verb::Status]
-                            .into_iter()
-                            .any(|verb| earlier.verbs.has(verb) && grant.verbs.has(verb))
+                        && [
+                            Verb::Open,
+                            Verb::Close,
+                            Verb::Reset,
+                            Verb::Status,
+                            Verb::Configure,
+                        ]
+                        .into_iter()
+                        .any(|verb| earlier.verbs.has(verb) && grant.verbs.has(verb))
                 });
                 if repeated {
                     return Err(GrantError::Repeated);
@@ -667,13 +734,20 @@ mod tests {
     const ADMIN: Zid = [0x1f; 16];
     const READER: Zid = [0x2e; 16];
     const STRANGER: Zid = [0x3d; 16];
-    const EVERY: [Verb; 4] = [Verb::Open, Verb::Close, Verb::Reset, Verb::Status];
+    const EVERY: [Verb; 5] = [
+        Verb::Open,
+        Verb::Close,
+        Verb::Reset,
+        Verb::Status,
+        Verb::Configure,
+    ];
 
-    /// A policy of fixed lists, a pipe statement and a write permission, as a test states them.
+    /// A policy of fixed lists, a pipe statement and the verbs granted to anyone, as a test
+    /// states them.
     #[derive(Default)]
     struct Table {
         pipe: bool,
-        write: bool,
+        anyone: &'static [Verb],
         grants: Vec<(Verb, Zid, Option<&'static str>)>,
     }
 
@@ -681,8 +755,8 @@ mod tests {
         fn pipe_commands(&self, _verb: Verb) -> bool {
             self.pipe
         }
-        fn write_permission(&self, verb: Verb) -> bool {
-            self.write && verb == Verb::Open
+        fn grants_anyone(&self, verb: Verb) -> bool {
+            self.anyone.contains(&verb)
         }
         fn each_grant(&self, verb: Verb, visit: &mut dyn FnMut(Grant<'_>) -> bool) {
             for (granted, commander, key) in &self.grants {
@@ -807,7 +881,7 @@ mod tests {
     fn an_unbound_verb_is_refused_to_everyone() {
         let table = Table {
             pipe: true,
-            write: true,
+            anyone: &[Verb::Open],
             grants: Vec::from([(Verb::Open, ADMIN, None)]),
         };
         for subject in [
@@ -893,12 +967,12 @@ mod tests {
         );
     }
 
-    /// The write permission names no subject: it permits what it covers to anyone, after the
-    /// grants, and only what it covers.
+    /// A grant to anyone names no subject: it permits the verbs it is stated for to every
+    /// subject, after the grants that name one, and no other verb.
     #[test]
-    fn the_write_permission_permits_what_no_grant_does() {
+    fn a_grant_to_anyone_permits_what_no_named_grant_does() {
         let table = Table {
-            write: true,
+            anyone: &[Verb::Open],
             ..Table::default()
         };
         for subject in [
@@ -908,10 +982,89 @@ mod tests {
         ] {
             assert_eq!(
                 decide(&table, true, &request(subject, Verb::Open, None)),
-                Decision::Permit(Grounds::WritePermission)
+                Decision::Permit(Grounds::GrantedToAnyone)
             );
             assert!(!decide(&table, true, &request(subject, Verb::Close, None)).permits());
         }
+    }
+
+    /// A write of the node's configuration is one more verb of the same function: its object is
+    /// the node the written key names and the key, it is asked by nobody shown, and only a grant
+    /// of [`Verb::Configure`] permits it. Red if `Request::configure` read another node or key,
+    /// or if the write permission granted any other verb.
+    #[test]
+    fn a_configuration_write_is_judged_as_every_verb_is() {
+        const KEY: &str = "@/a1b2/peer/config/connect/endpoints";
+        let write = Request::configure(Asker::admin_write(KEY));
+        assert_eq!(
+            write,
+            Request {
+                subject: Commander::Unproven,
+                verb: Verb::Configure,
+                object: Object {
+                    peer: "a1b2",
+                    generation: None,
+                    key: Some(KEY),
+                },
+                channel: Channel::AdminWrite,
+            }
+        );
+        // Default deny, and the write permission off is no grant.
+        assert_eq!(
+            decide(&NoGrants, true, &write),
+            Decision::Deny(Refusal::Unproven)
+        );
+        assert_eq!(
+            decide(&WritePermission(false), true, &write),
+            Decision::Deny(Refusal::Unproven)
+        );
+        // The write permission on grants the write to anyone, and grants nothing else.
+        assert_eq!(
+            decide(&WritePermission(true), true, &write),
+            Decision::Permit(Grounds::GrantedToAnyone)
+        );
+        for verb in [Verb::Open, Verb::Close, Verb::Reset, Verb::Status] {
+            assert!(
+                !decide(
+                    &WritePermission(true),
+                    true,
+                    &request(Commander::Unproven, verb, None)
+                )
+                .permits(),
+                "{verb:?}"
+            );
+        }
+        // A node that does not host the write refuses it before the policy is read.
+        assert_eq!(
+            decide(&WritePermission(true), false, &write),
+            Decision::Deny(Refusal::NotBound)
+        );
+        // A grant of the verb to a zid, narrowed to one key, permits that key and no other.
+        let table = Table {
+            grants: Vec::from([(Verb::Configure, ADMIN, Some(KEY))]),
+            ..Table::default()
+        };
+        let by_admin = |key| Request {
+            subject: Commander::Verified(&ADMIN),
+            ..Request::configure(Asker::admin_write(key))
+        };
+        assert_eq!(
+            decide(&table, true, &by_admin(KEY)),
+            Decision::Permit(Grounds::GrantedForKey)
+        );
+        assert_eq!(
+            decide(
+                &table,
+                true,
+                &by_admin("@/a1b2/peer/config/adminspace/permissions/write")
+            ),
+            Decision::Deny(Refusal::OutsideGrant)
+        );
+        // A key outside the admin space names no node.
+        assert_eq!(
+            Request::configure(Asker::admin_write("demo/a")).object.peer,
+            ""
+        );
     }
 
     /// The monitor records every decision it makes, permit and refusal alike, with the subject,

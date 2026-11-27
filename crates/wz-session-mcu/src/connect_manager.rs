@@ -599,13 +599,16 @@ impl Commanders {
         status: &[],
     };
 
-    /// The zids that may command `verb`.
+    /// The zids that may command `verb`. None may write the configuration: a write arrives as a
+    /// sample, which proves no writer, so a list of zids could never permit one, and the write
+    /// permission of the configuration is what grants it (`ConnectControl`).
     pub const fn of(&self, verb: Verb) -> &'static [DirectoryZid] {
         match verb {
             Verb::Open => self.open,
             Verb::Close => self.close,
             Verb::Reset => self.reset,
             Verb::Status => self.status,
+            Verb::Configure => &[],
         }
     }
 }
@@ -727,8 +730,8 @@ impl<P: Policy> Policy for PipeOr<P> {
         true
     }
 
-    fn write_permission(&self, verb: Verb) -> bool {
-        self.0.write_permission(verb)
+    fn grants_anyone(&self, verb: Verb) -> bool {
+        self.0.grants_anyone(verb)
     }
 
     fn each_grant(&self, verb: Verb, visit: &mut dyn FnMut(Grant<'_>) -> bool) {
@@ -766,13 +769,15 @@ impl<P: Policy> StoreNode<P> {
 #[cfg(feature = "lifecycle-verbs")]
 impl<P: Policy> LifecycleNode for StoreNode<P> {
     /// The verbs the build compiled in: `open` whenever the machinery is, and each of the others
-    /// by its own feature.
+    /// by its own feature. The configuration is written through the node's connection control,
+    /// which decides its writes itself, and never through the store.
     fn binds(&self, verb: Verb) -> bool {
         match verb {
             Verb::Open => true,
             Verb::Close => cfg!(feature = "lifecycle-close"),
             Verb::Reset => cfg!(feature = "lifecycle-reset"),
             Verb::Status => cfg!(feature = "lifecycle-status"),
+            Verb::Configure => false,
         }
     }
 
@@ -850,12 +855,12 @@ impl ControlledOpener {
     }
 }
 
-/// The policy of the opener: the write permission of the node's configuration, which names no
-/// subject, grants the open verb and no other. An image that names its commanders states them by
+/// The policy of the opener: the write permission of the node's configuration grants the open
+/// verb to anyone, and no other verb. An image that names its commanders states them by
 /// `Commanders` in a `StoreNode` (a build with `lifecycle-verbs`) and not by this opener.
 #[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
 impl Policy for ControlledOpener {
-    fn write_permission(&self, verb: Verb) -> bool {
+    fn grants_anyone(&self, verb: Verb) -> bool {
         matches!(verb, Verb::Open) && self.permit.write_permit()
     }
 
@@ -893,9 +898,9 @@ pub struct WritePermit(pub &'static (dyn crate::admin_status::ConnectStatusSourc
     feature = "lifecycle-verbs"
 ))]
 impl Policy for WritePermit {
-    /// It names no subject, which is what the write permit has always done; an image that wants
+    /// A grant to anyone, which is what the write permit has always been; an image that wants
     /// the commanders named gives [`Commanders`] in its place.
-    fn write_permission(&self, verb: Verb) -> bool {
+    fn grants_anyone(&self, verb: Verb) -> bool {
         matches!(verb, Verb::Open) && self.0.write_permit()
     }
 
@@ -3443,6 +3448,7 @@ mod tests {
                     Verb::Close => self.0.close,
                     Verb::Reset => self.0.reset,
                     Verb::Status => self.0.status,
+                    Verb::Configure => false,
                 }
             }
             fn each_grant(&self, _verb: Verb, _visit: &mut dyn FnMut(Grant<'_>) -> bool) {}

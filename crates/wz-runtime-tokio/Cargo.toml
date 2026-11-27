@@ -1750,7 +1750,10 @@ session-unicast-accept = ["wz-session-core/session-unicast-accept"]
 # verbs are taken over a secure channel, and wz-session-core refuses the build
 # without one); it does not turn either on, so a build that asks for the verbs
 # names the channel it takes them over.
-session-close-ingress = ["wz-session-core/session-close-ingress"]
+#
+# The heap node reads who may command it from its declaration file (`node_declaration`), the
+# same rows the fixed profile compiles, so the verbs bring the TOML reader with them.
+session-close-ingress = ["wz-session-core/session-close-ingress", "dep:toml"]
 # R1 extauth — forward the §5.4 Z_EXT_AUTH establishment ext codec into the
 # AP runtime (the codec lives in wz-session-core; only the AP profile carries
 # auth — the MCU/lwip path never forwards it). The dispatch + methods are
@@ -2266,6 +2269,11 @@ portable-atomic = "1"
 # socket2's `all`). Distinct from the dev-dependencies socket2 below,
 # which serves a bind-without-listen test shim; Cargo unifies the two.
 socket2 = { version = "0.6", features = ["all"], optional = true }
+
+# The reader of a node's declaration file (`node_declaration`), pulled by
+# `session-close-ingress`: the grants of the lifecycle verbs are its commander rows.
+# The version `wz-zenoh-config` reads its TOML with, so the lock holds one.
+toml = { version = "0.9.6", optional = true }
 
 # R2801 — the filesystem storage backend's dependencies, pulled ONLY by
 # `storage-backend-filesystem`, each at the version zenoh-backend-filesystem
