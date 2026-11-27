@@ -233,11 +233,12 @@ impl FaceTables {
     unsafe fn rowless_over_zero<'p>(
         place: &'p mut MaybeUninit<Self>,
         limits: &SessionLimits,
-    ) -> &'p mut Self {
-        // The peer's tables are read as they lie only because zero bytes are a whole empty value of
-        // them; a policy whose tables are not is refused here.
-        const fn empty_at_zero_bytes<T: wz_session_core::bounded::ZeroEmpty>() {}
-        empty_at_zero_bytes::<Peer>();
+    ) -> &'p mut Self
+    where
+        // The peer's tables are read as they lie only because zero bytes are a whole empty value
+        // of them; a policy whose tables are not is refused here.
+        Peer: wz_session_core::bounded::ZeroEmpty,
+    {
         let at = place.as_mut_ptr();
         // SAFETY: `at` is valid for writes of a `Self` (a `MaybeUninit<T>` has the layout of
         // `T`): every field but the peer's tables is written by `write_unpeered`, and the peer's
