@@ -8292,7 +8292,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         } else {
             Ok(0)
         };
-        match self.decide_alone(put, &asked) {
+        let answer = match asked.answer.get() {
+            Some(answer) => answer,
+            None => self.decide_alone(put, &asked),
+        };
+        match answer {
             Answer::HeldBack => return FilteredPut::Suppressed,
             Answer::NotPlain => return FilteredPut::NotPlain,
             Answer::Through => {}
@@ -8321,6 +8325,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// before it takes the session, the answer read now by a take of its own, nothing sent
     /// (`Self::decide_put`). A closed session holds nothing back, as
     /// `SessionEngine::write_filter_holds_back` answers.
+    // Out of line: a put whose leg held the session was answered there, and takes none of this.
+    #[inline(never)]
     fn decide_alone(&self, put: &PutOn<'_>, asked: &Asked) -> Answer {
         if let Some(answer) = asked.answer.get() {
             return answer;
@@ -8347,6 +8353,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// general way, which no epoch counts. The first leg asks the filter, which holds the put
     /// back on this session unless the session holds a group it does not ask
     /// (`Self::holds_back_in`), and of a plain put whether it is plain on this node.
+    // Inlined whole: the leg that sends a put reads it in its own body, as a put's path is the one
+    // a message takes each time.
+    #[inline(always)]
     fn decide_put<'r>(core: &'r Core<L, C>, put: &PutOn<'_>, first: bool) -> PutGoes<'r> {
         // The registry itself, not its holder: the filter reads it as what the peers declare.
         let registry: &Registry = &core.session.registry;
