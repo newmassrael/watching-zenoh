@@ -22,6 +22,8 @@
 
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::link_storage::{copied_send, HeapTx, TxLender};
+#[cfg(feature = "multicast-send-hold")]
+use wz_session_core::inbound::{frame_lane, FrameLane};
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkSendOutcome, TxSlot, TxSlotGrant, SESSION_TX_SLOTS,
 };
@@ -90,6 +92,20 @@ impl<T: GroupTransport, P: GroupTxPace> GroupDriver<T, P> {
                 LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
             }
         }
+    }
+
+    /// The lane of the frame a full socket refused and the driver holds, read off its head: the
+    /// group's JOIN advertises that frame's sequence number on its lane and not the next one, so a
+    /// member told the group's numbers while the frame waits still takes it when it leaves.
+    /// `None` while nothing is held.
+    #[cfg(feature = "multicast-send-hold")]
+    pub fn held_lane(&self) -> Option<FrameLane> {
+        let held = self.held.get()?;
+        let (base, _) = self.tx.storage(held.slot);
+        // SAFETY: as in `offer_held`: the held slot is the driver's until it is released, and
+        // `start .. start + len` was found inside it when it was held.
+        let frame = unsafe { core::slice::from_raw_parts(base.wrapping_add(held.start), held.len) };
+        frame_lane(frame)
     }
 
     /// Offer the held frame again: whether the socket still refuses it. A frame the socket took,
@@ -442,6 +458,35 @@ mod tests {
         );
         assert_eq!(wire.borrow().seen, [vec![7], vec![8]]);
         assert_eq!(wire.borrow().offers, 4, "each frame offered once a wait");
+    }
+
+    /// With the hold the frame a full socket refused answers its lane off its head while it is
+    /// held, and none once it left. Turned red by a lane read off another slot's bytes, or one
+    /// still answered after the socket took the frame.
+    #[cfg(feature = "multicast-send-hold")]
+    #[test]
+    fn a_held_frame_answers_its_lane_until_it_leaves() {
+        use wz_session_core::inbound::FrameLane;
+        use wz_session_core::link::RoomWait;
+        use wz_session_core::qos::Priority;
+
+        let (driver, wire) = driver(0, true);
+        assert_eq!(driver.held_lane(), None, "nothing held");
+        assert_eq!(
+            driver.send_blocking(&[0x25, 0x07, 0xAA], Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            driver.held_lane(),
+            Some(FrameLane {
+                priority: Priority::DEFAULT,
+                reliable: true,
+                sn: 7,
+            })
+        );
+        let _ = driver.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 1_000 });
+        assert_eq!(wire.borrow().seen, [vec![0x25, 0x07, 0xAA]]);
+        assert_eq!(driver.held_lane(), None, "the frame left");
     }
 
     /// With the hold an ask for room whose wait finds the socket still full is congested, and

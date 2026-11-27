@@ -125,7 +125,9 @@ transport-multicast = [
 # The group's send socket holds the datagram it had no room for and the send returns, the next ask
 # for room offering it first (`group_drive::GroupDriver`): a behaviour, which implies nothing.
 # Off, the send waits on the socket until it takes the datagram, as zenoh-pico's group send blocks.
-multicast-send-hold = []
+# The held datagram's lane is read back off its head by the session core's receive decode, which
+# the storage profile carries.
+multicast-send-hold = ["wz-session-core/storage-profile"]
 # The group session counts what it sends and receives into the counters its holder attaches
 # (`MulticastSessionSeed::with_stats`, `GroupTxStage::attach_stats`): the bytes and transport
 # messages of each datagram either way, and each network message a member sent, the session core's
