@@ -95,9 +95,11 @@ pub(crate) enum Kind {
 /// The place of one `T`, taken and not yet filled. Dropped unfilled, it is given back.
 pub(crate) struct Slot<T> {
     place: NonNull<MaybeUninit<T>>,
-    /// The session whose arena lent the place, for an entity's object on the cooperative engine
-    /// ([`Self::take_entity`]); none for a place of the process pools or the heap.
-    lender: Option<Lender>,
+    /// Whether a session's arena lent the place for an entity's object on the cooperative engine
+    /// ([`Self::take_entity`]), which wrote its lender in the place as it lent it; else the place
+    /// is one of the process pools or the heap.
+    #[cfg(not(feature = "engine-tokio"))]
+    lent: bool,
 }
 
 impl<T> Slot<T> {
@@ -106,7 +108,8 @@ impl<T> Slot<T> {
     pub(crate) fn take(kind: Kind) -> Option<Self> {
         crate::process_pool::take::<T>(kind).map(|place| Self {
             place: place.cast(),
-            lender: None,
+            #[cfg(not(feature = "engine-tokio"))]
+            lent: false,
         })
     }
 
@@ -116,7 +119,8 @@ impl<T> Slot<T> {
         let _ = kind;
         Some(Self {
             place: NonNull::from(Box::leak(Box::new(MaybeUninit::<T>::uninit()))),
-            lender: None,
+            #[cfg(not(feature = "engine-tokio"))]
+            lent: false,
         })
     }
 
@@ -126,12 +130,20 @@ impl<T> Slot<T> {
     /// session opened under admits, so one session's entities never take another's: `None`
     /// when every one is held, or the kind or `T` is not one the open laid places out for. On the
     /// tokio engine it is a place of the kind's pool ([`Self::take`]).
+    ///
+    /// The lender is written in the place as it is lent, so the slot is the place alone and its
+    /// fill writes the object only.
     #[cfg(not(feature = "engine-tokio"))]
     pub(crate) fn take_entity(engine: &crate::session::EngineHold, kind: Kind) -> Option<Self> {
-        let lender = Lender::lend(engine, kind, InSession::<T>::LAYOUT)?;
+        let place = Lender::lend_into(
+            engine,
+            kind,
+            InSession::<T>::LAYOUT,
+            InSession::<T>::LENDER_AT,
+        )?;
         Some(Self {
-            place: lender.place.as_ptr().cast(),
-            lender: Some(lender),
+            place: place.cast(),
+            lent: true,
         })
     }
 
@@ -143,23 +155,18 @@ impl<T> Slot<T> {
         Self::take(kind)
     }
 
-    /// The place and the session that lent it, the slot given up.
-    fn into_parts(self) -> (NonNull<MaybeUninit<T>>, Option<Lender>) {
-        let mut this = core::mem::ManuallyDrop::new(self);
-        (this.place, this.lender.take())
+    /// The place, the slot given up: what lies there is its holder's to let go of.
+    fn into_place(self) -> NonNull<MaybeUninit<T>> {
+        core::mem::ManuallyDrop::new(self).place
     }
 
     /// Put `value` in the place and hand back where it lies: the handle an owned struct holds,
     /// which [`release`] lets go, or [`release_entity`] for one [`Self::take_entity`] placed.
     pub(crate) fn fill(self, value: T) -> *mut T {
-        let (place, lender) = self.into_parts();
+        let place = self.into_place();
         // SAFETY: the place is a live allocation sized and aligned for `T`, which nothing else
-        // holds, and it is not filled yet.
+        // holds, and it is not filled yet; a lent place's lender lies past the object.
         unsafe { place.as_ptr().write(MaybeUninit::new(value)) };
-        if let Some(lender) = lender {
-            // SAFETY: the place was lent for an `InSession<T>` and now holds its value.
-            unsafe { lender.attach(place) };
-        }
         place.as_ptr().cast::<T>()
     }
 
@@ -173,11 +180,7 @@ impl<T> Slot<T> {
     pub(crate) unsafe fn fill_in_place(self, write: impl FnOnce(*mut T)) -> *mut T {
         let at = self.place.as_ptr().cast::<T>();
         write(at);
-        let (place, lender) = self.into_parts();
-        if let Some(lender) = lender {
-            // SAFETY: the place was lent for an `InSession<T>` and now holds its value.
-            unsafe { lender.attach(place) };
-        }
+        self.into_place();
         at
     }
 
@@ -199,11 +202,15 @@ impl<T> Slot<T> {
 
 impl<T> Drop for Slot<T> {
     fn drop(&mut self) {
-        match self.lender.take() {
-            Some(lender) => lender.give_back(),
-            // SAFETY: an unfilled place this slot took, given back once.
-            None => unsafe { give_back(self.place) },
+        #[cfg(not(feature = "engine-tokio"))]
+        if self.lent {
+            // SAFETY: a place lent for an `InSession<T>`, its lender written at the take and its
+            // object never written, given back once.
+            unsafe { give_back_lent_place(self.place.cast(), InSession::<T>::LENDER_AT) };
+            return;
         }
+        // SAFETY: an unfilled place this slot took, given back once.
+        unsafe { give_back(self.place) }
     }
 }
 
@@ -216,22 +223,21 @@ pub(crate) struct Lender {
     engine: crate::session::EngineHold,
 }
 
-/// No session lends a place on the tokio engine: its entities' objects lie in the pools.
-#[cfg(feature = "engine-tokio")]
-pub(crate) enum Lender {}
-
 #[cfg(not(feature = "engine-tokio"))]
 impl Lender {
     /// A place of `engine`'s arena for an entity of `kind` whose object, with its lender, is laid
-    /// out by `needed`: `None` when every place of the kind is held, or the kind or the layout is
-    /// not one the open laid places out for. One body for every kind of entity, out of the line of
-    /// each declare, so the layout is a value rather than each object's own copy of the take.
+    /// out by `needed`, the lender written in it `lender_at` bytes past its start: `None` when
+    /// every place of the kind is held, or the kind or the layout is not one the open laid places
+    /// out for. One body for every kind of entity, out of the line of each declare, so the layout
+    /// and the lender's offset are values, and no declare carries a copy of the take or moves the
+    /// lender to its object's fill.
     #[inline(never)]
-    fn lend(
+    fn lend_into(
         engine: &crate::session::EngineHold,
         kind: Kind,
         needed: core::alloc::Layout,
-    ) -> Option<Self> {
+        lender_at: usize,
+    ) -> Option<NonNull<u8>> {
         let (entity, laid) = entity_place(kind)?;
         if needed.size() > laid.size() || needed.align() > laid.align() {
             return None;
@@ -241,21 +247,20 @@ impl Lender {
             crate::session::EngineHold::as_ref(engine),
             entity,
         )?;
-        Some(Self {
+        let base = place.as_ptr();
+        let lender = Self {
             place,
             engine: crate::session::EngineHold::clone(engine),
-        })
-    }
-
-    /// Keep this lender beside the value at `place`.
-    ///
-    /// # Safety
-    /// `place` is the place this lender lent, laid out for an `InSession<T>`, and holds its
-    /// value.
-    unsafe fn attach<T>(self, place: NonNull<MaybeUninit<T>>) {
-        let at = place.as_ptr().cast::<InSession<T>>();
-        // SAFETY: the caller's: the place holds an `InSession<T>`, whose lender is not written.
-        unsafe { core::ptr::addr_of_mut!((*at).lender).write(core::mem::ManuallyDrop::new(self)) };
+        };
+        // SAFETY: the place is at least as large and as aligned as `needed`, the layout of an
+        // `InSession` whose lender lies `lender_at` bytes in, which nothing has written yet.
+        unsafe {
+            base.as_ptr()
+                .add(lender_at)
+                .cast::<core::mem::ManuallyDrop<Self>>()
+                .write(core::mem::ManuallyDrop::new(lender));
+        }
+        Some(base)
     }
 
     /// Give the place back to the session that lent it, whatever it held let go of first. One
@@ -275,17 +280,6 @@ impl Lender {
     }
 }
 
-#[cfg(feature = "engine-tokio")]
-impl Lender {
-    unsafe fn attach<T>(self, _place: NonNull<MaybeUninit<T>>) {
-        match self {}
-    }
-
-    fn give_back(self) {
-        match self {}
-    }
-}
-
 /// An entity's object in a place of its session's arena, and the session that lent the place: the
 /// object first, so the handle of the object is the place itself.
 #[cfg(not(feature = "engine-tokio"))]
@@ -299,6 +293,32 @@ struct InSession<T> {
 impl<T> InSession<T> {
     /// The layout a place of the session's arena is laid out by for a `T`.
     const LAYOUT: core::alloc::Layout = core::alloc::Layout::new::<Self>();
+    /// How many bytes past the start of the place its lender lies.
+    const LENDER_AT: usize = core::mem::offset_of!(InSession<T>, lender);
+}
+
+/// Give back the place at `place` to the session that lent it, reading its lender `lender_at`
+/// bytes in: what the place held let go of first, or never written. One body for every kind of
+/// entity, so the release of an object and the drop of an unfilled slot read the lender in one
+/// place, apart from `T`.
+///
+/// # Safety
+/// `place` is a place [`Lender::lend_into`] lent with its lender at `lender_at`, which holds no
+/// live object and is given back once.
+#[cfg(not(feature = "engine-tokio"))]
+#[inline(never)]
+unsafe fn give_back_lent_place(place: NonNull<u8>, lender_at: usize) {
+    // SAFETY: the caller's: the lender was written there as the place was lent, and is read out
+    // once, here.
+    let lender = core::mem::ManuallyDrop::into_inner(unsafe {
+        core::ptr::read(
+            place
+                .as_ptr()
+                .add(lender_at)
+                .cast::<core::mem::ManuallyDrop<Lender>>(),
+        )
+    });
+    lender.give_back();
 }
 
 /// The entity kind of the engine's arena an object of `kind` is placed as, and the layout of its
@@ -753,7 +773,7 @@ unsafe fn give_back_lent(
     open: *mut crate::ffi::OpenClosures,
     lender: *const core::mem::ManuallyDrop<Lender>,
 ) {
-    // SAFETY: the caller's: the lender was written when the place was filled, and is read out
+    // SAFETY: the caller's: the lender was written when the place was lent, and is read out
     // once, here, as the count is dropped once.
     let lender = core::mem::ManuallyDrop::into_inner(unsafe { core::ptr::read(lender) });
     // SAFETY: the caller's: the count is live and nothing reads it after.
@@ -814,15 +834,15 @@ pub(crate) unsafe fn release<T>(object: *mut T) {
 /// again.
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) unsafe fn release_entity<T>(object: *mut T) {
-    let at = object.cast::<InSession<T>>();
-    // SAFETY: the caller's: the object lies in an `InSession<T>` whose lender was written when it
-    // was filled, and is read out once, here.
-    let lender = core::mem::ManuallyDrop::into_inner(unsafe {
-        core::ptr::read(core::ptr::addr_of!((*at).lender))
-    });
-    // SAFETY: the caller's: a live object, dropped once.
-    unsafe { core::ptr::drop_in_place(object) };
-    lender.give_back();
+    // SAFETY: the caller's: a live object, dropped once, in an `InSession<T>` whose lender was
+    // written when its place was lent, which goes back once, here.
+    unsafe {
+        core::ptr::drop_in_place(object);
+        give_back_lent_place(
+            NonNull::new_unchecked(object.cast()),
+            InSession::<T>::LENDER_AT,
+        );
+    }
 }
 
 /// Drop the object of an entity at `object` and give its place back to the kind's pool.
@@ -1396,6 +1416,82 @@ mod tests {
                 2
             );
         }
+    }
+
+    /// The lender of a lent place lies past its object and within the place, aligned for itself,
+    /// for objects of several sizes and alignments: the take writes it there before the object is
+    /// written, so a fill that wrote over it, or a place with no room for it, would lose the
+    /// session that lent the place. Turned red by a `LENDER_AT` that is not `InSession`'s own
+    /// offset of its lender.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    fn a_lent_places_lender_lies_past_its_object_within_the_place() {
+        fn holds<T>() {
+            let at = InSession::<T>::LENDER_AT;
+            assert!(at >= core::mem::size_of::<T>(), "past the object");
+            assert!(
+                at + core::mem::size_of::<Lender>() <= InSession::<T>::LAYOUT.size(),
+                "within the place"
+            );
+            assert_eq!(
+                at % core::mem::align_of::<Lender>(),
+                0,
+                "aligned for itself"
+            );
+        }
+        holds::<u8>();
+        holds::<u64>();
+        holds::<[u8; 13]>();
+        holds::<crate::pubsub::PublisherState>();
+        holds::<crate::pubsub::SubscriberState>();
+    }
+
+    /// A lent place whose fill is refused goes back to the session that lent it, its lender read
+    /// where the take wrote it, and a filled one goes back at its release: the path a declaration
+    /// the engine refuses takes. Turned red by an unfilled lent slot given back as a pool's place,
+    /// or by a fill or a release that does not find the lender the take wrote.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_refused_fill_gives_the_lent_place_back_to_its_session() {
+        use crate::session::{
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            z_session_move,
+        };
+
+        // How many subscriber places `engine` has free: each claimed, then all given back.
+        let free = |engine: &crate::session::EngineHold| {
+            let claimed: Vec<Slot<u64>> =
+                core::iter::from_fn(|| Slot::<u64>::take_entity(engine, Kind::Subscriber))
+                    .collect();
+            claimed.len()
+        };
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let engine = engine_held(handle.expect("an open session has its handle")).clone();
+        let places = free(&engine);
+        assert!(places > 0, "the session's limit admits subscribers");
+
+        let slot = Slot::<u64>::take_entity(&engine, Kind::Subscriber).expect("a place");
+        assert_eq!(free(&engine), places - 1, "the slot holds its place");
+        // SAFETY: the refused write writes nothing.
+        let refused = unsafe { slot.try_fill_in_place(|_| Err::<(), i32>(7)) };
+        assert_eq!(refused.err(), Some(7));
+        assert_eq!(free(&engine), places, "a refused fill gives the place back");
+
+        let drops = core::cell::Cell::new(0);
+        let object = Slot::take_entity(&engine, Kind::Subscriber)
+            .expect("a place")
+            .fill(Counted(&drops));
+        assert_eq!(free(&engine), places - 1, "a filled place stays lent");
+        // SAFETY: the object was filled above and is released once.
+        unsafe { release_entity(object) };
+        assert_eq!(drops.get(), 1, "the object is dropped once");
+        assert_eq!(free(&engine), places, "the release gives the place back");
+
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
     }
 
     /// What one entity of each kind takes of its session's arena for the ABI's object, printed for
