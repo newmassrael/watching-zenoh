@@ -50,11 +50,9 @@ runs:
       with:
         python-version-file: .github/python-version
 
-    # The packager resolves the profile with the pinned interpreter; `wz_config.py` imports it
-    # from the running python, where this puts it, by version and hash.
+    # The packager resolves the profile with the pinned Kconfig interpreter.
     - name: The pinned Kconfig interpreter
-      shell: bash
-      run: python -m pip install --quiet --no-deps --require-hashes -r scripts/requirements-kconfig.txt
+      uses: ./.github/actions/kconfig-interpreter
 
     # The transports example joins a group on the adapter of the default route, as the C ABI
     # examples job does: the loopback adapter of Windows carries no group.

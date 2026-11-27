@@ -349,6 +349,11 @@ jobs:
         with:
           python-version-file: .github/python-version
 
+      # The packager reads the build configuration through `wz_config.py`, whose profile
+      # resolution needs the pinned Kconfig interpreter.
+      - name: The pinned Kconfig interpreter
+        uses: ./.github/actions/kconfig-interpreter
+
       - name: Download the packages
         uses: actions/download-artifact@v4
         with:
