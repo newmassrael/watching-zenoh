@@ -345,6 +345,9 @@ struct Router {
 }
 
 impl Router {
+    /// A stand-in that accepts on a free port. Its acceptor arms its accept window
+    /// (`SessionTimeouts::accepting_inactivity_ms`, one second) when it starts and closes silently
+    /// once the window passes with no handshake, so a test dials it as soon as it starts it.
     fn start(catch_all: CatchAll) -> Self {
         Self::start_as(ROUTER_ZID, catch_all)
     }
@@ -1261,8 +1264,15 @@ fn sessions_open_past_the_builds_rows_on_the_heap_policy_and_closed_ones_are_rea
     let held: Vec<crate::RowClaim> = (0..wz_session_core::caps::ENGINE_ROWS)
         .map(|_| crate::RowClaim::take().expect("the heap gives a row"))
         .collect();
-    let routers: Vec<Router> = (0..11).map(|_| Router::start(CatchAll::None)).collect();
-    let engines: Vec<EngineHold<Engine>> = routers.iter().map(open).collect();
+    // Each stand-in is dialled right after it starts: one started ahead of the opens before its
+    // own would be past its accept window (`Router::start`) by the time it is dialled.
+    let (routers, engines): (Vec<Router>, Vec<EngineHold<Engine>>) = (0..11)
+        .map(|_| {
+            let router = Router::start(CatchAll::None);
+            let engine = open(&router);
+            (router, engine)
+        })
+        .unzip();
     let handles: Vec<_> = engines.iter().map(EngineHold::downgrade).collect();
     assert!(
         handles
@@ -1279,6 +1289,7 @@ fn sessions_open_past_the_builds_rows_on_the_heap_policy_and_closed_ones_are_rea
             .all(|handle| !handle.is_open() && handle.upgrade().is_none()),
         "a closed session's handle reaches nothing"
     );
+    drop((engines, routers));
     drop(held);
 }
 
