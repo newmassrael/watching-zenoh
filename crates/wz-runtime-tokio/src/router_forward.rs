@@ -3334,7 +3334,7 @@ pub struct RouterForwarder {
     face_watchers: PlainMutex<FaceWatches>,
     /// The transitions the writes of the tables made, to be told once each write is released
     /// ([`WrittenTables`]): an observer runs user code, and the tables are held for writing.
-    face_events: PlainMutex<Vec<QueuedFaceEvent>>,
+    face_events: PlainMutex<FaceEvents>,
     /// Whether `face_events` holds something, so that the write that made nothing pays no lock.
     face_events_pending: std::sync::atomic::AtomicBool,
     /// Whether the face has been told the tables were written since it last looked.
@@ -4361,7 +4361,7 @@ impl RouterForwarder {
         let Some(face) = FaceSnapshot::of_actions(actions) else {
             return;
         };
-        self.face_events.guard().push(QueuedFaceEvent {
+        self.face_events.guard().queued.push(QueuedFaceEvent {
             kind,
             face,
             watched,
@@ -4370,8 +4370,13 @@ impl RouterForwarder {
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    /// Tell the observers the transitions queued, in the order they were made, each to the watches
-    /// it is told to that are still made. Called with no lock of the router held.
+    /// Tell the observers the transitions queued, in the order they were made. Called with no lock
+    /// of the router held.
+    ///
+    /// One thread tells at a time, and tells what the others queue while it does ([`FaceTelling`]):
+    /// a thread that finds another telling leaves its transitions to it. Two threads each telling
+    /// their own write's would reach a watch in the order they happen to run, so that a face that
+    /// went while its coming up was being told could be told it went first.
     fn tell_face_events(&self) {
         if !self
             .face_events_pending
@@ -4379,19 +4384,23 @@ impl RouterForwarder {
         {
             return;
         }
-        let events = std::mem::take(&mut *self.face_events.guard());
-        for event in &events {
-            // Read for each transition: a watch let go of since is told nothing more.
-            let sinks: Vec<FaceEventSink> = self
-                .face_watchers
-                .guard()
-                .sinks
-                .iter()
-                .filter(|(id, _)| event.watched.includes(*id))
-                .map(|(_, sink)| sink.clone())
-                .collect();
-            for sink in &sinks {
-                sink.tell(event.kind, &event.face);
+        let Some(mut telling) = FaceTelling::begin(self) else {
+            return;
+        };
+        while let Some(events) = telling.queued() {
+            for event in &events {
+                // Read for each transition: a watch let go of since is told nothing more.
+                let sinks: Vec<FaceEventSink> = self
+                    .face_watchers
+                    .guard()
+                    .sinks
+                    .iter()
+                    .filter(|(id, _)| event.watched.includes(*id))
+                    .map(|(_, sink)| sink.clone())
+                    .collect();
+                for sink in &sinks {
+                    sink.tell(event.kind, &event.face);
+                }
             }
         }
     }
@@ -4435,6 +4444,60 @@ struct QueuedFaceEvent {
     kind: FaceEventKind,
     face: FaceSnapshot,
     watched: WatchesUpTo,
+}
+
+/// The transitions the writes made that no thread has told yet, in the order the writes made
+/// them, and whether a thread is telling them ([`FaceTelling`]).
+#[derive(Default)]
+struct FaceEvents {
+    queued: Vec<QueuedFaceEvent>,
+    telling: bool,
+}
+
+/// The telling of the queued transitions by one thread ([`RouterForwarder::tell_face_events`]),
+/// until it finds the queue empty. A sink that unwinds ends it too, and leaves what is still
+/// queued to the next thread that releases the tables.
+struct FaceTelling<'a> {
+    fwd: &'a RouterForwarder,
+    /// Ended in the step that found the queue empty.
+    ended: bool,
+}
+
+impl<'a> FaceTelling<'a> {
+    /// The telling, for this thread; `None` while another thread tells, which tells what this one
+    /// queued too.
+    fn begin(fwd: &'a RouterForwarder) -> Option<Self> {
+        let mut events = fwd.face_events.guard();
+        if events.telling {
+            return None;
+        }
+        events.telling = true;
+        Some(Self { fwd, ended: false })
+    }
+
+    /// What was queued since the last call, or `None` once nothing was. The telling ends in the
+    /// step that finds the queue empty, so a transition queued after that step is told by the
+    /// thread that queued it.
+    fn queued(&mut self) -> Option<Vec<QueuedFaceEvent>> {
+        let mut events = self.fwd.face_events.guard();
+        if events.queued.is_empty() {
+            events.telling = false;
+            self.ended = true;
+            return None;
+        }
+        Some(std::mem::take(&mut events.queued))
+    }
+}
+
+impl Drop for FaceTelling<'_> {
+    fn drop(&mut self) {
+        if !self.ended {
+            self.fwd.face_events.guard().telling = false;
+            self.fwd
+                .face_events_pending
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
 }
 
 /// The tables held for writing. When they are let go the node's own face is told that they may
@@ -5416,7 +5479,7 @@ impl RouterForwarder {
             interceptor_version: PlainCell::new(0),
             watchers: std::sync::atomic::AtomicUsize::new(0),
             face_watchers: PlainMutex::new(FaceWatches::default()),
-            face_events: PlainMutex::new(Vec::new()),
+            face_events: PlainMutex::new(FaceEvents::default()),
             face_events_pending: std::sync::atomic::AtomicBool::new(false),
             change_told: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "routing-namespace")]

@@ -166,6 +166,11 @@ What a peer of the zenoh preset can observe must not change under A, which is un
    history listed. A handler a writer calls must not make a watch, as it must not declare. Held under
    both values by `router_forward/face_watch_tests.rs` and the `between_writes` pair in
    `table_sharing_pair_tests.rs`.
+7. **The order a watch is told the transitions in.** One thread tells at a time, and tells what the
+   others queue meanwhile (`FaceTelling`), so each watch is told the transitions in the order the writes
+   made them. Two writes told on their own threads would reach a watch in the order the threads ran, and
+   a face that went while its coming up was being told could be told it went first. Held under both
+   values by `a_face_that_goes_while_its_coming_up_is_told_is_told_it_went_after_it_came`.
 
 ## 6. Phases
 

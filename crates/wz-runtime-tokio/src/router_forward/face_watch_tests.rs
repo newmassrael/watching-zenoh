@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Which face watches a router tells that a face came up or went, under each value of the
-//! `routing-table-sharing` policy. A watch is made between two writes of the tables, so it is
-//! told the transitions of the writes after it and none of a write before it, whose tables it
-//! reads. Each test runs under both values, whatever value the build states.
+//! Which face watches a router tells that a face came up or went, and in what order, under each
+//! value of the `routing-table-sharing` policy. A watch is made between two writes of the tables,
+//! so it is told the transitions of the writes after it and none of a write before it, whose
+//! tables it reads; one thread tells at a time, so a watch is told the transitions in the order
+//! the writes made them. Each test runs under both values, whatever value the build states.
 
 use super::*;
 use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
@@ -172,6 +173,56 @@ fn a_watch_asked_for_during_a_write_is_made_after_it_and_reads_the_face_it_broug
             told(&told_late),
             [FaceEventKind::Down],
             "{sharing:?}: the watch is told the face it read went"
+        );
+    }
+}
+
+/// A face that goes while its coming up is being told is told to each watch after it came up:
+/// the thread that tells the coming up tells the going too. The first watch holds the telling of
+/// the coming up, on the thread that brought the face, until the face has gone on this one. This
+/// test fails (the second watch is told `Down` before `Up`) when each write's thread tells its
+/// own transitions.
+#[test]
+fn a_face_that_goes_while_its_coming_up_is_told_is_told_it_went_after_it_came() {
+    for sharing in SHARINGS {
+        let fwd = router(sharing);
+        let (in_up_tx, in_up) = mpsc::channel();
+        let (go_on, go_on_rx) = mpsc::channel::<()>();
+        let holding = Mutex::new(Some((in_up_tx, go_on_rx)));
+        fwd.watch_faces(FaceEventSink::of_arc(Arc::new(
+            move |kind: FaceEventKind, _face: &FaceSnapshot| {
+                if kind != FaceEventKind::Up {
+                    return;
+                }
+                let Some((came_up, let_go)) = holding
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                else {
+                    return;
+                };
+                came_up.send(()).expect("the test is waiting");
+                let_go.recv().expect("the test lets the telling go on");
+            },
+        )));
+        let (second, told_second) = recording();
+        fwd.watch_faces(second);
+        let (actions, _sink) = client(zid(0xC0));
+        let bringer = {
+            let fwd = Arc::clone(&fwd);
+            let actions = Arc::clone(&actions);
+            std::thread::spawn(move || fwd.register(FaceId(0), &actions))
+        };
+        in_up
+            .recv_timeout(FINISHES_WITHIN)
+            .expect("the first watch is told the face came up");
+        fwd.deregister(FaceId(0));
+        go_on.send(()).expect("the first watch is waiting");
+        bringer.join().expect("the bringer finishes");
+        assert_eq!(
+            told(&told_second),
+            [FaceEventKind::Up, FaceEventKind::Down],
+            "{sharing:?}: the second watch is told the face came up, then that it went"
         );
     }
 }
