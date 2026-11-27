@@ -8823,6 +8823,25 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4708": {
+      "decision_summary": "Pin a scout's ask socket by the text of its address written by wz's own\nwriter, so a build that scouts links no core::fmt: the formatter and the\nnet Display impls left the library with the one call that needed them.",
+      "changes_bullets": [
+        "runtime-posix scouting: iface_text over TextOut::push_ip.",
+        "session-core text_out: IPV6_TEXT_LEN public.",
+        "docs/win-budget/rss.md R2.6 row."
+      ],
+      "verification_bullets": [
+        "capability cost: pico-client-coop-scout 369,011 vs main 377,591 B (-8,580).",
+        "pico-peer-coop 488,281 vs 496,829 B (-8,548); client case unchanged.",
+        "runtime-posix scouting tests 5 pass; clippy clean; reason pins OK."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
