@@ -1838,7 +1838,7 @@ impl<
             // `pending_role`); every other profile activates here, as it always did.
             #[cfg(not(feature = "session-slot"))]
             for event in role.activation() {
-                wz_session_core::drive::deliver_session_event(engine, *event);
+                engine.process_event(*event);
             }
 
             core::ptr::addr_of_mut!((*at).runtime).write(runtime);
@@ -2011,7 +2011,7 @@ impl<
         #[cfg(feature = "session-slot")]
         if let Some(role) = self.pending_role.take() {
             for event in role.activation() {
-                wz_session_core::drive::deliver_session_event(&mut self.engine, *event);
+                self.engine.process_event(*event);
             }
         }
         if self.engine.is_in_final_state() {
@@ -3919,17 +3919,17 @@ mod wake_budget_tests {
         assert_eq!(waited(Some(0)), 0);
     }
 
-    /// The session machine takes every event a path of the receive, the timers or the loop tells
-    /// it through `deliver_session_event`: the handshake's answers establish a dialled session, an
-    /// event its state does not take leaves it where it is, a lease that expired closes it with
-    /// that reason staged, and a machine that has ended takes nothing more. Turned red by
-    /// `deliver_session_event` not handing the engine the event (`engine.process_event(event)`
-    /// left out of its body), whose session stays where it was made.
+    /// The session machine the pump makes takes every event a path of the receive, the timers or
+    /// the loop tells it through the runtime's one body of the machine (`Engine::process_event`):
+    /// the handshake's answers establish a dialled session, an event its state does not take leaves
+    /// it where it is, a lease that expired closes it with that reason staged, and a machine that
+    /// has ended takes nothing more. Turned red by `engine.initialize()` left out of
+    /// `LinkSession::init_in`, whose machine is not running and refuses every event, and by
+    /// `set_close_reason_expired` staging another reason.
     #[cfg(feature = "session-unicast-open")]
     #[test]
     fn the_session_machine_takes_its_events_through_the_one_body() {
         use wz_session_core::close_reason::CloseReason;
-        use wz_session_core::drive::deliver_session_event;
         use wz_session_core::session_fsm_unicast::{
             SessionFsmUnicastEvent as E, SessionFsmUnicastState as S,
         };
@@ -3948,18 +3948,18 @@ mod wake_budget_tests {
         let mut pump = SessionPump::try_new(runtime, link, actions, entropy, clock, config)
             .expect("the heap has room");
         let engine = &mut pump.session.engine;
-        deliver_session_event(engine, E::InitAckReceived);
-        deliver_session_event(engine, E::OpenAckReceived);
+        engine.process_event(E::InitAckReceived);
+        engine.process_event(E::OpenAckReceived);
         assert!(
             engine.get_current_state() == S::Established,
             "the handshake's answers establish the dialled session"
         );
-        deliver_session_event(engine, E::InitAckReceived);
+        engine.process_event(E::InitAckReceived);
         assert!(
             engine.get_current_state() == S::Established,
             "an event the state does not take leaves the machine where it is"
         );
-        deliver_session_event(engine, E::LeaseExpired);
+        engine.process_event(E::LeaseExpired);
         assert!(
             engine.get_current_state() == S::Closing,
             "an expired lease closes the session"
@@ -3970,12 +3970,12 @@ mod wake_budget_tests {
             "the transition's content ran: the close carries the lease's reason"
         );
         let engine = &mut pump.session.engine;
-        deliver_session_event(engine, E::LinkLost);
+        engine.process_event(E::LinkLost);
         assert!(
             engine.is_in_final_state(),
             "a lost link ends the closing session"
         );
-        deliver_session_event(engine, E::SessionClose);
+        engine.process_event(E::SessionClose);
         assert!(
             engine.is_in_final_state(),
             "a machine that has ended takes nothing more"

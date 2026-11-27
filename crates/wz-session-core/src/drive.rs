@@ -284,10 +284,7 @@ pub fn dispatch_link_lost<R: SessionRuntime, T: TimeSource>(
     engine: &mut SessionEngine<R, T>,
     cause: crate::link::LostCause,
 ) -> DriverLoopOutcome {
-    deliver_session_event(
-        engine,
-        crate::session_fsm_unicast::SessionFsmUnicastEvent::LinkLost,
-    );
+    engine.process_event(crate::session_fsm_unicast::SessionFsmUnicastEvent::LinkLost);
     DriverLoopOutcome::LinkLost(cause)
 }
 
@@ -321,7 +318,7 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     match event {
         LinkEvent::Ready => {
-            deliver_session_event(engine, E::LinkOpened);
+            engine.process_event(E::LinkOpened);
             DriverLoopOutcome::AdvancedFsm
         }
         LinkEvent::Lost { cause } => dispatch_link_lost(engine, cause),
@@ -360,7 +357,7 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                 ) {
                     Some(b) => Some(b),
                     None => {
-                        deliver_session_event(engine, E::FramingError);
+                        engine.process_event(E::FramingError);
                         return DriverLoopOutcome::ParseError(
                             crate::parse_error::InboundParseError::CompressionFailed,
                         );
@@ -498,7 +495,7 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
     // sent) is the deepest path the receive reaches, and the decoded message was a slot under it
     // that nothing read.
     if let Some(event) = decided {
-        deliver_session_event(engine, event);
+        engine.process_event(event);
     }
     outcome
 }
@@ -608,7 +605,7 @@ fn dispatch_lean_unit<R: SessionRuntime, T: TimeSource>(
                     }
                 }
                 Err(parse_err) => {
-                    deliver_session_event(engine, E::FramingError);
+                    engine.process_event(E::FramingError);
                     DriverLoopOutcome::ParseError(parse_err)
                 }
             });
@@ -1794,7 +1791,7 @@ fn admit_head_in_place<
         return HeadAdmission::Admitted;
     };
     if let Some(event) = to_engine {
-        deliver_session_event(engine, event);
+        engine.process_event(event);
     }
     on_event.event(crate::driver_loop::IterationEvent::Poll(&refused));
     if matches!(refused, DriverLoopOutcome::RxSnRejected { .. }) {
@@ -2558,7 +2555,7 @@ fn refused_data_unit<R: SessionRuntime, T: TimeSource>(
     };
     #[cfg(not(any(feature = "transport-stats", feature = "resource-snapshot")))]
     let _ = actions;
-    deliver_session_event(engine, E::FramingError);
+    engine.process_event(E::FramingError);
     Some(outcome)
 }
 
@@ -2584,7 +2581,7 @@ fn dispatch_control_in_place<R: SessionRuntime, T: TimeSource>(
 ) -> (DriverLoopOutcome, usize) {
     let (outcome, decided, used) = read_control_in_place(unit, actions, engine);
     if let Some(event) = decided {
-        deliver_session_event(engine, event);
+        engine.process_event(event);
     }
     (outcome, used)
 }
@@ -2739,7 +2736,7 @@ fn lean_in_place<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::EventS
         #[cfg(not(any(feature = "transport-stats", feature = "resource-snapshot")))]
         Ok(_) => {}
         Err(parse_err) => {
-            deliver_session_event(engine, E::FramingError);
+            engine.process_event(E::FramingError);
             on_event.event(crate::driver_loop::IterationEvent::Poll(
                 &DriverLoopOutcome::ParseError(parse_err),
             ));
@@ -2858,7 +2855,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::Event
         // step reads from.
         Ok((read, stopped)) => (admitted, records_at.saturating_add(read), stopped),
         Err(parse_err) => {
-            deliver_session_event(engine, E::FramingError);
+            engine.process_event(E::FramingError);
             on_event.event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
                 parse_err,
             )));
@@ -3512,14 +3509,14 @@ pub(crate) fn judge_lease<R: SessionRuntime, T: TimeSource>(
         .is_some_and(|deadline_ms| now_ms >= deadline_ms)
         && actions.expire_declaration_watch() == crate::declaration_sync::WatchExpiry::LosesLink
     {
-        deliver_session_event(engine, E::LinkLost);
+        engine.process_event(E::LinkLost);
         return LeaseCheckOutcome::DeclarationsStalled;
     }
     // Only the watch asks the actions anything here.
     #[cfg(not(feature = "alloc"))]
     let _ = actions;
     if now_ms >= deadlines.expiry {
-        deliver_session_event(engine, E::LeaseExpired);
+        engine.process_event(E::LeaseExpired);
         LeaseCheckOutcome::Expired
     } else {
         LeaseCheckOutcome::WithinLease
@@ -3556,7 +3553,7 @@ pub fn check_requested_close<R: SessionRuntime, T: TimeSource>(
 ) -> bool {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     if actions.take_requested_close() {
-        deliver_session_event(engine, E::SessionClose);
+        engine.process_event(E::SessionClose);
         true
     } else {
         false
@@ -3590,7 +3587,7 @@ pub fn check_out_of_band<R: SessionRuntime, T: TimeSource>(
     // before and which, as zenoh 1.10.2 deletes the transport, sends no Close frame.
     if actions.take_congestion_close() {
         use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-        deliver_session_event(engine, E::TxCongestionExhaust);
+        engine.process_event(E::TxCongestionExhaust);
         return true;
     }
     // The peer deleted the transport on another link of this session: this link
@@ -3598,7 +3595,7 @@ pub fn check_out_of_band<R: SessionRuntime, T: TimeSource>(
     #[cfg(feature = "transport-multilink")]
     if actions.take_transport_deleted() {
         use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-        deliver_session_event(engine, E::PeerClose);
+        engine.process_event(E::PeerClose);
         return true;
     }
     false
@@ -4310,19 +4307,6 @@ pub(crate) fn judge_keepalive<R: SessionRuntime, T: TimeSource>(
 /// ([`SessionFsmUnicastActions`], which [`SessionActionsBinding`] implements) replaces this
 /// definition and the two constructors below, and nothing else.
 pub type SessionEngine<R, T> = Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>;
-
-/// Give the session machine `event` and run the turn it starts ([`Engine::process_event`]), in one
-/// body for every path that tells the machine something: the receive's refusals and decided
-/// handshake events, the timers, the link's loss and the requests from outside the loop. Inlined
-/// at each of them, the engine's queueing and its turn were a copy per caller; out of line, a
-/// caller's frame is also not under the turn's.
-#[inline(never)]
-pub fn deliver_session_event<R: SessionRuntime, T: TimeSource>(
-    engine: &mut SessionEngine<R, T>,
-    event: crate::session_fsm_unicast::SessionFsmUnicastEvent,
-) {
-    engine.process_event(event);
-}
 
 /// Build a session [`Engine`] over the generated engine-free
 /// [`SessionFsmUnicastPolicy`], parameterised over a [`SessionActionsBinding`]
