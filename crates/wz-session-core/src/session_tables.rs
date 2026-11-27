@@ -1676,6 +1676,10 @@ pub struct Undeclared<T, R = ()> {
     pub retraction: R,
 }
 
+/// An entity undeclared whose retraction is read off the row it removes ([`Retracting`]), with
+/// the key `K` the retraction holds past the row.
+pub type RetractedUndeclared<T, K> = Undeclared<T, Option<Retracting<K>>>;
+
 /// What an entity's retraction names beside its id, read off its row as the row went: the
 /// declaration and the rest of the key past it ([`RetractionKey`]), with the key that rest is read
 /// against, so the retraction is told once the row and the declarations it held went. The key is
@@ -2632,7 +2636,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     pub fn undeclare_subscriber(
         &mut self,
         handle: SubscriberHandle,
-    ) -> Option<Undeclared<F::Subscriber, Option<Retracting<P::Key>>>> {
+    ) -> Option<RetractedUndeclared<F::Subscriber, P::Key>> {
         let undeclared = undeclare_entity(
             &mut self.subscribers,
             &mut self.keyexprs,
