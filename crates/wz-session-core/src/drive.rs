@@ -300,6 +300,7 @@ pub fn note_rx_dropped<R: SessionRuntime, T: TimeSource>(
 ) {
     #[cfg(feature = "transport-stats")]
     actions
+        .tx
         .stats
         .inc_rx_drop(crate::stats::StatDrop::Transport, datagrams, 0);
     #[cfg(not(feature = "transport-stats"))]
