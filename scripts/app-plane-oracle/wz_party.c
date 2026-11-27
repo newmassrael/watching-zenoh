@@ -19,7 +19,7 @@
  * When the check directory holds key-ids, the session is opened with that dictionary of key
  * ids every node of the deployment shares, and with the key-wire form params states for this
  * party's endpoint. When params names owned_address, the session is opened with that address
- * as the node's own (wz/owned-address), which heads the zid it derives under
+ * as the node's own (zext/owned-address), which heads the zid it derives under
  * zid-derivation = address-ports, a dialling party having no listener to take one from. When params says segmented, an e2e sender cuts every frame it puts into
  * the pieces of the segment profile, and the receiver joins them before it judges.
  *
@@ -37,7 +37,7 @@
 
 #include <zenoh-pico.h>
 
-#include "wz_ext.h"
+#include "zext.h"
 
 /* The key-id doors are in a build with shared-key-ids only. Weak, so the party links against
  * every build and refuses a dictionary by name where the library has none. */
@@ -315,7 +315,7 @@ static int configure_owned_address(z_owned_config_t *config) {
         return 2;
     }
     char document[96];
-    int written = snprintf(document, sizeof document, "{ wz: { \"owned-address\": \"%s\" } }", owned);
+    int written = snprintf(document, sizeof document, "{ zext: { \"owned-address\": \"%s\" } }", owned);
     if (written < 0 || (size_t)written >= sizeof document) return refused("owned address", _Z_ERR_GENERIC, NULL);
     z_result_t rc = zext_config_document(z_config_loan_mut(config), document);
     return rc == Z_OK ? 0 : refused("owned address", rc, NULL);

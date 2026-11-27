@@ -4,7 +4,7 @@
  *
  * A program that runs its own periodic task: every cycle it sends what the cycle produced
  * and takes what arrived since the last one, on its own thread, at its own period. The
- * call order is the one docs/periodic-run-api.md and wz_ext.h ("the periodic run API")
+ * call order is the one docs/periodic-run-api.md and zext.h ("the periodic run API")
  * state:
  *
  *   open        z_open; in the multi-threaded arm the read task starts with the session

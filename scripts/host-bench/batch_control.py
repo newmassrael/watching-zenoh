@@ -6,7 +6,7 @@
 zenoh-pico fixes its unicast batch size when it is built: `BATCH_UNICAST_SIZE`, which its CMake writes into
 `config.h` as `Z_BATCH_UNICAST_SIZE` (`vendor/zenoh-pico/cmake/feature_config.cmake` @
 `set(BATCH_UNICAST_SIZE 2048 CACHE STRING "Use this to override the maximum unicast batch size")`). A session of the wz
-pico ABI takes it from the `wz/limits` of its configuration document (`PICO_UNICAST_BATCH_BYTES`) when it
+pico ABI takes it from the `zext/limits` of its configuration document (`PICO_UNICAST_BATCH_BYTES`) when it
 opens. This runs one program (`batch_probe.c`) both ways and reads the batches off the wire through a relay
 of its own, the same way for both:
 

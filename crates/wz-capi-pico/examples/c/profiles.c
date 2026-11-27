@@ -7,7 +7,7 @@
  * Two sessions over the host's loopback (tcp/): the listening one declares a subscriber and
  * a queryable, the dialling one publishes and asks. The publisher and the queryable both
  * hand over a timestamp of their own (z_timestamp_new), which makes one policy visible to
- * the program: entity-timestamp-opt-in. Under the upstream profile (the policy off, upstream's
+ * the program: entity-timestamp-opt-in. Under the standard profile (the policy off, upstream's
  * behaviour) the subscriber and the querier see the timestamp they are sent. With the policy
  * on, an entity takes part in timestamps only when its declaration says so, and a pico
  * declaration has no such option, so neither sees one.
@@ -18,10 +18,10 @@
  *   1. from configs that state nothing: the build's own defaults. The library's build states
  *      them (WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN when it is built, off unless stated), and the
  *      program reads the same variable to know which answer to expect;
- *   2. from configs handed the document DOC_UPSTREAM (zext_config_document), which names the
- *      upstream profile: the timestamps are seen whatever the build's default;
- *   3. from configs handed DOC_OPT_IN, the upstream profile with the policy stated on in the
- *      document's wz/policies: no timestamp is seen.
+ *   2. from configs handed the document DOC_STANDARD (zext_config_document), which names the
+ *      standard profile: the timestamps are seen whatever the build's default;
+ *   3. from configs handed DOC_OPT_IN, the standard profile with the policy stated on in the
+ *      document's zext/policies: no timestamp is seen.
  *
  * The listener's config of each document round is also handed documents the library refuses
  * (REFUSED): a policy it does not have, a value the policy does not have, a profile it does not
@@ -35,23 +35,23 @@
 
 #include <zenoh-pico.h>
 
-#include "wz_ext.h"
+#include "zext.h"
 
 #include "example_common.h"
 
 #define DATA_KEY "example/profiles/data"
 #define ASK_KEY "example/profiles/ask"
 
-/* Only the wz member of a document is read: the rest of a zenoh-c program's configuration may sit
+/* Only the zext member of a document is read: the rest of a zenoh-c program's configuration may sit
  * beside it in the same document, and the mode and locators here are the config's own keys. */
-#define DOC_UPSTREAM "{ wz: { profile: \"upstream\" } }"
-#define DOC_OPT_IN "{ wz: { profile: \"upstream\", policies: { \"entity-timestamp-opt-in\": \"on\" } } }"
+#define DOC_STANDARD "{ zext: { profile: \"standard\" } }"
+#define DOC_OPT_IN "{ zext: { profile: \"standard\", policies: { \"entity-timestamp-opt-in\": \"on\" } } }"
 
 static const char *const REFUSED[] = {
-    "{ wz: { policies: { \"no-such-policy\": \"on\" } } }",
-    "{ wz: { policies: { \"entity-timestamp-opt-in\": \"sometimes\" } } }",
-    "{ wz: { profile: \"no-such-profile\" } }",
-    "{ wz: ",
+    "{ zext: { policies: { \"no-such-policy\": \"on\" } } }",
+    "{ zext: { policies: { \"entity-timestamp-opt-in\": \"sometimes\" } } }",
+    "{ zext: { profile: \"no-such-profile\" } }",
+    "{ zext: ",
 };
 
 /* Each count is raised on a session thread and read on the program's, under the counter's lock:
@@ -217,7 +217,7 @@ static void run_round(const char *what, const char *document, int opt_in) {
             CHECK(ex_counter_get(&heard.stamped) == 0, "%s: under opt-in the subscriber, declared without opting in, saw a timestamp",
                   what);
         } else {
-            CHECK(ex_counter_get(&heard.stamped) > 0, "%s: under the upstream profile the subscriber did not see the put's timestamp",
+            CHECK(ex_counter_get(&heard.stamped) > 0, "%s: under the standard profile the subscriber did not see the put's timestamp",
                   what);
         }
 
@@ -226,7 +226,7 @@ static void run_round(const char *what, const char *document, int opt_in) {
         if (opt_in) {
             CHECK(ex_counter_get(&asked.stamped) == 0, "%s: under opt-in the querier saw the reply's timestamp", what);
         } else {
-            CHECK(ex_counter_get(&asked.stamped) > 0, "%s: under the upstream profile the querier did not see the reply's timestamp",
+            CHECK(ex_counter_get(&asked.stamped) > 0, "%s: under the standard profile the querier did not see the reply's timestamp",
                   what);
         }
         ex_close(&dialer);
@@ -247,7 +247,7 @@ int main(void) {
     int build_opt_in = stated != NULL && strcmp(stated, "on") == 0;
 
     run_round("the build's defaults, no document", NULL, build_opt_in);
-    run_round("a document naming the upstream profile", DOC_UPSTREAM, 0);
+    run_round("a document naming the standard profile", DOC_STANDARD, 0);
     run_round("a document stating entity-timestamp-opt-in on", DOC_OPT_IN, 1);
     return ex_finish();
 }

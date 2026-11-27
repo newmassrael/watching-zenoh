@@ -1182,7 +1182,7 @@ pub(crate) mod tests {
     /// agrees with itself. Whether a REAL zenohd reads it is
     /// `wz_capi_c_config_to_json5_starts_a_real_zenohd`, in this crate's
     /// `tests/`.
-    /// The resolved emit writes the `wz` member a config states, its profile named as a profile,
+    /// The resolved emit writes the `zext` member a config states, its profile named as a profile,
     /// and wz's reader reads it back to the snapshot and provenance the same member resolves to
     /// read whole.
     #[test]
@@ -1195,7 +1195,7 @@ pub(crate) mod tests {
         let value = SessionPolicy::defaults().subscriber_overload().id();
         let quoted = format!("\"{value}\"");
         let stated = format!(
-            r#"{{ "wz": {{ "profile": "upstream", "policies": {{ "subscriber-overload": "{value}" }} }} }}"#
+            r#"{{ "zext": {{ "profile": "standard", "policies": {{ "subscriber-overload": "{value}" }} }} }}"#
         );
         let want = resolve_document(
             SessionPolicy::defaults(),
@@ -1208,8 +1208,8 @@ pub(crate) mod tests {
                 wz_capi_c_config_to_json5,
                 &[
                     ("mode", "\"peer\""),
-                    ("wz/profile", "\"upstream\""),
-                    ("wz/policies/subscriber-overload", quoted.as_str()),
+                    ("zext/profile", "\"standard\""),
+                    ("zext/policies/subscriber-overload", quoted.as_str()),
                 ],
             )
         };
@@ -1222,7 +1222,7 @@ pub(crate) mod tests {
         let back = ZenohNodeConfig::from_json5(&emitted).expect("wz reads its own emit");
         assert_eq!(back.config.policies, want, "{emitted}");
         let tree = json5::parse(&emitted).expect("the emit is JSON5");
-        assert!(tree.get("wz/profile").is_some(), "{emitted}");
+        assert!(tree.get("zext/profile").is_some(), "{emitted}");
     }
 
     #[test]

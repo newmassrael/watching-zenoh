@@ -919,7 +919,7 @@ jobs:
 
       # A zenoh-pico C program whose sessions open NO socket, on this host: two sessions
       # joined by an in-memory transport the program supplies through the wz extension
-      # doors (zext_transport_*, wz_ext.h), over a stream pair with injected partial
+      # doors (zext_transport_*, zext.h), over a stream pair with injected partial
       # sends and would-blocks, a datagram pair and a two-member group, each carrying a
       # put and a query. It is the Windows DLL's evidence that a host program can hand the
       # library its own network stack. The cdylib is built with the app-transport
@@ -1346,7 +1346,7 @@ jobs:
   # (`x86_64-pc-windows-msvc`) and x86 (`i686-pc-windows-msvc`, a 32-bit program, which the 64-bit
   # runner runs as Windows runs any).
   # Each is the DLL in a debug and a release build with its import library and symbols, zenoh-pico's
-  # headers with the config.h of the DLL's build and wz_ext.h, the examples, a configuration sample,
+  # headers with the config.h of the DLL's build and zext.h, the examples, a configuration sample,
   # the usage and release notes, the licence and the notices derived from the dependency graph, and
   # a manifest of every file's SHA-256, as one deterministic zip. The feature set is the registered
   # profile `host-peer-ext` (configs/profiles/), resolved by the pinned Kconfig interpreter, which

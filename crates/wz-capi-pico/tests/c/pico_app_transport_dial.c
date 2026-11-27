@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
  *
  * A zenoh-pico C program that DIALS over a transport it supplies (zext_transport_*,
- * wz_ext.h) and answers nothing: the client half of pico_app_transport.c, which needs no
+ * zext.h) and answers nothing: the client half of pico_app_transport.c, which needs no
  * listener, no group and no query, so it is the check of the app-transport capability on any
  * build that has it (the host library without std among them).
  *
@@ -23,7 +23,7 @@
 
 #include <zenoh-pico.h>
 
-#include "wz_ext.h"
+#include "zext.h"
 
 /* The report comes from a task, which is the multi-threaded arm's. */
 #if Z_FEATURE_MULTI_THREAD != 1

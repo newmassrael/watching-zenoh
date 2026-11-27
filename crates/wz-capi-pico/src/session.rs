@@ -1366,6 +1366,18 @@ unsafe fn taken_config(
     Ok(cfg)
 }
 
+/// The code [`z_open`] refuses `cfg` with when its document asks for the program's transport
+/// (`zext/transport` = `application`) and the config is handed none (`zext_config_transport`):
+/// the open would otherwise open its links on the system's sockets, which the document refused.
+/// `None` when the config may open.
+#[cfg(feature = "app-transport")]
+pub(crate) fn transport_refused(cfg: &ConfigState) -> Option<ZResult> {
+    cfg.policies
+        .document_transport()
+        .and_then(|transport| transport.refusal(cfg.transport.is_some()))
+        .map(|_| crate::result::Z_ERR_CONFIG_INVALID_VALUE)
+}
+
 /// What [`z_open`] reads off the config `cfg` and its options, the texts the engine is handed
 /// made from `cfg`'s where they lie, or the code `z_open` answers when it refuses them. Never
 /// inlined, for the stack: the resolved snapshots and a scout for a locator lie in this frame,
@@ -1413,6 +1425,10 @@ unsafe fn open_request(
         if let Some(code) = crate::app_transport::refused_open(connect, listen) {
             return Err(code);
         }
+    }
+    #[cfg(feature = "app-transport")]
+    if let Some(code) = transport_refused(cfg) {
+        return Err(code);
     }
     // R311y406 / R311y534 — the TLS material, RESOLVED here (path or inline
     // base64 -> PEM bytes) because the key numbers are this ABI's knowledge.
@@ -1847,7 +1863,7 @@ struct OpenRequest {
     /// The id the config names for the session, as an INIT carries it, `None` for one the
     /// engine mints.
     zid: Option<SessionZid>,
-    /// The node's own address the config states (`wz/owned-address`), which heads a zid the
+    /// The node's own address the config states (`zext/owned-address`), which heads a zid the
     /// engine derives under `zid-derivation = address-ports`; `None` for a config that states
     /// none.
     owned_address: Option<[u8; 4]>,

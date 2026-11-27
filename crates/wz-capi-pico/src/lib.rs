@@ -431,7 +431,7 @@ pub mod abi;
 // left out of the core alone.
 //
 // Which version of the extension interface the doors were built against, asked of them and compared
-// with the core's: a wz door (`wz_ext.h`) in a build with any of those capabilities, one of the
+// with the core's: a wz door (`zext.h`) in a build with any of those capabilities, one of the
 // doors.
 #[cfg(any(
     feature = "e2e-sender",
@@ -451,7 +451,7 @@ pub mod advanced;
 mod advanced_forms;
 #[cfg(feature = "advanced")]
 mod advanced_plane;
-// A transport the program supplies, in place of the system's sockets: wz doors (`wz_ext.h`) of the
+// A transport the program supplies, in place of the system's sockets: wz doors (`zext.h`) of the
 // unstable surface, over the links of the program's stack of whichever engine the build has.
 #[cfg(feature = "app-transport")]
 pub mod app_transport;
@@ -459,7 +459,7 @@ pub mod bytes;
 // The width of pico's C enums in the structs a C program allocates, read from the target's C ABI.
 pub mod c_enum;
 // The conformance digest of this build (decision C15), handed out by `zext_conformance_digest`:
-// a wz door (`wz_ext.h`) in a build with `conformance-digest`, which the zenoh-pico preset leaves out.
+// a wz door (`zext.h`) in a build with `conformance-digest`, which the zenoh-pico preset leaves out.
 #[cfg(feature = "conformance-digest")]
 pub mod conformance;
 // What the cooperative engine is given by the system the build runs on (the tokio engine brings
@@ -475,26 +475,26 @@ pub mod cancellation;
 pub mod codec;
 pub mod config;
 // The policies a config states for its session, from code and from a zenoh document: wz doors
-// (`wz_ext.h`) in a build with `config-policy`, which the zenoh-pico preset leaves out; without
+// (`zext.h`) in a build with `config-policy`, which the zenoh-pico preset leaves out; without
 // them the open runs a session under the build's policies and limits.
 pub mod config_policy;
-// The limits a config states for its session through a numbered key (`wz_ext.h`), in every build:
+// The limits a config states for its session through a numbered key (`zext.h`), in every build:
 // a session opens its tables at a few and a program that holds more names them before the open.
 pub mod config_limits;
 #[cfg(feature = "connectivity")]
 pub mod connectivity;
-// The clock a program registers and the standing it reports: wz doors (`wz_ext.h`) of the unstable
+// The clock a program registers and the standing it reports: wz doors (`zext.h`) of the unstable
 // surface (the clock of the observation plane).
 #[cfg(feature = "clock-source")]
 pub mod clock_source;
-// What the peers of a session declare and retract, told to C: wz doors (`wz_ext.h`) in a build with
+// What the peers of a session declare and retract, told to C: wz doors (`zext.h`) in a build with
 // either capability that reads them (the declaration watch).
 #[cfg(any(
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
 ))]
 pub mod decl_watch;
-// What an open of a config would ask of the operating system: a wz door (`wz_ext.h`) of the
+// What an open of a config would ask of the operating system: a wz door (`zext.h`) of the
 // unstable surface (docs/target-build-contract.md T9), in a build with `device-requires`.
 #[cfg(feature = "device-requires")]
 pub mod device_requires;
@@ -509,19 +509,19 @@ pub mod device_requires;
 ))]
 #[cfg(not(wz_additional_apart))]
 mod e2e;
-// The receiving judge of end-to-end protected frames: wz doors (`wz_ext.h`) of the unstable
+// The receiving judge of end-to-end protected frames: wz doors (`zext.h`) of the unstable
 // surface.
 #[cfg(feature = "e2e-receiver")]
 #[cfg(not(wz_additional_apart))]
 pub mod e2e_receiver;
-// The sending side of end-to-end protection: wz doors (`wz_ext.h`) of the unstable surface.
+// The sending side of end-to-end protection: wz doors (`zext.h`) of the unstable surface.
 #[cfg(feature = "e2e-sender")]
 #[cfg(not(wz_additional_apart))]
 pub mod e2e_sender;
 // `zext_redeclare`: tell a session's peers what it holds again.
 #[cfg(feature = "unstable-api")]
 pub mod redeclare;
-// The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
+// The node's event log, written and read from C: wz doors (`zext.h`) of the unstable surface
 // (the event ring of the observation plane).
 pub mod encoding;
 // zenoh-pico's reading of an endpoint's text, for the cooperative engine's open and the link a
@@ -533,7 +533,7 @@ pub mod entity;
 pub mod event_log;
 // What the doors of the additional features (end-to-end protection, reception supervision, instance
 // keys, the replay cache, the message catalog) ask of the core beyond the pico ABI: wz doors
-// (`wz_ext.h`) of a versioned interface, in a build with any of those capabilities. Those doors
+// (`zext.h`) of a versioned interface, in a build with any of those capabilities. Those doors
 // name the core through the pico ABI and this module only, and the core names none of them
 // (`scripts/lib/layer_direction_gate.py`).
 #[cfg(any(
@@ -545,12 +545,12 @@ pub mod event_log;
     feature = "replay-cache"
 ))]
 pub mod ext_interface;
-// The node's supervisor, driven from C: wz doors (`wz_ext.h`) of the unstable surface
+// The node's supervisor, driven from C: wz doors (`zext.h`) of the unstable surface
 // (the supervision deadline of the observation plane).
 mod ffi;
 #[cfg(feature = "query")]
 pub mod get;
-// A get addressed to one node by its zenoh id: a wz door (`wz_ext.h`), refused while the build's
+// A get addressed to one node by its zenoh id: a wz door (`zext.h`), refused while the build's
 // `targeted-query` policy is off.
 #[cfg(feature = "query")]
 pub mod get_to_peer;
@@ -559,12 +559,12 @@ pub mod handlers;
 // that includes them (`_z_pending_query_cancellation_data_clear`).
 #[cfg(feature = "unstable-api")]
 pub mod header_internals;
-// The instance of a message a sample is, read from fields of its payload: wz doors (`wz_ext.h`)
+// The instance of a message a sample is, read from fields of its payload: wz doors (`zext.h`)
 // of the unstable surface.
 #[cfg(feature = "instance-key")]
 #[cfg(not(wz_additional_apart))]
 pub mod instance_key;
-// The key ids every node of a deployment shares: a wz door (`wz_ext.h`) of the unstable surface
+// The key ids every node of a deployment shares: a wz door (`zext.h`) of the unstable surface
 // with the capability, and in every build the open's judgement of the key-wire form.
 pub mod key_ids;
 pub mod keyexpr;
@@ -575,18 +575,18 @@ mod link_properties;
 pub mod liveliness;
 pub mod locality;
 pub mod matching;
-// A deployment's message catalog, read from one JSON5 declaration: wz doors (`wz_ext.h`) of the
+// A deployment's message catalog, read from one JSON5 declaration: wz doors (`zext.h`) of the
 // unstable surface, over the reader of `wz-app-frame`.
 #[cfg(feature = "message-catalog")]
 #[cfg(not(wz_additional_apart))]
 pub mod message_catalog;
 // A catalog message's payload set and read field by field under the program's `.proto` files:
-// wz doors (`wz_ext.h`) of the unstable surface, over the message payload of `wz-app-frame`.
+// wz doors (`zext.h`) of the unstable surface, over the message payload of `wz-app-frame`.
 #[cfg(feature = "message-payload")]
 #[cfg(not(wz_additional_apart))]
 pub mod message_payload;
 // The doors through which a program reserves the process pools itself and reads them: wz doors
-// (`wz_ext.h`) of the unstable surface.
+// (`zext.h`) of the unstable surface.
 #[cfg(feature = "object-pool")]
 pub mod object_pool;
 // Where an object a program holds outside a session is placed and let go: a slot of the process
@@ -599,7 +599,7 @@ pub mod platform;
 // process: in every library without the tokio engine, and in one with it that has their doors.
 #[cfg(wz_process_pools)]
 mod process_pool;
-// One `.proto` file as a program hands it over (`zext_proto_file_t`, `wz_ext.h`), for the doors
+// One `.proto` file as a program hands it over (`zext_proto_file_t`, `zext.h`), for the doors
 // that read a schema from its text: the instance keys' and the message payloads', in a build that
 // links the text reader.
 #[cfg(all(
@@ -615,7 +615,7 @@ pub mod querier;
 #[cfg(feature = "queryable")]
 pub mod query;
 // The replay cache, the publisher's ring and answer and the subscriber's asking and order: wz
-// doors (`wz_ext.h`) of the unstable surface, over the models of `wz-session-core`.
+// doors (`zext.h`) of the unstable surface, over the models of `wz-session-core`.
 #[cfg(test)]
 mod heap_refusal_tests;
 mod refusal;
@@ -632,7 +632,7 @@ pub mod result;
 pub mod scout;
 #[cfg(test)]
 mod test_heap;
-// The sending side of a declared segment profile: wz doors (`wz_ext.h`) of the unstable surface,
+// The sending side of a declared segment profile: wz doors (`zext.h`) of the unstable surface,
 // over the piece writer the zenoh-c ABI's doors of the same capability write with.
 #[cfg(feature = "segment-sender")]
 pub mod segment_sender;
@@ -642,11 +642,11 @@ mod session_ext;
 // The place a session's handle lies in, and what stays in it once the handle is let go of.
 mod session_place;
 // The most memory a session holds, computed from the limits it opened under: wz doors
-// (`wz_ext.h`) of the unstable surface, over the session core's rows.
+// (`zext.h`) of the unstable surface, over the session core's rows.
 #[cfg(feature = "session-memory")]
 pub mod session_memory;
 // One step of a session the program runs on its own cycle, opened without its read task: a wz
-// door (`wz_ext.h`) of the multi-threaded arm, whose read task otherwise steps the session.
+// door (`zext.h`) of the multi-threaded arm, whose read task otherwise steps the session.
 #[cfg(feature = "multi-thread")]
 pub mod session_step;
 // The structs the doors write into memory the program sized: each starts with its size.
@@ -668,7 +668,7 @@ pub mod session_step;
 mod sized;
 #[cfg(feature = "resource-snapshot")]
 pub mod snapshot;
-// Reception supervision per stream: wz doors (`wz_ext.h`) of the unstable surface, over the
+// Reception supervision per stream: wz doors (`zext.h`) of the unstable surface, over the
 // supervisor of `wz-session-core`.
 #[cfg(feature = "e2e-supervision")]
 #[cfg(not(wz_additional_apart))]
@@ -680,7 +680,7 @@ pub mod supervision;
 #[cfg(feature = "multi-thread")]
 pub mod sync;
 // A time base the program supplies, which the timers of a session run on in place of the system's
-// clock: wz doors (`wz_ext.h`) of the unstable surface, over the time base of `wz-node-time`, for
+// clock: wz doors (`zext.h`) of the unstable surface, over the time base of `wz-node-time`, for
 // whichever engine the build has.
 #[cfg(feature = "time-base")]
 pub mod time_base;

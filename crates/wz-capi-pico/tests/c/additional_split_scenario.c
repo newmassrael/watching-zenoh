@@ -32,7 +32,7 @@
 
 #include <zenoh-pico.h>
 
-#include "wz_ext.h"
+#include "zext.h"
 
 #define NAME "additional-split-scenario"
 #define KEY "test/additional/reading"

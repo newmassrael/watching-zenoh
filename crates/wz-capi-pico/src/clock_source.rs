@@ -5,7 +5,7 @@
 //! clock a program registers, and what it tells the library about whether that clock is
 //! synchronised (the clock of the observation plane).
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
 //! build without `unstable-api` carries none of it.
 //!

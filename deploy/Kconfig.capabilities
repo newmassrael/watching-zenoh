@@ -448,7 +448,7 @@ config WZ_CAP_SHARED_KEY_IDS
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (the wz/key-ids member of a configuration document, and zext_config_key_ids and zext_config_key_wire_form_for, wz-own doors over it), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says.
+	  Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (the zext/key-ids member of a configuration document, and zext_config_key_ids and zext_config_key_wire_form_for, wz-own doors over it), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says.
 	  Exported by: pico, c.
 
 config WZ_CAP_RX_CALLBACK_OFFLOAD
@@ -487,7 +487,7 @@ config WZ_CAP_CONFIG_DOCUMENT
 	default n
 	select WZ_CAP_CONFIG_POLICY
 	help
-	  zext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own).
+	  zext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its zext member states the session's profile and policies (wz-own).
 	  Exported by: pico.
 
 config WZ_CAP_DEVICE_REQUIRES

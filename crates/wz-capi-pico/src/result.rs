@@ -151,7 +151,7 @@ pub const Z_ERR_CONFIG_INVALID_VALUE: ZResult = -89;
 /// a new key past the config's rows or a value past its text.
 pub const Z_ERR_CONFIG_FAILED_INSERT: ZResult = -95;
 
-/// A wz door (`wz_ext.h`) was asked for something this build's policy does not
+/// A wz door (`zext.h`) was asked for something this build's policy does not
 /// allow: a get addressed to one node (`zext_get_to_peer`) while the
 /// `targeted-query` policy is off. Nothing was sent. Not `Z_EINVAL`, which says
 /// the value is wrong: the same call is right in a build whose policy is on.

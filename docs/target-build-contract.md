@@ -196,7 +196,7 @@ built artifacts of both profiles and of a stripped copy; `wz-capi-c` also keeps 
 header macro and its door, and the gate holds the stamp to the door's answer. A header
 macro and a door for `capi-pico` are not part of the first landing: the drop-in header
 carries upstream's symbols only (a wz-only door is never in a drop-in
-header), so they belong in `wz_ext.h`, which is a
+header), so they belong in `zext.h`, which is a
 decision of its own. The layout arm is a value of the stamp, so a program is told
 when it links the wrong arm instead of crashing in a struct it laid out differently:
 for `capi-pico` it is `multi_thread`, `unstable_api`, `local_subscriber` and
@@ -352,7 +352,7 @@ whether it reads the calendar. Each artifact has a door that answers one JSON ob
 
 - the zenoh-c drop-in and the Rust API, `wz_capi_c_config_device_requires`, from the
   `OpenPlan` the open runs (`crates/wz-capi-core/src/open_facilities.rs`);
-- the pico library, `zext_config_device_requires` (`wz_ext.h`, `device-requires`), from the
+- the pico library, `zext_config_device_requires` (`zext.h`, `device-requires`), from the
   config as `z_open` reads it: one attempt at its one locator, a listened group as its one
   transport, scouting only when no locator is given, and the code `z_open` refuses with;
 - `wz-ap-demo --device-requires <file>`, from a `--sessions` document as `--check-sessions`

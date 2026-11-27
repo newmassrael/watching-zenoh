@@ -154,7 +154,7 @@ fn a_listener_past_the_sessions_table_is_out_of_memory_and_its_slot_null() {
         let mut cfg = listening_config();
         let stated = zext_config_document(
             z_config_loan_mut(&mut cfg),
-            c"{ wz: { limits: { MAX_MATCHING_LISTENERS: 1 } } }".as_ptr(),
+            c"{ zext: { limits: { MAX_MATCHING_LISTENERS: 1 } } }".as_ptr(),
         );
         // A build whose domain keeps the limit to its own value refuses the document by name.
         if !selectable {

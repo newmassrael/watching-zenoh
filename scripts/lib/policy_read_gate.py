@@ -101,7 +101,7 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     # Outside session-core: every site that still reads the build.
     ("crates/wz-ap-demo/src/args.rs", "resolve_policy", "creator: the snapshot of a node no --config file describes and of a sessions document; main hands a file's snapshot down"),
     ("crates/wz-capi-coop/src/engine.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
-    ("crates/wz-capi-core/src/open_plan.rs", "resolve_snapshot", "creator: the snapshots the document's wz member resolved, else the build defaults"),
+    ("crates/wz-capi-core/src/open_plan.rs", "resolve_snapshot", "creator: the snapshots the document's zext member resolved, else the build defaults"),
     ("crates/wz-capi-pico/src/config_policy.rs", "resolve", "creator: the process runtime's limits the runtime document's rows state, resolved over the build defaults before any session exists; the document may state no policy"),
     ("crates/wz-capi-pico/src/session.rs", "compose_snapshots", "creator: the policy snapshot a config's doors compose over the build defaults, the one composition an open and each change a door checks share"),
     ("crates/wz-capi-pico/src/session.rs", "preset_over", "creator: the region a build that states no policy lays out when it is compiled, over each of its links; no document reaches it, so the build's policy is the one its sessions open under"),
@@ -114,9 +114,9 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-replay/src/live.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
     ("crates/wz-runtime-tokio-test-support/src/sessions.rs", "fixture_policy", "creator: resolves the snapshot (build defaults until a run-time document is read); a test fixture"),
     ("crates/wz-runtime-tokio/src/router_forward.rs", "resolve_policy", "creator: resolves the snapshot (build defaults until a run-time document is read)"),
-    ("crates/wz-runtime-tokio/src/zenoh_config.rs", "build_policies", "the base a zenoh document's wz member is resolved over, and a document without one"),
+    ("crates/wz-runtime-tokio/src/zenoh_config.rs", "build_policies", "the base a zenoh document's zext member is resolved over, and a document without one"),
     ("crates/wz-zenoh/src/api/config.rs", "judge_alone", "creator: a Rust API open's door statement, judged over the build defaults it is resolved over"),
-    ("crates/wz-zenoh/src/api/config.rs", "resolve", "creator: the snapshot a Rust API open resolves from its Config's wz member and doors"),
+    ("crates/wz-zenoh/src/api/config.rs", "resolve", "creator: the snapshot a Rust API open resolves from its Config's zext member and doors"),
     # The fuzz harnesses of the network ingress: each makes the session it feeds, with nothing above
     # it to hand a snapshot down, so it is the creator, as an integration test is.
     ("crates/wz-fuzz/coop-engine/fuzz_targets/coop_read.rs", "config", "creator: the harness opens the engine it feeds over the build defaults, a fuzz target of the build"),

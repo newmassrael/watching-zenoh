@@ -91,7 +91,7 @@ the value is a decimal count, parsed once at the insert into a typed table of co
 the config's text bytes (`CONFIG_TEXT_BYTES`, 256 at the preset) and entry rows
 (`CONFIG_ENTRIES`, 8) are not spent on them. A count past its ceiling, or text that is not a count,
 is refused at the insert with `_Z_ERR_CONFIG_FAILED_INSERT` and the config keeps what it had. Where
-the config document capability is on, `wz/limits` sets the same table (one table, two writers).
+the config document capability is on, `zext/limits` sets the same table (one table, two writers).
 A typed door (`wz_config_set_count(config, id, value)`) sets it without text for a program written
 for wz. The open reads the table, fills each count the config did not state with the preset's
 default, and lays the plan out from it (`ArenaPlan::count` already takes a config; it reads

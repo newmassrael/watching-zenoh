@@ -136,6 +136,7 @@ use wz_session_core::json::escape_into;
 use wz_session_core::json5::{number_as_u64, Json5Value};
 use wz_session_core::limit_binding::{LimitValue, Quota, UNBOUNDED};
 use wz_session_core::limits::{RuntimeLimits, RUNTIME_LIMITS, SESSION_LIMITS};
+use wz_session_core::policy_document::{EXT_MEMBER, RETIRED_MEMBER};
 // R2652 — the ACL subject axis `link_protocols` is TYPED in the retained inputs,
 // because upstream types it too; the reader therefore names the enum rather than
 // carrying protocol text it has already validated.
@@ -1582,25 +1583,25 @@ pub struct ZenohNodeConfig {
     /// `stats/filters`: the key expressions the node's transports count payloads under, each
     /// filter's `key` in the document's order. Empty, upstream's default, counts under no key.
     pub stats_filters: Vec<String>,
-    /// `wz`: the policies and the limits the document states for the node (`wz/profile`,
-    /// `wz/policies`, `wz/limits`), resolved over the build defaults, with the layer each value
+    /// `zext`: the policies and the limits the document states for the node (`zext/profile`,
+    /// `zext/policies`, `zext/limits`), resolved over the build defaults, with the layer each value
     /// came from. The limits are `policies.limits`, resolved in the same resolution: the
     /// snapshot of a session's, and the snapshot of a runtime's, which the node holds
-    /// ([`Base::node`](crate::policy_document::Base::node)). A document with no `wz` member, or
+    /// ([`Base::node`](crate::policy_document::Base::node)). A document with no `zext` member, or
     /// one that states it `null`, leaves every value at the build default. The snapshots are for
     /// the creator of a session the node opens to hand its machines; a member the resolution
     /// refuses is [`ConfigIngestError::PoliciesRefused`], never this field at the defaults.
-    /// [`Self::to_json5`] writes it as a `wz` member that this build reads back to equal
+    /// [`Self::to_json5`] writes it as a `zext` member that this build reads back to equal
     /// snapshots and provenance.
     pub policies: crate::policy_document::Resolved,
-    /// `wz/key-ids`: the key ids every node of the deployment shares and the endpoints whose
+    /// `zext/key-ids`: the key ids every node of the deployment shares and the endpoints whose
     /// key-wire form the document states apart from the session's, read with the policies of the
     /// same member and refused in the same list ([`ConfigIngestError::PoliciesRefused`]). Nothing
     /// when the document states no such member; a build without the `shared-key-ids` capability
     /// refuses the member by name. [`Self::to_json5`] writes it back.
     #[cfg(feature = "shared-key-ids")]
     pub key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
-    /// `wz/owned-address`: the node's own IPv4 address, which heads the zid
+    /// `zext/owned-address`: the node's own IPv4 address, which heads the zid
     /// `zid-derivation = address-ports` derives in place of the address of a listener, so that a
     /// node that only dials derives one; read with the policies of the same member and refused in
     /// the same list ([`ConfigIngestError::PoliciesRefused`]). `None` when the document states
@@ -2005,8 +2006,8 @@ impl ZenohNodeConfig {
     /// `DEFAULT_CONFIG.json5`, so a diff against the reference reads top to
     /// bottom.
     ///
-    /// The [`WZ_MEMBER`] comes last, and only when a value of the policies is
-    /// not the build default or the node holds key ids (`wz/key-ids`, with the
+    /// The [`EXT_MEMBER`] comes last, and only when a value of the policies is
+    /// not the build default or the node holds key ids (`zext/key-ids`, with the
     /// `shared-key-ids` capability): a node whose document stated nothing of wz's is
     /// emitted as before, and stock zenoh, which has no such member, is handed
     /// none.
@@ -2393,7 +2394,7 @@ impl ZenohNodeConfig {
             }
             out.push_str("] }");
         }
-        push_wz_member(
+        push_ext_member(
             &self.policies,
             self.key_ids_member(),
             self.owned_address_member(),
@@ -2404,17 +2405,17 @@ impl ZenohNodeConfig {
     }
 }
 
-/// The [`WZ_MEMBER`] that states `policies` and its limits again, written after the members
+/// The [`EXT_MEMBER`] that states `policies` and its limits again, written after the members
 /// already in `out`, or nothing when every value is the build default.
 ///
 /// It is written as a document states it, the layers named rather than flattened: the profile
-/// that set a value is named as `wz/profile`, and only the values a later layer set are written
-/// under `wz/policies`. Read back by the same build, the profile sets what it set before and the
+/// that set a value is named as `zext/profile`, and only the values a later layer set are written
+/// under `zext/policies`. Read back by the same build, the profile sets what it set before and the
 /// statements override it where they did, so the snapshot and the origin of each value come back
 /// equal. A profile every value of which a later layer overrode set nothing in the snapshot, and
 /// is not named. A document has no layer for the open's overrides ([`Origin::Api`]), so a value
 /// one of them set is written as the document's own statement and reads back as the document's.
-/// The limits a layer set are written under `wz/limits` the same way, those of a session first
+/// The limits a layer set are written under `zext/limits` the same way, those of a session first
 /// and then those of a runtime, each in its table's order; no profile states a limit.
 ///
 /// [`Origin::Api`]: crate::policy_document::Origin::Api
@@ -2422,7 +2423,7 @@ impl ZenohNodeConfig {
 /// `key_ids` is the member's `key-ids`, already written ([`ZenohNodeConfig::key_ids_member`]),
 /// and `owned_address` its `owned-address` ([`ZenohNodeConfig::owned_address_member`]), which
 /// come last, and either makes the member written when no policy needs it.
-fn push_wz_member(
+fn push_ext_member(
     policies: &crate::policy_document::Resolved,
     key_ids: Option<String>,
     owned_address: Option<String>,
@@ -2456,7 +2457,7 @@ fn push_wz_member(
     {
         return;
     }
-    // Each member of the `wz` member, in the order a document states them, with a comma between
+    // Each member of the `zext` member, in the order a document states them, with a comma between
     // two.
     let mut members: Vec<String> = Vec::new();
     if let Some(id) = profile {
@@ -2500,7 +2501,7 @@ fn push_wz_member(
     members.extend(key_ids);
     members.extend(owned_address);
     out.push_str(",\n  ");
-    escape_into(WZ_MEMBER, out);
+    escape_into(EXT_MEMBER, out);
     out.push_str(": {");
     out.push_str(&members.join(","));
     out.push_str(" }");
@@ -2527,7 +2528,7 @@ fn stated_limits(
 }
 
 impl ZenohNodeConfig {
-    /// The `key-ids` member of the [`WZ_MEMBER`] that states [`Self::key_ids`] again, as a
+    /// The `key-ids` member of the [`EXT_MEMBER`] that states [`Self::key_ids`] again, as a
     /// document states it, or `None` when it holds neither a dictionary nor a form of an
     /// endpoint. The dictionary is written ascending by id, which the reader does not depend on.
     #[cfg(feature = "shared-key-ids")]
@@ -2579,7 +2580,7 @@ impl ZenohNodeConfig {
         None
     }
 
-    /// The `owned-address` member of the [`WZ_MEMBER`] that states [`Self::owned_address`]
+    /// The `owned-address` member of the [`EXT_MEMBER`] that states [`Self::owned_address`]
     /// again, as a document states it, or `None` when the node states no address of its own.
     fn owned_address_member(&self) -> Option<String> {
         let [a, b, c, d] = self.owned_address?;
@@ -4767,12 +4768,12 @@ pub enum ConfigKeyDisposition {
 /// this order silently depends on.
 ///
 /// One arm stands before it, and it is not a second spelling of that predicate: the paths of the
-/// document's [`WZ_MEMBER`] that the open reads ([`wz_member_path_is_read`]). That member is wz's
+/// document's [`EXT_MEMBER`] that the open reads ([`ext_member_path_is_read`]). That member is wz's
 /// own document, resolved whole at the open, and no list of zenoh's keys holds it. It stays out of
 /// [`honours_config_key`] because that predicate is also the vocabulary of the admin config write,
 /// and a running node does not take a change of its policies there.
 pub fn config_key_disposition(path: &str) -> ConfigKeyDisposition {
-    if wz_member_path_is_read(path) {
+    if ext_member_path_is_read(path) {
         return ConfigKeyDisposition::Honoured;
     }
     // Reached by a build without the capability that reads them, which refuses them by name.
@@ -5187,9 +5188,9 @@ pub enum ConfigIngestError {
         /// either of which compiles it.
         capability: &'static str,
     },
-    /// The `wz` member, wz's own statements about the node, is refused: a policy, a value, a
+    /// The `zext` member, wz's own statements about the node, is refused: a policy, a value, a
     /// profile or a limit the build does not have, a value the build's domain leaves out, a limit
-    /// only the build decides, a member of `wz` this build does not read, a member stated twice,
+    /// only the build decides, a member of `zext` this build does not read, a member stated twice,
     /// a shape that is not the one it reads ([`crate::policy_document::Reason`]). One refusal
     /// refuses the document, so a node is never opened on part of what the member states.
     PoliciesRefused {
@@ -5200,7 +5201,7 @@ pub enum ConfigIngestError {
         unreported: usize,
     },
     /// `connect/endpoints` lists more endpoints than the node's runtime limits admit
-    /// (`MAX_STATIC_CONNECT`, as `wz/limits` states it; no bound on the heap unless a layer
+    /// (`MAX_STATIC_CONNECT`, as `zext/limits` states it; no bound on the heap unless a layer
     /// states one). A node told to hold more peers than it was bounded to does not open on a part
     /// of the list ([`admit_connect_list`]).
     ConnectPastLimit {
@@ -5249,7 +5250,7 @@ impl core::fmt::Display for ConfigIngestError {
                 refusals,
                 unreported,
             } => {
-                f.write_str("the `wz` member is refused: ")?;
+                write!(f, "the `{EXT_MEMBER}` member is refused: ")?;
                 for (index, refusal) in refusals.iter().enumerate() {
                     if index > 0 {
                         f.write_str("; ")?;
@@ -5290,26 +5291,19 @@ pub fn admit_connect_list(
     }
 }
 
-/// The top-level member of a document that holds wz's own statements about the node: the profile
-/// it names (`wz/profile`), the policies it states (`wz/policies`) and the limits it states
-/// (`wz/limits`). No key of zenoh's is spelled with it, so a store of zenoh keys that also holds
-/// this member tells the two apart by this name.
-pub const WZ_MEMBER: &str = "wz";
-
-/// Whether `path` is a part of the document's [`WZ_MEMBER`] that the open reads: the member
-/// itself, `wz/profile`, `wz/policies`, `wz/policies/<id>` where `<id>` names a policy of the
-/// build, `wz/limits`, `wz/limits/<id>` where `<id>` names a limit a stage after the build may
-/// decide, of a session or of a runtime, whose machines read it from the snapshot,
-/// `wz/owned-address`, and, in a build with the `shared-key-ids` capability, `wz/key-ids` and
-/// its two lists. Any other path below the
-/// member, a limit only the build decides and a limit whose machines still read the build's value
-/// among them, is one the open refuses by name ([`ConfigIngestError::PoliciesRefused`]), and is
-/// no key wz honours.
-pub fn wz_member_path_is_read(path: &str) -> bool {
+/// Whether `path` is a part of the document's [`EXT_MEMBER`] that the open reads: the member
+/// itself, `zext/version`, `zext/transport`, `zext/profile`, `zext/policies`, `zext/policies/<id>`
+/// where `<id>` names a policy of the build, `zext/limits`, `zext/limits/<id>` where `<id>` names a
+/// limit a stage after the build may decide, of a session or of a runtime, whose machines read it
+/// from the snapshot, `zext/owned-address`, and, in a build with the `shared-key-ids` capability,
+/// `zext/key-ids` and its two lists. Any other path below the member, a limit only the build
+/// decides and a limit whose machines still read the build's value among them, is one the open
+/// refuses by name ([`ConfigIngestError::PoliciesRefused`]), and is no key wz honours.
+pub fn ext_member_path_is_read(path: &str) -> bool {
     if names_key_ids(path) {
         return cfg!(feature = "shared-key-ids");
     }
-    let Some(below) = path.strip_prefix(WZ_MEMBER) else {
+    let Some(below) = path.strip_prefix(EXT_MEMBER) else {
         return false;
     };
     if below.is_empty() {
@@ -5319,7 +5313,10 @@ pub fn wz_member_path_is_read(path: &str) -> bool {
         return false;
     };
     match below.split_once('/') {
-        None => matches!(below, "profile" | "policies" | "limits" | "owned-address"),
+        None => matches!(
+            below,
+            "version" | "transport" | "profile" | "policies" | "limits" | "owned-address"
+        ),
         Some(("policies", policy)) => crate::policy::POLICIES
             .iter()
             .any(|entry| entry.id() == policy),
@@ -5335,36 +5332,40 @@ pub fn wz_member_path_is_read(path: &str) -> bool {
     }
 }
 
-/// Whether `path` is `wz/key-ids` or one of its two lists: the paths the `shared-key-ids`
+/// Whether `path` is `zext/key-ids` or one of its two lists: the paths the `shared-key-ids`
 /// capability reads, and a build without it refuses by name. An entry of a list is a value of the
 /// list and no path of its own.
 fn names_key_ids(path: &str) -> bool {
-    matches!(
-        path,
-        "wz/key-ids" | "wz/key-ids/dictionary" | "wz/key-ids/links"
-    )
+    const KEY_IDS: &str = wz_session_core::ext_member!("key-ids");
+    const DICTIONARY: &str = wz_session_core::ext_member!("key-ids/dictionary");
+    const LINKS: &str = wz_session_core::ext_member!("key-ids/links");
+    matches!(path, KEY_IDS | DICTIONARY | LINKS)
 }
 
-/// The top-level `wz` members of a document, taken out of `members` and gathered, in their order,
-/// as the members of a document of their own, which is what [`policies_of`] resolves.
+/// The top-level [`EXT_MEMBER`] members of a document, taken out of `members` and gathered, in
+/// their order, as the members of a document of their own, which is what [`policies_of`] resolves.
 ///
-/// Taken by the member's key and not by the leaf path: a top-level key spelled `"wz/policies"` is
-/// no `wz` member, stays in the document and is judged there as the key zenoh does not have. A
-/// `null` is zenoh's spelling of a member left unset ([`honoured`]), so a `wz: null` states
-/// nothing; every other value is kept, a second `wz` member included, for the resolution to judge.
-fn take_wz_member(members: &mut Vec<(String, Json5Value)>) -> Json5Value {
-    let (wz, zenoh): (Vec<_>, Vec<_>) = core::mem::take(members)
+/// Taken by the member's key and not by the leaf path: a top-level key spelled `"zext/policies"`
+/// is no member, stays in the document and is judged there as the key zenoh does not have. A
+/// `null` is zenoh's spelling of a member left unset ([`honoured`]), so a `zext: null` states
+/// nothing; every other value is kept, a second member included, for the resolution to judge. A
+/// member under [`RETIRED_MEMBER`] is taken too, whatever it holds, for the resolution to refuse
+/// by the name of the member that is read rather than for the boundary to report as a key zenoh
+/// does not have.
+fn take_ext_member(members: &mut Vec<(String, Json5Value)>) -> Json5Value {
+    let (member, zenoh): (Vec<_>, Vec<_>) = core::mem::take(members)
         .into_iter()
-        .partition(|(key, _)| key == WZ_MEMBER);
+        .partition(|(key, _)| key == EXT_MEMBER || key == RETIRED_MEMBER);
     *members = zenoh;
     Json5Value::Object(
-        wz.into_iter()
-            .filter(|(_, value)| !matches!(value, Json5Value::Null))
+        member
+            .into_iter()
+            .filter(|(key, value)| key != EXT_MEMBER || !matches!(value, Json5Value::Null))
             .collect(),
     )
 }
 
-/// The node's policies before a document's `wz` member is read: the build defaults, every value
+/// The node's policies before a document's `zext` member is read: the build defaults, every value
 /// from the build. The one read of the build in this reader: what a document with no such member
 /// leaves (the `Default` of [`ZenohNodeConfig`]) and what a member is resolved over
 /// ([`policies_of`]).
@@ -5372,41 +5373,41 @@ fn build_policies() -> crate::policy_document::Resolved {
     crate::policy_document::Resolved::unchanged(crate::policy::SessionPolicy::defaults())
 }
 
-/// The snapshot the `wz` member of a document resolves to over the build defaults, the profile it
+/// The snapshot the `zext` member of a document resolves to over the build defaults, the profile it
 /// names and then its own policies and limits ([`crate::policy_document::resolve_document`]), or
 /// every refusal found, as the sentences [`ConfigIngestError::PoliciesRefused`] carries. The node
 /// holds the limits of a runtime as well as a session's
 /// ([`Base::node`](crate::policy_document::Base::node)), so a runtime's limit the member states
 /// is selected into its snapshot.
 fn policies_of(
-    wz_member: &Json5Value,
+    ext_member: &Json5Value,
 ) -> Result<crate::policy_document::Resolved, ConfigIngestError> {
     let base = crate::policy_document::Base::node(build_policies().policy);
-    crate::policy_document::resolve_document(base, wz_member).map_err(member_refused)
+    crate::policy_document::resolve_document(base, ext_member).map_err(member_refused)
 }
 
-/// The key ids the `wz` member of a document states (`wz/key-ids`), read by the reader that
+/// The key ids the `zext` member of a document states (`zext/key-ids`), read by the reader that
 /// resolves its policies ([`policies_of`]), which refuses the member first when it refuses any of
 /// it; nothing when the member states none.
 #[cfg(feature = "shared-key-ids")]
 fn key_ids_of(
-    wz_member: &Json5Value,
+    ext_member: &Json5Value,
 ) -> Result<wz_session_core::shared_key_ids::KeyIdsAtOpen, ConfigIngestError> {
-    crate::policy_document::statements_from_json5(wz_member)
+    crate::policy_document::statements_from_json5(ext_member)
         .map(|read| read.key_ids)
         .map_err(member_refused)
 }
 
-/// The node's own address the `wz` member of a document states (`wz/owned-address`), read by
+/// The node's own address the `zext` member of a document states (`zext/owned-address`), read by
 /// the reader that resolves its policies ([`policies_of`]), which refuses the member first when
 /// it refuses any of it; `None` when the member states none.
-fn owned_address_of(wz_member: &Json5Value) -> Result<Option<[u8; 4]>, ConfigIngestError> {
-    crate::policy_document::statements_from_json5(wz_member)
+fn owned_address_of(ext_member: &Json5Value) -> Result<Option<[u8; 4]>, ConfigIngestError> {
+    crate::policy_document::statements_from_json5(ext_member)
         .map(|read| read.owned_address)
         .map_err(member_refused)
 }
 
-/// Every refusal of the `wz` member, as the sentences [`ConfigIngestError::PoliciesRefused`]
+/// Every refusal of the `zext` member, as the sentences [`ConfigIngestError::PoliciesRefused`]
 /// carries.
 fn member_refused(refusals: crate::policy_document::Refusals<'_>) -> ConfigIngestError {
     ConfigIngestError::PoliciesRefused {
@@ -8476,7 +8477,7 @@ impl ZenohNodeConfig {
         };
         // wz's own member is no key of zenoh's: it is taken out before the boundary below, which
         // judges the document against zenoh's surface, and resolved on its own after it.
-        let wz_member = take_wz_member(members);
+        let ext_member = take_ext_member(members);
 
         // The ACCEPTANCE BOUNDARY, matched to zenoh's before anything is read.
         // Checked first so a typo is reported as a typo rather than as a
@@ -8496,12 +8497,12 @@ impl ZenohNodeConfig {
         }
 
         let mut out = reading.start();
-        out.policies = policies_of(&wz_member)?;
+        out.policies = policies_of(&ext_member)?;
         #[cfg(feature = "shared-key-ids")]
         {
-            out.key_ids = key_ids_of(&wz_member)?;
+            out.key_ids = key_ids_of(&ext_member)?;
         }
-        out.owned_address = owned_address_of(&wz_member)?;
+        out.owned_address = owned_address_of(&ext_member)?;
         let mut named: Vec<&'static str> = Vec::new();
         // R2081 (open-debt item 500) — keys the document states for OTHER modes.
         // Neither honoured (this node got no instruction) nor ignored (wz reads
@@ -8537,7 +8538,7 @@ impl ZenohNodeConfig {
             EndpointElements::StringsOrGroups,
         )? {
             ModeRead::Value(v) => {
-                // The limits the `wz` member resolved above bound the list.
+                // The limits the `zext` member resolved above bound the list.
                 admit_connect_list(v.len(), &out.policies.limits.runtime)?;
                 out.connect = v;
                 named.push("connect/endpoints");
@@ -9014,8 +9015,8 @@ impl ZenohNodeConfig {
             named.push(ALLOCATION);
         }
         // Held as a session of this node holds it: the window of `tx-no-progress-deadline` is the
-        // node's snapshots' (`wz/policies` and `TX_NO_PROGRESS_WINDOW_US` of `wz/limits`), not a
-        // key of the file, so a total wait the file states shorter than it is refused here.
+        // node's snapshots' (`zext/policies` and `TX_NO_PROGRESS_WINDOW_US` of `zext/limits`), not
+        // a key of the file, so a total wait the file states shorter than it is refused here.
         let windowed = wz_session_core::session_init_params::TxQueueConf::of_snapshot(
             &out.policies.policy,
             &out.policies.limits.session,
@@ -15504,7 +15505,7 @@ mod tests {
     }
 }
 
-/// The `wz` member of a document: resolved into the node's snapshot of the policies, never judged
+/// The `zext` member of a document: resolved into the node's snapshot of the policies, never judged
 /// as a key of zenoh's, and refused whole, by name, when any of it is refused.
 #[cfg(test)]
 mod wz_member_tests {
@@ -15533,7 +15534,12 @@ mod wz_member_tests {
     fn a_document_with_no_wz_member_resolves_to_the_build_defaults() {
         let unchanged = Resolved::unchanged(SessionPolicy::defaults());
         assert_eq!(ZenohNodeConfig::default().policies, unchanged);
-        for document in ["{}", r#"{ mode: "peer" }"#, "{ wz: null }", "{ wz: {} }"] {
+        for document in [
+            "{}",
+            r#"{ mode: "peer" }"#,
+            "{ zext: null }",
+            "{ zext: {} }",
+        ] {
             let read = ZenohNodeConfig::from_json5(document)
                 .unwrap_or_else(|error| panic!("{document}: {error}"));
             assert_eq!(read.config.policies, unchanged, "{document}");
@@ -15555,7 +15561,7 @@ mod wz_member_tests {
     fn the_wz_member_is_resolved_into_the_node_snapshot() {
         let value = a_chosen_overload();
         let document = format!(
-            r#"{{ mode: "peer", wz: {{ policies: {{ "subscriber-overload": "{value}" }} }} }}"#
+            r#"{{ mode: "peer", zext: {{ policies: {{ "subscriber-overload": "{value}" }} }} }}"#
         );
         let read = ZenohNodeConfig::from_json5(&document).expect("the member resolves");
         let policies = read.config.policies;
@@ -15570,7 +15576,7 @@ mod wz_member_tests {
         );
         assert!(read.ignored.is_empty(), "{:?}", read.ignored);
         assert!(
-            read.named.iter().all(|key| !key.starts_with(WZ_MEMBER)),
+            read.named.iter().all(|key| !key.starts_with(EXT_MEMBER)),
             "{:?}",
             read.named
         );
@@ -15588,7 +15594,7 @@ mod wz_member_tests {
     fn a_total_wait_shorter_than_the_window_the_member_states_is_refused() {
         let at = |total_us: u64| {
             ZenohNodeConfig::from_json5(&format!(
-                r#"{{ transport: {{ link: {{ tx: {{ queue: {{ congestion_control: {{ block: {{ wait_before_close: {total_us} }} }} }} }} }} }}, wz: {{ policies: {{ "tx-no-progress-deadline": "on" }}, limits: {{ TX_NO_PROGRESS_WINDOW_US: 2000 }} }} }}"#
+                r#"{{ transport: {{ link: {{ tx: {{ queue: {{ congestion_control: {{ block: {{ wait_before_close: {total_us} }} }} }} }} }} }}, zext: {{ policies: {{ "tx-no-progress-deadline": "on" }}, limits: {{ TX_NO_PROGRESS_WINDOW_US: 2000 }} }} }}"#
             ))
         };
         let read = match at(2_000) {
@@ -15606,11 +15612,11 @@ mod wz_member_tests {
     }
 
     /// One refusal refuses the document, and the error names every refusal found: a member of
-    /// `wz` this build does not read, a value the policy lacks, and a limit the build lacks.
+    /// `zext` this build does not read, a value the policy lacks, and a limit the build lacks.
     #[test]
     fn a_refused_wz_member_fails_the_ingest_naming_each_refusal() {
         let error = ZenohNodeConfig::from_json5(
-            r#"{ mode: "peer", wz: { colour: "blue", limits: { NO_SUCH_LIMIT: 1 }, policies: { "key-set": "ajar" } } }"#,
+            r#"{ mode: "peer", zext: { colour: "blue", limits: { NO_SUCH_LIMIT: 1 }, policies: { "key-set": "ajar" } } }"#,
         )
         .unwrap_err();
         let ConfigIngestError::PoliciesRefused {
@@ -15623,8 +15629,8 @@ mod wz_member_tests {
         assert_eq!(refusals.len(), 3, "{refusals:?}");
         assert_eq!(*unreported, 0);
         let text = error.to_string();
-        assert!(text.starts_with("the `wz` member is refused: "), "{text}");
-        for named in ["`wz/colour`", "`NO_SUCH_LIMIT`", "`key-set` = `ajar`"] {
+        assert!(text.starts_with("the `zext` member is refused: "), "{text}");
+        for named in ["`zext/colour`", "`NO_SUCH_LIMIT`", "`key-set` = `ajar`"] {
             assert!(text.contains(named), "{named} is not named: {text}");
         }
     }
@@ -15636,7 +15642,7 @@ mod wz_member_tests {
             .map(|n| format!(r#""unknown-{n}": "on", "#))
             .collect();
         let error =
-            ZenohNodeConfig::from_json5(&format!("{{ wz: {{ policies: {{ {policies} }} }} }}"))
+            ZenohNodeConfig::from_json5(&format!("{{ zext: {{ policies: {{ {policies} }} }} }}"))
                 .unwrap_err();
         let ConfigIngestError::PoliciesRefused {
             refusals,
@@ -15650,14 +15656,14 @@ mod wz_member_tests {
         assert!(error.to_string().ends_with("; and 2 more"), "{error}");
     }
 
-    /// A top-level key spelled with the member's path is no `wz` member: it stays in the
+    /// A top-level key spelled with the member's path is no `zext` member: it stays in the
     /// document, which is judged as zenoh judges it, and zenoh has no such key.
     #[test]
     fn a_flat_key_spelled_as_a_wz_path_is_a_key_zenoh_does_not_have() {
         assert_eq!(
-            ZenohNodeConfig::from_json5(r#"{ "wz/policies/key-set": "open" }"#),
+            ZenohNodeConfig::from_json5(r#"{ "zext/policies/key-set": "open" }"#),
             Err(ConfigIngestError::UnknownKey {
-                path: String::from("wz/policies/key-set")
+                path: String::from("zext/policies/key-set")
             })
         );
     }
@@ -15667,17 +15673,77 @@ mod wz_member_tests {
     #[test]
     fn a_key_zenoh_does_not_have_is_reported_before_the_member() {
         assert_eq!(
-            ZenohNodeConfig::from_json5(r#"{ colour: "blue", wz: { colour: "blue" } }"#),
+            ZenohNodeConfig::from_json5(r#"{ colour: "blue", zext: { colour: "blue" } }"#),
             Err(ConfigIngestError::UnknownKey {
                 path: String::from("colour")
             })
         );
     }
 
-    /// Whether the build's domain allows every value the `upstream` profile states; an image
+    /// The member's `version` and `transport` are read: the version this build reads and the
+    /// system's sockets open, and another version, a transport of the program's, which a node is
+    /// never handed, and a transport the document has no value for fail the ingest, each named.
+    /// Turned red by an ingest that drops either member, or opens on the system's sockets a
+    /// document that asks for the program's transport.
+    #[test]
+    fn the_version_and_the_transport_of_the_member_are_read() {
+        let read = ZenohNodeConfig::from_json5(
+            r#"{ mode: "peer", zext: { version: 1, transport: "system" } }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(read.ignored.is_empty(), "{:?}", read.ignored);
+        for (document, named) in [
+            (r#"{ zext: { version: 2 } }"#, "`zext/version` = 2"),
+            (
+                r#"{ zext: { transport: "application" } }"#,
+                "`zext/transport` = `application`",
+            ),
+            (
+                r#"{ zext: { transport: "carrier-pigeon" } }"#,
+                "`zext/transport` = `carrier-pigeon`",
+            ),
+        ] {
+            let error = ZenohNodeConfig::from_json5(document).unwrap_err();
+            assert!(
+                matches!(error, ConfigIngestError::PoliciesRefused { .. }),
+                "{document}: {error:?}"
+            );
+            let text = error.to_string();
+            assert!(text.contains(named), "{text}");
+        }
+    }
+
+    /// A document that states the member under its retired name fails the ingest whatever that
+    /// member holds, `null` too, and the refusal names the member that is read; no path below the
+    /// retired name is one the open reads. Turned red by a `take_ext_member` that leaves the
+    /// retired name to the boundary, which would report it as a key zenoh does not have.
+    #[test]
+    fn the_retired_member_fails_the_ingest_naming_the_member_read() {
+        for document in [
+            r#"{ mode: "peer", wz: { policies: { "key-set": "open" } } }"#,
+            "{ wz: {} }",
+            "{ wz: null }",
+            r#"{ zext: { policies: { "key-set": "open" } }, wz: {} }"#,
+        ] {
+            let error = ZenohNodeConfig::from_json5(document).unwrap_err();
+            assert!(
+                matches!(error, ConfigIngestError::PoliciesRefused { .. }),
+                "{document}: {error:?}"
+            );
+            let text = error.to_string();
+            assert!(text.starts_with("the `zext` member is refused: "), "{text}");
+            assert!(text.contains("states the member `wz`"), "{text}");
+            assert!(text.contains("belong in the member `zext`"), "{text}");
+        }
+        for path in ["wz", "wz/profile", "wz/policies", "wz/limits", "wz/key-ids"] {
+            assert!(!ext_member_path_is_read(path), "{path}");
+        }
+    }
+
+    /// Whether the build's domain allows every value the `standard` profile states; an image
     /// whose domain leaves one out refuses the profile.
-    fn the_upstream_profile_is_allowed() -> bool {
-        Profile::find("upstream").is_some_and(|profile| {
+    fn the_standard_profile_is_allowed() -> bool {
+        Profile::find("standard").is_some_and(|profile| {
             profile.statements.iter().all(|statement| {
                 POLICIES
                     .iter()
@@ -15692,15 +15758,17 @@ mod wz_member_tests {
     #[test]
     fn the_paths_of_the_member_the_open_reads_are_honoured_and_no_others() {
         for path in [
-            "wz",
-            "wz/profile",
-            "wz/policies",
-            "wz/policies/key-set",
-            "wz/policies/subscriber-overload",
-            "wz/limits",
-            "wz/limits/MAX_SUBSCRIPTIONS",
+            "zext",
+            "zext/version",
+            "zext/transport",
+            "zext/profile",
+            "zext/policies",
+            "zext/policies/key-set",
+            "zext/policies/subscriber-overload",
+            "zext/limits",
+            "zext/limits/MAX_SUBSCRIPTIONS",
         ] {
-            assert!(wz_member_path_is_read(path), "{path}");
+            assert!(ext_member_path_is_read(path), "{path}");
             assert_eq!(
                 config_key_disposition(path),
                 ConfigKeyDisposition::Honoured,
@@ -15710,20 +15778,22 @@ mod wz_member_tests {
             assert!(!wz_accepts(path), "{path} is no admin write");
         }
         for path in [
-            "wz/colour",
-            "wz/limits/max",
-            "wz/limits/NO_SUCH_LIMIT",
-            "wz/limits/MAX_TASKS",
-            "wz/limits/PICO_TX_QUEUE_SIZE/4",
-            "wz/limitsx",
-            "wz/policies/no-such-policy",
-            "wz/policies/key-set/open",
-            "wz/profile/upstream",
-            "wz/",
+            "zext/colour",
+            "zext/limits/max",
+            "zext/limits/NO_SUCH_LIMIT",
+            "zext/limits/MAX_TASKS",
+            "zext/limits/PICO_TX_QUEUE_SIZE/4",
+            "zext/limitsx",
+            "zext/policies/no-such-policy",
+            "zext/policies/key-set/open",
+            "zext/profile/standard",
+            "zext/version/1",
+            "zext/transport/system",
+            "zext/",
             "wzx",
             "wzx/profile",
         ] {
-            assert!(!wz_member_path_is_read(path), "{path}");
+            assert!(!ext_member_path_is_read(path), "{path}");
             assert_eq!(
                 config_key_disposition(path),
                 ConfigKeyDisposition::Unknown,
@@ -15741,8 +15811,8 @@ mod wz_member_tests {
                     .map(|entry| (entry.id(), entry.read_from_snapshot())),
             );
         for (limit, read) in limits {
-            let path = format!("wz/limits/{limit}");
-            assert_eq!(wz_member_path_is_read(&path), read, "{path}");
+            let path = format!("zext/limits/{limit}");
+            assert_eq!(ext_member_path_is_read(&path), read, "{path}");
             assert_eq!(
                 config_key_disposition(&path),
                 if read {
@@ -15755,13 +15825,17 @@ mod wz_member_tests {
         }
     }
 
-    /// `wz/key-ids` and its two lists are read by a build with the capability and out of the
+    /// `zext/key-ids` and its two lists are read by a build with the capability and out of the
     /// build of one without it; a path below them is no key at all.
     #[test]
     fn the_key_ids_paths_are_read_by_a_build_with_the_capability_alone() {
         let with = cfg!(feature = "shared-key-ids");
-        for path in ["wz/key-ids", "wz/key-ids/dictionary", "wz/key-ids/links"] {
-            assert_eq!(wz_member_path_is_read(path), with, "{path}");
+        for path in [
+            "zext/key-ids",
+            "zext/key-ids/dictionary",
+            "zext/key-ids/links",
+        ] {
+            assert_eq!(ext_member_path_is_read(path), with, "{path}");
             assert_eq!(
                 config_key_disposition(path),
                 if with {
@@ -15774,11 +15848,11 @@ mod wz_member_tests {
             assert!(!honours_config_key(path), "{path} is no admin write");
         }
         for path in [
-            "wz/key-ids/colour",
-            "wz/key-ids/dictionary/0",
-            "wz/key-idsx",
+            "zext/key-ids/colour",
+            "zext/key-ids/dictionary/0",
+            "zext/key-idsx",
         ] {
-            assert!(!wz_member_path_is_read(path), "{path}");
+            assert!(!ext_member_path_is_read(path), "{path}");
             assert_eq!(
                 config_key_disposition(path),
                 ConfigKeyDisposition::Unknown,
@@ -15787,20 +15861,20 @@ mod wz_member_tests {
         }
     }
 
-    /// `wz/owned-address` is a path of the member the open reads, its address is read into the
+    /// `zext/owned-address` is a path of the member the open reads, its address is read into the
     /// node with its policies and written back by the export, and a text that is no IPv4 address
     /// of a node fails the ingest by name.
     #[test]
     fn the_owned_address_of_the_member_is_read_exported_and_refused_by_name() {
-        assert!(wz_member_path_is_read("wz/owned-address"));
+        assert!(ext_member_path_is_read("zext/owned-address"));
         assert_eq!(
-            config_key_disposition("wz/owned-address"),
+            config_key_disposition("zext/owned-address"),
             ConfigKeyDisposition::Honoured
         );
-        assert!(!honours_config_key("wz/owned-address"), "no admin write");
-        assert!(!wz_member_path_is_read("wz/owned-address/0"));
+        assert!(!honours_config_key("zext/owned-address"), "no admin write");
+        assert!(!ext_member_path_is_read("zext/owned-address/0"));
         let read = ZenohNodeConfig::from_json5(
-            r#"{ mode: "peer", wz: { "owned-address": "127.0.0.1" } }"#,
+            r#"{ mode: "peer", zext: { "owned-address": "127.0.0.1" } }"#,
         )
         .expect("the member reads");
         assert_eq!(read.config.owned_address, Some([127, 0, 0, 1]));
@@ -15821,13 +15895,15 @@ mod wz_member_tests {
             "a document with no member states no address"
         );
         let error =
-            ZenohNodeConfig::from_json5(r#"{ wz: { "owned-address": "127.0.0" } }"#).unwrap_err();
+            ZenohNodeConfig::from_json5(r#"{ zext: { "owned-address": "127.0.0" } }"#).unwrap_err();
         assert!(
             matches!(error, ConfigIngestError::PoliciesRefused { .. }),
             "{error:?}"
         );
         assert!(
-            error.to_string().contains("`wz/owned-address` = `127.0.0`"),
+            error
+                .to_string()
+                .contains("`zext/owned-address` = `127.0.0`"),
             "{error}"
         );
     }
@@ -15841,7 +15917,7 @@ mod wz_member_tests {
         use wz_session_core::shared_key_ids::{KeyIds, KeyIdsAtOpen};
 
         let read = ZenohNodeConfig::from_json5(
-            r#"{ mode: "peer", wz: { "key-ids": {
+            r#"{ mode: "peer", zext: { "key-ids": {
                 dictionary: [ { id: 41, key: "lab/rig/alpha" }, { id: 40, key: "lab/rig" } ],
                 links: [ { locator: "tcp/192.0.2.7:7447", form: "literal" } ] } } }"#,
         )
@@ -15871,13 +15947,13 @@ mod wz_member_tests {
         );
     }
 
-    /// A refused part of `wz/key-ids` fails the ingest as a refused policy does, named in the
+    /// A refused part of `zext/key-ids` fails the ingest as a refused policy does, named in the
     /// same error.
     #[cfg(feature = "shared-key-ids")]
     #[test]
     fn a_refused_key_ids_member_fails_the_ingest_by_name() {
         let error = ZenohNodeConfig::from_json5(
-            r#"{ wz: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ],
+            r#"{ zext: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ],
                                     links: [ { locator: "tcp/192.0.2.7:7447", form: "loud" } ] },
                        policies: { "key-set": "ajar" } } }"#,
         )
@@ -15888,7 +15964,7 @@ mod wz_member_tests {
         assert_eq!(refusals.len(), 3, "{refusals:?}");
         let text = error.to_string();
         for named in [
-            "id 0 in entry 0 of `wz/key-ids/dictionary`",
+            "id 0 in entry 0 of `zext/key-ids/dictionary`",
             "the key-wire form `loud` for `tcp/192.0.2.7:7447`",
             "`key-set` = `ajar`",
         ] {
@@ -15901,7 +15977,7 @@ mod wz_member_tests {
     #[test]
     fn a_key_ids_member_is_refused_by_a_build_without_the_capability() {
         let error = ZenohNodeConfig::from_json5(
-            r#"{ wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#,
+            r#"{ zext: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#,
         )
         .unwrap_err();
         assert!(
@@ -15919,11 +15995,11 @@ mod wz_member_tests {
     /// A node whose document states nothing of wz's is emitted without the member.
     #[test]
     fn the_export_of_a_node_that_states_nothing_has_no_member() {
-        for document in ["{}", "{ wz: {} }", "{ wz: null }"] {
+        for document in ["{}", "{ zext: {} }", "{ zext: null }"] {
             let read = ZenohNodeConfig::from_json5(document).expect("it reads");
             let export = read.config.to_json5();
             let tree = wz_session_core::json5::parse(&export).expect("the emitter writes JSON5");
-            assert_eq!(tree.get(WZ_MEMBER), None, "{document}: {export}");
+            assert_eq!(tree.get(EXT_MEMBER), None, "{document}: {export}");
         }
     }
 
@@ -15932,14 +16008,14 @@ mod wz_member_tests {
     #[test]
     fn the_export_reads_back_to_an_equal_snapshot_and_provenance() {
         let value = a_chosen_overload();
-        let allowed = the_upstream_profile_is_allowed();
+        let allowed = the_standard_profile_is_allowed();
         let profile = if allowed {
-            r#"profile: "upstream", "#
+            r#"profile: "standard", "#
         } else {
             ""
         };
         let document = format!(
-            r#"{{ mode: "peer", wz: {{ {profile}policies: {{ "subscriber-overload": "{value}" }} }} }}"#
+            r#"{{ mode: "peer", zext: {{ {profile}policies: {{ "subscriber-overload": "{value}" }} }} }}"#
         );
         let read = ZenohNodeConfig::from_json5(&document)
             .expect("the member resolves")
@@ -15952,24 +16028,24 @@ mod wz_member_tests {
 
         let tree = wz_session_core::json5::parse(&export).expect("the emitter writes JSON5");
         assert_eq!(
-            tree.get("wz/policies/subscriber-overload"),
+            tree.get("zext/policies/subscriber-overload"),
             Some(&Json5Value::String(String::from(value))),
             "{export}"
         );
         if allowed {
             assert_eq!(
-                tree.get("wz/profile"),
-                Some(&Json5Value::String(String::from("upstream"))),
+                tree.get("zext/profile"),
+                Some(&Json5Value::String(String::from("standard"))),
                 "{export}"
             );
             // The profile's values are not flattened into the document's statements.
-            assert_eq!(tree.get("wz/policies/key-set"), None, "{export}");
+            assert_eq!(tree.get("zext/policies/key-set"), None, "{export}");
             assert_eq!(
                 back.policies.provenance.origin("key-set"),
-                Some(Origin::Profile("upstream"))
+                Some(Origin::Profile("standard"))
             );
         } else {
-            assert_eq!(tree.get("wz/profile"), None, "{export}");
+            assert_eq!(tree.get("zext/profile"), None, "{export}");
         }
     }
 
@@ -16014,7 +16090,7 @@ mod wz_member_tests {
         use wz_session_core::limit_corpus::{cases, Expected};
 
         for case in cases() {
-            let document = format!(r#"{{ mode: "peer", wz: {} }}"#, case.wz_member());
+            let document = format!(r#"{{ mode: "peer", zext: {} }}"#, case.ext_member());
             let read = ZenohNodeConfig::from_json5(&document);
             match (&case.node, read) {
                 (Expected::Selected(selected), Ok(read)) => {
@@ -16052,14 +16128,14 @@ mod wz_member_tests {
         }
     }
 
-    /// The limits a document states are exported under `wz/limits` and read back to the same
-    /// snapshots and provenance; a document that states none exports no `wz/limits`.
+    /// The limits a document states are exported under `zext/limits` and read back to the same
+    /// snapshots and provenance; a document that states none exports no `zext/limits`.
     #[test]
     fn the_export_writes_the_limits_the_document_states() {
         use wz_session_core::limit_corpus::cases;
 
         for case in cases().into_iter().filter(|case| case.node.is_selected()) {
-            let document = format!(r#"{{ mode: "peer", wz: {} }}"#, case.wz_member());
+            let document = format!(r#"{{ mode: "peer", zext: {} }}"#, case.ext_member());
             let read = ZenohNodeConfig::from_json5(&document)
                 .unwrap_or_else(|error| panic!("{}: {error}", case.name))
                 .config;
@@ -16070,7 +16146,7 @@ mod wz_member_tests {
             assert_eq!(back.policies, read.policies, "{}: {export}", case.name);
             let tree = wz_session_core::json5::parse(&export).expect("the emitter writes JSON5");
             for (limit, value) in case.node.selected() {
-                let path = format!("wz/limits/{limit}");
+                let path = format!("zext/limits/{limit}");
                 let written = match value {
                     LimitValue::Unbounded => Json5Value::String(String::from(UNBOUNDED)),
                     LimitValue::Integer(_) => Json5Value::Number(value.to_string()),
@@ -16078,7 +16154,7 @@ mod wz_member_tests {
                 assert_eq!(tree.get(&path), Some(&written), "{}: {export}", case.name);
             }
             if case.node.selected().is_empty() {
-                assert_eq!(tree.get("wz/limits"), None, "{}: {export}", case.name);
+                assert_eq!(tree.get("zext/limits"), None, "{}: {export}", case.name);
             }
         }
     }

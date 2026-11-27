@@ -545,7 +545,7 @@ CASES: tuple[Case, ...] = (
     # `pico-client` +5,596 and `pico-client-coop` +3,718 (the statement doors on link sets, the
     # all-or-none reservation `try_reserve_rooms_for`, the typed zid in `z_open` and
     # `wire_zid`). Rounds 4521 to 4526 (`f7ab3a770` -> `64d1da2e4`): `capic-client` +10,424, the
-    # document layer of step 4a (`policy_document::{read_wz, compose, resolve_document}`, the
+    # document layer of step 4a (`policy_document::{read_ext_member, compose, resolve_document}`, the
     # `Refusal` and `ValueSet` displays, `ZenohNodeConfig::read_over` with the `wz` member) and its
     # generated tables (`.rela.dyn` +4,104, `.data.rel.ro` +2,560); `capic-router-node` +19,425,
     # the same and Round 4523's `EndpointKey`, a key per listing of an endpoint, monomorphised
@@ -610,10 +610,10 @@ CASES: tuple[Case, ...] = (
     # under theirs.
     # 2026-11-21 -- step 4b rounds 2 to 4, landed together: the six peer-filled bounds, the
     # semaphore's bound as the limit's value, the session's limits in its parameters, the
-    # document's `wz/limits` read with named refusals, and the three doors that open under it.
+    # document's `zext/limits` read with named refusals, and the three doors that open under it.
     # +12,802 here, both trees (`b58b71c19` and the round's head) built on one machine. The
     # symbol diff of pico-client-small (+6,580 of text symbols; .text +6,864, .data.rel.ro
-    # +4,904, .rodata +1,920, .eh_frame +1,512): the reader of `wz/limits` (`compose_limits`
+    # +4,904, .rodata +1,920, .eh_frame +1,512): the reader of `zext/limits` (`compose_limits`
     # +1,453, `FoundLimit::find` +1,382) and the limit tables it finds a limit in (read-only
     # data), the quotas asked on the observer's paths (`dispatch_event` +824) and the open that
     # resolves the document's limits (`resolve_policy` +552, `open_blocking` +155, `z_open`

@@ -348,7 +348,7 @@ fn a_document_that_lowers_the_batch_size_is_the_batch_the_report_counts() {
         let mut listener = open_role(port, Z_CONFIG_LISTEN_KEY);
         let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
         let document = CString::new(format!(
-            "{{ wz: {{ limits: {{ PICO_UNICAST_BATCH_BYTES: {LOWERED_BATCH_BYTES} }} }} }}"
+            "{{ zext: {{ limits: {{ PICO_UNICAST_BATCH_BYTES: {LOWERED_BATCH_BYTES} }} }} }}"
         ))
         .unwrap();
         let mut cfg: z_owned_config_t = std::mem::zeroed();

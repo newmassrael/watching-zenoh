@@ -28,7 +28,7 @@
 
 #include <zenoh-pico.h>
 
-#include "wz_ext.h"
+#include "zext.h"
 
 #include "example_common.h"
 
@@ -120,7 +120,7 @@ int main(void) {
     CHECK(zext_stream_supervisor_set_callback(sv, on_loss, NULL) == Z_OK, "set_callback");
 
     /* The refused cases: a period of 0, and a reception of a stream there is none of. Both
-     * answer the code wz_ext.h calls Z_ERR_INVALID, which zenoh-pico's header does not
+     * answer the code zext.h calls Z_ERR_INVALID, which zenoh-pico's header does not
      * name, so the program reads only that they were refused. */
     rc = zext_stream_supervisor_add(sv, 0, FACTOR, SENDER, true, NULL);
     CHECK(rc != Z_OK, "a period of 0 was not refused");

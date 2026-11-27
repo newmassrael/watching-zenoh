@@ -7,7 +7,7 @@
 //! rings hold, oldest first, and, under the session's policy, holds the message's sends while it
 //! answers.
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h`, and part
 //! of the unstable surface: the `replay-cache` capability implies `unstable-api`. The ring, the
 //! answer's order and the held sends are [`wz_session_core::replay_publisher`]'s; this file is
 //! the pico ABI's names, result codes, queryable and ownership around it.

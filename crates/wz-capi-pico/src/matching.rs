@@ -1052,7 +1052,7 @@ mod tests {
             let stated = unsafe {
                 zext_config_document(
                     config,
-                    c"{ wz: { limits: { MAX_MATCHING_LISTENERS: 2 } } }".as_ptr(),
+                    c"{ zext: { limits: { MAX_MATCHING_LISTENERS: 2 } } }".as_ptr(),
                 )
             };
             assert_eq!(stated, Z_OK);

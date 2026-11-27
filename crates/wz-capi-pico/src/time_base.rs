@@ -5,7 +5,7 @@
 //! the timers of a session opened from a config naming it run on in place of the system's
 //! monotonic clock.
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h`, and part
 //! of the unstable surface: the `time-base` capability implies `unstable-api`.
 //!
 //! A program that runs its sessions on a time of its own (a network simulator's, paused, or

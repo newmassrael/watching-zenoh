@@ -4,7 +4,7 @@
 //! `zext_object_pool_*`: the doors through which a program reserves the process pools itself, and
 //! reads what they hold (`crate::process_pool`, where the pools and their counts are described).
 //!
-//! Doors wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
+//! Doors wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h`, and part
 //! of the unstable surface: the `object-pool` capability implies `unstable-api`. The pools
 //! themselves are not the doors': a library without the tokio engine has them whether or not it has
 //! the doors, reserved by its first object from the build's limits, so a build without the unstable

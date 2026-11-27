@@ -16,7 +16,7 @@
 // session FLUSH_MS later; it prints the batch size its header states and the one it was handed.
 //
 // -B, in a build with BATCH_PROBE_DOCUMENT (against libwz_capi_pico only), hands the config the document
-// {"wz": {"limits": {"PICO_UNICAST_BATCH_BYTES": BATCH}}} through zext_config_document: the size is then
+// {"zext": {"limits": {"PICO_UNICAST_BATCH_BYTES": BATCH}}} through zext_config_document: the size is then
 // the session's. zenoh-pico has no such door, and a build without the define refuses -B.
 
 #define _GNU_SOURCE
@@ -31,7 +31,7 @@
 #include "zenoh-pico.h"
 
 #ifdef BATCH_PROBE_DOCUMENT
-#include "wz_ext.h"
+#include "zext.h"
 #endif
 
 #if Z_FEATURE_BATCHING != 1 || Z_FEATURE_MATCHING != 1
@@ -163,7 +163,7 @@ int main(int argc, char **argv) {
 #ifdef BATCH_PROBE_DOCUMENT
     if (stated > 0) {
         char document[96];
-        snprintf(document, sizeof document, "{\"wz\": {\"limits\": {\"PICO_UNICAST_BATCH_BYTES\": %d}}}", stated);
+        snprintf(document, sizeof document, "{\"zext\": {\"limits\": {\"PICO_UNICAST_BATCH_BYTES\": %d}}}", stated);
         z_result_t rc = zext_config_document(z_config_loan_mut(&config), document);
         if (rc != Z_OK) {
             printf("batch_probe %s: the document stating a batch of %d was refused (%d)\n", role, stated, (int)rc);

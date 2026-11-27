@@ -15,7 +15,7 @@
 //! (`ZEXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED`). The last value of each instance is kept in storage
 //! the program gives when it makes the keyer.
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h`, and part
 //! of the unstable surface: the `instance-key` capability implies `unstable-api`. The keyer is
 //! [`wz_app_frame::instance_key`]; ownership and threads are as `crate::e2e` describes. The
 //! judging and protecting doors hold the keyer's lock and then the receiver's or the sender's, and

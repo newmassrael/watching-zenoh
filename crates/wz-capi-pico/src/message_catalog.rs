@@ -8,7 +8,7 @@
 //! the rows of a reception supervisor. One library serves every deployment whose catalog it is
 //! given; the catalog, not the build, says which messages exist.
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h`, and part
 //! of the unstable surface: the `message-catalog` capability implies `unstable-api`. The doors that
 //! make a sender, a receiver or supervision rows are in a build that also has `e2e-sender`,
 //! `e2e-receiver` or `e2e-supervision`, and hand back the same handles those capabilities' own

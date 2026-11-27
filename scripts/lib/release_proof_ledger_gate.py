@@ -23,7 +23,7 @@ than the tree does:
   `fnmatch` patterns it matches, and every pattern claims a name. The switch rows are exactly the
   `Z_FEATURE_*` switches of zenoh-pico's CMake (`upstream_switch_map.pico_switches`), each with its
   default. The example and test rows are exactly the programs of those directories. The door rows
-  claim every `zext_*` function `wz_ext.h` declares, every `#if` arm kept.
+  claim every `zext_*` function `zext.h` declares, every `#if` arm kept.
 * LANES. Every source file and workflow job a lane names exists, every program pattern matches a
   file, and `release form` is `yes` exactly when the host is Windows, the form `nostd` and the
   profile `host-peer-ext`.
@@ -56,7 +56,7 @@ import upstream_switch_map as usm  # noqa: E402  the one reader of zenoh-pico's 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 LEDGER = ROOT / "docs" / "release-proof-pico-windows.md"
 PICO = ROOT / "vendor" / "zenoh-pico"
-EXT = ROOT / "crates" / "wz-capi-core" / "include" / "wz_ext.h"
+EXT = ROOT / "crates" / "wz-capi-core" / "include" / "zext.h"
 
 PUBLIC = re.compile(r"(?:z|zp|ze)_\w+")
 MACRO = re.compile(r"^\s*#\s*define\s+((?:z|zp|ze)_\w+)", re.M)

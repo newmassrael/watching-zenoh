@@ -498,7 +498,11 @@ pub(crate) fn refused_ask(stance: &OpenStance) -> Option<&'static str> {
     }
     #[cfg(feature = "shared-key-ids")]
     if stance.session_defaults.key_ids != wz_session_core::shared_key_ids::KeyIdsAtOpen::default() {
-        return Some("the key ids every node shares (`wz/key-ids`)");
+        return Some(concat!(
+            "the key ids every node shares (`",
+            wz_session_core::ext_member!("key-ids"),
+            "`)"
+        ));
     }
     // The node's timers run on the system's clock: a time base the program supplies is a
     // session's, and a node opened on it would keep the wall clock's time unasked.

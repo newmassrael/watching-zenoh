@@ -2226,14 +2226,19 @@ def wire_code_problems(pid: str, pol: dict, choices: list) -> list[str]:
 
 PROFILE_KEYS = {"id", "help", "policies"}
 # The profile that states every policy at upstream's behaviour, which each policy's `default` is.
-UPSTREAM_PROFILE = "upstream"
+STANDARD_PROFILE = "standard"
+# The version of the document's format the readers read, and the values of `zext/transport`, the
+# first the one a document that states none opens on: `DOCUMENT_VERSION` and `DocumentTransport`
+# of crates/wz-session-core/src/policy_document.rs, which refuse any other.
+DOCUMENT_VERSION = 1
+DOCUMENT_TRANSPORTS = ("system", "application")
 
 
 def validate_profiles(profiles: list[dict], policies: list[dict]) -> list[str]:
-    """A profile is a named set of policy values a run-time document starts from (`wz/profile`):
+    """A profile is a named set of policy values a run-time document starts from (`zext/profile`):
     each value is one the declaration gives its policy, and no policy the build alone decides is
     in it. Whether the build's domain allows a value is the open's question, not this one. The
-    profile `upstream` states every policy a document may state, each at its `default`."""
+    profile `standard` states every policy a document may state, each at its `default`."""
     out: list[str] = []
     ids = [p.get("id") for p in profiles]
     if len(ids) != len(set(ids)):
@@ -2272,7 +2277,7 @@ def validate_profiles(profiles: list[dict], policies: list[dict]) -> list[str]:
                 continue
             if not isinstance(value, str) or value not in values:
                 out.append(f"{where}: {value!r} is not a value of `{pid}` ({', '.join(values)})")
-        if name == UPSTREAM_PROFILE:
+        if name == STANDARD_PROFILE:
             missing = [p.get("id") for p in policies
                        if p.get("binding") != "build" and p.get("id") not in stated]
             if missing:
@@ -3430,7 +3435,7 @@ def schema_annotations(row: dict, keys: tuple[str, ...]) -> dict:
 
 
 def emit_config_schema(decl: dict) -> str:
-    """The JSON Schema (draft 2020-12) of the run-time document: under `wz`, `policies` holds each
+    """The JSON Schema (draft 2020-12) of the run-time document: under `zext`, `policies` holds each
     policy a stage after the build decides (its `binding` is not `build`), as the enum of its
     values, and `limits` each limit that is not a capacity alone (`open_limits`) and that the
     build's machines read from a statement (`read = "snapshot"`; one read from the build would be
@@ -3440,8 +3445,9 @@ def emit_config_schema(decl: dict) -> str:
     document is checked against when it is applied, not here. `profile` is the enum of the
     declared profiles' ids, present only where the declaration states one. `key-ids` is the shape
     of the key ids every node shares, present where the declaration has `key-wire-form`.
-    `owned-address` is the node's own IPv4 address, which a zid the `address-ports` value of
-    `zid-derivation` derives is headed by."""
+    `version` is the version of the format the readers read, and `transport` what the links of a
+    session open on, both in every schema. `owned-address` is the node's own IPv4 address, which
+    a zid the `address-ports` value of `zid-derivation` derives is headed by."""
     policies = {}
     for pol in decl["policies"]:
         if pol["binding"] == "build":
@@ -3472,7 +3478,13 @@ def emit_config_schema(decl: dict) -> str:
             **schema_annotations(lim, ("kind", "driven", "storage", "scope", "binding_heap",
                                        "binding_fixed", "wire")),
         }
-    members: dict = {}
+    members: dict = {
+        "version": {
+            "description": ("The version of the document's format; this build reads version "
+                            f"{DOCUMENT_VERSION} and refuses any other."),
+            "const": DOCUMENT_VERSION,
+        },
+    }
     profiles = decl.get("profiles", [])
     if profiles:
         members["profile"] = {
@@ -3482,7 +3494,7 @@ def emit_config_schema(decl: dict) -> str:
         }
     members["policies"] = {"type": "object", "properties": policies, "additionalProperties": False}
     members["limits"] = {"type": "object", "properties": limits, "additionalProperties": False}
-    # `wz/key-ids`, read by a build with the `shared-key-ids` capability: its forms are the values
+    # `zext/key-ids`, read by a build with the `shared-key-ids` capability: its forms are the values
     # of `key-wire-form`, and how many entries a dictionary may have is the session's
     # MAX_SHARED_KEY_IDS, which the document's own `limits` may state, so the schema states no
     # bound of its own.
@@ -3522,7 +3534,7 @@ def emit_config_schema(decl: dict) -> str:
             },
             "additionalProperties": False,
         }
-    # `wz/owned-address`, read by every build: the reader refuses text that is no IPv4 address of
+    # `zext/owned-address`, read by every build: the reader refuses text that is no IPv4 address of
     # a node (the unspecified, a multicast and the broadcast address), which `format` does not say.
     members["owned-address"] = {
         "description": ("The node's own IPv4 address, dotted, which heads the zid "
@@ -3530,6 +3542,13 @@ def emit_config_schema(decl: dict) -> str:
                         "listener, so that a node that only dials derives one."),
         "type": "string",
         "format": "ipv4",
+    }
+    members["transport"] = {
+        "description": ("What the links of the session open on: the system's sockets, or the "
+                         "transport the program hands the open, which then refuses to open "
+                         "without it."),
+        "enum": list(DOCUMENT_TRANSPORTS),
+        "default": DOCUMENT_TRANSPORTS[0],
     }
     doc = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3542,7 +3561,7 @@ def emit_config_schema(decl: dict) -> str:
                         "limit no machine of the build reads from a statement are not here."),
         "type": "object",
         "properties": {
-            "wz": {
+            "zext": {
                 "type": "object",
                 "properties": members,
                 "additionalProperties": False,
@@ -4210,7 +4229,7 @@ def profiles_rust(pols: list[dict], profiles: list[dict]) -> list[str]:
                 f"    id: {rust_word(prof['id'])},"]
         out += ["    statements: &["] + lines + ["    ],"] if lines else ["    statements: &[],"]
         out.append("};")
-    out += ["", "/// Every profile the declaration states, which a document names by its id (`wz/profile`)."]
+    out += ["", "/// Every profile the declaration states, which a document names by its id (`zext/profile`)."]
     head = f"pub static PROFILES: [Profile; {len(profiles)}] ="
     return out + rust_static_array(head, [profile_const(prof) for prof in profiles])
 
@@ -5685,12 +5704,12 @@ Flush early.
 """
 
 
-# Two profiles over POLICY_SAMPLE; the upstream one lists its values out of the declaration's
+# Two profiles over POLICY_SAMPLE; the standard one lists its values out of the declaration's
 # order, which the generated table does not follow.
 PROFILE_SAMPLE = """\
 
 [[profile]]
-id = "upstream"
+id = "standard"
 help = '''
 Every policy at upstream's behaviour.
 '''
@@ -6736,11 +6755,11 @@ def cmd_selftest() -> int:
     expect("no limit is no import", "use crate" not in emit_rust_limit_bindings({"limits": []}))
     # The run-time document's schema: the policies and limits a stage after the build decides.
     schema = json.loads(emit_config_schema(dict(pdecl, limits=sdecl["limits"])))
-    spolicies = schema["properties"]["wz"]["properties"]["policies"]["properties"]
-    slimits = schema["properties"]["wz"]["properties"]["limits"]["properties"]
-    expect("the schema is draft 2020-12 and closed under `wz`",
+    spolicies = schema["properties"]["zext"]["properties"]["policies"]["properties"]
+    slimits = schema["properties"]["zext"]["properties"]["limits"]["properties"]
+    expect("the schema is draft 2020-12 and closed under `zext`",
            schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
-           and schema["properties"]["wz"]["additionalProperties"] is False)
+           and schema["properties"]["zext"]["additionalProperties"] is False)
     expect("a policy the open or a running node decides is in the schema with its values and binding",
            list(spolicies) == ["wire-mode", "eager-flush"]
            and spolicies["wire-mode"]["enum"] == ["os-default", "on", "off"]
@@ -6752,7 +6771,7 @@ def cmd_selftest() -> int:
     build_bound = decl_of(read_decl_toml(with_policy.replace(
         'binding = "open"\nmutability = "fixed"\n', 'binding = "build"\nmutability = "fixed"\n')))
     expect("a policy the build fixes is not in the schema",
-           list(json.loads(emit_config_schema(build_bound))["properties"]["wz"]["properties"]
+           list(json.loads(emit_config_schema(build_bound))["properties"]["zext"]["properties"]
                 ["policies"]["properties"]) == ["wire-mode"])
     expect("a bound a stage after the build decides is a count of at least 1 or `unbounded`",
            slimits["MAX_A"] == {"description": "A table.",
@@ -6765,11 +6784,11 @@ def cmd_selftest() -> int:
     built_only = [dict(sdecl["limits"][0], storage="capacity", binding_heap=stage)
                   for stage in ("open", "none")]
     expect("a capacity alone is not in the schema, whatever stage sizes it",
-           json.loads(emit_config_schema({"policies": [], "limits": built_only}))["properties"]["wz"]
+           json.loads(emit_config_schema({"policies": [], "limits": built_only}))["properties"]["zext"]
            ["properties"]["limits"]["properties"] == {})
     expect("a limit no machine reads from a statement is not in the schema",
            json.loads(emit_config_schema({"policies": [], "limits": [
-               dict(sdecl["limits"][0], read=LIMIT_READ_BUILD)]}))["properties"]["wz"]
+               dict(sdecl["limits"][0], read=LIMIT_READ_BUILD)]}))["properties"]["zext"]
            ["properties"]["limits"]["properties"] == {})
     expect("a description is the help's first sentence, a stop inside an address not ending it",
            first_sentence("A locator (for example udp/192.168.1.10:7447). A longer one\nis refused.")
@@ -6799,15 +6818,15 @@ def cmd_selftest() -> int:
            profile_refused('binding = "open"\nmutability = "fixed"\n',
                            'binding = "build"\nmutability = "fixed"\n',
                            "profile `quiet`: `eager-flush` is decided by the build alone"))
-    expect("the upstream profile that leaves out a policy a document may state is refused",
+    expect("the standard profile that leaves out a policy a document may state is refused",
            profile_refused('wire-mode = "os-default"\n', "",
-                           "profile `upstream`: states every policy a document may state, and "
+                           "profile `standard`: states every policy a document may state, and "
                            "leaves out wire-mode"))
-    expect("the upstream profile that states a policy off its default is refused",
+    expect("the standard profile that states a policy off its default is refused",
            profile_refused('wire-mode = "os-default"', 'wire-mode = "on"',
-                           "profile `upstream`: states `wire-mode` = 'on', and its default, "
+                           "profile `standard`: states `wire-mode` = 'on', and its default, "
                            "upstream's behaviour, is 'os-default'"))
-    expect("the upstream profile leaves out a policy only the build decides, and validates",
+    expect("the standard profile leaves out a policy only the build decides, and validates",
            validate_decl(read_decl_toml(with_profile.replace(
                'binding = "open"\nmutability = "fixed"\n', 'binding = "build"\nmutability = "fixed"\n')
                .replace('eager-flush = "off"\n', "").replace('eager-flush = "on"\n', ""))) == [])
@@ -6846,14 +6865,14 @@ def cmd_selftest() -> int:
     rprofiles = emit_rust_policies(profile_decl)
     expect("a profile is a constant whose statements follow the declaration's order of policies",
            "use crate::policy_document::{Profile, Statement};\n" in rprofiles
-           and "const PROFILE_UPSTREAM: Profile = Profile {\n    id: \"upstream\",\n"
+           and "const PROFILE_STANDARD: Profile = Profile {\n    id: \"standard\",\n"
                "    statements: &[\n        Statement::new(\"wire-mode\", \"os-default\"),\n"
                "        Statement::new(\"eager-flush\", \"off\"),\n    ],\n};\n" in rprofiles
            and "const PROFILE_QUIET: Profile = Profile {\n    id: \"quiet\",\n    statements: &[\n"
                "        Statement::new(\"eager-flush\", \"on\"),\n    ],\n};\n" in rprofiles)
     expect("a profile's doc is its help, and PROFILES holds every profile",
            "/// The profile `quiet`: Flush early, wire left alone.\nconst PROFILE_QUIET" in rprofiles
-           and "pub static PROFILES: [Profile; 2] = [PROFILE_UPSTREAM, PROFILE_QUIET];\n" in rprofiles)
+           and "pub static PROFILES: [Profile; 2] = [PROFILE_STANDARD, PROFILE_QUIET];\n" in rprofiles)
     expect("a statement past rustfmt's call width goes one argument a line",
            rust_statement("p" * 50, "v" * 20)
            == ["        Statement::new(", '            "' + "p" * 50 + '",',
@@ -6867,14 +6886,14 @@ def cmd_selftest() -> int:
            and "Statement" not in empty_profile)
     pschema = json.loads(emit_config_schema(dict(profile_decl, limits=sdecl["limits"])))
     expect("the schema names the profiles a document may start from, before its policies",
-           list(pschema["properties"]["wz"]["properties"])
-           == ["profile", "policies", "limits", "owned-address"]
-           and pschema["properties"]["wz"]["properties"]["profile"]["enum"] == ["upstream", "quiet"])
+           list(pschema["properties"]["zext"]["properties"])
+           == ["version", "profile", "policies", "limits", "owned-address", "transport"]
+           and pschema["properties"]["zext"]["properties"]["profile"]["enum"] == ["standard", "quiet"])
     expect("the schema names the node's own address as a dotted IPv4 string",
-           pschema["properties"]["wz"]["properties"]["owned-address"]["format"] == "ipv4"
-           and pschema["properties"]["wz"]["properties"]["owned-address"]["type"] == "string")
+           pschema["properties"]["zext"]["properties"]["owned-address"]["format"] == "ipv4"
+           and pschema["properties"]["zext"]["properties"]["owned-address"]["type"] == "string")
     expect("a declaration without a profile has no `profile` in the schema",
-           "profile" not in schema["properties"]["wz"]["properties"])
+           "profile" not in schema["properties"]["zext"]["properties"])
     # The domain a build allows each policy.
     weager = next(p for p in pdecl["policies"] if p["id"] == "eager-flush")
     wmode = next(p for p in pdecl["policies"] if p["id"] == "wire-mode")
@@ -7079,7 +7098,7 @@ def cmd_selftest() -> int:
     expect("a bound's `most` reaches its Kconfig range, its binding row, its schema and its domain",
            "\trange 0 65535\n" in emit_kconfig_limits(mdecl)
            and "    range: Some((0, 65535)),\n" in emit_rust_limit_bindings(mdecl)
-           and json.loads(emit_config_schema(mdecl))["properties"]["wz"]["properties"]["limits"]
+           and json.loads(emit_config_schema(mdecl))["properties"]["zext"]["properties"]["limits"]
            ["properties"]["MAX_A"]["oneOf"][0]["maximum"] == 65535
            and "LimitDomain::of_bound_within(Self::CAPACITY, 65535, Self::DEFAULT, DEFAULTS_ONLY)"
            in emit_rust_limit_snapshots(mdecl))
@@ -7186,17 +7205,17 @@ def cmd_selftest() -> int:
     expect("a bound's binding row states its driver",
            "    kind: LimitKind::Bound,\n    driven: Some(Driven::Remote),\n    range: None,\n"
            in emit_rust_limit_bindings(bdecl))
-    bound_schema = json.loads(emit_config_schema(bdecl))["properties"]["wz"]["properties"]["limits"]
+    bound_schema = json.loads(emit_config_schema(bdecl))["properties"]["zext"]["properties"]["limits"]
     expect("a bound's schema takes a count of at least 1 or `unbounded`",
            bound_schema["properties"]["MAX_A"]["oneOf"]
            == [{"type": "integer", "minimum": 1}, {"const": "unbounded"}])
-    param_schema = json.loads(emit_config_schema(pdecl))["properties"]["wz"]["properties"]["limits"]
+    param_schema = json.loads(emit_config_schema(pdecl))["properties"]["zext"]["properties"]["limits"]
     expect("a parameter's schema is an integer in its range",
            {k: param_schema["properties"]["MAX_A"][k] for k in ("type", "minimum", "maximum")}
            == {"type": "integer", "minimum": 1, "maximum": 8})
     cdecl = decl_of(read_decl_toml(limit_text(storage='"capacity"')))
     expect("a capacity alone is not in the schema and has no snapshot type",
-           "MAX_A" not in json.loads(emit_config_schema(cdecl))["properties"]["wz"]["properties"]
+           "MAX_A" not in json.loads(emit_config_schema(cdecl))["properties"]["zext"]["properties"]
            ["limits"]["properties"]
            and "pub struct MaxA;" not in emit_rust_limit_snapshots(cdecl))
     bsnap = emit_rust_limit_snapshots(bdecl)

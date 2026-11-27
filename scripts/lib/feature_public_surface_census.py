@@ -577,25 +577,25 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "below rather than to this sentence",
         # `clock-source` gates `pub mod clock_source`, whose three public items are wz's own
         # doors `zext_clock_source_register`, `zext_clock_source_unregister` and
-        # `zext_clock_report`, each `#[no_mangle] extern "C"` and declared in `wz_ext.h`. Like
+        # `zext_clock_report`, each `#[no_mangle] extern "C"` and declared in `zext.h`. Like
         # `admin-space` it is off by default; unlike it, upstream has no name for them.
         # `event-ring` gates `pub mod event_log`, whose public items are wz's own doors
         # `zext_event_emit`, `zext_event_read`, `zext_event_release` and
-        # `zext_event_dropped`, declared in `wz_ext.h`, off by default as `clock-source` is.
+        # `zext_event_dropped`, declared in `zext.h`, off by default as `clock-source` is.
         # `supervision` gates `pub mod supervision`, whose public items are wz's own doors
         # `zext_supervision_set_hook`, `_start`, `_feed`, `_stop`, `_check`, `_healthy` and
-        # `_state`, declared in `wz_ext.h`, off by default as `event-ring` is.
+        # `_state`, declared in `zext.h`, off by default as `event-ring` is.
         # `resource-snapshot` gates `pub mod snapshot`, whose public items are wz's own doors
         # `zext_snapshot_set_source`, `_poll`, `_size` and `_read`, and the types they take,
-        # declared in `wz_ext.h`, off by default as `supervision` is.
+        # declared in `zext.h`, off by default as `supervision` is.
         # `segment-sender` gates `pub mod segment_sender`, whose public items are wz's own doors
         # `zext_segment_sender_new`, `_put`, `_split`, `_next`, `_set`, `_loan`, `_move`,
         # `_drop`, `zext_segment_put_options_default` and the two `zext_internal_*` doors,
-        # and the types and constants they take, declared in `wz_ext.h`; off by default, as
+        # and the types and constants they take, declared in `zext.h`; off by default, as
         # upstream has no such doors.
         # `e2e-sender` gates `pub mod e2e_sender` and `e2e-receiver` gates `pub mod e2e_receiver`,
         # whose public items are wz's own doors `zext_e2e_sender_*` and `zext_e2e_receiver_*`,
-        # the types and constants they take, declared in `wz_ext.h` (what both share is the
+        # the types and constants they take, declared in `zext.h` (what both share is the
         # private `mod e2e`); `e2e-sender-demux` gates the receiver's two slot doors
         # `zext_e2e_receiver_counts` and `_slot_sender` inside it. Off by default in this ABI,
         # as upstream has no such doors.
@@ -606,28 +606,28 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `remote-declaration-watch` and `declarations-synced-event` each gate `pub mod
         # decl_watch` (either one is enough), whose public items are wz's own doors
         # `zext_decl_watch_declare` and `zext_decl_watch_drop`, the event struct, the owned
-        # watch and the constants they take, declared in `wz_ext.h`, off by default as the
+        # watch and the constants they take, declared in `zext.h`, off by default as the
         # observation plane's doors are.
         # `e2e-supervision` gates `pub mod stream_supervision`, whose public items are wz's own
         # doors `zext_stream_supervisor_new`, `_add`, `_received`, `_set_condition`,
         # `_set_sender_present`, `_set_callback`, `_poll`, `_stream_errors`, `_node_errors`,
         # `_phase`, `_notify`, `_start_task`, `_stop_task`, `_loan`, `_move`, `_drop` and the two
         # `zext_internal_*` doors, and the types and constants they take, declared in
-        # `wz_ext.h`; off by default, as upstream has no such doors.
+        # `zext.h`; off by default, as upstream has no such doors.
         # `app-transport` gates `pub mod app_transport`, whose public items are wz's own doors
         # `zext_transport_new`, `_received`, `_event`, `_accepted`, `_loan`, `_move`, `_drop`,
         # `zext_config_transport` and the two `zext_internal_transport_*` doors, and the types
-        # and constants they take, declared in `wz_ext.h`; off by default, as upstream has no such
+        # and constants they take, declared in `zext.h`; off by default, as upstream has no such
         # doors.
         # `time-base` gates `pub mod time_base`, whose public items are wz's own doors
         # `zext_time_base_new`, `_advanced`, `_loan`, `_move`, `_drop`,
         # `zext_config_time_base` and the two `zext_internal_time_base_*` doors, and the types
-        # they take, declared in `wz_ext.h`; off by default, as upstream has no such doors.
+        # they take, declared in `zext.h`; off by default, as upstream has no such doors.
         # `shared-key-ids` gates the doors `zext_config_key_ids` and
-        # `zext_config_key_wire_form_for` of `pub mod key_ids`, declared in `wz_ext.h`; off by
+        # `zext_config_key_wire_form_for` of `pub mod key_ids`, declared in `zext.h`; off by
         # default, as upstream has no such doors.
         # `config-document` gates the door `zext_config_document` of `pub mod config_policy`
-        # (its two siblings are in every build), declared in `wz_ext.h`; off by default, as
+        # (its two siblings are in every build), declared in `zext.h`; off by default, as
         # zenoh-pico reads no document and the door links a JSON5 reader.
         # `replay-cache` gates `pub mod replay_publisher` and `pub mod replay_subscriber`, whose
         # public items are wz's own doors `zext_replay_publisher_storage_size`, `_new`,
@@ -635,46 +635,46 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `zext_replay_serve_options_default`, `zext_replay_subscriber_options_default`,
         # `_new`, `_poll`, `_phase`, `_counts`, `_loan`, `_move`, `_drop` and the four
         # `zext_internal_replay_*` doors, and the types and constants they take, declared in
-        # `wz_ext.h`; off by default, as upstream has no such doors.
+        # `zext.h`; off by default, as upstream has no such doors.
         # `message-catalog` gates `pub mod message_catalog`, whose public items are wz's own doors
         # `zext_message_catalog_new`, `_len`, `_find`, `_find_id`, `_node`, `_entry`,
         # `_direction`, `_supervision_start_delay`, `_loan`, `_move`, `_drop`, the two
         # `zext_internal_message_catalog_*` doors, and, beside `e2e-sender`, `e2e-receiver` and
         # `e2e-supervision`, `_e2e_sender_new`, `_e2e_receiver_new`, `_supervision_rows` and
-        # `_supervise`, with the types and constants they take, declared in `wz_ext.h`; off by
+        # `_supervise`, with the types and constants they take, declared in `zext.h`; off by
         # default, as upstream has no such doors.
         # `instance-key` gates `pub mod instance_key`, whose public items are wz's own doors
         # `zext_instance_keyer_from_descriptor_set`, `_instances`, `_index`, `_flush`, `_counts`, `_last`,
         # `_set_last`, `_loan`, `_move`, `_drop`, `zext_instance_keyer_options_default` and the
         # two `zext_internal_instance_keyer_*` doors, and the types and constants they take,
-        # declared in `wz_ext.h`; `e2e-receiver` and `e2e-sender` gate its `_judge` and `_protect`
+        # declared in `zext.h`; `e2e-receiver` and `e2e-sender` gate its `_judge` and `_protect`
         # doors inside it. Off by default, as upstream has no such doors.
         # `message-payload` gates `pub mod message_payload`, whose public items are wz's own doors
         # `zext_payload_schema_from_descriptor_set`, `_loan`, `_move`, `_drop`, `zext_message_payload_new`,
         # `_options_default`, `_storage_size`, `_key_expr`, the six `_set_*` and six `_get_*` doors, `_count`, `_clear`, `_reset`,
         # `_encode`, `_decode`, `_refusal`, `_loan`, `_move`, `_drop`, the four `zext_internal_*`
-        # doors of the two handles, and the types they take, declared in `wz_ext.h`; off by
+        # doors of the two handles, and the types they take, declared in `zext.h`; off by
         # default, as upstream has no such doors.
         # `proto-text` gates the doors `zext_payload_schema_new` (inside `message-payload`'s
         # module) and `zext_instance_keyer_new` (inside `instance-key`'s), which read a schema
         # from `.proto` text, and, beside either of those two, `pub mod proto_file`, whose one
-        # public item is the `zext_proto_file_t` struct both take, declared in `wz_ext.h`; off
+        # public item is the `zext_proto_file_t` struct both take, declared in `zext.h`; off
         # by default, as upstream has no such doors and a schema is otherwise read from the
         # `FileDescriptorSet` `protoc` compiled.
         # `object-pool` gates `pub mod object_pool`, whose public items are wz's own doors
         # `zext_object_pool_bytes`, `_reserve`, `_class` and `_release`, the
         # `ZEXT_OBJECT_POOL_CLASSES` constant and the two structs they take, declared in
-        # `wz_ext.h`; `object-pool-region` gates its `zext_object_pool_place` door inside it. Off
+        # `zext.h`; `object-pool-region` gates its `zext_object_pool_place` door inside it. Off
         # by default, as upstream has no such doors.
         # Each of `e2e-sender`, `e2e-receiver`, `e2e-supervision`, `instance-key`,
         # `message-catalog` and `replay-cache` also gates `pub mod ext_interface`, the versioned
         # interface the doors of those capabilities reach the core through, whose public items are
         # wz's own doors `zext_interface_version`, `_session_facts`, `_bytes_view` and
-        # `_run_in_callback`, and the types and constants they take, declared in `wz_ext.h`; and
+        # `_run_in_callback`, and the types and constants they take, declared in `zext.h`; and
         # `pub mod additional`, whose public item is wz's own door `zext_additional_interface`.
         # `session-memory` gates `pub mod session_memory`, whose public items are wz's own doors
         # `zext_session_memory` and `zext_session_memory_row` and the two structs they write,
-        # declared in `wz_ext.h`; off by default, as upstream has no such doors.
+        # declared in `zext.h`; off by default, as upstream has no such doors.
         frozenset(
             {
                 "admin-space",

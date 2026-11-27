@@ -4,7 +4,7 @@
 //! `zext_supervision_*`: the node's supervisor, driven from C (the deadline the application
 //! feeds, an instrument of the observation plane).
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
 //! build without `unstable-api` carries none of it.
 //!

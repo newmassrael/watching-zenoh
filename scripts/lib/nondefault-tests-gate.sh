@@ -163,7 +163,7 @@ LEGS=(
     # `zenoh_config::` is the module the two instruments live in; the filter is
     # the module path so a test ADDED there is covered without touching this row.
     "wz-runtime-tokio|hook|zenoh-config|zenoh_config::"
-    # The document's `wz/key-ids`, read with the member's policies and written back by the export
+    # The document's `zext/key-ids`, read with the member's policies and written back by the export
     # (`zenoh_config::wz_member_tests`, its key-id tests built with `shared-key-ids`); the twin a
     # build without the capability runs is on the row above.
     "wz-runtime-tokio|hook|zenoh-config,shared-key-ids|zenoh_config::wz_member_tests::"
@@ -514,7 +514,7 @@ object-pool|files::ext_handles_across_threads::"
     # that lowers each limit, and each machine refusing the one past what it was lent.
     "wz-capi-pico|hook|config-document,supervision,e2e-supervision,message-catalog|config_policy::tests::a_runtime_document"
     # The same module in a build with the key ids a config states (`shared-key-ids`): the door's
-    # reading of `wz/key-ids` against the tree reader, and the arms that capability turns on in the
+    # reading of `zext/key-ids` against the tree reader, and the arms that capability turns on in the
     # other tests of the module, are compiled in no other build, so no row above runs them.
     "wz-capi-pico|hook|config-document,shared-key-ids|config_policy::tests::"
     "wz-capi-pico|hook|shared-key-ids|key_ids::"
@@ -565,7 +565,7 @@ object-pool|files::ext_handles_across_threads::"
     # stack, here the host's: an open that names no locator scouts for the budget and finds nobody,
     # where a build that cannot scout answers at once. The C1co lane runs the same file with `scout`.
     "wz-capi-pico|hook|-default,os-host,link-udp,scout-mcu,object-pool|--test=open_scouts_for_a_locator"
-    # A session's batch size stated by its config's document (`wz/limits`) through the document door:
+    # A session's batch size stated by its config's document (`zext/limits`) through the document door:
     # three pairs of sessions open at once in one process, each held on the wire to its own size, and a
     # size past the build's ceiling refused by name (`batch_size_per_session`, behind `config-document`
     # on top of the default `peer`). Two tests.
@@ -718,7 +718,7 @@ files::decl_watch_doors::"
     # tests (`time_base::tests`) and the integration file (`time_base_open`), an open whose connect
     # budget is the program's time and a node refused on one. The filter is the shared word.
     "wz-capi-c|hook|time-base|time_base"
-    # The config's `wz/key-ids` through this ABI's doors, read into what the open hands its
+    # The config's `zext/key-ids` through this ABI's doors, read into what the open hands its
     # session (`config::tests::wz_member`, its key-id tests built with `shared-key-ids`).
     "wz-capi-c|hook|shared-key-ids|config::tests::wz_member::"
     # The same document through the pico ABI's document door, over which its key-id doors go,
@@ -755,7 +755,7 @@ files::decl_watch_doors::"
     # which no leg named, so the census reported it as claimed by nothing. The filter is the module
     # path, so a test added there is covered.
     "wz-capi-core|hook|router-node,scout|open_plan::"
-    # The key ids a document's `wz/key-ids` hands the session the plan opens, and the node that
+    # The key ids a document's `zext/key-ids` hands the session the plan opens, and the node that
     # refuses them by name (`open_plan::`, built with `shared-key-ids`, the node's test with
     # `router-node` too). The same module path, so the row's build adds one feature to the row
     # above and a test added there under the feature is claimed.
@@ -1860,7 +1860,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # projection. The filters are the two modules' paths.
     "wz-session-core|hook|rx-lent-only,pubsub-put,query-reply|pubsub::in_place::"
     "wz-session-core|hook|rx-lent-only,pubsub-put,query-reply|reply::in_place::"
-    # The key ids every node of a deployment shares and the reader of a document's `wz/key-ids`
+    # The key ids every node of a deployment shares and the reader of a document's `zext/key-ids`
     # (`shared_key_ids`, a module built with `shared-key-ids` alone). Pure functions over a
     # dictionary and a parsed document; the filter is the module path. Its reply-frame tests also
     # need `codec-response` and its registry tests `pubsub-put`, so the leg builds both.
@@ -2276,7 +2276,7 @@ wz-session-core/query-reply-err|"
         internal,\
         unstable|"
     "zenoh|hook|shared-memory,unstable|"
-    # The configuration's `wz/key-ids`, which an open hands its session (`shared-key-ids`, no item
+    # The configuration's `zext/key-ids`, which an open hands its session (`shared-key-ids`, no item
     # of the surface): the one test of the reader behind it.
     "zenoh|hook|shared-key-ids|api::config::tests::the_members_key_ids_are_read_as_a_documents"
 )

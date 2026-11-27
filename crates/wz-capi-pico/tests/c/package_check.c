@@ -30,7 +30,7 @@
 
 #include <zenoh-pico.h>
 
-#include "wz_ext.h"
+#include "zext.h"
 
 static int checks = 0;
 static int failures = 0;

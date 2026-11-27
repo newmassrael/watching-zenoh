@@ -25,7 +25,7 @@ the same commit and profile and carry the same headers.
 | `release/lib/wz_capi_pico.lib` | its import library, which a program links |
 | `debug/bin/`, `debug/lib/` | the same three files of the debug build |
 | `include/zenoh-pico.h`, `include/zenoh-pico/` | zenoh-pico's own headers, with the `config.h` of this library's build |
-| `include/wz_ext.h` | the declarations of wz's own doors |
+| `include/zext.h` | the declarations of wz's own doors |
 | `examples/` | C programs that use the library, each a complete exchange that checks itself |
 | `config/` | a message catalog sample and the schemas of the catalog and of the run-time configuration |
 | `build-statement.json` | what this build is: every capability with whether it is in, every limit and policy value |
@@ -56,7 +56,7 @@ cl /std:c11 /DZENOH_WINDOWS /I include my_program.c release\lib\wz_capi_pico.lib
   its multi-threaded arm, its planes and sizes), which decide the size of every type a program
   allocates. A program compiled against another `config.h` allocates structs of another size, and
   the library writes past them.
-* A program that calls a `zext_*` door includes `wz_ext.h` after `zenoh-pico.h`. A program that
+* A program that calls a `zext_*` door includes `zext.h` after `zenoh-pico.h`. A program that
   does not include it is portable to zenoh-pico.
 
 ## One library or two
@@ -123,7 +123,7 @@ session; what it shares with the program's own thread the program locks, or it r
 through a ring or fifo channel and pulls them with the channel's `try_recv`. A program written for
 the single-threaded arm links a build of that arm, which this package is not: the two arms differ
 in the size of types a program allocates. The order a program with its own scheduler calls the
-run API in is written in `wz_ext.h`, in the section "the periodic run API", and
+run API in is written in `zext.h`, in the section "the periodic run API", and
 `examples\periodic.c` runs it. A program that opens its session without the read task steps it
 itself, once a cycle or more, with `zext_session_step`, whose bound is how long the step may wait
 for input; `examples\periodic_step.c` does, on a time base the program moves (`zext_time_base_*`).
@@ -132,7 +132,7 @@ A build on the cooperative engine (`os-host`) hands a put to the session's own s
 inside the put, as zenoh-pico does. A subscriber's callback is called with no lock of the library
 held, so it may run on two threads at once, and a put made inside a subscriber's callback that
 reaches that same subscriber calls the callback again from inside itself, before the put returns,
-as zenoh-pico's recursion does. The order of the callbacks is `wz_ext.h`'s section "callbacks".
+as zenoh-pico's recursion does. The order of the callbacks is `zext.h`'s section "callbacks".
 
 A liveliness subscriber declared with history is handed the tokens the session already knows
 inside the declaration, before its peers are asked for the rest, as zenoh-pico's is: on the
@@ -141,7 +141,7 @@ number, and from inside a callback as well.
 
 ## wz's own doors in this build
 
-Every door is declared in `wz_ext.h` with its arguments, its results and its refusals; a door of a
+Every door is declared in `zext.h` with its arguments, its results and its refusals; a door of a
 capability this build does not have is declared there too and does not link. The capabilities of
 this build are listed in `RELEASE-NOTES.md` and `build-statement.json`. Its extension doors:
 
@@ -188,7 +188,7 @@ What is wz's own is in `config\`:
   text of its own catalog to that door.
 * `message-catalog.schema.json`: the shape of a catalog, with the words of each refusal.
 * `wz-config.schema.json`: the policies and limits a stage after the build may decide, the shape
-  of the `wz` member of a configuration document (next section). Their values in this build are
+  of the `zext` member of a configuration document (next section). Their values in this build are
   in `build-statement.json`.
 
 ## Choosing policies and limits at run time
@@ -202,21 +202,27 @@ z_owned_config_t config;
 z_config_default(&config);
 zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, "tcp/192.0.2.1:7447");
 z_result_t rc = zext_config_document(z_config_loan_mut(&config),
-    "{ wz: { profile: \"upstream\", policies: { \"entity-timestamp-opt-in\": \"on\" } } }");
+    "{ zext: { profile: \"standard\", policies: { \"entity-timestamp-opt-in\": \"on\" } } }");
 if (rc != Z_OK) { /* refused: the config is as it was */ }
 z_open(&session, z_config_move(&config), NULL);
 ```
 
 The document is the zenoh JSON5 document a zenoh-c program opens with; this library reads only
-its `wz` member, so one file configures both. A program reads the file and hands its text to
-`zext_config_document`; a second call replaces the first. The members of `wz`, whose every
+its `zext` member, so one file configures both. A program reads the file and hands its text to
+`zext_config_document`; a second call replaces the first. The members of `zext`, whose every
 name and value `config\wz-config.schema.json` lists:
 
-* `profile`: a named set of policy values the session starts from. `upstream` states every
+* `profile`: a named set of policy values the session starts from. `standard` states every
   policy at upstream's behaviour, whatever this build's defaults are.
 * `policies`: a policy's id mapped to one of its values' ids, over the profile.
 * `limits`: a session limit's id mapped to a whole number or `"unbounded"`, over the build's.
 * `key-ids`: the key ids every node of the deployment shares (the shared-key-ids capability).
+* `version`: the version of the document's format, `1`; a document that states another is
+  refused.
+* `transport`: what the links of the session open on, `"system"` (the system's sockets, as when
+  nothing is stated) or `"application"`, the transport the program hands the config
+  (`zext_config_transport`); `z_open` refuses a config whose document states `"application"` and
+  that was handed none, and a library without that door refuses the document.
 
 A session's policies are composed lowest first: this build's defaults, the profile
 (`zext_config_profile`'s, else the document's), the document's `policies`, then each
@@ -224,7 +230,7 @@ A session's policies are composed lowest first: this build's defaults, the profi
 
 The door checks the document when it is handed, as the open will compose it, and answers
 `_Z_ERR_CONFIG_INVALID_VALUE` (-89), leaving the config with what it held before, for: text
-that is no JSON5 object; a `wz` member that is not an object, that names a member other than
+that is no JSON5 object; a `zext` member that is not an object, that names a member other than
 these four, or that names one twice; a profile, a policy, a value or a limit this build does
 not have; a value of a policy that this build's domain leaves out; a policy or a limit only the
 build decides; a limit of a runtime rather than of a session; a limit's value that is neither a

@@ -4,7 +4,7 @@
 //! `zext_snapshot_*`: the node's resource snapshot, taken and read from C (the sampled snapshot
 //! of the observation plane).
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
 //! build without `unstable-api` carries none of it.
 //!

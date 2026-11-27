@@ -403,7 +403,7 @@ pub const CONFIG_DOCUMENT_DEPTH: usize = generated::CONFIG_DOCUMENT_DEPTH;
 
 const _: () = assert!(
     CONFIG_DOCUMENT_DEPTH >= 3,
-    "a document's wz member reaches its policies and limits at a depth of 3"
+    "a document's zext member reaches its policies and limits at a depth of 3"
 );
 
 const _: () = assert!(

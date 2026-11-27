@@ -14,7 +14,7 @@
 //! | 6..8   | the lowest port a UDP listener of the node binds, little-endian |
 //! | 8..16  | random bytes, from the source an upstream zid is drawn from    |
 //!
-//! The node's own address is the one its configuration states (`wz/owned-address`, read by
+//! The node's own address is the one its configuration states (`zext/owned-address`, read by
 //! [`parse_owned_address`]), which a node that only dials has no listener to tell; a node that
 //! states none takes the address of the first of its listeners that binds one. A node with no
 //! listener of a protocol writes `0` for that port. The address must be one a peer can name the
@@ -34,7 +34,7 @@ pub const RANDOM_BYTES: usize = 8;
 /// Why an address cannot head a derived zid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZidDerivationError {
-    /// Neither the configuration (`wz/owned-address`) nor a listener gave the node an IPv4
+    /// Neither the configuration (`zext/owned-address`) nor a listener gave the node an IPv4
     /// address of its own.
     NoAddress,
     /// `0.0.0.0`: every address of the host, which names none of them.
@@ -49,7 +49,7 @@ impl core::fmt::Display for ZidDerivationError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let why = match self {
             Self::NoAddress => {
-                "neither `wz/owned-address` nor a listener names an IPv4 address of the node"
+                "neither `zext/owned-address` nor a listener names an IPv4 address of the node"
             }
             Self::Unspecified => "the unspecified address names no node",
             Self::Multicast => "a multicast group address names no node",
@@ -70,7 +70,7 @@ pub const fn admit_address(address: [u8; 4]) -> Result<(), ZidDerivationError> {
 }
 
 /// The configuration's member that states the node's own IPv4 address.
-pub const OWNED_ADDRESS_MEMBER: &str = "wz/owned-address";
+pub const OWNED_ADDRESS_MEMBER: &str = crate::ext_member!("owned-address");
 
 /// Why the text a configuration states as the node's own address is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

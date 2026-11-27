@@ -4,7 +4,7 @@
 //! `zext_config_device_requires`: what pico's open of a config would ask of the operating system
 //! (docs/target-build-contract.md T9), one JSON object with the manifest's keys.
 //!
-//! A door wz has and zenoh-pico does not, so it is `zext_*` and declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so it is `zext_*` and declared in `zext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
 //! build without `device-requires` (the zenoh-pico preset, the size-measured client builds)
 //! carries none of it, whether or not it has pico's unstable API.
@@ -106,6 +106,14 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, Refused> {
             "the open refuses this config: the build refuses a policy or limit it states",
         )
     })?;
+    #[cfg(feature = "app-transport")]
+    if let Some(code) = crate::session::transport_refused(cfg) {
+        return Err((
+            code,
+            "the open refuses this config: its document asks for the program's transport, and the \
+             config is handed none",
+        ));
+    }
     #[cfg(not(feature = "peer"))]
     if listen.is_some() || dial_whatami != WhatAmI::Client {
         return Err((

@@ -8,7 +8,7 @@ the two engines and in each of zenoh-pico's two threading arms. The example that
 `crates/wz-capi-pico/examples/c/periodic.c`, beside the read task; a session opened without it
 and stepped by the program, on a time base the program moves one period per cycle, is
 `crates/wz-capi-pico/examples/c/periodic_step.c`. The same order is written as a comment section
-of `crates/wz-capi-core/include/wz_ext.h` ("the periodic run API").
+of `crates/wz-capi-core/include/zext.h` ("the periodic run API").
 
 ## The two arms are two builds
 
@@ -22,7 +22,7 @@ one library serves one arm. The wz library follows: the `multi-thread` feature o
   dispatches the callbacks, checks the lease and sends the keep-alives. The program starts and
   stops it; `zp_read`, `zp_send_keep_alive`, `zp_send_join` and `zp_spin_once` are not in this
   arm. On the cooperative engine the program may instead open a session without its read task
-  and step it itself, once a cycle, with wz's door `zext_session_step` (`wz_ext.h`): one
+  and step it itself, once a cycle, with wz's door `zext_session_step` (`zext.h`): one
   library carries both ways, and each open picks one.
 - **Single-threaded.** There is no task. The program steps the session from its own loop with
   `zp_spin_once` (or the older `zp_read`, `zp_send_keep_alive` and `zp_send_join`), and the

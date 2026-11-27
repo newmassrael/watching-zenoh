@@ -5360,7 +5360,7 @@ mod tests {
     }
 
     /// A node that only dials has no listener: the address its configuration states
-    /// (`wz/owned-address`) heads the id, both port fields are `0`, as the address-ports rule
+    /// (`zext/owned-address`) heads the id, both port fields are `0`, as the address-ports rule
     /// writes them for a node with no listener of either protocol, and the random half follows.
     /// The stated address heads the id over a listener's too, whose ports still follow it.
     #[test]

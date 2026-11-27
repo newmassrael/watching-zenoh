@@ -2079,26 +2079,26 @@ mod config_disposition_tests {
         assert_eq!(ask("mode"), (Z_OK, WZ_CAPI_C_CONFIG_HONOURED));
     }
 
-    /// The paths of the document's `wz` member that the open reads are keys this library
+    /// The paths of the document's `zext` member that the open reads are keys this library
     /// honours; a path below the member that the open refuses is not, a limit whose machines
     /// still read the build's value among them.
     #[test]
     fn the_door_honours_the_paths_of_the_wz_member_the_open_reads() {
         for path in [
-            "wz",
-            "wz/profile",
-            "wz/policies",
-            "wz/policies/key-set",
-            "wz/limits",
-            "wz/limits/MAX_SUBSCRIPTIONS",
+            "zext",
+            "zext/profile",
+            "zext/policies",
+            "zext/policies/key-set",
+            "zext/limits",
+            "zext/limits/MAX_SUBSCRIPTIONS",
         ] {
             assert_eq!(ask(path), (Z_OK, WZ_CAPI_C_CONFIG_HONOURED), "{path}");
         }
         for path in [
-            "wz/colour",
-            "wz/limits/max",
-            "wz/limits/MAX_TASKS",
-            "wz/policies/no-such-policy",
+            "zext/colour",
+            "zext/limits/max",
+            "zext/limits/MAX_TASKS",
+            "zext/policies/no-such-policy",
         ] {
             assert_eq!(ask(path), (Z_OK, WZ_CAPI_C_CONFIG_UNKNOWN), "{path}");
         }
@@ -2111,7 +2111,7 @@ mod config_disposition_tests {
                     .map(|entry| (entry.id(), entry.read_from_snapshot())),
             );
         for (limit, read) in limits {
-            let path = format!("wz/limits/{limit}");
+            let path = format!("zext/limits/{limit}");
             let disposition = if read {
                 WZ_CAPI_C_CONFIG_HONOURED
             } else {

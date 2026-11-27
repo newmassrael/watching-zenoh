@@ -4,8 +4,8 @@
  *
  * A zenoh-pico C program whose sessions open no socket: two sessions in one process
  * joined by an in-memory transport this program implements through the wz extension
- * doors (zext_transport_*, wz_ext.h). Compiled against zenoh-pico's OWN headers for
- * this host plus wz_ext.h, linked against the wz cdylib built with the app-transport
+ * doors (zext_transport_*, zext.h). Compiled against zenoh-pico's OWN headers for
+ * this host plus zext.h, linked against the wz cdylib built with the app-transport
  * capability.
  *
  * Three joins, each carrying a put to a subscriber and a query to its reply:
@@ -27,7 +27,7 @@
 
 #include <zenoh-pico.h>
 
-#include "wz_ext.h"
+#include "zext.h"
 
 #define SEQUENCE 30
 #define MAX_PAIRS 8

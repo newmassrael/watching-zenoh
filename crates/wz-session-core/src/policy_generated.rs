@@ -806,14 +806,14 @@ impl Default for QueryUnanswerableFinal {
 /// `zid-derivation`: How a node makes its zid when the configuration states none. `random`
 /// draws all sixteen bytes, as upstream does. `address-ports` derives the first eight from
 /// where the node is reachable and draws the other eight: bytes 0 to 3 are the node's own
-/// IPv4 address, the one its configuration states as `wz/owned-address` or else the address
-/// of the first listen endpoint that binds an address of the node, bytes 4 and 5 the lowest
-/// port of its tcp listeners and bytes 6 and 7 the lowest port of its udp listeners, each
-/// little-endian and 0 for a node with no listener of that protocol. A wildcard, multicast
-/// or broadcast address names no node, and a node that states no address of its own and
-/// whose listeners name none is refused at open rather than given a random zid. A zid the
-/// configuration states is used under either value. Only the C ABIs' open reads this
-/// policy.
+/// IPv4 address, the one its configuration states as `zext/owned-address` or else the
+/// address of the first listen endpoint that binds an address of the node, bytes 4 and 5
+/// the lowest port of its tcp listeners and bytes 6 and 7 the lowest port of its udp
+/// listeners, each little-endian and 0 for a node with no listener of that protocol. A
+/// wildcard, multicast or broadcast address names no node, and a node that states no
+/// address of its own and whose listeners name none is refused at open rather than given a
+/// random zid. A zid the configuration states is used under either value. Only the C ABIs'
+/// open reads this policy.
 /// Upstream: Draws every byte of a zid the configuration does not state from its random
 /// source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -962,7 +962,7 @@ impl Default for HandshakeCookie {
 /// hold the same dictionary cannot read what `shared` sends, so both ends of the link must
 /// hold it. Every node that holds the dictionary reads an id only the dictionary names,
 /// whatever its own value. The value is the session's, and an endpoint the configuration
-/// dials or listens on may be stated a value of its own (wz/key-ids/links,
+/// dials or listens on may be stated a value of its own (zext/key-ids/links,
 /// zext_config_key_wire_form_for), which every link to or from that endpoint takes. A
 /// session opened with `shared`, for itself or an endpoint, and no dictionary is refused,
 /// and so is one whose value is not `declared` in a build without the capability, and a
@@ -4099,12 +4099,12 @@ pub static POLICIES: [PolicyEntry; POLICY_COUNT] = [
     PolicyEntry::of::<HeldPublishDrop>(),
 ];
 
-/// The profile `upstream`: Every policy at upstream's behaviour, stated explicitly, so a
+/// The profile `standard`: Every policy at upstream's behaviour, stated explicitly, so a
 /// document that names it behaves as the original whatever the build states as its
 /// defaults. Where upstream has no such behaviour, the value is the one wz had before the
 /// policy existed.
-const PROFILE_UPSTREAM: Profile = Profile {
-    id: "upstream",
+const PROFILE_STANDARD: Profile = Profile {
+    id: "standard",
     statements: &[
         Statement::new("multicast-loopback", "os-default"),
         Statement::new("tx-no-progress-deadline", "off"),
@@ -4142,5 +4142,5 @@ const PROFILE_UPSTREAM: Profile = Profile {
     ],
 };
 
-/// Every profile the declaration states, which a document names by its id (`wz/profile`).
-pub static PROFILES: [Profile; 1] = [PROFILE_UPSTREAM];
+/// Every profile the declaration states, which a document names by its id (`zext/profile`).
+pub static PROFILES: [Profile; 1] = [PROFILE_STANDARD];

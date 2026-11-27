@@ -4,7 +4,7 @@
  *
  * A network stack of the program's own under the sessions: the guide to plugging a TCP/IP
  * stack that is not the operating system's into the library, through the program's transport
- * (zext_transport_*; wz_ext.h, the section "the program's transport", states the contract).
+ * (zext_transport_*; zext.h, the section "the program's transport", states the contract).
  *
  * The file is in three parts. A program that brings its own stack keeps the shape of the second
  * and puts its stack in place of the first:
@@ -47,7 +47,7 @@
 
 #include <zenoh-pico.h>
 
-#include "wz_ext.h"
+#include "zext.h"
 
 #include "example_common.h"
 

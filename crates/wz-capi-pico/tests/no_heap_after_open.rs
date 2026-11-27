@@ -2371,7 +2371,7 @@ unsafe fn config_clone() {
     z_config_drop(z_config_move(&mut config));
 }
 
-/// A document the zenoh-c ABI reads too, of which this ABI reads the `wz` member. Synthetic.
+/// A document the zenoh-c ABI reads too, of which this ABI reads the `zext` member. Synthetic.
 #[cfg(feature = "config-document")]
 const DOCUMENT: &CStr = c"{ mode: \"peer\" }";
 

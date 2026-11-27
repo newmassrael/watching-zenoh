@@ -5,7 +5,7 @@
 //! under a profile and the program's header values, with the counter the sender keeps for each
 //! stream it sends on.
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h`, and part
 //! of the unstable surface: the `e2e-sender` capability implies `unstable-api`. The sender is
 //! [`wz_app_frame::e2e_stream_sender`]; ownership and threads are as `crate::e2e` describes.
 

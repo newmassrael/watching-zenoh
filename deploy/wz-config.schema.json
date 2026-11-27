@@ -5,13 +5,17 @@
   "description": "The policies and limits a document may state when a node opens or while it runs. A policy the build fixes, a limit only the build sizes, and a limit no machine of the build reads from a statement are not here.",
   "type": "object",
   "properties": {
-    "wz": {
+    "zext": {
       "type": "object",
       "properties": {
+        "version": {
+          "description": "The version of the document's format; this build reads version 1 and refuses any other.",
+          "const": 1
+        },
         "profile": {
           "description": "The profile the document starts from: a named set of policy values the build declares, which the document's own policies override.",
           "enum": [
-            "upstream"
+            "standard"
           ]
         },
         "policies": {
@@ -1726,6 +1730,14 @@
           "description": "The node's own IPv4 address, dotted, which heads the zid zid-derivation = address-ports derives in place of the address of a listener, so that a node that only dials derives one.",
           "type": "string",
           "format": "ipv4"
+        },
+        "transport": {
+          "description": "What the links of the session open on: the system's sockets, or the transport the program hands the open, which then refuses to open without it.",
+          "enum": [
+            "system",
+            "application"
+          ],
+          "default": "system"
         }
       },
       "additionalProperties": false

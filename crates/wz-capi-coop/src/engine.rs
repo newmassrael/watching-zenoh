@@ -410,7 +410,7 @@ pub struct CoopConfig<E = Vec<String>> {
     /// non-zero byte, as zenoh writes an id; `None` has the open make one as the session's
     /// policy says.
     pub zid: Option<SessionZid>,
-    /// The node's own IPv4 address as the config states it (`wz/owned-address`), which heads a
+    /// The node's own IPv4 address as the config states it (`zext/owned-address`), which heads a
     /// zid `zid-derivation = address-ports` derives in place of the address of a listener, so
     /// that a session that only dials derives one. `None` for a config that states none.
     pub owned_address: Option<[u8; 4]>,
@@ -579,7 +579,7 @@ fn clock_beside(
 
 /// The policies a session `CoopEngine::open` opens from `config` runs under: the one place that
 /// open decides them. The build defaults: the config is what the ABI read from its own keys and
-/// values, not a zenoh document with a `wz` member, and it has no field for a policy yet; the
+/// values, not a zenoh document with a `zext` member, and it has no field for a policy yet; the
 /// ABI's door for one is a key of its own.
 #[cfg(any(feature = "runtime-plan", feature = "listen", feature = "group", test))]
 pub(crate) fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {
@@ -625,7 +625,7 @@ pub enum OpenError {
     /// The configured zid is not one: it is not one to sixteen bytes, or its bytes are all zero.
     InvalidZid(ZidError),
     /// The session states no zid and its `zid-derivation` is `address-ports`, and neither its
-    /// config (`wz/owned-address`) nor its `listen` endpoints give the node an address a zid can
+    /// config (`zext/owned-address`) nor its `listen` endpoints give the node an address a zid can
     /// be built on.
     ZidDerivation(wz_session_core::zid_derivation::ZidDerivationError),
     /// The session's `key-wire-form` cannot be honoured: see [`KeyWireFormRefused`].

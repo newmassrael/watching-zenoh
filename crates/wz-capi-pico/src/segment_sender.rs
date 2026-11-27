@@ -5,7 +5,7 @@
 //! application's own is cut into the pieces whose header the profile declares, and the pieces are
 //! put on a publisher or handed to a callback, in order.
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: the
 //! `segment-sender` capability implies `unstable-api`.
 //!

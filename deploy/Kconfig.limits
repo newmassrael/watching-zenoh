@@ -457,7 +457,7 @@ config WZ_LIMIT_CONFIG_DOCUMENT_DEPTH
 	  (zext_config_document) may nest, the outermost object being 1: the reader
 	  walks the document keeping no tree, and this bounds the values it steps over.
 	  A deeper document is refused with _Z_ERR_CONFIG_INVALID_VALUE and the config
-	  keeps what it held. From 3, which the wz member's policies and limits take.
+	  keeps what it held. From 3, which the zext member's policies and limits take.
 
 config WZ_LIMIT_CONFIG_TEXT_BYTES
 	int "CONFIG_TEXT_BYTES"

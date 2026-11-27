@@ -4,9 +4,9 @@
 """R3440 (no register item) -- a drop-in header carries upstream's symbols only; wz's own are zext_.
 
 Drop-in and extension are separate namespaces: a drop-in header declares only what its upstream
-header declares, and a door wz has and upstream does not is `zext_*`, declared in `wz_ext.h`.
+header declares, and a door wz has and upstream does not is `zext_*`, declared in `zext.h`.
 Then "drop-in" is a claim a compiler can check: a program that includes the drop-in header and
-not `wz_ext.h` is portable to the upstream library, and one that needs `wz_ext.h` says so.
+not `zext.h` is portable to the upstream library, and one that needs `zext.h` says so.
 
     --check         check (also with no argument, the spelling the hook and run-ci.sh use)
     --selftest      every refusal on a fixture
@@ -24,7 +24,7 @@ UPSTREAM  the functions zenoh-pico's own header declares at the pinned source
           needed, and the header is read under three configurations whose union is the set:
           upstream's defaults, every switch on, and every switch on but single-threaded (the
           thread switch changes which functions exist rather than adding some).
-EXT       the functions `crates/wz-capi-core/include/wz_ext.h` declares, every one `zext_*`.
+EXT       the functions `crates/wz-capi-core/include/zext.h` declares, every one `zext_*`.
 
 A switch whose header needs a library the pinned source does not carry is left off in the
 all-on configuration, and is listed with the reason. The list is held too: a switch on it that
@@ -54,7 +54,7 @@ import upstream_switch_map as usm  # noqa: E402  the one reader of where a pico 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PICO = ROOT / "vendor" / "zenoh-pico"
 DROP_IN = ROOT / "crates" / "wz-capi-pico" / "include" / "wz_capi_pico.h"
-EXT = ROOT / "crates" / "wz-capi-core" / "include" / "wz_ext.h"
+EXT = ROOT / "crates" / "wz-capi-core" / "include" / "zext.h"
 EXT_PREFIX = "zext_"
 # The switches whose headers need what the pinned source does not carry.
 NEEDS_A_LIBRARY = {
@@ -150,7 +150,7 @@ def check(pico: pathlib.Path, drop_in: pathlib.Path, ext: pathlib.Path) -> list[
         findings.append(f"{drop_in.name} declares no function here: the reader stopped matching it")
     for name in sorted(ours - upstream):
         findings.append(f"{drop_in.name} declares {name}, which zenoh-pico's header does not"
-                        + (" (a wz door belongs in wz_ext.h)" if name.startswith(EXT_PREFIX) else ""))
+                        + (" (a wz door belongs in zext.h)" if name.startswith(EXT_PREFIX) else ""))
     if not ext.is_file():
         findings.append(f"{ext.relative_to(ROOT) if ext.is_relative_to(ROOT) else ext} is missing")
     else:
@@ -217,7 +217,7 @@ def cmd_selftest() -> int:
             "#if Z_FEATURE_EXTRA == 1\nint z_extra(void);\n#endif\n"
             '#if Z_FEATURE_LINK_TLS == 1\n#include "mbedtls/ssl.h"\n#endif\n', encoding="utf-8")
         drop_in = root / "drop.h"
-        ext = root / "wz_ext.h"
+        ext = root / "zext.h"
         ext.write_text("int zext_watch(void);\n", encoding="utf-8")
 
         def findings(drop_text: str) -> list[str]:
@@ -229,12 +229,12 @@ def cmd_selftest() -> int:
                findings(clean) == [])
         expect("a function upstream does not declare is a finding",
                any("z_invented" in f for f in findings(clean + "int z_invented(void);\n")))
-        expect("a wz door in the drop-in header is pointed to wz_ext.h",
-               any("belongs in wz_ext.h" in f for f in findings(clean + "int zext_watch(void);\n")))
+        expect("a wz door in the drop-in header is pointed to zext.h",
+               any("belongs in zext.h" in f for f in findings(clean + "int zext_watch(void);\n")))
         expect("an empty drop-in header is a finding, not a pass",
                any("declares no function" in f for f in findings("/* nothing */\n")))
         ext.write_text("int wz_watch(void);\n", encoding="utf-8")
-        expect("a function in wz_ext.h without the prefix is a finding",
+        expect("a function in zext.h without the prefix is a finding",
                any("not zext_*" in f for f in findings(clean)))
         ext.write_text("int zext_watch(void);\n", encoding="utf-8")
         (pico / "include" / "zenoh-pico.h").write_text(

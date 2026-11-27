@@ -6,7 +6,7 @@
 //! polls; a stream that stops arriving is told to the program's callback once per loss, with
 //! saturating error counts per stream and per node.
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: the
 //! `e2e-supervision` capability implies `unstable-api`.
 //!

@@ -35,7 +35,7 @@ use crate::ffi::guarded;
 use crate::result::{ZResult, Z_EGENERIC, Z_EIO, Z_ENULL, Z_EPARSE, Z_OK};
 use wz_capi_core::drive::ConfiguredZid;
 use wz_runtime_tokio::json5::Json5Value;
-use wz_runtime_tokio::zenoh_config::WZ_MEMBER;
+use wz_session_core::policy_document::EXT_MEMBER;
 
 /// zenoh-c's `mode` key (`Z_CONFIG_MODE_KEY`, `zenoh_constants.h:23`).
 pub(crate) const MODE_KEY: &str = "mode";
@@ -89,20 +89,20 @@ pub(crate) const SESSION_ZID_KEY: &str = "id";
 /// upstream refuses the same insert at the door). One reader cannot disagree
 /// with itself.
 ///
-/// # The `wz` member is held whole
+/// # The `zext` member is held whole
 ///
-/// A document's [`WZ_MEMBER`] is not a set of zenoh keys: it is wz's own document, which the open
+/// A document's [`EXT_MEMBER`] is not a set of zenoh keys: it is wz's own document, which the open
 /// resolves whole (`wz_session_core::policy_document::resolve_document`), and a leaf set cannot
 /// hold everything that resolution judges. JSON5 keeps a member stated twice, and the resolution
 /// refuses a policy or a member stated twice in it; a map of leaves keeps the later one and the
 /// refusal is gone, so the same text would open here and be refused by every other reader of it.
-/// The member is therefore kept as the values it was stated with, one per top-level `wz` member
-/// in the order stated, and a key below it (`wz/profile`, `wz/policies/<id>`, `wz/limits/<id>`)
-/// is a path into that tree ([`Self::insert`]).
+/// The member is therefore kept as the values it was stated with, one per top-level `zext` member
+/// in the order stated, and a key below it (`zext/profile`, `zext/policies/<id>`,
+/// `zext/limits/<id>`) is a path into that tree ([`Self::insert`]).
 #[derive(Debug, Default)]
 pub(crate) struct ConfigState {
     entries: BTreeMap<String, Json5Value>,
-    wz: Vec<Json5Value>,
+    ext: Vec<Json5Value>,
     /// The time base the program supplies (`wz_capi_c_config_time_base`), which the session
     /// opened from this config times its deadlines by in place of the system's clock. Not a key
     /// of the document: the program's object, held by reference.
@@ -110,16 +110,16 @@ pub(crate) struct ConfigState {
     pub(crate) time_base: Option<wz_capi_core::runtime::time_base::TimeBaseHold>,
 }
 
-/// An insert below the [`WZ_MEMBER`] whose path runs through a value that is not an object: a
+/// An insert below the [`EXT_MEMBER`] whose path runs through a value that is not an object: a
 /// tree has no place for it, and the value in the way is the caller's own statement, which an
 /// insert does not discard. Nothing is stored.
 #[derive(Debug)]
 pub(crate) struct ThroughAValue;
 
-/// The segments of `key` below the document's [`WZ_MEMBER`], none for the member itself, or
+/// The segments of `key` below the document's [`EXT_MEMBER`], none for the member itself, or
 /// `None` when `key` is not a path of that member.
-fn below_wz_member(key: &str) -> Option<Vec<&str>> {
-    let rest = key.strip_prefix(WZ_MEMBER)?;
+fn below_ext_member(key: &str) -> Option<Vec<&str>> {
+    let rest = key.strip_prefix(EXT_MEMBER)?;
     if rest.is_empty() {
         return Some(Vec::new());
     }
@@ -217,7 +217,7 @@ impl ConfigState {
     /// A merge here would make wz remember an instruction upstream forgot.
     ///
     /// The store of zenoh's keys; the doors store through [`Self::insert`], which takes a path
-    /// of the [`WZ_MEMBER`] to the member's tree instead.
+    /// of the [`EXT_MEMBER`] to the member's tree instead.
     fn insert_value(&mut self, key: &str, value: Json5Value) {
         let under = format!("{key}/");
         self.entries
@@ -231,14 +231,14 @@ impl ConfigState {
         }
     }
 
-    /// Store one json5 VALUE at `key`, as every door does: a path of the [`WZ_MEMBER`] into the
+    /// Store one json5 VALUE at `key`, as every door does: a path of the [`EXT_MEMBER`] into the
     /// member's tree, any other key into the leaves of zenoh's keys
     /// ([`Self::insert_value`]). Either replaces what stood at `key`, as upstream's insert does.
     /// Refused, storing nothing, when `key` runs below the member through a value that is not an
     /// object.
     fn insert(&mut self, key: &str, value: Json5Value) -> Result<(), ThroughAValue> {
-        match below_wz_member(key) {
-            Some(below) => self.insert_wz(&below, value),
+        match below_ext_member(key) {
+            Some(below) => self.insert_ext(&below, value),
             None => {
                 self.insert_value(key, value);
                 Ok(())
@@ -246,36 +246,38 @@ impl ConfigState {
         }
     }
 
-    /// Store `value` at `below` in the [`WZ_MEMBER`]: the member itself, every top-level `wz`
+    /// Store `value` at `below` in the [`EXT_MEMBER`]: the member itself, every top-level `zext`
     /// member giving way to the one statement, or a path into the member a reader of it takes,
     /// the last one stated, made when there is none.
-    fn insert_wz(&mut self, below: &[&str], value: Json5Value) -> Result<(), ThroughAValue> {
+    fn insert_ext(&mut self, below: &[&str], value: Json5Value) -> Result<(), ThroughAValue> {
         let Some((head, rest)) = below.split_first() else {
-            self.wz = vec![value];
+            self.ext = vec![value];
             return Ok(());
         };
         // Edited on a copy, so a refused insert leaves the member as it was.
-        let mut members = self.wz.clone();
+        let mut members = self.ext.clone();
         if members.is_empty() {
             members.push(Json5Value::Object(Vec::new()));
         }
         let last = members.len() - 1;
         set_below(&mut members[last], head, rest, value)?;
-        self.wz = members;
+        self.ext = members;
         Ok(())
     }
 
-    /// The value at `below` in the [`WZ_MEMBER`] a reader of it takes, the last one stated, as
+    /// The value at `below` in the [`EXT_MEMBER`] a reader of it takes, the last one stated, as
     /// `Json5Value::get` takes the later of a member stated twice; `None` when nothing is there.
-    fn wz_value(&self, below: &[&str]) -> Option<&Json5Value> {
-        below.iter().try_fold(self.wz.last()?, |at, step| match at {
-            Json5Value::Object(members) => members
-                .iter()
-                .rev()
-                .find(|(key, _)| key == step)
-                .map(|(_, value)| value),
-            _ => None,
-        })
+    fn ext_value(&self, below: &[&str]) -> Option<&Json5Value> {
+        below
+            .iter()
+            .try_fold(self.ext.last()?, |at, step| match at {
+                Json5Value::Object(members) => members
+                    .iter()
+                    .rev()
+                    .find(|(key, _)| key == step)
+                    .map(|(_, value)| value),
+                _ => None,
+            })
     }
 
     /// Whether storing `value` at `key` would put a value into a key whose own
@@ -352,8 +354,8 @@ impl ConfigState {
     /// not — and half a subtree would be a value the caller could re-insert to
     /// silently lose the rest.
     fn render(&self, key: &str) -> Option<String> {
-        if let Some(below) = below_wz_member(key) {
-            return self.wz_value(&below).map(Json5Value::to_json5_text);
+        if let Some(below) = below_ext_member(key) {
+            return self.ext_value(&below).map(Json5Value::to_json5_text);
         }
         if let Some(value) = self.entries.get(key) {
             return Some(value.to_json5_text());
@@ -413,9 +415,9 @@ impl ConfigState {
             let segments: Vec<&str> = key.split('/').collect();
             root.insert(&segments, value, key)?;
         }
-        // Each top-level `wz` member as it was stated, so the document read back, here or by any
+        // Each top-level `zext` member as it was stated, so the document read back, here or by any
         // other reader of it, resolves as the stated one does.
-        root.insert_repeated(WZ_MEMBER, &self.wz)?;
+        root.insert_repeated(EXT_MEMBER, &self.ext)?;
         let mut out = String::new();
         root.write(&mut out, 1, Layout::Indented);
         Ok(out)
@@ -425,7 +427,7 @@ impl ConfigState {
     fn deep_copy(&self) -> Self {
         Self {
             entries: self.entries.clone(),
-            wz: self.wz.clone(),
+            ext: self.ext.clone(),
             // A copy names the same time base, and holds it too.
             #[cfg(feature = "time-base")]
             time_base: self.time_base.clone(),
@@ -486,7 +488,7 @@ enum NestNode<'a> {
     /// A stored value, rendered by its own `to_json5_text` like any other.
     Leaf(&'a Json5Value),
     /// Values each written as a member of its own under the one key, in order: the top-level
-    /// `wz` members as stated, a member stated twice included.
+    /// `zext` members as stated, a member stated twice included.
     Repeated(&'a [Json5Value]),
     /// Named children, in key order.
     Branch(std::collections::BTreeMap<&'a str, NestNode<'a>>),
@@ -799,7 +801,7 @@ pub unsafe extern "C" fn zc_config_insert_json5(
         if ConfigState::refuses(key, &parsed) {
             return Z_EGENERIC;
         }
-        // A path below the `wz` member through a value that is not an object is refused at the
+        // A path below the `zext` member through a value that is not an object is refused at the
         // door with the same code, nothing stored. A statement the member can hold is judged at
         // the open, which fails with `Z_EINVAL` when the resolution refuses it.
         match state.insert(key, parsed) {
@@ -1038,12 +1040,13 @@ unsafe fn install_parsed(this_: *mut z_owned_config_t, text: &str) -> ZResult {
     let Json5Value::Object(members) = document else {
         return Z_EPARSE;
     };
-    // The `wz` members are held whole, each as stated (see `ConfigState`); the rest of the
+    // The `zext` members are held whole, each as stated (see `ConfigState`); the rest of the
     // document is zenoh's keys, decomposed into leaves.
-    let (wz, zenoh): (Vec<_>, Vec<_>) = members.into_iter().partition(|(key, _)| key == WZ_MEMBER);
+    let (ext, zenoh): (Vec<_>, Vec<_>) =
+        members.into_iter().partition(|(key, _)| key == EXT_MEMBER);
     let mut state = ConfigState {
         entries: BTreeMap::new(),
-        wz: wz.into_iter().map(|(_, value)| value).collect(),
+        ext: ext.into_iter().map(|(_, value)| value).collect(),
         // A document names no time base: one is the program's object, given by its own door.
         #[cfg(feature = "time-base")]
         time_base: None,
@@ -1059,7 +1062,7 @@ unsafe fn install_parsed(this_: *mut z_owned_config_t, text: &str) -> ZResult {
         if ConfigState::refuses(&path, leaf) {
             return Z_EPARSE;
         }
-        // A flat key spelled as a path of the `wz` member (`"wz/profile"`) is that path, as a
+        // A flat key spelled as a path of the `zext` member (`"zext/profile"`) is that path, as a
         // flat zenoh key is the nesting it spells; one through a value that is not an object
         // has no place, and the document does not read.
         if state.insert(&path, leaf.clone()).is_err() {
@@ -2119,7 +2122,7 @@ mod tests {
         assert_eq!(state.render("wz-fixture/beta").as_deref(), Some("77"));
     }
 
-    /// The document's `wz` member through the config doors: what the inserts and the document
+    /// The document's `zext` member through the config doors: what the inserts and the document
     /// doors store, the open reads as the policy-document resolution reads the same text, and
     /// the export reads back to the same member.
     mod wz_member {
@@ -2181,43 +2184,47 @@ mod tests {
             let quoted = format!("\"{value}\"");
             let quoted = quoted.as_str();
             let object = format!(
-                r#"{{ profile: "upstream", policies: {{ "subscriber-overload": "{value}" }} }}"#
+                r#"{{ profile: "standard", policies: {{ "subscriber-overload": "{value}" }} }}"#
             );
             let object = object.as_str();
-            let with_profile = format!(r#"{{ "wz": {object} }}"#);
+            let with_profile = format!(r#"{{ "zext": {object} }}"#);
             let with_profile = with_profile.as_str();
-            let policy_alone =
-                format!(r#"{{ "wz": {{ "policies": {{ "subscriber-overload": "{value}" }} }} }}"#);
+            let policy_alone = format!(
+                r#"{{ "zext": {{ "policies": {{ "subscriber-overload": "{value}" }} }} }}"#
+            );
             let policy_alone = policy_alone.as_str();
             let cases: Vec<(Vec<(&str, &str)>, &str)> = vec![
                 (
-                    vec![("wz/policies/subscriber-overload", quoted)],
+                    vec![("zext/policies/subscriber-overload", quoted)],
                     policy_alone,
                 ),
                 (
                     vec![
-                        ("wz/profile", "\"upstream\""),
-                        ("wz/policies/subscriber-overload", quoted),
+                        ("zext/profile", "\"standard\""),
+                        ("zext/policies/subscriber-overload", quoted),
                     ],
                     with_profile,
                 ),
-                (vec![("wz", object)], with_profile),
+                (vec![("zext", object)], with_profile),
                 (
                     vec![
-                        ("wz/policies/subscriber-overload", "\"block\""),
-                        ("wz/policies/subscriber-overload", quoted),
+                        ("zext/policies/subscriber-overload", "\"block\""),
+                        ("zext/policies/subscriber-overload", quoted),
                     ],
                     policy_alone,
                 ),
                 (
                     vec![
-                        ("wz", r#"{ policies: { "key-set": "open" } }"#),
-                        ("wz", object),
+                        ("zext", r#"{ policies: { "key-set": "open" } }"#),
+                        ("zext", object),
                     ],
                     with_profile,
                 ),
                 (
-                    vec![("wz", "null"), ("wz/policies/subscriber-overload", quoted)],
+                    vec![
+                        ("zext", "null"),
+                        ("zext/policies/subscriber-overload", quoted),
+                    ],
                     policy_alone,
                 ),
             ];
@@ -2247,30 +2254,30 @@ mod tests {
             // SAFETY: a config built through the C doors.
             let cfg = unsafe {
                 config_of(&[
-                    ("wz/profile", "\"upstream\""),
-                    ("wz/policies/key-set", "\"open\""),
+                    ("zext/profile", "\"standard\""),
+                    ("zext/policies/key-set", "\"open\""),
                 ])
             };
             // SAFETY: a live config.
             unsafe {
                 assert_eq!(
-                    get_text(&cfg, "wz/profile"),
-                    (Z_OK, String::from("\"upstream\""))
+                    get_text(&cfg, "zext/profile"),
+                    (Z_OK, String::from("\"standard\""))
                 );
                 assert_eq!(
-                    get_text(&cfg, "wz/policies"),
+                    get_text(&cfg, "zext/policies"),
                     (Z_OK, String::from("{\"key-set\":\"open\"}"))
                 );
                 assert_eq!(
-                    get_text(&cfg, "wz"),
+                    get_text(&cfg, "zext"),
                     (
                         Z_OK,
                         String::from(
-                            "{\"profile\":\"upstream\",\"policies\":{\"key-set\":\"open\"}}"
+                            "{\"profile\":\"standard\",\"policies\":{\"key-set\":\"open\"}}"
                         )
                     )
                 );
-                assert_eq!(get_text(&cfg, "wz/policies/event-ring-full").0, Z_EPARSE);
+                assert_eq!(get_text(&cfg, "zext/policies/event-ring-full").0, Z_EPARSE);
                 z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
             }
         }
@@ -2281,9 +2288,9 @@ mod tests {
         #[test]
         fn a_member_the_document_states_twice_is_refused_at_the_open_as_elsewhere() {
             for document in [
-                r#"{ wz: { policies: { "key-set": "open", "key-set": "closed" } } }"#,
-                r#"{ wz: { profile: "upstream" }, wz: {} }"#,
-                r#"{ wz: { policies: { "key-set": "open" }, policies: {} } }"#,
+                r#"{ zext: { policies: { "key-set": "open", "key-set": "closed" } } }"#,
+                r#"{ zext: { profile: "standard" }, zext: {} }"#,
+                r#"{ zext: { policies: { "key-set": "open" }, policies: {} } }"#,
             ] {
                 assert_eq!(resolved_as_document(document), None, "{document}");
                 // SAFETY: a document read through the C door.
@@ -2303,9 +2310,9 @@ mod tests {
         fn a_path_through_a_value_is_refused_at_the_door_and_stores_nothing() {
             // SAFETY: a config built through the C doors, and NUL-terminated strings.
             unsafe {
-                let mut cfg = config_of(&[("wz/profile", "\"upstream\"")]);
-                let key = std::ffi::CString::new("wz/profile/id").expect("no NUL");
-                let value = std::ffi::CString::new("\"upstream\"").expect("no NUL");
+                let mut cfg = config_of(&[("zext/profile", "\"standard\"")]);
+                let key = std::ffi::CString::new("zext/profile/id").expect("no NUL");
+                let value = std::ffi::CString::new("\"standard\"").expect("no NUL");
                 let rc = zc_config_insert_json5(
                     z_config_loan_mut(&mut cfg),
                     key.as_ptr(),
@@ -2315,24 +2322,75 @@ mod tests {
                 let rc = zc_config_insert_json5_from_substr(
                     z_config_loan_mut(&mut cfg),
                     key.as_ptr(),
-                    "wz/profile/id".len(),
+                    "zext/profile/id".len(),
                     value.as_ptr(),
-                    "\"upstream\"".len(),
+                    "\"standard\"".len(),
                 );
                 assert_eq!(rc, Z_EGENERIC);
                 assert_eq!(
-                    get_text(&cfg, "wz"),
-                    (Z_OK, String::from("{\"profile\":\"upstream\"}")),
+                    get_text(&cfg, "zext"),
+                    (Z_OK, String::from("{\"profile\":\"standard\"}")),
                     "a refused insert stores nothing"
                 );
                 z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
 
-                let (rc, _) = from_str(r#"{ wz: { profile: "upstream" }, "wz/profile/id": 1 }"#);
+                let (rc, _) =
+                    from_str(r#"{ zext: { profile: "standard" }, "zext/profile/id": 1 }"#);
                 assert_eq!(rc, Z_EPARSE);
 
                 // A member that is no object is a statement the door stores and the open refuses.
-                let cfg = config_of(&[("wz", "\"upstream\"")]);
+                let cfg = config_of(&[("zext", "\"standard\"")]);
                 assert_eq!(resolved_at_open(&cfg), None);
+                z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+            }
+        }
+
+        /// The member's `version` and `transport` reach the open through the insert door as a
+        /// document's do: the version this build reads and the system's sockets open, and another
+        /// version, or a transport of the program's, which this ABI is never handed, refuse the
+        /// open. Turned red by an open that drops either member.
+        #[test]
+        fn the_version_and_the_transport_reach_the_open() {
+            // SAFETY: configs built through the C doors, each dropped here.
+            unsafe {
+                let cfg = config_of(&[("zext/version", "1"), ("zext/transport", "\"system\"")]);
+                assert!(resolved_at_open(&cfg).is_some());
+                z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+                for refused in [("zext/version", "2"), ("zext/transport", "\"application\"")] {
+                    let cfg = config_of(&[refused]);
+                    assert_eq!(resolved_at_open(&cfg), None, "{refused:?}");
+                    z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+                }
+            }
+        }
+
+        /// The member under its retired name, stated by a document or by an insert, is no
+        /// statement of the member: the door stores it as zenoh's keys, and the open refuses the
+        /// config by the name of the member that is read. Turned red by a door that holds the
+        /// retired name as the member, or an open that drops it unread.
+        #[test]
+        fn the_retired_member_is_refused_at_the_open_naming_the_member_read() {
+            let refusal_of = |cfg: &z_owned_config_t| {
+                // SAFETY: a live owned config, only read here.
+                let state =
+                    unsafe { config_state(z_config_loan(cfg) as *mut _) }.expect("a live state");
+                let document = state.render_nested().expect("the config nests");
+                ZenohNodeConfig::from_json5(&document)
+                    .map(|_| ())
+                    .expect_err("the open refuses the retired member")
+                    .to_string()
+            };
+            // SAFETY: configs built through the C doors, each dropped here.
+            unsafe {
+                let (rc, cfg) = from_str(r#"{ wz: { policies: { "key-set": "open" } } }"#);
+                assert_eq!(rc, Z_OK);
+                let text = refusal_of(&cfg);
+                assert!(text.contains("belong in the member `zext`"), "{text}");
+                z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+
+                let cfg = config_of(&[("wz/policies/key-set", "\"open\"")]);
+                let text = refusal_of(&cfg);
+                assert!(text.contains("belong in the member `zext`"), "{text}");
                 z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
             }
         }
@@ -2345,15 +2403,15 @@ mod tests {
             let quoted = format!("\"{value}\"");
             // An image whose domain leaves out a value of the profile refuses it, and the round
             // trip then compares two refusals.
-            let upstream_allowed =
-                resolved_as_document(r#"{ wz: { profile: "upstream" } }"#).is_some();
+            let standard_allowed =
+                resolved_as_document(r#"{ zext: { profile: "standard" } }"#).is_some();
             for inserts in [
                 vec![
-                    ("wz/profile", "\"upstream\""),
-                    ("wz/policies/subscriber-overload", quoted.as_str()),
+                    ("zext/profile", "\"standard\""),
+                    ("zext/policies/subscriber-overload", quoted.as_str()),
                     ("mode", "\"peer\""),
                 ],
-                vec![("wz/policies/subscriber-overload", quoted.as_str())],
+                vec![("zext/policies/subscriber-overload", quoted.as_str())],
             ] {
                 // SAFETY: a config built through the C doors, its export read back by the
                 // document door; both are dropped here.
@@ -2365,21 +2423,25 @@ mod tests {
                     let (rc, back) = from_str(&document);
                     assert_eq!(rc, Z_OK, "{document}");
                     let resolved = resolved_at_open(&cfg);
-                    let names_the_profile = inserts.iter().any(|(key, _)| *key == "wz/profile");
+                    let names_the_profile = inserts.iter().any(|(key, _)| *key == "zext/profile");
                     assert_eq!(
                         resolved.is_some(),
-                        upstream_allowed || !names_the_profile,
+                        standard_allowed || !names_the_profile,
                         "{document}"
                     );
                     assert_eq!(resolved_at_open(&back), resolved, "{document}");
                     assert_eq!(resolved_as_document(&document), resolved, "{document}");
-                    assert_eq!(get_text(&back, "wz"), get_text(&cfg, "wz"), "{document}");
+                    assert_eq!(
+                        get_text(&back, "zext"),
+                        get_text(&cfg, "zext"),
+                        "{document}"
+                    );
                     z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
                     z_config_drop((&mut { back } as *mut z_owned_config_t).cast());
                 }
             }
             // A member stated twice is written twice and still refused once read back.
-            let twice = r#"{ wz: { profile: "upstream" }, wz: { policies: {} } }"#;
+            let twice = r#"{ zext: { profile: "standard" }, zext: { policies: {} } }"#;
             // SAFETY: as above.
             unsafe {
                 let (rc, cfg) = from_str(twice);
@@ -2387,7 +2449,7 @@ mod tests {
                 let mut out: crate::abi::z_owned_string_t = std::mem::zeroed();
                 assert_eq!(zc_config_to_string(z_config_loan(&cfg), &mut out), Z_OK);
                 let document = take_text(&mut out);
-                assert_eq!(document.matches("\"wz\":").count(), 2, "{document}");
+                assert_eq!(document.matches("\"zext\":").count(), 2, "{document}");
                 let (rc, back) = from_str(&document);
                 assert_eq!(rc, Z_OK, "{document}");
                 assert_eq!(resolved_at_open(&back), None, "{document}");
@@ -2417,7 +2479,7 @@ mod tests {
         /// `wz-capi-pico`'s `key_ids` tests), and the key ids it states: one document gives both
         /// ABIs equal key ids.
         #[cfg(feature = "shared-key-ids")]
-        const KEY_IDS_DOCUMENT: &str = r#"{ mode: "peer", wz: { "key-ids": {
+        const KEY_IDS_DOCUMENT: &str = r#"{ mode: "peer", zext: { "key-ids": {
             dictionary: [ { id: 40, key: "lab/rig" }, { id: 41, key: "lab/rig/alpha" } ],
             links: [ { locator: "tcp/192.0.2.7:7447", form: "literal" } ] } } }"#;
 
@@ -2435,7 +2497,7 @@ mod tests {
         }
 
         /// The document's key ids reach the open whether the document is read whole or its
-        /// `wz/key-ids` is inserted, as the member or as its two lists.
+        /// `zext/key-ids` is inserted, as the member or as its two lists.
         #[cfg(feature = "shared-key-ids")]
         #[test]
         fn a_documents_key_ids_reach_the_open_through_each_door() {
@@ -2446,10 +2508,10 @@ mod tests {
             unsafe {
                 let (rc, read) = from_str(KEY_IDS_DOCUMENT);
                 assert_eq!(rc, Z_OK);
-                let inserted = config_of(&[("wz/key-ids", member.as_str())]);
+                let inserted = config_of(&[("zext/key-ids", member.as_str())]);
                 let by_list = config_of(&[
-                    ("wz/key-ids/dictionary", dictionary),
-                    ("wz/key-ids/links", links),
+                    ("zext/key-ids/dictionary", dictionary),
+                    ("zext/key-ids/links", links),
                 ]);
                 for (cfg, door) in [
                     (&read, "zc_config_from_str"),
@@ -2464,29 +2526,33 @@ mod tests {
             }
         }
 
-        /// A refused part of `wz/key-ids` is taken by the insert door and refused at the open, in
+        /// A refused part of `zext/key-ids` is taken by the insert door and refused at the open, in
         /// the list that refuses the member's policies.
         #[cfg(feature = "shared-key-ids")]
         #[test]
         fn a_refused_key_ids_member_refuses_the_open() {
             // SAFETY: a config built through the C doors, live until dropped here.
             unsafe {
-                let cfg =
-                    config_of(&[("wz/key-ids/dictionary", r#"[ { id: 0, key: "lab/rig" } ]"#)]);
+                let cfg = config_of(&[(
+                    "zext/key-ids/dictionary",
+                    r#"[ { id: 0, key: "lab/rig" } ]"#,
+                )]);
                 assert_eq!(key_ids_at_open(&cfg), None);
                 assert_eq!(resolved_at_open(&cfg), None);
                 z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
             }
         }
 
-        /// A build without the capability refuses `wz/key-ids` at the open by name.
+        /// A build without the capability refuses `zext/key-ids` at the open by name.
         #[cfg(not(feature = "shared-key-ids"))]
         #[test]
         fn a_key_ids_member_is_refused_at_the_open_without_the_capability() {
             // SAFETY: a config built through the C doors, live until dropped here.
             unsafe {
-                let cfg =
-                    config_of(&[("wz/key-ids/dictionary", r#"[ { id: 40, key: "lab/rig" } ]"#)]);
+                let cfg = config_of(&[(
+                    "zext/key-ids/dictionary",
+                    r#"[ { id: 40, key: "lab/rig" } ]"#,
+                )]);
                 assert_eq!(resolved_at_open(&cfg), None);
                 z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
             }
