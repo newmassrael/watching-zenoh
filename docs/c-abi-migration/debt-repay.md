@@ -29,6 +29,13 @@ The debt names three sites, each read on main `df994d7913`:
    module of the peer tables was gated on `codec-declare` alone, while each of its tables needs a
    feature of its own, so a build with the codec and no table held five imports and the fixture
    `declares` that nothing called.
+4. Under the same command, `declare::local_token`'s unit tests: seven tests that hand
+   `respond_to_interest` or `dispatch_messages` an owned `InterestOwned` were gated on
+   `storage-profile` (one with `bounded-heapless`), while both readers are `alloc`, and the
+   module imported `hashbrown::HashMap`, a dependency only `alloc` brings, for every build. The
+   slot profile is `storage-profile` without `alloc`, so these named an unimported type and an
+   absent crate. The main session's run of arm 21 after D3 found it; D3 alone did not make that
+   arm green.
 
 No leg built any of these: Layer C1h builds the heap's forms or no session, and the slot profile
 is clippied only in its largest set (every feature beside it).
@@ -64,6 +71,7 @@ of it twice.
 | D4 | `5dda657e55` | Layer C1h: four clippy arms of the slot profile's small builds (section 3) |
 | D5 | `5e9b659c1c` | wz-runtime-coop's crate doc rewritten to link only what every build compiles; two module docs name a gated item as code; fourteen ledger lines dropped |
 | D6 | `aa4f7db8c5` | both release profiles say the advanced behaviours are on and why |
+| D7 | `e5c7de0d22` | `local_token`'s tests of the owned Interest parse carry its gate, `alloc`; the peer map's import comes with `alloc` (site 4) |
 
 ### 2.1 Why D1 is the structure and not a marker on the lifetime
 
@@ -110,7 +118,7 @@ So the leg is four C1h arms (D4):
 |---|---|---|
 | 19 | `-p wz-session-core --no-default-features --features session-slot,liveliness-token --lib` | site 2 |
 | 20 | `-p wz-session-core --no-default-features --features session-slot,session-unicast,liveliness-token --lib` | site 1 |
-| 21 | `-p wz-session-core --no-default-features --features session-slot,liveliness-token --all-targets` | site 3 |
+| 21 | `-p wz-session-core --no-default-features --features session-slot,liveliness-token --all-targets` | sites 3 and 4 |
 | 22 | `-p wz-session-core --no-default-features --features session-slot,session-unicast,liveliness-token,codec-push,rx-push,codec-response,codec-response-final,rx-response,codec-request --lib` | a small slot node |
 
 Not added, and why: `session-slot,session-unicast,liveliness-token --all-targets`. The debt read
@@ -147,9 +155,13 @@ in every build:
 The readers that call the combinators keep their own tests (`network_message`'s and its readers'),
 unchanged.
 
-### 4.3 D3 to D6
+### 4.3 D3 to D7
 
-D3 is a test file's gates; its tests are unchanged. D4 is the leg itself. D5 and D6 are docs and a
+D3 is a test file's gates; its tests are unchanged. D7 is a test module's gates: `alloc`
+implies `storage-profile`, so each moved test still compiles in every build that built it, and
+leaves only the slot profile without `alloc`, which never could. That profile keeps the tests of
+the no-heap staging (`respond_to_interest_borrowed`, the refused whole chain, the reply's
+keyexpr bound). Arm 21 is its check; no arm is added. D4 is the leg itself. D5 and D6 are docs and a
 profile's comments; D5's check is Layer C1bzr, whose ledger it lowers.
 
 ## 5. What the main session runs
@@ -167,9 +179,14 @@ Per commit, each a single command from the workspace root:
 - D5: `cargo doc --manifest-path crates/Cargo.toml -p wz-runtime-coop --no-deps` with
   `RUSTDOCFLAGS=-D warnings`; Layer C1bzr for the ledger.
 - D6: none (comments).
+- D7: `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,liveliness-token --all-targets -- -D warnings`;
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,liveliness-token --lib local_token::`;
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib local_token::` (the heap build keeps every test).
 
 ## 6. Left open
 
+- D1's `LentDeclaration::TokenReply` meets the group-link-writer lane's variant of the same name
+  (link and group form) at the merge, which takes that lane's form; nothing here builds on D1's.
 - `docs/win-budget/codec-scale.md` records the step that introduced `local_token::token_reply_len`;
   D1 removed it. That record is the codec-scale lane's and is left as written.
 - The ledger keeps wz-runtime-coop's two `session_drive.rs` findings (a redundant explicit link
