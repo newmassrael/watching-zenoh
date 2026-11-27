@@ -11,10 +11,15 @@
 //! Winsock has no `MSG_DONTWAIT`, so a read of a socket that blocks, which must not wait, asks
 //! `WSAPoll` first and reads only what it reports; a socket made non-blocking (the sockets of a
 //! group are) is read at once, `WSAEWOULDBLOCK` being nothing queued, as the stream seam reads.
-//! The bounded read of the drive loop is the same poll with the wait the link armed. Two answers
-//! of Winsock differ from a POSIX stack's and are made the same here: a datagram longer than the
-//! buffer is the buffer's length and not an error, and the report of an unreachable port a send
-//! brings back is turned off, where Windows would hand it to the next receive as a reset
+//! The bounded read of the drive loop is the same poll with the wait the link armed, but on a
+//! socket whose receive was made to wait (a group's joined socket, read by a reader of its own),
+//! where it is the one `recvfrom`, bounded by `SO_RCVTIMEO`, as zenoh-pico reads its group socket
+//! (`vendor/zenoh-pico/src/link/transport/udp/udp_multicast_windows.c` @
+//! `SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(tv)`).
+//!
+//! Two answers of Winsock differ from a POSIX stack's and are made the same here: a datagram longer
+//! than the buffer is the buffer's length and not an error, and the report of an unreachable port a
+//! send brings back is turned off, where Windows would hand it to the next receive as a reset
 //! connection and fail a read that has a datagram behind it.
 
 use core::ffi::c_int;
@@ -36,9 +41,13 @@ pub struct WindowsUdpSocket {
     socket: ws::SOCKET,
     local: SocketAddr,
     wait_ms: AtomicI32,
-    /// Whether the socket was made non-blocking (`make_nonblocking`): set before the socket is
-    /// handed to another thread, and never cleared.
+    /// Whether every call of the socket returns at once (`make_nonblocking`): set before the
+    /// socket is handed to another thread, and cleared only by the one reader of a socket whose
+    /// receive was made to wait, when its first receive that waits turns it back to blocking.
     nonblocking: AtomicBool,
+    /// Whether a receive that waits is the one `recvfrom`, bounded by `SO_RCVTIMEO`
+    /// (`make_receive_wait`), rather than a poll and the read of what it reported.
+    receive_waits: AtomicBool,
 }
 
 /// Turn off the report of an unreachable port on a datagram socket (`SIO_UDP_CONNRESET`): the
@@ -81,6 +90,7 @@ impl WindowsUdpSocket {
             local: at,
             wait_ms: AtomicI32::new(SERVICE_WAIT_MS),
             nonblocking: AtomicBool::new(false),
+            receive_waits: AtomicBool::new(false),
         };
         ignore_unreachable_reports(socket).map_err(WindowsNetError::ResetReport)?;
         if shared {
@@ -209,6 +219,25 @@ impl WindowsUdpSocket {
         Ok(())
     }
 
+    /// Make a receive that waits ([`DatagramSocket::recv_waiting`]) the one `recvfrom`, bounded by
+    /// the socket's receive timeout (`SO_RCVTIMEO`, armed here at the wait the socket holds):
+    /// `true` when the system took the option, `false` with the receive left to wait in a poll.
+    /// A socket made non-blocking is turned back to blocking by its first receive that waits and
+    /// not here: Winsock has no flag that keeps one read from waiting, so a socket reads at once in
+    /// one call or waits in one call, and one whose reader waits on it beside other links, in
+    /// `WSAPoll`, never waits in its receive and keeps the read of a non-blocking socket.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn make_receive_wait(&self) -> bool {
+        if self
+            .arm_receive_timeout(self.wait_ms.load(Ordering::Relaxed))
+            .is_err()
+        {
+            return false;
+        }
+        self.receive_waits.store(true, Ordering::Relaxed);
+        true
+    }
+
     /// Whether this host's other members of a group observe what this socket sends:
     /// `IP_MULTICAST_LOOP` or `IPV6_MULTICAST_LOOP`, each a `DWORD` on Windows.
     #[cfg(feature = "host-multicast")]
@@ -278,6 +307,35 @@ impl WindowsUdpSocket {
             0 => Err(WindowsNetError::NoPortChosen),
             port => Ok(port),
         }
+    }
+
+    /// Bound a receive of this socket that blocks by `ms` milliseconds (`SO_RCVTIMEO`, a `DWORD`
+    /// on Windows, never 0, which would be no bound): the code when the system refuses.
+    fn arm_receive_timeout(&self, ms: c_int) -> Result<(), i32> {
+        set_option(
+            self.socket,
+            ws::SOL_SOCKET,
+            ws::SO_RCVTIMEO,
+            &ms.unsigned_abs().max(1),
+        )
+    }
+
+    /// Whether a receive of this socket waits in its `recvfrom`: one whose receive was made to
+    /// wait, turned back to blocking here when it was made non-blocking. A socket the system
+    /// refuses to turn waits in a poll from then on.
+    fn waits_in_receive(&self) -> bool {
+        if !self.receive_waits.load(Ordering::Relaxed) {
+            return false;
+        }
+        if !self.nonblocking.load(Ordering::Relaxed) {
+            return true;
+        }
+        if super::set_nonblocking(self.socket, false).is_err() {
+            self.receive_waits.store(false, Ordering::Relaxed);
+            return false;
+        }
+        self.nonblocking.store(false, Ordering::Relaxed);
+        true
     }
 
     /// One `recvfrom` into `buf`, made once the socket has reported input or on a socket that
@@ -371,25 +429,34 @@ impl DatagramSocket for WindowsUdpSocket {
     const CAN_SET_RECEIVE_TIMEOUT: bool = true;
 
     /// A wait of no length is refused, where a POSIX socket would read it as "for ever": the link
-    /// then waits the tick, which is what it asked for at most.
+    /// then waits the tick, which is what it asked for at most. On a socket whose receive waits in
+    /// its `recvfrom` the option that bounds that receive is armed too.
     fn set_receive_timeout(&self, ms: c_int) -> bool {
         if ms <= 0 {
+            return false;
+        }
+        if self.receive_waits.load(Ordering::Relaxed) && self.arm_receive_timeout(ms).is_err() {
             return false;
         }
         self.wait_ms.store(ms, Ordering::Relaxed);
         true
     }
 
+    // The one `recvfrom` on a socket whose receive waits, a timeout being `WSAETIMEDOUT`, which
+    // `receive` reads as nothing; a poll of the armed wait first on any other.
     fn recv_waiting(&self, buf: &mut [u8]) -> Result<Option<Received>, WindowsNetError> {
-        if !poll_readable(self.socket, self.wait_ms.load(Ordering::Relaxed)) {
+        if !self.waits_in_receive()
+            && !poll_readable(self.socket, self.wait_ms.load(Ordering::Relaxed))
+        {
             return Ok(None);
         }
         self.receive(buf)
     }
 
     // A socket that does not block is read at once and answers `WSAEWOULDBLOCK` when nothing is
-    // queued: one call for each datagram, where a poll before the read made two. One that blocks
-    // is asked first, so the read does not wait.
+    // queued: one call for each datagram, where a poll before the read made two. One that blocks,
+    // which a receive that waits may have turned it back to, is asked first, so the read does not
+    // wait.
     fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, WindowsNetError> {
         if !self.nonblocking.load(Ordering::Relaxed) && !poll_readable(self.socket, 0) {
             return Ok(None);
@@ -644,6 +711,148 @@ mod tests {
             super::super::readable_polls(),
             polls + 1,
             "the reads of what is queued poll nothing"
+        );
+    }
+
+    /// A socket whose receive was made to wait reads in its `recvfrom`, with no poll before it: a
+    /// quiet socket waits the armed time out there, and a datagram that comes after is taken by
+    /// the one call. CONTROL: before any receive waited, the socket is still non-blocking and a
+    /// read that must not wait polls nothing. Turned red by a `recv_waiting` that polls a socket
+    /// whose receive waits, by one that reads it while it still returns at once (the time not
+    /// waited out), or by a `set_receive_timeout` that leaves the option unarmed.
+    #[cfg(feature = "host-multicast")]
+    #[test]
+    fn a_receive_made_to_wait_is_one_recvfrom_bounded_by_its_timeout() {
+        use std::time::{Duration, Instant};
+
+        let (a, b) = pair();
+        b.make_nonblocking().expect("non-blocking");
+        assert!(
+            b.make_receive_wait(),
+            "the system takes the receive timeout"
+        );
+        let mut buf = [0u8; 16];
+        let polls = super::super::readable_polls();
+        assert_eq!(b.try_recv(&mut buf), Ok(None), "CONTROL: nothing queued");
+        assert_eq!(
+            super::super::readable_polls(),
+            polls,
+            "CONTROL: still read at once, with no poll"
+        );
+
+        assert!(b.set_receive_timeout(300));
+        assert_eq!(
+            option(&b, ws::SOL_SOCKET, ws::SO_RCVTIMEO),
+            300,
+            "the receive is bounded by the option"
+        );
+        let started = Instant::now();
+        assert_eq!(b.recv_waiting(&mut buf), Ok(None), "nothing was sent");
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(150),
+            "the time was waited out in the receive, took {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(3),
+            "and bounded by it, took {waited:?}"
+        );
+        assert_eq!(
+            super::super::readable_polls(),
+            polls,
+            "the wait polled nothing"
+        );
+
+        a.send_to(b.local(), b"now").expect("a send");
+        assert!(b.set_receive_timeout(2_000));
+        let (len, src) = b
+            .recv_waiting(&mut buf)
+            .expect("a receive that timed out leaves the socket readable")
+            .expect("the datagram");
+        assert_eq!(&buf[..len], b"now");
+        assert_eq!(
+            src,
+            a.local(),
+            "the source is the sender's address and port"
+        );
+        assert_eq!(
+            super::super::readable_polls(),
+            polls,
+            "taken by the one recvfrom"
+        );
+    }
+
+    /// Once a receive that waits turned the socket back to blocking, a read that must not wait asks
+    /// it first and does not wait: nothing queued is answered at once, and a queued datagram is
+    /// taken. Turned red by a `try_recv` that reads such a socket with no poll first (it would wait
+    /// the armed receive timeout out), or by a turn to blocking that leaves the socket marked
+    /// non-blocking.
+    #[cfg(feature = "host-multicast")]
+    #[test]
+    fn a_read_that_must_not_wait_asks_a_socket_turned_blocking_first() {
+        use std::time::{Duration, Instant};
+
+        let (a, b) = pair();
+        b.make_nonblocking().expect("non-blocking");
+        assert!(b.make_receive_wait());
+        assert!(b.set_receive_timeout(20));
+        let mut buf = [0u8; 16];
+        assert_eq!(
+            b.recv_waiting(&mut buf),
+            Ok(None),
+            "the receive that turns the socket to blocking"
+        );
+        assert!(b.set_receive_timeout(3_000));
+        let polls = super::super::readable_polls();
+        let started = Instant::now();
+        assert_eq!(b.try_recv(&mut buf), Ok(None), "nothing queued");
+        assert!(
+            started.elapsed() < Duration::from_millis(1_000),
+            "and no wait, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            super::super::readable_polls(),
+            polls + 1,
+            "the read asked the socket first"
+        );
+        a.send_to(b.local(), b"now").expect("a send");
+        b.wait_readable(500);
+        let (len, ..) = b
+            .try_recv(&mut buf)
+            .expect("no error")
+            .expect("the queued datagram");
+        assert_eq!(&buf[..len], b"now");
+    }
+
+    /// A socket whose receive was not made to wait keeps its wait in a poll: the receive timeout is
+    /// the poll's alone, the option is left unarmed, and a non-blocking socket stays so. Turned red
+    /// by a `set_receive_timeout` or a `recv_waiting` that takes every socket for one whose
+    /// receive waits.
+    #[cfg(feature = "host-multicast")]
+    #[test]
+    fn a_receive_not_made_to_wait_waits_in_a_poll() {
+        let (_a, b) = pair();
+        b.make_nonblocking().expect("non-blocking");
+        assert!(b.set_receive_timeout(30));
+        assert_eq!(
+            option(&b, ws::SOL_SOCKET, ws::SO_RCVTIMEO),
+            0,
+            "no receive timeout is armed"
+        );
+        let mut buf = [0u8; 16];
+        let polls = super::super::readable_polls();
+        assert_eq!(b.recv_waiting(&mut buf), Ok(None));
+        assert_eq!(
+            super::super::readable_polls(),
+            polls + 1,
+            "the wait is the poll's"
+        );
+        assert_eq!(b.try_recv(&mut buf), Ok(None));
+        assert_eq!(
+            super::super::readable_polls(),
+            polls + 1,
+            "still non-blocking: read at once"
         );
     }
 

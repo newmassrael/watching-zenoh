@@ -58,6 +58,13 @@ impl MulticastSocket for WindowsUdpSocket {
         WindowsUdpSocket::make_nonblocking(self)
     }
 
+    // The one `recvfrom`, bounded by `SO_RCVTIMEO`; a read that must not wait asks the socket
+    // first once a receive that waits has turned it to blocking.
+    #[cfg(feature = "host-multicast")]
+    fn make_receive_wait(&self) -> bool {
+        WindowsUdpSocket::make_receive_wait(self)
+    }
+
     #[cfg(feature = "host-multicast")]
     fn set_multicast_loopback(&self, on: bool) -> Result<(), WindowsNetError> {
         WindowsUdpSocket::set_multicast_loopback(self, on)
@@ -180,6 +187,69 @@ mod tests {
             "a released link is not a failed one"
         );
         assert_eq!(transport.rx_error(), None);
+    }
+
+    wz_runtime_coop::with_heap_link_seams! {
+        /// A group's receive half on Winsock waits in its receive, as a POSIX host's does: the
+        /// joined socket, made non-blocking as a join makes it, waits the half's time out in its
+        /// `recvfrom`, keeps a member's datagram past what the group's own sender sent, and the
+        /// half's read that must not wait does not wait after. Turned red by a socket that takes no
+        /// receive that waits (`MulticastSocket::make_receive_wait` left to the provided `false`),
+        /// by a wait that returns at once, or by a read that must not wait and waits the armed
+        /// timeout out.
+        #[cfg(feature = "host-multicast")]
+        #[test]
+        fn a_groups_receive_half_waits_in_its_receive_past_its_own_datagrams() {
+            use crate::multicast::HostGroupTransport;
+            use std::time::{Duration, Instant};
+
+            let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+            let read = WindowsUdpSocket::bind(loopback).expect("a reading socket");
+            read.make_nonblocking().expect("non-blocking, as a joined socket is made");
+            let write = WindowsUdpSocket::bind(loopback).expect("a sending socket");
+            let member = WindowsUdpSocket::bind(loopback).expect("a member's socket");
+            let to = read.local();
+            let mut group = HostGroupTransport::new(read, write, to, None);
+            let mut half = group.split_receive().expect("the receive half");
+            assert!(
+                half.awaits_input(),
+                "Winsock's joined socket waits in its receive"
+            );
+            let started = Instant::now();
+            let mut now_us = || u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            let waited = Instant::now();
+            let since_us = now_us();
+            assert!(
+                !half.await_input(60_000, since_us, &mut now_us),
+                "nothing was sent"
+            );
+            assert!(
+                waited.elapsed() >= Duration::from_millis(30),
+                "the time was waited out in the receive, took {:?}",
+                waited.elapsed()
+            );
+            group.send_to_group(b"own");
+            member.send_to(to, b"member").expect("sent");
+            let since_us = now_us();
+            assert!(
+                half.await_input(5_000_000, since_us, &mut now_us),
+                "the member's datagram"
+            );
+            let mut seen = None;
+            assert!(half.recv_with(&mut |bytes, from| seen = Some((bytes.to_vec(), from))));
+            assert_eq!(
+                seen,
+                Some((b"member".to_vec(), member.local())),
+                "kept past the group's own datagram, and lent by the next receive"
+            );
+            let reading = Instant::now();
+            assert!(!half.recv_with(&mut |_, _| panic!("one member's datagram was sent")));
+            assert!(
+                reading.elapsed() < Duration::from_secs(2),
+                "the read that must not wait did not wait, took {:?}",
+                reading.elapsed()
+            );
+        }
     }
 
     #[test]

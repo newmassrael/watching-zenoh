@@ -23,7 +23,9 @@
 //! A socket is made non-inheritable (a child the program starts holds none of them, as a
 //! close-on-exec descriptor is not held by a program the process executes), and is waited on
 //! with `WSAPoll`: a read never blocks, a wait is bounded, and a write blocks until the stack has
-//! taken every byte, as the POSIX sockets of this crate do. Winsock is started on the first
+//! taken every byte, as the POSIX sockets of this crate do. A group's joined socket whose receive
+//! was made to wait waits in that receive instead, bounded by its receive timeout ([`net`]), and a
+//! read of it that must not wait still does not. Winsock is started on the first
 //! socket the process asks for and stays started for the life of the process.
 //!
 //! What the POSIX half has and this one does not: the console and panic glue of a `#![no_std]`
