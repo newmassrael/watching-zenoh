@@ -128,3 +128,9 @@ The lane states the tables' policy once, in the build script (`wz_lent`,
   subscriber tables are, and removes only the observer's field and the
   registry's region and counted forms. The imports (`Arena`, `LendRefused`,
   `Lent`, `KeySpace`, `LentKeys`) are restored as l3-queryable had them.
+- `crates/wz-runtime-coop/src/ip_stack.rs`: base-td's `IpLinks::closed`
+  was written before heap-native held a port's slots and a group's receive
+  buffers in the links themselves (`port_slots`, `group_rx`, lent by
+  `lend_port_rows` and `lend_group_rx`), so the merge left it without both
+  fields. It now carries them over as every other reshaping constructor does;
+  `port_slots` under `udp-listen`, which the failing builds did not enable.

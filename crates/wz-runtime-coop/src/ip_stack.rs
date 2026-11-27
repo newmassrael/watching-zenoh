@@ -793,6 +793,9 @@ where
             shape: self.shape,
             #[cfg(feature = "udp-listen")]
             ports: self.ports,
+            #[cfg(feature = "udp-listen")]
+            port_slots: self.port_slots,
+            group_rx: self.group_rx,
             datagrams: self.datagrams,
             waiter: self.waiter,
             set: core::marker::PhantomData,
