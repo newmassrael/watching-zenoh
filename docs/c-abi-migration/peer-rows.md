@@ -501,36 +501,69 @@ its own.
   `abort_rejected_channel` over `OnePeer` of its own (about 100 to 200); about even in every case
   whose Router is `OnePeer`, read in the explain reports.
 
-### 7.3 Why R2 and R4 wait for R1 to be built
+### 7.3 R2 and R4: the decisions, and why
 
 Both are wider than one crate's feature matrix can be written for without a compiler in the loop,
-and each holds a decision the code does not settle yet.
+and each held a decision the code did not settle. Each is decided here by the textbook criterion
+the owner set for the lane: no receive instruction is added to the client, and what a read on
+another thread finds is what it finds today. Each decision is written before its code.
 
-- **R2's table of one row.** `ManyFaces` keeps its places in a `Vec`
-  (`crates/wz-runtime-coop/src/faces.rs` @ `faces: Vec<TablePlace<F, D>>,`) and the client's
-  `OneFace` holds its face inline; one form bounded by the build is a new table, inline in the
-  engine's place for a bound of 1 and lent from the region or arena past it. Inline is what the
-  fold asks: with the bound a constant 1, a walk `for row in 0..N` is one turn and a row's index a
-  constant, but a row's address is a constant offset from the engine only if the table lies in the
-  engine's place, as `DirectFaces::dial` does now; a lent table adds a load of its base to every
-  reach of row 0, which the client's receive Ir would count.
-- **R2's one read body.** `read_dial` takes the one slot once and holds it across the wait;
-  `read_faces` takes every slot by a try to see that none is held, lets them go, waits, and takes
-  each again to turn it. With one row the second does not fold into the first: it is two takes of
-  the slot a read where the client makes one, more instructions on every read. One body that keeps
-  the client's count holds the slots it turns across the wait, which for several rows changes what
-  a read on another thread finds (`CoopEngine::held_elsewhere`, the quiet read): a decision about
-  section 8's reads, not a fold.
-- **R2's plan.** The dial role's face lies in the engine's place and the plan lays rows for the
-  faces past it alone (`ArenaPlan::lay_direct_faces`; `tests::arena`'s
-  `each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own` asserts it); row 0 in
-  the table moves a region's layout and the cost gate's lists (`link_turn`, `OneFace`).
-- **R4** puts the kernel and the link state in the row by value, where the binding reaches them by
-  shared handles today (`crates/wz-session-core/src/session_actions.rs` @
+- **R2's table of one row: inline for a bound of 1, lent past it.** `ManyFaces` keeps its places in
+  a `Vec` (`crates/wz-runtime-coop/src/faces.rs` @ `faces: Vec<TablePlace<F, D>>,`) and the client's
+  `OneFace` holds its face inline. With the bound a constant 1, a walk `for row in 0..N` is one turn
+  and a row's index a constant, but a row's address is a constant offset from the engine only if the
+  table lies in the engine's place, as `DirectFaces::dial` does now; a lent table adds a load of its
+  base to every reach of row 0, which the client's receive Ir would count. **Decided:** one table
+  type whose one parameter is where its rows lie (section 5.8's storage row: a preset of the build,
+  not a face's), chosen once a build: inline, one row, in the owner's place where the build's bound
+  is one row (no `listen`: a group is no row of the table before R5); reserved at the open past it
+  (the supervisor's places on the heap as today, the read slots lent from the arena, P3). The bodies
+  are one source, compiled once a build over its one storage; row 0 is held for the table's life by
+  construction (never vacant, never freed), so a reach of it reads no mark, and over the inline
+  storage every bound and index is a constant the compiler folds. A listening build's reach of row 0
+  then loads the table's base, which its reaches of every other row load today: one load a read,
+  none a message.
+
+- **R2's one read body: the slots held across the wait exactly where the bound is 1.** `read_dial`
+  takes the one slot once and holds it across the wait; `read_faces` takes every slot by a try to
+  see that none is held, lets them go, waits, and takes each again to turn it. With one row the
+  second does not fold into the first: two takes of the slot a read where the client makes one.
+  Holding every row's slot across the wait for several rows would keep a read on another thread from
+  turning any row while this read waits: section 8's reads in parallel, one row by one thread, would
+  be lost. **Decided:** one body, which holds the slot it turns across the wait where the read turns
+  row 0 and nothing else (a build that takes no face beside the dial role's and joins no group,
+  `crate::arena::TAKES_FACES` false) and otherwise lets the slots go before the wait and takes each
+  again by a try, as `read_faces` does. That is a constant of the build, so each build compiles one
+  arm: the client's read keeps its one take, and a build that listens or joins a group keeps its
+  reads as they are, a group's step taking the dial role's slot by a try after the faces
+  (`CoopEngine::read_groups`) as now. With one row and no group no other row exists for another
+  thread to turn, and a read on another thread that finds the one slot held waits behind it
+  (`CoopEngine::held_elsewhere`) exactly as it does today against `read_dial`.
+
+- **R2's plan: row 0 is laid with the table.** The dial role's face lies in the engine's place and
+  the plan lays rows for the faces past it alone (`ArenaPlan::lay_direct_faces`; `tests::arena`'s
+  `each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own` asserts it).
+  **Decided:** where the table is lent, the plan lays every row, row 0 among them, and the engine's
+  place holds the table's handle; where it is inline, the plan lays none and row 0 lies in the
+  engine's place as it does now. The chain buffers' share stays one a row read where it lies, so the
+  chain table is unchanged; the engine's place shrinks by a face where the arena grows by one, which
+  the explain reports read as the same bytes moved, not added. The cost gate's lists forbid
+  `link_turn` and `faces::OneFace` in every case once they are gone; a forbidden name no build can
+  link is held in the gate's table of pending controls, with why.
+
+- **R4's handles: the row's owner keeps them, a handle counts nothing.** The kernel and the link
+  state are reached by shared handles today (`crates/wz-session-core/src/session_actions.rs` @
   `pub core: R::Shared<SessionCore<R, T>>,`), held besides by the place's halves
   (`TransportState::place_halves`), the gates, and `resource-snapshot`'s count of the face
-  (`crates/wz-capi-coop/src/engine/direct.rs` @ `let count = KernelCount(CellRc::clone(&wire.actions.core));`):
-  three crates and every feature that reaches a kernel.
+  (`crates/wz-capi-coop/src/engine/direct.rs` @
+  `let count = KernelCount(CellRc::clone(&wire.actions.core));`): three crates and every feature
+  that reaches a kernel. **Decided:** the kernel and the link state are the row's fields by value,
+  the session slot's shape (`crates/wz-session-core/src/session_actions.rs` @
+  `pub core: SessionCore<R, T>,`); every other holder reaches them through a `PlacedRef` that counts
+  nothing, the row kept where it lies for the life of the link's session, which is the row's slot's
+  life; the place's halves and the count are such handles. A record's sequence number and gate are
+  then read through a field rather than through a counted handle: the same instructions or fewer a
+  message.
 
 ## 8. Where the cases end
 
