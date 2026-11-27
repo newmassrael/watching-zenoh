@@ -9126,6 +9126,23 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4725": {
+      "decision_summary": "Fill the Windows preset perf rows from their first readings, and make the\nprobe tell a pong's first CPU reading of 0 from no reading at all.",
+      "changes_bullets": [
+        "pico_perf_ceiling_windows.json: 84 rows from perf_matrix --gate.",
+        "perf_probe: a flag marks the first ping's CPU read (Windows ticks at 15.6 ms)."
+      ],
+      "verification_bullets": [
+        "pc3-win preset package 41988298bc: 26 win, 19 tie, 39 loss; gate passes.",
+        "two pong rows re-read with the fixed probe, 3 of 3 repetitions each."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
