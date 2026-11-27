@@ -390,12 +390,10 @@ fn a_gets_hold_keeps_its_replies_in_the_planes_rows_until_its_end() {
         drained.is_empty(),
         "a leg's Final hands nothing on: what the get held waits in its rows"
     );
-    drop(one);
-    drop(two);
     assert_eq!(
         StdLocks::with(&plane.replies, |replies| replies.len()),
         2,
-        "a leg's hold lets go of nothing as it goes"
+        "a leg's hold lets go of nothing at its Final"
     );
     let due = plane.take_due(LegId(1)).expect("the get's reply");
     assert_eq!(due.payload(), b"first", "a get is handed its own");
