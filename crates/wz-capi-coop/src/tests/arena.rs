@@ -1462,7 +1462,9 @@ fn interest_pool_laid_as_kept(config: &CoopConfig) {
 /// The pools of what the faces' peers write hold the fewer of the session's limit and what the
 /// faces could hold together, each at the bound of one peer: a session of one face lends what that
 /// face's tables held, a listener of four lends four faces' worth, and a session limit lowered at
-/// the open lowers its pool and no other, the faces' own tables untouched.
+/// the open lowers its pool and no other, the faces' own tables untouched. The arena lays the
+/// lowered pool out in fewer bytes where it lends the pools; where the tables take their memory on
+/// use the pools are counted and the plan lays out no row of them.
 #[cfg(any(feature = "listen", feature = "group"))]
 #[test]
 fn the_pools_hold_the_fewer_of_the_sessions_limit_and_what_its_faces_could() {
@@ -1522,10 +1524,19 @@ fn the_pools_hold_the_fewer_of_the_sessions_limit_and_what_its_faces_could() {
         (four.peers().pools.aliases, four.peers().rows),
         "the other pools and the faces' tables are untouched"
     );
+    #[cfg(wz_lent)]
     assert!(
         row(&at_one, "peer declaration pools").entry_bytes
             < row(&four, "peer declaration pools").entry_bytes,
         "the declarations' pools lent fewer rows"
+    );
+    #[cfg(wz_on_use)]
+    assert!(
+        at_one
+            .rows()
+            .chain(four.rows())
+            .all(|row| row.part() != "peer declaration pools"),
+        "the pools are counted, not laid out"
     );
 }
 
