@@ -1408,7 +1408,85 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   lodgings, the advanced cache's ring, and the count the engine keeps the arena by. The next steps
   of 3d take them in that order; the arena leaves with the last.
 
+### 7.28 3d, step 2: the reassembly chains on use, and the red of hn16
+
+- `3d8b5368d9` (the red of hn16): `OnceRows::get` and `made`, `rows`, `iter` and `OnceRow::get`
+  were compiled for `listen`, but their only readers outside the tests are the direct form's faces
+  (`engine/direct.rs`, `not(wz_round)`): a listening build that keeps the round compiled them with
+  no reader. `get` and `made` now read `all(feature = "listen", not(wz_round))`; `rows`, `iter`,
+  `OnceRow::get` and the `Ordering` import that or `all(test, feature = "std")`, where the
+  rooms' count of places made reads them.
+- `9dedb82d14`: `OwnStaging<SLOTS, CAP>` (`wz-session-core`, `chain_staging.rs`, `alloc`) is
+  the staging of a session whose tables take their memory on use: a chain takes a buffer of the
+  session's bound (`sized(bytes, chains)`, held to `CAP` and `SLOTS`) at its first fragment by a
+  fallible reservation (`Vec::try_reserve_exact`), never grows it, and gives it back when it ends;
+  a chain past the count of open chains or whose buffer the allocator refuses is refused and
+  counted (`refused`), which the Router answers as pool exhaustion, as zenoh-pico drops a chain
+  whose `_z_wbuf_make` fails. No spare buffer is kept after a chain ends: holding the bound for
+  idle chains is the lent form's resident cost, which the on-use form exists not to pay.
+  `KeptBytes` holds a table's cell or an owned buffer (`KeptBytes::own`), read where it lies; a
+  kept chain moves its buffer into it, so the chain's place is free at once and the buffer is the
+  delivery's. The bound this keeps: a Router's chains open are held to its share up to
+  `LENT_CHAINS`, as in the lent form; a message kept by the round is not counted against them (the
+  round keeps one at a time), so where a session lowers `REASSEMBLY_CHAINS` below
+  `SESSION_CHAIN_BUFFERS`, a chain that starts while a message is kept begins on use where the lent
+  table, one buffer held by the kept message, refuses it. D12's cost: one match on a rejoined
+  message's read (`KeptBytes::as_slice`, twice a message) and one on its drop.
+- `5a7c446e01`: `ChainStore` (`wz-runtime-coop`, `reassembly_rx.rs`) names, for a storage
+  policy, a Router's staging and the source the session holds to make it: `Lent` stages in the
+  table the open lent (`LentChainTable { cells, chains }`, `SessionChains`), `OnUse` in each
+  chain's own buffer (`HeapChains { bytes, chains }`, `OwnSessionChains`).
+  `SessionReassembly<P, S = SessionChains>` and `session_reassembly` are generic over the staging;
+  the transport's Router is staged as `TransportFaces::Policy` says (`Policy: Storage +
+  ChainStore`, `RouterOf<T>`), so the one fact (the policy) chooses both the endpoints' texts' rows
+  and the chains' buffers.
+- `1d678048fc`: the engine holds `ChainSource` (`<StatePolicy as ChainStore>::Source`) in its
+  transport tables and makes every Router of it (`chain_router`): the session's one Router, each
+  direct face's at the open (D12) or at its place's first face (on use). The plan lays out the
+  reassembly flags and buffers in D12 alone (`REASSEMBLY_ROWS`, the `put_table` in `lay_out`) and
+  counts the chains in both (`ArenaPlan::reassembly`), which size `HeapChains` on use.
+- Tests. wz-session-core `reassembly_dispatch::tests`:
+  `an_own_staging_takes_a_buffer_when_a_chain_starts_and_none_past_its_count` (red if `acquire`
+  passes the count, refuses uncounted, or `release` does not free the place),
+  `an_own_chain_stages_what_its_filler_wrote` (red if a chain is held to `CAP` and not to its
+  capacity, or a commit past the reservation is taken), `a_chain_past_the_own_bound_is_refused`
+  (red if the staging is sized to `CAP`), `a_kept_own_chain_is_handed_up_where_it_was_staged` (red
+  if `keep` copies, or holds the place while the buffer is kept); `byte_cells::tests`
+  `kept_bytes_of_an_own_buffer_are_read_where_it_lies` (red if `own` copies). wz-runtime-coop
+  `reassembly_rx::tests::an_on_use_router_stages_each_chain_in_a_buffer_of_its_own` (red if
+  `ChainStore for OnUse` sizes to the build's ceiling, or a kept message holds a place).
+  wz-capi-coop `tests::on_use::an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table`
+  (new; red if `TransportRows::lent_from` lends a table of chains on use, which `finish` refuses,
+  or sizes `HeapChains` off the plan), `an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts`
+  (the reassembly rows now among those not laid out; CONTROL the plan's count of chains);
+  `tests::arena` `the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_count_and_length`
+  is the lent form's alone, and `each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own`
+  reads the plan's count in both forms and the row in D12. `a_session_rejoins_as_many_chains_at_once_as_its_config_states`
+  runs on use unchanged: a share of one opens one chain at a time on either staging. The
+  allocator's refusal of a chain's buffer has no test: no allocator of the tests refuses a buffer
+  of the session's bound.
+- What the on-use arena still lays out after this step: the links' cells where the plan holds
+  them (none on use), the ABI's handle, entity places and lodgings, the advanced cache's ring, and
+  the count the engine keeps the arena by.
+
 ## 8. What the main session runs
+
+- 3d, step 2, the reassembly chains on use (`9dedb82d14`, `5a7c446e01`, `1d678048fc`) and the
+  red of hn16 (`3d8b5368d9`), not built or run by this lane. `cargo test --manifest-path
+  crates/Cargo.toml -p wz-session-core --features alloc,reassembly --lib reassembly_dispatch` (four
+  more) and `--lib byte_cells` (one more); `cargo test --manifest-path crates/Cargo.toml -p
+  wz-runtime-coop --features alloc,session-unicast,reassembly --lib reassembly_rx` (one more);
+  `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --features tables-on-use --lib
+  tests::on_use` (one more) and `--features listen,tables-on-use --lib tests::arena` (one fewer:
+  the lent table's test is the lent form's), `--lib tests::arena` in the default set (unchanged).
+  Clippy of wz-session-core (`--features alloc,reassembly` and the `fixed` set), wz-runtime-coop
+  (`--features alloc,session-unicast,reassembly`) and wz-capi-coop in its default set,
+  `--features tables-on-use`, `--features listen,tables-on-use`, `--features
+  udp-listen,tables-on-use` and `--features group-host`. Size: D12 a few bytes more (the
+  discriminant and match of `KeptBytes`); the on-use client smaller by the reassembly rows' lay-out
+  and lend and by `LentStaging`'s instantiation, larger by `OwnStaging`'s (one fallible
+  reservation and `Vec` appends, the allocator's code already linked). Receive Ir: an unfragmented
+  receive unchanged; a rejoined message two matches more in D12.
 
 - 3d, step 1, the endpoints' texts (`5b46c5a67b`), not built or run by this lane. `cargo test
   --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast --lib
@@ -1998,8 +2076,9 @@ The order that builds at each step:
    `PlaceRows::lent_from`, `SessionRows::lent_from`) are not compiled in it; the counts the plan
    reads off the limits (`ArenaPlan::count`, `tables`, `peers`, `gets`, `session`) stay, the
    on-use constructors' only input. The size case reads group A's figure here. Written, step 1
-   (7.27): the endpoints' texts by the state's policy, counted on use; the reassembly chains, the
-   ABI's places, the cache's ring and the arena's count are next.
+   (7.27): the endpoints' texts by the state's policy, counted on use; step 2 (7.28): the
+   reassembly chains by the policy's `ChainStore`, each chain's own buffer on use; the ABI's
+   places, the cache's ring and the arena's count are next.
 6. The zenoh-pico preset's own library on use (11.1, R1 to R4), and N5 once R1 builds (11.2).
 
 The pushes of the tables step 2's second half counts, and of the tables beside them in the same
