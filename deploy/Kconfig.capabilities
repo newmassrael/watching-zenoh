@@ -547,6 +547,20 @@ config WZ_CAP_TX_STREAM_OWED
 	  A stream link's send that never waits for its stream: the part of a frame the stream did not take is owed in the frame's slot and written by a later step, and the link answers a question of room from its stream within the message's own wait, as zenoh's queue does. Off, each frame is written whole by a send that waits for its stream, as zenoh-pico's link write does, and the link has room whenever it has a slot.
 	  Exported by: pico.
 
+config WZ_CAP_DIAL_IN_FLIGHT
+	bool "dial-in-flight"
+	default y
+	help
+	  A dial that does not hold the session: a stream link's connect is begun without waiting and asked at each later step, and a connect refused once under way passes to the next address its host resolved to. Off, a dial connects and waits in the call that begins it, walking the host's addresses there, as zenoh-pico's open does, so a connect the other end does not answer holds the open or the redial for as long.
+	  Exported by: pico.
+
+config WZ_CAP_DIAL_ADDRESS_READER
+	bool "dial-address-reader"
+	default y
+	help
+	  A dial reads the address its endpoint writes with wz's own reader, held to zenoh's grammar of a socket address, and hands the host's resolver names alone, a name being a text whose last label opens with a letter. Off, every host a dial names over a network that resolves, an address as well as a name, is handed to the resolver, as zenoh-pico hands it to getaddrinfo, so an address is read by the C library's grammar and a text it reads no address in is refused as a host it answers none for.
+	  Exported by: pico.
+
 config WZ_CAP_CONFIG_LIMITS
 	bool "config-limits"
 	default y
@@ -627,6 +641,13 @@ config WZ_CAP_FACE_SEND_PLACES
 	select WZ_CAP_PEER
 	help
 	  Each face its own send place: a put to one peer does not wait behind a send to another, a droppable one passes over a peer another send holds, and a declaration holds every peer's place before the session's (wz-own). Off, in the single-threaded library, every face shares one send place, the session's lock, as zenoh-pico sends to every peer under one transmit lock: a put is one leg that writes each peer in turn, and a declaration runs under that lock alone. The multi-threaded library keeps each face's place either way.
+	  Exported by: pico.
+
+config WZ_CAP_HANDSHAKE_REGIONS
+	bool "handshake-regions"
+	default y
+	help
+	  The region extensions of the unicast establishment (wz-own): the peer's region name on its Init and the bound it announces for this node on its Open, each read and a malformed one refusing the handshake, and the bound this node announces for the peer decided before its Open, as zenoh's establishment does. Off, neither is read, each skipped as an extension the build does not know, as zenoh-pico's decoder skips it, so a malformed one refuses nothing, and no bound is announced.
 	  Exported by: pico.
 
 endmenu

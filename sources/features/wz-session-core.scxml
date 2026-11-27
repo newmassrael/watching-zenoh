@@ -38,6 +38,7 @@
   <sce:feature name="codec-response-final"/>
   <sce:feature name="codec-scout"/>
   <sce:feature name="connect-endpoints"/>
+  <sce:feature name="declaration-sync-watch" requires="alloc"/>
   <sce:feature name="declarations-synced-event" requires="alloc"/>
   <sce:feature name="declare-final" requires="codec-declare"/>
   <sce:feature name="declare-interest" requires="alloc codec-declare"/>
@@ -52,6 +53,7 @@
   <sce:feature name="e2e-supervision"/>
   <sce:feature name="ext-pubsub-group-membership" requires="alloc wire-bincode"/>
   <sce:feature name="ext-pubsub-serde-codec" requires="alloc"/>
+  <sce:feature name="handshake-regions"/>
   <sce:feature name="initial-sn-compact"/>
   <sce:feature name="interest-answer"/>
   <sce:feature name="key-set-closed"/>
@@ -62,6 +64,7 @@
   <sce:feature name="keyexpr-wildcard-single"/>
   <sce:feature name="lifecycle-contract"/>
   <sce:feature name="limits-lent-at-open"/>
+  <sce:feature name="link-admission" requires="alloc"/>
   <sce:feature name="link-wire-reports"/>
   <sce:feature name="liveliness-get" requires="codec-declare rx-control"/>
   <sce:feature name="liveliness-subscriber" requires="codec-declare rx-control"/>
@@ -73,6 +76,7 @@
   <sce:feature name="peer-row-pools" requires="storage-profile"/>
   <sce:feature name="policy-selection"/>
   <sce:feature name="pool-monitor"/>
+  <sce:feature name="publish-statements"/>
   <sce:feature name="pubsub-attachment" requires="attachment-bytes"/>
   <sce:feature name="pubsub-congestion-control" requires="pubsub-qos"/>
   <sce:feature name="pubsub-delete" requires="codec-push"/>
@@ -129,7 +133,7 @@
   <sce:feature name="session-unicast-open"/>
   <sce:feature name="sha256-compact"/>
   <sce:feature name="shared-key-ids" requires="alloc"/>
-  <sce:feature name="south-subregions" requires="alloc"/>
+  <sce:feature name="south-subregions" requires="alloc handshake-regions"/>
   <sce:feature name="storage-profile"/>
   <sce:feature name="supervision"/>
   <sce:feature name="switchboard" requires="codec-push"/>

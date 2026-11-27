@@ -90,6 +90,8 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("tx-fragment-credit", &["core", "pico"]),
     ("tx-held-wait", &["core", "pico"]),
     ("tx-stream-owed", &["core", "pico"]),
+    ("dial-in-flight", &["core", "pico"]),
+    ("dial-address-reader", &["core", "pico"]),
     ("config-limits", &["core", "pico"]),
     ("interest-answer", &["core", "pico"]),
     ("transport_compression", &["core", "c"]),
@@ -101,6 +103,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("link-admission", &["core", "pico"]),
     ("accept-cookie", &["core", "pico"]),
     ("face-send-places", &["core", "pico"]),
+    ("handshake-regions", &["core", "pico"]),
 ];
 
 /// Each layout switch that is not a capability (`wz_config.arm_switches`) and the ABIs whose
