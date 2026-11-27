@@ -361,16 +361,17 @@ impl SegmentSender {
         Ok(())
     }
 
-    /// The number after `sent`, which a message has just carried.
+    /// The number after `sent`, which a message has just carried: the next one below the
+    /// field's largest, and past it the first number under [`Rollover::Restart`] or none under
+    /// [`Rollover::Refuse`]. The rule is the generated `counter_after`, which the end-to-end
+    /// stream sender shares; a reader tells a transfer from the one before by its number changing.
     fn after(&self, sent: u64) -> Option<u64> {
-        if sent < self.transfer_max() {
-            Some(sent + 1)
-        } else {
-            match self.rollover {
-                Rollover::Restart => Some(self.first),
-                Rollover::Refuse => None,
-            }
-        }
+        crate::sending_counter::counter_after(
+            sent,
+            self.transfer_max(),
+            self.rollover == Rollover::Restart,
+            self.first,
+        )
     }
 }
 

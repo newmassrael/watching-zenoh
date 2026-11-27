@@ -150,6 +150,27 @@ fn a_restarting_sender_goes_back_to_its_first_number() {
     assert_eq!(s.next(), Some(1), "back to the first number, never 0");
 }
 
+/// The rollover the segment sender shares with the end-to-end stream sender
+/// (`sources/algorithms/counter_after.scxml`), taken every time round: each
+/// restart goes back to the number the sender was made with, and a message
+/// refused at the largest number does not consume it.
+#[test]
+fn a_restarting_sender_counts_from_its_first_number_every_time_round() {
+    let mut s = sender(253, Rollover::Restart);
+    let seen: Vec<u64> = (0..8)
+        .map(|_| pieces(&mut s, &message(3), 8).0.transfer)
+        .collect();
+    assert_eq!(seen, [253, 254, 255, 253, 254, 255, 253, 254]);
+    s.set(255);
+    assert_eq!(
+        s.split::<()>(&[], 8, |_| Ok(())),
+        Err(SplitError::Refused(Refusal::EmptyMessage))
+    );
+    assert_eq!(s.next(), Some(255), "a refused message consumes no number");
+    assert_eq!(pieces(&mut s, &message(3), 8).0.transfer, 255);
+    assert_eq!(s.next(), Some(253));
+}
+
 #[test]
 fn a_refused_message_emits_nothing_and_consumes_no_number() {
     let mut s = sender(5, Rollover::Refuse);
