@@ -105,7 +105,7 @@ too: the preset's contract is zenoh-pico's.
 | B2 | T5 | form | the lease's deadlines read once, out of line, for `fire_due` and `next_due_ms` | -150 to -300 | must not rise: a call per turn is added, so only with a per-turn Ir reading | the perf matrix arm W |
 | W4 | T3 | work | the stray-message policy's replay of a held answer | -100 to -200 | none | **stopped** (section 6.4): already a switch, the policy's domain |
 | B5 | T6 | form | no Control barrier on one conduit | -60 to -150 | none | merging `sz-transport2` |
-| W3 | T3 | work | a dial's expected peer (the InitAck's zid against the node the dial was made for) | -80 to -150 | none | as W1 |
+| W3 | T3 | work | a dial's expected peer (the InitAck's zid against the node the dial was made for) | -80 to -150 | none | **stopped** (section 6.5): the MCU shell's dialer names it; its split is the shell's step |
 
 Together, the wz steps (B and W) are about -2,430 to -4,305 on the row with B3 and B4 as section
 5.3 splits them (-2,850 to -4,850 before that reading), S-SCE another -2,000 to -2,900; the rest of
@@ -348,3 +348,27 @@ every value. A capability beside the allowance would be a second switch of the o
 is added. The row's estimate was read before this domain was: if the case's line reading still
 shows a body of the replay, the domain the case was built with is the thing to read, not a new
 switch.
+
+### 6.5 W3, a dial's expected peer: stopped
+
+**Stopped, as the cut is not the transport's.** No key path of the pico ABI names a node a dial
+is made for: the cooperative engine of the C library sets no expectation, so a capability would
+switch nothing a program can ask for. The expectation is a property of the dialers that dial for
+a node, which is B1's and W5's shape (the session core's feature, named by them): the tokio
+runtime's mesh (`crates/wz-runtime-tokio/src/accept_loop.rs` @ `actions.expect_peer_zid(zid);`)
+and the MCU shell's dialers, whose connect manager dials a directory's nodes
+(`crates/wz-session-mcu/src/connect_manager.rs` @ `self.dialer.dial_for(&locator, zid)`;
+`crates/wz-session-mcu/src/dial.rs` @ `actions.expect_peer_zid(zid);` and
+`crates/wz-session-mcu/src/slot_host.rs` @ `opened.actions.expect_peer_zid(zid);`).
+
+That shape does not take the check out of the case: the cooperative engine names the shell's
+`dial` (`crates/wz-capi-coop/Cargo.toml`, its `wz-session-mcu` line), which is where its session
+core takes the opening role from (`dial = ["wz-session-core/connect-endpoints",
+"wz-session-core/session-unicast-open", ...]` in `crates/wz-session-mcu/Cargo.toml`), and the
+shell's `dial` compiles its dialers, which set expectations, so it would name the feature for
+every build that dials, the case's included. The step that cuts it is the shell's: its dial for a
+node (`dial_for` and `dial_expecting` of `dial.rs` and `slot_dial.rs`, the expected zid of
+`slot_host`'s `dial`, the connect manager's directory) made a feature of its own that names the
+session core's, which the images that dial a directory name, and the cooperative engine taking
+the opening role from the session core directly. It reaches the MCU images and the lwIP host, so
+it is not built in this lane.
