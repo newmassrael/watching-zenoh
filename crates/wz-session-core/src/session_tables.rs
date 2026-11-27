@@ -260,6 +260,16 @@ pub const FILTER_ROWS: usize = caps::MAX_PUBLISHERS
     .saturating_add(caps::MAX_QUERIERS)
     .saturating_add(caps::MAX_MATCHING_LISTENERS);
 
+/// The build's bound of the pending gets: a query's each and, where the build asks for liveliness
+/// snapshots (`liveliness-get`), a snapshot's each, every get of either kind a row of the one
+/// table.
+pub const PENDING_GET_ROWS: usize =
+    caps::MAX_PENDING_QUERIES.saturating_add(if cfg!(feature = "liveliness-get") {
+        caps::MAX_PENDING_LIVELINESS_GETS
+    } else {
+        0
+    });
+
 /// What a write filter or a matching listener counts: the subscribers, or the queryables, complete
 /// ones alone where the querier's target requires them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1532,8 +1542,7 @@ pub type MatchingListeners<F, P> =
 /// A pending get's row of a build's tables.
 pub type PendingGet<F, P> = PendingGetRow<<P as Storage>::Key, <F as RowCallbacks>::Reply>;
 /// The pending gets' table.
-pub type PendingGets<F, P> =
-    SlotMap<kind::PendingGet, PendingGet<F, P>, { caps::MAX_PENDING_QUERIES }, P>;
+pub type PendingGets<F, P> = SlotMap<kind::PendingGet, PendingGet<F, P>, PENDING_GET_ROWS, P>;
 
 /// How many rows each table holds: the values of the limits the session's open resolved, each
 /// under the build's bound.
@@ -1558,7 +1567,8 @@ pub struct TableRows {
     /// The matching listeners declared on a key, each with a write filter of its own:
     /// `MAX_MATCHING_LISTENERS` where the engine keeps such listeners, none where it does not.
     pub key_listeners: usize,
-    /// `MAX_PENDING_QUERIES`.
+    /// `MAX_PENDING_QUERIES` and, with `liveliness-get`, `MAX_PENDING_LIVELINESS_GETS`: a row
+    /// for each get, a query's or a snapshot's, under [`PENDING_GET_ROWS`].
     pub pending_gets: usize,
     /// `MAX_PENDING_REPLIES`: the replies the consolidating gets hold back, of all of them.
     pub held_replies: usize,
@@ -4495,9 +4505,8 @@ pub struct SessionRows<F: RowCallbacks> {
     matching: <F::FilterPresence as Presence>::Table<
         SlotRows<Matching<F>, { caps::MAX_MATCHING_LISTENERS }>,
     >,
-    pending_gets: <F::GetPresence as Presence>::Table<
-        SlotRows<PendingGet<F, Region>, { caps::MAX_PENDING_QUERIES }>,
-    >,
+    pending_gets:
+        <F::GetPresence as Presence>::Table<SlotRows<PendingGet<F, Region>, PENDING_GET_ROWS>>,
     #[cfg(feature = "storage-profile")]
     held: [core::mem::MaybeUninit<crate::reply_hold::HeldReply<PendingGetHandle, Region>>;
         caps::MAX_PENDING_REPLIES],

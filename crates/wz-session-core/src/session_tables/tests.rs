@@ -2018,6 +2018,37 @@ fn lent_tables_past_a_build_bound_are_refused() {
     ));
 }
 
+/// The gets' table holds a row for each query and, where the build asks for liveliness snapshots,
+/// each snapshot pending at once (`PENDING_GET_ROWS`), and refuses a row past them. Turned red by
+/// a table bound to the queries alone, which refuses the snapshots' rows of a build that asks for
+/// them.
+#[test]
+fn the_gets_table_holds_a_row_for_each_query_and_snapshot_pending() {
+    #[cfg(feature = "liveliness-get")]
+    assert_eq!(
+        PENDING_GET_ROWS,
+        caps::MAX_PENDING_QUERIES + caps::MAX_PENDING_LIVELINESS_GETS
+    );
+    #[cfg(not(feature = "liveliness-get"))]
+    assert_eq!(PENDING_GET_ROWS, caps::MAX_PENDING_QUERIES);
+    let within = TableRows {
+        pending_gets: PENDING_GET_ROWS,
+        ..small_rows()
+    };
+    let bytes = SessionTables::<Calls, Lent>::arena_bytes(&within).unwrap();
+    let mut whole = arena(bytes);
+    assert!(SessionTables::<Calls, Lent>::lent(&mut whole, keys(64), &within).is_ok());
+    let past = TableRows {
+        pending_gets: PENDING_GET_ROWS + 1,
+        ..small_rows()
+    };
+    let mut refused = arena(1 << 16);
+    assert!(matches!(
+        SessionTables::<Calls, Lent>::lent(&mut refused, keys(64), &past),
+        Err(LendRefused::OverCeiling { .. })
+    ));
+}
+
 /// A table refused past its build bound leaves the tables after it rowless: the arena keeps the
 /// key expressions' table lent before the refusal, and lends nothing after it. The CONTROL is the
 /// same rows within the bound, which take every table's span.
