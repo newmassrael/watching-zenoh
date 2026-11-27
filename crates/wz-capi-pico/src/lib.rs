@@ -478,8 +478,9 @@ pub mod config;
 // (`zext.h`) in a build with `config-policy`, which the zenoh-pico preset leaves out; without
 // them the open runs a session under the build's policies and limits.
 pub mod config_policy;
-// The limits a config states for its session through a numbered key (`zext.h`), in every build:
-// a session opens its tables at a few and a program that holds more names them before the open.
+// The limits a config states for its session through a numbered key (`zext.h`): a session opens
+// its tables at a few and a program that holds more names them before the open. The key's number
+// is in every build; only one with `config-limits` reads it, and one without opens at the bound.
 pub mod config_limits;
 #[cfg(feature = "connectivity")]
 pub mod connectivity;

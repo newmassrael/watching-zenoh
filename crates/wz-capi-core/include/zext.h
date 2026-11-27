@@ -98,8 +98,12 @@ z_result_t zext_config_document(z_loaned_config_t *config,
                                   const char *json5);
 
 /* The config key (zp_config_insert) whose value states the limits of the
- * session the pico ABI's z_open opens from the config, in every build of it,
- * the zenoh-pico preset included. A session opens its tables at a few, the
+ * session the pico ABI's z_open opens from the config, in a build with the
+ * config-limits capability. The zenoh-pico preset leaves it out: such a
+ * library holds the key as zenoh-pico holds a key it does not know, the
+ * insert recording it and the open reading none of it, and opens each table
+ * of every session at the bound below, what a statement could have raised it
+ * to. With the capability, a session opens its tables at a few, the
  * counts zenoh-pico's parity examples declare, and takes no memory after its
  * open; a program that holds more names them here before it opens, e.g.
  * "MAX_SUBSCRIPTIONS=4,MAX_PUBLISHERS=2": NAME=count items separated by

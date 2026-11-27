@@ -1765,6 +1765,20 @@ implies = []
 help = "A stream link's send that never waits for its stream: the part of a frame the stream did not take is owed in the frame's slot and written by a later step, and the link answers a question of room from its stream within the message's own wait, as zenoh's queue does. Off, each frame is written whole by a send that waits for its stream, as zenoh-pico's link write does, and the link has room whenever it has a slot."
 
 [[capability]]
+id = "config-limits"
+kconfig = "WZ_CAP_CONFIG_LIMITS"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's config is a map
+# of numbered keys that holds a key it does not know and whose open reads none, and its tables grow
+# on the heap, so no program of it states its counts. A library without it holds the key unread
+# and opens each table of every session at the preset's bound. Read by the pico ABI's own crate on
+# either engine, not a door: the key's number is in zext.h whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "ZEXT_CONFIG_LIMITS_KEY: the numbered config key by which a program states its session's limits and the values it holds apart from any session, judged at the insert and read by the open (wz-own). Off, the key is held unread as zenoh-pico's config holds a key it does not know, and every session opens each table at the preset's bound, what a statement could have raised it to."
+
+[[capability]]
 id = "transport_compression"
 kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
 os_needs = []

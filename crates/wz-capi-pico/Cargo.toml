@@ -115,6 +115,7 @@ default = [
     "tx-fragment-credit",
     "tx-held-wait",
     "tx-stream-owed",
+    "config-limits",
 ]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
@@ -672,6 +673,14 @@ tx-held-wait = ["wz-capi-core?/tx-held-wait", "wz-capi-coop?/tx-held-wait"]
 # stream within the message's wait. Off, each frame is written whole by a send that waits for the
 # stream, as zenoh-pico's link write does, and the link has room whenever it has a slot.
 tx-stream-owed = ["wz-capi-core?/tx-stream-owed", "wz-capi-coop?/tx-stream-owed"]
+# `config-limits`: the numbered key `ZEXT_CONFIG_LIMITS_KEY` (`zext.h`) by which a config states
+# its session's limits and, with process pools, the values a program holds apart from any
+# session, judged at the insert and read by the open (`src/config_limits.rs`). A parity contract
+# of the zenoh preset: on in a build that names nothing and off in the zenoh-pico preset, whose
+# config holds the key unread as zenoh-pico's holds a key it does not know, and whose every session
+# opens each table at the preset's bound (`session::opening_limits`). This crate reads the key on
+# either engine, so the core's feature only carries the name.
+config-limits = ["wz-capi-core?/config-limits"]
 # `config-document`: `zext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a

@@ -225,6 +225,8 @@ impl Counts {
 /// value of it, the most a statement may ask, the build reserving memory for no more.
 #[derive(Clone, Copy, Debug)]
 struct HeldRow {
+    /// Read by name only where the limits key states a count (`config-limits`) and by the tests.
+    #[cfg(any(test, feature = "config-limits"))]
     id: &'static str,
     build: usize,
     /// The pool that holds the value among a plan's, or [`POOLS`] where the build has none.
@@ -240,41 +242,49 @@ pub(crate) const HELD: usize = 8;
 /// first config is made before any open states anything.
 const HELD_ROWS: [HeldRow; HELD] = [
     HeldRow {
+        #[cfg(any(test, feature = "config-limits"))]
         id: "HELD_SAMPLES",
         build: caps::HELD_SAMPLES,
         pool: Kind::Sample as usize,
     },
     HeldRow {
+        #[cfg(any(test, feature = "config-limits"))]
         id: "HELD_REPLIES",
         build: caps::HELD_REPLIES,
         pool: REPLY_POOL,
     },
     HeldRow {
+        #[cfg(any(test, feature = "config-limits"))]
         id: "HELD_QUERIES",
         build: caps::HELD_QUERIES,
         pool: QUERY_POOL,
     },
     HeldRow {
+        #[cfg(any(test, feature = "config-limits"))]
         id: "HELD_ENCODINGS",
         build: caps::HELD_ENCODINGS,
         pool: Kind::Encoding as usize,
     },
     HeldRow {
+        #[cfg(any(test, feature = "config-limits"))]
         id: "HELD_HELLOS",
         build: caps::HELD_HELLOS,
         pool: HELLO_POOL,
     },
     HeldRow {
+        #[cfg(any(test, feature = "config-limits"))]
         id: "HELD_SMALL_PAYLOAD_BLOCKS",
         build: caps::HELD_SMALL_PAYLOAD_BLOCKS,
         pool: payload_pool(0),
     },
     HeldRow {
+        #[cfg(any(test, feature = "config-limits"))]
         id: "HELD_MEDIUM_PAYLOAD_BLOCKS",
         build: caps::HELD_MEDIUM_PAYLOAD_BLOCKS,
         pool: payload_pool(1),
     },
     HeldRow {
+        #[cfg(any(test, feature = "config-limits"))]
         id: "HELD_LARGE_PAYLOAD_BLOCKS",
         build: caps::HELD_LARGE_PAYLOAD_BLOCKS,
         pool: payload_pool(2),
@@ -358,6 +368,7 @@ impl Held {
     /// Set the count of the held value at `at` among [`HELD_ROWS`] to `count`: `false`, with
     /// nothing set, for a count past the build's value of it or a place past the last row. The
     /// limits key finds the place by the value's id among every statement's (`held_id`).
+    #[cfg(any(test, feature = "config-limits"))]
     pub(crate) fn select_at(&mut self, at: usize, count: usize) -> bool {
         let Some((row, held)) = HELD_ROWS.get(at).zip(self.0.get_mut(at)) else {
             return false;
@@ -378,6 +389,7 @@ impl Held {
 }
 
 /// The id of the held value at `at` among [`HELD_ROWS`], or `None` past the last.
+#[cfg(any(test, feature = "config-limits"))]
 pub(crate) fn held_id(at: usize) -> Option<&'static str> {
     HELD_ROWS.get(at).map(|row| row.id)
 }

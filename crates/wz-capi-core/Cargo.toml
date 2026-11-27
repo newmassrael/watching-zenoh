@@ -91,6 +91,8 @@ default = [
     "tx-fragment-credit",
     "tx-held-wait",
     "tx-stream-owed",
+    # The numbered key that states a session's limits (`config-limits`), read by the pico ABI.
+    "config-limits",
     "config-verdict",
     "transport_compression",
     "auth_usrpwd",
@@ -326,6 +328,9 @@ tx-held-wait = []
 # engine's stream links write through their own queue whatever is named, so the feature only
 # carries the capability's name.
 tx-stream-owed = []
+# The numbered key a pico config states its session's limits by (`wz-capi-pico/config-limits`):
+# the pico ABI's own crate reads it on either engine, so the feature only carries the name.
+config-limits = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

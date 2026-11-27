@@ -370,8 +370,8 @@ session::tests::a_declaration_event_names_the_peer_that_was_connected_when_it_ar
     # `resource-snapshot,peer,query,admin-space` leg's.
     "wz-capi-pico|hook|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
 multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
-unstable-api,connectivity,config-policy,conformance-digest,device-requires,admin-space,\
-transport-link-quic,transport-link-serial,transport-link-tls,transport-link-unixpipe,\
+unstable-api,connectivity,config-policy,conformance-digest,device-requires,config-limits,\
+admin-space,transport-link-quic,transport-link-serial,transport-link-tls,transport-link-unixpipe,\
 transport-link-ws|"
     # The merged test executable `it` requires the pools' door (`object-pool`), its harness
     # reserving through it the share of the programs it runs in one process (the crate's
@@ -381,8 +381,8 @@ transport-link-ws|"
     "wz-capi-pico|hook|object-pool|--test-target=it"
     "wz-capi-pico|hook|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
 multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
-unstable-api,connectivity,config-policy,conformance-digest,device-requires,admin-space,\
-transport-link-quic,transport-link-serial,transport-link-tls,transport-link-unixpipe,\
+unstable-api,connectivity,config-policy,conformance-digest,device-requires,config-limits,\
+admin-space,transport-link-quic,transport-link-serial,transport-link-tls,transport-link-unixpipe,\
 transport-link-ws,object-pool|--test-target=it"
     # The files of `it` that only a whole-crate or a module-name leg of their feature reached
     # before the target required the door: each by name, with it.
@@ -593,8 +593,14 @@ object-pool|files::ext_handles_across_threads::"
     "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp|session::coop_open_refusal_tests::"
     # The same build is a library without the send's behaviours zenoh-pico's transport does not
     # have, as the zenoh-pico preset builds it: a count of `TX_EXPIRY_CLOSE_AFTER` its key states is
-    # refused, the run of expiries being one of them (`config_limits::`).
-    "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp|config_limits::tests::a_build_without_the_expiry_run_refuses_its_count"
+    # refused, the run of expiries being one of them (`config_limits::`). The key itself is a
+    # capability the preset leaves out (`config-limits`), so the row names it.
+    "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp,config-limits|config_limits::tests::a_build_without_the_expiry_run_refuses_its_count"
+    # The same build without the key, as the zenoh-pico preset builds it: the insert records the key
+    # as any other and the open reads none of it (`config::tests::`), and a session of the peer
+    # build opens each table at the preset's bound (`session::opening_limits_tests::`), each test
+    # gated `not(feature = "config-limits")`. Two tests. NOT YET MEASURED.
+    "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp|without_the_limits_key"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
     "wz-app-frame|hook|replay|"

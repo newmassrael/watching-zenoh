@@ -325,11 +325,14 @@ impl ConfigState {
     }
 
     /// Record `value` under `key` (see [`ConfigEntries::insert`]): `Z_OK`, or
-    /// `Z_ERR_CONFIG_FAILED_INSERT` with the config as it was. A value of the limits key is
-    /// judged as the open will compose it, so a count the build refuses is refused here, with
-    /// `Z_ERR_CONFIG_INVALID_VALUE`, and the config keeps its earlier value: the one place a value
-    /// enters a config, so no door records one unjudged.
+    /// `Z_ERR_CONFIG_FAILED_INSERT` with the config as it was. In a build that reads the limits
+    /// key (`config-limits`) a value of it is judged as the open will compose it, so a count the
+    /// build refuses is refused here, with `Z_ERR_CONFIG_INVALID_VALUE`, and the config keeps its
+    /// earlier value: the one place a value enters a config, so no door records one unjudged. A
+    /// build without it records the key as any other, as zenoh-pico's config holds a key its open
+    /// does not read.
     pub(crate) fn insert(&mut self, key: u8, value: &str) -> ZResult {
+        #[cfg(feature = "config-limits")]
         if key == crate::config_limits::ZEXT_CONFIG_LIMITS_KEY {
             // Judged over a copy of what an open composes from, which the judgement drops.
             let mut probe = crate::config_limits::Stated::OPENING;
@@ -576,6 +579,7 @@ mod tests {
     /// A value of the limits key the build refuses is refused where it enters the config, through
     /// the door and through the config's own insert alike, and the value before it stays; one the
     /// build takes is recorded. Turned red by an insert that records the key unjudged.
+    #[cfg(feature = "config-limits")]
     #[test]
     fn a_limits_value_the_build_refuses_is_not_recorded() {
         use crate::config_limits::ZEXT_CONFIG_LIMITS_KEY as LIMITS;
@@ -599,6 +603,7 @@ mod tests {
     /// An open writes the counts of the limits key over the statement it is handed, under the
     /// build's policies for a config that states none, and refuses a config the build refuses
     /// without a policy. Turned red by an open that answers the statement it was handed unwritten.
+    #[cfg(feature = "config-limits")]
     #[test]
     fn an_open_writes_the_limits_keys_counts_over_its_statement() {
         use crate::config_limits::{state_over, Stated, ZEXT_CONFIG_LIMITS_KEY as LIMITS};
@@ -626,6 +631,35 @@ mod tests {
             Ok(SessionPolicy::defaults())
         );
         assert_eq!(stated, expected);
+    }
+
+    /// A library without the limits key (`config-limits`, off in the zenoh-pico preset) records a
+    /// value of it as any other key, one that names no limit included, and its open reads none of
+    /// it: the statement the open composes is the one it was handed. Turned red by the judgement
+    /// of the insert or the read of the open compiled without the capability.
+    #[cfg(not(feature = "config-limits"))]
+    #[test]
+    fn a_build_without_the_limits_key_records_it_unread() {
+        use crate::config_limits::{Stated, ZEXT_CONFIG_LIMITS_KEY as LIMITS};
+        use wz_session_core::policy::SessionPolicy;
+        let mut config = Config::new();
+        for text in [
+            "NO_SUCH_LIMIT=1",
+            "MAX_SUBSCRIPTIONS=1",
+            "MAX_SUBSCRIPTIONS",
+        ] {
+            assert_eq!(config.insert(LIMITS, text), Z_OK, "{text}");
+            assert_eq!(config.text(LIMITS).as_deref(), Some(text));
+            // SAFETY: the config is live and holds a `ConfigState`.
+            let state = unsafe { &*(config.0.handle as *const ConfigState) };
+            let mut stated = Stated::OPENING;
+            assert_eq!(
+                crate::session::resolve_open(state, &mut stated),
+                Ok(SessionPolicy::defaults()),
+                "{text}"
+            );
+            assert_eq!(stated, Stated::OPENING, "{text}");
+        }
     }
 
     /// An empty value is its terminator alone: read back empty, and lent as a C string of no

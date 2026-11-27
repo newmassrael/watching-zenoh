@@ -375,9 +375,10 @@ fn compose_snapshots(
 /// The snapshots `z_open` opens `cfg` under, its limits composed over `stated`, which an open
 /// hands as [`Stated::OPENING`]: the policies its doors state over the build's, returned, and the
 /// limits they state written over `stated`, as `compose_snapshots` composes both, and over them
-/// the counts its [`ZEXT_CONFIG_LIMITS_KEY`] states, which every build reads, the held values
-/// the process pools reserve at the first open among them; `Z_ERR_CONFIG_INVALID_VALUE` when the
-/// build refuses any of it, and then what was written is no resolution, which the caller drops.
+/// the counts its [`ZEXT_CONFIG_LIMITS_KEY`] states, which a build with `config-limits` reads, the
+/// held values the process pools reserve at the first open among them;
+/// `Z_ERR_CONFIG_INVALID_VALUE` when the build refuses any of it, and then what was written is no
+/// resolution, which the caller drops.
 ///
 /// Not inlined where `z_open` and the device requirements' judgement share this one body; a
 /// build without those requirements has `z_open`'s open request its one caller, which holds it
@@ -392,8 +393,11 @@ pub(crate) fn resolve_open(
     stated: &mut crate::config_limits::Stated,
 ) -> Result<SessionPolicy, ZResult> {
     let policy = compose_snapshots(&cfg.policies, &mut stated.limits)?;
-    let text = cfg.get(crate::config_limits::ZEXT_CONFIG_LIMITS_KEY);
-    crate::config_limits::state_over(text, stated)?;
+    #[cfg(feature = "config-limits")]
+    crate::config_limits::state_over(
+        cfg.get(crate::config_limits::ZEXT_CONFIG_LIMITS_KEY),
+        stated,
+    )?;
     Ok(policy)
 }
 
@@ -411,8 +415,12 @@ pub(crate) fn resolve_open(
 /// no config resizes a region, so a table opened below its bound would never reach it, and a
 /// session of such a build could hold no second querier or liveliness subscriber whatever its
 /// program stated.
+///
+/// So does a build without the limits key (`config-limits`, off in the zenoh-pico preset): no
+/// config of it raises a table, and zenoh-pico refuses no program for holding more than its
+/// examples declare, so each session holds at its open what a statement could have raised it to.
 pub(crate) const fn opening_limits() -> SessionLimits {
-    if OPENS_BY_REGION {
+    if OPENS_BY_REGION || !READS_LIMITS_KEY {
         SessionLimits::PICO_PRESET_BOUND
     } else {
         SessionLimits::PICO_PRESET
@@ -431,6 +439,9 @@ const OPENS_BY_REGION: bool = cfg!(all(
     ))
 ));
 
+/// Whether a config states its session's limits through the limits key (`config-limits`).
+const READS_LIMITS_KEY: bool = cfg!(feature = "config-limits");
+
 #[cfg(test)]
 mod opening_limits_tests {
     use super::opening_limits;
@@ -442,24 +453,31 @@ mod opening_limits_tests {
     /// build that opens by its region opens under the preset's bound, any other under the preset.
     /// Turned red by an open under the build's defaults, or by a region build that opens under
     /// the open values (`opening_limits` answering `PICO_PRESET` whatever `OPENS_BY_REGION` is).
+    /// A build without the limits key opens under the bound too (the test below).
     #[test]
     fn a_session_opens_under_picos_limits() {
-        #[cfg(not(all(
-            not(feature = "engine-tokio"),
-            not(any(
-                feature = "config-policy",
-                feature = "peer",
-                feature = "multicast-transport"
-            ))
-        )))]
-        assert_eq!(opening_limits(), SessionLimits::PICO_PRESET);
         #[cfg(all(
-            not(feature = "engine-tokio"),
-            not(any(
-                feature = "config-policy",
-                feature = "peer",
-                feature = "multicast-transport"
+            feature = "config-limits",
+            not(all(
+                not(feature = "engine-tokio"),
+                not(any(
+                    feature = "config-policy",
+                    feature = "peer",
+                    feature = "multicast-transport"
+                ))
             ))
+        ))]
+        assert_eq!(opening_limits(), SessionLimits::PICO_PRESET);
+        #[cfg(any(
+            not(feature = "config-limits"),
+            all(
+                not(feature = "engine-tokio"),
+                not(any(
+                    feature = "config-policy",
+                    feature = "peer",
+                    feature = "multicast-transport"
+                ))
+            )
         ))]
         assert_eq!(opening_limits(), SessionLimits::PICO_PRESET_BOUND);
         let mut probe = SessionLimits::defaults();
@@ -473,11 +491,14 @@ mod opening_limits_tests {
     /// queryables with the admin space's, one publisher, two declared keys and one get. Turned red
     /// by a preset that opens them at the bound the Kconfig keeps. A build that opens by its region
     /// opens at the bound instead (the test below).
-    #[cfg(any(
-        feature = "engine-tokio",
-        feature = "config-policy",
-        feature = "peer",
-        feature = "multicast-transport"
+    #[cfg(all(
+        feature = "config-limits",
+        any(
+            feature = "engine-tokio",
+            feature = "config-policy",
+            feature = "peer",
+            feature = "multicast-transport"
+        )
     ))]
     #[test]
     fn a_session_opens_its_entity_tables_at_the_parity_programs_counts() {
@@ -507,11 +528,14 @@ mod opening_limits_tests {
     /// holds two: one for the reliable chain zenoh-pico's parity programs send and one for the
     /// message it rejoined while its records are handed out; a config raises it to the bound.
     /// Turned red by a preset that opens them at the bound the Kconfig keeps.
-    #[cfg(any(
-        feature = "engine-tokio",
-        feature = "config-policy",
-        feature = "peer",
-        feature = "multicast-transport"
+    #[cfg(all(
+        feature = "config-limits",
+        any(
+            feature = "engine-tokio",
+            feature = "config-policy",
+            feature = "peer",
+            feature = "multicast-transport"
+        )
     ))]
     #[test]
     fn a_session_opens_two_reassembly_buffers() {
@@ -617,6 +641,26 @@ mod opening_limits_tests {
                 at_least(bound, open),
                 "{name}: {bound:?} below the open value {open:?}"
             );
+        }
+    }
+
+    /// A session of a build without the limits key (`config-limits`, off in the zenoh-pico
+    /// preset) opens each table at the preset's bound whatever else the build is, a peer or a
+    /// build with policies included: no config of it raises a table. Where the build's domain
+    /// holds two queriers it holds them at the open, where the open values hold one (the
+    /// CONTROL). Turned red by such a build that opens under the open values.
+    #[cfg(not(feature = "config-limits"))]
+    #[test]
+    fn a_session_of_a_build_without_the_limits_key_opens_at_the_presets_bound() {
+        assert_eq!(opening_limits(), SessionLimits::PICO_PRESET_BOUND);
+        let mut probe = SessionLimits::defaults();
+        if probe.select_max_queriers(Quota::at_most(2)).is_ok() {
+            assert_eq!(
+                SessionLimits::PICO_PRESET.max_queriers(),
+                Quota::at_most(1),
+                "CONTROL: the open value"
+            );
+            assert_eq!(opening_limits().max_queriers(), Quota::at_most(2));
         }
     }
 }

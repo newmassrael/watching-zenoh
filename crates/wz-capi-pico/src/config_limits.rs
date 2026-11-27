@@ -7,8 +7,13 @@
 //! A session opens its tables at a few (`crate::session::opening_limits`) and takes no memory
 //! after its open, so a program that holds more says so before it opens, as a DDS reader names
 //! its resource limits in its QoS. The build's value of each limit is the bound: what the build
-//! reserves memory for at most, and a statement past it is refused. The key needs no
-//! `config-policy`, so the zenoh-pico preset, which leaves those doors out, has it too.
+//! reserves memory for at most, and a statement past it is refused.
+//!
+//! The key is read only by a build with the `config-limits` capability, which the zenoh-pico
+//! preset leaves out: zenoh-pico's config holds a key it does not know and its open reads none, and
+//! so does a library without the capability, whose every session opens each table at the preset's
+//! bound (`crate::session::opening_limits`), what a statement could have raised it to. Its number
+//! is named in every build, so a program written for either compiles against both.
 //!
 //! Its value is `NAME=count` items, separated by commas, each `NAME` a session limit's id as the
 //! declaration spells it (`MAX_SUBSCRIPTIONS=4,MAX_PUBLISHERS=2`). Items apply left to right, so a
@@ -17,9 +22,13 @@
 //! `HELD_SMALL_PAYLOAD_BLOCKS`, ...): the first open reserves those pools from its statement and
 //! fixes them, so a later open that states more of one is refused (`crate::process_pool`).
 
+#[cfg(feature = "config-limits")]
 use wz_session_core::limit_binding::{LimitEntry, LimitValue};
-use wz_session_core::limits::{SessionLimits, SESSION_LIMITS};
+use wz_session_core::limits::SessionLimits;
+#[cfg(feature = "config-limits")]
+use wz_session_core::limits::SESSION_LIMITS;
 
+#[cfg(feature = "config-limits")]
 use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE};
 
 /// The config key whose value states the session's limits (`zext.h`). Past zenoh-pico's own
@@ -51,6 +60,7 @@ impl Stated {
     pub(crate) const OPENING: Self = Self::over(crate::session::opening_limits());
 }
 
+#[cfg(feature = "config-limits")]
 impl Stated {
     /// `self` with the count of the limit `name` at `count`; `false`, and `self` as it was,
     /// for a name that is no limit of a session nor a held value of the process pools, a limit
@@ -87,6 +97,7 @@ impl Stated {
 /// one statement it opens from, which no layer copies out. One body for every door that reads the
 /// key: `zp_config_insert` judges a value with it as the open composes it, and an open whose
 /// config holds none composes through it too.
+#[cfg(feature = "config-limits")]
 #[inline(never)]
 pub(crate) fn state_over(text: Option<&str>, stated: &mut Stated) -> Result<(), ZResult> {
     // Read as bytes: the separators are ASCII, and a byte's search is a plain loop where a
@@ -114,6 +125,7 @@ pub(crate) fn state_over(text: Option<&str>, stated: &mut Stated) -> Result<(), 
 
 /// `bytes` before and after the first `separator`, which neither holds; `None` where `bytes`
 /// holds none.
+#[cfg(feature = "config-limits")]
 fn split_at_first(bytes: &[u8], separator: u8) -> Option<(&[u8], &[u8])> {
     let at = bytes.iter().position(|byte| *byte == separator)?;
     let (before, after) = bytes.split_at(at);
@@ -122,12 +134,14 @@ fn split_at_first(bytes: &[u8], separator: u8) -> Option<(&[u8], &[u8])> {
 
 /// `bytes` without the ASCII whitespace at either end. Out of line: an item, its name and its
 /// count are each trimmed, and inlined each trim carried its two loops of its own.
+#[cfg(feature = "config-limits")]
 #[inline(never)]
 fn trimmed(bytes: &[u8]) -> &[u8] {
     bytes.trim_ascii()
 }
 
 /// Whether `name` spells the id `id`, byte for byte: a name that is no text spells none.
+#[cfg(any(feature = "config-limits", all(test, wz_process_pools)))]
 fn names(id: &str, name: &[u8]) -> bool {
     id.as_bytes() == name
 }
@@ -136,6 +150,7 @@ fn names(id: &str, name: &[u8]) -> bool {
 /// values a program holds apart from any session first, where the build has process pools
 /// (`crate::process_pool::held_id`), then the session limits ([`SESSION_LIMITS`]). One table, so
 /// an item's name is found by one walk whichever it names.
+#[cfg(feature = "config-limits")]
 fn statement_id(at: usize) -> Option<&'static str> {
     #[cfg(wz_process_pools)]
     let at = match at.checked_sub(crate::process_pool::HELD) {
@@ -150,6 +165,8 @@ fn statement_id(at: usize) -> Option<&'static str> {
 /// table a name is found in, each id read through the table's own function: a
 /// short table known when compiled, walked where it is named, is unrolled into a comparison of its
 /// own for each row, and a table handed as an iterator object brings every method of its iterator.
+/// The held values' own test reads them by name through it, with or without the key.
+#[cfg(any(feature = "config-limits", all(test, wz_process_pools)))]
 #[inline(never)]
 pub(crate) fn position_named(
     id_at: fn(usize) -> Option<&'static str>,
@@ -167,6 +184,7 @@ pub(crate) fn position_named(
 
 /// The count `digits` spell in decimal, read as `usize`'s `FromStr` reads one: an optional `+`
 /// and one digit or more, none past `usize::MAX`; `None` for anything else.
+#[cfg(feature = "config-limits")]
 fn count_of(digits: &[u8]) -> Option<usize> {
     let digits = digits.strip_prefix(b"+").unwrap_or(digits);
     if digits.is_empty() {
@@ -178,7 +196,7 @@ fn count_of(digits: &[u8]) -> Option<usize> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "config-limits"))]
 mod tests {
     use super::{count_of, names, position_named, split_at_first, state_over, trimmed, Stated};
     use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE};
