@@ -1896,7 +1896,7 @@ mod lent_control_order {
 mod lent_window {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
-    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     use super::{params, PlainRuntime, StillClock};
@@ -1907,11 +1907,12 @@ mod lent_window {
     use crate::session_actions::SessionLinkActions;
 
     /// A link of one slot wider than the batch, lent to one holder at a time, that keeps each
-    /// frame sent.
+    /// frame sent and counts each slot given back.
     struct OneSlotLink {
         lent: AtomicBool,
         slot: Mutex<Vec<u8>>,
         sent: Mutex<Vec<Vec<u8>>>,
+        aborts: AtomicUsize,
     }
 
     impl BoxedLinkDriver for OneSlotLink {
@@ -1953,6 +1954,7 @@ mod lent_window {
         }
 
         fn tx_slot_abort(&self, _slot: TxSlot) {
+            self.aborts.fetch_add(1, Ordering::SeqCst);
             self.lent.store(false, Ordering::SeqCst);
         }
     }
@@ -1966,6 +1968,7 @@ mod lent_window {
             lent: AtomicBool::new(false),
             slot: Mutex::new(alloc::vec![0; 2048]),
             sent: Mutex::new(Vec::new()),
+            aborts: AtomicUsize::new(0),
         });
         let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
         let actions =
@@ -2075,6 +2078,28 @@ mod lent_window {
             "the frames take SNs 0 and 1"
         );
         assert_eq!(actions.tx_refusals().no_slot, 0, "nothing was refused");
+    }
+
+    /// The frame a put of the other reliability sends and the frame the flush sends are each
+    /// handed to the link, and no slot is given back. Turned red by a send of the open frame that
+    /// gives its slot back as well as or instead of handing it over (`send_lent_batch` settling the
+    /// lease before its emit, or letting it go unsent), which this link counts as an abort.
+    #[test]
+    fn a_frame_the_window_sends_is_handed_over_and_never_given_back() {
+        let (actions, link) = windowed();
+        assert_eq!(put(&actions, b"v", true), Some(Ok(())));
+        assert_eq!(put(&actions, b"v", false), Some(Ok(())));
+        assert_eq!(actions.batch_flush(), Ok(()));
+        assert_eq!(
+            link.sent.lock().expect("the sends").len(),
+            2,
+            "the reliable frame left for the best-effort put, and the flush sent that put's"
+        );
+        assert_eq!(
+            link.aborts.load(Ordering::SeqCst),
+            0,
+            "no slot was given back"
+        );
     }
 }
 

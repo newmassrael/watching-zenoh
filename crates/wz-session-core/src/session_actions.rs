@@ -6629,9 +6629,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // SAFETY: `link` recorded the slot for this conduit until the line above, and every
             // send or abort of a conduit's lent slot clears the record first, under the
             // conduit's lock, which the caller holds (`batch`).
-            let slot = unsafe { crate::tx_lease::TxLease::pick_up(link.link_driver(), open) };
+            let mut slot = unsafe { crate::tx_lease::TxLease::pick_up(link.link_driver(), open) };
             let channel = crate::frame_encode::frame_wire_reliability(slot.as_slice());
-            self.send_lent_batch(link, slot, channel, priority, lend);
+            self.send_lent_batch(link, &mut slot, channel, priority, lend);
         });
     }
 
@@ -6686,11 +6686,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// to another link meanwhile), the frame is copied out, the slot goes back
     /// to its lender, and the bytes take the route the heap stage's frame would
     /// take ([`Self::send_wire`]), counted `moved_to_heap`.
+    ///
+    /// The lease is borrowed and settled here, handed over or given back, so its drop where the
+    /// caller picked it up finds nothing to give back. Taken by value it would be copied whole into
+    /// a second lease on the send of every message that does not join the open frame.
     #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
     fn send_lent_batch(
         &self,
         link: &LinkState<R>,
-        mut slot: crate::tx_lease::TxLease<'_, R::Driver>,
+        slot: &mut crate::tx_lease::TxLease<'_, R::Driver>,
         channel: Reliability,
         priority: Priority,
         lend: &mut BatchLendCounts,
@@ -6698,7 +6702,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "tx-lend-only"))]
         use crate::tx_buf::TxBuf;
         if self.conduit_routes_to(link, channel, priority) {
-            self.emit_on_link(link, &[], Some(&mut slot), channel, priority, false);
+            self.emit_on_link(link, &[], Some(slot), channel, priority, false);
             return;
         }
         // Fixed-memory step S4 — the conduit now routes to another link, which
@@ -6708,7 +6712,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // `transport-multilink` is outside what the lend-only profile covers.)
         #[cfg(feature = "tx-lend-only")]
         {
-            drop(slot);
+            slot.give_back();
             lend.lost = lend.lost.wrapping_add(1);
             let _ = self.refuse_tx(crate::link::LinkDropCause::NoTxSlot);
             let _ = (channel, priority);
@@ -6716,7 +6720,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "tx-lend-only"))]
         {
             let bytes = slot.as_slice().to_vec();
-            drop(slot);
+            slot.give_back();
             lend.moved_to_heap = lend.moved_to_heap.wrapping_add(1);
             self.send_wire(&bytes, channel, priority);
         }
@@ -13416,7 +13420,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     }
                     let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
                     batch.stage.count = 0;
-                    self.send_lent_batch(link, slot, open_channel, priority, &mut batch.lend);
+                    self.send_lent_batch(link, &mut slot, open_channel, priority, &mut batch.lend);
                     false
                 });
                 if joined {
