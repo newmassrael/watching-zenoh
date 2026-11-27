@@ -1347,7 +1347,7 @@ pub use crate::session_init_params::{
 };
 
 impl<R: SessionRuntime> TxConduits<R> {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             #[cfg(feature = "transport-batching")]
             window: <R::Word as crate::runtime_cell::WordCell>::new(0),
@@ -1629,7 +1629,7 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// Every conduit back to its initial state, the window closed. The
     /// reopen path's (`reset_for_reopen`), and gated as that arm is.
     #[cfg(feature = "session-reconnect")]
-    fn reset(&self) {
+    pub(crate) fn reset(&self) {
         #[cfg(feature = "transport-batching")]
         self.set_active(false);
         for conduit in &self.conduits {
@@ -2028,7 +2028,7 @@ impl TxLimits {
 /// R311y205 (transport-multilink IMPL-2a) — the SHARED session kernel: the
 /// ~30 fields that are one-per-logical-session regardless of how many physical
 /// links carry it (SN generators, RX-SN gate, negotiated caps, peer identity,
-/// id-spaces, declaration cache, namespace, the TX-order `tx_conduits`). Split out
+/// id-spaces, declaration cache, namespace, the transmit state `tx`). Split out
 /// of the former flat `SessionLinkActions` so a later multilink slice can share
 /// ONE core across N per-link [`LinkState`]s on separate drive loops; the 5
 /// per-link fields moved to [`LinkState`]. `SessionCore` holds NO reference to
@@ -2217,30 +2217,6 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// zenoh's `auth_shm` is `None` unless the manager was configured with SHM.
     #[cfg(feature = "session-extshm")]
     pub shm_auth: R::Mutex<crate::extshm::ShmAuthDispatch>,
-    /// R121e — outbound Frame sequence-number generator. The
-    /// session-FSM Established-side path emits one `Frame`
-    /// transport-message per outbound application-layer batch
-    /// (PUSH, DECLARE, INTEREST, …); each Frame carries a
-    /// VLE-encoded `sn` per zenoh-pico
-    /// `_z_frame_encode`(transport.c:386-395). The first Frame
-    /// uses `params.initial_sn` (matching the value announced in
-    /// the OpenSyn/OpenAck body so the peer's reliable-channel
-    /// SN-window tracking starts from the agreed origin) and
-    /// each subsequent Frame uses the next position on the
-    /// negotiated SN ring (`seq_num_res` → 7/14/28/63-bit per
-    /// Zenoh RFC §5.O). The counter itself stays raw monotonic —
-    /// the `u64` wrap is ring-transparent, `(n + 1) & mask` is
-    /// the ring successor of `n & mask` across the `u64`
-    /// boundary too — and the wire-visible value is masked at
-    /// the mint (`Self::next_outbound_frame_sn`) and at the
-    /// fragment walk (`frame_encode::fragment_body`). R311kb
-    /// realized the R121e explicit-modulo carry via zenoh-pico
-    /// `_z_sn_increment` parity (the F-5 consolidation). R311y214 —
-    /// [`ConduitTxSn`], split per reliability channel (pico/zenoh parity).
-    /// R311y215 — [`FrameTxConduits`]: one such pair per `Priority` conduit
-    /// under `transport-qos` (else the single R311y214 pair); the
-    /// `(priority, reliable)` of each mint selects the conduit + channel.
-    pub outbound_frame_sn: FrameTxConduits<R::Word>,
     /// Whether the peer's `DeclareFinal` of the initial interest has arrived on
     /// this session: the one fact the RX SN gate needs from the declaration
     /// plane, which sits after the gate and cannot be asked from it. Read by the
@@ -2263,23 +2239,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// settles the sync as one with nothing in it. Reset with the flag above.
     #[cfg(feature = "alloc")]
     peer_sync_bits: AtomicU8,
-    /// R311jp — TX batching accumulator (zenoh-pico
-    /// `_z_transport_common_t::{_batch_state,_batch_count}` + the shared
-    /// TX `_wbuf` parity, `Z_FEATURE_BATCHING`). Inactive by default —
-    /// every `Self::dispatch_network_message_at` call flushes
-    /// immediately, the pre-A3 behavior. `Self::batch_start` activates
-    /// accumulation; see [`BatchTx`] for the buffer shape — the
-    /// absorb/overflow state machine lives in the chokepoint itself
-    /// (R311jq, all emits under the lock).
-    /// R311kf — ungated: this mutex is ALSO the TX-order serialization
-    /// lock (mint + emit under one hold, pico TX-mutex parity); see the
-    /// [`BatchTx`] doc.
-    /// R311km — renamed from `batch_tx`: the name leads with the
-    /// ungated lock role (pico `_z_transport_common_t._mutex_tx`
-    /// parity); [`BatchTx`] keeps naming the guarded coalescing state.
-    /// R2920 — one lock PER CONDUIT (`tx_mutex` was one for the session):
-    /// see [`BatchTx`] for why a conduit's lock is all its sender needs.
-    pub tx_conduits: TxConduits<R>,
+    /// What this session transmits with: the conduits its sends are framed in, whose locks are
+    /// the order of those sends, and the sequence numbers its frames carry.
+    pub tx: crate::transport_tx::TransportTx<R>,
     /// The egress admission of a REPLY: the §5.16 verdict the session that owns this bundle
     /// installs when it holds an egress policy, asked of every `Response`, and of every
     /// `Declare` that answers a peer's Interest, before it is sent.
@@ -4676,10 +4638,10 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
         )
     ))]
     fn begin_burst(&self) -> bool {
-        if self.tx_conduits.is_active() {
+        if self.tx.conduits.is_active() {
             return false;
         }
-        self.tx_conduits.set_active(true);
+        self.tx.conduits.set_active(true);
         true
     }
 
@@ -4700,7 +4662,8 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
     ))]
     fn end_burst(&self, opened: bool) {
         if opened {
-            self.tx_conduits
+            self.tx
+                .conduits
                 .close_and_drain(WINDOW_CALLER, || self.flush_open_batch());
         }
     }
@@ -5492,13 +5455,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // session-extshm — no authenticator until the AP installs one.
                 #[cfg(feature = "session-extshm")]
                 shm_auth: R::new_mutex(crate::extshm::ShmAuthDispatch::empty()),
-                outbound_frame_sn: FrameTxConduits::new(initial_frame_sn),
                 peer_declarations_final: core::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "declaration-sync-watch")]
                 peer_declaration_progress_ms: AtomicU64::new(u64::MAX),
                 #[cfg(feature = "alloc")]
                 peer_sync_bits: AtomicU8::new(0),
-                tx_conduits: TxConduits::new(),
+                tx: crate::transport_tx::TransportTx::new(initial_frame_sn),
                 #[cfg(all(
                     feature = "reply-egress-gate",
                     any(
@@ -6306,7 +6268,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 continue;
             }
             let priority = TxConduits::<R>::conduit_priority(idx);
-            taken |= R::try_with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+            taken |= R::try_with_mutex_mut(self.tx.conduits.conduit(priority), |batch| {
                 self.flush_conduit(idx, priority, batch)
             })
             .is_some();
@@ -6462,7 +6424,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn abort_lent_batches(&self) {
         for idx in 0..TX_CONDUITS {
             let priority = TxConduits::<R>::conduit_priority(idx);
-            R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+            R::with_mutex_mut(self.tx.conduits.conduit(priority), |batch| {
                 let Some(open) = batch.stage.lent.take() else {
                     return;
                 };
@@ -6492,7 +6454,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         use crate::tx_buf::TxBuf;
         for idx in 0..TX_CONDUITS {
             let priority = TxConduits::<R>::conduit_priority(idx);
-            R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+            R::with_mutex_mut(self.tx.conduits.conduit(priority), |batch| {
                 let open = match batch.stage.lent.take() {
                     Some(open)
                         if link
@@ -6540,7 +6502,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// one conduit.
     #[cfg(feature = "transport-batching")]
     pub fn batch_staged_messages(&self, priority: Priority) -> usize {
-        R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+        R::with_mutex_mut(self.tx.conduits.conduit(priority), |batch| {
             batch.stage.count
         })
     }
@@ -6550,7 +6512,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
     pub fn batch_lend_counts(&self) -> BatchLendCounts {
         let mut sum = BatchLendCounts::default();
-        for conduit in &self.tx_conduits.conduits {
+        for conduit in &self.tx.conduits.conduits {
             R::with_mutex_mut(conduit, |batch| sum.add(&batch.lend));
         }
         sum
@@ -6562,7 +6524,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
     pub fn fragment_lend_counts(&self) -> FragmentLendCounts {
         let mut sum = FragmentLendCounts::default();
-        for conduit in &self.tx_conduits.conduits {
+        for conduit in &self.tx.conduits.conduits {
             R::with_mutex_mut(conduit, |batch| sum.add(&batch.frag_lend));
         }
         sum
@@ -6574,7 +6536,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "transport-tx-lend")]
     pub fn frame_lend_counts(&self) -> FrameLendCounts {
         let mut sum = FrameLendCounts::default();
-        for conduit in &self.tx_conduits.conduits {
+        for conduit in &self.tx.conduits.conduits {
             R::with_mutex_mut(conduit, |batch| sum.add(&batch.frame_lend));
         }
         sum
@@ -8528,7 +8490,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "codec-open-body")]
     fn reseed_tx_sn(&self, initial_sn: Option<crate::sn::Sn>) -> Option<crate::sn::Sn> {
         if let Some(initial_sn) = initial_sn {
-            self.outbound_frame_sn.reset(crate::sn::to_wire(initial_sn));
+            self.tx.frame_sn.reset(crate::sn::to_wire(initial_sn));
         }
         initial_sn
     }
@@ -12303,7 +12265,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         reliable: bool,
         sn_mask: crate::sn::Sn,
     ) -> crate::sn::Sn {
-        self.outbound_frame_sn.mint(priority, reliable, sn_mask)
+        self.tx.frame_sn.mint(priority, reliable, sn_mask)
     }
 
     /// Whether the link a frame of `reliability` and `priority` leaves by stayed full for what is
@@ -12847,7 +12809,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
         let control = TxConduits::<R>::conduit_index(Priority::Control);
         #[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
-        if priority == Priority::Control && self.tx_conduits.is_auto() {
+        if priority == Priority::Control && self.tx.conduits.is_auto() {
             // A conduit's lock is held across its sender's wait for room, so a send that may not
             // wait does not wait for it either: it goes ahead only when it can drain every
             // conduit now, and is told there is no room otherwise.
@@ -12862,7 +12824,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // follows the control messages left open there, which leave first. A control message
         // that left none costs the data path one atomic load.
         #[cfg(all(feature = "transport-batching", feature = "transport-qos"))]
-        if self.tx_conduits.control_left_open()
+        if self.tx.conduits.control_left_open()
             && TxConduits::<R>::conduit_index(priority) != control
         {
             #[cfg(feature = "alloc")]
@@ -12885,13 +12847,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let stage_and_emit = |batch: &mut BatchTx| {
             // Whatever this sender does with the conduit, a wait for room included, is a send
             // in progress to a droppable message that finds the conduit held.
-            let _sender = SenderInside::mark(self.tx_conduits.sender_flag(priority));
+            let _sender = SenderInside::mark(self.tx.conduits.sender_flag(priority));
             // A held reply joins its conduit's open frame as a message of a window does, and
             // leaves with what follows it in that frame. One load of the face's windows decides
             // both whether the message joins the open frame and whether a frame it does not join
             // may be open.
             #[cfg(feature = "transport-batching")]
-            let windows = self.tx_conduits.windows();
+            let windows = self.tx.conduits.windows();
             #[cfg(feature = "transport-batching")]
             let window = window_joins(windows, conduit.held);
             // A frame held replies, or a window being drained, left open leaves before a message
@@ -12960,14 +12922,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let mut held_dropped = false;
         #[cfg(feature = "alloc")]
         let push = if probing {
-            match R::try_with_mutex_mut(self.tx_conduits.conduit(priority), stage_and_emit) {
+            match R::try_with_mutex_mut(self.tx.conduits.conduit(priority), stage_and_emit) {
                 Some(push) => push,
                 None => return Ok(Dispatched::NoRoom),
             }
         } else if droppable && !reserved {
             let mut stage = Some(stage_and_emit);
             loop {
-                let taken = R::try_with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
+                let taken = R::try_with_mutex_mut(self.tx.conduits.conduit(priority), |batch| {
                     stage.take().map(|stage_and_emit| stage_and_emit(batch))
                 });
                 match taken {
@@ -12991,7 +12953,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // another send holds; a holder that is not one (the writer's flush of what is
                 // staged) lets go once it has written, and is waited for.
                 if crate::runtime_cell::FlagCell::load(
-                    self.tx_conduits.sender_flag(priority),
+                    self.tx.conduits.sender_flag(priority),
                     core::sync::atomic::Ordering::Relaxed,
                 ) {
                     held_dropped = true;
@@ -13000,16 +12962,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 core::hint::spin_loop();
             }
         } else {
-            R::with_mutex_mut(self.tx_conduits.conduit(priority), stage_and_emit)
+            R::with_mutex_mut(self.tx.conduits.conduit(priority), stage_and_emit)
         };
         #[cfg(not(feature = "alloc"))]
-        let push = R::with_mutex_mut(self.tx_conduits.conduit(priority), stage_and_emit);
+        let push = R::with_mutex_mut(self.tx.conduits.conduit(priority), stage_and_emit);
         // The window is the link's (`set_auto_batching`): a frame may now be open in
         // a conduit, and the link's writer flushes it when it has nothing else to
         // write. Told here, once the conduit's lock is released, because the writer's
         // flush takes that lock.
         #[cfg(feature = "transport-batching")]
-        if self.tx_conduits.is_auto() {
+        if self.tx.conduits.is_auto() {
             // A control message stays in its conduit's open frame for the control messages after
             // it, and leaves when the writer next falls idle, or ahead of the first message staged
             // on another conduit, whichever is first (the barrier's second half, above). Marked
@@ -13017,7 +12979,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // mark raised over an empty conduit, which costs the next sender an empty drain.
             #[cfg(feature = "transport-qos")]
             if priority == Priority::Control && matches!(push, Ok(UnicastPush::Pushed)) {
-                self.tx_conduits.leave_control_open();
+                self.tx.conduits.leave_control_open();
             }
             // Whatever the outcome, not only a message staged: the writer's flush skips a
             // conduit whose lock a sender holds ([`Self::try_flush_open_batch`]), and
@@ -13034,7 +12996,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // frames leave by its stop ([`Self::batch_stop`]), which asks for the flush; a
             // sender that read the window open let go of its conduit before the stop's
             // drain, which waits for each conduit's lock.
-            if !self.tx_conduits.caller_window_open() {
+            if !self.tx.conduits.caller_window_open() {
                 self.own_link().link_driver().tx_staged();
             }
         }
@@ -13360,7 +13322,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // The frame took the SN it was written with before it crossed the budget:
                     // given back, as a refused encode's is, or the conduit's next frame leaves a
                     // gap in a reliable channel that no frame fills.
-                    self.outbound_frame_sn.unmint(priority, emit.reliable);
+                    self.tx.frame_sn.unmint(priority, emit.reliable);
                     Err(SendWireError::LinkRefused(
                         self.refuse_tx(crate::link::LinkDropCause::Oversize),
                     ))
@@ -13371,7 +13333,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // reliable channel that no frame fills. A link that lent none took no SN.
                 FrameLend::Heap => {
                     if minted.is_some() {
-                        self.outbound_frame_sn.unmint(priority, emit.reliable);
+                        self.tx.frame_sn.unmint(priority, emit.reliable);
                     }
                     Err(SendWireError::LinkRefused(
                         self.refuse_tx(crate::link::LinkDropCause::NoTxSlot),
@@ -13379,7 +13341,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 }
                 // Refused before a byte left: the SN minted for it is given back.
                 FrameLend::Refused(refused) => {
-                    self.outbound_frame_sn.unmint(priority, emit.reliable);
+                    self.tx.frame_sn.unmint(priority, emit.reliable);
                     Err(SendWireError::Codec(refused))
                 }
             }
@@ -13391,14 +13353,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             FrameLend::PastMtu => return self.emit_fragments_encoded(batch, encode_body, emit),
             // Refused before a byte left: the SN minted for it is given back.
             FrameLend::Refused(refused) => {
-                self.outbound_frame_sn.unmint(priority, emit.reliable);
+                self.tx.frame_sn.unmint(priority, emit.reliable);
                 return Err(SendWireError::Codec(refused));
             }
             // Written on the heap below, under the SN given back here, which is the one the heap
             // frame mints: nothing else takes one while the conduit's lock is held.
             _ => {
                 if minted.is_some() {
-                    self.outbound_frame_sn.unmint(priority, emit.reliable);
+                    self.tx.frame_sn.unmint(priority, emit.reliable);
                 }
                 if !in_window {
                     batch.frame_lend.heap_frames = batch.frame_lend.heap_frames.wrapping_add(1);
@@ -13435,7 +13397,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // SN given back, before a byte left.
                     stage.buf.clear();
                     stage.count = 0;
-                    self.outbound_frame_sn.unmint(priority, emit.reliable);
+                    self.tx.frame_sn.unmint(priority, emit.reliable);
                     return Err(SendWireError::Codec(refused));
                 }
                 if stage.buf.len() > emit.mtu {
@@ -13462,7 +13424,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // The body refused its message: refused before a byte left, with its SN given
                 // back.
                 Err(refused) => {
-                    self.outbound_frame_sn.unmint(priority, emit.reliable);
+                    self.tx.frame_sn.unmint(priority, emit.reliable);
                     return Err(SendWireError::Codec(refused));
                 }
             };
@@ -13609,7 +13571,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let body_len = match crate::tx_buf::try_encoded_len(encode) {
             Ok(len) => len,
             Err(refused) => {
-                self.outbound_frame_sn
+                self.tx
+                    .frame_sn
                     .unmint(emit.ext_qos.unwrap_or(Priority::DEFAULT), emit.reliable);
                 return Err(SendWireError::Codec(refused));
             }
@@ -13689,7 +13652,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // the next frame) turns into a lost session, while the caller
         // was told only that this one message failed.
         if body_len > max_reassembly_bytes {
-            self.outbound_frame_sn.unmint(priority, reliable);
+            self.tx.frame_sn.unmint(priority, reliable);
             return Err(SendWireError::ExceedsReassemblyCap);
         }
         // R311y215 — a QoS chain carries an ext_qos on every fragment, so
@@ -13743,7 +13706,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 .saturating_sub(1)
                 .saturating_mul(mtu);
             if before_last >= self.tx_lane_bytes(priority) {
-                self.outbound_frame_sn.unmint(priority, reliable);
+                self.tx.frame_sn.unmint(priority, reliable);
                 return Ok(UnicastPush::Chain);
             }
         }
@@ -13796,7 +13759,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     // (`common/pipeline.rs`, `ext_first.is_some()`), and
                     // so does this: `sn` is the last mint under the
                     // conduit's lock, as for `ExceedsReassemblyCap` above.
-                    self.outbound_frame_sn.unmint(priority, reliable);
+                    self.tx.frame_sn.unmint(priority, reliable);
                     return Err(SendWireError::FragmentTxBudgetExhausted);
                 }
                 // Fragments are already on the wire and the peer is
@@ -13809,7 +13772,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 break (this_sn, true, Err(SendWireError::FragmentTxBudgetExhausted));
             }
             if emitted > 0 {
-                self.outbound_frame_sn.reserve_next(priority, reliable);
+                self.tx.frame_sn.reserve_next(priority, reliable);
             }
             // Every fragment rides the frame's conduit (`priority`
             // reconstructed above == the SN-mint conduit) so the whole
@@ -13836,7 +13799,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "tx-fragment-credit")]
         {
             if reserve_stop {
-                self.outbound_frame_sn.reserve_next(priority, reliable);
+                self.tx.frame_sn.reserve_next(priority, reliable);
             }
             let _ = self.send_fragment(
                 batch,
@@ -13854,7 +13817,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             let _ = stop_sn;
             if !reserve_stop {
-                self.outbound_frame_sn.unmint(priority, reliable);
+                self.tx.frame_sn.unmint(priority, reliable);
             }
         }
         abandoned
@@ -14040,7 +14003,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // the priority selects its conduit, so the drain and the staging
             // seam agree by construction on which conduit is which.
             let priority = TxConduits::<R>::conduit_priority(idx);
-            let conduit = self.tx_conduits.conduit(priority);
+            let conduit = self.tx.conduits.conduit(priority);
             let drain = |batch: &mut BatchTx| self.flush_conduit(idx, priority, batch);
             if wait {
                 R::with_mutex_mut(conduit, drain);
@@ -14064,7 +14027,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // being staged in between: whatever control message the mark stood for leaves here.
         #[cfg(feature = "transport-qos")]
         if idx == TxConduits::<R>::conduit_index(Priority::Control) {
-            self.tx_conduits.control_taken();
+            self.tx.conduits.control_taken();
         }
         // ARCHITECTURE section 9.1 -- a frame open in a lent slot leaves
         // as that slot, with nothing copied.
@@ -14114,7 +14077,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn batch_start(&self) -> Result<(), SendWireError> {
         #[cfg(feature = "transport-batching")]
         {
-            self.tx_conduits.set_active(true);
+            self.tx.conduits.set_active(true);
             Ok(())
         }
         #[cfg(not(feature = "transport-batching"))]
@@ -14153,8 +14116,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn batch_stop(&self) -> Result<(), SendWireError> {
         #[cfg(feature = "transport-batching")]
         {
-            self.tx_conduits.close_and_drain(WINDOW_CALLER, || {
-                if self.tx_conduits.is_auto() {
+            self.tx.conduits.close_and_drain(WINDOW_CALLER, || {
+                if self.tx.conduits.is_auto() {
                     self.own_link().link_driver().tx_staged();
                 }
                 self.flush_open_batch();
@@ -14177,7 +14140,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn hold_replies(&self) -> bool {
         #[cfg(feature = "transport-batching")]
         {
-            REPLIES_HOLD && self.tx_conduits.set_window(WINDOW_REPLIES, true)
+            REPLIES_HOLD && self.tx.conduits.set_window(WINDOW_REPLIES, true)
         }
         #[cfg(not(feature = "transport-batching"))]
         false
@@ -14190,8 +14153,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn release_replies(&self, raised: bool) {
         #[cfg(feature = "transport-batching")]
         if REPLIES_HOLD && raised {
-            self.tx_conduits.close_and_drain(WINDOW_REPLIES, || {
-                if !self.tx_conduits.caller_window_open() && !self.tx_conduits.is_auto() {
+            self.tx.conduits.close_and_drain(WINDOW_REPLIES, || {
+                if !self.tx.conduits.caller_window_open() && !self.tx.conduits.is_auto() {
                     self.flush_open_batch();
                 }
             });
@@ -14215,7 +14178,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Conduit {
                 priority,
                 reliable,
-                held: REPLIES_HOLD && self.tx_conduits.replies_held(),
+                held: REPLIES_HOLD && self.tx.conduits.replies_held(),
             }
         }
         #[cfg(not(feature = "transport-batching"))]
@@ -14234,7 +14197,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `transport-batching` there is no window to open and this does nothing.
     pub fn set_auto_batching(&self, on: bool) {
         #[cfg(feature = "transport-batching")]
-        self.tx_conduits.set_auto(on);
+        self.tx.conduits.set_auto(on);
         #[cfg(not(feature = "transport-batching"))]
         let _ = on;
     }
@@ -14256,7 +14219,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // The writer calls this, and a writer must not wait for a conduit's lock: see
         // [`Self::try_flush_open_batch`].
         #[cfg(feature = "transport-batching")]
-        if !self.tx_conduits.caller_window_open() && !self.try_flush_open_batch() {
+        if !self.tx.conduits.caller_window_open() && !self.try_flush_open_batch() {
             return crate::link::IdleFlush::SenderHeld;
         }
         crate::link::IdleFlush::Drained
@@ -19165,7 +19128,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// monitor, the staged close reason, `inbound_peer_zid`,
     /// `inbound_peer_init_caps`, the RX SN gate (`rx_sn`, re-seeded by
     /// the reopen handshake's OpenSyn/OpenAck), the open batching window
-    /// (`transport-batching`), and `outbound_frame_sn` (re-seeded to
+    /// (`transport-batching`), and the frame numbers of `tx` (re-seeded to
     /// `params.initial_sn`, the value the re-handshake's OpenSyn
     /// announces — pico mints a fresh random initial SN per `_z_open`;
     /// wz reuses the params seed, equivalent because the peer adopts
@@ -19187,7 +19150,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // makes `reset_for_reopen` a TOTAL function — safe to call in ANY
             // link-set state: when a survivor link is live the CORRECT action is
             // to PRESERVE it (skip the shared-core reset), because zeroing the
-            // shared `rx_sn` / `outbound_frame_sn` would corrupt the survivor's
+            // shared `rx_sn` / frame numbers of `tx` would corrupt the survivor's
             // per-channel SN gate mid-stream (the exact hazard the XOR named).
             // It is not a bug to assert away: preserving a live survivor is the
             // right output for that input. Production reaches this skip arm only
@@ -19321,11 +19284,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // back to its lender before the reset forgets it.
             #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
             self.abort_lent_batches();
-            self.tx_conduits.reset();
-            // SeqCst pairs with `next_outbound_frame_sn`'s fetch_add — the
-            // reset must not reorder against a straggling in-flight mint.
-            // R311y214 — resets BOTH reliability channels to the origin.
-            self.outbound_frame_sn.reset(self.params.initial_sn);
+            self.tx.reset(self.params.initial_sn);
         }
     }
 

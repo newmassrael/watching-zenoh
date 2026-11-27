@@ -2237,6 +2237,11 @@ pub mod session_timeouts;
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod session_actions;
 
+/// What one transport transmits with, held apart from the session around it so that a transport
+/// that is not a unicast session holds the same state: the conduits and the frame numbers.
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+pub mod transport_tx;
+
 // The sends a sender's owner defers while it holds a lock of its own, kept in order: a unicast
 // session's and a multicast group producer's. A plain comment, not an outer doc: the module
 // documents itself with `//!`. The heap profile's, as the block-first hand-off is: a deferred
