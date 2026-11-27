@@ -80,6 +80,16 @@
 #                                             wz-capi-pico is built in the form the release ships, without
 #                                             `std` unless PICO_CMP_STDLIB=std names the other, as the size
 #                                             gate builds that form (perf_matrix.py wz-arm)
+#   scripts/pico-compare.sh run-text
+#                                             the list of the code a run of the perf matrix executes, by which the
+#                                             library without `std` lays that code out ahead of the rest of its
+#                                             text (docs/win-budget/rss.md section 5.4): the arms built as `perf`
+#                                             builds them, every tcp, udp and multicast cell run once and short
+#                                             with each probe under callgrind (perf_matrix.py run --trace-text),
+#                                             and the functions each library executed read from the profiles
+#                                             (perf_matrix.py run-text): arm P's bytes printed, arm W's written
+#                                             into crates/wz-capi-pico/link/run-text.ld of this tree. Left under
+#                                             target/pico-compare/perf-runs/trace-<time>/ (run/, profiles/)
 #   scripts/pico-compare.sh batch [sizes] [count]
 #                                             the unicast batch size on the wire: zenoh-pico built once per size
 #                                             (BATCH_UNICAST_SIZE, default sizes 512,2048,8192) against one
@@ -110,14 +120,14 @@
 # for example WZ_CAPI_RX_BUSY_POLL_US=10), PICO_CMP_NO_BUILD=1 (use the libraries already built), PICO_CMP_ENGINE
 # (`tokio` or `coop`: the engine the wz library is built on, to compare the two; unset, the one the package for a
 # host ships on, which its profile configs/profiles/host-peer-ext.conf chooses). `rtt`, `thr`, `nodrop`, `profile`,
-# `tids`, `perf` and `batch` build the wz library on that engine and print it with their readings; `parity`
-# builds each original's preset and `nodrop-c` the zenoh-c family, which have one engine each. PICO_CMP_STDLIB
-# (`std` or `nostd`, `perf` only): the standard library the wz library is built with, to compare the two;
-# unset, the one form the release ships (perf_matrix.py bench-stdlib).
-# `parity` and `perf` pin the client side of a pair (z_ping, z_pub_thr, z_put, z_get) to PICO_CMP_CLIENT_CPUS
-# and the server side to PICO_CMP_SERVER_CPUS (unset, from the topology: two whole cores a side where the host
-# has them, because zenoh-c and zenoh run several threads a process and one SMT pair would bind them where it
-# binds pico's one); PICO_CMP_PINGS (default 20000), PICO_CMP_WARMUP_S (3) and
+# `tids`, `perf`, `run-text` and `batch` build the wz library on that engine and print it with their readings;
+# `parity` builds each original's preset and `nodrop-c` the zenoh-c family, which have one engine each.
+# PICO_CMP_STDLIB (`std` or `nostd`, `perf` and `run-text` only): the standard library the wz library is built
+# with, to compare the two; unset, the one form the release ships (perf_matrix.py bench-stdlib).
+# `parity`, `perf` and `run-text` pin the client side of a pair (z_ping, z_pub_thr, z_put, z_get) to
+# PICO_CMP_CLIENT_CPUS and the server side to PICO_CMP_SERVER_CPUS (unset, from the topology: two whole cores a
+# side where the host has them, because zenoh-c and zenoh run several threads a process and one SMT pair would
+# bind them where it binds pico's one); PICO_CMP_PINGS (default 20000), PICO_CMP_WARMUP_S (3) and
 # PICO_CMP_WINDOW_S (10) set the round trips and the window of the free-running throughput pair (a diagnostic of
 # `parity`, not a cell), and PICO_CMP_NODROP_TRIAL_S (3) the seconds of a trial of parity's no-drop search.
 # PICO_CMP_TRANSPORT (`subprofile`, `opprofile`): tcp, the default, or multicast, the transport the pair
@@ -162,7 +172,7 @@ case "${1:-}" in
         pub_cpus="$client_cpus"
         sub_cpus="$server_cpus"
         ;;
-    parity | perf)
+    parity | perf | run-text)
         pin_sides PICO_CMP_CLIENT_CPUS PICO_CMP_SERVER_CPUS
         ;;
 esac
@@ -1796,15 +1806,11 @@ perf_probe_build() {
         || perf_fail "perf_probe against arm $arm did not build (see $dir/build-probe-$arm.log)"
 }
 
-# perf_matrix [reps] [sizes]: build the arms (unless PICO_CMP_NO_BUILD=1), run the matrix and judge the run. The
-# cells can be narrowed with PICO_CMP_PERF_TRANSPORTS, PICO_CMP_PERF_BATCHING and PICO_CMP_PERF_WORKLOADS (comma
-# lists of perf_matrix.py's words); the pinning is parity's (pin_sides above). The
-# exit is the gate's (docs/pico-perf-matrix.md section 5): 0 every row held, 1 a row failed, 2 an input refused,
-# 3 nothing failed but a row, or arm X when the environment names it, was not measured; a run that did not
-# finish exits as before, 2 when it measured nothing.
-perf_matrix() {
-    local reps="${1:-3}" sizes="${2:-8,64,1024}" dir="$out/perf" run rc
-    local external_args=() gate_args=()
+# perf_build <dir>: the arms of the perf matrix built into <dir> (reference.json, lib-<arm>, include-<arm>, bin/),
+# or with PICO_CMP_NO_BUILD=1 the ones an earlier build left there, an engine or a standard library other than its
+# record's refused; then the line that names the engine and the standard library arm W was built with.
+perf_build() {
+    local dir="$1"
     if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ]; then
         rm -rf "${dir:?}/bin"
         mkdir -p "$dir/bin"
@@ -1828,6 +1834,18 @@ perf_matrix() {
         stamped_stdlib "$(recorded_stdlib "$dir/reference.json")"
     fi
     echo "pico-compare: arm W on the $(recorded_engine "$dir/reference.json") engine, $(recorded_stdlib "$dir/reference.json")"
+}
+
+# perf_matrix [reps] [sizes]: build the arms (unless PICO_CMP_NO_BUILD=1), run the matrix and judge the run. The
+# cells can be narrowed with PICO_CMP_PERF_TRANSPORTS, PICO_CMP_PERF_BATCHING and PICO_CMP_PERF_WORKLOADS (comma
+# lists of perf_matrix.py's words); the pinning is parity's (pin_sides above). The
+# exit is the gate's (docs/pico-perf-matrix.md section 5): 0 every row held, 1 a row failed, 2 an input refused,
+# 3 nothing failed but a row, or arm X when the environment names it, was not measured; a run that did not
+# finish exits as before, 2 when it measured nothing.
+perf_matrix() {
+    local reps="${1:-3}" sizes="${2:-8,64,1024}" dir="$out/perf" run rc
+    local external_args=() gate_args=()
+    perf_build "$dir"
     if [ -f "$dir/external.json" ]; then
         external_args=(--external-record "$dir/external.json")
     fi
@@ -1851,6 +1869,30 @@ perf_matrix() {
     fi
     python3 -I "$root/scripts/host-bench/perf_matrix.py" --gate "$run/perf.json" \
         --table "$root/deploy/pico_perf_ceiling.json" ${gate_args[@]+"${gate_args[@]}"}
+}
+
+# perf_run_text: the list of the code a run of the perf matrix executes, which the library without `std` is linked
+# by (docs/win-budget/rss.md section 5.4, cell R6). The arms are built as `perf` builds them (perf_build); every
+# cell of the tcp, udp and multicast transports, at every size and with batching off and on, runs once and short
+# with each probe under callgrind (perf_matrix.py run --trace-text: the figures are the tracer's and nothing judges
+# them); then the functions each library executed are read from the profiles (perf_matrix.py run-text), arm P's
+# printed and arm W's written into the run-text script of this tree, which the library's next build links by. The
+# exit is run-text's for arm W: 0 the list was written, 2 an input was refused, 3 no profile named its code.
+perf_run_text() {
+    local dir="$out/perf" trace
+    perf_build "$dir"
+    trace="$out/perf-runs/trace-$(date -u +%Y%m%dT%H%M%S)"
+    python3 -I "$root/scripts/host-bench/perf_matrix.py" run --bin-dir "$dir/bin" --run "$trace/run" --reps 1 \
+        --sizes 8,64,1024 --transports tcp,udp,multicast --batching off,on --workloads rtt,thr \
+        --client-cpus "$client_cpus" --server-cpus "$server_cpus" --pings 500 --warmup-ms 500 --window-s 2 \
+        --timeout-ms 1000 --reference-record "$dir/reference.json" --trace-text "$trace/profiles" \
+        || perf_fail "the traced run was refused (perf_matrix.py run said why above)"
+    compgen -G "$trace/profiles/*" >/dev/null || perf_fail "the traced run wrote no profile under $trace/profiles"
+    python3 -I "$root/scripts/host-bench/perf_matrix.py" run-text "$dir/lib-P/libzenohpico.so" - \
+        "$trace/profiles"/* \
+        || echo "pico-compare: the code arm P executed was not read (perf_matrix.py run-text said why above)"
+    python3 -I "$root/scripts/host-bench/perf_matrix.py" run-text "$dir/lib-W/libwz_capi_pico.so" \
+        "$root/crates/wz-capi-pico/link/run-text.ld" "$trace/profiles"/*
 }
 
 # batch_probe_build <dir> <arm> <library name> [compiler words...]: the batch probe against an arm's library and
@@ -2006,11 +2048,12 @@ case "$mode" in
     opprofile) opprofile "$@" ;;
     parity) parity "$@" ;;
     perf) perf_matrix "$@" ;;
+    run-text) perf_run_text ;;
     batch) batch_control "$@" ;;
     fanin) fanin "$@" ;;
     selftest) selftest ;;
     *)
-        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | subprofile [size] [count] [rate] | opprofile [ops,comma,separated] [size] | parity <pico|c|rust> [boots] [sizes] | perf [reps] [sizes,comma,separated] | batch [sizes,comma,separated] [count] | fanin [rounds] [publishers] [size] [hz] [seconds] [block|drop] [pairs] | selftest" >&2
+        echo "usage: $0 rtt [reps] | thr [reps] [sizes...] | nodrop [reps] [sizes,comma,separated] | nodrop-c [reps] [sizes] | profile [size] [rate] | subprofile [size] [count] [rate] | opprofile [ops,comma,separated] [size] | parity <pico|c|rust> [boots] [sizes] | perf [reps] [sizes,comma,separated] | run-text | batch [sizes,comma,separated] [count] | fanin [rounds] [publishers] [size] [hz] [seconds] [block|drop] [pairs] | selftest" >&2
         exit 2
         ;;
 esac
