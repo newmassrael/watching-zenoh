@@ -364,11 +364,11 @@ pub struct BatchTx {
     /// Where this conduit's fragments were written, counted. Cumulative, as
     /// `lend` is.
     #[cfg(all(feature = "transport-fragmentation", feature = "transport-tx-lend"))]
-    frag_lend: FragmentLendCounts,
+    pub(crate) frag_lend: FragmentLendCounts,
     /// Where this conduit's frames sent whole, outside a batch window, were
     /// written, counted. Cumulative, as `lend` is.
     #[cfg(feature = "transport-tx-lend")]
-    frame_lend: FrameLendCounts,
+    pub(crate) frame_lend: FrameLendCounts,
 }
 
 impl BatchTx {
@@ -649,7 +649,7 @@ where
         )
     ),
 ))]
-fn lent_write<F>(write: F) -> F
+pub(crate) fn lent_write<F>(write: F) -> F
 where
     F: Fn(&mut crate::tx_buf::EncodeBuf<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
 {
@@ -657,7 +657,7 @@ where
 }
 
 /// What putting one frame into a slot its link lends came to
-/// (`SessionLinkActions::write_n_msg`).
+/// (`TxRoute::write_n_msg`).
 #[cfg(all(
     feature = "transport-tx-lend",
     any(
@@ -674,7 +674,7 @@ where
     )
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FrameLend {
+pub(crate) enum FrameLend {
     /// The frame left as the slot.
     Sent,
     /// The frame is past the batch budget: nothing was sent and the slot is
@@ -1730,7 +1730,7 @@ impl BatchStage {
     )
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HeapStage {
+pub(crate) enum HeapStage {
     /// The link lent no slot.
     NoSlot,
     /// The slot lent was smaller than the batch budget.
@@ -1756,7 +1756,7 @@ enum HeapStage {
 ))]
 impl BatchLendCounts {
     /// Count a batch frame staged on the heap.
-    fn count_heap(&mut self, why: HeapStage) {
+    pub(crate) fn count_heap(&mut self, why: HeapStage) {
         match why {
             HeapStage::NoSlot => self.heap_no_slot = self.heap_no_slot.wrapping_add(1),
             HeapStage::ShortSlot => self.heap_short_slot = self.heap_short_slot.wrapping_add(1),
@@ -3965,7 +3965,7 @@ pub enum UnsentShared {
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
-enum UnicastPush {
+pub(crate) enum UnicastPush {
     /// The message is on the link's queue.
     Pushed,
     /// No room was found within the message's deadline.
@@ -4238,7 +4238,7 @@ where
 pub type ReplyEgressGate =
     alloc::boxed::Box<dyn Fn(crate::network_message::MessageRef<'_>) -> bool + Send + Sync>;
 
-/// The per-frame context [`SessionLinkActions::emit_frame_or_fragments`]
+/// The per-frame context `TxRoute::emit_frame_or_fragments`
 /// needs to decide between one frame and a fragment chain, and to route
 /// whichever it emits.
 ///
@@ -4248,7 +4248,7 @@ pub type ReplyEgressGate =
 /// together to both call sites. All `Copy`, so the grouping is free.
 ///
 /// Carries the SAME feature gate as
-/// [`SessionLinkActions::emit_frame_or_fragments`], its only consumer: a
+/// `TxRoute::emit_frame_or_fragments`, its only consumer: a
 /// build with none of these codecs (the lwIP MCU profiles reach it) emits
 /// no network message at all, and an ungated struct is dead code the
 /// workspace's `-D warnings` rejects.
@@ -4265,31 +4265,31 @@ pub type ReplyEgressGate =
     feature = "liveliness-token",
 ))]
 #[derive(Clone, Copy)]
-struct FrameEmit {
+pub(crate) struct FrameEmit {
     /// The frame's own `ext_qos` — `Some(p)` iff the effective priority is
     /// non-DEFAULT, which is also how the emit reconstructs the SN conduit.
-    ext_qos: Option<Priority>,
+    pub(crate) ext_qos: Option<Priority>,
     /// The already-minted Frame SN. A fragment chain reuses it as the FIRST
     /// fragment's SN (R311y206) rather than re-minting a block.
-    sn: crate::sn::Sn,
+    pub(crate) sn: crate::sn::Sn,
     /// Reliable vs best-effort — selects the conduit and the frame's R flag.
-    reliable: bool,
+    pub(crate) reliable: bool,
     /// The outbound budget one frame may occupy; over it, the message
     /// fragments (or is emitted as-is when fragmentation is compiled out).
-    mtu: usize,
+    pub(crate) mtu: usize,
     /// The negotiated SN ring the chain's follow-on SNs walk.
-    sn_mask: crate::sn::Sn,
+    pub(crate) sn_mask: crate::sn::Sn,
     /// This profile's reassembly cap — a chain longer than this is refused,
     /// because no same-profile peer could rejoin it. `usize::MAX` = no cap.
-    max_reassembly_bytes: usize,
+    pub(crate) max_reassembly_bytes: usize,
     /// R2926 — the message's congestion deadline, what is left of it after the
     /// ask for the first frame's room: a fragment chain asks again before each
     /// further fragment, against the same deadline.
-    deadline: PushDeadline,
+    pub(crate) deadline: PushDeadline,
     /// The bound the message's codec gives its bytes: a heap frame reserves it, and a frame
     /// sent whole asks a slot of it. A lend-only build measures nothing.
     #[cfg(not(feature = "tx-lend-only"))]
-    worst_case_payload: usize,
+    pub(crate) worst_case_payload: usize,
 }
 
 /// What a send tells its dispatch of the bytes its message encodes to: a heap frame is reserved
@@ -11295,45 +11295,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.tx.frame_sn.mint(priority, reliable, sn_mask)
     }
 
-    /// Whether the link a frame of `reliability` and `priority` leaves by stayed full for what is
-    /// left of `deadline`, which the ask spends. A sender that holds the room (`reserved`, see
-    /// `DispatchStage::Reserved`) asks nothing: asking would count its own promise against the
-    /// lane and find it full when it is exactly full enough. One body for every ask a send makes
-    /// before its frame takes an SN.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    fn congested_within(
-        &self,
-        reliability: Reliability,
-        priority: Priority,
-        reserved: bool,
-        deadline: &mut PushDeadline,
-    ) -> bool {
-        if reserved {
-            return false;
-        }
-        // The room of the queue this message's class leaves by: a best-effort message on a link
-        // that carries it apart never waits for its streams' room.
-        let answer = self
-            .route()
-            .with_conduit_link(reliability, priority, |link| {
-                link.link_driver()
-                    .wait_for_room_for(reliability, priority, deadline.ask())
-            });
-        deadline.spend(answer.waited_us);
-        answer.room == crate::link::LinkRoom::Congested
-    }
-
     /// R311y215 (transport-qos) / R3122 -- the EFFECTIVE priority a message is routed on: the
     /// caller's when this session negotiated QoS, else forced to DEFAULT (a non-QoS session has
     /// one conduit and writes no ext_qos). Without `transport-qos` the priority passes straight
@@ -11813,13 +11774,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if probing {
             deadline.set(PushDeadline::probe(droppable));
         }
-        // Room is asked where a frame opens (`Self::write_n_msg`), and, with a heap and the
+        // Room is asked where a frame opens (`TxRoute::write_n_msg`), and, with a heap and the
         // held-conduit wait (`tx-held-wait`), while a droppable message waits for its conduit's
         // lock.
         #[cfg(all(feature = "alloc", feature = "tx-held-wait"))]
         let congested = || {
             let mut left = deadline.get();
-            let full = self.congested_within(wire_reliability, priority, reserved, &mut left);
+            let full =
+                self.route()
+                    .congested_within(wire_reliability, priority, reserved, &mut left);
             deadline.set(left);
             full
         };
@@ -11913,7 +11876,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             //
             // The frame's room is not yet asked for out of the deadline it carries, and its SN is
             // not taken here but where the frame is written, so `sn` stays zero until then.
-            self.write_n_msg(
+            self.route().write_n_msg(
                 batch,
                 window,
                 priority,
@@ -12086,884 +12049,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 count_pushed();
                 pushed.map(|_| Dispatched::Sent)
             }
-        }
-    }
-
-    /// The frame one message goes into, in one body from the open frame to the answer, for every
-    /// build. In the batch window (`in_window`) the message first joins the frame its conduit
-    /// holds open, in a lent slot or, in a build with a heap, on the heap, which needs no room
-    /// check; a frame it does not join, of the other reliability or with no room left for it, is
-    /// sent, once, rolled back to the messages it held, and a fresh one opens. To open one, the
-    /// conduit's link is asked for room out of `emit`'s deadline (none when the sender holds it,
-    /// `reserved`) and, with `transport-tx-lend`, for a slot: of the whole batch budget for a
-    /// window's frame and for every frame of a lend-only build, of the message's worst case for a
-    /// frame a build with a heap sends whole. The SN is minted once a slot is lent, and the frame
-    /// is written into the slot held to the budget, kept open for the messages after it in the
-    /// window or sent at once. A message past the budget leaves as a chain of lent fragments. A
-    /// frame no slot takes (none lent, one short of the frame, or without fragmentation one past
-    /// the budget) is written on the heap by a build that has one, its SN given back and minted
-    /// again there, and refused by a lend-only build, which has no answer in the heap; a message
-    /// its encoder refuses is refused in either, and an SN minted for a frame that does not leave
-    /// is given back.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    #[inline(never)]
-    fn write_n_msg(
-        &self,
-        batch: &mut BatchTx,
-        in_window: bool,
-        priority: Priority,
-        reserved: bool,
-        mut emit: FrameEmit,
-        encode_body: &dyn crate::tx_buf::WireWrite,
-    ) -> Result<UnicastPush, SendWireError> {
-        let reliability = Reliability::from_reliable_bool(emit.reliable);
-        // The frame the conduit holds open in a lent slot takes a message of its reliability while
-        // the budget it was held to has room, which it had when it opened. A message of the other
-        // reliability, or one the frame has no room left for, sends it, once, rolled back to the
-        // messages it held, and opens the next frame below.
-        #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-        if in_window {
-            if let Some(open) = batch.stage.lent.take() {
-                use crate::tx_buf::TxBuf;
-                let idx = TxConduits::<R>::conduit_index(priority);
-                // Found where it was put down, under the conduit's lock the caller holds: no other
-                // lock is taken and the driver is asked nothing. Its lender is this binding's own
-                // link for every session but an aggregated one whose conduit moved.
-                let joined = self.route().with_batch_holder(idx, open.slot(), |found| {
-                    let Some(link) = found else {
-                        // No link records the slot: the link that lent it has gone and gave it
-                        // back as it went, and the open frame with it.
-                        batch.stage.count = 0;
-                        batch.lend.lost = batch.lend.lost.wrapping_add(1);
-                        return false;
-                    };
-                    // SAFETY: `link` records the slot for this conduit, so it lent it, and every
-                    // send or abort of a conduit's lent slot clears the record first, under the
-                    // conduit's lock, which the caller holds (`batch`): the slot is still lent and
-                    // unsettled.
-                    let mut slot =
-                        unsafe { crate::tx_lease::TxLease::pick_up(link.link_driver(), open) };
-                    let open_channel = crate::frame_encode::frame_wire_reliability(slot.as_slice());
-                    if open_channel == reliability {
-                        let wpos = slot.len();
-                        let appended = {
-                            let mut sink = crate::tx_buf::TxSink::new(&mut slot);
-                            encode_body.write_body(&mut sink).is_ok()
-                        };
-                        if appended {
-                            batch.stage.count = batch.stage.count.saturating_add(1);
-                            batch.stage.lent = Some(slot.keep_open());
-                            return true;
-                        }
-                        slot.truncate(wpos);
-                    }
-                    let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
-                    batch.stage.count = 0;
-                    self.route().send_lent_batch(
-                        link,
-                        &mut slot,
-                        open_channel,
-                        priority,
-                        &mut batch.lend,
-                    );
-                    false
-                });
-                if joined {
-                    return Ok(UnicastPush::Pushed);
-                }
-            }
-        }
-        // The same for a frame open on the heap, which a lent slot did not take when it opened.
-        // The frame's own R flag names the conduit it leaves on (R311y222): a frame never mixes
-        // the two, as zenoh's per-(priority, reliability) frame does not
-        // (`zenoh-codec` `CurrentFrame`/`NewFrame`), where zenoh-pico appends a message of either
-        // reliability to whatever frame is open (`tx.c` `_z_transport_tx_send_n_msg_inner`).
-        #[cfg(all(feature = "transport-batching", not(feature = "tx-lend-only")))]
-        if in_window && !batch.stage.buf.is_empty() {
-            let stage = &mut batch.stage;
-            let open_channel = crate::frame_encode::frame_wire_reliability(&stage.buf);
-            if open_channel == reliability {
-                let wpos = stage.buf.len();
-                let appended = {
-                    let mut sink = crate::tx_buf::TxSink::new(&mut stage.buf);
-                    encode_body.write_body(&mut sink)
-                };
-                if let Err(refused) = appended {
-                    // The body refused its message: its partial bytes are rolled back and the
-                    // frame open before it stays as it was.
-                    stage.buf.truncate(wpos);
-                    return Err(SendWireError::Codec(refused));
-                }
-                if stage.buf.len() <= emit.mtu {
-                    // One more message than the frame held, which holds at most a batch.
-                    stage.count = stage.count.saturating_add(1);
-                    return Ok(UnicastPush::Pushed);
-                }
-                // Overflow (zenoh-pico's `_z_transport_tx_batch_overflow`): rolled back, and
-                // the frame leaves before the next opens.
-                stage.buf.truncate(wpos);
-            }
-            let prev = core::mem::take(&mut stage.buf);
-            stage.count = 0;
-            self.route().send_wire(&prev, open_channel, priority);
-        }
-        if self.congested_within(reliability, priority, reserved, &mut emit.deadline) {
-            return Ok(UnicastPush::Congested);
-        }
-        // A build without batching opens no window, and has no open frame to join.
-        #[cfg(not(feature = "transport-batching"))]
-        let in_window = {
-            let _ = in_window;
-            false
-        };
-        // A build that neither batches nor lends reads it nowhere else.
-        #[cfg(not(any(feature = "transport-batching", feature = "transport-tx-lend")))]
-        let _ = in_window;
-        // Why a window's frame is staged on the heap, counted once it is.
-        #[cfg(all(
-            feature = "transport-batching",
-            feature = "transport-tx-lend",
-            not(feature = "tx-lend-only")
-        ))]
-        let mut heap_why = HeapStage::NoSlot;
-        // A lend-only build asks for the whole budget for every frame, as zenoh-pico's batch is the
-        // budget whatever it carries, so nothing measures a message before it is written; a build
-        // with a heap asks that for a window's frame, which grows to it, and the message's worst
-        // case for a frame sent whole.
-        #[cfg(feature = "tx-lend-only")]
-        let want = emit.mtu;
-        #[cfg(all(feature = "transport-tx-lend", not(feature = "tx-lend-only")))]
-        let want = if in_window {
-            emit.mtu
-        } else {
-            // The widest prefix and a possible ext_qos, as the heap frame reserves.
-            emit.worst_case_payload.saturating_add(1 + 10 + 2)
-        };
-        // A window in its conduit's band, a frame sent whole on the conduit its ext_qos names, as
-        // the heap frame's send does.
-        #[cfg(feature = "transport-tx-lend")]
-        let lend_priority = if in_window {
-            priority
-        } else {
-            emit.ext_qos.unwrap_or(Priority::DEFAULT)
-        };
-        // The SN is minted where the frame is written, once a slot was lent: a link that lent none
-        // leaves it unminted, and a frame that does not leave gives it back below.
-        #[cfg(feature = "transport-tx-lend")]
-        let mut minted: Option<crate::sn::Sn> = None;
-        #[cfg(feature = "transport-tx-lend")]
-        let lent = self
-            .route()
-            .with_conduit_link(reliability, lend_priority, |link| {
-                use sce_forge_runtime::codec::CodecError;
-                // Lent from where `acquire` wrote it: bound out of its `Option` it would be copied
-                // first.
-                let mut lease = self.route().lease_on(link, want, lend_priority);
-                let Some(slot) = lease.as_mut() else {
-                    return FrameLend::Heap;
-                };
-                // A window's frame grows across calls up to the whole budget, which a shorter slot
-                // would close earlier than the budget does: refused before an SN is minted for it.
-                if in_window && slot.capacity() < emit.mtu {
-                    #[cfg(all(feature = "transport-batching", not(feature = "tx-lend-only")))]
-                    {
-                        heap_why = HeapStage::ShortSlot;
-                    }
-                    return FrameLend::Heap;
-                }
-                // Over a slot that holds the whole budget a frame that crosses it is past the budget;
-                // over a shorter one the slot is what is short.
-                let whole_budget = slot.capacity() >= emit.mtu;
-                let sn = self.next_outbound_frame_sn(priority, emit.reliable, emit.sn_mask);
-                minted = Some(sn);
-                // Held to the budget, so a message past it is refused where it crosses it and its
-                // payload is not copied in; a window kept open keeps the hold for what is appended.
-                slot.hold_to(emit.mtu);
-                let written = crate::frame_encode::encode_frame_envelope_into(
-                    slot,
-                    crate::sn::to_wire(sn),
-                    crate::frame_encode::frame_flags(emit.reliable),
-                    emit.ext_qos,
-                    crate::tx_buf::wire_body(encode_body),
-                );
-                match written {
-                    Ok(()) => {}
-                    Err(CodecError::BufferOverflow) if whole_budget => return FrameLend::PastMtu,
-                    Err(CodecError::BufferOverflow) => return FrameLend::Heap,
-                    // An encoder's refusal in a window's slot takes the oversize path, which measures
-                    // the message again and answers the refusal (`emit_fragments_encoded`).
-                    Err(_) if in_window => return FrameLend::PastMtu,
-                    Err(refused) => return FrameLend::Refused(refused),
-                }
-                #[cfg(feature = "transport-batching")]
-                if in_window {
-                    let idx = TxConduits::<R>::conduit_index(priority);
-                    if let Some(stale) = link.batch_slots.get(idx).and_then(LentRecord::take) {
-                        // A record with no open frame naming it: the stage and the link disagree,
-                        // which the shared conduit lock rules out. Give the slot back rather than
-                        // lose it, and say so.
-                        link.link_driver().tx_slot_abort(stale);
-                        batch.lend.lost = batch.lend.lost.wrapping_add(1);
-                    }
-                    batch.lend.slot_frames = batch.lend.slot_frames.wrapping_add(1);
-                    // A link whose slots come from a pool the session's other links share keeps none
-                    // past this message while the pool has no other free: the frame leaves now with
-                    // this message alone, as the window's flush would send it, and the next link that
-                    // asks for a slot finds one.
-                    #[cfg(feature = "session-unicast-accept")]
-                    let keeps = link.link_driver().tx_slot_spare();
-                    #[cfg(not(feature = "session-unicast-accept"))]
-                    let keeps = true;
-                    if keeps {
-                        let open = lease.take().map(crate::tx_lease::TxLease::keep_open);
-                        if let (Some(record), Some(open)) =
-                            (link.batch_slots.get(idx), open.as_ref())
-                        {
-                            record.hold(open.slot());
-                        }
-                        batch.stage.lent = open;
-                        batch.stage.count = 1;
-                        return FrameLend::Sent;
-                    }
-                    batch.stage.count = 0;
-                }
-                self.tx
-                    .emit_on_link(link, &[], Some(slot), reliability, lend_priority, false);
-                FrameLend::Sent
-            });
-        #[cfg(feature = "transport-tx-lend")]
-        if let Some(sn) = minted {
-            emit.sn = sn;
-        }
-        // A window counts its own opening (above); a frame sent whole is counted here.
-        #[cfg(feature = "transport-tx-lend")]
-        if lent == FrameLend::Sent && !in_window {
-            batch.frame_lend.slot_frames = batch.frame_lend.slot_frames.wrapping_add(1);
-        }
-        #[cfg(feature = "tx-lend-only")]
-        {
-            match lent {
-                FrameLend::Sent => Ok(UnicastPush::Pushed),
-                #[cfg(feature = "transport-fragmentation")]
-                FrameLend::PastMtu => self.emit_fragments_encoded(batch, encode_body, emit),
-                #[cfg(not(feature = "transport-fragmentation"))]
-                FrameLend::PastMtu => {
-                    // What only a fragment chain reads is unread here, as in
-                    // `emit_frame_or_fragments` without fragmentation.
-                    let _ = (
-                        emit.sn,
-                        emit.sn_mask,
-                        emit.max_reassembly_bytes,
-                        emit.deadline,
-                    );
-                    // The frame took the SN it was written with before it crossed the budget:
-                    // given back, as a refused encode's is, or the conduit's next frame leaves a
-                    // gap in a reliable channel that no frame fills.
-                    self.tx.frame_sn.unmint(priority, emit.reliable);
-                    Err(SendWireError::LinkRefused(
-                        self.tx.refuse(crate::link::LinkDropCause::Oversize),
-                    ))
-                }
-                // No slot, or one short of the frame. A slot that was lent and then found short
-                // took the SN its frame was written with, which is given back, as a refused
-                // encode's is, so the conduit's next frame carries it: kept, it would be a gap in a
-                // reliable channel that no frame fills. A link that lent none took no SN.
-                FrameLend::Heap => {
-                    if minted.is_some() {
-                        self.tx.frame_sn.unmint(priority, emit.reliable);
-                    }
-                    Err(SendWireError::LinkRefused(
-                        self.tx.refuse(crate::link::LinkDropCause::NoTxSlot),
-                    ))
-                }
-                // Refused before a byte left: the SN minted for it is given back.
-                FrameLend::Refused(refused) => {
-                    self.tx.frame_sn.unmint(priority, emit.reliable);
-                    Err(SendWireError::Codec(refused))
-                }
-            }
-        }
-        #[cfg(all(feature = "transport-tx-lend", not(feature = "tx-lend-only")))]
-        match lent {
-            FrameLend::Sent => return Ok(UnicastPush::Pushed),
-            #[cfg(feature = "transport-fragmentation")]
-            FrameLend::PastMtu => return self.emit_fragments_encoded(batch, encode_body, emit),
-            // Refused before a byte left: the SN minted for it is given back.
-            FrameLend::Refused(refused) => {
-                self.tx.frame_sn.unmint(priority, emit.reliable);
-                return Err(SendWireError::Codec(refused));
-            }
-            // Written on the heap below, under the SN given back here, which is the one the heap
-            // frame mints: nothing else takes one while the conduit's lock is held.
-            _ => {
-                if minted.is_some() {
-                    self.tx.frame_sn.unmint(priority, emit.reliable);
-                }
-                if !in_window {
-                    batch.frame_lend.heap_frames = batch.frame_lend.heap_frames.wrapping_add(1);
-                }
-            }
-        }
-        // The heap frame, for every frame no lent slot took: under the conduit's lock the SN is
-        // minted, the frame written and emitted (zenoh-pico's TX mutex, R311kf).
-        #[cfg(not(feature = "tx-lend-only"))]
-        {
-            emit.sn = self.next_outbound_frame_sn(priority, emit.reliable, emit.sn_mask);
-            #[cfg(feature = "transport-batching")]
-            if in_window {
-                let stage = &mut batch.stage;
-                // +2 for a possible ext_qos ([0x31][VLE(priority)]) that begin_frame may append
-                // (symmetric with encode_frame_envelope).
-                stage
-                    .buf
-                    .reserve(emit.worst_case_payload.saturating_add(1 + 10 + 2));
-                let staged = match crate::frame_encode::begin_frame(
-                    &mut stage.buf,
-                    crate::sn::to_wire(emit.sn),
-                    crate::frame_encode::frame_flags(emit.reliable),
-                    emit.ext_qos,
-                ) {
-                    Ok(()) => {
-                        let mut sink = crate::tx_buf::TxSink::new(&mut stage.buf);
-                        encode_body.write_body(&mut sink)
-                    }
-                    Err(refused) => Err(refused),
-                };
-                if let Err(refused) = staged {
-                    // The body refused its message: the frame it opened is dropped whole and its
-                    // SN given back, before a byte left.
-                    stage.buf.clear();
-                    stage.count = 0;
-                    self.tx.frame_sn.unmint(priority, emit.reliable);
-                    return Err(SendWireError::Codec(refused));
-                }
-                if stage.buf.len() > emit.mtu {
-                    // The message alone is past the budget, which no batch carries: it leaves by
-                    // the oversize path, still under the lock, and the stage is left empty, so a
-                    // refusal there stages nothing for a later flush to send half of.
-                    let frame = core::mem::take(&mut stage.buf);
-                    stage.count = 0;
-                    return self.emit_frame_or_fragments(batch, &frame, emit);
-                }
-                stage.count = 1;
-                #[cfg(feature = "transport-tx-lend")]
-                batch.lend.count_heap(heap_why);
-                return Ok(UnicastPush::Pushed);
-            }
-            let wire = match crate::frame_encode::encode_frame_envelope(
-                crate::sn::to_wire(emit.sn),
-                crate::frame_encode::frame_flags(emit.reliable),
-                emit.worst_case_payload,
-                emit.ext_qos,
-                crate::tx_buf::wire_body(encode_body),
-            ) {
-                Ok(wire) => wire,
-                // The body refused its message: refused before a byte left, with its SN given
-                // back.
-                Err(refused) => {
-                    self.tx.frame_sn.unmint(priority, emit.reliable);
-                    return Err(SendWireError::Codec(refused));
-                }
-            };
-            self.emit_frame_or_fragments(batch, &wire, emit)
-        }
-    }
-
-    /// R311jq — terminal emit for one already-encoded outbound frame:
-    /// send as-is when it fits `mtu`, else re-frame the network-message
-    /// body as a `T_MID_FRAGMENT` chain (zenoh-pico
-    /// `_z_transport_tx_send_fragment` parity). Shared by the immediate
-    /// path and the batching oversize arm so the fragment decision stays
-    /// in one place.
-    ///
-    /// The FRAME body is the tail after the 1-byte header + `VLE(sn)`;
-    /// slice it rather than re-encoding (`vle_width` = base-128 width of
-    /// `sn`). The oversize FRAME's already-minted `sn` IS the first
-    /// fragment's SN; the chain reserves only the `count - 1` follow-on SNs
-    /// (`fragment_body` projects the walk onto the ring of `sn_mask`, R311kb),
-    /// so the chunk SNs are ring-consecutive from `sn` with NO skipped SN
-    /// (R311y206 — matching zenoh `pipeline.rs` + the
-    /// `multicast_frame_or_fragments` twin; the pre-y206 code discarded `sn`
-    /// and reserved a fresh block, leaving a 1-SN wire gap). The caller's `sn`
-    /// mint and this follow-on reserve both run inside the one conduit-lock
-    /// hold, so the split reservation is atomic w.r.t. a concurrent sender
-    /// (the reassembly dispatcher aborts a non-consecutive chain).
-    ///
-    /// Fixed-memory step S4 — the heap frame's terminal emit: under
-    /// `tx-lend-only` there is no heap frame to emit, so the function is not
-    /// compiled (its callers are the heap arms, which are not either).
-    #[cfg(all(
-        not(feature = "tx-lend-only"),
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "declare-interest",
-            feature = "liveliness-token",
-        )
-    ))]
-    fn emit_frame_or_fragments(
-        &self,
-        batch: &mut BatchTx,
-        frame: &[u8],
-        emit: FrameEmit,
-    ) -> Result<UnicastPush, SendWireError> {
-        let FrameEmit {
-            ext_qos,
-            sn,
-            reliable,
-            mtu,
-            ..
-        } = emit;
-        let reliability = if reliable {
-            Reliability::Reliable
-        } else {
-            Reliability::BestEffort
-        };
-        #[cfg(feature = "transport-fragmentation")]
-        {
-            if frame.len() > mtu {
-                // R311y215 — strip the frame's own ext_qos (if any) along with the
-                // header + VLE(sn): the fragments re-frame their OWN ext_qos,
-                // so `body` must be ONLY the NetworkMessage batch (else the stale
-                // `[0x31][priority]` prepends to the reassembled batch and breaks
-                // the peer's parse_frame_payload).
-                let body =
-                    crate::frame_encode::frame_wire_body(frame, crate::sn::to_wire(sn), ext_qos);
-                return self.emit_fragment_chain(
-                    batch,
-                    crate::frame_encode::FragmentBody::Bytes(body),
-                    body.len(),
-                    emit,
-                );
-            }
-        }
-        // Without fragmentation a frame past the budget leaves whole, so what
-        // only a chain reads is unread here.
-        #[cfg(not(feature = "transport-fragmentation"))]
-        let _ = (
-            batch,
-            sn,
-            mtu,
-            emit.sn_mask,
-            emit.max_reassembly_bytes,
-            emit.deadline,
-        );
-        // The frame's conduit reconstructed from its own ext_qos (`Some(p)` iff
-        // `p != DEFAULT`, else `None -> DEFAULT`) — the same key the SN mint used.
-        self.route()
-            .send_wire(frame, reliability, ext_qos.unwrap_or(Priority::DEFAULT));
-        Ok(UnicastPush::Pushed)
-    }
-
-    /// ARCHITECTURE section 9.1 -- the oversize message cut into a chain WITHOUT
-    /// being written out whole: `encode_body` is measured (nothing is written),
-    /// and each fragment is then encoded straight into a slot the conduit's link
-    /// lends, the encoder keeping only that fragment's range of the message
-    /// (`frame_encode::write_fragment`). A message moves once, from the
-    /// application into the slots that leave, where the heap form moved it into
-    /// a frame vector and again into a vector per fragment.
-    ///
-    /// The chain is the heap chain byte for byte -- the same plan, the same head
-    /// writer, the same SN walk -- and every rule of the heap chain (the cap, the
-    /// fragment budget, the room before each further fragment, the stop
-    /// fragment) is [`Self::emit_fragment_chain`]'s, shared. Reached only once a
-    /// lent slot of the whole budget has refused the frame, so `emit.sn` is
-    /// minted and the frame is known to be past `emit.mtu`.
-    #[cfg(all(
-        feature = "transport-fragmentation",
-        feature = "transport-tx-lend",
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "declare-interest",
-            feature = "liveliness-token",
-        )
-    ))]
-    // Cold and out of line: a message past the budget is the rare send, and inlined into each of
-    // its three callers the chain's walk would be copied into the hot frame writers with it.
-    #[cold]
-    #[inline(never)]
-    fn emit_fragments_encoded(
-        &self,
-        batch: &mut BatchTx,
-        encode_body: &dyn crate::tx_buf::WireWrite,
-        emit: FrameEmit,
-    ) -> Result<UnicastPush, SendWireError> {
-        let encode: &crate::frame_encode::BodyEncoder<'_> = encode_body;
-        // An encoder that refuses its message (a field past its codec bound) reaches here too:
-        // the slot of an open window answers its refusal as a message past the budget. It is
-        // refused typed, before a byte leaves, with the SN the caller minted for it given back,
-        // as `emit_fragment_chain` gives it back for a message past the reassembly cap.
-        let body_len = match crate::tx_buf::try_encoded_len(encode) {
-            Ok(len) => len,
-            Err(refused) => {
-                self.tx
-                    .frame_sn
-                    .unmint(emit.ext_qos.unwrap_or(Priority::DEFAULT), emit.reliable);
-                return Err(SendWireError::Codec(refused));
-            }
-        };
-        self.emit_fragment_chain(
-            batch,
-            crate::frame_encode::FragmentBody::Encoded(encode),
-            body_len,
-            emit,
-        )
-    }
-
-    /// The fragment chain of a `body_len`-byte message, whichever form the
-    /// message is in ([`crate::frame_encode::FragmentBody`]): the bytes of a
-    /// heap frame, or the encoder a lent chain re-runs per fragment. One walk,
-    /// so the two forms cannot differ in anything but where the bytes are
-    /// written.
-    #[cfg(all(
-        feature = "transport-fragmentation",
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "declare-interest",
-            feature = "liveliness-token",
-        )
-    ))]
-    // Out of line, so the heap frame's emit and the lent entry share one walk.
-    #[cold]
-    #[inline(never)]
-    fn emit_fragment_chain(
-        &self,
-        batch: &mut BatchTx,
-        body: crate::frame_encode::FragmentBody<'_>,
-        body_len: usize,
-        emit: FrameEmit,
-    ) -> Result<UnicastPush, SendWireError> {
-        let FrameEmit {
-            ext_qos,
-            sn,
-            reliable,
-            mtu,
-            sn_mask,
-            max_reassembly_bytes,
-            deadline,
-            ..
-        } = emit;
-        let reliability = Reliability::from_reliable_bool(reliable);
-        // The conduit the follow-on SNs reserve on IS the frame's conduit:
-        // `ext_qos = Some(p)` iff the effective priority `p != DEFAULT`
-        // (dispatch_network_message_at), and a DEFAULT frame carries `None`,
-        // so `ext_qos.unwrap_or(DEFAULT)` reconstructs the effective
-        // priority exactly (no separate param — keeps the arg count sane).
-        let priority = ext_qos.unwrap_or(Priority::DEFAULT);
-        // `body` is EXACTLY what a receiver stages: the chunks below
-        // carry it and nothing else, and the reassembler rejoins them
-        // into it. So it is the right unit to test against the slot
-        // cap — the framed `frame` would over-count by the header the
-        // fragments strip, and the caller's payload would under-count
-        // by the network-message envelope they keep.
-        //
-        // Refuse before the follow-on SN reserve and before the first
-        // `send_wire`, so NO wire bytes leave and the chain reserves
-        // none of the `count - 1` follow-on SNs.
-        //
-        // The caller minted `sn` before it could know the encoded length,
-        // and gives it back here: the conduit's lock has been held since
-        // that mint, so it is still the last one, and the next frame on
-        // the channel must carry it again. Left spent it is a 1-SN hole
-        // in the reliable ring, which the half-window check of a peer
-        // that does not tolerate it (zenoh-pico: the session closes at
-        // the next frame) turns into a lost session, while the caller
-        // was told only that this one message failed.
-        if body_len > max_reassembly_bytes {
-            self.tx.frame_sn.unmint(priority, reliable);
-            return Err(SendWireError::ExceedsReassemblyCap);
-        }
-        // R311y215 — a QoS chain carries an ext_qos on every fragment, so
-        // the count (which the follow-on SN reserve below must match) uses
-        // the same qos budget the `fragment_body` chunker does.
-        // R2238 (open-debt item 580) — the chain STREAMS: one fragment
-        // is built, paid for out of the session's finite fragment TX
-        // budget, and written, and only then is the next one built.
-        //
-        // The pre-R2238 code reserved `count - 1` follow-on SNs up
-        // front and then walked a `Vec` the encoder had already
-        // materialised whole. Both halves of that are now per-fragment,
-        // and the SN policy is UNCHANGED by it: the oversize frame's
-        // already-minted `sn` IS the first fragment's SN and each
-        // further fragment reserves exactly one more, so the chain
-        // stays ring-consecutive from `sn` with no skipped SN
-        // (R311y206; zenoh `io/zenoh-transport/src/common/pipeline.rs`
-        // @ `fn on_next_fragment` reuses
-        // the frame SN slot and the `multicast_frame_or_fragments`
-        // twin does the same). Reserving as we go rather than in
-        // advance is not a weakening: the whole walk runs inside the
-        // one conduit-lock hold, which is what made the split
-        // reservation atomic w.r.t. a concurrent sender in the first
-        // place. What it BUYS is that an abandoned chain reserves
-        // only the SNs it actually put on the wire, instead of
-        // punching a `count`-wide hole in the conduit's ring.
-        //
-        // R311y215 — every reserve is on the SAME (priority, reliable)
-        // conduit the first fragment minted from (the base-mint +
-        // reserve MUST share one conduit key, else conduit[priority]
-        // under-advances and reuses an SN).
-        //
-        // ARCHITECTURE section 9.1 — the PLAN walks the chain and each
-        // fragment is written by `Self::send_fragment`, into a lent slot
-        // where the link lends one and on the heap where it does not.
-        let mut plan = crate::frame_encode::FragmentPlan::new(body_len, mtu, sn, sn_mask, ext_qos);
-        // A sender that may not wait can send a chain only when the lane holds the whole of it
-        // at once. A chain is wire-atomic: it is not put down at the fragment the lane fills at
-        // and picked up again later, so a chain the lane cannot hold would be begun, abandoned
-        // at the same fragment and begun again, for ever, by a sender that asks for room
-        // without waiting. Every fragment but the last has to find the lane under its bound
-        // with the ones before it queued, and a fragment weighs at most `mtu`. Refused here, in
-        // the way the cap above is: before a byte leaves and before a follow-on SN is reserved,
-        // with the SN of this message given back; the sender sends it waiting. The chain that
-        // fits may still find the lane full and is abandoned and put down for later, which is
-        // what a probe does with a frame. A probe exists with `tx-probe`.
-        #[cfg(feature = "tx-probe")]
-        if deadline.is_probe() {
-            let before_last = plan
-                .remaining_fragments()
-                .saturating_sub(1)
-                .saturating_mul(mtu);
-            if before_last >= self.tx.lane_bytes(priority) {
-                self.tx.frame_sn.unmint(priority, reliable);
-                return Ok(UnicastPush::Chain);
-            }
-        }
-        let mut emitted = 0usize;
-        let mut deadline = deadline;
-        // A chain abandoned once some of it is on the wire ends in one place: the stop fragment
-        // at the SN the abandoned fragment would have had, reserved first unless the fragment
-        // reserved it already, and the answer the abandon gives.
-        let (stop_sn, reserve_stop, abandoned) = loop {
-            // The span is taken before the draw, so its SN names the fragment
-            // this iteration is about to send — which is also the SN
-            // the stop fragment takes if the draw fails, keeping the
-            // conduit's ring gapless across the abandon. The plan is not read
-            // again once a draw fails.
-            let Some(span) = plan.next_span() else {
-                return Ok(UnicastPush::Pushed);
-            };
-            let this_sn = span.sn;
-            // R2926 — each further fragment waits for room against the
-            // message's ONE deadline, as upstream's chain waits for a
-            // batch per fragment (`io/zenoh-transport/src/common/pipeline.rs`
-            // @ `// Otherwise, an ephemeral batch is created to send the stop fragment`).
-            // The first fragment's room was asked before its SN was
-            // minted. A chain that runs out mid-way is abandoned the way
-            // a spent fragment budget abandons it just below: the stop
-            // fragment, outside the queue's bound as upstream's
-            // ephemeral batch is outside its pool, and the message is a
-            // congestion drop. A chain whose every frame's room the sender reserved asks for
-            // none: that room is the sender's, and asking would count its own promise.
-            if emitted > 0 && !deadline.is_covered() {
-                let answer = self
-                    .route()
-                    .with_conduit_link(reliability, priority, |link| {
-                        link.link_driver()
-                            .wait_for_room_for(reliability, priority, deadline.ask())
-                    });
-                deadline.spend(answer.waited_us);
-                if answer.room == crate::link::LinkRoom::Congested {
-                    // (A stop marker the link lends no slot for is lost, and the
-                    // peer's staged chain with it: there is nothing more to send
-                    // it on a profile that has no heap frame to fall back to.)
-                    break (this_sn, true, Ok(UnicastPush::Congested));
-                }
-            }
-            #[cfg(feature = "tx-fragment-credit")]
-            if !self.tx.take_fragment_credit() {
-                if emitted == 0 {
-                    // Nothing left this session, and nothing has left
-                    // for THIS message: there is no chain for a peer to
-                    // be holding, so no marker is due. Upstream's
-                    // equivalent arm restores the SN and writes nothing
-                    // (`common/pipeline.rs`, `ext_first.is_some()`), and
-                    // so does this: `sn` is the last mint under the
-                    // conduit's lock, as for `ExceedsReassemblyCap` above.
-                    self.tx.frame_sn.unmint(priority, reliable);
-                    return Err(SendWireError::FragmentTxBudgetExhausted);
-                }
-                // Fragments are already on the wire and the peer is
-                // staging them. Tell it to stop — the marker is the
-                // abandon NOTICE, not chain payload, so it is drawn
-                // OUTSIDE the budget (upstream's ephemeral stop batch
-                // is outside its pool for the same reason). It does
-                // spend an SN, which zenoh's receive-side `SeqNum::roll`
-                // requires of every accepted transport message.
-                break (this_sn, true, Err(SendWireError::FragmentTxBudgetExhausted));
-            }
-            if emitted > 0 {
-                self.tx.frame_sn.reserve_next(priority, reliable);
-            }
-            // Every fragment rides the frame's conduit (`priority`
-            // reconstructed above == the SN-mint conduit) so the whole
-            // chain pins to one link (y217 one-conduit=one-link).
-            // The heap form of a fragment cannot be refused, so this `?` is
-            // vacuous there.
-            #[cfg(not(feature = "tx-lend-only"))]
-            self.send_fragment(batch, &span, body, reliable, ext_qos)?;
-            // Fixed-memory step S4 — under `tx-lend-only` a fragment the link
-            // lends no slot for ends the chain: the fragments already on the
-            // wire are followed by the stop marker (which draws the SN this
-            // fragment would have had, reserved above), so the peer releases
-            // what it staged, and the message is refused, counted.
-            #[cfg(feature = "tx-lend-only")]
-            if let Err(refused) = self.send_fragment(batch, &span, body, reliable, ext_qos) {
-                if emitted == 0 {
-                    return Err(refused);
-                }
-                break (this_sn, false, Err(refused));
-            }
-            emitted = emitted.saturating_add(1);
-            deadline.next_fragment();
-        };
-        #[cfg(feature = "tx-fragment-credit")]
-        {
-            if reserve_stop {
-                self.tx.frame_sn.reserve_next(priority, reliable);
-            }
-            let _ = self.send_fragment(
-                batch,
-                &crate::frame_encode::FragmentSpan::stop(stop_sn),
-                body,
-                reliable,
-                ext_qos,
-            );
-        }
-        // Without the stop fragment the chain ends where it was cut, as zenoh-pico's does when a
-        // fragment's write fails: nothing more of it leaves, and the peer lets go of what it
-        // staged when the next chain begins. The sequence number of the fragment that did not
-        // leave is given back where it was reserved, so the conduit's ring has no gap.
-        #[cfg(not(feature = "tx-fragment-credit"))]
-        {
-            let _ = stop_sn;
-            if !reserve_stop {
-                self.tx.frame_sn.unmint(priority, reliable);
-            }
-        }
-        abandoned
-    }
-
-    /// Put ONE fragment of a chain on its conduit's link: written straight into
-    /// a slot that link lends when it lends one that holds the fragment, else
-    /// written on the heap and sent through the byte door. The bytes are the
-    /// same either way (`frame_encode::write_fragment` writes both); where they
-    /// went is counted on the conduit ([`FragmentLendCounts`]).
-    ///
-    /// The conduit is the frame's: `ext_qos` reconstructs its priority as the
-    /// SN mint did, so every fragment of a chain is lent by, and sent on, the
-    /// one link the conduit is routed to.
-    #[cfg(all(
-        feature = "transport-fragmentation",
-        any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "declare-interest",
-            feature = "liveliness-token",
-        )
-    ))]
-    // Out of line: the chain writes a fragment from its loop and its stop marker from one body.
-    #[inline(never)]
-    fn send_fragment(
-        &self,
-        batch: &mut BatchTx,
-        span: &crate::frame_encode::FragmentSpan,
-        body: crate::frame_encode::FragmentBody<'_>,
-        reliable: bool,
-        ext_qos: Option<Priority>,
-    ) -> Result<(), SendWireError> {
-        let reliability = Reliability::from_reliable_bool(reliable);
-        let priority = ext_qos.unwrap_or(Priority::DEFAULT);
-        // Fixed-memory step S4 — under `tx-lend-only` no slot, or one the
-        // fragment does not fit, is a refusal, and the fragment is not written on
-        // the heap.
-        #[cfg(feature = "tx-lend-only")]
-        {
-            let write = lent_write(|slot| {
-                crate::frame_encode::write_fragment(slot, span, body, reliable, ext_qos)
-            });
-            match self
-                .route()
-                .send_lent(reliability, priority, span.wire_bound(), &write)
-            {
-                Lend::Sent => {
-                    let counts = &mut batch.frag_lend;
-                    counts.slot_fragments = counts.slot_fragments.wrapping_add(1);
-                    Ok(())
-                }
-                Lend::NoSlot | Lend::Refused(_) => Err(SendWireError::LinkRefused(
-                    self.tx.refuse(crate::link::LinkDropCause::NoTxSlot),
-                )),
-            }
-        }
-        #[cfg(not(feature = "tx-lend-only"))]
-        {
-            #[cfg(feature = "transport-tx-lend")]
-            {
-                // A fragment the slot cannot hold gives the slot back (the
-                // lease's drop) and is written on the heap below.
-                let write = lent_write(|slot| {
-                    crate::frame_encode::write_fragment(slot, span, body, reliable, ext_qos)
-                });
-                let lent = self
-                    .route()
-                    .send_lent(reliability, priority, span.wire_bound(), &write);
-                let counts = &mut batch.frag_lend;
-                match lent {
-                    Lend::Sent => {
-                        counts.slot_fragments = counts.slot_fragments.wrapping_add(1);
-                        return Ok(());
-                    }
-                    Lend::NoSlot => counts.heap_no_slot = counts.heap_no_slot.wrapping_add(1),
-                    Lend::Refused(_) => {
-                        counts.heap_short_slot = counts.heap_short_slot.wrapping_add(1)
-                    }
-                }
-            }
-            #[cfg(not(feature = "transport-tx-lend"))]
-            let _ = batch;
-            let mut wire = Vec::with_capacity(span.wire_bound());
-            // The vector refuses no write, but the body can refuse itself (an encoder that composes
-            // its message as it writes it), as it does in a slot: refused before a byte leaves.
-            crate::frame_encode::write_fragment(&mut wire, span, body, reliable, ext_qos)?;
-            self.route().send_wire(&wire, reliability, priority);
-            Ok(())
         }
     }
 

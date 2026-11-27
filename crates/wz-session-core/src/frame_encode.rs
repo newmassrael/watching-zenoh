@@ -1839,7 +1839,7 @@ pub fn build_frame_wire(
 /// re-frames as a `T_MID_FRAGMENT` chain (zenoh-pico
 /// `_z_transport_tx_send_n_msg_inner` -> `_z_transport_tx_send_fragment`,
 /// common/tx.c — multicast rides the same common TX path). The multicast
-/// twin of `SessionLinkActions::emit_frame_or_fragments`, hosted here
+/// twin of `TxRoute::emit_frame_or_fragments`, hosted here
 /// (pure, driver-free) so the AP drive loop and a future MCU multicast
 /// loop share one egress SSOT — the TX mirror of
 /// [`crate::multicast_dispatch::ingest_multicast_fragment`].
