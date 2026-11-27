@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The one pinned Kconfig interpreter (kconfiglib, by version and hash) that the build configuration
+# reader (`scripts/lib/wz_config.py`) resolves profiles and presets with, prepared the way every
+# host prepares it: `scripts/provision-kconfiglib.sh`, which installs it in the checkout's
+# `target/kconfig-venv`, where the reader looks for it. Linux, macOS and Windows (Git Bash) alike.
+#
+# Every job, and every composite action, whose step runs the reader or a script that reaches it
+# without provisioning it itself uses this action before that step. The one other form is the
+# provisioner's own line inside a step that runs a lane of `scripts/run-ci.sh`: that is the line
+# `scripts/lib/runci_plan.py` carries to the build fleet, which reads run lines and not actions.
+# `scripts/lib/workflow_cache_save_gate.py` derives the steps that reach the reader and holds both.
+#
+# The venv is made by whatever python the job has on PATH when this runs: a job that pins its python
+# (`actions/setup-python`) does so before this step. kconfiglib is pure Python, so any python 3 the
+# job then runs the reader with reads it from the venv.
+name: pinned Kconfig interpreter
+description: Provision the pinned kconfiglib the build configuration reader resolves profiles with
+runs:
+  using: composite
+  steps:
+    - name: the pinned Kconfig interpreter (scripts/provision-kconfiglib.sh)
+      shell: bash
+      run: bash scripts/provision-kconfiglib.sh

@@ -1,0 +1,18 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Pay the hosted C ABI reds on Windows and macOS: every job that reads the
+Kconfig interpreter now provisions it through one action, a gate keeps it
+so, and main's never-cancel concurrency is held and written down.
+'''
+changes = '''
+- .github/actions/kconfig-interpreter: the one provisioning step.
+- provision-kconfiglib.sh and wz_config.py read a Windows venv too.
+- workflow gate rules 3 and 4; docs/verdicts-in-the-fleet.md the run cost.
+'''
+verification = '''
+- workflow_cache_save_gate --selftest 49/49 and --check OK.
+- runci_plan, soft_job, trigger paths, python floor, actionlint pass.
+'''
+carry = '''
+- none for this lane.
+'''

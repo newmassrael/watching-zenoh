@@ -4811,13 +4811,16 @@ def kconfiglib_module():
 
     scripts/provision-kconfiglib.sh installs it in target/kconfig-venv at the version and hashes
     scripts/requirements-kconfig.txt pins. kconfiglib is pure Python, so the venv's
-    site-packages serves the interpreter that runs this tool.
+    site-packages serves the interpreter that runs this tool. A venv keeps it in
+    lib/python*/site-packages on Linux and macOS and in Lib/site-packages on Windows.
     """
     try:
         return importlib.import_module("kconfiglib")
     except ImportError:
         pass
-    for site in sorted(KCONFIG_VENV.glob("lib/python*/site-packages")):
+    sites = sorted(KCONFIG_VENV.glob("lib/python*/site-packages"))
+    sites += sorted(KCONFIG_VENV.glob("Lib/site-packages"))
+    for site in sites:
         sys.path.insert(0, str(site))
         try:
             return importlib.import_module("kconfiglib")

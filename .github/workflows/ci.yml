@@ -89,6 +89,11 @@ on:
 # `github.ref` from a push to main, so neither supersedes the other.
 # `scripts/lib/previous-run-gate.sh` (pre-push gate 2c) grades a `cancelled`
 # predecessor accordingly.
+#
+# What a group per commit or a cancel in progress would cost at the measured
+# landing rate, and why neither gives more verdicts: docs/verdicts-in-the-fleet.md
+# (Hosted runs on main). `scripts/lib/workflow_cache_save_gate.py` (rule 4) holds
+# this block and `platform.yml`'s.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false

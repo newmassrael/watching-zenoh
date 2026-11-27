@@ -62,6 +62,9 @@ on:
       - "scripts/lib/wz_config.py"
       - "scripts/lib/upstream_switch_map.py"
       - "scripts/requirements-kconfig.txt"
+      # The one preparation of that interpreter, which every job reaching the reader uses.
+      - ".github/actions/kconfig-interpreter/**"
+      - "scripts/provision-kconfiglib.sh"
       - "configs/**"
       - "deploy/Kconfig*"
       - "deploy/wz-config.toml"
@@ -665,6 +668,12 @@ jobs:
         with:
           python-version-file: .github/python-version
 
+      # scripts/pico-c-program.sh resolves the tokio engine's feature list and renders the arm's
+      # header through `wz_config.py`, which resolves with the pinned Kconfig interpreter.
+      - name: The pinned Kconfig interpreter
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: ./.github/actions/kconfig-interpreter
+
       - name: the C ABI crates on this host, gated (one verdict line per question)
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         timeout-minutes: 35
@@ -995,6 +1004,12 @@ jobs:
         with:
           python-version-file: .github/python-version
 
+      # scripts/pico-c-program.sh renders the arm's header through `wz_config.py`, which resolves
+      # with the pinned Kconfig interpreter.
+      - name: The pinned Kconfig interpreter
+        if: ${{ env.WZ_HOST_SELECTED == 'true' }}
+        uses: ./.github/actions/kconfig-interpreter
+
       # The vendored pico library's bindings are generated through libclang, which the Linux
       # image may not carry; installed only when none is found.
       - name: libclang for the pico bindings, where the image has none
@@ -1190,12 +1205,10 @@ jobs:
             bash scripts/lib/apt-install.sh libclang-dev
           fi
 
-      # The package's feature list is resolved from its profile with the pinned interpreter, which
-      # `wz_config.py` imports from the running python, where this puts it, by version and hash.
+      # The package's feature list is resolved from its profile with the pinned Kconfig interpreter.
       - name: The pinned Kconfig interpreter
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
-        shell: bash
-        run: python -m pip install --quiet --no-deps --require-hashes -r scripts/requirements-kconfig.txt
+        uses: ./.github/actions/kconfig-interpreter
 
       # The profile's list without `os-host`: scripts/pico-c-program.sh names the engine itself
       # (`WZ_PICO_ENGINE=coop` puts `os-host` in front of the program's capabilities), and the
