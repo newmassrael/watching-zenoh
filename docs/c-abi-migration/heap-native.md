@@ -1586,7 +1586,34 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   the on-use open lays none of them; they are the D12 forms' API and go with the next pass over the
   plan's public surface.
 
+### 7.32 N5 prepared: the pico ABI's feature and the on-use client's size case
+
+- `8d3ca8c52b`: `wz-capi-pico` names the form, `tables-on-use = ["wz-capi-coop?/tables-on-use"]`,
+  off in every build and preset (11.2); no source of the ABI reads it, so the census of public
+  features has no site of it, and the non-default legs gate reads it as a forward of the engine's
+  leg (`EXEMPT`, `forward`).
+- `e143a83856`: `capability_cost_gate.py` gains `pico-client-coop-nostd-on-use` (10.2, 11.3):
+  the D12 client's package, profile, configuration files, exports and forbidden patterns, its
+  features `os-host,link-udp,tables-on-use`, REQUIRED of it the on-use column's one body
+  (`ON_USE_ROWS`, `wz_session_core::on_use::take_rows`), `HEAP_ABORT` forbidden as in its twin.
+  Its budget is `None`, which `--check` refuses with the budget the reading sets: the case lands
+  unread, and the main session's first `--measure` writes the budget, its
+  `deploy/pico_host_ceiling.json` row, its `deploy/size_ledger.json` case and
+  `size_ledger_gate.py`'s selftest set (line 3381). Left for that reading, as 11.3 says: the D12
+  lay-out witness REQUIRED of `pico-client-coop-nostd` and FORBIDDEN here (read off the D12
+  library's `nm`), and `ON_USE_ROWS` FORBIDDEN in the D12 pico cases once the D12 `nm` shows no
+  `take_rows`.
+
 ## 8. What the main session runs
+
+- N5 prepared (`8d3ca8c52b`, `e143a83856`), not built or run by this lane. `cargo build
+  --manifest-path crates/Cargo.toml -p wz-capi-pico --no-default-features --features
+  os-host,link-udp,tables-on-use`, then `python3 scripts/lib/capability_cost_gate.py --measure
+  pico-client-coop-nostd-on-use pico-client-coop-nostd` (the first reading: the budget and the
+  ceiling row it prints, and the D12 twin read beside it for the step), `python3
+  scripts/lib/capability_cost_gate.py --selftest` and `python3
+  scripts/lib/nondefault_feature_legs_gate.py --check`. Size: the case's first figure is the
+  measurement section 4 is read against (the on-use client against `pico-client-coop-nostd`).
 
 - 3d, the last step: no arena on use (`f90e925543`), not built or run by this lane. `cargo test
   --manifest-path crates/Cargo.toml -p wz-capi-coop --features tables-on-use --lib` (one more in
