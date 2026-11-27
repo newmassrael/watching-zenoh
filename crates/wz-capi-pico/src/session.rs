@@ -1071,15 +1071,6 @@ pub(crate) unsafe fn open_session_handle<'a>(
 /// of the session's arena on the cooperative engine, the session's object slot on the tokio engine.
 pub(crate) type SessionPlace = crate::session_place::HeldPlace<PicoSessionHandle, SessionTail>;
 
-/// A seat in the program's pool of sessions, on the cooperative engine where the pools' doors are
-/// (`object-pool`): its handle lies in the session's arena and takes no slot, so without a seat the
-/// `sessions` a program reserved would bound nothing and its slots would lie unused. The open
-/// takes one before its arena is reserved or anything is bound or dialled, so the one more open is
-/// refused as out of memory, as the tokio engine's is for its handle's slot, and the seat goes back
-/// with the handle's place. No value of it exists: a slot of it holds nothing and is never filled.
-#[cfg(all(not(feature = "engine-tokio"), feature = "object-pool"))]
-pub(crate) enum SessionSeat {}
-
 /// What stays in the place of a session's handle after the handle is let go of, until the last
 /// closure the session answers for (each get it issued) is let go of too: the count of those
 /// closures, which its close waits on and which a closure let go of after the handle (a close or a
@@ -1090,9 +1081,6 @@ pub(crate) struct SessionTail {
     open: crate::ffi::OpenClosures,
     #[cfg(not(feature = "engine-tokio"))]
     arena: core::mem::ManuallyDrop<EngineHold>,
-    /// The session's seat in the program's pool of sessions, given back with the place.
-    #[cfg(all(not(feature = "engine-tokio"), feature = "object-pool"))]
-    seat: crate::object_slot::Slot<SessionSeat>,
 }
 
 impl SessionTail {
@@ -1105,19 +1093,14 @@ impl SessionTail {
     }
 
     /// What stays beside a handle of the cooperative engine in its place, made at `at`: no
-    /// closure counted yet, `arena`, the hold on the engine whose arena the place lies in, and
-    /// where the pools' doors are the session's `seat`. The count's lock is made where it stays,
-    /// as a kernel's is.
+    /// closure counted yet, and `arena`, the hold on the engine whose arena the place lies in. The
+    /// count's lock is made where it stays, as a kernel's is.
     ///
     /// # Safety
     /// `at` is valid for writes of a `Self`, aligned for it and holds none, and the tail is not
     /// moved from it.
     #[cfg(not(feature = "engine-tokio"))]
-    unsafe fn write_at(
-        at: core::ptr::NonNull<Self>,
-        arena: EngineHold,
-        #[cfg(feature = "object-pool")] seat: crate::object_slot::Slot<SessionSeat>,
-    ) {
+    unsafe fn write_at(at: core::ptr::NonNull<Self>, arena: EngineHold) {
         let at = at.as_ptr();
         // SAFETY: the caller's: each field is written once through a pointer to it.
         unsafe {
@@ -1125,8 +1108,6 @@ impl SessionTail {
                 core::ptr::addr_of_mut!((*at).open),
             ));
             core::ptr::addr_of_mut!((*at).arena).write(core::mem::ManuallyDrop::new(arena));
-            #[cfg(feature = "object-pool")]
-            core::ptr::addr_of_mut!((*at).seat).write(seat);
         }
     }
 }
@@ -1220,19 +1201,11 @@ pub(crate) unsafe fn count_in_session<C>(
 #[cfg(not(feature = "engine-tokio"))]
 unsafe fn give_back_session_place(place: core::ptr::NonNull<c_void>) {
     let place = place.cast::<SessionPlace>();
-    // The count of open closures owns nothing; the hold on the engine is what is let go of, and
-    // the seat goes back to the pool of sessions once the arena is no longer held here.
+    // The count of open closures owns nothing; the hold on the engine is what is let go of.
     // SAFETY: the caller's: nothing reads what lies beside the handle again, and it is read out
     // once, here, while the hold it carries keeps the place standing.
-    let SessionTail {
-        open: _,
-        arena,
-        #[cfg(feature = "object-pool")]
-        seat,
-    } = unsafe { core::ptr::read(place.as_ref().beside()) };
+    let SessionTail { open: _, arena } = unsafe { core::ptr::read(place.as_ref().beside()) };
     drop(core::mem::ManuallyDrop::into_inner(arena));
-    #[cfg(feature = "object-pool")]
-    drop(seat);
 }
 
 /// Give back the session's object slot once neither the handle nor a closure counted in the
@@ -1506,14 +1479,6 @@ unsafe fn open_request(
             return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
         }
     }
-    // The cooperative engine's seat in the program's pool of sessions, taken before anything is
-    // scouted, bound or dialled and before the session's arena is reserved ([`SessionSeat`]).
-    #[cfg(all(not(feature = "engine-tokio"), feature = "object-pool"))]
-    let Some(seat) =
-        crate::object_slot::Slot::<SessionSeat>::take(crate::object_slot::Kind::Session)
-    else {
-        return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
-    };
     // The key-wire form, judged for the engine the session opens on, and the key ids every
     // node shares that the config states (`crate::key_ids`).
     #[cfg(feature = "shared-key-ids")]
@@ -1594,8 +1559,6 @@ unsafe fn open_request(
     Ok(OpenRequest {
         #[cfg(feature = "engine-tokio")]
         slot,
-        #[cfg(all(not(feature = "engine-tokio"), feature = "object-pool"))]
-        seat,
         #[cfg(feature = "engine-tokio")]
         connect,
         #[cfg(feature = "engine-tokio")]
@@ -1893,9 +1856,6 @@ struct OpenRequest {
     /// The place the session's handle is installed in, taken before anything is opened.
     #[cfg(feature = "engine-tokio")]
     slot: crate::object_slot::Slot<SessionPlace>,
-    /// The session's seat in the program's pool of sessions, taken before anything is opened.
-    #[cfg(all(not(feature = "engine-tokio"), feature = "object-pool"))]
-    seat: crate::object_slot::Slot<SessionSeat>,
     /// The locators dialled and the one listened on, as the tokio engine holds them.
     #[cfg(feature = "engine-tokio")]
     connect: Vec<String>,
@@ -2870,19 +2830,12 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let handle = handle.with_memory(memory);
     debug_assert!(place.bytes() >= SessionPlace::LAYOUT.size());
     let arena = engine_held(&handle).clone();
-    #[cfg(feature = "object-pool")]
-    let seat = request.seat;
     *zs = z_owned_session_t {
         // SAFETY: the arena lent the place for `SessionPlace::LAYOUT`, aligned as a span starts,
         // to this handle alone, and it stands while the engine the tail beside it holds does; the
         // tail is made there, beside the handle, and stays.
         _val: SessionPlace::fill(place.as_ptr(), handle, |tail| {
-            SessionTail::write_at(
-                tail,
-                arena,
-                #[cfg(feature = "object-pool")]
-                seat,
-            )
+            SessionTail::write_at(tail, arena)
         }) as *mut c_void,
         _cnt: core::ptr::null_mut(),
     };

@@ -49,8 +49,9 @@
 //!
 //! # Releasing
 //!
-//! `zext_object_pool_release` gives the pools up when no object is held in them: the heap's
-//! memory is freed and the program's is the program's again. The next object reserves the build's
+//! `zext_object_pool_release` gives the pools up when no object is held in them and no session is
+//! open: the heap's memory is freed and the program's is the program's again, and the count of
+//! sessions they were reserved with bounds the opens no more. The next object reserves the build's
 //! pools again, unless the program reserves its own first.
 
 #[cfg(feature = "object-pool-region")]
@@ -84,7 +85,8 @@ pub struct zext_object_pool_counts_t {
     /// The bytes of the struct the program was compiled with, `sizeof` of it: the counts past them
     /// are read as zero, and a size short of the counts up to `encodings` is refused.
     pub struct_size: usize,
-    /// Sessions open at once: an open past them is refused as out of memory, before it dials.
+    /// Sessions open at once: an open past them is refused as out of memory, before it dials. On
+    /// the cooperative engine they are rows of its table of engines and take no slot of the pools.
     pub sessions: usize,
     /// Publishers of each session.
     pub publishers: usize,
@@ -320,16 +322,19 @@ unsafe fn stated(
     Ok(read)
 }
 
-/// The pools `counts` make; `Z_EINVAL` for counts that state payload bytes, which no pool reads.
+/// The pools `counts` make, and the sessions they state open at once, which on the cooperative
+/// engine no pool holds (`process_pool::reserve`); `Z_EINVAL` for counts that state payload bytes,
+/// which no pool reads.
 ///
 /// # Safety
 /// As [`stated`].
-unsafe fn planned(counts: *const zext_object_pool_counts_t) -> Result<Plan, ZResult> {
+unsafe fn planned(counts: *const zext_object_pool_counts_t) -> Result<(Plan, usize), ZResult> {
     let stated = stated(counts)?;
     if stated.payload_bytes != 0 {
         return Err(Z_EINVAL);
     }
-    process_pool::plan_of(&stated.counts()).map_err(code_of)
+    let plan = process_pool::plan_of(&stated.counts()).map_err(code_of)?;
+    Ok((plan, stated.sessions))
 }
 
 /// The bytes the pools of `counts` take, in `out_bytes` (zero on every error): what memory a
@@ -348,7 +353,7 @@ pub unsafe extern "C" fn zext_object_pool_bytes(
             return Z_ERR_NULL;
         }
         *out_bytes = 0;
-        match planned(counts).and_then(|plan| plan.bytes().map_err(code_of)) {
+        match planned(counts).and_then(|(plan, _)| plan.bytes().map_err(code_of)) {
             Ok(bytes) => {
                 *out_bytes = bytes;
                 Z_OK
@@ -369,7 +374,9 @@ pub unsafe extern "C" fn zext_object_pool_reserve(
     counts: *const zext_object_pool_counts_t,
 ) -> ZResult {
     guarded(|| match planned(counts) {
-        Ok(plan) => process_pool::reserve(&plan).map_or_else(refused_code, |()| Z_OK),
+        Ok((plan, sessions)) => {
+            process_pool::reserve(&plan, sessions).map_or_else(refused_code, |()| Z_OK)
+        }
         Err(code) => code,
     })
 }
@@ -392,8 +399,8 @@ pub unsafe extern "C" fn zext_object_pool_place(
         let Some(base) = NonNull::new(base.cast::<u8>()) else {
             return Z_ERR_NULL;
         };
-        let plan = match planned(counts) {
-            Ok(plan) => plan,
+        let (plan, sessions) = match planned(counts) {
+            Ok(planned) => planned,
             Err(code) => return code,
         };
         if base.as_ptr() as usize % process_pool::SLOT_ALIGN != 0 {
@@ -404,7 +411,7 @@ pub unsafe extern "C" fn zext_object_pool_place(
             _ => return Z_ERR_SYSTEM_OUT_OF_MEMORY,
         }
         // SAFETY: the program hands the memory over, aligned and long enough, for the pools alone.
-        process_pool::place(base, &plan).map_or_else(refused_code, |()| Z_OK)
+        process_pool::place(base, &plan, sessions).map_or_else(refused_code, |()| Z_OK)
     })
 }
 
@@ -442,8 +449,9 @@ pub unsafe extern "C" fn zext_object_pool_class(
 }
 
 /// Give the pools up, so that the next object reserves the build's again: the heap's memory is
-/// freed, a program's is the program's again. `Z_OK`, also when none are reserved; `Z_EINVAL`
-/// while an object is held in them, which keeps them.
+/// freed, a program's is the program's again, and the count of sessions they were reserved with
+/// no longer bounds the opens. `Z_OK`, also when none are reserved; `Z_EINVAL` while an object is
+/// held in them or a session is open, which keeps them.
 #[no_mangle]
 pub extern "C" fn zext_object_pool_release() -> ZResult {
     guarded(|| {
@@ -716,9 +724,9 @@ mod tests {
             ..blocks
         };
         // SAFETY: live locals.
-        let with = unsafe { planned(&blocks) }.expect("planned");
+        let (with, _) = unsafe { planned(&blocks) }.expect("planned");
         // SAFETY: live locals.
-        let without = unsafe { planned(&none) }.expect("planned");
+        let (without, _) = unsafe { planned(&none) }.expect("planned");
         let grown = with.bytes().expect("bytes") - without.bytes().expect("bytes");
         assert!(grown >= 25 * process_pool::LARGEST_BLOCK, "{grown}");
     }

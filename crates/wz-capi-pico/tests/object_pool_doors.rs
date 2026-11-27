@@ -280,11 +280,11 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             * (usize::from(cfg!(feature = "queryable"))
                 + 2 * usize::from(cfg!(feature = "liveliness"))
                 + usize::from(cfg!(feature = "query")));
-        // The session's slot (its handle's on the tokio engine, on the cooperative engine the seat
-        // its open takes, its handle lying in its arena), the publisher and the subscriber where
-        // they are pooled, the planes', the declared key expression, the config and the four
-        // payload blocks: no slot for a payload.
-        let reported = 1 + 2 * pooled + held_by_plane + 1 + configs_reported + 4;
+        // The session's handle's slot on the tokio engine (on the cooperative engine the session
+        // lies in its arena and takes a row of its engine's table, no slot), the publisher and the
+        // subscriber where they are pooled, the planes', the declared key expression, the config
+        // and the four payload blocks: no slot for a payload.
+        let reported = pooled + 2 * pooled + held_by_plane + 1 + configs_reported + 4;
         assert_eq!(slots(), reported);
         let laid: usize = classes().iter().map(|class| class.bytes).sum();
         assert_eq!(
@@ -331,18 +331,21 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         assert_eq!(code, Z_OK);
         assert_eq!(in_use(), 4);
 
-        // ARM 7: the one session's place is taken; a second open is refused before it dials, and
-        // consumes its config. Each config states the held values the reservation holds, so the
-        // second is refused for the session's place and not for a held value. Open, the pools
-        // hold the four payloads' blocks and the session's slot, on either engine: the config's
-        // slot went back as the open read it.
+        // ARM 7: the one session the counts state is open; a second open is refused before it
+        // dials, and consumes its config: on the tokio engine for want of its handle's slot, on
+        // the cooperative engine for want of a row of its engine's table, which the reservation
+        // held to one. Each config states the held values the reservation holds, so the second is
+        // refused for the session and not for a held value. Open, the pools hold the four
+        // payloads' blocks and, on the tokio engine, the session's slot: the config's slot went
+        // back as the open read it.
+        let open_in_use = 4 + pooled;
         let mut cfg = config(Z_CONFIG_LISTEN_KEY, &counts);
         let mut session: z_owned_session_t = std::mem::zeroed();
         assert_eq!(
             z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
             Z_OK
         );
-        assert_eq!(in_use(), 5);
+        assert_eq!(in_use(), open_in_use);
         let mut refused_cfg = config(Z_CONFIG_CONNECT_KEY, &counts);
         let mut second_session: z_owned_session_t = std::mem::zeroed();
         assert_eq!(
@@ -354,7 +357,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             Z_ERR_SYSTEM_OUT_OF_MEMORY
         );
         assert!(!z_internal_session_check(&second_session));
-        assert_eq!(in_use(), 5);
+        assert_eq!(in_use(), open_in_use);
 
         // ARM 8: each publisher's place is taken, the pool's one on the tokio engine and on the
         // cooperative engine those of the session's own arena, as many as its limit admits, which
@@ -380,13 +383,13 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         let (redeclared, code) = publisher(&session, c"wz/pool/b");
         assert_eq!(code, Z_OK);
         declared.push(redeclared);
-        assert_eq!(in_use(), 5 + pooled);
+        assert_eq!(in_use(), open_in_use + pooled);
 
         // ARM 8b: the one declared key expression's place is taken; a second declaration is
         // refused, left null, and the place of an undeclared one goes back.
         let (mut key, code) = declared_keyexpr(&session, c"wz/pool/key/a");
         assert_eq!(code, Z_OK);
-        assert_eq!(in_use(), 6 + pooled);
+        assert_eq!(in_use(), open_in_use + pooled + 1);
         let (refused_key, code) = declared_keyexpr(&session, c"wz/pool/key/b");
         assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert!(!wz_capi_pico::z_internal_keyexpr_check(&refused_key));
@@ -399,7 +402,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         );
         assert_eq!(
             in_use(),
-            5 + pooled,
+            open_in_use + pooled,
             "an undeclared key gives its place back"
         );
 
@@ -418,7 +421,7 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
                     querier
                 })
                 .collect();
-            assert_eq!(in_use(), 5 + 2 * pooled);
+            assert_eq!(in_use(), open_in_use + 2 * pooled);
             let (refused_querier, code) = declared_querier(&session, c"wz/pool/ask/b");
             assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
             assert!(!wz_capi_pico::z_internal_querier_check(&refused_querier));
@@ -430,21 +433,34 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             }
             assert_eq!(
                 in_use(),
-                5 + pooled,
+                open_in_use + pooled,
                 "an undeclared querier gives its place back"
             );
         }
 
-        // ARM 9: everything let go, the pools are given up, and the next object reserves the
-        // build's pools again: five payloads fit where the program's pools held four.
+        // ARM 9: with every object let go but the session, the pools are kept while it is open:
+        // on the tokio engine it holds its handle's slot, on the cooperative engine a row of its
+        // engine's table and no slot. Everything let go, the pools are given up, and the next
+        // object reserves the build's pools again: five payloads fit where the program's held four.
         for publisher in &mut declared {
             z_publisher_drop(z_publisher_move(publisher));
         }
-        z_session_drop(z_session_move(&mut session));
         z_bytes_drop(z_bytes_move(&mut first));
         z_bytes_drop(z_bytes_move(&mut third));
         z_bytes_drop(z_bytes_move(&mut fourth));
         z_bytes_drop(z_bytes_move(&mut again));
+        assert_eq!(
+            in_use(),
+            pooled,
+            "the session's slot alone, where it has one"
+        );
+        assert_eq!(
+            zext_object_pool_release(),
+            Z_EINVAL,
+            "kept while a session is open"
+        );
+        assert_eq!(slots(), reported);
+        z_session_drop(z_session_move(&mut session));
         assert_eq!(in_use(), 0);
         assert_eq!(zext_object_pool_release(), Z_OK);
         assert_eq!(slots(), 0);
@@ -463,6 +479,27 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         assert_eq!(in_use(), 5, "five blocks and no slot");
         for bytes in &mut after {
             z_bytes_drop(z_bytes_move(bytes));
+        }
+        assert_eq!(in_use(), 0);
+        assert_eq!(zext_object_pool_release(), Z_OK);
+        assert_eq!(slots(), 0);
+
+        // ARM 10: given up, the pools let go of the one session they were reserved for: two
+        // sessions open at once over the build's pools, each listening on a port of its own.
+        let mut open: Vec<z_owned_session_t> = (0..2)
+            .map(|_| {
+                let mut cfg = config(Z_CONFIG_LISTEN_KEY, &counts);
+                let mut session: z_owned_session_t = std::mem::zeroed();
+                assert_eq!(
+                    z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+                    Z_OK,
+                    "the count of sessions went with the pools"
+                );
+                session
+            })
+            .collect();
+        for session in &mut open {
+            z_session_drop(z_session_move(session));
         }
         assert_eq!(in_use(), 0);
         assert_eq!(zext_object_pool_release(), Z_OK);

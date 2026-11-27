@@ -19,8 +19,10 @@
 //! the same code for an object and for a payload's bytes. A session of the cooperative engine
 //! lies in its own arena, not here, and so do its entities, each in a place its open laid out
 //! under the session's own limit (`crate::object_slot::held_places`): a count of the pools' for
-//! an entity does not apply there. Where the doors are, such a session's open takes a seat here,
-//! a slot that holds nothing, so the count of sessions bounds the sessions open at once.
+//! an entity does not apply there, and no pool holds the session. Where the doors are, the count of
+//! sessions a program states holds the cooperative engine's table of engines to that many rows
+//! (`wz_capi_coop::RowClaim::hold_to`), one row for each session open at once, so the open of one
+//! more is refused by its engine's claim of a row.
 //!
 //! The pools are in every library without the tokio engine, the C library's form with no heap, and
 //! in one with it that has the doors which let a program reserve them itself (`object-pool`,
@@ -781,16 +783,11 @@ impl Plan {
         }
         .with_payloads(&objects.payload_blocks);
         // A session of the tokio engine lies in its slot. One of the cooperative engine lies in
-        // its own arena, and where the doors are its slot is the seat its open takes, which holds
-        // nothing (`crate::session::SessionSeat`): the sessions the program reserved bound the
-        // sessions open at once on either engine.
+        // its own arena and takes a row of its engine's table, to which the doors hold the
+        // sessions the program reserved (`install`), so no pool of the process holds it.
         #[cfg(feature = "engine-tokio")]
         {
             plan = plan.with::<crate::session::SessionPlace>(Kind::Session, objects.sessions);
-        }
-        #[cfg(all(not(feature = "engine-tokio"), feature = "object-pool"))]
-        {
-            plan = plan.with::<crate::session::SessionSeat>(Kind::Session, objects.sessions);
         }
         // An entity of the cooperative engine lies in its own session's arena, as many as the
         // limit that session opened under admits (`crate::object_slot::held_places`): a pool of
@@ -1933,38 +1930,59 @@ pub(crate) fn plan_of(stated: &Counts) -> Result<Plan, Unplanned> {
     Plan::of(&objects)
 }
 
-/// Lay `plan` out over the memory at `base` and hold it as the reservation, unless one is held
-/// already: then the memory is not touched, and is let go as `origin` says.
+/// Lay `plan` out over the memory at `base` and hold it as the reservation, with `sessions`
+/// sessions open at once, unless one is held already: then the memory is not touched, and is let
+/// go as `origin` says. On the tokio engine the sessions are the plan's slots of handles; on the
+/// cooperative engine they hold its table of engines to that many rows
+/// (`wz_capi_coop::RowClaim::hold_to`), which a heap with no room for them refuses, the memory
+/// let go the same way.
 ///
 /// # Safety
 /// As [`Pools::lay`], for `base` and `origin`.
 #[cfg(feature = "object-pool")]
-unsafe fn install(base: NonNull<u8>, plan: &Plan, origin: Origin) -> Result<(), Refused> {
+unsafe fn install(
+    base: NonNull<u8>,
+    plan: &Plan,
+    sessions: usize,
+    origin: Origin,
+) -> Result<(), Refused> {
     let refused = RESERVED.with(|reserved| {
         if reserved.stages.iter().any(Option::is_some) {
-            return true;
+            return Some(Refused::Reserved);
         }
         let Some(held) = reserved.stages.get_mut(Stage::Open as usize) else {
-            return true;
+            return Some(Refused::Reserved);
         };
+        #[cfg(not(feature = "engine-tokio"))]
+        if let Err(rows) = wz_capi_coop::RowClaim::hold_to(sessions) {
+            return Some(match rows {
+                // A session is open or opening though no pools are reserved: the program states its
+                // counts before its first object, so these come too late, as counts stated over
+                // the build's pools do.
+                wz_capi_coop::RowsRefused::Open => Refused::Reserved,
+                wz_capi_coop::RowsRefused::NoMemory => Refused::NoMemory,
+            });
+        }
+        #[cfg(feature = "engine-tokio")]
+        let _ = sessions;
         held.insert(Pools::unlaid(base, origin)).lay(plan, None);
         // The program stated every count at once: nothing is reserved after it, the first open
         // included, which is judged against what it holds.
         reserved.whole = true;
         reserved.fixed = true;
-        false
+        None
     });
-    if refused {
+    if let Some(refused) = refused {
         origin.free(base);
-        return Err(Refused::Reserved);
+        return Err(refused);
     }
     Ok(())
 }
 
-/// Reserve the pools of `plan` from the heap, in one allocation; a refusal leaves the heap as it
-/// was.
+/// Reserve the pools of `plan` from the heap, in one allocation, for `sessions` sessions open at
+/// once ([`install`]); a refusal leaves the heap as it was.
 #[cfg(feature = "object-pool")]
-pub(crate) fn reserve(plan: &Plan) -> Result<(), Refused> {
+pub(crate) fn reserve(plan: &Plan, sessions: usize) -> Result<(), Refused> {
     let (base, layout) = plan
         .bytes()
         .ok()
@@ -1972,17 +1990,18 @@ pub(crate) fn reserve(plan: &Plan) -> Result<(), Refused> {
         .ok_or(Refused::NoMemory)?;
     // SAFETY: the allocation is this layout's, aligned to the slot, as long as the plan and no
     // one else's.
-    unsafe { install(base, plan, Origin::Heap(layout)) }
+    unsafe { install(base, plan, sessions, Origin::Heap(layout)) }
 }
 
-/// Reserve the pools of `plan` over the program's memory at `base`.
+/// Reserve the pools of `plan` over the program's memory at `base`, for `sessions` sessions
+/// open at once ([`install`]).
 ///
 /// # Safety
 /// `base` is aligned to `SLOT_ALIGN`, and the `plan.bytes()` bytes from it are the program's,
 /// handed over for the pools alone until they are given up.
 #[cfg(feature = "object-pool-region")]
-pub(crate) unsafe fn place(base: NonNull<u8>, plan: &Plan) -> Result<(), Refused> {
-    install(base, plan, Origin::Program)
+pub(crate) unsafe fn place(base: NonNull<u8>, plan: &Plan, sessions: usize) -> Result<(), Refused> {
+    install(base, plan, sessions, Origin::Program)
 }
 
 /// The pools of size class `class` together; with none reserved, the class's slot size alone.
@@ -2007,16 +2026,23 @@ pub(crate) fn report(class: usize) -> ClassReport {
     })
 }
 
-/// Give the pools up, unless they hold an object: `false` then, and they are kept.
+/// Give the pools up, and on the cooperative engine the count of sessions they were reserved with,
+/// unless they hold an object or a session is open: `false` then, and both are kept. A session of
+/// the cooperative engine holds a row of its engine's table and no slot of the pools, so its row is
+/// asked (`wz_capi_coop::RowClaim::let_go_of_count`), as the tokio engine's handle's slot is.
 #[cfg(feature = "object-pool")]
 pub(crate) fn release() -> bool {
     let (released, kept) = RESERVED.with(|reserved| {
-        if reserved
+        let holds = reserved
             .stages
             .iter()
             .flatten()
-            .any(|pools| pools.held() > 0)
-        {
+            .any(|pools| pools.held() > 0);
+        #[cfg(not(feature = "engine-tokio"))]
+        let holds = holds
+            || (reserved.stages.iter().any(Option::is_some)
+                && !wz_capi_coop::RowClaim::let_go_of_count());
+        if holds {
             (None, true)
         } else {
             (Some(core::mem::replace(reserved, Reserved::NONE)), false)
@@ -2697,12 +2723,6 @@ mod tests {
             Kind::Session,
             core::mem::size_of::<crate::session::SessionPlace>(),
         );
-        #[cfg(all(not(feature = "engine-tokio"), feature = "object-pool"))]
-        row(
-            "session seat",
-            Kind::Session,
-            core::mem::size_of::<crate::session::SessionSeat>(),
-        );
         row(
             "publisher",
             Kind::Publisher,
@@ -3076,7 +3096,7 @@ mod tests {
                 assert!(pools.give_back(slot), "{kind:?}: its slot goes back");
             }
         };
-        #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
+        #[cfg(feature = "engine-tokio")]
         check(Kind::Session);
         #[cfg(feature = "engine-tokio")]
         check(Kind::Publisher);
