@@ -46,6 +46,7 @@
     "wz": {
       "names": {
         "^_?z[a-z]?_": "doors",
+        "^zext_": "doors",
         "^rust_eh_personality$": "language"
       },
       "owners": {
@@ -111,7 +112,14 @@
         "heapless": "language",
         "foldhash": "language",
         "log": "language",
-        "__rustc": "language"
+        "__rustc": "language",
+        "portable_atomic": "language",
+        "sha2": "transport",
+        "hmac": "transport",
+        "digest": "transport",
+        "block_buffer": "transport",
+        "generic_array": "transport",
+        "subtle": "transport"
       }
     },
     "pico": {
