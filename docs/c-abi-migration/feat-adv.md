@@ -1,7 +1,7 @@
 # Feature lane feat-adv: what `advanced` costs, and which part of it is form
 
-Status: design of the lane, with its first step (A1 and A2, section 5) committed beside it.
-Nothing here was built by this lane. Every byte figure is either **read** or an **estimate**:
+Status: design of the lane. Its first step (A1 and A2, section 5) and its second (A3 to A10 but
+A8, and the switches of section 6) are committed beside it. Nothing here was built by this lane. Every byte figure is either **read** or an **estimate**:
 read figures come from the libraries the size ledger's `--per-feature` run left on
 2026-11-27 (case `pico-api-coop-nostd`, pin 6a881c21dad1): the shipped library of the step
 before `advanced` and of the step that turns it on (symbol sizes), and the unstripped library of
@@ -128,3 +128,52 @@ Step 1 (A1 and A2) is committed beside this document. Its tests:
 `pico-api-coop-nostd` (expected about -2,900), `declare_subscriber_state` (13,469 now) and the
 cache queryable's closure (3,665 now) in its explain report, and the receive instructions of
 `pico-client-coop-nostd` (unchanged).
+
+## 6. The owner's ruling: a switch for each behaviour zenoh-pico does not have
+
+Ruling of 2026-11-27: each behaviour of the advanced plane that zenoh-pico does not have is a
+capability of its own (`deploy/wz-config.toml`, `upstream_off = ["zenoh-pico"]`), on in a build
+that names nothing and off in the zenoh-pico preset, as the send's behaviours are (`tx-probe` and
+its siblings). The no-heap contract (O4) is not one of them. Each row of section 4, read against
+the ruling:
+
+| id | switch | why |
+|----|--------|-----|
+| O1 | none | zenoh-pico reads the same grammar (`strtod` takes exponents, `inf` and `nan`), so a `_time` selector means the same in both; what differs is where the reader's code lies, a form and not a behaviour |
+| O2 | `advanced-source-retention` | zenoh-pico's subscriber keeps a source until the subscriber goes. Off: no retention job is started, a source carries no sweep bookkeeping, and a source keeps its row until the subscriber goes or a new source takes the row met longest ago among those that hold nothing back (`wz-ext-pubsub`'s `advanced-retention`) |
+| O3 | `advanced-node-clock` | zenoh-pico's publisher stamps a sample with `z_timestamp_new`, the system clock. Off: the session holds no node clock (`wz-node-time`'s `time-hlc` is not linked), a sample takes the system clock's time ordered by the session's last time given, and `trusted-only` holds nothing back |
+| O4 | none | the no-heap contract of the C library (owner) |
+| O5 | none | one host for both engines is the structure the plane is written over, not a behaviour a build can leave out; a plane of the pico ABI's own would be a second implementation |
+| O6 | none | a parity of accounting: the receive path's source info is already behind `pubsub-source-info` |
+
+Both switches are off in the zenoh-pico defconfig and named by neither `host-peer` nor
+`host-peer-ext`, so the like-for-like library (`pico-api-coop-nostd`) leaves them out and the
+release library with it: `--size-features` holds the two profiles to the same features but the
+doors. The tokio engine's runtime keeps both whatever is named.
+
+## 7. Where the steps stand
+
+| step | commit | what was done | estimate on `pico-api-coop-nostd` |
+|------|--------|---------------|------------------------------------:|
+| A3 | `refactor(ext-pubsub): Read the cache ring's headers as fixed arrays` | as planned; a header that does not lie whole in the span is no record | -2,500 |
+| O3 | `feat(config): Make the advanced publisher's node clock a capability` | section 6 | -2,500 (with the clock's standing; the clock-quality machine of the session core may go with it, not counted) |
+| O2 | `feat(config): Make the advanced subscriber's source sweep a capability` | section 6 | -2,100 |
+| A4 | `refactor(ext-pubsub): Write the subscriber's machine in its place` | the machine written in its lock's place (`State::write_in`), `declare_over` over borrowed options, the door's subscriber written into its known-empty place; the partly declared entities are still dropped one by one | -1,100 |
+| A6 | `refactor(ext-pubsub): Reach registered miss listeners through a table` | the registry's map is made by the first registration and reached through a table of its operations, so a host lent one listener (the pico ABI's set) links no code of the map; the lent listener still fires the set | -1,300 |
+| A7 | `refactor(ext-pubsub): Name a plane's refusal by entity and door code` | `AdvancedPublisherError::Plane { entity, code }`, in both C ABIs | -900 |
+| A5 | `refactor(ext-pubsub): Look up a source out of line off the sample path` | one out-of-line lookup for the cold callers, and the search for a new source's row out of line over the caller's test as an object | -600 |
+| A9 | `refactor(ext-pubsub): Walk a heartbeat key's chunks instead of a Vec` | as planned | -400 |
+| A10 | `refactor(ext-pubsub): Run both of a subscriber's jobs over one body` | `start_job` over a plain function per job | -400 |
+| A8 | not taken | the composite holds its plane by `Arc` for its heartbeat job, in three crates' callers; placing it in the session's place needs that ownership changed first | (-1,000) |
+
+Together about -11,800 on `pico-api-coop-nostd` (estimate). None of it touches the minimal case
+`pico-client-coop-nostd`, which links neither `wz-ext-pubsub` nor `wz-node-time`'s clock: its
+bytes and its receive instructions are to read unchanged.
+
+What to read after they land: `size_ledger_gate.py --measure pico-api-coop-nostd` and its
+`--explain` (the doors area, `declare_subscriber_state`, `RecordRing`'s bodies, the cache
+queryable's closure, `NodeHlc`'s and `reclaim_expired_sources` gone), and the bytes and receive
+instructions of `pico-client-coop-nostd`. The generated files the switches add rows to
+(`deploy/Kconfig.capabilities`, `configs/zenoh-pico_defconfig`, `items_generated.rs`) were written
+by hand in the generator's form; `crates/wz-conformance-build/statement_vectors.json` was not, and
+is to be written by `wz_config.py --write`.
