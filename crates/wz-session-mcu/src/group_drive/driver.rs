@@ -16,7 +16,9 @@
 //!
 //! Either wait is the host's ([`GroupTxPace`]): its tasks run and the socket's writability is
 //! waited on, so a socket that stays full is offered a frame once a wait, and never twice in a
-//! row. The transport's own wait (`GroupTransport::wait_for_room`) is not asked: a stack whose
+//! row. A frame whose ask for room allowed no wait (a group's own step answers with such sends,
+//! from inside the wait its senders wait with) waits in no build: refused by a full socket it is
+//! a congestion drop, counted ([`HeldFrame::congested`]). The transport's own wait (`GroupTransport::wait_for_room`) is not asked: a stack whose
 //! socket can be full but which gives no wait of its own answers it at once, and an offer after
 //! such an answer is an offer after none.
 
@@ -28,7 +30,6 @@ use wz_session_core::inbound::{frame_lane, FrameLane};
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkSendOutcome, TxSlot, TxSlotGrant, SESSION_TX_SLOTS,
 };
-#[cfg(feature = "multicast-send-hold")]
 use wz_session_core::link::{LinkRoom, RoomAnswer, RoomWait};
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
@@ -67,6 +68,12 @@ pub trait HeldFrame {
     /// How many frames a send the stack failed lost since the driver was made.
     fn lost(&self) -> u32;
 
+    /// How many frames the walk handed over that the driver dropped for want of room on the
+    /// socket since it was made: one whose ask allowed no wait, and one handed over with no ask
+    /// while another is held. Congestion drops the walk's answer does not carry, since the frame
+    /// had its number when the socket refused it.
+    fn congested(&self) -> u32;
+
     /// The lane of the held frame, read off its head: its priority, channel and number. The
     /// group's JOIN advertises that number on its lane, so a member told the group's numbers while
     /// the frame waits still takes it when it leaves. `None` while nothing is held.
@@ -83,6 +90,12 @@ pub struct GroupDriver<T, P> {
     tx: TxLender<HeapTx>,
     /// How many frames a send the stack failed lost.
     lost: core::cell::Cell<u32>,
+    /// How many frames handed over were dropped for want of room.
+    congested: core::cell::Cell<u32>,
+    /// Whether the frame handed over next may wait for the socket: what the last ask for room
+    /// allowed, taken by the send. A frame handed over with no ask (a window's flush) may.
+    #[cfg(not(feature = "multicast-send-hold"))]
+    may_wait: core::cell::Cell<bool>,
     #[cfg(feature = "multicast-send-hold")]
     held: core::cell::Cell<Option<Held>>,
 }
@@ -96,9 +109,19 @@ impl<T: GroupTransport, P: GroupTxPace> GroupDriver<T, P> {
             pace,
             tx: TxLender::new(HeapTx::new(SLOTS, batch)),
             lost: core::cell::Cell::new(0),
+            congested: core::cell::Cell::new(0),
+            #[cfg(not(feature = "multicast-send-hold"))]
+            may_wait: core::cell::Cell::new(true),
             #[cfg(feature = "multicast-send-hold")]
             held: core::cell::Cell::new(None),
         }
+    }
+
+    /// A frame handed over that the socket had no room for and that may not wait: dropped and
+    /// counted ([`HeldFrame::congested`]).
+    fn congestion_drop(&self) -> LinkSendOutcome {
+        self.congested.set(self.congested.get().saturating_add(1));
+        LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
     }
 
     /// Offer `frame` to the socket: whether it is done with, taken or lost, or the socket had no
@@ -171,6 +194,10 @@ impl<T: GroupTransport, P: GroupTxPace> HeldFrame for GroupDriver<T, P> {
         self.lost.get()
     }
 
+    fn congested(&self) -> u32 {
+        self.congested.get()
+    }
+
     #[cfg(feature = "multicast-send-hold")]
     fn held_lane(&self) -> Option<FrameLane> {
         let held = self.held.get()?;
@@ -195,6 +222,10 @@ impl<X: HeldFrame + ?Sized, N: CountKind> HeldFrame for CellRc<X, N> {
 
     fn lost(&self) -> u32 {
         (**self).lost()
+    }
+
+    fn congested(&self) -> u32 {
+        (**self).congested()
     }
 
     #[cfg(feature = "multicast-send-hold")]
@@ -228,11 +259,15 @@ impl<T: GroupTransport, P: GroupTxPace> BoxedLinkDriver for GroupDriver<T, P> {
         _reliability: Reliability,
         _priority: Priority,
     ) -> LinkSendOutcome {
+        let may_wait = self.may_wait.replace(true);
         let Some(frame) = self.tx.take(slot, start, len) else {
             return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
         };
         loop {
             match self.offer(frame) {
+                // A frame whose ask allowed no wait is not waited for: its sender may be the
+                // group's own step, which runs inside the wait the host would pass to.
+                Some(GroupSend::Full) if !may_wait => return self.congestion_drop(),
                 // A group whose session ended is written by nothing: the frame is lost with its
                 // link, as a stage's wait answers a producer of an ended group.
                 Some(GroupSend::Full) if self.pace.ended() => {
@@ -260,7 +295,7 @@ impl<T: GroupTransport, P: GroupTxPace> BoxedLinkDriver for GroupDriver<T, P> {
         // (the flush of a window), finds the one hold taken: it is a drop.
         if self.offer_again() {
             self.tx.release(slot);
-            return LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot);
+            return self.congestion_drop();
         }
         let Some((start, end)) = self.tx.seal(slot, start, len, |_, start| Some(start)) else {
             self.tx.release(slot);
@@ -284,6 +319,14 @@ impl<T: GroupTransport, P: GroupTxPace> BoxedLinkDriver for GroupDriver<T, P> {
 
     fn tx_slot_abort(&self, slot: TxSlot) {
         self.tx.release(slot);
+    }
+
+    // Without the hold there is nothing to offer before the frame is built: the room is the
+    // socket's at the send, which waits there only if this ask allowed a wait.
+    #[cfg(not(feature = "multicast-send-hold"))]
+    fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
+        self.may_wait.set(wait.wait_us() > 0);
+        RoomAnswer::at_once(LinkRoom::Free)
     }
 
     // A link whose queue is full: the held frame is offered first, and while the socket refuses
@@ -515,6 +558,60 @@ mod tests {
         );
     }
 
+    /// Without the hold a frame whose ask for room allowed no wait is not waited for: a full socket
+    /// refusing it is a counted congestion drop, with no pass of the host and no wait on the
+    /// socket, and the next frame, handed over with no ask, waits as before. The CONTROL is a frame
+    /// whose ask allowed a wait, which waits once and leaves. Turned red by an at-once frame that
+    /// passes or waits, one not counted, or an ask whose zero wait outlives its frame.
+    #[cfg(not(feature = "multicast-send-hold"))]
+    #[test]
+    fn a_frame_asked_at_once_is_not_waited_for_on_a_full_socket() {
+        use wz_session_core::link::{LinkRoom, RoomWait};
+        use wz_session_core::qos::Priority;
+
+        let (driver, wire) = driver(0, true);
+        let answer = driver.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 0 });
+        assert_eq!(answer.room, LinkRoom::Free, "nothing is held to refuse it");
+        assert_eq!(
+            driver.send_blocking(&[7], Reliability::Reliable),
+            LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
+        );
+        assert_eq!(
+            (
+                wire.borrow().offers,
+                wire.borrow().waits,
+                wire.borrow().passes
+            ),
+            (1, 0, 0),
+            "offered once, with no wait and no pass"
+        );
+        assert_eq!((driver.congested(), driver.lost()), (1, 0));
+
+        let _ = driver.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 1_000 });
+        assert_eq!(
+            driver.send_blocking(&[8], Reliability::Reliable),
+            LinkSendOutcome::Sent,
+            "CONTROL: a frame that may wait waits and leaves"
+        );
+        assert_eq!((wire.borrow().waits, wire.borrow().passes), (1, 1));
+
+        let _ = driver.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 0 });
+        assert_eq!(
+            driver.send_blocking(&[9], Reliability::Reliable),
+            LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot),
+            "a blocking message asked at once is not waited for either"
+        );
+        assert_eq!(
+            driver.send_blocking(&[10], Reliability::Reliable),
+            LinkSendOutcome::Sent,
+            "a frame with no ask of its own waits"
+        );
+        let wire = wire.borrow();
+        assert_eq!(wire.seen, [vec![8], vec![10]]);
+        assert_eq!((wire.waits, wire.passes), (2, 2));
+        assert_eq!(driver.congested(), 2);
+    }
+
     /// Without the hold a frame a full socket refuses after the group's session ended is a drop,
     /// and nothing waits for a socket nothing will drain. Turned red by a send that waits on an
     /// ended group.
@@ -619,6 +716,28 @@ mod tests {
             (0, 0),
             "the step waits on nothing"
         );
+    }
+
+    /// With the hold a frame handed over with no ask while another is held (a window's flush) is a
+    /// counted congestion drop, and the held frame stays first. Turned red by a drop not counted,
+    /// or one that lets the held frame go or overtakes it.
+    #[cfg(feature = "multicast-send-hold")]
+    #[test]
+    fn a_frame_handed_over_while_one_is_held_is_a_counted_drop() {
+        let (driver, wire) = driver(0, true);
+        assert_eq!(
+            driver.send_blocking(&[7], Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            driver.send_blocking(&[8], Reliability::Reliable),
+            LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
+        );
+        assert_eq!((driver.congested(), driver.lost()), (1, 0));
+        assert!(driver.holds(), "the first frame is still held");
+        wire.borrow_mut().room = 1;
+        assert!(!driver.offer_held(), "taken");
+        assert_eq!(wire.borrow().seen, [vec![7]]);
     }
 
     /// With the hold an ask for room whose wait finds the socket still full is congested, and
