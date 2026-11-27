@@ -26,6 +26,9 @@
 //!   ([`refusals`](crate::id_map::IdMap::refusals)) and allocates nothing.
 //!   Rebinding an id the table already holds replaces it in place and needs no
 //!   room, which is what a peer that re-declares an id expects.
+//! - **on use** (the tables a session takes at their first row) is a `CountedIdMap`: its count's
+//!   rows taken at its first id, and each NEW id a row of its kind of the session's key budget, so
+//!   the faces of a session hold what their peers write to the session's bounds together.
 //!
 //! The bound a session's creator states for a table ([`crate::limits::SessionLimits`])
 //! is asked through [`bind_within`](crate::id_map::IdMap::bind_within) on both
@@ -47,7 +50,7 @@
 use hashbrown::HashMap;
 
 #[cfg(feature = "alloc")]
-use crate::bounded::{BoundedVec, Static};
+use crate::bounded::{BoundedVec, SeqBacking, Static};
 use crate::bounded::{CapacityFull, KeyMaker, KeyUnkept, Profile, Storage};
 use crate::caps;
 #[cfg(feature = "alloc")]
@@ -496,6 +499,15 @@ pub trait PeerIds<V, H>: Default {
     unsafe fn release(&mut self, keys: &H, slot: crate::row_pool::PeerSlot) {
         let _ = (keys, slot);
     }
+
+    /// Count the table to `rows` rows while it holds no id: a table whose rows are counted when
+    /// it is made (`CountedIdMap`) takes `rows` as its count from here on and answers `true`,
+    /// and keeps its count while it holds an id. A table of a fixed capacity, of rows lent from a
+    /// pool, or that grows has no count to change: `false`.
+    fn recount(&mut self, rows: usize) -> bool {
+        let _ = rows;
+        false
+    }
 }
 
 impl<V, const N: usize, H> PeerIds<V, H> for FixedIdMap<V, N> {
@@ -586,6 +598,295 @@ impl<V, const N: usize> PeerIds<V, crate::key_arena::LentKeys> for PooledIdMap<V
         let space = crate::row_pool::lent_space::<crate::row_pool::Keyed<V>>(keys, slot);
         // SAFETY: as `lend`'s.
         unsafe { PooledIdMap::lend(self, &space) }.reset();
+    }
+}
+
+/// The on-use backing of [`IdMap`] (the `Ids` of [`OnUse`](crate::bounded::OnUse)): at most a
+/// count of rows of `(id, value)`, `N` until its owner counts it anew while it holds no id
+/// ([`PeerIds::recount`]), all of them taken from the allocator at its first id
+/// ([`FirstUse`](crate::on_use::FirstUse)) and scanned as [`FixedIdMap`]'s are. A table never
+/// bound takes nothing, and the count is the table's, not the build's: a group's face is counted
+/// to every member's aliases where a peer's is held to its own.
+///
+/// It answers [`IdMap`] only lent its owner's handle ([`PeerIds::lend`], [`CountedIds`]): a
+/// NEW id then takes a row of its slot's kind from the session's [`KeyBudget`](crate::on_use::KeyBudget)
+/// as well, so the peers of every face hold their rows of each kind to the session's bound
+/// together, as a lent session's pool holds them; each id let go of gives its row back. Its owner
+/// gives every row back through the handle before it drops the table or changes the handle
+/// ([`PeerIds::release`]), as a pooled table's owner does.
+#[cfg(feature = "alloc")]
+pub struct CountedIdMap<V, const N: usize> {
+    rows: crate::on_use::FirstUse<(u64, V), { usize::MAX }>,
+    /// How many NEW ids were refused, as [`FixedIdMap`]'s count.
+    refused: u32,
+    /// The most ids the table has held: zero-sized unless the build keeps the mark
+    /// (`pool-monitor`).
+    high: crate::pool_gauge::HighWater,
+}
+
+#[cfg(feature = "alloc")]
+impl<V, const N: usize> CountedIdMap<V, N> {
+    /// An empty table of `N` rows that has taken no memory.
+    pub const fn new() -> Self {
+        Self {
+            rows: crate::on_use::FirstUse::counted(N),
+            refused: 0,
+            high: crate::pool_gauge::HighWater::new(),
+        }
+    }
+
+    /// The most ids the table holds at once: its count.
+    pub fn capacity(&self) -> usize {
+        self.rows.count()
+    }
+
+    /// Whether the table took its rows.
+    pub fn holds_rows(&self) -> bool {
+        self.rows.holds_rows()
+    }
+
+    /// Count the table to `rows` while it holds no id, giving back the rows it took: `false`, the
+    /// count kept, while it holds one. The refusals it counted are kept.
+    pub fn recount(&mut self, rows: usize) -> bool {
+        if !self.rows.as_slice().is_empty() {
+            return false;
+        }
+        self.rows = crate::on_use::FirstUse::counted(rows);
+        true
+    }
+
+    /// Where `id` lies among the rows.
+    fn position(&self, id: u64) -> Option<usize> {
+        self.rows
+            .as_slice()
+            .iter()
+            .position(|(held, _)| *held == id)
+    }
+
+    /// Count a NEW id refused, and hand its value back.
+    fn refuse(&mut self, value: V) -> CapacityFull<V> {
+        self.refused = self.refused.saturating_add(1);
+        CapacityFull(value)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<V, const N: usize> Default for CountedIdMap<V, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<V, const N: usize> crate::pool_gauge::PoolGauge for CountedIdMap<V, N> {
+    fn pool_stat(&self, name: &'static str) -> crate::pool_gauge::PoolStat {
+        crate::pool_gauge::PoolStat {
+            name,
+            capacity: crate::pool_gauge::count(self.rows.count()),
+            in_use: crate::pool_gauge::count(self.rows.as_slice().len()),
+            high_water: self.high.get(),
+            refused: u64::from(self.refused),
+        }
+    }
+}
+
+/// A [`CountedIdMap`] lent its owner's handle, to bind and unbind: a NEW id takes a row of the
+/// slot's kind from the session's budget the handle names, and each id let go of gives one back.
+/// A handle of no budget holds the table to its own count alone.
+#[cfg(feature = "alloc")]
+pub struct CountedIds<'a, V, const N: usize> {
+    table: &'a mut CountedIdMap<V, N>,
+    budget: Option<&'a crate::on_use::KeyBudget>,
+    slot: crate::row_pool::PeerSlot,
+}
+
+#[cfg(feature = "alloc")]
+impl<V, const N: usize> CountedIds<'_, V, N> {
+    /// Give `count` rows of the slot's kind back to the session's budget.
+    fn give_back(&self, count: usize) {
+        if let Some(budget) = self.budget {
+            budget.give_peer_rows(self.slot, count);
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<V, const N: usize> IdMap<V> for CountedIds<'_, V, N> {
+    fn find(&self, id: u64) -> Option<&V> {
+        let at = self.table.position(id)?;
+        self.table.rows.as_slice().get(at).map(|(_, value)| value)
+    }
+
+    fn find_mut(&mut self, id: u64) -> Option<&mut V> {
+        let at = self.table.position(id)?;
+        self.table
+            .rows
+            .as_mut_slice()
+            .get_mut(at)
+            .map(|(_, value)| value)
+    }
+
+    fn bind(&mut self, id: u64, value: V) -> Result<Option<V>, CapacityFull<V>> {
+        self.bind_within(id, value, |_| true)
+    }
+
+    fn bind_within<F: FnOnce(usize) -> bool>(
+        &mut self,
+        id: u64,
+        value: V,
+        admits: F,
+    ) -> Result<Option<V>, CapacityFull<V>> {
+        if let Some((_, held)) = self
+            .table
+            .rows
+            .as_mut_slice()
+            .iter_mut()
+            .find(|(held, _)| *held == id)
+        {
+            return Ok(Some(core::mem::replace(held, value)));
+        }
+        let count = self.table.rows.as_slice().len().saturating_add(1);
+        if !admits(count) || self.table.rows.free_slots() == 0 {
+            return Err(self.table.refuse(value));
+        }
+        if let Some(budget) = self.budget {
+            if !budget.take_peer_row(self.slot) {
+                return Err(self.table.refuse(value));
+            }
+        }
+        match self.table.rows.push((id, value)) {
+            Ok(()) => {
+                self.table.high.note(count);
+                Ok(None)
+            }
+            // The allocator has no room for the table's rows: the session's row goes back.
+            Err(CapacityFull((_, value))) => {
+                self.give_back(1);
+                Err(self.table.refuse(value))
+            }
+        }
+    }
+
+    fn unbind(&mut self, id: u64) -> Option<V> {
+        let at = self.table.position(id)?;
+        let (_, value) = self.table.rows.remove(at);
+        self.give_back(1);
+        Some(value)
+    }
+
+    fn reset(&mut self) {
+        let held = self.table.rows.as_slice().len();
+        self.table.rows.clear();
+        self.give_back(held);
+    }
+
+    fn count(&self) -> usize {
+        self.table.rows.as_slice().len()
+    }
+
+    fn entries<'e>(&'e self) -> impl Iterator<Item = (u64, &'e V)>
+    where
+        V: 'e,
+    {
+        self.table
+            .rows
+            .as_slice()
+            .iter()
+            .map(|(id, value)| (*id, value))
+    }
+
+    fn refusals(&self) -> u32 {
+        self.table.refused
+    }
+
+    fn count_refused(&mut self) {
+        self.table.refused = self.table.refused.saturating_add(1);
+    }
+}
+
+/// A [`CountedIdMap`] lent its owner's handle, to read: a read takes nothing of the budget.
+#[cfg(feature = "alloc")]
+pub struct CountedIdsRef<'a, V, const N: usize>(&'a CountedIdMap<V, N>);
+
+#[cfg(feature = "alloc")]
+impl<V, const N: usize> Clone for CountedIdsRef<'_, V, N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<V, const N: usize> Copy for CountedIdsRef<'_, V, N> {}
+
+#[cfg(feature = "alloc")]
+impl<'a, V: 'a, const N: usize> IdRead<'a, V> for CountedIdsRef<'a, V, N> {
+    fn find(&self, id: u64) -> Option<&'a V> {
+        let table = self.0;
+        let at = table.position(id)?;
+        table.rows.as_slice().get(at).map(|(_, value)| value)
+    }
+
+    fn count(&self) -> usize {
+        self.0.rows.as_slice().len()
+    }
+
+    fn into_entries(self) -> impl Iterator<Item = (u64, &'a V)> + 'a {
+        self.0
+            .rows
+            .as_slice()
+            .iter()
+            .map(|(id, value)| (*id, value))
+    }
+
+    fn refusals(&self) -> u32 {
+        self.0.refused
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<V, const N: usize> PeerIds<V, crate::on_use::BudgetKeys> for CountedIdMap<V, N> {
+    type Mut<'a>
+        = CountedIds<'a, V, N>
+    where
+        Self: 'a,
+        V: 'a;
+    type Ref<'a>
+        = CountedIdsRef<'a, V, N>
+    where
+        Self: 'a,
+        V: 'a;
+
+    unsafe fn lend<'a>(
+        &'a mut self,
+        keys: &'a crate::on_use::BudgetKeys,
+        slot: crate::row_pool::PeerSlot,
+    ) -> CountedIds<'a, V, N> {
+        CountedIds {
+            table: self,
+            budget: keys.budget(),
+            slot,
+        }
+    }
+
+    unsafe fn lend_ref<'a>(
+        &'a self,
+        _: &'a crate::on_use::BudgetKeys,
+        _: crate::row_pool::PeerSlot,
+    ) -> CountedIdsRef<'a, V, N> {
+        CountedIdsRef(self)
+    }
+
+    unsafe fn release(
+        &mut self,
+        keys: &crate::on_use::BudgetKeys,
+        slot: crate::row_pool::PeerSlot,
+    ) {
+        // SAFETY: as `lend`'s: the owner's handle, for the slot the table's rows are counted in.
+        unsafe { <Self as PeerIds<V, crate::on_use::BudgetKeys>>::lend(self, keys, slot) }.reset();
+    }
+
+    fn recount(&mut self, rows: usize) -> bool {
+        CountedIdMap::recount(self, rows)
     }
 }
 
@@ -1404,6 +1705,144 @@ mod tests {
         table.reset();
         assert_eq!((table.count(), table.refusals()), (0, 1));
         assert!(!table.is_bound());
+    }
+
+    /// The on-use table of a peer's ids takes its rows at its first id, and lent its owner's handle
+    /// a NEW id takes a row of the slot's kind from the session's budget: two faces' tables hold
+    /// the session's bound together, a refused id takes nothing, a replaced id needs no row, and an
+    /// id let go of or a table released gives its row back. Turned red by a bind that asks no row of
+    /// the budget, by an unbind, a reset or a release that gives none back, or by a table that takes
+    /// its rows when made.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_on_use_table_holds_its_faces_ids_to_the_sessions_bound_together() {
+        use crate::limit_binding::{LimitSpec, Quota};
+        use crate::limits::SessionLimits;
+        use crate::on_use::{BudgetKeys, KeyBudget};
+        use crate::row_pool::PeerSlot;
+
+        let mut limits = SessionLimits::defaults();
+        if limits
+            .select_session_max_remote_decls(Quota::at_most(2))
+            .is_err()
+        {
+            assert!(
+                <crate::limits::SessionMaxRemoteDecls as LimitSpec>::DOMAIN.is_singleton(),
+                "only a domain of one value refuses a lower bound"
+            );
+            return;
+        }
+        let budget =
+            KeyBudget::new(0, limits.max_keyexpr_bytes_held()).holding_peer_rows_to(&limits);
+        // SAFETY: the budget outlives the handle and every table lent it, all of this test's.
+        let keys = unsafe { budget.keys() };
+        let slot = PeerSlot::Subscribers;
+        let mut first: CountedIdMap<u32, 4> = CountedIdMap::new();
+        let mut second: CountedIdMap<u32, 4> = CountedIdMap::new();
+        assert!(
+            !first.holds_rows() && first.capacity() == 4,
+            "CONTROL: a table made takes nothing and is counted to N"
+        );
+        // SAFETY: each table is lent the one handle and slot it is counted in.
+        unsafe {
+            let mut lent = PeerIds::<u32, BudgetKeys>::lend(&mut first, &keys, slot);
+            assert!(lent.bind(1, 10).is_ok() && lent.bind(2, 20).is_ok());
+            assert_eq!(
+                lent.bind(1, 11).ok(),
+                Some(Some(10)),
+                "a replaced id needs no row"
+            );
+        }
+        assert!(first.holds_rows());
+        assert_eq!(budget.peer_rows(slot), 2);
+        // SAFETY: as above.
+        unsafe {
+            let mut lent = PeerIds::<u32, BudgetKeys>::lend(&mut second, &keys, slot);
+            assert!(
+                lent.bind(7, 70).is_err(),
+                "the second face's first id is past the session's two"
+            );
+            assert_eq!(lent.refusals(), 1);
+        }
+        assert!(!second.holds_rows(), "the refusal took nothing");
+        // SAFETY: as above.
+        unsafe {
+            assert_eq!(
+                PeerIds::<u32, BudgetKeys>::lend(&mut first, &keys, slot).unbind(2),
+                Some(20)
+            );
+            assert_eq!(
+                budget.peer_rows(slot),
+                1,
+                "the id let go of gave its row back"
+            );
+            assert!(PeerIds::<u32, BudgetKeys>::lend(&mut second, &keys, slot)
+                .bind(7, 70)
+                .is_ok());
+            PeerIds::<u32, BudgetKeys>::release(&mut first, &keys, slot);
+        }
+        assert_eq!(
+            budget.peer_rows(slot),
+            1,
+            "the released table gave its row back, the other's stays"
+        );
+        // SAFETY: as above.
+        let read = unsafe { PeerIds::<u32, BudgetKeys>::lend_ref(&second, &keys, slot) };
+        assert_eq!((read.find(7), read.count()), (Some(&70), 1));
+        let none = BudgetKeys::default();
+        let mut own: CountedIdMap<u32, 1> = CountedIdMap::new();
+        // SAFETY: a handle of no budget names no space; the table is lent it alone.
+        unsafe {
+            let mut lent = PeerIds::<u32, BudgetKeys>::lend(&mut own, &none, slot);
+            assert!(lent.bind(1, 1).is_ok());
+            assert!(
+                lent.bind(2, 2).is_err(),
+                "a table is held to its own count too"
+            );
+        }
+    }
+
+    /// The on-use table of a peer's ids is counted anew while it holds no id, giving back the
+    /// rows it took, and keeps its count while it holds one. Turned red by a recount of a table
+    /// that holds ids (its rows would go with them), or by one that keeps the rows it took.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_on_use_table_is_recounted_only_while_it_holds_no_id() {
+        use crate::on_use::BudgetKeys;
+        use crate::row_pool::PeerSlot;
+
+        let none = BudgetKeys::default();
+        let slot = PeerSlot::Aliases;
+        let mut table: CountedIdMap<u32, 2> = CountedIdMap::new();
+        assert!(PeerIds::<u32, BudgetKeys>::recount(&mut table, 5));
+        assert_eq!(table.capacity(), 5, "counted past the build's N");
+        // SAFETY: a handle of no budget names no space; the table is lent it alone.
+        unsafe {
+            let mut lent = PeerIds::<u32, BudgetKeys>::lend(&mut table, &none, slot);
+            for id in 0..5 {
+                assert!(lent.bind(id, 0).is_ok());
+            }
+            assert!(lent.bind(5, 0).is_err());
+        }
+        assert!(
+            !PeerIds::<u32, BudgetKeys>::recount(&mut table, 1),
+            "a table that holds ids keeps its count"
+        );
+        assert_eq!(table.capacity(), 5);
+        // SAFETY: as above.
+        unsafe { PeerIds::<u32, BudgetKeys>::lend(&mut table, &none, slot).reset() };
+        assert!(
+            table.holds_rows(),
+            "CONTROL: emptied, the rows are still taken"
+        );
+        assert!(PeerIds::<u32, BudgetKeys>::recount(&mut table, 1));
+        assert!(!table.holds_rows(), "a recount gives the rows back");
+        assert_eq!(table.capacity(), 1);
+        let mut fixed: FixedIdMap<u32, 2> = FixedIdMap::new();
+        assert!(
+            !PeerIds::<u32, BudgetKeys>::recount(&mut fixed, 5),
+            "a table of a fixed capacity has no count to change"
+        );
     }
 
     /// The table answers as a pool: its capacity and holdings, the refusals it counted, and the
