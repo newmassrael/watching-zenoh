@@ -21,6 +21,7 @@
 //! such an answer is an offer after none.
 
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
+use wz_runtime_coop::link_cells::{CellRc, CountKind};
 use wz_runtime_coop::link_storage::{copied_send, HeapTx, TxLender};
 #[cfg(feature = "multicast-send-hold")]
 use wz_session_core::inbound::{frame_lane, FrameLane};
@@ -51,6 +52,28 @@ struct Held {
     len: usize,
 }
 
+/// What a group's step and its JOIN read of the driver its sends leave by, past the walk: the frame
+/// a full socket refused, which the step offers again before anything else of the group and whose
+/// number the JOIN advertises in place of the next, and the frames a send the stack failed lost.
+/// Without `multicast-send-hold` nothing is held, and the answers say so.
+pub trait HeldFrame {
+    /// Whether a frame the socket refused is held.
+    fn holds(&self) -> bool;
+
+    /// Offer the held frame to the socket again, without waiting: whether it is still refused. A
+    /// frame the socket took, or lost, is let go.
+    fn offer_held(&self) -> bool;
+
+    /// How many frames a send the stack failed lost since the driver was made.
+    fn lost(&self) -> u32;
+
+    /// The lane of the held frame, read off its head: its priority, channel and number. The
+    /// group's JOIN advertises that number on its lane, so a member told the group's numbers while
+    /// the frame waits still takes it when it leaves. `None` while nothing is held.
+    #[cfg(feature = "multicast-send-hold")]
+    fn held_lane(&self) -> Option<FrameLane>;
+}
+
 /// A group's socket as a link driver: the transport it shares with the group's session task, the
 /// host's wait for the socket's room (`P`), and the slots its frames are encoded into, each a
 /// batch of the group.
@@ -58,6 +81,8 @@ pub struct GroupDriver<T, P> {
     link: GroupLink<T>,
     pace: P,
     tx: TxLender<HeapTx>,
+    /// How many frames a send the stack failed lost.
+    lost: core::cell::Cell<u32>,
     #[cfg(feature = "multicast-send-hold")]
     held: core::cell::Cell<Option<Held>>,
 }
@@ -70,6 +95,7 @@ impl<T: GroupTransport, P: GroupTxPace> GroupDriver<T, P> {
             link,
             pace,
             tx: TxLender::new(HeapTx::new(SLOTS, batch)),
+            lost: core::cell::Cell::new(0),
             #[cfg(feature = "multicast-send-hold")]
             held: core::cell::Cell::new(None),
         }
@@ -84,34 +110,22 @@ impl<T: GroupTransport, P: GroupTxPace> GroupDriver<T, P> {
 
     /// The outcome the session counts of a frame the socket was offered. A failed send loses the
     /// frame and nothing else: a group's next datagram may well leave, so the link stays open
-    /// and the loss is a drop.
-    fn outcome(sent: Option<GroupSend>) -> LinkSendOutcome {
+    /// and the loss is a drop, counted ([`HeldFrame::lost`]).
+    fn outcome(&self, sent: Option<GroupSend>) -> LinkSendOutcome {
         match sent {
             Some(GroupSend::Sent) => LinkSendOutcome::Sent,
-            Some(GroupSend::Full | GroupSend::Failed) | None => {
+            Some(GroupSend::Failed) => {
+                self.lost.set(self.lost.get().saturating_add(1));
                 LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
             }
+            Some(GroupSend::Full) | None => LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot),
         }
-    }
-
-    /// The lane of the frame a full socket refused and the driver holds, read off its head: the
-    /// group's JOIN advertises that frame's sequence number on its lane and not the next one, so a
-    /// member told the group's numbers while the frame waits still takes it when it leaves.
-    /// `None` while nothing is held.
-    #[cfg(feature = "multicast-send-hold")]
-    pub fn held_lane(&self) -> Option<FrameLane> {
-        let held = self.held.get()?;
-        let (base, _) = self.tx.storage(held.slot);
-        // SAFETY: as in `offer_held`: the held slot is the driver's until it is released, and
-        // `start .. start + len` was found inside it when it was held.
-        let frame = unsafe { core::slice::from_raw_parts(base.wrapping_add(held.start), held.len) };
-        frame_lane(frame)
     }
 
     /// Offer the held frame again: whether the socket still refuses it. A frame the socket took,
     /// or lost, gives its slot back.
     #[cfg(feature = "multicast-send-hold")]
-    fn offer_held(&self) -> bool {
+    fn offer_again(&self) -> bool {
         let Some(held) = self.held.get() else {
             return false;
         };
@@ -119,12 +133,73 @@ impl<T: GroupTransport, P: GroupTxPace> GroupDriver<T, P> {
         // SAFETY: the held slot was handed over by the session and is the driver's until it is
         // released below; `start .. start + len` was found inside it when it was held.
         let frame = unsafe { core::slice::from_raw_parts(base.wrapping_add(held.start), held.len) };
-        if self.offer(frame) == Some(GroupSend::Full) {
+        let sent = self.offer(frame);
+        if sent == Some(GroupSend::Full) {
             return true;
         }
+        let _ = self.outcome(sent);
         self.held.set(None);
         self.tx.release(held.slot);
         false
+    }
+}
+
+impl<T: GroupTransport, P: GroupTxPace> HeldFrame for GroupDriver<T, P> {
+    fn holds(&self) -> bool {
+        #[cfg(feature = "multicast-send-hold")]
+        {
+            self.held.get().is_some()
+        }
+        #[cfg(not(feature = "multicast-send-hold"))]
+        {
+            false
+        }
+    }
+
+    fn offer_held(&self) -> bool {
+        #[cfg(feature = "multicast-send-hold")]
+        {
+            self.offer_again()
+        }
+        #[cfg(not(feature = "multicast-send-hold"))]
+        {
+            false
+        }
+    }
+
+    fn lost(&self) -> u32 {
+        self.lost.get()
+    }
+
+    #[cfg(feature = "multicast-send-hold")]
+    fn held_lane(&self) -> Option<FrameLane> {
+        let held = self.held.get()?;
+        let (base, _) = self.tx.storage(held.slot);
+        // SAFETY: as in `offer_again`: the held slot is the driver's until it is released, and
+        // `start .. start + len` was found inside it when it was held.
+        let frame = unsafe { core::slice::from_raw_parts(base.wrapping_add(held.start), held.len) };
+        frame_lane(frame)
+    }
+}
+
+// The engine keeps a counted handle on the driver beside the erased one its group's transmit state
+// sends through (`CellRc::into_sink`), and reads the driver through it.
+impl<X: HeldFrame + ?Sized, N: CountKind> HeldFrame for CellRc<X, N> {
+    fn holds(&self) -> bool {
+        (**self).holds()
+    }
+
+    fn offer_held(&self) -> bool {
+        (**self).offer_held()
+    }
+
+    fn lost(&self) -> u32 {
+        (**self).lost()
+    }
+
+    #[cfg(feature = "multicast-send-hold")]
+    fn held_lane(&self) -> Option<FrameLane> {
+        (**self).held_lane()
     }
 }
 
@@ -167,7 +242,7 @@ impl<T: GroupTransport, P: GroupTxPace> BoxedLinkDriver for GroupDriver<T, P> {
                     self.pace.pass();
                     let _ = self.pace.wait_writable(u64::MAX);
                 }
-                sent => return Self::outcome(sent),
+                sent => return self.outcome(sent),
             }
         }
     }
@@ -183,7 +258,7 @@ impl<T: GroupTransport, P: GroupTxPace> BoxedLinkDriver for GroupDriver<T, P> {
     ) -> LinkSendOutcome {
         // A frame handed over while another is held, which only a send that asks no room makes
         // (the flush of a window), finds the one hold taken: it is a drop.
-        if self.offer_held() {
+        if self.offer_again() {
             self.tx.release(slot);
             return LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot);
         }
@@ -202,7 +277,7 @@ impl<T: GroupTransport, P: GroupTxPace> BoxedLinkDriver for GroupDriver<T, P> {
             }
             sent => {
                 self.tx.release(slot);
-                Self::outcome(sent)
+                self.outcome(sent)
             }
         }
     }
@@ -215,7 +290,7 @@ impl<T: GroupTransport, P: GroupTxPace> BoxedLinkDriver for GroupDriver<T, P> {
     // it the ask runs the host's tasks and waits on the socket, once, for as long as it may.
     #[cfg(feature = "multicast-send-hold")]
     fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
-        if !self.offer_held() {
+        if !self.offer_again() {
             return RoomAnswer::at_once(LinkRoom::Free);
         }
         let wait_us = wait.wait_us();
@@ -223,7 +298,7 @@ impl<T: GroupTransport, P: GroupTxPace> BoxedLinkDriver for GroupDriver<T, P> {
             let started = self.pace.now_us();
             self.pace.pass();
             let room = self.pace.wait_writable(wait_us);
-            if room && !self.offer_held() {
+            if room && !self.offer_again() {
                 return RoomAnswer {
                     room: LinkRoom::Free,
                     waited_us: self.pace.now_us().saturating_sub(started).min(wait_us),
@@ -255,7 +330,7 @@ mod tests {
     use wz_session_core::reliability::Reliability;
 
     use super::super::{GroupLink, GroupTxPace};
-    use super::GroupDriver;
+    use super::{GroupDriver, HeldFrame};
 
     /// What the socket took and was offered, how many more it takes before it is full, and what
     /// the host did while it was: a wait of the host frees one datagram's room once `fills` is
@@ -272,6 +347,8 @@ mod tests {
         passes: usize,
         socket_waits: usize,
         ended: bool,
+        /// Whether the stack fails each send.
+        fail: bool,
     }
 
     struct Socket(Rc<RefCell<Wire>>);
@@ -296,6 +373,9 @@ mod tests {
         fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
             let mut wire = self.0.borrow_mut();
             wire.offers += 1;
+            if wire.fail {
+                return GroupSend::Failed;
+            }
             if wire.room == 0 {
                 return GroupSend::Full;
             }
@@ -384,6 +464,28 @@ mod tests {
             LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
         );
         assert!(wire.borrow().seen.is_empty());
+    }
+
+    /// A send the stack fails loses its frame, counted, holds nothing, and leaves the link open for
+    /// the next frame. Turned red by a failure not counted, one counted twice, or one that closes
+    /// the link or is held as a full socket's refusal is.
+    #[test]
+    fn a_frame_a_send_failed_is_lost_and_counted() {
+        let (driver, wire) = driver(1, true);
+        wire.borrow_mut().fail = true;
+        assert_eq!(
+            driver.send_blocking(&[1], Reliability::Reliable),
+            LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot)
+        );
+        assert_eq!(driver.lost(), 1);
+        assert!(!driver.holds(), "a lost frame is not held");
+        wire.borrow_mut().fail = false;
+        assert_eq!(
+            driver.send_blocking(&[2], Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(wire.borrow().seen, [vec![2]]);
+        assert_eq!(driver.lost(), 1);
     }
 
     /// Without the hold a full socket is waited on inside the send until it takes the frame, and
@@ -487,6 +589,36 @@ mod tests {
         let _ = driver.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 1_000 });
         assert_eq!(wire.borrow().seen, [vec![0x25, 0x07, 0xAA]]);
         assert_eq!(driver.held_lane(), None, "the frame left");
+    }
+
+    /// With the hold a group's step offers the held frame again without waiting, through the
+    /// counted handle the engine keeps beside the erased one: refused, it stays held; taken, it is
+    /// let go. Turned red by an offer that waits, a frame let go while refused, or a handle that
+    /// answers another driver's state.
+    #[cfg(feature = "multicast-send-hold")]
+    #[test]
+    fn a_held_frame_is_offered_again_by_the_step_without_a_wait() {
+        use wz_runtime_coop::link_cells::{CellRc, OneTask};
+
+        let (driver, wire) = driver(0, true);
+        let handle = CellRc::<_, OneTask>::try_on_heap(driver).expect("the heap takes the driver");
+        assert_eq!(
+            handle.send_blocking(&[7], Reliability::Reliable),
+            LinkSendOutcome::Sent
+        );
+        assert!(HeldFrame::holds(&handle));
+        assert!(HeldFrame::offer_held(&handle), "still refused");
+        assert!(HeldFrame::holds(&handle));
+        wire.borrow_mut().room = 1;
+        assert!(!HeldFrame::offer_held(&handle), "taken");
+        assert!(!HeldFrame::holds(&handle));
+        let wire = wire.borrow();
+        assert_eq!(wire.seen, [vec![7]]);
+        assert_eq!(
+            (wire.waits, wire.passes),
+            (0, 0),
+            "the step waits on nothing"
+        );
     }
 
     /// With the hold an ask for room whose wait finds the socket still full is congested, and

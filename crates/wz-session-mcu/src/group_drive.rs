@@ -318,7 +318,7 @@ mod driver;
     not(feature = "session-slot"),
     feature = "codec-push"
 ))]
-pub use driver::GroupDriver;
+pub use driver::{GroupDriver, HeldFrame};
 
 /// R311ma/R311mb/R311md — the no_std multicast reply backing: the MCU
 /// [`MulticastReplyEnqueue`] provider for the shared generic
