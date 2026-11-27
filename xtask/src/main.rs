@@ -497,7 +497,6 @@ fn regen_codec_deployment(
 ///                      session_rx_pool_mcu_minimal,
 ///                      session_rx_pool_mcu_multicast,
 ///                      session_tx_pool_mcu, eth_rx_pool_mcu (buffer-pools)
-///   wz-runtime-tokio : also accept_window_after (algorithm)
 ///   wz-plugin-abi    : abi_gate_verdict (algorithm)
 ///   wz-volume-abi    : abi_gate_verdict, volume_abi_verdict (algorithms)
 ///   wz-session-core  : also fragment_pacing_wait (algorithm), fragment_pacing_step
@@ -659,10 +658,6 @@ fn regen_statecharts_and_pools(root: &Path) {
     // own directory: (stem, consuming crate). Each is a pure function of scalars, so it names no
     // runtime and adds no dependency to the crate that includes it.
     let crate_algorithms: &[(&str, &str)] = &[
-        // The window an accepted link's session handshake is given: what the link's own
-        // handshake left of the accept's one bound, never nothing (wz-runtime-tokio
-        // `accept_bounds`).
-        ("accept_window_after", "wz-runtime-tokio"),
         // The compatibility gate of a C ABI loaded by `dlopen`: what a plugin declares against
         // what its host knows (wz-plugin-abi). Plain integers, so the ABI crate, which every
         // third-party plugin links, gains no dependency.
