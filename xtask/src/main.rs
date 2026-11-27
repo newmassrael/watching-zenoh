@@ -500,6 +500,7 @@ fn regen_codec_deployment(
 ///   wz-runtime-tokio : also accept_window_after (algorithm)
 ///   wz-plugin-abi    : abi_gate_verdict (algorithm)
 ///   wz-volume-abi    : abi_gate_verdict, volume_abi_verdict (algorithms)
+///   wz-node-time     : timestamping_enabled_for (algorithm)
 fn regen_statecharts_and_pools(root: &Path) {
     // `Codegen::from_manifest` derives the SCE workspace as
     // <manifest>/../../vendor/sce; any crates/* dir resolves to repo/vendor/sce.
@@ -666,6 +667,9 @@ fn regen_statecharts_and_pools(root: &Path) {
         // record a volume and its host pass by pointer.
         ("abi_gate_verdict", "wz-volume-abi"),
         ("volume_abi_verdict", "wz-volume-abi"),
+        // The entry of the per-role timestamping map a node's role reads (wz-node-time
+        // `node_clock`), over the role's API byte.
+        ("timestamping_enabled_for", "wz-node-time"),
     ];
     for (stem, krate) in crate_algorithms {
         let out = root.join("out").join(krate);
@@ -686,6 +690,7 @@ fn regen_statecharts_and_pools(root: &Path) {
         "wz-app-frame",
         "wz-plugin-abi",
         "wz-volume-abi",
+        "wz-node-time",
     ] {
         let _ = std::fs::remove_file(root.join("out").join(krate).join("sce_sourcemap.json"));
     }
