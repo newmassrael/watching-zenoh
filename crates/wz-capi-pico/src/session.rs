@@ -2668,50 +2668,6 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     };
     #[cfg(not(feature = "time-base"))]
     let clock_moves: Option<wz_capi_coop::ClockMovesWord> = None;
-    // The engine's config, which the open moves into the session.
-    let engine_config = wz_capi_coop::CoopConfig {
-        endpoints: dial_list,
-        whatami: dial_whatami,
-        zid,
-        // The node's own address the config states, which heads a zid the engine derives.
-        owned_address: request.owned_address,
-        // The numbers of pico's value build switches, as the open's snapshot holds them: the
-        // batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
-        // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`), how often
-        // its keepalive speaks (`Z_TRANSPORT_LEASE_EXPIRE_FACTOR`) and its handshake's
-        // receive deadline (`Z_TRANSPORT_CONNECT_TIMEOUT`).
-        batch_size: pico_unicast_batch(&limits),
-        lease_ms: pico_lease_ms(&limits),
-        keep_alive: pico_keep_alive(&limits),
-        sn_resolution,
-        link_rx: pico_link_rx(&limits),
-        tx_queue,
-        timeouts: pico_session_timeouts(&limits),
-        open_timeout_ms: limits.pico_connect_timeout_ms() as u64,
-        // pico tries again every 1000 ms while the reopen fails
-        // (`vendor/zenoh-pico/src/net/session.c` @
-        // `return _z_fut_fn_result_wake_up_after(1000);`).
-        redial_ms: Some(1000),
-        // A read waits on the link as long as pico's socket receive times out, its
-        // `Z_CONFIG_SOCKET_TIMEOUT` as the open's snapshot holds it.
-        idle_wait_ms: pico_socket_timeout(&limits),
-        // The bounds of an accept are the session's limits: the faces it holds besides its dial
-        // (`MAX_FACES`) and the handshakes under way (`MAX_ACCEPT_PENDING`), at the pico preset
-        // pico's own, ten peers and one handshake at a time.
-        listen: listen_list,
-        accept_pending,
-        max_faces,
-        // The group the listen endpoint names, when it names one.
-        groups,
-        // A session on a time base waits for the program's word that its time moved on as well
-        // as for its links.
-        clock_moves,
-        // The session limits the config states, which the engine's tables are held to.
-        limits,
-        // A peer this session meets as a peer is told the Final of the initial interest after
-        // its replay, as on the tokio engine.
-        initial_interest: ENDS_PEER_PUSH_WITH_INITIAL_FINAL,
-    };
     // A config that carries the program's transport opens the engine over its links, and over no
     // socket of the host's; `z_open` has refused a locator the transport does not carry. Either
     // way the session holds the key ids the config states (`crate::key_ids`). The read task waits
@@ -2797,7 +2753,51 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         clock,
         crate::coop_host::entropy(),
         wz_capi_coop::open_source::OpenInput {
-            config: engine_config,
+            // The engine's config, built where the input holds it, which the open moves into the
+            // session.
+            config: wz_capi_coop::CoopConfig {
+                endpoints: dial_list,
+                whatami: dial_whatami,
+                zid,
+                // The node's own address the config states, which heads a zid the engine derives.
+                owned_address: request.owned_address,
+                // The numbers of pico's value build switches, as the open's snapshot holds
+                // them: the batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
+                // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`), how
+                // often its keepalive speaks (`Z_TRANSPORT_LEASE_EXPIRE_FACTOR`) and its
+                // handshake's receive deadline (`Z_TRANSPORT_CONNECT_TIMEOUT`).
+                batch_size: pico_unicast_batch(&limits),
+                lease_ms: pico_lease_ms(&limits),
+                keep_alive: pico_keep_alive(&limits),
+                sn_resolution,
+                link_rx: pico_link_rx(&limits),
+                tx_queue,
+                timeouts: pico_session_timeouts(&limits),
+                open_timeout_ms: limits.pico_connect_timeout_ms() as u64,
+                // pico tries again every 1000 ms while the reopen fails
+                // (`vendor/zenoh-pico/src/net/session.c` @
+                // `return _z_fut_fn_result_wake_up_after(1000);`).
+                redial_ms: Some(1000),
+                // A read waits on the link as long as pico's socket receive times out, its
+                // `Z_CONFIG_SOCKET_TIMEOUT` as the open's snapshot holds it.
+                idle_wait_ms: pico_socket_timeout(&limits),
+                // The bounds of an accept are the session's limits: the faces it holds besides
+                // its dial (`MAX_FACES`) and the handshakes under way (`MAX_ACCEPT_PENDING`), at
+                // the pico preset pico's own, ten peers and one handshake at a time.
+                listen: listen_list,
+                accept_pending,
+                max_faces,
+                // The group the listen endpoint names, when it names one.
+                groups,
+                // A session on a time base waits for the program's word that its time moved on
+                // as well as for its links.
+                clock_moves,
+                // The session limits the config states, which the engine's tables are held to.
+                limits,
+                // A peer this session meets as a peer is told the Final of the initial interest
+                // after its replay, as on the tokio engine.
+                initial_interest: ENDS_PEER_PUSH_WITH_INITIAL_FINAL,
+            },
             endpoints: unicast_endpoints(&stated_texts, found),
         },
         policy,

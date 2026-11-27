@@ -1,7 +1,7 @@
 # Structural lane sz-open: the session's open, line by line
 
 Status: the reading and the design of the lane, with its steps carried in beside it as section 5
-onwards records them (O1, O2, O4, O5, O6; O3 and O7 held, sections 7 and 11).
+onwards records them (O1, O2, O4, O5, O6, half of O8; O3 and O7 held, sections 7 and 11).
 Nothing here was built or measured by this lane: every byte figure is either **read** (from the
 size ledger's explain document of the case, from the case's shipped library, or from a line table
 named below) or an **estimate** from the code, to be read on the explain document after the merge.
@@ -284,3 +284,19 @@ the build's limits, the clock's word and the program's transport, so a config wi
 be answered by another code than today's. That order is the owner's to set, with the refusal's
 form; the step is written once both are. `checked_endpoint` stays for
 `zext_config_device_requires` either way.
+
+## 12. O8, half carried
+
+- Carried: `open_on_coop` (`crates/wz-capi-pico/src/session.rs`) builds the engine's `CoopConfig`
+  in the `OpenInput` it hands `CoopEngine::assemble`, in the call, and not in its frame first to be
+  moved in after (the API build's 561 and 448). Every field reads what it read; the refusals between
+  the old place and the call (the TLS channel, the program's transport, the preset region) no longer
+  have a config made and let go of. A relocation of one value, which no test can tell from the old
+  place: the open's tests hold what it does, and the explain document's `z_open` reads the step.
+- Held: `open_request` writing the request where `z_open` holds it. Its frame returns before the
+  open (it holds the resolved snapshots and a scout's answers), so the request crosses a return
+  either way, and `open_on_coop` takes it by value and moves its fields out one by one: a place
+  written through an out pointer is read out of by `MaybeUninit::assume_init`, a copy of it, or by
+  `ptr::read` of each field, unchecked, as O3's last point. What would carry it is `open_on_coop`
+  reading the request where it lies, field by field through a reference, which is a rewrite of the
+  door, to be read on the explain document before it is written.
