@@ -824,8 +824,12 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # of the policy (`handshake_stray_message`) asserts the hold is filled and let go,
                 # behind `all(any(codec-init-body, codec-open-body), any(session-unicast-open,
                 # session-unicast-accept))` (`session_actions.rs`). Its one public site is
-                # compound, which rustc's note does not name. `session-unicast-accept` left for
-                # the methods list below.
+                # compound, which rustc's note does not name. `session-unicast-accept` came back
+                # from the methods list below when the stateless acceptor's cookie became its own
+                # capability: its key's reader `CookieKey::signing_key` is now behind
+                # `all(session-unicast-accept, accept-cookie)`, so both of its public sites are
+                # compound.
+                "session-unicast-accept",
                 "session-unicast-open",
                 # `transport-batching` LEFT this list: see its own row below.
                 # `transport-tx-lend` LEFT this list: the session's count of the frames it built
@@ -875,11 +879,6 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "query-selector-parameters",
                 "query-source-info",
                 "query-value",
-                # `session-unicast-accept` joins from the compound list above: the accepting
-                # role's cookie key is held only where a session accepts, and its reader
-                # `CookieKey::signing_key` is a METHOD under the bare feature; its other
-                # public site, `SessionLinkActions::held_answer_len`, is compound.
-                "session-unicast-accept",
                 "switchboard",
             )
         },
