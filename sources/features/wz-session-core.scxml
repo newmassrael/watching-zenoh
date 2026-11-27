@@ -114,6 +114,7 @@
   <sce:feature name="rx-push"/>
   <sce:feature name="rx-response"/>
   <sce:feature name="rx-shared-bytes" requires="alloc"/>
+  <sce:feature name="scout-rx-verdicts"/>
   <sce:feature name="scouting-active"/>
   <sce:feature name="scouting-static"/>
   <sce:feature name="secure-channel"/>
