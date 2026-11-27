@@ -72,8 +72,12 @@ use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::link_life::{LinkInput, LinkPhase, Refused};
 
 use super::registry::Planes;
+#[cfg(any(feature = "listen", all(feature = "threads", feature = "group")))]
+use wz_session_core::bounded::BoundedVec;
 #[cfg(feature = "listen")]
-use wz_session_core::bounded::{BoundedVec, Lent};
+use wz_session_core::bounded::Lent;
+#[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
+use wz_session_core::bounded::Static;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 
 /// The pump of the session's one link, which the read steps itself.
@@ -2172,21 +2176,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         let run = self.reader_run.load(Ordering::Acquire);
         // The faces of the run, with their places, in the order of the face table.
-        let mut faces = [(0, &self.direct.dial); QUIET_RUN];
-        let mut count = 0;
+        let mut faces = BoundedVec::<_, QUIET_RUN, Static>::new_static();
         let mut until_us = u64::MAX;
         for (at, face) in self.direct.walked().enumerate() {
             if face.rests.load(Ordering::Acquire) {
                 continue;
             }
-            if count == QUIET_RUN || !face.quiet.load(Ordering::Acquire) {
+            if !face.quiet.load(Ordering::Acquire) || faces.push((at, face)).is_err() {
                 return;
             }
             until_us = until_us.min(face.quiet_until_us.load(Ordering::Relaxed));
-            faces[count] = (at, face);
-            count += 1;
         }
-        let faces = &faces[..count];
+        let count = faces.len();
+        let faces: &[_] = &faces;
         // Each face's row is read off its slot, taken before the session's lock as a read takes
         // them, one slot at a time, and what the run waits on is gathered once under that lock.
         let (mut kept, mut now_us) = {
@@ -2222,8 +2224,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             (kept, core.now_us())
         };
         let waits: &mut [LinkWait] = &mut kept;
-        // Each face's own entry, in the order of the run: a wait moves the entries it found ready
-        // to its front.
+        // Each face's own entry, in the order of the run, and none past it, which no wait names: a
+        // wait moves the entries it found ready to its front.
         let mut owns = [None; QUIET_RUN];
         for (own, wait) in owns.iter_mut().zip(waits.iter().take(count)) {
             *own = Some(wait.on);
@@ -2254,11 +2256,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 #[cfg(test)]
                 self.takes.polls.fetch_add(1, Ordering::Relaxed);
                 let ready = self.rooms.waits().wait_ready(waits, left_ms);
-                let found = &waits[..ready];
-                if found
-                    .iter()
-                    .any(|wait| !owns[..count].contains(&Some(wait.on)))
-                {
+                let Some(found) = waits.get(..ready) else {
+                    return;
+                };
+                if found.iter().any(|wait| !owns.contains(&Some(wait.on))) {
                     return;
                 }
                 Some(found)
@@ -3957,7 +3958,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// How many faces' send places another holder has now, as a try of each finds them: none once
     /// every operation and send has let go of what it held.
-    #[cfg(all(test, feature = "std", wz_face_places))]
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "listen",
+        feature = "query",
+        feature = "queryable",
+        feature = "threads",
+        not(wz_round)
+    ))]
     pub(crate) fn places_held_now(&self) -> usize {
         self.direct
             .iter()
@@ -3968,7 +3977,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// Inside an operation, how many faces that are up its own hold finds kept, and how many a
     /// hold under another mark finds: the operation's every face, and none, as each face names the
     /// one hold that keeps its place.
-    #[cfg(all(test, feature = "std", wz_face_places))]
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "listen",
+        feature = "query",
+        feature = "queryable",
+        feature = "threads",
+        not(wz_round)
+    ))]
     pub(crate) fn faces_found_by_an_operation_and_another_hold(&self) -> (usize, usize) {
         self.live_on_link(|core, tx| {
             let other = FacesMark::new(&self.direct);
