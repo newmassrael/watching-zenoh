@@ -224,6 +224,17 @@ pub mod crc32 {
         env!("CARGO_MANIFEST_DIR"),
         "/../../out/wz-codecs/crc32.rs"
     ));
+
+    // The vectors crc32.scxml states (`<sce:test-vector>`), as SCE emits them beside the
+    // codec (`xtask regen`): the Rust half of the rows Layer Bc runs against the C11 emission.
+    #[cfg(all(test, feature = "alloc"))]
+    mod document_vectors {
+        use super::*;
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../out/wz-codecs/crc32_test.rs"
+        ));
+    }
 }
 
 // R311ns — serial-link pre-COBS frame envelope (codec kind):
@@ -285,6 +296,17 @@ pub mod frame {
         env!("CARGO_MANIFEST_DIR"),
         "/../../out/wz-codecs/frame.rs"
     ));
+
+    // The vectors frame.scxml states (`<sce:test-vector>`), as SCE emits them beside the
+    // codec (`xtask regen`): the Rust half of the rows Layer Bc runs against the C11 emission.
+    #[cfg(all(test, feature = "alloc"))]
+    mod document_vectors {
+        use super::*;
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../out/wz-codecs/frame_test.rs"
+        ));
+    }
 }
 
 #[cfg(feature = "codec-fragment")]
@@ -294,6 +316,17 @@ pub mod fragment {
         env!("CARGO_MANIFEST_DIR"),
         "/../../out/wz-codecs/fragment.rs"
     ));
+
+    // The vectors fragment.scxml states (`<sce:test-vector>`), as SCE emits them beside the
+    // codec (`xtask regen`): the Rust half of the rows Layer Bc runs against the C11 emission.
+    #[cfg(all(test, feature = "alloc"))]
+    mod document_vectors {
+        use super::*;
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../out/wz-codecs/fragment_test.rs"
+        ));
+    }
 }
 
 #[cfg(feature = "codec-scout")]
@@ -338,6 +371,17 @@ pub mod locator {
         env!("CARGO_MANIFEST_DIR"),
         "/../../out/wz-codecs/locator.rs"
     ));
+
+    // The vectors locator.scxml states (`<sce:test-vector>`), as SCE emits them beside the
+    // codec (`xtask regen`): the Rust half of the rows Layer Bc runs against the C11 emission.
+    #[cfg(all(test, feature = "alloc"))]
+    mod document_vectors {
+        use super::*;
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../out/wz-codecs/locator_test.rs"
+        ));
+    }
 
     /// The longest locator string a no-alloc wz node DECODES from a message:
     /// the `locator` capacity `deploy/codec_node.yaml` gives the `node::Node`
@@ -1685,5 +1729,47 @@ mod ext_envelope_oracle {
             wire, ORACLE_WIRE,
             "encode(decode(oracle)) must round-trip byte-equivalent"
         );
+    }
+}
+
+/// Every vector sidecar `xtask regen` writes into `out/wz-codecs` is compiled into its
+/// codec's module (`document_vectors` above), and runs as many rows as its document states.
+/// A sidecar no module includes would be vectors nothing runs, and a sidecar with fewer
+/// tests than the document's `<sce:test-vector>` elements would be a pass over rows that
+/// never ran; both fail here. The tests themselves run with the `alloc` feature, which the
+/// default features carry.
+#[cfg(test)]
+mod document_vector_coverage {
+    use std::format;
+    use std::path::Path;
+
+    #[test]
+    fn every_vector_sidecar_is_compiled_and_runs_what_its_document_states() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let lib = include_str!("lib.rs");
+        let out = root.join("out/wz-codecs");
+        let mut sidecars = 0usize;
+        for entry in std::fs::read_dir(&out).expect("out/wz-codecs is readable") {
+            let name = entry.expect("a directory entry").file_name();
+            let name = name.to_string_lossy();
+            let Some(stem) = name.strip_suffix("_test.rs") else {
+                continue;
+            };
+            sidecars += 1;
+            assert!(
+                lib.contains(&format!("\"/../../out/wz-codecs/{stem}_test.rs\"")),
+                "out/wz-codecs/{name} is compiled into no module of lib.rs"
+            );
+            let sidecar = std::fs::read_to_string(out.join(&*name)).expect("the sidecar reads");
+            let document =
+                std::fs::read_to_string(root.join(format!("sources/codecs/{stem}.scxml")))
+                    .expect("the sidecar's document reads");
+            assert_eq!(
+                sidecar.matches("#[test]").count(),
+                document.matches("<sce:test-vector").count(),
+                "out/wz-codecs/{name} runs another number of rows than sources/codecs/{stem}.scxml states"
+            );
+        }
+        assert!(sidecars > 0, "out/wz-codecs holds no vector sidecar");
     }
 }

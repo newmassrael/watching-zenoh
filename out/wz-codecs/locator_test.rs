@@ -1,0 +1,241 @@
+
+
+// SCE Forge: Auto-generated codec test-vector sidecar (RFC §synth-5-B)
+// Companion to locator.rs — do not edit; regenerate from the source SCXML.
+
+#[test]
+fn test_vector_locator_l49() {
+    let actual = Locator {
+        locator_len: 0x0u64,
+        locator: ::sce_forge_runtime::codec::Bounded::new("").expect("<sce:test-vector> at SCXML L49: `locator` within its bound"),
+    };
+    let encoded = actual.encode_to_vec();
+    let expected: &[u8] = &[0x00u8];
+    assert_eq!(
+        encoded.as_slice(), expected,
+        "<sce:test-vector> at SCXML L49: encode produced {:?}, expected {:?}",
+        encoded, expected
+    );
+    let mut cursor = SceCursor::new(expected);
+    let decoded = Locator::decode(&mut cursor)
+        .expect("<sce:test-vector> at SCXML L49: decode failed");
+    assert_eq!(
+        cursor.remaining(), 0,
+        "<sce:test-vector> at SCXML L49: decode left {} bytes unconsumed",
+        cursor.remaining()
+    );
+    assert_eq!(
+        decoded.locator_len, 0x0u64,
+        "<sce:test-vector> at SCXML L49: field `locator_len` mismatch"
+    );
+    assert_eq!(
+        decoded.locator, "",
+        "<sce:test-vector> at SCXML L49: field `locator` mismatch"
+    );
+    // Owned-projection round-trip (acceptance #2): deep-copy the borrowed
+    // decode into its no-alloc owned mirror and assert every field still
+    // equals the oracle. An owned bytes or text field held within its bound
+    // lends its value with the bounds, which compares against the `&[u8]` /
+    // `&str` literal (docs/adr/0077 §3). `try_into_owned` is fallible (the bounded
+    // copy re-checks the decode bound); the decode above already proved the
+    // value fits, so the projection cannot fail here.
+    let owned = Locator::decode(&mut SceCursor::new(expected))
+        .expect("<sce:test-vector> at SCXML L49: decode for into_owned failed")
+        .try_into_owned()
+        .expect("<sce:test-vector> at SCXML L49: try_into_owned exceeded a bounded field");
+    assert_eq!(
+        owned.locator_len, 0x0u64,
+        "<sce:test-vector> at SCXML L49: into_owned field `locator_len` mismatch"
+    );
+    assert_eq!(
+        owned.locator.as_text(), "",
+        "<sce:test-vector> at SCXML L49: into_owned field `locator` mismatch"
+    );
+    // Owned→borrowed projection round-trip (acceptance #2): re-borrow the
+    // owned mirror back into the zero-copy view and assert it re-encodes to
+    // the exact oracle bytes — closing the borrowed→owned→borrowed loop so
+    // an owned value reaches the borrowed-only `encode`. Every sidecar-
+    // eligible codec is scalar / bytes / string (no bounded list reaches
+    // this gate), so the projection is infallible.
+    assert_eq!(
+        owned.as_borrowed().encode_to_vec().as_slice(), expected,
+        "<sce:test-vector> at SCXML L49: as_borrowed re-encode mismatch"
+    );
+}
+#[test]
+fn test_vector_locator_l53() {
+    let actual = Locator {
+        locator_len: 0x3u64,
+        locator: ::sce_forge_runtime::codec::Bounded::new("abc").expect("<sce:test-vector> at SCXML L53: `locator` within its bound"),
+    };
+    let encoded = actual.encode_to_vec();
+    let expected: &[u8] = &[0x03u8, 0x61u8, 0x62u8, 0x63u8];
+    assert_eq!(
+        encoded.as_slice(), expected,
+        "<sce:test-vector> at SCXML L53: encode produced {:?}, expected {:?}",
+        encoded, expected
+    );
+    let mut cursor = SceCursor::new(expected);
+    let decoded = Locator::decode(&mut cursor)
+        .expect("<sce:test-vector> at SCXML L53: decode failed");
+    assert_eq!(
+        cursor.remaining(), 0,
+        "<sce:test-vector> at SCXML L53: decode left {} bytes unconsumed",
+        cursor.remaining()
+    );
+    assert_eq!(
+        decoded.locator_len, 0x3u64,
+        "<sce:test-vector> at SCXML L53: field `locator_len` mismatch"
+    );
+    assert_eq!(
+        decoded.locator, "abc",
+        "<sce:test-vector> at SCXML L53: field `locator` mismatch"
+    );
+    // Owned-projection round-trip (acceptance #2): deep-copy the borrowed
+    // decode into its no-alloc owned mirror and assert every field still
+    // equals the oracle. An owned bytes or text field held within its bound
+    // lends its value with the bounds, which compares against the `&[u8]` /
+    // `&str` literal (docs/adr/0077 §3). `try_into_owned` is fallible (the bounded
+    // copy re-checks the decode bound); the decode above already proved the
+    // value fits, so the projection cannot fail here.
+    let owned = Locator::decode(&mut SceCursor::new(expected))
+        .expect("<sce:test-vector> at SCXML L53: decode for into_owned failed")
+        .try_into_owned()
+        .expect("<sce:test-vector> at SCXML L53: try_into_owned exceeded a bounded field");
+    assert_eq!(
+        owned.locator_len, 0x3u64,
+        "<sce:test-vector> at SCXML L53: into_owned field `locator_len` mismatch"
+    );
+    assert_eq!(
+        owned.locator.as_text(), "abc",
+        "<sce:test-vector> at SCXML L53: into_owned field `locator` mismatch"
+    );
+    // Owned→borrowed projection round-trip (acceptance #2): re-borrow the
+    // owned mirror back into the zero-copy view and assert it re-encodes to
+    // the exact oracle bytes — closing the borrowed→owned→borrowed loop so
+    // an owned value reaches the borrowed-only `encode`. Every sidecar-
+    // eligible codec is scalar / bytes / string (no bounded list reaches
+    // this gate), so the projection is infallible.
+    assert_eq!(
+        owned.as_borrowed().encode_to_vec().as_slice(), expected,
+        "<sce:test-vector> at SCXML L53: as_borrowed re-encode mismatch"
+    );
+}
+#[test]
+fn test_vector_locator_l57() {
+    let actual = Locator {
+        locator_len: 0x12u64,
+        locator: ::sce_forge_runtime::codec::Bounded::new("tcp/127.0.0.1:7447").expect("<sce:test-vector> at SCXML L57: `locator` within its bound"),
+    };
+    let encoded = actual.encode_to_vec();
+    let expected: &[u8] = &[0x12u8, 0x74u8, 0x63u8, 0x70u8, 0x2fu8, 0x31u8, 0x32u8, 0x37u8, 0x2eu8, 0x30u8, 0x2eu8, 0x30u8, 0x2eu8, 0x31u8, 0x3au8, 0x37u8, 0x34u8, 0x34u8, 0x37u8];
+    assert_eq!(
+        encoded.as_slice(), expected,
+        "<sce:test-vector> at SCXML L57: encode produced {:?}, expected {:?}",
+        encoded, expected
+    );
+    let mut cursor = SceCursor::new(expected);
+    let decoded = Locator::decode(&mut cursor)
+        .expect("<sce:test-vector> at SCXML L57: decode failed");
+    assert_eq!(
+        cursor.remaining(), 0,
+        "<sce:test-vector> at SCXML L57: decode left {} bytes unconsumed",
+        cursor.remaining()
+    );
+    assert_eq!(
+        decoded.locator_len, 0x12u64,
+        "<sce:test-vector> at SCXML L57: field `locator_len` mismatch"
+    );
+    assert_eq!(
+        decoded.locator, "tcp/127.0.0.1:7447",
+        "<sce:test-vector> at SCXML L57: field `locator` mismatch"
+    );
+    // Owned-projection round-trip (acceptance #2): deep-copy the borrowed
+    // decode into its no-alloc owned mirror and assert every field still
+    // equals the oracle. An owned bytes or text field held within its bound
+    // lends its value with the bounds, which compares against the `&[u8]` /
+    // `&str` literal (docs/adr/0077 §3). `try_into_owned` is fallible (the bounded
+    // copy re-checks the decode bound); the decode above already proved the
+    // value fits, so the projection cannot fail here.
+    let owned = Locator::decode(&mut SceCursor::new(expected))
+        .expect("<sce:test-vector> at SCXML L57: decode for into_owned failed")
+        .try_into_owned()
+        .expect("<sce:test-vector> at SCXML L57: try_into_owned exceeded a bounded field");
+    assert_eq!(
+        owned.locator_len, 0x12u64,
+        "<sce:test-vector> at SCXML L57: into_owned field `locator_len` mismatch"
+    );
+    assert_eq!(
+        owned.locator.as_text(), "tcp/127.0.0.1:7447",
+        "<sce:test-vector> at SCXML L57: into_owned field `locator` mismatch"
+    );
+    // Owned→borrowed projection round-trip (acceptance #2): re-borrow the
+    // owned mirror back into the zero-copy view and assert it re-encodes to
+    // the exact oracle bytes — closing the borrowed→owned→borrowed loop so
+    // an owned value reaches the borrowed-only `encode`. Every sidecar-
+    // eligible codec is scalar / bytes / string (no bounded list reaches
+    // this gate), so the projection is infallible.
+    assert_eq!(
+        owned.as_borrowed().encode_to_vec().as_slice(), expected,
+        "<sce:test-vector> at SCXML L57: as_borrowed re-encode mismatch"
+    );
+}
+#[test]
+fn test_vector_locator_l61() {
+    let actual = Locator {
+        locator_len: 0x6u64,
+        locator: ::sce_forge_runtime::codec::Bounded::new("héllo").expect("<sce:test-vector> at SCXML L61: `locator` within its bound"),
+    };
+    let encoded = actual.encode_to_vec();
+    let expected: &[u8] = &[0x06u8, 0x68u8, 0xc3u8, 0xa9u8, 0x6cu8, 0x6cu8, 0x6fu8];
+    assert_eq!(
+        encoded.as_slice(), expected,
+        "<sce:test-vector> at SCXML L61: encode produced {:?}, expected {:?}",
+        encoded, expected
+    );
+    let mut cursor = SceCursor::new(expected);
+    let decoded = Locator::decode(&mut cursor)
+        .expect("<sce:test-vector> at SCXML L61: decode failed");
+    assert_eq!(
+        cursor.remaining(), 0,
+        "<sce:test-vector> at SCXML L61: decode left {} bytes unconsumed",
+        cursor.remaining()
+    );
+    assert_eq!(
+        decoded.locator_len, 0x6u64,
+        "<sce:test-vector> at SCXML L61: field `locator_len` mismatch"
+    );
+    assert_eq!(
+        decoded.locator, "héllo",
+        "<sce:test-vector> at SCXML L61: field `locator` mismatch"
+    );
+    // Owned-projection round-trip (acceptance #2): deep-copy the borrowed
+    // decode into its no-alloc owned mirror and assert every field still
+    // equals the oracle. An owned bytes or text field held within its bound
+    // lends its value with the bounds, which compares against the `&[u8]` /
+    // `&str` literal (docs/adr/0077 §3). `try_into_owned` is fallible (the bounded
+    // copy re-checks the decode bound); the decode above already proved the
+    // value fits, so the projection cannot fail here.
+    let owned = Locator::decode(&mut SceCursor::new(expected))
+        .expect("<sce:test-vector> at SCXML L61: decode for into_owned failed")
+        .try_into_owned()
+        .expect("<sce:test-vector> at SCXML L61: try_into_owned exceeded a bounded field");
+    assert_eq!(
+        owned.locator_len, 0x6u64,
+        "<sce:test-vector> at SCXML L61: into_owned field `locator_len` mismatch"
+    );
+    assert_eq!(
+        owned.locator.as_text(), "héllo",
+        "<sce:test-vector> at SCXML L61: into_owned field `locator` mismatch"
+    );
+    // Owned→borrowed projection round-trip (acceptance #2): re-borrow the
+    // owned mirror back into the zero-copy view and assert it re-encodes to
+    // the exact oracle bytes — closing the borrowed→owned→borrowed loop so
+    // an owned value reaches the borrowed-only `encode`. Every sidecar-
+    // eligible codec is scalar / bytes / string (no bounded list reaches
+    // this gate), so the projection is infallible.
+    assert_eq!(
+        owned.as_borrowed().encode_to_vec().as_slice(), expected,
+        "<sce:test-vector> at SCXML L61: as_borrowed re-encode mismatch"
+    );
+}

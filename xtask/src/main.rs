@@ -164,8 +164,11 @@ fn repo_root() -> PathBuf {
 
 /// Regenerate `out/wz-codecs/<stem>.rs` for every codec. Byte-faithful to the
 /// old `wz-codecs/build.rs` emit: same compile call, same SCE-MAP strip,
-/// same per-stem output file (`<stem>.rs`); the unconsumed `<stem>_test.rs`
-/// SCE also emits is dropped (lib.rs never `include!`s it).
+/// same per-stem output file (`<stem>.rs`). A document that states
+/// `<sce:test-vector>` rows also gets the `<stem>_test.rs` sidecar SCE emits for
+/// them, which `wz-codecs` compiles into the codec's module under test, so the
+/// Rust emission is held to the same vectors Layer Bc holds the C11 one to; a
+/// sidecar whose document no longer states a vector is removed.
 fn regen_codecs(root: &Path) {
     let resource_dir = root.join("sources/codecs");
     let out_dir = root.join("out/wz-codecs");
@@ -275,6 +278,22 @@ fn regen_codecs(root: &Path) {
             .join("\n");
 
         generated.push((target_name, stripped));
+
+        // The document's vectors, when it states any. The sidecar is `include!`d
+        // mid-module as the codec is, so it takes the same strip.
+        let sidecar_name = format!("{stem}_test.rs");
+        if let Some((_, sidecar)) = output
+            .files
+            .iter()
+            .find(|(filename, _)| filename == &sidecar_name)
+        {
+            let stripped = sidecar
+                .lines()
+                .filter(|line| !line.starts_with("#![doc = \"SCE-MAP:"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            generated.push((sidecar_name, stripped));
+        }
     }
 
     if !refusals.is_empty() {
@@ -297,6 +316,20 @@ fn regen_codecs(root: &Path) {
                 "sce-build refused the codec deployment; nothing was written to {}",
                 out_dir.display()
             );
+        }
+    }
+
+    // A vector sidecar this run did not generate belongs to a document that no
+    // longer states a vector: left in place, the crate would compile vectors the
+    // document has dropped.
+    let entries = std::fs::read_dir(&out_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", out_dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| panic!("read {}: {e}", out_dir.display()));
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with("_test.rs") && !generated.iter().any(|(target, _)| target == &name) {
+            std::fs::remove_file(entry.path())
+                .unwrap_or_else(|e| panic!("remove {}: {e}", entry.path().display()));
         }
     }
 
