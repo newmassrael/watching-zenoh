@@ -8539,6 +8539,24 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4692": {
+      "decision_summary": "Build zenoh-pico's preset as a Windows package, so the Windows performance\ntable, whose rows are the preset's, can be filled from a run on it.",
+      "changes_bullets": [
+        "pico_windows_package --build --preset; manifest names its preset.",
+        "perf_matrix windows-plan reads the preset from the manifest.",
+        "platform.yml package-windows-preset job uploads the zip."
+      ],
+      "verification_bullets": [
+        "pico_windows_package --selftest OK; perf_matrix --selftest 179/179.",
+        "trigger paths, soft jobs, workflow gate, actionlint pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
