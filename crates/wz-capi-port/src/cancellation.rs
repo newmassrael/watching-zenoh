@@ -70,6 +70,13 @@ use crate::lodge::StaticPlaces;
 use crate::lodge::{Lent, NoPlace, Strong};
 use crate::os::{Condvar, Mutex, MutexGuard};
 use crate::sync::Lock;
+#[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
+use wz_session_core::bounded::Profile;
+#[cfg(any(
+    all(test, feature = "std"),
+    all(not(feature = "std"), not(feature = "os-sys"))
+))]
+use wz_session_core::bounded::{Heap, Static};
 use wz_session_core::caps;
 
 /// The token's state, under one lock so "cancel has started", "the fans are off the list" and
@@ -547,21 +554,18 @@ pub fn register_fan(
     Ok(unsafe { fan.register(TokenRef::shared(token.clone())) }.then_some(fan))
 }
 
-/// How many tokens a kernel's build holds at once, read off the build's limits: a token is held to
-/// cancel gets, and a process has at most this many gets pending at once, each of its engines'
-/// rows ([`caps::ENGINE_ROWS`]) as many as its session's tables admit, queries and a querier's
-/// queries in one ([`caps::MAX_PENDING_QUERIES`]) and liveliness gets in the other
-/// ([`caps::MAX_PENDING_LIVELINESS_GETS`]). A program holding a token for each get it has pending
-/// is never refused one; the next past them is, as a full heap refuses pico's. Moved as those
-/// limits are, by the build's configuration.
+/// How many tokens a kernel's build on the fixed storage policy holds at once, read off the
+/// build's limits: a token is held to cancel gets, and a process has at most this many gets
+/// pending at once, each of its engines' rows ([`caps::ENGINE_ROWS`]) as many as its session's
+/// tables admit, queries and a querier's queries in one ([`caps::MAX_PENDING_QUERIES`]) and
+/// liveliness gets in the other ([`caps::MAX_PENDING_LIVELINESS_GETS`]). A program holding a token
+/// for each get it has pending is never refused one; the next past them is, as a full heap refuses
+/// pico's. Moved as those limits are, by the build's configuration.
 pub const TOKEN_PLACES: usize = caps::ENGINE_ROWS
     .saturating_mul(caps::MAX_PENDING_QUERIES.saturating_add(caps::MAX_PENDING_LIVELINESS_GETS));
 
-/// The process's places for tokens in a kernel's build.
-#[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
-static TOKENS: StaticPlaces<CancellationToken, TOKEN_PLACES> = StaticPlaces::new();
-
-/// The token `make` writes, in a place of [`TOKENS`], or [`NoPlace`] when every one is held.
+/// The token `make` writes, where the build's storage policy places a kernel's tokens
+/// ([`TokenSource`]), or [`NoPlace`] when there is no room for it.
 ///
 /// # Safety
 /// `make` leaves a whole token in the place it is handed, which is valid for writes of one.
@@ -570,7 +574,56 @@ unsafe fn lodge_token(
     make: impl FnOnce(NonNull<CancellationToken>),
 ) -> Result<Strong<CancellationToken>, NoPlace> {
     // SAFETY: the caller's.
-    unsafe { lodge_in_table(&TOKENS, make) }
+    unsafe { <Profile as TokenSource>::lodge(make) }
+}
+
+/// Where a kernel's build places its tokens, by a storage policy of the session core
+/// (`wz_session_core::bounded`): the build's policy (`Profile`) decides for every token, as it
+/// decides where the cooperative engine's rows come from; a host's build boxes each token on
+/// either policy.
+#[cfg(any(
+    all(test, feature = "std"),
+    all(not(feature = "std"), not(feature = "os-sys"))
+))]
+trait TokenSource {
+    /// The token `make` writes in a place of the policy, or [`NoPlace`] when it has no room.
+    ///
+    /// # Safety
+    /// As [`lodge_token`].
+    unsafe fn lodge<F: FnOnce(NonNull<CancellationToken>)>(
+        make: F,
+    ) -> Result<Strong<CancellationToken>, NoPlace>;
+}
+
+/// The heap policy: each token in a box of its own, as a host's is, so a process holds as many as
+/// its heap has room for, as zenoh-pico allocates each.
+#[cfg(any(
+    all(test, feature = "std"),
+    all(not(feature = "std"), not(feature = "os-sys"))
+))]
+impl TokenSource for Heap {
+    unsafe fn lodge<F: FnOnce(NonNull<CancellationToken>)>(
+        make: F,
+    ) -> Result<Strong<CancellationToken>, NoPlace> {
+        // SAFETY: the caller's.
+        unsafe { Strong::try_boxed_in(make) }
+    }
+}
+
+/// The fixed policy: [`TOKEN_PLACES`] places of the process's in static memory, the next token
+/// past them refused, and nothing of the heap.
+#[cfg(any(
+    all(test, feature = "std"),
+    all(not(feature = "std"), not(feature = "os-sys"))
+))]
+impl TokenSource for Static {
+    unsafe fn lodge<F: FnOnce(NonNull<CancellationToken>)>(
+        make: F,
+    ) -> Result<Strong<CancellationToken>, NoPlace> {
+        static TOKENS: StaticPlaces<CancellationToken, TOKEN_PLACES> = StaticPlaces::new();
+        // SAFETY: the caller's.
+        unsafe { lodge_in_table(&TOKENS, make) }
+    }
 }
 
 /// The token `make` writes, in a place of `table`, or [`NoPlace`] when every one is held.
@@ -814,5 +867,40 @@ mod tests {
             again.is_ok(),
             "a token's place goes back with its last count"
         );
+    }
+
+    /// A kernel's token lies where the storage policy places it: on the heap policy in a box of its
+    /// own, so a process holds more than the fixed policy's places, and on the fixed policy in the
+    /// static places, which refuse the one past them.
+    ///
+    /// # Control
+    ///
+    /// The fixed policy's places up to the bound are the control. Turned red by a policy that
+    /// lodges in the other's source: the heap's tokens bounded by the places, or the fixed
+    /// policy's boxed past them.
+    #[test]
+    fn a_kernels_token_lies_where_the_storage_policy_places_it() {
+        let make = |place: NonNull<CancellationToken>| {
+            // SAFETY: the place is its lodging's, valid for one token, holding none, never moved.
+            unsafe { CancellationToken::init_in(place) }
+        };
+        let boxed: Vec<Strong<CancellationToken>> = (0..=TOKEN_PLACES)
+            .map(|_| {
+                // SAFETY: `make` makes the whole token.
+                unsafe { <Heap as TokenSource>::lodge(make) }.expect("the heap has room")
+            })
+            .collect();
+        assert_eq!(boxed.len(), TOKEN_PLACES + 1, "no place bounds the heap's");
+        let placed: Vec<Strong<CancellationToken>> = (0..TOKEN_PLACES)
+            .map(|_| {
+                // SAFETY: as above.
+                unsafe { <Static as TokenSource>::lodge(make) }.expect("CONTROL: a place")
+            })
+            .collect();
+        // SAFETY: as above.
+        let past = unsafe { <Static as TokenSource>::lodge(make) };
+        assert_eq!(past.err(), Some(NoPlace), "one past the places is refused");
+        drop(placed);
+        drop(boxed);
     }
 }
