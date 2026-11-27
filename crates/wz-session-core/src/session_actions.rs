@@ -3236,8 +3236,8 @@ pub struct LinkState<R: SessionRuntime> {
     /// installs before the handshake ([`SessionLinkActions::install_link_admission`]) and asks while
     /// the link is still being established. `None` for a node that decides the question after the
     /// link is up, or that holds one link in any case. On the LINK, as the handshake it guards
-    /// is.
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    /// is. Only a build that admits its links (`link-admission`) has one.
+    #[cfg(all(feature = "link-admission", target_has_atomic = "ptr"))]
     pub(crate) link_lease: R::Mutex<Option<crate::link_admission::LinkLease>>,
 }
 
@@ -5666,7 +5666,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 shm_rx: R::new_mutex(crate::extshm::ShmRxSlot::default()),
                 #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
                 batch_slots: core::array::from_fn(|_| LentRecord::new()),
-                #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+                #[cfg(all(feature = "link-admission", target_has_atomic = "ptr"))]
                 link_lease: R::new_mutex(None),
             } in_place {}
         );
@@ -12285,7 +12285,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// known and (the initiator) when the OpenAck is about to be taken, and a link the node refuses
     /// is closed with `MaxLinks` before the application has seen anything over it. `dialled` says
     /// whether this session dialled the link. A second install replaces the first, which is released.
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    #[cfg(all(feature = "link-admission", target_has_atomic = "ptr"))]
     pub fn install_link_admission(
         &self,
         authority: alloc::sync::Arc<dyn crate::link_admission::LinkAdmission>,
@@ -12298,7 +12298,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// [`Self::install_link_admission`] with an admission the session lends from where it owns
     /// it: its owner is dropped after this link's actions, as the handle's maker answered for
     /// ([`crate::link_admission::LinkLease::placed`]).
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    #[cfg(all(feature = "link-admission", target_has_atomic = "ptr"))]
     pub fn install_placed_link_admission(
         &self,
         authority: crate::placed::PlacedRef<dyn crate::link_admission::LinkAdmission>,
@@ -12311,7 +12311,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The node's answer to the remote's zid, once known; `true` for a link the node does not
     /// guard. See [`crate::link_admission::LinkAdmission::reserve`].
     #[cfg(all(
-        feature = "alloc",
+        feature = "link-admission",
         target_has_atomic = "ptr",
         any(
             feature = "codec-init-body",
@@ -12332,7 +12332,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// of the fixed-memory crates hold to: reading it with `peer_zid` is one `Vec` for every
     /// handshake. The two mutexes are taken one after the other and never nested.
     #[cfg(all(
-        feature = "alloc",
+        feature = "link-admission",
         target_has_atomic = "ptr",
         feature = "codec-open-body",
         feature = "session-unicast-accept"
@@ -12352,7 +12352,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The node's answer to an initiator that is about to take the OpenAck; `true` for a link the
     /// node does not guard. See [`crate::link_admission::LinkAdmission::confirm`].
     #[cfg(all(
-        feature = "alloc",
+        feature = "link-admission",
         target_has_atomic = "ptr",
         feature = "codec-open-body"
     ))]
@@ -12368,7 +12368,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// second link to the node on the other end. See
     /// [`crate::link_admission::LinkAdmission::has_row`].
     #[cfg(all(
-        feature = "alloc",
+        feature = "link-admission",
         target_has_atomic = "ptr",
         any(feature = "codec-init-body", feature = "codec-open-body")
     ))]
@@ -12381,7 +12381,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// This link has left its node's admission: its place is free for the next link to the same
     /// node. The node calls it when the link's face goes; the lease's drop does it otherwise.
-    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    #[cfg(all(feature = "link-admission", target_has_atomic = "ptr"))]
     pub fn release_link_admission(&self) {
         R::with_mutex_mut(&self.link.link_lease, |slot| {
             if let Some(lease) = slot.as_ref() {
@@ -12393,20 +12393,28 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The node this link's admission was last asked about, whatever the answer: the remote of a
     /// link that was refused for it, which [`Self::peer_zid`] may not name yet (an initiator
     /// refused at the InitAck has not taken the Init that carried the zid). `None` before the
-    /// question, and for a link with no admission.
+    /// question, and for a link with no admission, which is every link of a build without
+    /// `link-admission`: its engine asks it of a link it holds a face for either way.
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     pub fn link_admission_node(&self) -> Option<SessionZid> {
-        R::with_mutex_mut(&self.link.link_lease, |slot| {
-            slot.as_ref()
-                .and_then(crate::link_admission::LinkLease::node)
-        })
+        #[cfg(feature = "link-admission")]
+        {
+            R::with_mutex_mut(&self.link.link_lease, |slot| {
+                slot.as_ref()
+                    .and_then(crate::link_admission::LinkLease::node)
+            })
+        }
+        #[cfg(not(feature = "link-admission"))]
+        {
+            None
+        }
     }
 
     /// The node refused this link during its handshake: the peer is told why, with the reason
     /// zenoh gives a link refused for the node it already holds (`MAX_LINKS`), and nothing was
     /// declared over it by either end.
     #[cfg(all(
-        feature = "alloc",
+        feature = "link-admission",
         target_has_atomic = "ptr",
         any(feature = "codec-init-body", feature = "codec-open-body")
     ))]

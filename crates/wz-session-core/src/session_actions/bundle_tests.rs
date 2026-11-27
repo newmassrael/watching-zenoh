@@ -4255,6 +4255,35 @@ mod unicast_transport {
         );
     }
 
+    /// A peer's Close with `MAX_LINKS` before the session is established is the peer refusing the
+    /// link in its handshake: a build that admits its links (`link-admission`) reports it as the
+    /// link refused, and one without takes it as any Close, as zenoh-pico's open takes one. Turned
+    /// red by the refusal's arm compiled where the admission is not, or left out where it is.
+    #[cfg(all(feature = "alloc", feature = "codec-close"))]
+    #[test]
+    fn a_peers_max_links_close_is_a_refused_link_only_where_links_are_admitted() {
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::link::{LinkEvent, RxFrame};
+
+        let (actions, _link) = bundle();
+        let mut engine = engine(&actions);
+        let close = alloc::vec![
+            wz_codecs::wire_const::T_MID_CLOSE,
+            crate::close_reason::CloseReason::MaxLinks as u8,
+        ];
+        let outcome = crate::drive::dispatch_link_event(
+            LinkEvent::Rx(RxFrame::new(close)),
+            &*actions,
+            &mut engine,
+        );
+        assert!(!actions.is_established(), "no handshake ran");
+        assert_eq!(
+            matches!(outcome, DriverLoopOutcome::LinkRefused),
+            cfg!(feature = "link-admission"),
+            "{outcome:?}"
+        );
+    }
+
     /// A datagram its link keeps is read on from where the last turn stopped, which the receive
     /// notes beside its record: two KeepAlives in one datagram are read over two lends of the same
     /// bytes, one a lend, and the turn between says the link is to keep it. A kept datagram read

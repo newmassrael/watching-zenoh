@@ -101,7 +101,7 @@ too: the preset's contract is zenoh-pico's.
 | B1 | T5 (and T7's `emit_on_link`) | form | the four write facts of a link driver (whether it reports its writes, its last write, a class carried apart, that carriage's last write) compiled only with `link-wire-reports`, which only the tokio runtime names | -350 to -500 | lower: no clock read and four indirect calls fewer at each keep-alive deadline read; two fewer at each frame handed over | **built, `248c36d42d`** |
 | W1 | T3, T9 | work | the handshake's regions: the peer's region name and remote bound read and refused when malformed, the bound the session decides and stages on its Open | -250 to -450 | none | **built** (section 6.1) |
 | W5 | T5 | work | the watch of the peer's initial declarations (its deadline in the lease, its expiry in `judge_lease`) | -250 to -400 | none | **built, changed** (section 6.2): form, not work; a feature only the tokio runtime names |
-| W2 | T3 | work | the node's admission of a link (`LinkAdmission`, `LinkLease`) and the `MaxLinks` close | -200 to -400 | none | as W1 |
+| W2 | T3 | work | the node's admission of a link (`LinkAdmission`, `LinkLease`) and the `MaxLinks` close | -200 to -400 | none | **built** (section 6.3), under the capability `link-admission` |
 | B2 | T5 | form | the lease's deadlines read once, out of line, for `fire_due` and `next_due_ms` | -150 to -300 | must not rise: a call per turn is added, so only with a per-turn Ir reading | the perf matrix arm W |
 | W4 | T3 | work | the stray-message policy's replay of a held answer | -100 to -200 | none | as W1 |
 | B5 | T6 | form | no Control barrier on one conduit | -60 to -150 | none | merging `sz-transport2` |
@@ -297,3 +297,30 @@ watch's own tests are compiled with the feature only.
 What is left: a statement of `DECLARATION_SYNC_RX_NO_PROGRESS_MS` is still taken by a build that
 reads it nowhere. Its refusal by name is the limit's `read_by`, which names a capability, and this
 is not one; it waits for an engine of the C library that notes the peer's declarations.
+
+### 6.3 W2, the node's admission of a link (`link-admission`)
+
+The capability is the one the peer lane declared (`deploy/wz-config.toml`, `link-admission`,
+taken here by `git cherry-pick` of its commit and of its test fix, the same changes as on the
+integration branch): it gates the cooperative engine's admission, the arena row and the install in
+each link's handshake, and turned on nothing of the session core, whose half stayed compiled into
+every build with an allocator, the dial-only case included. This step is that half: the session
+core's feature of the same name, a default, which `wz-runtime-coop`'s `link-admission` and the
+tokio runtime name. Without it:
+
+- a link carries no lease (`SessionLinkActions::link_lease`), and the install, the three
+  questions the handshake asks (`link_admitted`, `link_admitted_for_remote`, `link_confirmed`),
+  the room check, the `MaxLinks` refusal and the release are not compiled; the node a link's
+  admission was asked about (`link_admission_node`), which the engine reads of a listening
+  session's faces either way, is none;
+- the dispatch asks nothing, so every link that ends its handshake is a face of its own;
+- a peer's `MaxLinks` Close before the establishment is a Close like any other, where a build with
+  it reports the link refused (`DriverLoopOutcome::LinkRefused`).
+
+The node's tables (`link_admission::LinkRegistry`, `LinkBook`) and the tie rule stay in
+`link_admission`, ungated: they are the node's, which a build that links none of the session's
+questions does not instantiate. The test is
+`session_actions::bundle_tests::unicast_transport::a_peers_max_links_close_is_a_refused_link_only_where_links_are_admitted`,
+which states both builds and runs without the feature in a leg of
+`scripts/lib/nondefault-tests-gate.sh`; the engine's own tests of one face to a node and of a
+face per link are the peer lane's (`tests::one_face`, `tests::one_thread::listen`).

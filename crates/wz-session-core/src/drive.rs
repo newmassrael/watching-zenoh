@@ -1482,8 +1482,11 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // closes a transport past `max_sessions`, INVALID (`framing.error`)
     // (`io/zenoh-transport/src/unicast/manager.rs` @ `max_sessions`), and the open
     // fails, so neither end reads a full node as one that holds the other.
+    // A build without `link-admission` installs no lease and asks nothing: each link that ends
+    // its handshake is a face of its own, as each link zenoh-pico's peer accepts or dials is a
+    // peer of its own.
     #[cfg(all(
-        feature = "alloc",
+        feature = "link-admission",
         target_has_atomic = "ptr",
         any(feature = "codec-init-body", feature = "codec-open-body")
     ))]
@@ -1567,8 +1570,9 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // `close::reason::MAX_LINKS => tracing::debug!`).
     // The FSM takes the Close, and the open reports what it reports for a link its own
     // node refused, [`DriverLoopOutcome::LinkRefused`], so that a connect whose link
-    // the other end refused is told apart from one that failed.
-    #[cfg(all(feature = "alloc", feature = "codec-close"))]
+    // the other end refused is told apart from one that failed. A build without `link-admission`
+    // takes it as any Close, as zenoh-pico's open takes one.
+    #[cfg(all(feature = "link-admission", feature = "codec-close"))]
     if matches!(
         facts,
         crate::inbound::ControlFacts::Close { reason, .. }

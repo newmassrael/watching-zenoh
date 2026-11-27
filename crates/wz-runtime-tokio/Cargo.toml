@@ -2166,7 +2166,9 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 # link carries best-effort frames on a companion, which they report through the link trait.
 # `declaration-sync-watch`: this runtime notes every inbound event of a session
 # (`note_declare_finals_in`), so it watches the peer's initial declarations for progress.
-wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend", "action-trace", "south-subregions", "handshake-regions", "interest-answer", "policy-selection", "link-wire-reports", "declaration-sync-watch"] }
+# `link-admission`: this runtime's nodes admit each link they dial or accept in its handshake
+# (`accept_loop`, `install_link_admission`).
+wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend", "action-trace", "south-subregions", "handshake-regions", "interest-answer", "policy-selection", "link-wire-reports", "declaration-sync-watch", "link-admission"] }
 # The admin space a node answers from (§5.23): the `local_data` view, every admin leg and the
 # config-write decoder, the server layer's (server-layer split, step 7). Pulled by
 # `adminspace-core`, which every admin feature here composes.

@@ -1986,6 +1986,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         link-wire-reports,\
         query-replies-with-final,\
         declaration-sync-watch,\
+        link-admission,\
         codec-close,\
         codec-frame,\
         codec-init-body,\
@@ -2018,6 +2019,7 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         link-wire-reports,\
         query-replies-with-final,\
         declaration-sync-watch,\
+        link-admission,\
         codec-close,\
         codec-frame,\
         codec-init-body,\
@@ -2031,6 +2033,44 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         transport-keepalive,\
         tx-lend-only\
         |session_actions::bundle_tests::lent_handshake::"
+    # The link admission left out (`link-admission`, a default of the crate that the cooperative
+    # engine names only with its capability of the same name), every other default spelled out,
+    # over the accepting lend-only row's build: a peer's `MaxLinks` Close before the
+    # establishment is a Close like any other, where the build with it reports the link refused
+    # (`session_actions::bundle_tests::unicast_transport::`). NOT YET MEASURED.
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        tx-probe,\
+        tx-expiry-run,\
+        tx-fragment-credit,\
+        tx-held-wait,\
+        multicast-locator-keys,\
+        link-wire-reports,\
+        query-replies-with-final,\
+        declaration-sync-watch,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_actions::bundle_tests::unicast_transport::a_peers_max_links_close_is_a_refused_link_only_where_links_are_admitted"
     # The COMPACT initial-sequence-number derivation, a row of its own because
     # `initial-sn-compact` is a selector, not an addition: it swaps the SHAKE
     # derivation for the FNV-1a and SplitMix64 one and compiles the tests of the

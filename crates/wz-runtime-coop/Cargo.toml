@@ -394,9 +394,11 @@ app-link = ["session-unicast", "alloc", "wz-session-core/app-link"]
 # (`query`) and the rows of its links it reports (`connectivity`). Each is the engine's feature
 # of the same name, which the engine forwards here; a build without one holds none of it. Without
 # `link-admission` a link is given no place in an admission before its handshake, so every link
-# that ends its handshake is a face of its own, two to a node that dials and is dialled.
+# that ends its handshake is a face of its own, two to a node that dials and is dialled; the
+# session core's feature of the same name is the lease each link carries and the dispatch's
+# questions of it, which a build without it does not compile.
 listen = ["session-unicast-accept"]
-link-admission = ["listen"]
+link-admission = ["listen", "dep:wz-session-core", "wz-session-core/link-admission"]
 group = []
 shared-key-ids = ["dep:wz-session-core", "wz-session-core/shared-key-ids"]
 queryable = []

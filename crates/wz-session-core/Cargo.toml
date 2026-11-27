@@ -104,6 +104,7 @@ default = [
     "link-wire-reports",
     "query-replies-with-final",
     "declaration-sync-watch",
+    "link-admission",
 ]
 
 # `log`: the session core's diagnostics (`diag`), the warnings an operator reads when a peer sends
@@ -1404,6 +1405,18 @@ link-wire-reports = []
 # nothing noted moves it, and no quiet window settles an accepted link's sync, as with the window
 # at 0. On by default.
 declaration-sync-watch = ["alloc"]
+
+# `link-admission`: a link's place in its node's admission (`link_admission::LinkLease`), installed
+# before its handshake and asked while the link is established: a second link to a node the node
+# holds is refused with `MaxLinks`, and a peer's `MaxLinks` Close before the establishment is
+# reported as the link refused (`DriverLoopOutcome::LinkRefused`). The admission's tables
+# (`LinkRegistry`, `LinkBook`) are the node's and stay in `link_admission` either way. Named by the
+# runtimes that admit their links: the tokio runtime's nodes, and the cooperative engine's
+# `link-admission`, the pico ABI's capability of the same name, which the zenoh-pico preset leaves
+# off. Without it a link carries no lease and is asked nothing, so every link that ends its
+# handshake is a face of its own, and a `MaxLinks` Close is a Close like any other, as each link
+# zenoh-pico's peer accepts or dials is a peer of its own. On by default.
+link-admission = ["alloc"]
 
 # session-slot — fixed-memory step S5: a session's per-session state lives in
 # storage of fixed size, and nothing it holds is behind a pointer to the heap.
