@@ -7553,8 +7553,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// The waits for room a publish that finds the session held asks. Compiled where its
     /// readers are: the tests of a full group's stage over the program's transport, in both forms
-    /// of the engine's calls (`tests::group_congested`).
-    #[cfg(all(test, feature = "std", feature = "group", feature = "app-transport"))]
+    /// of the engine's calls, where a held session waits for room (`tests::group_congested`,
+    /// under `tx-held-wait`).
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "group",
+        feature = "app-transport",
+        feature = "tx-held-wait"
+    ))]
     pub(crate) fn rooms(&self) -> &LinkRooms<L::Waits> {
         &self.rooms
     }
