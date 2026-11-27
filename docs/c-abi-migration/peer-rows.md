@@ -1113,6 +1113,60 @@ over by its `rests` as a listener's group rows already were (section 7.8).
   after which a group row's send place is the place its leg is written through and the walk's
   arm is the link kind's (section 5.6). Until then R6's `Held::Groups` leg stands.
 
+### 7.13 R5c landed: the read steps the groups' rows in its walk
+
+**What changed** (`crates/wz-capi-coop/src/engine/direct.rs`). A whole read
+(`CoopEngine::read_faces`) walks the rows of the face table once, in their order, and steps a
+group's session in its row where the walk reaches it (`CoopEngine::step_group_row`, the body of
+the groups' step drawn out of `step_groups`), where it stepped every group after the faces through
+`read_groups`. Its entry tries every row it reaches (`DirectFaces::read_rows`: the faces it turns
+and the groups' rows), so the guard against a read made from a callback is the slot of the row
+whose records are handed out, the group's own, and the dial role's slot is no longer held across
+the groups' steps: not in the whole read, not in the quiet run's (`step_groups_in_run`). The call
+path that asks the groups a step outside a read (`read_groups`, the JOIN asked of the session)
+steps them only where no row a read reaches is held, which also leaves a JOIN asked from a
+callback of a listener's face to the next read, where the dial role's slot did not. The time a
+read made no wait for (D10's awaited read) goes to the first group whose receive waits, as before.
+What the groups' steps left (an end, a join again) is read once the walk is over
+(`poll_groups`), in a session that joined a group.
+
+**The order, and the look for the bookkeeping.** The groups' places are taken at the open, before
+any face a port gives, so their rows lie between the dial role's and the listener's faces, and the
+walk steps a group before those faces: at the reading of the clock of the face turned before it.
+A read whose faces all rest turned the first of them after the walk, for the session's bookkeeping;
+it now turns it in its place, decided at the entry by the same walk that tries the slots (a group's
+row rests for its life), so the dial role's look still comes before the group's step, and a
+session of groups alone (D10) reads the clock once a read, as before.
+
+**Held by** (`tests::group`, `group`, `app-transport`, `threads`, the direct form):
+`a_read_steps_the_groups_row_in_its_walk_at_the_reading_of_the_look_before_it` (each read of a
+member that dials nothing delivers the frame handed in before it, turns the dial role's face once
+and steps the group at that turn's reading: red if the walk steps the group before the look, which
+`Takes::group_steps_own_clock` counts, or if no look is made while every face rests);
+`a_read_from_a_callback_of_a_groups_record_turns_no_face` (a callback's read answers open and turns
+no face, no call runs inside another, the records once and in order: red if the entry leaves the
+groups' rows out, when the callback's read turns the dial role's face). The burst, the awaited
+read's and the join-again tests of `tests::group` and `tests::one_thread` stand over the walk.
+
+**Expected.** Bytes: about even to slightly down in the builds with `group` (`step_groups`' loop
+moves into `step_group_row`, called from two places; the post-walk turn of a resting face and
+`read_groups`' arguments go; `read_rows` and the entry's fold of `rests` come in); the zenoh-pico
+preset's client and peer cases, which join no group, compile the same walk with no group arm.
+Receive Ir: the client case does not move (no `listen`, no `group`: the walk is the dial role's
+row); a listening build that joins no group reads one byte more a row at the entry and drops the
+post-walk test of the resting face, about even; a session of groups alone does not move (one look,
+then the group at its reading, as before). One case reads the clock once more a read: a listener
+that dials nothing, joins a group and holds a face a port gave, whose group's row now precedes the
+faces it was stepped after, and is reached with no face turned before it.
+
+**Corrections to the run's records.** Two tests of this lane were red on the main session's run:
+the pico preset's arena test counted the marks of the places past the dial role's as a row of
+`MAX_FACES` (the basis R3a gave it, section 7.8), where the row counts the faces the config opens past
+the dial role's (none for the client); it now leaves that row to the faces' test. And section
+7.11's `a_quiet_read_reads_a_face_and_a_group_in_one_run` opened its client before any read of
+the listener ran, whose open then found no answer: the listener's and the member's read tasks
+start before the client dials.
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)
