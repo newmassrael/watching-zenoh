@@ -1,8 +1,8 @@
 # Feature lane feat-adv: what `advanced` costs, and which part of it is form
 
 Status: design of the lane. Its first step (A1 and A2, section 5), its second (A3 to A10 but
-A8, and the switches of section 6) and its third (A8, and A11 to A13 of section 9) are committed
-beside it; section 8 reads what remains and section 9 steps it. Nothing here was built by this lane. Every byte figure is either **read** or an **estimate**:
+A8, and the switches of section 6) and its third (A8, and A11 to A13 of section 9) and its fourth (A14 to A19 of section 9) are
+committed beside it; section 8 reads what remains and section 9 steps it. Nothing here was built by this lane. Every byte figure is either **read** or an **estimate**:
 read figures come from the libraries the size ledger's `--per-feature` run left on
 2026-11-27 (case `pico-api-coop-nostd`, pin 6a881c21dad1): the shipped library of the step
 before `advanced` and of the step that turns it on (symbol sizes), and the unstripped library of
@@ -209,12 +209,12 @@ and where its excess lies:
 | A11 | put and delete | `delete` is `put_sample` with the Del kind and no value, so the stamping, numbering, folding and keeping of a sample are one body for a put, a chunk and a Del | -700 | a delete: no call added | `refactor(ext-pubsub): Send an advanced delete through the put's body` |
 | A12 | late publishers, declare | `get_options` out of line (`#[inline(never)]`): the five gets of a subscriber share one body of the builder's stores | -800 | a get: one call added, off the sample path | `refactor(ext-pubsub): Build an advanced subscriber's get options once` |
 | A13 | declare (background) | the background subscriber lets its late-publisher and heartbeat entities stand by one arm each, not through an array iterator that moves both | -400 | declaration | `refactor(ext-pubsub): Let a background subscriber's entities stand apart` |
-| A14 | declare | the subscriber declared in the door's state (`EngineSubscriber::declare_in` over a place, as A8 made the publisher's), the state's `subscriber` place written once | -1,500 | declaration | next |
-| A15 | declare | the options read where the caller holds them through `declare_over` and the forms, no clone and no builder returning `self` by value on the declaration's path | -500 | declaration | next |
-| A16 | declare | the anchor rooms written row by row in the kept part's place through one out-of-line body, as A1 writes the table of gets (a constant repeated would be an interior-mutable constant) | -300 | declaration | next |
-| A17 | `_time` | the value's text checked against upstream's grammar by wz (a few hundred bytes) and converted by the platform's `strtod` where the C library has one (its OS layer, as zenoh-pico reads it); core's reader stays for a build without a platform reader | -4,500 | a query with `_time` | next |
-| A18 | cache: keep | the heap backing of a cache linked only in a build with an engine that keeps no ring (the tokio engine); the cooperative engine's library holds the ring arm alone | -2,200 | a put with a cache: one branch fewer | next |
-| A19 | order, hold | the boxed-closure arm of the sample's hand-on linked only with a host that hands a closure; the pico library calls the lent callback alone | -300 | the sample path: one branch fewer | next |
+| A14 | declare | the subscriber declared in the door's state (`EngineSubscriber::declare_in` over a place, as A8 made the publisher's), the state's `subscriber` place written once | -1,500 | declaration | `refactor(ext-pubsub): Declare an advanced subscriber in its host's place` |
+| A15 | declare | the options read where the caller holds them through `declare_over` and the forms, no clone and no builder returning `self` by value on the declaration's path | -500 | declaration | `refactor(ext-pubsub): Read a subscriber's options in its host's frame` |
+| A16 | declare | the anchor rooms written row by row in the kept part's place through one out-of-line body, as A1 writes the table of gets (a constant repeated would be an interior-mutable constant) | -300 | declaration | `refactor(capi-pico): Write an advanced subscriber's rooms in its place` |
+| A17 | `_time` | the value's text checked against upstream's grammar by wz (a few hundred bytes) and converted by the platform's `strtod` where the C library has one (its OS layer, as zenoh-pico reads it); core's reader stays for a build without a platform reader | -4,500 | a query with `_time` | `refactor(capi-pico): Read a time's numbers with the C library's strtod` |
+| A18 | cache: keep | the heap backing of a cache linked only in a build with an engine that keeps no ring (the tokio engine); the cooperative engine's library holds the ring arm alone | -2,200 | a put with a cache: one branch fewer | `refactor(ext-pubsub): Link a cache's heap form only beside no ring` |
+| A19 | order, hold | the boxed-closure arm of the sample's hand-on linked only with a host that hands a closure; the pico library calls the lent callback alone | -300 | the sample path: one branch fewer, one call | `refactor(ext-pubsub): Hand a subscriber's sample on through one form` |
 
 A11 to A13 together about -1,900 on `pico-api-coop-nostd` (estimate); A14 to A19 about -9,300.
 None touches `pico-client-coop-nostd`, which links no `wz-ext-pubsub`.
@@ -229,6 +229,88 @@ held by the existing host tests. What to read after they land: `ze_declare_advan
 in the explain report of `pico-api-coop-nostd`, and the receive instructions of
 `pico-client-coop-nostd` (unchanged).
 
+What the fourth step did, where it differs from the row, and its tests (all of them written for
+the merge to run; none was run here):
+
+- A14. `EngineSubscriber::declare_in` takes the place the subscriber is written in
+  (`&mut MaybeUninit<Self>`) and answers it; `declare_over` writes the fields one by one after the
+  last step that can refuse, as A8's `declare_in` does, and `declare_with` is it over a local
+  place. The pico state's `subscriber` is a `MaybeUninit` written by the declaration and read for
+  every state a handle names; the release drops it there and the background door reads it out.
+  Test `a_subscriber_is_declared_in_the_place_its_host_gives` (`advanced_subscriber/host/tests.rs`):
+  red with a subscriber made elsewhere and moved in (the answer is not the place), or a refusal
+  after the subscription (an engine with no periodic jobs) that writes the place (its bytes are
+  read back as the pattern written before).
+- A15. `declare_in` reads the options by reference and takes the host's forms by value beside them
+  (`options.forms` is `declare_with`'s, and a debug build refuses both); `declare_over` keeps the
+  forms with no clone; an entity's form gives its keep to the entity (`EntityForm::into_kept`), and
+  the pico forms name a form in place (`name_on_retraction`, `name_key_on_token_retraction`, `keep`)
+  where a chain of builders moved it. Tests
+  `a_form_named_in_place_reads_as_its_builders_and_gives_up_its_keep` (red with a setter that
+  writes another field, or a keep handed on as a copy) and
+  `a_subscriber_declared_in_a_lent_place_refuses_forms_in_its_options` (debug builds).
+- A16. `AnchorRooms::write_vacant` writes each room through one out-of-line body
+  (`AnchorRoom::write_vacant`), and the advanced subscriber's place is written where it lies
+  (`Answering::write_at`, now also built with `advanced`), its kept part field by field
+  (`AdvSubKept::write_in`), so no room is made on the stack and moved. Test
+  `advanced_forms::room_tests::every_room_is_written_vacant_in_its_place`: red with a row left
+  unwritten (the place is zeroed first, so such a row reads as held).
+- A17. The grammar's numbers are read by a reader its caller names (`FloatRead`;
+  `parse_range_with`, `parse_duration_with`), and a refusal is wz's `FloatError` in core's words,
+  so `wz-zenoh-util` prints upstream's message whichever reader read it.
+  `time_range::decimal_text` checks `f64::from_str`'s grammar and writes the number as an integer
+  of at most 48 significant digits (one more, `1`, standing for any nonzero digit past them) and a
+  power of ten, with no radix character (no locale reads it otherwise) and a NUL, so the C reader
+  reads nothing past it; infinities, NaNs and zeros are answered without a reader. The pico plane's
+  cache reads with `libc::strtod` over it on a unix host (`CacheStore::query_handler_reading`);
+  Windows and the kernels keep core's reader, as neither the DLL's C runtime nor an image's C
+  library is a fact this lane established. zenoh-pico's own reader calls `strtod` on its
+  argument and not on the copy it makes (`src/utils/time_range.c` @
+  `double value = strtod(bound->start, &err);`), so it reads past the duration in the caller's
+  text. A literal past 48 significant digits that lies within a part in 10^48 of a halfway point
+  between two `f64`s may round the other way; a duration is then held to the nanosecond.
+  Tests `a_decimal_written_for_a_platform_reader_reads_as_core_reads_the_literal` and
+  `a_durations_number_is_read_by_the_reader_named` (`wz-session-core/src/time_range.rs`),
+  `answer_from_ring_reads_the_time_with_the_reader_named` (`advanced_cache/tests.rs`),
+  `time_number_tests::the_c_librarys_reader_reads_a_time_as_core_does` (`advanced_plane.rs`, unix).
+  The bytes go only if nothing else of the library calls `f64::from_str`: the explain report
+  says.
+- A18. `wz-ext-pubsub`'s `cache-heap` (on by default; `wz-capi-pico`'s `engine-tokio` names it)
+  gates the heap form of a cache (`Samples::Heap`, `CacheStore::new`, the plane's default
+  `cache_store`); the cooperative library, whose sessions always keep a ring, refuses a cache on a
+  session with none rather than keep it on the heap. Not a capability: no behaviour of a build
+  changes, as the cooperative engine's sessions answer a ring at every open. Test
+  `a_sample_pushed_into_a_cache_in_the_ring_is_kept_as_a_record`.
+- A19. `OnSample` is one form, a function over a context and its drop: a lent callback is that, and
+  a program's closure is boxed behind it (`call_boxed`, `drop_boxed`), linked only where a host
+  hands one. The pico library's sample path is one indirect call with no branch; a Rust host's is
+  one call more than before (the trampoline), a closure an allocation more at its declaration.
+  Test `a_boxed_closure_is_called_through_the_lent_form_and_dropped_once`
+  (`advanced_subscriber/state/tests.rs`).
+
+What to read after they land: `declare_subscriber_state` and `ze_declare_advanced_subscriber`,
+`PicoSubscriberForms::form`, the cache queryable's closure and the language area (`f64::from_str`,
+`dec2flt` gone), `CacheStore::retain` and `Samples::for_each_held`, `State::admit` in the explain
+report of `pico-api-coop-nostd`, and the receive instructions of `pico-client-coop-nostd`
+(unchanged: it links no `wz-ext-pubsub`).
+
+## 11. The plane's retraction (taken over from the facade lane)
+
+`arch-l4-facade.md` section 4.2 (on `l4-facade-1128`, its F2) left the advanced plane's
+entities each holding a count of the engine (`advanced_plane::KeptPublisher`, `KeptToken`,
+`query::PlainQueryable`), because the composite holds them by value and lets go of them by
+dropping them. A8 made the composite the plane's one holder (`plane: P`), so the plane can retract
+what it declared: `AdvancedPublisherPlane` gains `retract_publisher`, `retract_queryable` and
+`retract_token` (by default a drop, which the tokio and zenoh-c planes keep), the composite's
+drop hands each entity to its plane in the retraction order, and the pico entities keep no engine
+and are used and retracted on the plane's one count. Two facts decide its shape and are not on this
+branch's base: F2's types (`KeptPublisher`, `KeptToken`, `WriteFilter::retract`) live on
+`l4-facade-1128`, which this branch does not contain, and the beacon publisher is shared with its
+timer's tick (`Arc`), so its retraction has to wait for the last tick in flight (the timer stopped
+first, then `Arc::into_inner` on the composite's count). The admin space's two `PlainQueryable`s
+are held by its own state and retract on the engine its place reaches. The step lands on
+`l4-facade-1128` merged, as one commit across both ABIs.
+
 ## 10. Rows for `contract-switches.md`
 
 The behaviours of this lane read as contract. `docs/c-abi-migration/contract-switches.md` is not on
@@ -240,6 +322,6 @@ this branch's base; these rows go there under the next free ids when the file is
 | C-adv-1 | the sweep of the sources that went away | upstream's `gc_task`, per subscriber | none: a source's state leaves only with the subscriber's (`src/api/advanced_subscriber.c` @ `_z_id__ze_advanced_subscriber_timestamped_state_hashmap_clear(&state->_timestamped_states);`, in the state's clear) | `advanced-source-retention`, off in the preset |
 | C-adv-2 | what stamps an advanced put, and the `trusted-only` refusal | the node's HLC under the clock-quality policy | the session's `z_timestamp_new` (`src/api/advanced_publisher.c` @ `_Z_CLEAN_RETURN_IF_ERR(z_timestamp_new(timestamp, &sess_rc), _z_session_rc_drop(&sess_rc));`) | `advanced-node-clock`, off in the preset |
 | C-adv-3 | where samples are kept: the cache and the subscriber's held-back samples | the session's ring and fixed tables, no heap after open | the heap (`_z_sample_copy` into `z_malloc`'d entries, sorted maps) | none: the C library's no-heap contract (owner) |
-| C-adv-4 | a `_time` value whose number is malformed | refused as upstream refuses it, so the query takes no time filter | its leading number is read and the rest ignored (`src/utils/time_range.c` @ `if (value == 0 && *err != '\0') {`, which refuses only a zero) | none: upstream's grammar; A17 keeps it |
+| C-adv-4 | a `_time` value whose number is malformed | refused as upstream refuses it, so the query takes no time filter; the grammar checked by wz and the number read by the C library's `strtod` on a unix host (A17) | its leading number is read and the rest ignored (`src/utils/time_range.c` @ `if (value == 0 && *err != '\0') {`, which refuses only a zero) | none: upstream's grammar; A17 keeps it |
 | C-adv-5 | the receive path's source info and timestamp | read with `pubsub-source-info` | read in every build (`src/protocol/codec/message.c` @ `_z_source_info_decode`) | none: a parity of accounting (O6) |
 
