@@ -33,15 +33,8 @@
 //! allocator and no unwinding can do about a malformed reply: the drain skips it, as it
 //! skips a reply whose bounded field overflows on the heap profile.
 
-use sce_forge_runtime::codec::{Bounded, CodecError, SceSink, SliceSink};
-use wz_codecs::ext_entry::{ExtEntryParts, ExtEntryPartsBody};
-use wz_codecs::ext_zbuf::ExtZbufParts;
-use wz_codecs::ext_zint::ExtZintParts;
-use wz_codecs::response::{ResponseParts, ResponsePartsBody, ResponseWire};
+use sce_forge_runtime::codec::{CodecError, SceSink, SliceSink};
 use wz_codecs::wire_const;
-use wz_codecs::wireexpr::{WireexprParts, WireexprPartsBody};
-use wz_codecs::wireexpr_local::WireexprLocalParts;
-use wz_codecs::wireexpr_nonlocal::WireexprNonlocalParts;
 
 use crate::declare_ext_qos::QOS_EXT_HEADER;
 use crate::ext_header::{ext_identity, EXT_ENC_ZBUF, EXT_FLAG_Z};
@@ -51,12 +44,6 @@ use crate::sample::QosLevel;
 // Every integer here is written as the codec runtime writes a `u64`: a `u16` or a `u32` ends on
 // its own data before the narrower width's cap could bind, so one count serves every width.
 use wz_codecs::vle::zint_len as vle_len;
-
-/// The `Response` envelope header of a reply that names its keyexpr inline:
-/// `N_MID_RESPONSE | N` (a suffix follows the id). The `M` flag derives from the
-/// `Local` arm at encode time, and `Z` is added when the envelope carries
-/// extensions.
-const RESPONSE_HEADER: u8 = wire_const::N_MID_RESPONSE | wire_const::FLAG_N_N;
 
 /// The bit the generated `Response::encode` derives from the key's `Local` arm.
 const LOCAL_KEY: u8 = 0x40;
@@ -79,6 +66,22 @@ struct Window<'w> {
 }
 
 impl Window<'_> {
+    /// Every store found its room and no byte of the window is left: the measure was the
+    /// writer's.
+    fn filled(&self) -> bool {
+        !self.short && self.rest.is_empty()
+    }
+}
+
+/// What the direct layout writes a reply into, front to back: a window of the measured length, or
+/// a sink written in turn ([`SinkOut`]).
+trait LayoutOut {
+    fn byte(&mut self, value: u8);
+    fn bytes(&mut self, value: &[u8]);
+    fn vle(&mut self, value: u64);
+}
+
+impl LayoutOut for Window<'_> {
     fn byte(&mut self, value: u8) {
         match core::mem::take(&mut self.rest).split_first_mut() {
             Some((slot, rest)) => {
@@ -99,12 +102,6 @@ impl Window<'_> {
         }
     }
 
-    /// Every store found its room and no byte of the window is left: the measure was the
-    /// writer's.
-    fn filled(&self) -> bool {
-        !self.short && self.rest.is_empty()
-    }
-
     /// `value` as the codec runtime writes a VLE: seven bits at a time with the continuation
     /// flag, and the ninth byte, when there is one, carrying its last eight bits whole. The loop
     /// runs to the length the value has, so it is not unrolled to the widest one at each call.
@@ -122,6 +119,50 @@ impl Window<'_> {
     }
 }
 
+/// The direct layout written into a sink in turn: for a transmit buffer that hands out no window
+/// (the fragment window of `transport-fragmentation`) and for [`ResponseWriter::encode`]. The
+/// first error the sink answers is kept, and nothing after it is written.
+struct SinkOut<'s, S> {
+    sink: &'s mut S,
+    failed: Option<CodecError>,
+}
+
+impl<S: SceSink> SinkOut<'_, S>
+where
+    CodecError: From<S::Error>,
+{
+    fn store(&mut self, write: impl FnOnce(&mut S) -> Result<(), S::Error>) {
+        if self.failed.is_none() {
+            self.failed = write(&mut *self.sink).err().map(CodecError::from);
+        }
+    }
+
+    /// What the sink answered: the first error, or none.
+    fn finish(self) -> Result<(), CodecError> {
+        match self.failed {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<S: SceSink> LayoutOut for SinkOut<'_, S>
+where
+    CodecError: From<S::Error>,
+{
+    fn byte(&mut self, value: u8) {
+        self.store(|sink| sink.write_u8(value));
+    }
+
+    fn bytes(&mut self, value: &[u8]) {
+        self.store(|sink| sink.write_bytes(value));
+    }
+
+    fn vle(&mut self, value: u64) {
+        self.store(|sink| sink.write_vle_u64(value));
+    }
+}
+
 /// The bytes an encoding takes after its header: the packed id, and the schema's length and bytes
 /// when it carries one.
 fn encoding_len(encoding: Option<crate::reply_stage::EncodingParts<'_>>) -> usize {
@@ -135,8 +176,11 @@ fn encoding_len(encoding: Option<crate::reply_stage::EncodingParts<'_>>) -> usiz
     len
 }
 
-/// [`encoding_len`]'s bytes into the window.
-fn write_encoding(out: &mut Window<'_>, encoding: Option<crate::reply_stage::EncodingParts<'_>>) {
+/// [`encoding_len`]'s bytes into `out`.
+fn write_encoding<O: LayoutOut>(
+    out: &mut O,
+    encoding: Option<crate::reply_stage::EncodingParts<'_>>,
+) {
     let Some(encoding) = encoding else {
         return;
     };
@@ -156,12 +200,14 @@ struct PartsView<'a> {
 
 /// The body of a directly written reply.
 enum BodyView<'a> {
-    /// A Put: its payload and the encoding a build that emits one writes.
+    /// A Put: its payload, the encoding a build that emits one writes, and what else it carries.
     Put {
         payload: &'a [u8],
         encoding: Option<crate::reply_stage::EncodingParts<'a>>,
+        extras: BodyExtras<'a>,
     },
-    Del,
+    /// A Del, and what it carries.
+    Del { extras: BodyExtras<'a> },
     /// An Err: its payload and encoding, the id packed as the owned builder packs it.
     #[cfg(feature = "query-reply-err")]
     Err {
@@ -170,18 +216,122 @@ enum BodyView<'a> {
     },
 }
 
-/// Whether [`ResponseWriter::encode_generic`] can be reached in this build: a reply that carries
-/// a timestamp, an attachment or a source info, which only a build with those features can stage,
-/// or a sink that hands out no window, which only the fragment window of `transport-fragmentation`
-/// is. Where none can happen the branches that call it fold away, and the codec's builder path
-/// (chains of eight extension entries at three levels, pushed by value into `heapless::Vec`s) is
-/// not in the image: 2.6 KB of text on the Zephyr fixed client.
-const GENERIC_REACHABLE: bool = cfg!(any(
-    feature = "pubsub-timestamp",
-    feature = "pubsub-attachment",
-    feature = "reply-source-info",
-    feature = "transport-fragmentation",
-));
+/// What a Put or a Del of a reply carries besides its payload and its encoding, as far as the
+/// build emits it: the timestamp, then the extension chain of the source info and the attachment.
+/// The codec's encoder writes the same parts (`write_reply`, the tests' reference): the timestamp
+/// after the body's header (and before a Put's encoding), the chain after the encoding.
+#[derive(Clone, Copy)]
+struct BodyExtras<'a> {
+    timestamp: Option<crate::reply_stage::TimestampParts<'a>>,
+    /// The source info's identity body; empty when the reply names none.
+    source_info: &'a [u8],
+    /// The attachment's entry header, of the body it rides, and its bytes.
+    attachment: Option<(u8, &'a [u8])>,
+}
+
+/// A Put's and a Del's header flags: a timestamp follows (`T`), an extension chain follows (`Z`).
+const BODY_FLAG_T: u8 = 0x20;
+const BODY_FLAG_Z: u8 = 0x80;
+
+/// The longest clock identity a timestamp carries (the codec's bound on `Timestamp::zid`).
+const TIMESTAMP_ZID_MAX: usize = 16;
+
+impl BodyExtras<'_> {
+    /// Whether an extension chain follows the body's header.
+    fn chained(&self) -> bool {
+        !self.source_info.is_empty() || self.attachment.is_some()
+    }
+
+    /// The flags the extras set on the header of the body they ride.
+    fn flags(&self) -> u8 {
+        let stamped = if self.timestamp.is_some() {
+            BODY_FLAG_T
+        } else {
+            0
+        };
+        let chained = if self.chained() { BODY_FLAG_Z } else { 0 };
+        stamped | chained
+    }
+
+    /// The bytes the extras take in the body: the timestamp's time, its identity's length and
+    /// bytes, and each entry's header, length and value.
+    fn len(&self) -> usize {
+        let timestamp = self.timestamp.map_or(0, |stamp| {
+            sum([
+                vle_len(stamp.time),
+                vle_len(stamp.zid.len() as u64),
+                stamp.zid.len(),
+            ])
+        });
+        let source_info = if self.source_info.is_empty() {
+            0
+        } else {
+            entry_len(self.source_info)
+        };
+        let attachment = self.attachment.map_or(0, |(_, bytes)| entry_len(bytes));
+        sum([timestamp, source_info, attachment])
+    }
+
+    /// The protocol bounds the codec's encoder holds the extras to: a timestamp's identity of at
+    /// most [`TIMESTAMP_ZID_MAX`] bytes, an attachment of at most a `u32` length.
+    fn bounds(&self) -> Result<(), CodecError> {
+        let zid = self.timestamp.map_or(0, |stamp| stamp.zid.len());
+        let attachment = self.attachment.map_or(0, |(_, bytes)| bytes.len());
+        if zid <= TIMESTAMP_ZID_MAX && attachment <= u32::MAX as usize {
+            Ok(())
+        } else {
+            Err(CodecError::LengthOutOfRange)
+        }
+    }
+
+    /// The timestamp into `out`, as the codec writes one: the time, then the identity's length
+    /// and bytes.
+    fn write_timestamp<O: LayoutOut>(&self, out: &mut O) {
+        if let Some(stamp) = self.timestamp {
+            out.vle(stamp.time);
+            out.vle(stamp.zid.len() as u64);
+            out.bytes(stamp.zid);
+        }
+    }
+
+    /// The extension chain into `out`: the source info, then the attachment, the chain flag on
+    /// each entry but the last.
+    fn write_chain<O: LayoutOut>(&self, out: &mut O) {
+        if !self.source_info.is_empty() {
+            write_entry(
+                out,
+                crate::ext_header::body_eid::SOURCE_INFO,
+                self.attachment.is_some(),
+                self.source_info,
+            );
+        }
+        if let Some((header, bytes)) = self.attachment {
+            write_entry(out, header, false, bytes);
+        }
+    }
+}
+
+/// The bytes a ZBuf extension entry of `value` takes: its header, its length and its value.
+fn entry_len(value: &[u8]) -> usize {
+    sum([1, vle_len(value.len() as u64), value.len()])
+}
+
+/// A ZBuf extension entry into `out`: `header` with the chain flag when `more` entries follow,
+/// then the value's length and bytes.
+fn write_entry<O: LayoutOut>(out: &mut O, header: u8, more: bool, value: &[u8]) {
+    out.byte(if more {
+        header | EXT_FLAG_Z
+    } else {
+        header & !EXT_FLAG_Z
+    });
+    out.vle(value.len() as u64);
+    out.bytes(value);
+}
+
+/// Whether a transmit buffer that hands out no window can be written: only the fragment window of
+/// `transport-fragmentation` is one. Elsewhere its branch folds away, and no reply is written
+/// into a sink in turn on the transmit path.
+const WINDOWLESS_REACHABLE: bool = cfg!(feature = "transport-fragmentation");
 
 /// The Reply body's header: `_Z_MID_Z_REPLY`, with no consolidation and no
 /// extension of its own (they ride the Put or Del inside it).
@@ -260,63 +410,8 @@ impl IdentityBody {
     }
 }
 
-/// The entries the envelope's extension chain holds at most: the QoS and the responder.
-const ENVELOPE_ENTRIES: usize = 2;
-
-/// The entries a Put's or a Del's extension chain holds at most: the source info and the
-/// attachment.
-const BODY_ENTRIES: usize = 2;
-
-/// The body of an entry no extension fills: a slot of a chain that is never written.
-static UNUSED_ENTRY_BODY: ExtZintParts = ExtZintParts { value: 0 };
-
-/// An integer-valued extension entry.
-const fn zint_entry<'a>(header: u8, body: &'a ExtZintParts) -> ExtEntryParts<'a> {
-    ExtEntryParts {
-        header,
-        body: ExtEntryPartsBody::CodecZenohExtZint(body),
-    }
-}
-
-/// The entries of `wanted` that are there, in order, at the front of `chain`, and the part of
-/// `chain` they fill. The two arrays are of one length, so every wanted entry has its slot.
-fn filled<'c, 'e, const N: usize>(
-    chain: &'c mut [ExtEntryParts<'e>; N],
-    wanted: [Option<ExtEntryParts<'e>>; N],
-) -> &'c mut [ExtEntryParts<'e>] {
-    let mut count = 0usize;
-    for (slot, entry) in chain.iter_mut().zip(wanted.into_iter().flatten()) {
-        *slot = entry;
-        count = count.saturating_add(1);
-    }
-    chain.get_mut(..count).unwrap_or_default()
-}
-
-/// Set the chain-continuation `Z` bit on every entry but the last, which ends the
-/// chain: [`crate::ext_nodeid::apply_chain_z_bits`] over the codec's parts entries.
-fn link_chain(chain: &mut [ExtEntryParts<'_>]) {
-    let Some(last) = chain.len().checked_sub(1) else {
-        return;
-    };
-    for (index, entry) in chain.iter_mut().enumerate() {
-        entry.header = if index == last {
-            entry.header & !EXT_FLAG_Z
-        } else {
-            entry.header | EXT_FLAG_Z
-        };
-    }
-}
-
-/// A staged encoding's schema as the codec's schema field, whose bound is the protocol's `u8`
-/// length: `LengthOutOfRange` past it, so a reply with such a schema is refused and not sent
-/// with another encoding.
-#[cfg(any(feature = "pubsub-encoding", feature = "query-reply-err"))]
-fn schema_bytes<const MAX: usize>(schema: &[u8]) -> Result<Bounded<&[u8], MAX>, CodecError> {
-    crate::codec_owned::sent(schema)
-}
-
 /// An Err's own encoding, when it names one: the id, and the schema's bytes when it has one.
-#[cfg(feature = "query-reply-err")]
+#[cfg(all(test, feature = "alloc", feature = "query-reply-err"))]
 type ErrEncoding<'a> = Option<(u32, Option<&'a [u8]>)>;
 
 /// A staged reply, ready to encode: the description it borrows and the two extension
@@ -412,63 +507,42 @@ impl<'a> ResponseWriter<'a> {
             _ => IdentityBody::NONE,
         }
     }
-    /// Encode the `Response` into any sink, through the codec's own encoder. A transmit sink is
-    /// written through [`Self::encode_tx`], which stores a plain reply in one window.
+    /// Encode the `Response` into any sink, written in turn by the direct layout: the bytes the
+    /// codec's own encoder writes for the same reply (`encode_generic`, the tests' reference). A
+    /// transmit sink is written through [`Self::encode_tx`], which stores a reply in one window.
     pub fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
     where
         CodecError: From<S::Error>,
     {
-        self.encode_generic(sink)
+        self.direct_bounds()?;
+        self.write_through(sink)
     }
 
-    /// Whether the reply is one [`Self::write_direct`] writes: the envelope with the QoS and the
-    /// responder as its extensions, around a Put or a Del with at most an encoding, or an Err. What
-    /// it does not write is a reply with a timestamp, an attachment or a source info.
-    fn is_direct(&self) -> bool {
-        match &self.parts.kind {
-            PartsKind::Reply {
-                timestamp,
-                attachment,
-                ..
-            } => {
-                let _ = (timestamp, attachment);
-                #[cfg(feature = "pubsub-timestamp")]
-                if timestamp.is_some() {
-                    return false;
-                }
-                #[cfg(feature = "pubsub-attachment")]
-                if attachment.is_some() {
-                    return false;
-                }
-                #[cfg(feature = "reply-source-info")]
-                if !self.source_info.value().is_empty() {
-                    return false;
-                }
-                true
-            }
-            #[cfg(feature = "query-reply-err")]
-            PartsKind::Err { .. } => true,
-        }
+    /// The direct layout into `sink` in turn, the bounds already held.
+    fn write_through<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+    where
+        CodecError: From<S::Error>,
+    {
+        let mut out = SinkOut { sink, failed: None };
+        self.write_layout(&mut out);
+        out.finish()
     }
 
-    /// [`Self::encode`] into a transmit sink, which can hand out a window: a plain reply's bytes
-    /// are stored where they go, in the order the generated encoders write them, into the whole
-    /// room of a buffer with an end (a slot) with no count of them first, or into a window of
-    /// the measured length of one without. A buffer that hands out no window, and a reply that
-    /// is not plain, are written as [`Self::encode`] writes them.
+    /// [`Self::encode`] into a transmit sink, which can hand out a window: the reply's bytes are
+    /// stored where they go, in the order the generated encoders write them, into the whole room
+    /// of a buffer with an end (a slot) with no count of them first, or into a window of the
+    /// measured length of one without. A buffer that hands out no window, the fragment window, is
+    /// written in turn by the same layout.
     ///
-    /// Building the codec's `Response` for the reply nearly every query gets moves a record that
-    /// holds a chain of eight extension entries inline at every level, encodes it through the
-    /// generic variant walk and writes it a byte at a time through a trait object; the bytes of
-    /// the window are the same (`Self::encode_generic` is the reference the tests hold this
-    /// path to), and the time of the two on the kit is in `docs/query-answer-path.md`.
+    /// Building the codec's `Response` for the reply moves a record that holds a chain of eight
+    /// extension entries inline at every level, encodes it through the generic variant walk and
+    /// writes it a byte at a time through a trait object; the bytes of the window are the same
+    /// (`encode_generic` is the reference the tests hold this path to), and the time of the two
+    /// on the kit is in `docs/query-answer-path.md`.
     pub fn encode_tx<B: crate::tx_buf::TxBuf<Error = CodecError> + ?Sized>(
         &self,
         sink: &mut crate::tx_buf::TxSink<'_, B>,
     ) -> Result<(), CodecError> {
-        if GENERIC_REACHABLE && !self.is_direct() {
-            return self.encode_generic(sink);
-        }
         self.direct_bounds()?;
         // A buffer with an end of its own hands out all its room: the reply is written in one
         // pass, its length where the writer stopped, and nothing is counted first.
@@ -489,30 +563,25 @@ impl<'a> ResponseWriter<'a> {
         }
         match sink.reserve(self.direct_len())? {
             Some(window) => self.write_direct(window),
-            None if GENERIC_REACHABLE => self.encode_generic(sink),
+            None if WINDOWLESS_REACHABLE => self.write_through(sink),
             // Every buffer of a build without fragmentation hands out a window.
             None => Err(CodecError::BufferOverflow),
         }
     }
 
-    /// The bytes [`Self::encode_tx`] writes for this reply, counted with nothing written: the size
-    /// a session asks its link to lend for it. A plain reply is counted by the direct writer's own
-    /// layout, so a build whose replies are all plain links no counting pass of the codec's encoder;
-    /// any other reply is counted by running that encoder into a sink that keeps nothing. A reply
-    /// past a protocol bound is refused with the error [`Self::encode_tx`] refuses it with.
+    /// The bytes [`Self::encode_tx`] writes for this reply, counted by the direct layout with
+    /// nothing written: the size a session asks its link to lend for it. No pass of an encoder
+    /// counts a reply, whatever it carries. A reply past a protocol bound is refused with the error
+    /// [`Self::encode_tx`] refuses it with.
     pub fn encoded_len(&self) -> Result<usize, CodecError> {
-        if GENERIC_REACHABLE && !self.is_direct() {
-            let mut count = sce_forge_runtime::codec::CountSink::new();
-            self.encode_generic(&mut count)?;
-            return Ok(count.len());
-        }
         self.direct_bounds()?;
         Ok(self.direct_len())
     }
 
     /// The protocol bounds the codec's encoder holds a reply to, held by the direct writer too, so
-    /// both paths refuse the same reply with the same `LengthOutOfRange`: the keyexpr's `u16`
-    /// length, the schema's `u8` length and the payload's `u32` length.
+    /// both refuse the same reply with the same `LengthOutOfRange`: the keyexpr's `u16` length,
+    /// the schema's `u8` length, the payload's and the attachment's `u32` length, and a
+    /// timestamp's identity of at most [`TIMESTAMP_ZID_MAX`] bytes.
     fn direct_bounds(&self) -> Result<(), CodecError> {
         let within = |len: usize, max: usize| {
             if len <= max {
@@ -523,8 +592,15 @@ impl<'a> ResponseWriter<'a> {
         };
         within(self.parts.keyexpr.len(), usize::from(u16::MAX))?;
         let (payload, encoding) = match self.direct_view().body {
-            BodyView::Put { payload, encoding } => (payload, encoding),
-            BodyView::Del => return Ok(()),
+            BodyView::Put {
+                payload,
+                encoding,
+                extras,
+            } => {
+                extras.bounds()?;
+                (payload, encoding)
+            }
+            BodyView::Del { extras } => return extras.bounds(),
             #[cfg(feature = "query-reply-err")]
             BodyView::Err { payload, encoding } => (payload, encoding),
         };
@@ -534,7 +610,7 @@ impl<'a> ResponseWriter<'a> {
         within(payload.len(), u32::MAX as usize)
     }
 
-    /// The bytes [`Self::write_direct`] writes, counted: the same layout, summed.
+    /// The bytes [`Self::write_layout`] writes, counted: the same layout, summed.
     fn direct_len(&self) -> usize {
         let parts = &self.parts;
         let PartsView {
@@ -563,13 +639,18 @@ impl<'a> ResponseWriter<'a> {
             sum([1, vle_len(responder.len() as u64), responder.len()])
         };
         let body = match body {
-            BodyView::Put { payload, encoding } => sum([
+            BodyView::Put {
+                payload,
+                encoding,
+                extras,
+            } => sum([
                 2,
+                extras.len(),
                 encoding_len(encoding),
                 vle_len(payload.len() as u64),
                 payload.len(),
             ]),
-            BodyView::Del => 2,
+            BodyView::Del { extras } => sum([2, extras.len()]),
             #[cfg(feature = "query-reply-err")]
             BodyView::Err { payload, encoding } => sum([
                 1,
@@ -581,13 +662,8 @@ impl<'a> ResponseWriter<'a> {
         sum([envelope, qos, identity, body])
     }
 
-    /// The reply's bytes into a window of exactly [`Self::direct_len`] bytes, in the order the
-    /// generated encoders write them: the envelope's header (the `N` bit when a suffix follows the
-    /// key's id, the `M` bit when the id is of the sender's space, which the literal's is, and the
-    /// chain flag when an extension follows), the request id, the key's id and its suffix, the QoS
-    /// extension and the responder's if there are any (the chain
-    /// flag on each but the last), then the body: the Reply's header and a Put's (its header,
-    /// encoding and payload) or a Del's header, or an Err's (its header, encoding and payload).
+    /// The reply's bytes into a window of exactly [`Self::direct_len`] bytes, as
+    /// [`Self::write_layout`] writes them.
     fn write_direct(&self, window: &mut [u8]) -> Result<(), CodecError> {
         if self.write_window(window).filled() {
             Ok(())
@@ -600,6 +676,23 @@ impl<'a> ResponseWriter<'a> {
     /// what is left of the window: a window longer than the reply keeps its tail, and one shorter
     /// is marked short.
     fn write_window<'w>(&self, window: &'w mut [u8]) -> Window<'w> {
+        let mut out = Window {
+            rest: window,
+            short: false,
+        };
+        self.write_layout(&mut out);
+        out
+    }
+
+    /// The reply's bytes into `out`, in the order the generated encoders write them: the
+    /// envelope's header (the `N` bit when a suffix follows the key's id, the `M` bit when the id
+    /// is of the sender's space, which the literal's is, and the chain flag when an extension
+    /// follows), the request id, the key's id and its suffix, the QoS extension and the
+    /// responder's if there are any (the chain flag on each but the last), then the body: the
+    /// Reply's header and a Put's (its header, timestamp, encoding, extension chain and payload)
+    /// or a Del's (its header, timestamp and extension chain), or an Err's (its header, encoding
+    /// and payload).
+    fn write_layout<O: LayoutOut>(&self, out: &mut O) {
         let parts = &self.parts;
         let PartsView {
             body,
@@ -607,10 +700,6 @@ impl<'a> ResponseWriter<'a> {
         } = self.direct_view();
         let identity = self.responder.value();
         let responder = !identity.is_empty();
-        let mut out = Window {
-            rest: window,
-            short: false,
-        };
         let name = self.key_name();
         let mut header = wire_const::N_MID_RESPONSE;
         if name.suffix.is_some() {
@@ -639,20 +728,29 @@ impl<'a> ResponseWriter<'a> {
             out.vle(identity.len() as u64);
             out.bytes(identity);
         }
-        // A Put and an Err end alike, in their encoding and their payload: written once for both.
+        // A Put and an Err end alike, in their payload: written once for both.
         let carried = match body {
-            BodyView::Put { payload, encoding } => {
+            BodyView::Put {
+                payload,
+                encoding,
+                extras,
+            } => {
                 out.byte(REPLY_HEADER);
-                let mut header = PUT_HEADER;
+                let mut header = PUT_HEADER | extras.flags();
                 if encoding.is_some() {
                     header |= wire_const::FLAG_Z_PUT_E;
                 }
                 out.byte(header);
-                Some((payload, encoding))
+                extras.write_timestamp(out);
+                write_encoding(out, encoding);
+                extras.write_chain(out);
+                Some(payload)
             }
-            BodyView::Del => {
+            BodyView::Del { extras } => {
                 out.byte(REPLY_HEADER);
-                out.byte(DEL_HEADER);
+                out.byte(DEL_HEADER | extras.flags());
+                extras.write_timestamp(out);
+                extras.write_chain(out);
                 None
             }
             #[cfg(feature = "query-reply-err")]
@@ -662,24 +760,30 @@ impl<'a> ResponseWriter<'a> {
                     header |= wire_const::FLAG_Z_ERR_E;
                 }
                 out.byte(header);
-                Some((payload, encoding))
+                write_encoding(out, encoding);
+                Some(payload)
             }
         };
-        if let Some((payload, encoding)) = carried {
-            write_encoding(&mut out, encoding);
+        if let Some(payload) = carried {
             out.vle(payload.len() as u64);
             out.bytes(payload);
         }
-        out
     }
 
     /// What a directly written reply writes besides its fixed parts, read once for the length and
     /// again for the bytes: the body (a Put's payload and the encoding a build that emits it
-    /// writes, a Del, or an Err's payload and encoding), and whether the envelope carries the QoS.
+    /// writes, a Del, or an Err's payload and encoding, a Put and a Del with what else they carry),
+    /// and whether the envelope carries the QoS.
     fn direct_view(&self) -> PartsView<'_> {
         let parts = &self.parts;
         let body = match &parts.kind {
-            PartsKind::Reply { body, encoding, .. } => {
+            PartsKind::Reply {
+                body,
+                encoding,
+                timestamp,
+                attachment,
+                ..
+            } => {
                 let payload: Option<&[u8]> = match body {
                     PartsBody::Put(bytes) => Some(bytes),
                     PartsBody::Del => None,
@@ -693,9 +797,14 @@ impl<'a> ResponseWriter<'a> {
                     let _ = encoding;
                     None
                 };
+                let extras = self.body_extras(payload.is_some(), *timestamp, *attachment);
                 match payload {
-                    Some(payload) => BodyView::Put { payload, encoding },
-                    None => BodyView::Del,
+                    Some(payload) => BodyView::Put {
+                        payload,
+                        encoding,
+                        extras,
+                    },
+                    None => BodyView::Del { extras },
                 }
             }
             #[cfg(feature = "query-reply-err")]
@@ -713,264 +822,380 @@ impl<'a> ResponseWriter<'a> {
         }
     }
 
-    /// The `Response` through the codec's own encoder: the reference for [`Self::write_direct`]
-    /// and the path of every reply that carries more than the plain one.
-    ///
-    /// The message is described in the codec's PARTS form (references, a slice of at most two
-    /// extension entries, a few words), which the codec's own wire writer reads
-    /// (`ResponseWire::encode_source`), as the request side does (`lent_request`). The lent form
-    /// of the same codecs holds their lists inline at the capacity the deployment gives them: a
-    /// `Response` built to be encoded was a frame of 1.5 KB under the drain of the reply
-    /// stage, on the worst path of a node's stack, for chains of a few entries.
-    ///
-    /// Not inlined: so that the plain replies, which never enter it, do not take its frame.
-    #[inline(never)]
-    pub(crate) fn encode_generic<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
-    where
-        CodecError: From<S::Error>,
-    {
-        match &self.parts.kind {
-            PartsKind::Reply {
-                body,
-                encoding,
-                timestamp,
-                attachment,
-                source_info: _,
-            } => self.write_reply(sink, body, *encoding, *timestamp, *attachment),
-            #[cfg(feature = "query-reply-err")]
-            PartsKind::Err { encoding, payload } => self.write_err(sink, *encoding, payload),
-        }
-    }
-
-    /// The `Response` envelope around `body`, written into `sink`: the key as a literal, and the
-    /// envelope's extensions, the QoS unless it is the default, then the responder.
-    fn write_response<S: SceSink>(
+    /// What the reply's Put (`put`) or Del carries besides its payload and its encoding, each part
+    /// only in the build whose feature puts it on the wire: the timestamp (`pubsub-timestamp`), the
+    /// source info (`reply-source-info`, a source that names a zid) and the attachment
+    /// (`pubsub-attachment`, under the id of the body it rides).
+    fn body_extras(
         &self,
-        sink: &mut S,
-        body: ResponsePartsBody<'_>,
-    ) -> Result<(), CodecError>
-    where
-        CodecError: From<S::Error>,
-    {
-        let parts = &self.parts;
-        let qos = ExtZintParts {
-            value: u64::from(parts.qos.raw),
-        };
-        let responder = ExtZbufParts {
-            value: crate::codec_owned::sent(self.responder.value())?,
-        };
-        let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); ENVELOPE_ENTRIES];
-        let chain = filled(
-            &mut chain,
-            [
-                (parts.qos != QosLevel::DEFAULT).then_some(zint_entry(QOS_EXT_HEADER, &qos)),
-                parts.responder.is_some().then_some(ExtEntryParts {
-                    header: RESPONDER_EXT_HEADER,
-                    body: ExtEntryPartsBody::CodecZenohExtZbuf(&responder),
-                }),
-            ],
-        );
-        link_chain(chain);
-        let name = self.key_name();
-        let suffix = name
-            .suffix
-            .map(crate::codec_owned::sent_suffix)
-            .transpose()?;
-        let local;
-        let nonlocal;
-        let keyexpr = WireexprParts {
-            body: if name.sender_mapping {
-                local = WireexprLocalParts {
-                    id: name.id,
-                    suffix,
-                };
-                WireexprPartsBody::WireexprLocal(&local)
-            } else {
-                nonlocal = WireexprNonlocalParts {
-                    id: name.id,
-                    suffix,
-                };
-                WireexprPartsBody::WireexprNonlocal(&nonlocal)
-            },
-        };
-        let response = ResponseParts {
-            // The codec sets the `Z` flag from the chain and the `M` flag from the key's arm.
-            header: RESPONSE_HEADER,
-            request_id: parts.rid,
-            keyexpr: &keyexpr,
-            // A chain of no entry is none: the bounds of a chain hold one entry or more.
-            extensions: Bounded::new(&*chain),
-            body,
-        };
-        ResponseWire::encode_source(&response, sink).map_err(CodecError::from)
-    }
-
-    /// The Reply body: a Put or a Del, with the value's timestamp and encoding (each
-    /// behind the feature the owned builder gates it on) and the source-info and
-    /// attachment extensions, in that order, with the attachment under the id of the
-    /// arm it rides. `LengthOutOfRange` for a field past its protocol bound.
-    fn write_reply<S: SceSink>(
-        &self,
-        sink: &mut S,
-        body: &PartsBody<'a>,
-        encoding: Option<crate::reply_stage::EncodingParts<'a>>,
+        put: bool,
         timestamp: Option<crate::reply_stage::TimestampParts<'a>>,
         attachment: Option<&'a [u8]>,
-    ) -> Result<(), CodecError>
-    where
-        CodecError: From<S::Error>,
-    {
-        use wz_codecs::msg_del::MsgDelParts;
-        use wz_codecs::msg_put::{MsgPutExtensionsHas0x12, MsgPutParts};
-        use wz_codecs::reply::{ReplyParts as CodecReplyParts, ReplyPartsBody};
-        let payload: Option<&[u8]> = match body {
-            PartsBody::Put(bytes) => Some(bytes),
-            PartsBody::Del => None,
-            // The descriptor is the heap profile's to take: a reply of this build goes
-            // out as the buffer's bytes, which is what a face that cannot map the
-            // segment is owed.
-            #[cfg(feature = "transport-shm")]
-            PartsBody::Shared(handle) => Some(handle.bytes()),
-        };
-        // Only the encoding (a Put's) and the attachment's extension id read it.
-        #[cfg(any(feature = "pubsub-encoding", feature = "pubsub-attachment"))]
-        let is_put = payload.is_some();
+    ) -> BodyExtras<'_> {
         #[cfg(not(feature = "pubsub-timestamp"))]
-        let _ = timestamp;
-        #[cfg(not(feature = "pubsub-attachment"))]
-        let _ = attachment;
-        #[cfg(not(feature = "pubsub-encoding"))]
-        let _ = encoding;
-
-        #[cfg(feature = "pubsub-timestamp")]
-        let timestamp = timestamp
-            .map(|ts| {
-                Ok::<_, CodecError>(wz_codecs::timestamp::TimestampParts {
-                    time: ts.time,
-                    zid: crate::codec_owned::sent(ts.zid)?,
-                })
-            })
-            .transpose()?;
-        #[cfg(not(feature = "pubsub-timestamp"))]
-        let timestamp: Option<wz_codecs::timestamp::TimestampParts<'_>> = None;
-
-        // An encoding is a Put's only: a Del has no slot for it.
-        #[cfg(feature = "pubsub-encoding")]
-        let encoding = encoding
-            .filter(|_| is_put)
-            .map(|e| {
-                Ok::<_, CodecError>(wz_codecs::encoding::EncodingParts {
-                    packed_id: e.packed_id,
-                    schema: e.schema.map(schema_bytes).transpose()?,
-                })
-            })
-            .transpose()?;
-        #[cfg(not(feature = "pubsub-encoding"))]
-        let encoding: Option<wz_codecs::encoding::EncodingParts<'_>> = None;
-
-        // The body's extension chain: the source info, then the attachment.
-        #[cfg(feature = "reply-source-info")]
-        let source_info = ExtZbufParts {
-            value: crate::codec_owned::sent(self.source_info.value())?,
+        let timestamp = {
+            let _ = timestamp;
+            None
         };
         #[cfg(feature = "pubsub-attachment")]
-        let attachment = attachment
-            .map(|bytes| {
-                Ok::<_, CodecError>(ExtZbufParts {
-                    value: crate::codec_owned::sent(bytes)?,
-                })
-            })
-            .transpose()?;
-        // The entries a build carries: the source info, then the attachment.
-        #[cfg(feature = "reply-source-info")]
-        let source_info_entry = (!self.source_info.value().is_empty()).then_some(ExtEntryParts {
-            header: crate::ext_header::body_eid::SOURCE_INFO,
-            body: ExtEntryPartsBody::CodecZenohExtZbuf(&source_info),
-        });
-        #[cfg(not(feature = "reply-source-info"))]
-        let source_info_entry = None;
-        #[cfg(feature = "pubsub-attachment")]
-        let attachment_entry = attachment.as_ref().map(|attachment| ExtEntryParts {
-            header: if is_put {
+        let attachment = attachment.map(|bytes| {
+            let header = if put {
                 crate::ext_header::body_eid::PUT_ATTACHMENT
             } else {
                 crate::ext_header::body_eid::DEL_ATTACHMENT
-            },
-            body: ExtEntryPartsBody::CodecZenohExtZbuf(attachment),
+            };
+            (header, bytes)
         });
         #[cfg(not(feature = "pubsub-attachment"))]
-        let attachment_entry = None;
-        let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); BODY_ENTRIES];
-        let chain = filled(&mut chain, [source_info_entry, attachment_entry]);
-        link_chain(chain);
-        // The codec derives the `T`, `E` and `Z` flags of a Put's and a Del's header from what
-        // the value holds, and a chain of no entry is none.
-        let put;
-        let del;
-        let inner = match payload {
-            Some(bytes) => {
-                put = MsgPutParts {
-                    header: PUT_HEADER,
-                    timestamp: timestamp.as_ref(),
-                    encoding: encoding.as_ref(),
-                    // The reply's chain holds the source info and the attachment, never the
-                    // shared-memory marker, so the Put is inline.
-                    extensions_has_0x12: MsgPutExtensionsHas0x12::NotHas0x12 {
-                        // `None` for a chain of no entry; the entries here are never the
-                        // marker's kind, so a chain of one or more is always held.
-                        extensions: sce_forge_runtime::codec::Chain::new(&*chain),
-                        payload: crate::codec_owned::sent(bytes)?,
-                    },
-                };
-                ReplyPartsBody::CodecZenohMsgPut(&put)
-            }
-            None => {
-                del = MsgDelParts {
-                    header: DEL_HEADER,
-                    timestamp: timestamp.as_ref(),
-                    extensions: Bounded::new(&*chain),
-                };
-                ReplyPartsBody::CodecZenohMsgDel(&del)
-            }
+        let attachment = {
+            let _ = (put, attachment);
+            None
         };
-        let reply = CodecReplyParts {
-            header: REPLY_HEADER,
-            consolidation: None,
-            extensions: None,
-            body: inner,
-        };
-        self.write_response(sink, ResponsePartsBody::CodecZenohReply(&reply))
+        #[cfg(feature = "reply-source-info")]
+        let source_info = self.source_info.value();
+        #[cfg(not(feature = "reply-source-info"))]
+        let source_info: &[u8] = &[];
+        BodyExtras {
+            timestamp,
+            source_info,
+            attachment,
+        }
+    }
+}
+
+/// The codec's own encoder of a reply: the reference the tests hold the direct layout to, byte for
+/// byte, and nothing a build sends with.
+#[cfg(all(test, feature = "alloc"))]
+mod reference {
+    use super::*;
+    use sce_forge_runtime::codec::Bounded;
+    use wz_codecs::ext_entry::{ExtEntryParts, ExtEntryPartsBody};
+    use wz_codecs::ext_zbuf::ExtZbufParts;
+    use wz_codecs::ext_zint::ExtZintParts;
+    use wz_codecs::response::{ResponseParts, ResponsePartsBody, ResponseWire};
+    use wz_codecs::wireexpr::{WireexprParts, WireexprPartsBody};
+    use wz_codecs::wireexpr_local::WireexprLocalParts;
+    use wz_codecs::wireexpr_nonlocal::WireexprNonlocalParts;
+
+    /// The `Response` envelope header of a reply that names its keyexpr inline:
+    /// `N_MID_RESPONSE | N` (a suffix follows the id). The `M` flag derives from the
+    /// `Local` arm at encode time, and `Z` is added when the envelope carries
+    /// extensions.
+    const RESPONSE_HEADER: u8 = wire_const::N_MID_RESPONSE | wire_const::FLAG_N_N;
+
+    /// The entries the envelope's extension chain holds at most: the QoS and the responder.
+    const ENVELOPE_ENTRIES: usize = 2;
+
+    /// The entries a Put's or a Del's extension chain holds at most: the source info and the
+    /// attachment.
+    const BODY_ENTRIES: usize = 2;
+
+    /// The body of an entry no extension fills: a slot of a chain that is never written.
+    static UNUSED_ENTRY_BODY: ExtZintParts = ExtZintParts { value: 0 };
+
+    /// An integer-valued extension entry.
+    const fn zint_entry<'a>(header: u8, body: &'a ExtZintParts) -> ExtEntryParts<'a> {
+        ExtEntryParts {
+            header,
+            body: ExtEntryPartsBody::CodecZenohExtZint(body),
+        }
     }
 
-    /// The Err body: the payload, and the error's own encoding when it names one, its id
-    /// packed with the schema bit as `ResponseErrBuilder::encoding` packs it.
-    ///
-    /// The codec derives the `E` and `Z` flags of the header from what the value holds.
-    #[cfg(feature = "query-reply-err")]
-    fn write_err<S: SceSink>(
-        &self,
-        sink: &mut S,
-        encoding: ErrEncoding<'_>,
-        payload: &[u8],
-    ) -> Result<(), CodecError>
-    where
-        CodecError: From<S::Error>,
-    {
-        let encoding = encoding
-            .map(|(id, schema)| {
-                Ok::<_, CodecError>(wz_codecs::encoding::EncodingParts {
-                    packed_id: id.wrapping_shl(1) | u32::from(schema.is_some()),
-                    schema: schema.map(schema_bytes).transpose()?,
-                })
-            })
-            .transpose()?;
-        let err = wz_codecs::err::ErrParts {
-            header: ERR_HEADER,
-            encoding: encoding.as_ref(),
-            extensions: None,
-            payload: crate::codec_owned::sent(payload)?,
+    /// The entries of `wanted` that are there, in order, at the front of `chain`, and the part of
+    /// `chain` they fill. The two arrays are of one length, so every wanted entry has its slot.
+    fn filled<'c, 'e, const N: usize>(
+        chain: &'c mut [ExtEntryParts<'e>; N],
+        wanted: [Option<ExtEntryParts<'e>>; N],
+    ) -> &'c mut [ExtEntryParts<'e>] {
+        let mut count = 0usize;
+        for (slot, entry) in chain.iter_mut().zip(wanted.into_iter().flatten()) {
+            *slot = entry;
+            count = count.saturating_add(1);
+        }
+        chain.get_mut(..count).unwrap_or_default()
+    }
+
+    /// Set the chain-continuation `Z` bit on every entry but the last, which ends the
+    /// chain: [`crate::ext_nodeid::apply_chain_z_bits`] over the codec's parts entries.
+    fn link_chain(chain: &mut [ExtEntryParts<'_>]) {
+        let Some(last) = chain.len().checked_sub(1) else {
+            return;
         };
-        self.write_response(sink, ResponsePartsBody::CodecZenohErr(&err))
+        for (index, entry) in chain.iter_mut().enumerate() {
+            entry.header = if index == last {
+                entry.header & !EXT_FLAG_Z
+            } else {
+                entry.header | EXT_FLAG_Z
+            };
+        }
+    }
+
+    /// A staged encoding's schema as the codec's schema field, whose bound is the protocol's `u8`
+    /// length: `LengthOutOfRange` past it, so a reply with such a schema is refused and not sent
+    /// with another encoding.
+    #[cfg(any(feature = "pubsub-encoding", feature = "query-reply-err"))]
+    fn schema_bytes<const MAX: usize>(schema: &[u8]) -> Result<Bounded<&[u8], MAX>, CodecError> {
+        crate::codec_owned::sent(schema)
+    }
+
+    impl<'a> ResponseWriter<'a> {
+        /// The `Response` through the codec's own encoder: the reference the tests hold the direct
+        /// layout (`write_layout`) to.
+        ///
+        /// The message is described in the codec's PARTS form (references, a slice of at most two
+        /// extension entries, a few words), which the codec's own wire writer reads
+        /// (`ResponseWire::encode_source`), as the request side does (`lent_request`). The lent form
+        /// of the same codecs holds their lists inline at the capacity the deployment gives them: a
+        /// `Response` built to be encoded was a frame of 1.5 KB under the drain of the reply
+        /// stage, on the worst path of a node's stack, for chains of a few entries.
+        pub(crate) fn encode_generic<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError>
+        where
+            CodecError: From<S::Error>,
+        {
+            match &self.parts.kind {
+                PartsKind::Reply {
+                    body,
+                    encoding,
+                    timestamp,
+                    attachment,
+                    source_info: _,
+                } => self.write_reply(sink, body, *encoding, *timestamp, *attachment),
+                #[cfg(feature = "query-reply-err")]
+                PartsKind::Err { encoding, payload } => self.write_err(sink, *encoding, payload),
+            }
+        }
+
+        /// The `Response` envelope around `body`, written into `sink`: the key as a literal, and the
+        /// envelope's extensions, the QoS unless it is the default, then the responder.
+        fn write_response<S: SceSink>(
+            &self,
+            sink: &mut S,
+            body: ResponsePartsBody<'_>,
+        ) -> Result<(), CodecError>
+        where
+            CodecError: From<S::Error>,
+        {
+            let parts = &self.parts;
+            let qos = ExtZintParts {
+                value: u64::from(parts.qos.raw),
+            };
+            let responder = ExtZbufParts {
+                value: crate::codec_owned::sent(self.responder.value())?,
+            };
+            let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); ENVELOPE_ENTRIES];
+            let chain = filled(
+                &mut chain,
+                [
+                    (parts.qos != QosLevel::DEFAULT).then_some(zint_entry(QOS_EXT_HEADER, &qos)),
+                    parts.responder.is_some().then_some(ExtEntryParts {
+                        header: RESPONDER_EXT_HEADER,
+                        body: ExtEntryPartsBody::CodecZenohExtZbuf(&responder),
+                    }),
+                ],
+            );
+            link_chain(chain);
+            let name = self.key_name();
+            let suffix = name
+                .suffix
+                .map(crate::codec_owned::sent_suffix)
+                .transpose()?;
+            let local;
+            let nonlocal;
+            let keyexpr = WireexprParts {
+                body: if name.sender_mapping {
+                    local = WireexprLocalParts {
+                        id: name.id,
+                        suffix,
+                    };
+                    WireexprPartsBody::WireexprLocal(&local)
+                } else {
+                    nonlocal = WireexprNonlocalParts {
+                        id: name.id,
+                        suffix,
+                    };
+                    WireexprPartsBody::WireexprNonlocal(&nonlocal)
+                },
+            };
+            let response = ResponseParts {
+                // The codec sets the `Z` flag from the chain and the `M` flag from the key's arm.
+                header: RESPONSE_HEADER,
+                request_id: parts.rid,
+                keyexpr: &keyexpr,
+                // A chain of no entry is none: the bounds of a chain hold one entry or more.
+                extensions: Bounded::new(&*chain),
+                body,
+            };
+            ResponseWire::encode_source(&response, sink).map_err(CodecError::from)
+        }
+
+        /// The Reply body: a Put or a Del, with the value's timestamp and encoding (each
+        /// behind the feature the owned builder gates it on) and the source-info and
+        /// attachment extensions, in that order, with the attachment under the id of the
+        /// arm it rides. `LengthOutOfRange` for a field past its protocol bound.
+        fn write_reply<S: SceSink>(
+            &self,
+            sink: &mut S,
+            body: &PartsBody<'a>,
+            encoding: Option<crate::reply_stage::EncodingParts<'a>>,
+            timestamp: Option<crate::reply_stage::TimestampParts<'a>>,
+            attachment: Option<&'a [u8]>,
+        ) -> Result<(), CodecError>
+        where
+            CodecError: From<S::Error>,
+        {
+            use wz_codecs::msg_del::MsgDelParts;
+            use wz_codecs::msg_put::{MsgPutExtensionsHas0x12, MsgPutParts};
+            use wz_codecs::reply::{ReplyParts as CodecReplyParts, ReplyPartsBody};
+            let payload: Option<&[u8]> = match body {
+                PartsBody::Put(bytes) => Some(bytes),
+                PartsBody::Del => None,
+                // The descriptor is the heap profile's to take: a reply of this build goes
+                // out as the buffer's bytes, which is what a face that cannot map the
+                // segment is owed.
+                #[cfg(feature = "transport-shm")]
+                PartsBody::Shared(handle) => Some(handle.bytes()),
+            };
+            // Only the encoding (a Put's) and the attachment's extension id read it.
+            #[cfg(any(feature = "pubsub-encoding", feature = "pubsub-attachment"))]
+            let is_put = payload.is_some();
+            #[cfg(not(feature = "pubsub-timestamp"))]
+            let _ = timestamp;
+            #[cfg(not(feature = "pubsub-attachment"))]
+            let _ = attachment;
+            #[cfg(not(feature = "pubsub-encoding"))]
+            let _ = encoding;
+
+            #[cfg(feature = "pubsub-timestamp")]
+            let timestamp = timestamp
+                .map(|ts| {
+                    Ok::<_, CodecError>(wz_codecs::timestamp::TimestampParts {
+                        time: ts.time,
+                        zid: crate::codec_owned::sent(ts.zid)?,
+                    })
+                })
+                .transpose()?;
+            #[cfg(not(feature = "pubsub-timestamp"))]
+            let timestamp: Option<wz_codecs::timestamp::TimestampParts<'_>> = None;
+
+            // An encoding is a Put's only: a Del has no slot for it.
+            #[cfg(feature = "pubsub-encoding")]
+            let encoding = encoding
+                .filter(|_| is_put)
+                .map(|e| {
+                    Ok::<_, CodecError>(wz_codecs::encoding::EncodingParts {
+                        packed_id: e.packed_id,
+                        schema: e.schema.map(schema_bytes).transpose()?,
+                    })
+                })
+                .transpose()?;
+            #[cfg(not(feature = "pubsub-encoding"))]
+            let encoding: Option<wz_codecs::encoding::EncodingParts<'_>> = None;
+
+            // The body's extension chain: the source info, then the attachment.
+            #[cfg(feature = "reply-source-info")]
+            let source_info = ExtZbufParts {
+                value: crate::codec_owned::sent(self.source_info.value())?,
+            };
+            #[cfg(feature = "pubsub-attachment")]
+            let attachment = attachment
+                .map(|bytes| {
+                    Ok::<_, CodecError>(ExtZbufParts {
+                        value: crate::codec_owned::sent(bytes)?,
+                    })
+                })
+                .transpose()?;
+            // The entries a build carries: the source info, then the attachment.
+            #[cfg(feature = "reply-source-info")]
+            let source_info_entry =
+                (!self.source_info.value().is_empty()).then_some(ExtEntryParts {
+                    header: crate::ext_header::body_eid::SOURCE_INFO,
+                    body: ExtEntryPartsBody::CodecZenohExtZbuf(&source_info),
+                });
+            #[cfg(not(feature = "reply-source-info"))]
+            let source_info_entry = None;
+            #[cfg(feature = "pubsub-attachment")]
+            let attachment_entry = attachment.as_ref().map(|attachment| ExtEntryParts {
+                header: if is_put {
+                    crate::ext_header::body_eid::PUT_ATTACHMENT
+                } else {
+                    crate::ext_header::body_eid::DEL_ATTACHMENT
+                },
+                body: ExtEntryPartsBody::CodecZenohExtZbuf(attachment),
+            });
+            #[cfg(not(feature = "pubsub-attachment"))]
+            let attachment_entry = None;
+            let mut chain = [zint_entry(0, &UNUSED_ENTRY_BODY); BODY_ENTRIES];
+            let chain = filled(&mut chain, [source_info_entry, attachment_entry]);
+            link_chain(chain);
+            // The codec derives the `T`, `E` and `Z` flags of a Put's and a Del's header from what
+            // the value holds, and a chain of no entry is none.
+            let put;
+            let del;
+            let inner = match payload {
+                Some(bytes) => {
+                    put = MsgPutParts {
+                        header: PUT_HEADER,
+                        timestamp: timestamp.as_ref(),
+                        encoding: encoding.as_ref(),
+                        // The reply's chain holds the source info and the attachment, never the
+                        // shared-memory marker, so the Put is inline.
+                        extensions_has_0x12: MsgPutExtensionsHas0x12::NotHas0x12 {
+                            // `None` for a chain of no entry; the entries here are never the
+                            // marker's kind, so a chain of one or more is always held.
+                            extensions: sce_forge_runtime::codec::Chain::new(&*chain),
+                            payload: crate::codec_owned::sent(bytes)?,
+                        },
+                    };
+                    ReplyPartsBody::CodecZenohMsgPut(&put)
+                }
+                None => {
+                    del = MsgDelParts {
+                        header: DEL_HEADER,
+                        timestamp: timestamp.as_ref(),
+                        extensions: Bounded::new(&*chain),
+                    };
+                    ReplyPartsBody::CodecZenohMsgDel(&del)
+                }
+            };
+            let reply = CodecReplyParts {
+                header: REPLY_HEADER,
+                consolidation: None,
+                extensions: None,
+                body: inner,
+            };
+            self.write_response(sink, ResponsePartsBody::CodecZenohReply(&reply))
+        }
+
+        /// The Err body: the payload, and the error's own encoding when it names one, its id
+        /// packed with the schema bit as `ResponseErrBuilder::encoding` packs it.
+        ///
+        /// The codec derives the `E` and `Z` flags of the header from what the value holds.
+        #[cfg(feature = "query-reply-err")]
+        fn write_err<S: SceSink>(
+            &self,
+            sink: &mut S,
+            encoding: ErrEncoding<'_>,
+            payload: &[u8],
+        ) -> Result<(), CodecError>
+        where
+            CodecError: From<S::Error>,
+        {
+            let encoding = encoding
+                .map(|(id, schema)| {
+                    Ok::<_, CodecError>(wz_codecs::encoding::EncodingParts {
+                        packed_id: id.wrapping_shl(1) | u32::from(schema.is_some()),
+                        schema: schema.map(schema_bytes).transpose()?,
+                    })
+                })
+                .transpose()?;
+            let err = wz_codecs::err::ErrParts {
+                header: ERR_HEADER,
+                encoding: encoding.as_ref(),
+                extensions: None,
+                payload: crate::codec_owned::sent(payload)?,
+            };
+            self.write_response(sink, ResponsePartsBody::CodecZenohErr(&err))
+        }
     }
 }
 
@@ -1086,8 +1311,8 @@ mod tests {
         assert_eq!(compared, 3 * 2 * 3 * 3 * 2 * 2 * 2, "the matrix ran whole");
     }
 
-    /// The plain reply is taken by the direct path, and the direct path writes the bytes the
-    /// codec's own encoder writes, for payloads either side of every length a VLE changes width at.
+    /// The direct path writes the bytes the codec's own encoder writes, for payloads either side of
+    /// every length a VLE changes width at.
     #[test]
     fn the_plain_reply_is_written_directly_and_as_the_codec_writes_it() {
         let big = [0xA5u8; 1000];
@@ -1126,7 +1351,6 @@ mod tests {
                                 },
                             };
                             let writer = ResponseWriter::new(parts).expect("writable");
-                            assert!(writer.is_direct(), "rid {rid}, {keyexpr:?}, {payload_len}");
                             let mut generic = [0u8; 2048];
                             let mut sink = SliceSink::new(&mut generic);
                             writer.encode_generic(&mut sink).expect("fits");
@@ -1320,7 +1544,6 @@ mod tests {
     /// of a slice buffer; the measure equals the length written.
     fn direct_matches_generic(parts: ReplyParts<'_>) {
         let writer = ResponseWriter::new(parts).expect("writable");
-        assert!(writer.is_direct());
         let mut generic = [0u8; 2048];
         let mut sink = SliceSink::new(&mut generic);
         writer.encode_generic(&mut sink).expect("fits");
@@ -1380,6 +1603,88 @@ mod tests {
             }
         }
         assert_eq!(taken, 4 * 2 * 5 * 3, "the matrix ran whole");
+    }
+
+    /// A reply that carries a timestamp, an attachment or a source info is written by the direct
+    /// layout too, through a window and through a sink in turn, as the codec's encoder writes it,
+    /// and counted alike, for a Put with and without an encoding and for a Del. Turned red by an
+    /// extra written out of the codec's order (`write_layout`: the timestamp before a Put's
+    /// encoding, the chain after it), by a measure that leaves one out (`BodyExtras::len`), by a
+    /// header without its `T` or `Z` flag (`BodyExtras::flags`), or by an attachment under the
+    /// other body's id (`body_extras`).
+    #[test]
+    fn a_reply_with_its_extras_is_written_directly_and_as_the_codec_writes_it() {
+        let source = SourceInfo::new(&[7u8; 4], 3, 9);
+        let long_source = SourceInfo::new(&[2u8; 16], u32::MAX, 300);
+        let big = [0x3Cu8; 300];
+        let stamps: [Option<TimestampParts<'_>>; 3] = [
+            None,
+            Some(TimestampParts {
+                time: 0,
+                zid: &[0x01],
+            }),
+            Some(TimestampParts {
+                time: u64::MAX,
+                zid: &[0xAB; 16],
+            }),
+        ];
+        let attachments: [Option<&[u8]>; 3] = [None, Some(b"a"), Some(&big)];
+        let sources: [Option<&SourceInfo>; 3] = [None, Some(&source), Some(&long_source)];
+        let encodings: [Option<EncodingParts<'_>>; 2] = [
+            None,
+            Some(EncodingParts {
+                packed_id: (5 << 1) | 1,
+                schema: Some(&b"v=1"[..]),
+            }),
+        ];
+        let bodies: [PartsBody<'_>; 3] = [
+            PartsBody::Put(b"answer"),
+            PartsBody::Put(b""),
+            PartsBody::Del,
+        ];
+        let mut taken = 0usize;
+        for body in bodies {
+            for encoding in encodings {
+                for timestamp in stamps {
+                    for attachment in attachments {
+                        for source_info in sources {
+                            let parts = ReplyParts {
+                                rid: 129,
+                                keyexpr: "demo/extras",
+                                responder: Some((&[1, 2, 3, 4], 5)),
+                                qos: QOS_DECLARE,
+                                #[cfg(feature = "pubsub-ts-stack")]
+                                ts_stack: None,
+                                kind: PartsKind::Reply {
+                                    body,
+                                    encoding,
+                                    timestamp,
+                                    attachment,
+                                    source_info,
+                                },
+                            };
+                            direct_matches_generic(parts);
+                            let writer = ResponseWriter::new(parts).expect("writable");
+                            let mut generic = [0u8; 2048];
+                            let mut reference = SliceSink::new(&mut generic);
+                            writer.encode_generic(&mut reference).expect("fits");
+                            let generic_len = reference.position();
+                            let mut through = [0u8; 2048];
+                            let mut sink = SliceSink::new(&mut through);
+                            writer.encode(&mut sink).expect("fits");
+                            let through_len = sink.position();
+                            assert_eq!(
+                                &through[..through_len],
+                                &generic[..generic_len],
+                                "a sink in turn"
+                            );
+                            taken += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(taken, 3 * 2 * 3 * 3 * 3, "the matrix ran whole");
     }
 
     /// An Err is written directly too: its header with the encoding flag, the encoding, and its

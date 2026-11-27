@@ -1355,7 +1355,8 @@ pub fn multicast_tx_request<R>(
     f: impl FnOnce(&MulticastTxEncoded<'_>) -> R,
 ) -> Option<R> {
     let body = |sink: &mut crate::tx_buf::TxSink<'_>| writer.encode(sink);
-    let size = encoded_size(&body)?;
+    // Counted off the layout the writer writes, as a link's get is: no pass of the writer.
+    let size = writer.encoded_len().ok().filter(|&size| size > 0)?;
     #[cfg(feature = "transport-stats")]
     let class = crate::network_message::get_stats_class(writer, |_| None);
     #[cfg(not(feature = "transport-stats"))]

@@ -18701,13 +18701,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let class = self.outbound_get_class(&writer);
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
-        // The query's own size, counted by running its writer into a sink that keeps nothing: a
-        // Request has no size constant, and the link lends a slot of this size. A query the
-        // writer refuses counts as zero and is refused by the encode below with its own error.
-        let size = size_hint(|| {
-            let mut count = sce_forge_runtime::codec::CountSink::new();
-            writer.encode(&mut count).map_or(0, |()| count.len())
-        });
+        // The query's own size, counted off the layout its writer writes: a Request has no size
+        // constant, and the link lends a slot of this size. A query the writer refuses counts as
+        // zero and is refused by the encode below with its own error.
+        let size = size_hint(|| writer.encoded_len().unwrap_or(0));
         let ended = self.dispatch_network_message_at(
             DispatchStage::Fresh,
             Conduit::new(qos.priority(), true),

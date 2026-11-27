@@ -102,26 +102,10 @@ impl<'a> RequestWriter<'a> {
     where
         CodecError: From<S::Error>,
     {
+        let body = self.checked_body()?;
         let GetParts { rid, key, query } = self.parts;
         let suffix = key.suffix();
-        if suffix.is_some_and(|text| u16::try_from(text.len()).is_err()) {
-            return Err(CodecError::LengthOutOfRange);
-        }
         let parameters = sent_parameters(&query);
-        if parameters.is_some_and(
-            |(stated, suffix)| match stated.len().checked_add(suffix.len()) {
-                Some(len) => u32::try_from(len).is_err(),
-                None => true,
-            },
-        ) {
-            return Err(CodecError::LengthOutOfRange);
-        }
-        let [value, source_info, attachment] = body_extensions(&query);
-        let body = [
-            measured(value)?,
-            measured(source_info)?,
-            measured(attachment)?,
-        ];
         let envelope = envelope_extensions(&query);
         #[cfg(feature = "pubsub-ts-stack")]
         let stack = query.ts_stack;
@@ -189,6 +173,87 @@ impl<'a> RequestWriter<'a> {
             extension.write_body(sink)?;
         }
         Ok(())
+    }
+
+    /// The bytes [`Self::encode`] writes for the get, counted off the layout it writes with
+    /// nothing written: the size a session asks its link to lend for it. No pass of the writer
+    /// counts a get. Refused as [`Self::encode`] refuses it.
+    pub fn encoded_len(&self) -> Result<usize, CodecError> {
+        let body = self.checked_body()?;
+        let GetParts { rid, key, query } = self.parts;
+        let suffix = key.suffix().map_or(0, |text| {
+            vle_len(widen(text.len())).saturating_add(text.len())
+        });
+        let envelope = envelope_extensions(&query)
+            .iter()
+            .flatten()
+            .fold(0usize, |len, &(_, value)| {
+                len.saturating_add(1).saturating_add(vle_len(value))
+            });
+        #[cfg(feature = "pubsub-ts-stack")]
+        let stack = query.ts_stack.map_or(0, |stack| {
+            let len = stack.encoded_len();
+            vle_len(widen(len)).saturating_add(len).saturating_add(1)
+        });
+        #[cfg(not(feature = "pubsub-ts-stack"))]
+        let stack = 0usize;
+        let consolidation = query
+            .consolidation
+            .map_or(0, |mode| vle_len(u64::from(mode.wire_byte())));
+        let parameters = sent_parameters(&query).map_or(0, |(stated, suffix)| {
+            let len = stated.len().saturating_add(suffix.len());
+            vle_len(widen(len)).saturating_add(len)
+        });
+        let extensions = body.iter().flatten().fold(0usize, |total, &(_, len)| {
+            let bytes = usize::try_from(len).unwrap_or(usize::MAX);
+            total
+                .saturating_add(1)
+                .saturating_add(vle_len(len))
+                .saturating_add(bytes)
+        });
+        // The Request's header and the Query's, one byte each.
+        Ok([
+            2,
+            vle_len(u64::from(rid)),
+            vle_len(u64::from(key.id())),
+            suffix,
+            envelope,
+            stack,
+            consolidation,
+            parameters,
+            extensions,
+        ]
+        .into_iter()
+        .fold(0usize, usize::saturating_add))
+    }
+
+    /// What [`Self::encode`] refuses before a byte is written, as the owned builder refuses it (a
+    /// key suffix past the protocol's `u16` length, parameters, a value or an attachment past its
+    /// `u32` length, a schema past `SCHEMA_MAX`, a source info whose id is not 1 to 16 bytes), and
+    /// otherwise the body's extensions with the length of each: one reading for the writer and
+    /// the count.
+    fn checked_body(&self) -> Result<[Option<(BodyExtension<'a>, u64)>; 3], CodecError> {
+        let GetParts { key, query, .. } = self.parts;
+        if key
+            .suffix()
+            .is_some_and(|text| u16::try_from(text.len()).is_err())
+        {
+            return Err(CodecError::LengthOutOfRange);
+        }
+        if sent_parameters(&query).is_some_and(|(stated, suffix)| {
+            match stated.len().checked_add(suffix.len()) {
+                Some(len) => u32::try_from(len).is_err(),
+                None => true,
+            }
+        }) {
+            return Err(CodecError::LengthOutOfRange);
+        }
+        let [value, source_info, attachment] = body_extensions(&query);
+        Ok([
+            measured(value)?,
+            measured(source_info)?,
+            measured(attachment)?,
+        ])
     }
 }
 
@@ -382,13 +447,28 @@ mod tests {
         Ok(view.encode_to_vec())
     }
 
-    /// The bytes the writer writes for `parts`.
+    /// The bytes the writer writes for `parts`, which its count states, or the refusal both make.
     fn lent_bytes(parts: GetParts<'_>) -> Result<Vec<u8>, CodecError> {
         let writer = RequestWriter::new(parts);
         let mut buffer = alloc::vec![0u8; 4096];
         let mut sink = SliceSink::new(&mut buffer);
-        writer.encode(&mut sink)?;
+        let written = writer.encode(&mut sink);
         let len = sink.position();
+        match written {
+            Ok(()) => assert_eq!(
+                writer.encoded_len(),
+                Ok(len),
+                "the count is the bytes written"
+            ),
+            Err(error) => {
+                assert_eq!(
+                    writer.encoded_len(),
+                    Err(error),
+                    "the count refuses it alike"
+                );
+                return Err(error);
+            }
+        }
         Ok(buffer.get(..len).expect("within the buffer").to_vec())
     }
 
@@ -573,6 +653,7 @@ mod tests {
             Some(CodecError::LengthOutOfRange)
         );
         assert_eq!(sink.position(), 0, "nothing is written");
+        assert_eq!(writer.encoded_len(), Err(CodecError::LengthOutOfRange));
     }
 
     /// What the owned builder refuses, the writer refuses, before a byte is written: a source
@@ -607,6 +688,11 @@ mod tests {
             let mut buffer = [0u8; 512];
             let mut sink = SliceSink::new(&mut buffer);
             let lent = writer.encode(&mut sink).err();
+            assert_eq!(
+                writer.encoded_len().err(),
+                lent,
+                "the count refuses it alike"
+            );
             if SOURCE_INFO_RIDES && VALUE_RIDES {
                 assert_eq!(lent, Some(CodecError::LengthOutOfRange), "{query:?}");
                 assert!(
