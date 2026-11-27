@@ -19,6 +19,7 @@ branch of 2026-11-27 (`cbc0f6ecb3`). One entity kind at a time, subscribers firs
 | a callback's life (P11) | the row's latch (`RowCallback` for the engine's row; `SessionTables::release_drained_subscriber`) | the per-door wait |
 | the delivery of a sample | the read pins the rows its key reaches under the session's lock (`SessionTables::pin_subscribers`) and calls each row's callback after it (`engine/pinned.rs`, `hand_row_by_row`) | `wz-capi-coop/src/lane.rs`; `wz-session-core/src/delivery_lane.rs` is read only by the tokio engine (`wz-runtime-tokio/src/session/offload.rs`) |
 | a queryable, a liveliness subscriber, a token | rows of the same table set (`QueryableRow` in `engine/query.rs`, `LivelinessRow`, `HeldTokens for SessionTables`) | their registries' entries |
+| the session's own tokens (H9, steps D9a, D9b) | the application's tables, one holder for every bundle (`ObserverTables::held_tokens`): the session's one table set's rows on the cooperative engine, the registry the tables of the storage policies keep (`RegistryTables::local_tokens`) on the others; a peer's Interest is answered into that peer's staging (`TokenAnswers` in `PeerTables::token_answers`), under the staging's own bound and with its own count of refused chains | the observer's own `LocalTokenRegistry` field beside the tables, its region rows and line, its lend of no row on the lent and counted forms, the choice between two holders on every answer and drain (`held_tokens().unwrap_or(&self.local_tokens)`); the registry's bound of a staging it did not hold (`reply_quota`) and the observer's sum of the refusals it was handed |
 
 The round of deliveries (`wz-capi-coop/src/round.rs`, `RoundDelivery::round`) is the one queue
 left between a read and a callback. It is built only under `wz_round` (`wz-capi-coop/build.rs`:
@@ -151,7 +152,7 @@ What it shows:
 | H6 | the session's L3 tables as a value | `SessionTables` and `PeerTables` in `wz-session-core` | `RegistryOf<H>` in `wz-capi-coop/src/engine/registry.rs`: the application's observer (`SlotObserverOf`, whose `tables` is the `SessionTables`), the faces' `FaceTables` (`peer`, `gets`, the due row), the holders' index and the written count; every operation reaches the tables through it | 1,101 bytes; 7,938 in the peer case, 18,542 in the api case | D7 |
 | H7 | a pending get | `SessionTables::pending_gets` | each face's `FaceTables::gets` (`Requesters<ConsolidatingSink<LegSink, LegHold>>`) and the due index (`Dues`) | no | D8 |
 | H8 | a query kept past its callback | the queries' plane (`wz-session-core/src/query_plane.rs`, `QueryPlane`'s Final holds) | the engine's held queries (`engine/query.rs`, `keep_query`, `HeldQueryId`) | no | D8 |
-| H9 | the session's own tokens | `SessionTables`'s tokens (`HeldTokens`) | `SlotObserverOf::local_tokens` (`LocalTokenRegistry`), empty where the tables keep tokens but still a field, and the tokens a lost face owes kept apart (`OwedTokens`) | no | D9 |
+| H9 | the session's own tokens | the application's tables (`ObserverTables::held_tokens`) | none; the tokens a lost face owes are kept apart (`OwedTokens`), read with D7 | no | gone (D9a, D9b) |
 | H10 | a sample between a read and a callback | the read's frame | the round, under `wz_round` | no | D10 |
 
 ## 5. Target
@@ -181,7 +182,8 @@ reverted when its row does not move by its expectation.
 | D6 | H5 | the queryable stage | `wz-capi-coop/src/engine.rs`, `engine/query.rs`: one latched record over the sink type | 0 (one instance) | 0 | `closure_drops` |
 | D7 | H6 | with the driver lane, step 6d | the registry becomes the session core's (`wz-session-core`: the table set and the faces' sets, a face named by its set's handle) | -300 to -800; `pico-peer-coop` and the api case to be read (7,938 and 18,542 held now) | to be read: the receive's one look at its face's set is kept, and no call is added | the registry's tests move with it; `direct_receive`, `in_place` |
 | D8 | H7, H8 | the gets' and queries' stage | the gets' legs as rows of the pending get; the held query as a row of the queries' plane | 0; the api case to be read | 0 | `get`, `local_query`, `queryable` |
-| D9 | H9 | the tokens' stage; read in 6.1: the answering's bound moves out of the registry first | `local_token.rs`: the answering apart from the holder; `slot_observer`: `local_tokens` by `Presence` where the tables keep tokens; the owed tokens as rows of the lost face's set, with D7 | 0 | 0 | `liveliness` |
+| D9a | H9: the answering apart from the holder | landed | `local_token.rs` (`TokenAnswers`), `peer_tables.rs` (`PeerTables::token_answers`), the observer's answer and drain | 0 (no liveliness); the api case 0 to -100 (the observer's sum of refusals and its `try_from`, read on `dispatch_event_among` and `answer_iteration_event`) | 0 (an Interest's path only) | `local_token::tests` (the staging's tests now stage through `TokenAnswers`, and `a_chain_that_does_not_fit_whole_is_refused_and_stages_nothing` reads the refusal it counts), `peer_tables::lent_tests::a_lent_peer_holds_a_liveliness_answer` (the refusal counted by the lent row's staging), `limits::tests::max_pending_declares_stated_refuses_the_next_chain_whole` (the quota reaches the staging through `PeerTables::limit_to`, and the observer reads the refusal off it) |
+| D9b | H9: one holder | landed | `slot_observer.rs` (`RegistryTables::local_tokens`, `RegistryRows::local_tokens`, `ObserverTables::held_tokens` and `init_empty_at`; `ObserverRows` and the observer's field, region rows and line gone), `observer.rs` (the heap view reads the tables' registry), `local_token.rs` (the registry's region and counted forms gone), the coop engine's three callers of the observer's lent and counted forms and its region rows | 0 (no liveliness); the api case -100 to -400 (the observer's `LocalTokenRegistry<Region>` state, its region line, its lend of no row, its two `limit_*` calls, and the `HeldTokens` of `LocalTokenRegistry<Lent>`, whose vtable the `unwrap_or` named) | 0 | `slot_observer::lent_tests::a_lent_observers_tokens_are_a_registry_of_its_tables_lent_their_own_rows`; `limits::tests::max_local_tokens_*` (the token quota reaches the registry through `RegistryTables::hold_to`); `liveliness` |
 | D10 | H10 | the MCU matrix | a lock per value on a target without 64-bit atomics (the kernel's), so no `threads` form keeps the round | 0 on a host; the MCU images' to be read | to be read on the MCU matrix | `one_thread`, `round` until they go |
 
 With D1 and D3 the subscriber holds in L3 what L3 can hold without another lane's file: its id,
@@ -225,6 +227,35 @@ lend of no row, and the `HeldTokens` of `LocalTokenRegistry<Lent>` (`each_token`
 claimed. The tokens a lost face owes (`OwedTokens`) are read with D7, whose faces' sets they
 would be rows of.
 
+What landed departs from the two moves above in where each fact went, read against the code as it
+was written:
+
+- D9a. The staging and its bound are one value, `TokenAnswers`, and it is the peer's: a field of
+  `PeerTables` in place of `pending_declares` and `token_interest_chains_refused`, as
+  `FinalStage` holds its rows, its quota and its refusals, and as the subscriber plane's answers
+  are held with their bound in `SubscriberPeer`. A value beside the observer's planes would have
+  held one bound for the stagings of every peer, which is a bound of none of them. The staging is
+  the one writer of its count of refused chains, so the observer no longer sums what the answer
+  returns; `answer_iteration_event` and `answer_messages` return nothing, and the tests read the
+  count off the staging. `PeerTables::limit_to` states the quota, as it states the subscriber
+  plane's.
+- D9b. Move 2 is not a `Presence`. Whether the session's tables keep its tokens is already a type,
+  the bundle the sinks name (`ObserverSinks::Tables`); a presence chosen beside it answers the same
+  question a second time, and the session's one table set without a tokens' table
+  (`LivelinessPresence = Absent`) would have had no holder at all, the registry absent and the
+  tables keeping none. The registry is a table of the storage policies' bundle instead
+  (`RegistryTables::local_tokens`, lent by `RegistryRows::local_tokens`, held to its limits by
+  `hold_to`), and `ObserverTables::held_tokens` names the one holder for every bundle, the table
+  set answering for itself whether or not it keeps tokens. The observer's field goes, and with it
+  its in-place write, its region rows and line (`ObserverRegionRows` loses its `LOCAL_TOKENS`
+  parameter, `SLOT_OBSERVER_LINES` its line), its lent and counted forms (`ObserverRows`, which
+  then wrapped the tables' rows alone, is gone: `lent` and `counted` take the tables' rows), and
+  the registry's region and counted forms, which no bundle makes. The heap view reads
+  `tables.local_tokens`; the tokio engine and the lwip drive register through it unchanged. The
+  bundle of the storage policies is written field by field where it lies
+  (`ObserverTables::init_empty_at`), so the observer's in-place write still holds one table at a
+  time on its frame, the token registry among them.
+
 D4 is the façade lane's because the port's identity of an entity is one contract for every kind
 and every engine: the cooperative engine, the tokio engine's port (`wz-capi-core/src/engine_port.rs`),
 the router node's (`wz-capi-core/src/drive/router_node/engine.rs`) and the advanced subscriber's
@@ -240,7 +271,10 @@ None of D1 to D6, D3q and D3t is on the receive or the put; their receive instru
 are expected unchanged (about 3,073 in the lane's reading; `docs/win-budget/size.md` section 8
 reads 3,078). D2 changes two declarations, D3q and D3t two undeclarations, none of which a read
 calls; the queryable's receive bodies (`next_queryable_reached`, `QueryableCall`) take none of
-their code.
+their code. D9a and D9b are on the receive of an Interest only, which the measured receive (a
+Push) does not reach: `dispatch_event_among` calls the tokens' staging for every record as it
+did, with the holder read off the tables instead of chosen between two, so a Push's path through it
+is the event match that finds no Interest, unchanged.
 D3 changes the undeclaration only: `undeclare_entity`, `Undeclared` and the engine's
 `undeclare_subscriber`. `wire_of` and `retraction_of` became calls of one free function each,
 which the receive reaches through neither: the receive's subscriber bodies (`hand_lent_push`,
