@@ -3551,25 +3551,46 @@ fn sleep_ms(ms: u32) {
     os::sleep_ms(ms.into());
 }
 
-/// One of the session's own subscribers, as a row of the session's tables holds it: the row keeps
-/// its entity id, the pattern the subscriber matches, the declaration its key is named by, which
-/// it holds, and what its retraction names, and this everything else the session knows of it, its
-/// callback among it. The subscriber is that one row (`docs/c-abi-architecture.md`, P1), and so
+/// One of the session's own entities whose callback the program registered, as a row of the
+/// session's tables holds it: the tables' row keeps the entity's id, its key, the declaration its
+/// key is named by and what its retraction names, and this everything else the session knows of
+/// it, its callback among it. The entity is that one row (`docs/c-abi-architecture.md`, P1), and so
 /// is its callback's life (P11): a call is begun on the row's latch with the session held and made
-/// after it, and an undeclared row is let go of by whoever sees its last call end.
-pub(crate) struct SubscriberRow {
+/// after it, and an undeclared row is let go of by whoever sees its last call end. One record for
+/// every kind, which is the callback it keeps (`S`) and what that callback is shown beside what it
+/// is handed (`A`): a subscriber's ([`SubscriberRow`]), a queryable's, a liveliness subscriber's.
+pub(crate) struct LatchedRow<S, A = ()> {
     /// What the ABI's key kept alive (an object of the ABI's), let go of with the row, with no
     /// lock of the session held: the declarations the key and the retraction name are the tables'
     /// row's to hold.
     _anchor: KeyAnchor,
     /// The program's callback, called where the row lies: the tables lend their rows from the
     /// session's arena and never move one.
-    sink: SubscriberSink,
-    /// Whether the callback is shown each sample's timestamp (`entity-timestamp-opt-in`).
-    expose: bool,
-    /// How many calls of the callback run, and whether the subscriber was undeclared.
+    sink: S,
+    /// What the callback is shown beside what it is handed: for a subscriber's, whether it sees
+    /// each sample's timestamp (`entity-timestamp-opt-in`); nothing for the other kinds. A field of
+    /// the row and not of the callback's, so the row is laid out as one record.
+    shown: A,
+    /// How many calls of the callback run, and whether the entity was undeclared.
     latch: Latch,
 }
+
+impl<S> LatchedRow<S> {
+    /// An entity keeping `anchor`, calling `sink`: a queryable's or a liveliness subscriber's.
+    #[cfg(any(feature = "queryable", feature = "liveliness"))]
+    pub(crate) fn new(anchor: KeyAnchor, sink: S) -> Self {
+        Self {
+            _anchor: anchor,
+            sink,
+            shown: (),
+            latch: Latch::new(),
+        }
+    }
+}
+
+/// One of the session's own subscribers: its callback, and whether it is shown each sample's
+/// timestamp.
+pub(crate) type SubscriberRow = LatchedRow<SubscriberSink, bool>;
 
 impl SubscriberRow {
     /// A subscriber keeping `anchor`, handing what it hears to `sink`, the timestamp shown when
@@ -3580,7 +3601,7 @@ impl SubscriberRow {
         Self {
             _anchor: anchor,
             sink,
-            expose,
+            shown: expose,
             latch: Latch::new(),
         }
     }
@@ -3590,7 +3611,7 @@ impl SubscriberRow {
     /// its callback is not to see. Whether a call begun before an undeclaration still hands it is
     /// the call's to say (`SubscriberCall`).
     fn hand(&self, sample: &SampleRef<'_>) {
-        self.sink.call_ref(sample, self.expose);
+        self.sink.call_ref(sample, self.shown);
     }
 
     /// Declare subscriber `id`, the id its row in the tables holds, on `key`, over `actions`:
@@ -3636,21 +3657,21 @@ const _: () = assert!(
     "a call of a subscriber's callback ends with no lock held"
 );
 
-/// A call of a subscriber's callback, begun on its row's latch: where the row lies.
-pub(crate) struct RowCall(NonNull<SubscriberRow>);
+/// A call of an entity's callback, begun on its row's latch: where the row lies.
+pub(crate) struct RowCall<S, A = ()>(NonNull<LatchedRow<S, A>>);
 
-impl RowCallback for SubscriberRow {
-    type Call = RowCall;
+impl<S, A> RowCallback for LatchedRow<S, A> {
+    type Call = RowCall<S, A>;
 
     const READS_ROW_IN_PLACE: bool = true;
 
     #[inline]
-    fn begin(&self) -> Option<RowCall> {
+    fn begin(&self) -> Option<RowCall<S, A>> {
         self.latch.begin().then(|| RowCall(NonNull::from(self)))
     }
 
     #[inline]
-    unsafe fn end(call: RowCall) -> bool {
+    unsafe fn end(call: RowCall<S, A>) -> bool {
         // SAFETY: the caller's: the row has not moved since the call began and is still in its
         // table, which keeps it until its last call ended.
         unsafe { call.0.as_ref() }.latch.end()
@@ -3673,12 +3694,12 @@ impl RowCallback for SubscriberRow {
 /// ([`Self::end`]), or its row would keep its slot for good.
 #[must_use = "a call is ended, or its row is never let go of"]
 pub(crate) struct SubscriberCall {
-    call: RowCall,
+    call: RowCall<SubscriberSink, bool>,
 }
 
 impl SubscriberCall {
     /// `call`, begun on a subscriber's row.
-    pub(crate) fn new(call: RowCall) -> Self {
+    pub(crate) fn new(call: RowCall<SubscriberSink, bool>) -> Self {
         Self { call }
     }
 
