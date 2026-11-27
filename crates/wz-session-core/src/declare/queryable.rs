@@ -21,7 +21,7 @@
 use crate::bounded::EpochCounter;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::bounded::KeyUnkept;
-use crate::bounded::{Arena, LendRefused, Lent, Profile, Static, Storage};
+use crate::bounded::{Profile, Static, Storage};
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
@@ -1130,17 +1130,17 @@ unsafe impl<D: DeclSink, U: UndeclSink, M: MatchingReport> crate::bounded::ZeroE
 {
 }
 
-impl<D: DeclSink, U: UndeclSink, M: MatchingReport>
-    RemoteQueryableTable<D, U, crate::bounded::Region, M>
+impl<D: DeclSink, U: UndeclSink, P: crate::bounded::LaidOut, M: MatchingReport>
+    RemoteQueryableTable<D, U, P, M>
 {
-    /// The description of a table of the region policy at `at` in a region and its watchers'
-    /// [`DeclObserverRows`](crate::decl_sink::DeclObserverRows) at `rows`.
+    /// The description of a table at `at` and, in a region, its watchers'
+    /// [`DeclObserverRows`](crate::decl_sink::DeclObserverRows) at `rows`: its pair's lines.
     pub const fn places(
         at: usize,
         rows: usize,
     ) -> crate::bounded::RegionLines<REMOTE_QUERYABLE_TABLE_LINES> {
         crate::bounded::RegionLines::EMPTY.with(
-            &DeclObserverPair::<D, U, crate::bounded::Region>::places(
+            &DeclObserverPair::<D, U, P>::places(
                 at.wrapping_add(core::mem::offset_of!(Self, observers)),
                 rows,
             ),
@@ -1163,25 +1163,6 @@ impl<D: DeclSink, U: UndeclSink, M: MatchingReport>
             #[cfg(not(all(feature = "session-matching", feature = "alloc")))]
             matching_watches: core::marker::PhantomData,
         }
-    }
-}
-
-impl<D: DeclSink, U: UndeclSink, M: MatchingReport> RemoteQueryableTable<D, U, Lent, M> {
-    /// A table with no observer whose two observer lists are lent from `arena`, `rows` rows each
-    /// ([`DeclObserverPair::lent`]). Refused as that refuses.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
-        Ok(Self {
-            observers: DeclObserverPair::lent(arena, rows)?,
-            #[cfg(all(feature = "session-matching", feature = "alloc"))]
-            matching_watches: MatchingWatchList::new(),
-            #[cfg(not(all(feature = "session-matching", feature = "alloc")))]
-            matching_watches: core::marker::PhantomData,
-        })
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes for `rows` rows. `None` past the address space.
-    pub const fn arena_bytes(rows: usize) -> Option<usize> {
-        DeclObserverPair::<D, U, Lent>::arena_bytes(rows)
     }
 }
 

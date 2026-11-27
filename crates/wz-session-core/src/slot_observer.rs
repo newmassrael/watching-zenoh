@@ -1475,10 +1475,15 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
     }
 }
 
-/// The rows of a [`SlotObserverOf`] of the region policy apart from its application tables', which
-/// a region lays out beside it: the declaration watchers' lists, at the build's bound, and
-/// `LOCAL_TOKENS` rows of the session's own tokens (none where the tables keep the tokens as rows).
-pub struct ObserverRegionRows<K: ObserverSinks, const LOCAL_TOKENS: usize> {
+/// The rows of a [`SlotObserverOf`] of a policy a description places apart from its application
+/// tables', which a region lays out beside it: the declaration watchers' lists, at the build's
+/// bound, and `LOCAL_TOKENS` rows of the session's own tokens (none where the tables keep the
+/// tokens as rows). The lent policy's are no value and stand only for the region's offsets.
+pub struct ObserverRegionRows<
+    K: ObserverSinks,
+    const LOCAL_TOKENS: usize,
+    P: crate::bounded::LaidOut = crate::bounded::Region,
+> {
     #[cfg(feature = "declare-subscriber")]
     remote_subscribers: crate::decl_sink::DeclObserverRows<K::Declared, K::Undeclared>,
     #[cfg(feature = "declare-queryable")]
@@ -1486,18 +1491,18 @@ pub struct ObserverRegionRows<K: ObserverSinks, const LOCAL_TOKENS: usize> {
     #[cfg(feature = "liveliness-token")]
     liveliness: crate::decl_sink::DeclObserverRows<K::Declared, K::Undeclared>,
     #[cfg(feature = "liveliness-token")]
-    local_tokens: crate::declare::local_token::LocalTokenRows<LOCAL_TOKENS>,
-    _sinks: core::marker::PhantomData<K>,
+    local_tokens: crate::declare::local_token::LocalTokenRows<LOCAL_TOKENS, P>,
+    _sinks: core::marker::PhantomData<(K, P)>,
 }
 
 // SAFETY: every field is rows of `MaybeUninit` (`ZeroEmpty`), holding no value until placed.
-unsafe impl<K: ObserverSinks, const LOCAL_TOKENS: usize> crate::bounded::ZeroEmpty
-    for ObserverRegionRows<K, LOCAL_TOKENS>
+unsafe impl<K: ObserverSinks, const LOCAL_TOKENS: usize, P: crate::bounded::LaidOut>
+    crate::bounded::ZeroEmpty for ObserverRegionRows<K, LOCAL_TOKENS, P>
 {
 }
 
-/// The lines a region's description holds for one [`SlotObserverOf`] of the region policy apart
-/// from its application tables', at most: three watcher pairs' and the session's own tokens'.
+/// The lines a description holds for one [`SlotObserverOf`] apart from its application tables', at
+/// most: three watcher pairs' and the session's own tokens'.
 pub const SLOT_OBSERVER_LINES: usize = 3 * crate::decl_sink::DECL_OBSERVER_LINES + 1;
 
 // SAFETY: of the region policy, at all zero bytes: the application tables are `ZeroEmpty` (the
@@ -1513,11 +1518,11 @@ where
 {
 }
 
-impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, crate::bounded::Region, M> {
-    /// The description of an observer of the region policy at `at` in a region and its
-    /// [`ObserverRegionRows`] at `rows`, apart from its application tables, which the region
-    /// describes by their own type (`SessionTables::places` at the offset of [`Self::tables`]):
-    /// the lines of the watchers' lists and of the session's own tokens, and the tokens' handle to
+impl<K: ObserverSinks, P: crate::bounded::LaidOut, M: MatchingReport> SlotObserverOf<K, P, M> {
+    /// The description of an observer at `at` and, in a region, its [`ObserverRegionRows`] at
+    /// `rows`, apart from its application tables, which a region describes by their own type
+    /// (`SessionTables::places` at the offset of [`Self::tables`]): the lines of the watchers'
+    /// lists and of the session's own tokens, at most `LOCAL_TOKENS`, and the tokens' handle to
     /// the key arena, those the build keeps.
     pub const fn places<const LOCAL_TOKENS: usize>(
         at: usize,
@@ -1526,10 +1531,10 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, crate::bounded::Regi
         let lines = crate::bounded::RegionLines::EMPTY;
         #[cfg(feature = "declare-subscriber")]
         let lines = lines.with(
-            &RemoteSubscriberTable::<K::Declared, K::Undeclared, crate::bounded::Region, M>::places(
+            &RemoteSubscriberTable::<K::Declared, K::Undeclared, P, M>::places(
                 at.wrapping_add(core::mem::offset_of!(Self, remote_subscribers)),
                 rows.wrapping_add(core::mem::offset_of!(
-                    ObserverRegionRows<K, LOCAL_TOKENS>,
+                    ObserverRegionRows<K, LOCAL_TOKENS, P>,
                     remote_subscribers
                 )),
             ),
@@ -1537,10 +1542,10 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, crate::bounded::Regi
         );
         #[cfg(feature = "declare-queryable")]
         let lines = lines.with(
-            &RemoteQueryableTable::<K::Declared, K::Undeclared, crate::bounded::Region, M>::places(
+            &RemoteQueryableTable::<K::Declared, K::Undeclared, P, M>::places(
                 at.wrapping_add(core::mem::offset_of!(Self, remote_queryables)),
                 rows.wrapping_add(core::mem::offset_of!(
-                    ObserverRegionRows<K, LOCAL_TOKENS>,
+                    ObserverRegionRows<K, LOCAL_TOKENS, P>,
                     remote_queryables
                 )),
             ),
@@ -1549,20 +1554,20 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, crate::bounded::Regi
         #[cfg(feature = "liveliness-token")]
         let lines = lines
             .with(
-                &LivelinessRegistry::<K::Declared, K::Undeclared, crate::bounded::Region>::places(
+                &LivelinessRegistry::<K::Declared, K::Undeclared, P>::places(
                     at.wrapping_add(core::mem::offset_of!(Self, liveliness)),
                     rows.wrapping_add(core::mem::offset_of!(
-                        ObserverRegionRows<K, LOCAL_TOKENS>,
+                        ObserverRegionRows<K, LOCAL_TOKENS, P>,
                         liveliness
                     )),
                 ),
                 0,
             )
             .with(
-                &LocalTokenRegistry::<crate::bounded::Region>::places::<LOCAL_TOKENS>(
+                &LocalTokenRegistry::<P>::places::<LOCAL_TOKENS>(
                     at.wrapping_add(core::mem::offset_of!(Self, local_tokens)),
                     rows.wrapping_add(core::mem::offset_of!(
-                        ObserverRegionRows<K, LOCAL_TOKENS>,
+                        ObserverRegionRows<K, LOCAL_TOKENS, P>,
                         local_tokens
                     )),
                 ),
@@ -1574,13 +1579,22 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, crate::bounded::Regi
 }
 
 impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
+    /// The description of an observer of the lent policy apart from its application tables, the
+    /// region's of the same lists, the session's own tokens at the build's bound: the lines
+    /// [`Self::lent`] lends beside the tables and [`Self::arena_bytes`] counts, from the
+    /// observer's start.
+    const LINES: crate::bounded::RegionLines<SLOT_OBSERVER_LINES> =
+        Self::places::<{ caps::MAX_LOCAL_TOKENS }>(0, 0);
+
     /// An observer with nothing registered whose application tables are lent from `arena`, as
     /// many rows each as `rows` states (the subscriptions' table reads its own of them,
     /// [`LentTables::lend`]), their keys kept in `keys`, the session's key arena, and
     /// held to `limits` as [`SlotObserverOf::with_limits`] holds one. The declaration watchers'
-    /// lists are lent too, as many rows each as `limits` admits watchers
-    /// ([`Self::decl_watcher_rows`]). Refused, the rows lent so far going back with the arena,
-    /// when the arena has not the room, or when `limits` admits more watchers than the build.
+    /// lists and the session's own tokens are lent after the tables through the observer's
+    /// description ([`SlotObserverOf::places`]), as many rows each list as `limits` admits
+    /// watchers ([`Self::decl_watcher_rows`]). Refused, the rows lent so far going back with the
+    /// arena, when the arena has not the room, or when `limits` admits more watchers than the
+    /// build, or `rows` more tokens.
     pub fn lent(
         arena: &mut Arena,
         keys: KeySpace,
@@ -1596,23 +1610,53 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
             feature = "liveliness-token"
         ))]
         let watchers = Self::decl_watcher_rows(limits)?;
+        // A build that keeps no watcher list describes none, and lends none a row.
+        #[cfg(not(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )))]
+        let watchers = 0;
         let mut observer = Self {
             tables: LentTables::lend(arena, keys, rows.tables)?,
             #[cfg(all(feature = "alloc", feature = "switchboard"))]
             switchboard: SwitchboardRegistry::new(),
             #[cfg(feature = "declare-subscriber")]
-            remote_subscribers: RemoteSubscriberTable::lent(arena, watchers)?,
+            remote_subscribers: RemoteSubscriberTable::default(),
             #[cfg(feature = "declare-queryable")]
-            remote_queryables: RemoteQueryableTable::lent(arena, watchers)?,
+            remote_queryables: RemoteQueryableTable::default(),
             #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
             matching: core::marker::PhantomData,
             #[cfg(feature = "liveliness-token")]
-            liveliness: LivelinessRegistry::lent(arena, watchers)?,
+            liveliness: LivelinessRegistry::default(),
             #[cfg(feature = "liveliness-token")]
-            local_tokens: LocalTokenRegistry::lent(arena, keys, rows.local_tokens)?,
+            local_tokens: LocalTokenRegistry::default(),
         };
+        let mut lend = crate::bounded::TableLender::new(arena);
+        // SAFETY: the description is this type's: each line names a list of `observer`, which
+        // holds no value, and states the bytes of its rows (`SeqPlace::of`), and its key line the
+        // tokens' handle, which holds no key; `observer` is reached by nothing else during the
+        // call, and `keys` is the session's, which outlives it.
+        unsafe {
+            crate::key_arena::lend_region(
+                core::ptr::NonNull::from(&mut observer).cast::<u8>(),
+                keys,
+                &Self::LINES,
+                &Self::counts(watchers, rows.local_tokens),
+                &mut lend,
+            );
+        }
+        lend.finish()?;
         observer.limit_to(limits);
         Ok(observer)
+    }
+
+    /// The counts the lines of the observer's description are lent: `watchers` rows of each
+    /// watcher list and `local_tokens` of the session's own tokens.
+    const fn counts(watchers: usize, local_tokens: usize) -> crate::bounded::RowCounts {
+        crate::bounded::RowCounts::NONE
+            .with(crate::bounded::RowCount::DeclWatchers, watchers)
+            .with(crate::bounded::RowCount::LocalTokens, local_tokens)
     }
 
     /// How many rows [`Self::lent`] lends each declaration watcher list under `limits`: the
@@ -1636,28 +1680,14 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
         }
     }
 
-    /// The bytes of an arena the declaration watchers' lists of [`Self::lent`] take, `rows` rows
-    /// each: two lists for each plane of the build that has watchers, each a span of its own.
-    /// `None` past the address space.
-    pub const fn decl_watcher_bytes(rows: usize) -> Option<usize> {
-        let bytes = Some(0);
-        #[cfg(feature = "declare-subscriber")]
-        let bytes = sum_of(
-            bytes,
-            RemoteSubscriberTable::<K::Declared, K::Undeclared, Lent>::arena_bytes(rows),
-        );
-        #[cfg(feature = "declare-queryable")]
-        let bytes = sum_of(
-            bytes,
-            RemoteQueryableTable::<K::Declared, K::Undeclared, Lent>::arena_bytes(rows),
-        );
-        #[cfg(feature = "liveliness-token")]
-        let bytes = sum_of(
-            bytes,
-            LivelinessRegistry::<K::Declared, K::Undeclared, Lent>::arena_bytes(rows),
-        );
-        let _ = rows;
-        bytes
+    /// The bytes of an arena [`Self::lent`] takes beside the application's tables for `watchers`
+    /// rows of each watcher list and `local_tokens` of the session's own tokens: its description's
+    /// lines summed. `None` past the address space.
+    pub const fn arena_bytes(watchers: usize, local_tokens: usize) -> Option<usize> {
+        crate::bounded::seq_bytes(
+            Self::LINES.seq_lines(),
+            &Self::counts(watchers, local_tokens),
+        )
     }
 }
 
@@ -1702,19 +1732,6 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, crate::bounded::OnUs
         };
         observer.limit_to(limits);
         Ok(observer)
-    }
-}
-
-/// `a + b`, `None` when either is or the sum is past the address space.
-#[cfg(any(
-    feature = "declare-subscriber",
-    feature = "declare-queryable",
-    feature = "liveliness-token"
-))]
-const fn sum_of(a: Option<usize>, b: Option<usize>) -> Option<usize> {
-    match (a, b) {
-        (Some(a), Some(b)) => a.checked_add(b),
-        _ => None,
     }
 }
 
@@ -4245,7 +4262,7 @@ mod lent_tests {
 
     /// The watchers' lists of the observer are lent from its arena, the session's
     /// `MAX_DECL_OBSERVERS` rows each: a session that admits fewer watchers is lent fewer bytes, by
-    /// what `decl_watcher_bytes` states for the rows between, and a watcher past the rows is
+    /// what `arena_bytes` states for the rows between, and a watcher past the rows is
     /// refused on each plane. Turned red by lists of the build's profile, or lent other rows.
     #[cfg(feature = "declare-subscriber")]
     #[test]
@@ -4277,8 +4294,8 @@ mod lent_tests {
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows");
-        let between = App::decl_watcher_bytes(caps::MAX_DECL_OBSERVERS)
-            .zip(App::decl_watcher_bytes(1))
+        let between = App::arena_bytes(caps::MAX_DECL_OBSERVERS, 0)
+            .zip(App::arena_bytes(1, 0))
             .map(|(all, least)| all - least);
         assert_eq!(
             Some(built.high_water() - one.high_water()),
@@ -4320,6 +4337,53 @@ mod lent_tests {
                     .liveliness
                     .on_token_declared_sink(BoxedDeclSink::new(|_| {})),
                 Err(RegisterError::TableFull)
+            );
+        }
+    }
+
+    /// The observer's own lists, its watchers' and the session's own tokens', are lent after its
+    /// application tables through the description a region places them by: each at the offset the
+    /// plan's count of the lines before it says, none meeting, each holding its count, and the
+    /// lines summed are what `arena_bytes` counts; a count of tokens past the build's bound is
+    /// refused. Turned red by a line of another count (a watcher list lent the tokens' rows, or the
+    /// build's bound), or by `arena_bytes` counting what the lend does not take.
+    #[test]
+    fn lent_observer_lists_lie_where_their_description_counts_them() {
+        type App = SlotObserverOf<HeapSinks, Lent>;
+        let limits = SessionLimits::defaults();
+        let watchers = App::decl_watcher_rows(&limits).expect("the build's value");
+        let tokens = caps::MAX_LOCAL_TOKENS.min(2);
+        let rows = ObserverRows {
+            local_tokens: tokens,
+            ..ObserverRows::default()
+        };
+        let mut lent_from = arena(1 << 16);
+        let observer =
+            App::lent(&mut lent_from, keys(256), rows, &limits).expect("the arena has the rows");
+        // SAFETY: the lines are the lent observer's own description, read and not written.
+        let laid = unsafe {
+            crate::bounded::assert_lent_as_described(
+                NonNull::from(&observer).cast::<u8>(),
+                core::mem::size_of::<App>(),
+                App::LINES.seq_lines(),
+                &App::counts(watchers, tokens),
+            )
+        };
+        assert_eq!(Some(laid), App::arena_bytes(watchers, tokens));
+        assert_eq!(
+            App::LINES.key_lines().len(),
+            usize::from(cfg!(feature = "liveliness-token")),
+            "the session's own tokens keep their keys in the session's key arena"
+        );
+        #[cfg(feature = "liveliness-token")]
+        {
+            let past = ObserverRows {
+                local_tokens: caps::MAX_LOCAL_TOKENS + 1,
+                ..ObserverRows::default()
+            };
+            assert!(
+                App::lent(&mut arena(1 << 16), keys(64), past, &limits).is_err(),
+                "a count of tokens past the build's bound"
             );
         }
     }

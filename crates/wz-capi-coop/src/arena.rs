@@ -2162,9 +2162,10 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // limit is still held, so a config over the build's is refused under its name either way.
         #[cfg(feature = "runtime-plan")]
         {
-            let watcher_bytes = self.sized(SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(
-                watchers,
-            ));
+            // The session's own tokens are rows of its one table set: the registry beside them is
+            // lent none (`RegistryOf::new`).
+            let watcher_bytes =
+                self.sized(SlotObserverOf::<HeapSinks, Lent>::arena_bytes(watchers, 0));
             self.put(ArenaPart::DeclarationWatchers, 1, watcher_bytes);
         }
         #[cfg(not(feature = "runtime-plan"))]

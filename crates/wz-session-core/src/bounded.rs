@@ -1761,11 +1761,15 @@ pub enum RowCount {
     Queries,
     /// `MAX_PENDING_LIVELINESS_GETS` of one face's requesters.
     LivelinessGets,
+    /// `MAX_DECL_OBSERVERS` of each of the application's lists of declaration watchers.
+    DeclWatchers,
+    /// `MAX_LOCAL_TOKENS` of the registry of the session's own tokens beside its tables.
+    LocalTokens,
 }
 
 impl RowCount {
     /// The last count: a count added after it moves this.
-    const LAST: Self = Self::LivelinessGets;
+    const LAST: Self = Self::LocalTokens;
     /// The counts a plan states, `Bound`'s place among them unused.
     const SLOTS: usize = (Self::LAST as usize).wrapping_add(1);
 }
