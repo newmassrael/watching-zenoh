@@ -45,7 +45,6 @@ use sce_forge_runtime::codec::CodecError;
     feature = "codec-frame",
     any(
         feature = "alloc",
-        test,
         feature = "session-unicast",
         feature = "session-multicast"
     )
@@ -197,7 +196,7 @@ macro_rules! own_wire {
                 feature = "rx-control"
             ),
             any(
-                test,
+                all(test, feature = "alloc"),
                 feature = "session-unicast",
                 all(feature = "session-multicast", not(feature = "alloc"))
             )
@@ -508,7 +507,7 @@ impl NetworkMessage {
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -540,7 +539,7 @@ fn declare_view_admission(
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -560,7 +559,7 @@ fn interest_view_admission(
     feature = "rx-response",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -581,7 +580,7 @@ fn response_final_view_admission(
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -753,11 +752,18 @@ fn judge_response_chains<E: crate::ext_view::ExtEntryView>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-request",
-    any(test, not(feature = "request-put-del")),
+    // Read by the walk of a build that reads no Put or Del a Request carries, and by the tests of
+    // the reader of one that does.
     any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
+        all(test, feature = "request-put-del"),
+        all(
+            not(feature = "request-put-del"),
+            any(
+                all(test, feature = "alloc"),
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        )
     )
 ))]
 fn request_view_admission(
@@ -1763,7 +1769,7 @@ impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -1833,7 +1839,7 @@ pub(crate) enum RecordForm {
             feature = "rx-push"
         ),
         any(
-            test,
+            all(test, feature = "alloc"),
             feature = "session-unicast",
             all(feature = "session-multicast", not(feature = "alloc"))
         ),
@@ -1866,7 +1872,7 @@ pub(crate) struct PushRead<'f> {
             feature = "rx-push"
         ),
         any(
-            test,
+            all(test, feature = "alloc"),
             feature = "session-unicast",
             all(feature = "session-multicast", not(feature = "alloc"))
         ),
@@ -1908,7 +1914,7 @@ pub(crate) struct PushExts<'f> {
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2057,7 +2063,6 @@ pub(crate) fn for_each_record<'f>(
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
         feature = "alloc",
         feature = "session-unicast",
         feature = "session-multicast"
@@ -2103,10 +2108,13 @@ pub(crate) fn try_for_each_record<'f>(
 /// owned form, and so a lent record is counted as the same record walked owned is, and how a
 /// record is received does not depend on whether the build counts it. An owned record is not
 /// handed to `counted`: its consumer counts it from the owned message it is handed.
+// Its test readers are the heap profile's (`record_walk_tests` and the chain tests), as
+// `try_for_each_record`'s are, so a test build with neither an allocator nor a session has no
+// reader of the walk, and every item the walk alone reads carries the same term.
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2140,7 +2148,7 @@ pub(crate) fn try_for_each_record_while<'f>(
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2157,7 +2165,7 @@ trait EachRecord<'f> {
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2184,7 +2192,7 @@ where
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2357,7 +2365,7 @@ fn walk_kept_records<'f>(
     feature = "codec-frame",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2428,7 +2436,7 @@ fn lend_record<'f>(
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     ),
@@ -2580,7 +2588,7 @@ mod response_read;
         feature = "rx-push"
     ),
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2605,7 +2613,7 @@ fn read_push<'f>(
     feature = "codec-frame",
     feature = "codec-request",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2642,7 +2650,7 @@ fn read_request<'f>(
         feature = "rx-response"
     ),
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2665,7 +2673,7 @@ fn read_response<'f>(
     feature = "rx-response",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2686,7 +2694,7 @@ fn read_response_final<'f>(
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2708,7 +2716,7 @@ fn read_declare<'f>(
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2728,7 +2736,7 @@ fn read_interest<'f>(
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
