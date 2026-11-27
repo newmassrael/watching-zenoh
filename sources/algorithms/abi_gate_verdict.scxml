@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The compatibility gate of a C ABI that two sides of a `dlopen` boundary link independently: a
+  host and a plugin (wz-plugin-abi), or a host and a storage volume (wz-volume-abi, which adds
+  the layout of the record it passes by pointer, volume_abi_verdict.scxml). The host compares
+  what it knows with what the loaded library declares, before reading its call table:
+
+    0  compatible: the call table may be read;
+    1  the ABI major differs, in either direction: the table's meaning is not shared;
+    2  the library's ABI minor is above the host's: it may reach for a field the host does not
+       have (an older minor is accepted, since a host may know fields the library never fills);
+    3  the call table's size or alignment differs at the same declared ABI: a stale rebuild.
+
+  The checks are made in that order and the first that fails names the verdict. The numbers are
+  all `uint32`, as the descriptor carries them, and only compared, so the predicate cannot fail.
+  It cannot tell whether the function pointers do what they say; nothing at such a boundary can.
+
+  The host maps the verdict to its `Compatibility` value, which carries both operands of the
+  check that failed. The function takes and returns plain integers so that a crate every
+  third-party library links (no_std, no dependencies) gains no dependency from it.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="abi_gate_verdict"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="host_major" type="uint32"/>
+    <sce:param name="plugin_major" type="uint32"/>
+    <sce:param name="host_minor" type="uint32"/>
+    <sce:param name="plugin_minor" type="uint32"/>
+    <sce:param name="host_size" type="uint32"/>
+    <sce:param name="plugin_size" type="uint32"/>
+    <sce:param name="host_align" type="uint32"/>
+    <sce:param name="plugin_align" type="uint32"/>
+    <sce:return type="uint8"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="plugin_major !== host_major">
+      <sce:return expr="1"/>
+    </sce:if>
+    <sce:if cond="plugin_minor &gt; host_minor">
+      <sce:return expr="2"/>
+    </sce:if>
+    <sce:if cond="plugin_size !== host_size || plugin_align !== host_align">
+      <sce:return expr="3"/>
+    </sce:if>
+    <sce:return expr="0"/>
+  </sce:body>
+</scxml>

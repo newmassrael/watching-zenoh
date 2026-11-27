@@ -498,6 +498,7 @@ fn regen_codec_deployment(
 ///                      session_rx_pool_mcu_multicast,
 ///                      session_tx_pool_mcu, eth_rx_pool_mcu (buffer-pools)
 ///   wz-runtime-tokio : also accept_window_after (algorithm)
+///   wz-plugin-abi    : abi_gate_verdict (algorithm)
 fn regen_statecharts_and_pools(root: &Path) {
     // `Codegen::from_manifest` derives the SCE workspace as
     // <manifest>/../../vendor/sce; any crates/* dir resolves to repo/vendor/sce.
@@ -655,6 +656,10 @@ fn regen_statecharts_and_pools(root: &Path) {
         // handshake left of the accept's one bound, never nothing (wz-runtime-tokio
         // `accept_bounds`).
         ("accept_window_after", "wz-runtime-tokio"),
+        // The compatibility gate of a C ABI loaded by `dlopen`: what a plugin declares against
+        // what its host knows (wz-plugin-abi). Plain integers, so the ABI crate, which every
+        // third-party plugin links, gains no dependency.
+        ("abi_gate_verdict", "wz-plugin-abi"),
     ];
     for (stem, krate) in crate_algorithms {
         let out = root.join("out").join(krate);
@@ -673,6 +678,7 @@ fn regen_statecharts_and_pools(root: &Path) {
         "wz-runtime-coop",
         "wz-link-lwip",
         "wz-app-frame",
+        "wz-plugin-abi",
     ] {
         let _ = std::fs::remove_file(root.join("out").join(krate).join("sce_sourcemap.json"));
     }
