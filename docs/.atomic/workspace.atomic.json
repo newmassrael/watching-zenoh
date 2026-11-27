@@ -9206,6 +9206,25 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4730": {
+      "decision_summary": "Land six lanes as one integration, verified once: the SCE pin of one body\nwith its wrapper gone, the transport, driver and doors steps, the peer's\nlent-only port, and the step tests on a simulated world with their engine fix.",
+      "changes_bullets": [
+        "SCE e90c0b6271b; session machine events direct; link-wire-reports switch.",
+        "tx-stream-owed capability; pool counts where read; udp-port-lent-only.",
+        "sim harness, bound-0 step polls; size rules, ledger rows, ceilings."
+      ],
+      "verification_bullets": [
+        "size 205,921 -> 203,025 B (-2,896); W/P 0.757 -> 0.756; ledger rc 0.",
+        "tests session-core 1798, runtime-coop 327/337, capi-coop 292/484, pico 543.",
+        "lane-form step tests 50 of 50; nondefault-features 4 crates; preflight."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
