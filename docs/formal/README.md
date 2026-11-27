@@ -19,6 +19,11 @@ promises those levels will be held to.
 | `ResetOnceService.tla` | 1, promise | A peer's reset ends its session only when its generation is later than every one that ended a session of that peer; a retransmission or an older reset ends nothing and is a duplicate of the last; a peer is refused for want of room only when none of its resets was taken |
 | `ResetGenerations.tla` | 2, protocol | How a node keeps it: the table of reset generations (`sources/algorithms/take_generation.scxml`, `crates/wz-session-core/src/reset_generations.rs`), which both profiles run. `Refines` checks it against the promise |
 | `ResetGenerations*.cfg` | bounded exploration | Two peers, generations 0 to 2, a table of one; one configuration per part taken out |
+| `SecondLinkService.tla` | 1, promise | Two nodes that dial each other at once: each link carries or is closed before it carried anything, at most one carries, and once both are decided one does |
+| `SecondLinks.tla` | 2, protocol | The two nodes' link books (S1 55): the initiator's and the acceptor's reservations, the initiator's confirmation, the zid rule. `Refines` checks it against the promise |
+| `FaceCollisionService.tla` | 1, promise | The faces a loop holds to one node: at most one, and the routing graph holds a link to the node exactly while one is held |
+| `FaceCollisions.tla` | 2, protocol | The tokio loop's collision tables (S4 26): a kept link parked behind the face it replaces until that face's departure is processed, a third link refused meanwhile |
+| `SecondLinks*.cfg`, `FaceCollisions*.cfg` | bounded exploration | Two crossing links, every order of their six steps; three links to one node, each kept or refused |
 | `models.json` | manifest | Every module and configuration, in the format of SCE's `schemas/sce-formal-models.v1.schema.json` (`"v": 1`, no tool pin) |
 
 ## 2. Each part of the query's Final has a configuration that fails without it
@@ -63,6 +68,23 @@ calls (Birrell and Nelson, 1984), decision D6 of `docs/session-lifecycle-intent.
 
 Not modelled: progress, since a reset is asked by a peer and answered in the same step; the
 lifecycle permit, which `lifecycle_verdict` judges before the table is asked.
+
+### The second link and the faces to one node (2026-11-28)
+
+Written for the rule S1 55 holds and the tables S4 26 holds, ahead of their move into SCE
+documents, which waits until the move keeps their size.
+
+| Module | Part (constant) | What it keeps | Without it TLC is to find | Promise |
+|---|---|---|---|---|
+| `SecondLinks` | `ZidRule` | two crossing links are judged by the zids | both links refused (`OneWhenSettled`) | broken |
+| `SecondLinks` | `EstablishedHolds` | an established row keeps its place | both links carrying (`AtMostOne`) | broken |
+| `FaceCollisions` | `Park` | a kept link waits for the face it replaces to leave | two faces to the node (`OneFace`) | broken |
+| `FaceCollisions` | `ThirdRefused` | a link to a node whose face is closing is refused | a kept link parked behind no face (`NoneLost`) | kept |
+
+Not modelled there: links that went the same way and a superseded row's own refusal at the
+confirmation, which with two crossing links decides no order (the loser is refused at its
+acceptor first); the release of a closed link's rows; a face that cannot be closed alone; the
+progress of a parked link, which waits on the departure of a face asked to close.
 
 ## 3. The judge is SCE's, and the SCE revision wz pins cannot run it on this manifest
 

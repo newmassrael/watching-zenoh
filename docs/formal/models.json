@@ -143,6 +143,79 @@
       "decision": "docs/zenoh-logic-as-sce-kinds.md, section 7.1 (S5 M5, S2 30)",
       "runs": [],
       "abstract": true
+    },
+    {
+      "module": "SecondLinks",
+      "decision": "docs/zenoh-logic-as-sce-kinds.md, W16 (S1 55)",
+      "parts": {
+        "ZidRule": "TRUE",
+        "EstablishedHolds": "TRUE"
+      },
+      "runs": [
+        {
+          "config": "SecondLinks.cfg",
+          "expect": "holds"
+        },
+        {
+          "config": "SecondLinks_without_zid_rule.cfg",
+          "expect": "violates",
+          "invariant": "OneWhenSettled",
+          "without": "ZidRule",
+          "promise": "broken"
+        },
+        {
+          "config": "SecondLinks_without_established.cfg",
+          "expect": "violates",
+          "invariant": "AtMostOne",
+          "without": "EstablishedHolds",
+          "promise": "broken"
+        }
+      ],
+      "promise": "Refines",
+      "refines": "SecondLinkService"
+    },
+    {
+      "module": "SecondLinkService",
+      "decision": "docs/zenoh-logic-as-sce-kinds.md, W16 (S1 55)",
+      "runs": [],
+      "abstract": true
+    },
+    {
+      "module": "FaceCollisions",
+      "decision": "docs/zenoh-logic-as-sce-kinds.md, S4 26",
+      "parts": {
+        "Park": "TRUE",
+        "ThirdRefused": "TRUE"
+      },
+      "runs": [
+        {
+          "config": "FaceCollisions.cfg",
+          "expect": "holds"
+        },
+        {
+          "config": "FaceCollisions_without_park.cfg",
+          "expect": "violates",
+          "invariant": "OneFace",
+          "without": "Park",
+          "promise": "broken"
+        },
+        {
+          "config": "FaceCollisions_without_third_refusal.cfg",
+          "expect": "violates",
+          "invariant": "NoneLost",
+          "without": "ThirdRefused",
+          "promise": "kept",
+          "why": "the link put out of the table is never held, so the faces and the graph stay right; it is a link the rule kept that the node never takes up, which NoneLost says"
+        }
+      ],
+      "promise": "Refines",
+      "refines": "FaceCollisionService"
+    },
+    {
+      "module": "FaceCollisionService",
+      "decision": "docs/zenoh-logic-as-sce-kinds.md, S4 26",
+      "runs": [],
+      "abstract": true
     }
   ]
 }
