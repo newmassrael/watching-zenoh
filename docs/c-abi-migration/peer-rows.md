@@ -1066,6 +1066,53 @@ Receive Ir: the client case and a session of groups alone (D10's awaited read) d
 session of faces and groups reads each batch of either in the run where it took a whole turn
 for each, as section 7.10 measured for the faces.
 
+### 7.12 R5b landed: the groups' rows marked in the table, and R5's rest read
+
+**What changed** (`crates/wz-capi-coop/src/engine/direct.rs`). A row of the face table carries
+whether it is a group's (`DirectFace::holds_group`), marked once, under the session's lock, as
+the open joins the groups (`CoopEngine::open_links` calls `DirectFaces::hold_group` for each
+group's place), for the table's life: a group keeps its place across its joins, and a join again
+(`Core::poll_groups`) takes no new one. The mark moves the bound of the rows a walk reaches
+(`held_rows`), and a face's going recomputes that bound over the rows that hold a face or are a
+group's (`DirectFace::walked_to`). The groups' step (`CoopEngine::step_groups`) walks the
+marked rows (`DirectFaces::group_rows`) with nothing held, where it took the session's lock once
+a group only to read the group's place by its index in the session's groups; the group's face is
+found by its place under the lock the step takes anyway, to pay the row's seat. `face_at` is the
+listener's alone again.
+
+**Held by.** `tests::group`'s
+`each_groups_row_is_marked_at_its_join_and_walked_by_the_groups_read` (`group`,
+`app-transport`, `threads`): a member's marked rows are its groups' places, past the dial
+role's, at the open and after the members met through the groups' reads (red if the open marks no
+row or another row, or if `hold_group` does not move the walk's bound: the step would find no
+row and the members would never meet). `tests::one_thread`'s
+`a_groups_session_lies_in_the_row_of_its_place` and the join-again test stand over the new walk.
+
+**Expected.** Bytes: about even (the place's lock and lookup leave `step_groups`; `hold_group`,
+the open's loop and a byte a row, within the row's padding, come in); the zenoh-pico preset's
+client and peer cases compile none of it where they join no group. Ir: a group's step takes the
+session's lock twice where it took it three times, about one uncontended lock and the closed
+test a group a read; a publish of a group build walks the group rows to the bound, each passed
+over by its `rests` as a listener's group rows already were (section 7.8).
+
+**R5's rest, read against the code.**
+
+- *The read as one walk* (section 5.6: no `read_groups` beside the faces' read). The premise
+  now holds: the table names a group's row without the session's state. What is left is the
+  whole read's walk (`CoopEngine::read_faces`) stepping a marked row where it lies, and the
+  callback's guard moving from the dial role's slot (held across `read_groups` today) to the
+  group row's own slot, which the read's entry check must then try as it tries the faces'
+  (`DirectFaces::turned`). That is the next step of this kind; it changes the order a read
+  steps a group in (with the faces, in the table's order, not after them), so its tests are the
+  group tests that count a read's steps and the awaited read's (D10).
+- *Publishing and telling in one walk* (no `TellGroups`, no groups' leg beside the faces'). The
+  premise does not hold yet: a group is written on through its own stage in the session's state
+  (`GroupFace` in `TransportState::groups`), under the session's lock, not through a row's send
+  place, and its messages are framed by the group's writer, not the links'. Both move with
+  `feat-mcast.md`'s F7 (the group's send through the links' writer, lane group-link-writer's T3),
+  after which a group row's send place is the place its leg is written through and the walk's
+  arm is the link kind's (section 5.6). Until then R6's `Held::Groups` leg stands.
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)
