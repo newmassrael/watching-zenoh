@@ -354,6 +354,8 @@ offsets in the plan form.
 |---|---|---|
 | `abe9ff7cd4` | the line's `stride` and `count`, `lend_seqs`, `seq_bytes`, `seq_rows`; lines in 32 bits; `SessionTables::lent` and `arena_bytes` read `SessionTables::places` (the per-table `Presence::lent_from`, `LentTable` and `kept_bytes` go) | `bounded::tests::a_plan_lends_the_description_a_region_places` (each table at the offset the count says, a count past the room refused and every later table rowless); `session_tables::tests::lent_tables_lie_where_their_description_counts_them` (the lent and the region's lines agree but for offsets, every line held to a limit, no two sequences or row spans meet, the arena took `arena_bytes`) |
 | `2b770ef192` | `Requesters::lent` and `arena_bytes` read `Requesters::places` through `lend_region`; `ReplyRegistry`'s and `LivelinessGetRegistry`'s own `lent` and `arena_bytes` go; counts `Queries` and `LivelinessGets` | `slot_observer::requester_region_tests::lent_requesters_lie_where_their_description_counts_them`, through the shared `bounded::assert_lent_as_described` |
+| `90a32d53ae` | the observer's own lists: `DeclObserverPair`, the three watcher tables and `LocalTokenRegistry` describe themselves over `LaidOut` (`LocalTokenRows` and `ObserverRegionRows` generic over the policy), each watcher line counted `DeclWatchers`, the tokens' `LocalTokens`; `SlotObserverOf::lent` lends the application tables, then one `lend_region` over the observer's description; `SlotObserverOf::arena_bytes(watchers, local_tokens)` is the lines summed and replaces `decl_watcher_bytes`; the per-table `lent`/`arena_bytes` of the pair, the three tables and the token registry go | `slot_observer::lent_tests::lent_observer_lists_lie_where_their_description_counts_them` (offsets, counts, no overlap, `arena_bytes` equal to the lines laid, one key line with `liveliness-token`, a token count past the build's bound refused); `decl_sink::tests::a_lent_pair_refuses_an_observer_past_its_rows` now lends through `lend_seqs` and holds the lines' sum to the two lists' spans |
+| `cda04a0c1a` | a face's peer tables: `SubscriberPeer`, `ReplyStage` (`ReplyStageRows` generic), `FinalStage` and `PeerTables` describe themselves over `LaidOut`, the key lines generic too; counts `PendingDeclares`, `Replies`, `ReplyBytes` (a line of one-byte rows) and `Finals` (`PeerRows::counts`); `PeerTables::lend_rows` keeps its keys and pools as before, walks `LINES` (its own lines, the reply stage's two, the Finals') by `lend_seqs`, then lends the side's compose row, which a region keeps inline and so is no line; `arena_bytes` is the lines summed and the compose row; `ReplyStage`'s and `FinalStage`'s `lent`/`arena_bytes` and `SubscriberPeer`'s `lent`/`lend_rows`/`arena_bytes` go (`lend_compose_row` and `compose_bytes` stay, public) | `peer_tables::lent_tests::lent_peer_tables_lie_where_their_description_counts_them` (line count by feature, the reply bytes a stride-1 line, offsets, counts, no overlap, lines plus compose row equal to `arena_bytes` and to the arena's high water); the existing in-place, refusal and over-the-build tests hold the order and the refusals |
 
 Size: a line was 24 bytes on a 64-bit target and is 20 now (four `u32` and the count), so the
 region's description statics shrink there; on a 32-bit target a line was 12 bytes and is 20, and a
@@ -363,15 +365,19 @@ is the per-table lends inlined into `SessionTables::lent` (nine `SlotMap::lent_f
 replies' `lend_with`) and into `Requesters::lent` (three `arena.lend`); each `lent` now carries one
 description static of its own. Receive Ir: none, the open only.
 
+Size of the two steps after them: the text that goes is the per-table lends the two `lent` bodies
+inlined (four `arena.lend` and the three tables' `lent` wrappers in the observer, four in a face's
+peer tables), each `lent` now one walk over one description static of its own; the plan's counts
+are the same bytes as before, in the same order for the observer and with the side's compose row
+moved after the stagings for a face, which no count reads. The region form's lines now carry their
+count; a region ignores it. Receive Ir: none, the open only. The coop plan still counts the
+watchers by `HeapSinks`' row type, not the engine's own, which over-counts a build whose watcher
+sink is a unit; step 4 below reads the registry's own lines and closes it. What `peer-row-pools`
+keeps in the session's pools is no line of a face's: the pools stay `PeerPools::lent`, and
+`keep_rows_in` stays the hand-out.
+
 Left, in order, each a step of its own over the same line:
 
-1. The observer's watcher lists and the session's own tokens (`SlotObserverOf::lent`,
-   `decl_watcher_bytes`, `DeclObserverPair`, `LocalTokenRegistry`): their count slots are the
-   watchers' (`decl_watcher_rows`) and `MAX_LOCAL_TOKENS`; then `App` is one walk.
-2. The peer's per-face lines (`PeerTables::lend_rows`: the subscriber side's staging, the reply and
-   final stages, the liveliness staging). The reply stage's byte area is a line of stride 1 counted
-   by `reply_bytes`. What `peer-row-pools` keeps in the session's pools is no line of a face's: the
-   pools stay `PeerPools::lent`, and `keep_rows_in` stays the hand-out.
 3. The registry's plan form as the region's: `RegistryOf::new` becomes `write_parts`, one
    `lend_region` over the registry's description (the application's lines, the sets' table, the dial
    face's set) and `bind`, the form `placed.rs` has; `lend_set` and `SpareSets` lend a set by the
