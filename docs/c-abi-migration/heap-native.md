@@ -28,7 +28,9 @@ item reads the policy apart from where its counts come from (`runtime-plan`) (R1
 `tables-on-use` takes the tables on use in a build laid out from its config too, but where the
 session takes faces beside its dial role's (R1a). The preset's own library takes such faces
 (`peer`, `multicast-transport`), so it is the lent form until R1b, and the switch waits for R1b
-(11.2); 11.3 lays out the commit of the switch and its size case. Nothing here was built or
+(11.2). R1b began with the session core: a peer's tokens split off on `OnUse` as on `Lent`
+(`PeerTokens::split_off`, 7.10); what the rest of R1b has to decide first, the bound of the owed
+table where no pool bounds the tokens, is read in 11.1 (R1b, 3). 11.3 lays out the commit of the switch and its size case. Nothing here was built or
 measured by this lane: a byte figure is either **read** from the size ledger's explain document or
 from `nm -S` of the case's library named below, or an **estimate** read off the code; a count of
 instructions is a reading of the code, not a run. Line references are to the tree this lane
@@ -288,6 +290,7 @@ session takes its row at its open, as every policy's does.
 | N4 | the doors: 3.7 | `crates/wz-capi-pico` (`process_pool.rs`, `object_slot.rs`, `bytes.rs`) | -2,000 to -3,000 | 0; the put's to be read | -0 to -8 KiB a pair |
 | **R1, step 0 (landed on the lane: `6b6041bf09`)** | the policy of the session's tables stated once, by `build.rs` (`TablePolicy`), as the cfg of its name (`wz_lent`, `wz_on_use`): an item that differs by the policy reads its name, one that differs by where the counts come from reads `runtime-plan` (7.9) | `crates/wz-capi-coop` (`build.rs`, `lib.rs`, `arena.rs`, `engine.rs`, `engine/{registry,registry/held,state_places,query,decl_watch}.rs`, `round.rs`, the tests) | 0 (every predicate is the one it replaced) | 0 | 0 |
 | **R1a (landed on the lane: `01cf14693c`)** | `tables-on-use` names `OnUse` in a build laid out from its config too, but where the session takes faces beside its dial role's (`listen`, `group`); its registry, keys, state and plain tables are the client form's, their counts the config's (7.9) | `crates/wz-capi-coop` (`build.rs`, `lib.rs`, `tests/on_use.rs`), `scripts/lib/nondefault-tests-gate.sh` | no case builds the planned on-use form yet (`config-policy` beside `wz-capi-coop/tables-on-use`); D12 0 | 0 | as N3c's client form |
+| **R1b, step 1 (landed on the lane: `1063768725`)** | the owed tokens' split on `OnUse`: `FixedIdMap::split_off` moves a fixed table's rows whole and keeps its refusals; `PeerTokens::<OnUse>::split_off` hands a face's tokens over as a table of their own, their keys still counted against the session's budget, and `None` for a table of no token (11.1, R1b, 3; 7.10) | `crates/wz-session-core` (`id_map.rs`, `declare/liveliness_subscriber.rs`) | 0 (no case names it: no engine form owes an on-use face's tokens yet) | 0 | 0 |
 | R1b to R4 | the zenoh-pico preset's own library (`peer`, `multicast-transport`, so `runtime-plan`) on use: the listening and grouped forms' holders, sets and owed tokens on use and `build.rs`'s `!takes_faces` dropped (R1b), the admission and the direct faces' slots per face (R2), the listening and grouped stacks' memory (R3), its arena out (R4) (11.1) | `crates/wz-capi-coop` (`lib.rs`, `engine.rs`, `engine/registry/counted.rs`, `engine/state_places.rs`, `engine/direct.rs`), `crates/wz-runtime-coop` (the stacks' ports and groups) | the preset's library, read once N5 resolves it so | 0 | section 5 |
 | N5, after R1b (11.2, 11.3) | the switch and its guards (section 9): the `table-memory` axis, the zenoh-pico defconfig's `on-use`, the release profiles' `at-open`, the size cases of both forms (section 10) and C1nh's second reading | `deploy/wz-config.toml` and what it generates, `configs/zenoh-pico_defconfig`, `configs/profiles/host-peer-ext.conf`, `host-peer.conf`, `scripts/lib/capability_cost_gate.py`, `deploy/size_ledger.json`, `deploy/pico_host_ceiling.json`, `scripts/run-ci.sh` (C1nh) | 0 for the release form; the on-use case reads N3 and N4's figures | 0 | 0 |
 
@@ -652,7 +655,33 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
 - Not tested: the C library in the planned on-use form (`config-policy` beside
   `wz-capi-coop/tables-on-use`), which no case builds yet.
 
+### 7.10 R1b, step 1
+
+- `id_map::tests::a_split_off_fixed_table_takes_its_rows_whole`: two ids bound in a table of two,
+  a third refused and counted (the CONTROL), the split holding both in the order bound with no
+  refusal, the table it came from holding none, its refusal kept, and binding again. Red if
+  `FixedIdMap::split_off` leaves the rows behind (`core::mem::take` of the rows dropped) or hands
+  the count of refusals to the table split off.
+- `declare::liveliness_subscriber::tests::an_on_use_peers_tokens_split_off_whole_and_stay_counted`
+  (`storage-profile`): a table of no token splits off nothing (the CONTROL); two tokens taken
+  against a key budget split off whole, in the order declared, the budget's count unmoved; the
+  table they came from takes a third token against the same budget; the table split off retracts
+  the lowest id first (`take_lost`); dropping both gives every key's bytes back. Red if
+  `PeerTokens::<OnUse>::split_off` leaves the tokens behind, drops their keys, or hands the new
+  table another budget than the one its keys are counted against.
+- D12: both are items no D12 build reaches (`FixedIdMap::split_off` is called by the on-use split
+  alone, which no engine form calls yet). C1cs's readings are not expected to move.
+
 ## 8. What the main session runs
+
+- R1b, step 1 (`1063768725`), not built or run by this lane: `cargo test --manifest-path
+  crates/Cargo.toml -p wz-session-core --lib a_split_off_fixed_table_takes_its_rows_whole` 1,
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --features codec-declare --lib
+  an_on_use_peers_tokens_split_off_whole_and_stay_counted` 1 (the module's tests need
+  `codec-declare`, which no default names; the gate's wide `wz-session-core` leg names it, so the
+  census finds the test claimed; a run of 0 is no pass), and `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core
+  --all-targets -- -D warnings`, the same with `--no-default-features` (no `alloc`: the on-use
+  split is not compiled).
 
 Nothing of N1, N2, N3a, N3b or N3c's first two steps was built or run by this lane.
 
@@ -1095,7 +1124,24 @@ The steps, each a build of its own, the D12 forms' bytes and behaviour unchanged
        decision of R1b's: an `OnUse` `split_off` that takes the table and leaves an empty one with
        the quotas and the keys' handle (each owed row then one peer's tokens at the build's bound,
        taken at the first face owed), or the set kept apart, its place held as a tomb's is
-       (`KEPT`), until its tokens are retracted, which keeps the owed table out of the form;
+       (`KEPT`), until its tokens are retracted, which keeps the owed table out of the form.
+       Decided and written (7.10): the split, as on `Lent`; a tomb would hold a place, and so a
+       face, for as long as a retraction waits for room. What is not decided yet is the owed
+       table's count on `OnUse`. On `Lent` it is a row for each row of the session's token pool
+       (`FacePeers::owed_tokens`, `crates/wz-capi-coop/src/arena.rs:1220`), sound because a face
+       owes apart only while its tokens hold a row of the pool, so the faces owing at once are
+       never more, and `owe_tokens_of` asserts the push is kept
+       (`crates/wz-capi-coop/src/engine/registry.rs:2136`). On `OnUse` no pool bounds the tokens
+       of all faces together, each face's table is held to its own `MAX_REMOTE_DECLS` alone, so
+       a face that comes and goes while the round has no room can owe more tables than that count,
+       and the push can be refused; and `FirstUse` takes every row of the count at the first face
+       owed, each row a whole `PeerTokens<OnUse>` (an inline table of `MAX_REMOTE_DECLS` rows).
+       The textbook answer keeps the lent form's argument: a count of the tokens the faces hold
+       together, held by the registry as the pool's rows hold it on `Lent` (a token refused past
+       it as a full table refuses it), which bounds the faces owing at once again; or an owed
+       table of tokens rather than of tables (a row a token, its face's order kept), counted to
+       that same count, which also takes the memory of the tokens owed and no more. Either is a
+       change of the session core's token tables, and R1b's engine half waits for it;
     4. the rooms' places: `StatePlaces::room_places` holds `FACE_SETS` (one) places; a listening
        session holds one for each set (`plan.peers().sets()`), at most `MAX_FACE_SETS`: the field
        at that bound in the state, or a counted table of them;
