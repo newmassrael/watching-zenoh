@@ -584,6 +584,11 @@ impl<F, U> HeldOperation<F, U> {
     /// is written over the running state this body wrote, which holds nothing to drop.
     #[inline(always)]
     fn run_once(&mut self, run: impl FnOnce(F) -> U) {
+        // Not taken unless waiting: an answered state taken would be let go of, its answer with
+        // it, and leave a running one in its place, which hands back nothing.
+        if !matches!(self, Self::Waiting(_)) {
+            return;
+        }
         if let Self::Waiting(f) = core::mem::replace(self, Self::Running) {
             *self = Self::Answered(run(f));
         }
@@ -3717,5 +3722,32 @@ mod held_operation_tests {
             None,
             "a run that never answered"
         );
+    }
+
+    /// An operation that unwinds, in a build whose panic unwinds, leaves its hold running: the
+    /// unwind lets go of what the operation took, once, no answer is handed back, and a run
+    /// after it runs nothing. Turned red by a take of the waiting operation that leaves the
+    /// waiting state standing while it runs: the run after the unwind would run it again.
+    #[test]
+    fn an_operation_that_unwinds_answers_nothing_and_is_let_go_of_once() {
+        let drops = Cell::new(0);
+        let held = Dropped(&drops);
+        let mut operation = HeldOperation::Waiting(move || -> u32 {
+            let _held = &held;
+            panic!("an operation that unwinds")
+        });
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            operation.run_once(|f| f());
+        }));
+        assert!(unwound.is_err(), "CONTROL: the operation unwound");
+        assert_eq!(drops.get(), 1, "the unwind let go of what it took");
+        let ran_again = Cell::new(false);
+        operation.run_once(|_| {
+            ran_again.set(true);
+            0
+        });
+        assert!(!ran_again.get(), "a run after the unwind runs nothing");
+        assert_eq!(operation.into_answer(), None);
+        assert_eq!(drops.get(), 1, "nothing is let go of twice");
     }
 }
