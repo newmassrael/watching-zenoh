@@ -771,3 +771,63 @@ T3b does not need the widening (16.1: its group is `wz-session-mcu`'s, which tak
 `session-unicast`), so the widening lands with T3c, whose group is the reader that makes it whole.
 
 Next: T3b with D2.
+
+## 18. Step T3b, first commits: the group's transmit state and its driver, as landed
+
+- **The door is one type of the session core, not the walk made public.** `TxRoute::write`,
+  `FrameEmit` and the conduits stay `pub(crate)`. What a transport that is not a unicast
+  session sends with is `transport_tx::GroupTx<R>`: a `TransportTx`, the `LinkTx` of its one
+  link and the group's limits (`GroupTxLimits`: the frame budget, the SN ring, the reassembly
+  cap, QoS, compression, the queue's waits), settled when it is made, so its send gate opens at
+  once. `GroupTx::send` is what a session's dispatch does from its conduit's lock on: the
+  conduit locked (a droppable message that finds a sender holding it is `PushOutcome::Held`, as
+  zenoh-pico's try of the transmit lock fails), `TxRoute::write` with a `FrameEmit` of the
+  group's limits, an express message's drain of its band; a body the codec refuses is
+  `PushOutcome::Refused`, a closed gate `SendWireError::TransportUnavailable`.
+  `GroupTx::next_sn` reads what the JOIN advertises (`FrameTxConduits::next`, new), and the
+  batch window is the conduits' own (`batch_start`, `batch_flush`, `batch_stop`). Under
+  `transport-multilink` the route's set is an empty one the group holds, so every frame leaves
+  by its link.
+- **One walk a build holds where the engine's runtime names the driver by a trait object.**
+  `wz-capi-coop`'s links run on `CoopRuntime<C, dyn BoxedLinkDriver, SessionLock>`
+  (`engine.rs` @ `type LinkRuntime<C>`), so a group of that runtime is the same instance of the
+  walk. A runtime that names a concrete driver (the slot profile's) would compile a second one
+  for a group's driver; no group runs there (`group_drive`'s stage is the heap profile's).
+- **Without `transport-qos` a group has one conduit and one SN ring a channel**, as zenoh-pico's
+  multicast transport does; `MulticastParams::is_qos` is inert in such a build already.
+- **The driver** is `wz-session-mcu`'s `group_drive::GroupDriver<T>`, over the `GroupLink` the
+  group's task shares: it lends the walk slots of one batch (`wz-runtime-coop`'s `TxLender` over
+  `HeapTx`, `SESSION_TX_SLOTS` of them, one more with the hold), copies bytes built apart into one
+  (`copied_send`), and offers a handed-over slot to the socket from where it was encoded. A link
+  the session does not hold open, and a send the stack fails, are a drop (`NoTxSlot`) and not a
+  writer gone: a group's next datagram may leave, and `WriterGone` would close its gate for good.
+- **D2 is the driver's** (`multicast-send-hold`, a feature of `wz-session-mcu` for now). Off, a
+  full socket is waited on inside the send until it takes the frame (`GroupTransport::wait_for_room`).
+  On, the frame's slot is held and the send returns; `wait_for_room` offers the held frame first
+  and waits on the socket while it is refused, and a frame handed over with no room asked (a
+  window's flush) while one is held is a drop.
+
+Held by `bundle_tests::group_tx_tests` (`codec-push`, not `tx-lend-only`):
+`a_group_frames_a_message_on_its_link_and_its_join_reads_past_it` (red if the send mints on
+another channel, the gate is closed at the making, or `next_sn` answers the last number minted),
+`a_group_whose_writer_is_gone_refuses_its_next_send` (red if the send does not read the gate),
+`a_group_window_holds_its_messages_in_one_frame_until_the_stop` (`transport-batching`); and by
+`group_drive::driver::tests`: `a_frame_leaves_on_the_socket_as_it_was_written`,
+`a_frame_on_a_link_not_open_is_a_drop`, `a_full_socket_is_waited_on_inside_the_send` (without
+the hold) and `a_frame_a_full_socket_refused_is_held_and_offered_first` (with it).
+
+Expected: 0 bytes on every case (no build calls either type yet); receive Ir none.
+
+Next, in order:
+- the stage over `GroupTx<LinkRuntime>` and `GroupDriver`: `GroupTxStage::push_encoded` and the
+  reply admission call `GroupTx::send` (the quota's admission before it), the JOIN reads
+  `next_sn`, less the held frame's number with the hold (read off its frame head, which the
+  driver will answer), the counters move to `GroupTx`'s `TransportStats`; the lanes, `Staged`,
+  `StageQueue`, `Writer` and `MulticastBatch` leave the pico builds;
+- the round form's group task reads `TxConduits::sender_flag` (a reader on `GroupTx`) before it
+  reads its socket (section 9.4), with the round-form test of a member's ask answered after the
+  put's frame;
+- D2's capability (`deploy/wz-config.toml`, `WZ_CAP_MULTICAST_SEND_HOLD`, the features of
+  `wz-capi-pico` and `wz-capi-coop` forwarding `wz-session-mcu/multicast-send-hold`; main runs
+  `wz_config.py --write`);
+- then T3c (with the gate widening of 17.1), F8b.
