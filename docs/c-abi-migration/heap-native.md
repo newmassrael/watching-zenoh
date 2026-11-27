@@ -13,10 +13,16 @@ under its feature `tables-on-use`, its registry made by value and its keys count
 one allocation the open takes from the allocator apart from its arena, `region.rs` no longer in
 the form; and that step's second half: the state's plain tables and the round's tables counted on
 `OnUse`, their policy the one the engine's calls name, each refusal of a first row answered as a
-value (section 11, the audit). The owner's ruling of 2026-11-27 chose the form of section 6 (c),
-per preset: the rest of the cooperative engine's on-use form (N3c's step 3, N3d, N3e), the doors' (N4) and the switch with its guards (section 9) are designed here and not
-written yet, because a switch that cannot be built is not declared; section 11 reads what N3c has to give a home to, and why it is the next step and not
-a part of N3b. Nothing here was built or
+value (section 11, the audit); then the first part of its third step (section 11, 3a): the
+engine and the faces' rooms of an on-use session each in an allocation of its own, the engine's
+claimed before anything is reserved and keeping the arena's memory by a count as its place in the
+arena did. The owner's ruling of 2026-11-27 chose the form of section 6 (c), per preset: the rest
+of the cooperative engine's on-use form (3b to 3d, N3e), the doors' (N4) and the switch with its
+guards (section 9) are designed here and not written yet, because a switch that cannot be built is
+not declared; section 11 reads what N3c has to give a home to, and why it is the next step and not
+a part of N3b, and 11.1 reads why the zenoh-pico preset's own library is the form laid out from
+its config (`runtime-plan`), which the on-use form does not reach yet, so the switch waits for
+that form's first step (11.2). Nothing here was built or
 measured by this lane: a byte figure is either **read** from the size ledger's explain document or
 from `nm -S` of the case's library named below, or an **estimate** read off the code; a count of
 instructions is a reading of the code, not a run. Line references are to the tree this lane
@@ -270,10 +276,12 @@ session takes its row at its open, as every policy's does.
 | **N3a (landed, `1243d2623f`)** | the session's tables made counted on `OnUse` (`SessionTables::counted`, `Presence::counted`, `CountedTable`, `HeldReplies::counted`) | `session_tables.rs`, `reply_hold.rs` | 0 (no engine makes them yet) | 0 | 0 |
 | **N3b (landed, `ffde81a72e`, `b83c368fbd`, `3da7536dde`)** | the session core's other tables a face and the application hold, counted on `OnUse`, each a constructor as N3a's from the limits the open resolved: `PeerTables::counted` and `count_rows` (the in-place form, as `lend_rows`), `SubscriberPeer::counted`, `ReplyStage::counted`, `FinalStage::counted`, `Requesters::counted` (`ReplyRegistry`, `LivelinessGetRegistry`), `SlotObserverOf::counted` over `CountedTables` (the watcher lists, `LocalTokenRegistry`); `LentRoom` and `PeerTokens` need none (on `OnUse` the composing room is inline, `ComposeInline`, and a peer's tokens a `FixedIdMap` whose keys `keep_keys_in` hands). `ReplyStage::stage_parts` makes both its columns' rooms before it writes either, and the query dispatch asks `FinalStaging::make_room` before a query runs, on a first-use policy (each arm folds away on every other) | `peer_tables.rs`, `slot_observer.rs`, `pubsub.rs`, `reply_stage.rs`, `reply.rs`, `decl_sink.rs`, `declare/{subscriber,queryable,liveliness,liveliness_get,local_token}.rs`, `query.rs`, `query/{in_place,pinned}.rs` | 0 (no case names them; the two room arms fold away on the D12 policies) | 0 | 0 |
 | N3c | the cooperative engine on `OnUse` under `tables-on-use`: `RowPolicy = OnUse`, the registry made by value (a third form beside `RegistryRegion` and the arena's), the open with no plan, no region and no lender (3.1), the session's `KeyBudget` in the boxed engine state (3.2); the moment assertion of N1 reads `AtFirstUse` in that form | `crates/wz-capi-coop` (`lib.rs`, `engine.rs` `lend_session` and `assemble`, `engine/registry.rs`, `registry/placed.rs`; `arena.rs` and `region.rs` not compiled in the form) | -4,500 to -8,200 (3.1, 3.2, 3.3, 3.5) | 0 to -6 (3.2); +3 at worst (3.5) | section 5 |
-| N3d | link memory on the heap arm alone (3.6) | `crates/wz-runtime-coop` (`link_cells.rs` `heap_head`, `kept.rs`, `link_storage.rs`) | -1,000 to -2,000 | 0 to -30 | section 5 |
+| **N3c, step 3a (landed on the lane: `f104d31bc8`, `81cebf0f4c`, `b0afa53110`)** | the engine and the faces' rooms of an on-use session each in an allocation of its own, the engine's claimed before anything is reserved and keeping the arena's memory by a count (11, 3a) | `crates/wz-runtime-coop/src/kept.rs` (`SharedClaim`), `crates/wz-capi-coop` (`engine.rs` `assemble`, `engine_of`, `lay_out_open`; `engine/state_places.rs` `RoomsPlace`; `arena.rs`) | the on-use case +100 to +300 (the claim and the rooms' block, until 3d); D12 0 | 0 | the on-use arena smaller by the engine's and the rooms' bytes, the same bytes from the allocator |
+| N3d (11, 3c) | link memory on the heap arm alone (3.6), its source a type the engine names, not a feature | `crates/wz-runtime-coop` (`link_cells.rs` `heap_head`, `kept.rs`, `link_storage.rs`) | -1,000 to -2,000 | 0 to -30 | section 5 |
 | N3e | a key held apart from every row (an object outside the lock: `KeyRef::hold_apart`, `KeysLocked::adopt`, `SampleView::keyexpr_held`) as a `HeapKey` clone taken and let go of under the lock, read by its text outside it | `key_arena.rs` beside `on_use.rs`, `sink.rs`, the engine's object paths | -200 to +200 | 0 | 0 |
 | N4 | the doors: 3.7 | `crates/wz-capi-pico` (`process_pool.rs`, `object_slot.rs`, `bytes.rs`) | -2,000 to -3,000 | 0; the put's to be read | -0 to -8 KiB a pair |
-| N5 | the switch and its guards (section 9): the `table-memory` axis, the zenoh-pico defconfig's `on-use`, the release profiles' `at-open`, the size cases of both forms (section 10) and C1nh's second reading | `deploy/wz-config.toml` and what it generates, `configs/zenoh-pico_defconfig`, `configs/profiles/host-peer-ext.conf`, `host-peer.conf`, `scripts/lib/capability_cost_gate.py`, `deploy/size_ledger.json`, `deploy/pico_host_ceiling.json`, `scripts/run-ci.sh` (C1nh) | 0 for the release form; the on-use case reads N3 and N4's figures | 0 | 0 |
+| R1 to R4 | the zenoh-pico preset's own library (`peer`, `multicast-transport`, so `runtime-plan`) on use: the precedence of the two forms turned, the registry, keys and state of the form laid out from its config made as the client form's (R1), the admission and the direct faces' slots per face (R2), the listening and grouped stacks' memory (R3), its arena out (R4) (11.1) | `crates/wz-capi-coop` (`lib.rs`, `engine.rs`, `engine/registry/counted.rs`, `engine/state_places.rs`, `engine/direct.rs`), `crates/wz-runtime-coop` (the stacks' ports and groups) | the preset's library, read once N5 resolves it so | 0 | section 5 |
+| N5, after R1 (11.2) | the switch and its guards (section 9): the `table-memory` axis, the zenoh-pico defconfig's `on-use`, the release profiles' `at-open`, the size cases of both forms (section 10) and C1nh's second reading | `deploy/wz-config.toml` and what it generates, `configs/zenoh-pico_defconfig`, `configs/profiles/host-peer-ext.conf`, `host-peer.conf`, `scripts/lib/capability_cost_gate.py`, `deploy/size_ledger.json`, `deploy/pico_host_ceiling.json`, `scripts/run-ci.sh` (C1nh) | 0 for the release form; the on-use case reads N3 and N4's figures | 0 | 0 |
 
 N3c to N4 together (N3 of the first reading, split by where the code lies): **about -7,500 to
 -13,200** in the on-use case (section 10), against a gap of 32,525 (the case at 203,025)
@@ -570,9 +578,52 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   `admit_call`. The D12 cases' bytes are not expected to move: C1cs's reading of them is the check,
   and a move there is a finding.
 
+### 7.8 N3c, step 3a
+
+- In `wz-runtime-coop`'s `kept::tests`, with its default features, two:
+  `a_claimed_value_keeps_the_memory_it_was_made_with_until_its_last_holder` (red if
+  `SharedClaim::made_with` writes the value elsewhere than the claim's memory, takes no count of
+  the memory it is handed, or the value's last holder gives none back: `Shared::last_boxed` in
+  place of `last_kept_boxed` in `SharedClaim::try_new`) and
+  `a_claim_let_go_of_before_its_value_is_made_drops_no_value` (red if the claim's drop drops the
+  value it never held; its CONTROL, a made value, is dropped by its last holder).
+- With `tables-on-use`, `tests::on_use::an_on_use_engine_and_its_rooms_lie_apart_from_its_arena`
+  (red if the open writes the engine at a place the arena lends, `SessionArena::engine_place` and
+  `Shared::placed_with` in `CoopEngine::engine_of`, or the rooms, `Arena::place_with` in
+  `CoopEngine::assemble`). `tests::arena::a_sessions_engine_lies_in_its_own_arena_and_is_reached_until_it_closes`
+  reads where the engine lies in the D12 forms alone and its row in every form: in those forms it
+  is the live control of the accessor the on-use test reads.
+- At the build: `EnginePlace` and `SessionArena::engine_place` compile outside the on-use form
+  alone, and `lay_out_open` lays the engine's and the rooms' places out there alone, so the on-use
+  arena is smaller by both and
+  `tests::on_use::an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart`
+  reads the plan's bytes as it did. The rooms' block is held after their owner in `Core`, whose
+  fields drop in order.
+- Not tested: the open refused when the allocator has no room for the engine
+  (`ArenaRefused::NoMemory` with the engine's bytes, before anything is reserved) or for the
+  rooms (`OwnBlock::take`); only a refusing allocator reaches either.
+- D12: every item added reads `all(feature = "tables-on-use", not(feature = "runtime-plan"))` or
+  is the claim, which no D12 build instantiates; `SessionArena::keep` is `pub(crate)` with the
+  body it had. The D12 cases' bytes are not expected to move: C1cs's reading of them is the check,
+  and a move there is a finding.
+
 ## 8. What the main session runs
 
 Nothing of N1, N2, N3a, N3b or N3c's first two steps was built or run by this lane.
+
+- N3c, step 3a (7.8), not built or run by this lane either. `cargo test -p wz-runtime-coop --lib
+  kept::tests` two more than before, and `cargo clippy -p wz-runtime-coop --all-targets -- -D
+  warnings`. The engine's on-use legs: `cargo test -p wz-capi-coop --features tables-on-use --lib
+  on_use` 7 (6 before), the same with `--features
+  liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use` 8 (7 before), and
+  `cargo clippy` of both legs with `--all-targets -- -D warnings`; the round's form,
+  `WZ_COOP_VALUE_LOCKS=off cargo clippy -p wz-capi-coop --features query,queryable,tables-on-use
+  --all-targets -- -D warnings`; the client library in the on-use form, `cargo build -p
+  wz-capi-pico --no-default-features --features os-host,link-udp,wz-capi-coop/tables-on-use`. The
+  D12 forms as before: the crate's suites of `wz-capi-coop` and `wz-capi-pico`, `cargo clippy -p
+  wz-capi-coop --all-features --all-targets -- -D warnings` (a build of both features, the
+  `runtime-plan` form, which this step does not reach), and C1cs's reading of
+  `pico-client-coop-nostd`, `pico-peer-coop` and `pico-api-coop-nostd`, unchanged.
 
 - N3c, step 2, second half (7.7). The session core with its default features: `cargo test -p
   wz-session-core --lib get_plane::tests` 16 (14 before), `--lib query_plane::tests` 16 (12
@@ -781,10 +832,10 @@ Every pico case is the D12 form, and so is every case of the size ledger (C1cs:
   "pico-api-coop-nostd"}`) and moves with it.
 - The statement: a library states the form it is, so `wz_config.conformance_statement` includes
   the axis's value, and the statement case of the pico ABI gains its on-use twin.
-- A peer twin (`pico-peer-coop-on-use`) waits for N3c to cover `runtime-plan` (until then a build
-  of `peer` beside `tables-on-use` is the D12 peer, 9.1), where a listening session's faces come
-  and go: on `OnUse` each face's tables are counted at its attach (N3b's constructors), with no
-  pool lent at open.
+- A peer twin (`pico-peer-coop-on-use`) waits for R1 (11.1; until then a build of `peer` beside
+  `tables-on-use` is the D12 peer, 9.1), where a listening session's faces come and go: on
+  `OnUse` each face's tables are counted at its attach (N3b's constructors), with no pool lent at
+  open.
 
 ## 11. What N3c has to give a home to
 
@@ -838,9 +889,49 @@ The order that builds at each step:
    (`PlacedTables::counted`, `RoundRows::counted`), the ends take their rows at the leg's open,
    `FinalHolds::admit` answers `Admitted`, and an offer to the round takes its rows before it
    writes. Every push of those tables is read in the audit below.
-3. N3d, then the runtime, the engine and the rooms boxed; `arena.rs` leaves the form and the
-   size case reads group A's figure.
-4. N4, then N5: the switch is declared once the form it selects builds.
+3. The engine's own values out of the arena, then N3d. Three parts, each of which builds alone,
+   in this order: the first two lie in the engine's crate and the heap arms they need are there or
+   one maker away, while the links' memory reaches every link of `wz-runtime-coop`.
+   - 3a, the engine and the faces' rooms. Written (7.8): the engine lies in an allocation of its
+     own the open claims beside its row, before it reserves anything (`SharedClaim`,
+     `crates/wz-runtime-coop/src/kept.rs`), so an open the allocator refuses reserves nothing;
+     the engine keeps a count of the arena's memory as the place the arena lent it did
+     (`SessionArena::keep`, `SharedClaim::made_with`), so what the engine holds that lies in the
+     arena (the lodgings, the handle's place) stands while the engine is held, and the arena's
+     memory goes back after the engine's last holder, as before. The rooms lie in an allocation of
+     their own (`RoomsPlace` in an `OwnBlock`, `engine/state_places.rs`), held by the session's
+     state after their owner. The plan lays out neither place in the form (`lay_out_open`). No
+     body of the open's lay-out leaves yet: the arena still lends the transport's tables, the
+     ABI's places and the runtime's span, and the form's code grows by the claim (one maker and one
+     drop, instantiated for the engine alone) until 3d.
+   - 3b, the runtime: the heap makers the runtime has (`CoopRuntime::try_reserved`,
+     `try_reserved_for_one`, `try_opening`, `crates/wz-runtime-coop/src/runtime_impl.rs`), and a
+     fourth for the form the one-link read runs on (`RuntimeForm::Taskless`), which has none: an
+     `ExecutorState::try_taskless` over a `TaskStore` of no cell, as `taskless_in` is over a
+     placed one, with the local set made over the runtime (`CoopLocalSet::try_new`). The count of
+     the arena the engine keeps is then laid out alone (`ArenaPart::ArenaKeep`, which
+     `ArenaPlan::lay_runtime` lays beside the runtime's span today), until 3d takes the arena out.
+   - 3c, N3d: the links' memory, chosen by a type and not by a feature. A feature of
+     `wz-runtime-coop` cannot yield to `runtime-plan` as `tables-on-use` does (one crate's
+     feature cannot read another's), so a feature that compiled the heap arm alone would take the
+     lent arm from the runtime-plan form of a build that unifies both. The engine names its links'
+     memory as it names `LinkCount` (`crates/wz-capi-coop/src/lib.rs`): a source the cells are
+     made through, the lent tables' or the heap's, in place of the `Option<&LentByteCells>` that
+     `head_in` reads today (`crates/wz-runtime-coop/src/link_cells.rs:345`), so a form whose
+     source is the heap's links neither `table_head` nor a cell table, and `Owner::Table` has no
+     maker in it. The same for the links' buffers (`LinkTables`): a link's buffers taken at its dial
+     and held for its life, as zenoh-pico's transport holds its two; a reassembly chain's buffer at
+     its first fragment; the endpoints' texts by value. Each stack's `lend_buffers` and
+     `lend_cells` (`ip_stack.rs`, `app_link.rs`, `serial_link/links.rs`, `unixpipe_link.rs`,
+     `ws_link/links.rs`, `either_links.rs`, `session_drive.rs`) reads the source.
+4. N4 (3.7): the doors' objects from the allocator, counted against their kinds, so the places the
+   ABI holds in the arena today (the handle's, the entities', the lodgings) are the ABI's own.
+5. 3d, the arena: with every tenant housed, the on-use form reserves no arena. `SessionArena`,
+   `TableLender` and the lend bodies of `arena.rs` (`TransportRows::lent_from`,
+   `PlaceRows::lent_from`, `SessionRows::lent_from`) are not compiled in it; the counts the plan
+   reads off the limits (`ArenaPlan::count`, `tables`, `peers`, `gets`, `session`) stay, the
+   on-use constructors' only input. The size case reads group A's figure here.
+6. The zenoh-pico preset's own library on use (11.1, R1 to R4), and N5 once R1 builds (11.2).
 
 The pushes of the tables step 2's second half counts, and of the tables beside them in the same
 planes, each with what a refusal reaches (read at the step's own commits):
@@ -876,3 +967,93 @@ counted as a refused request after the callbacks ran, with no `Final` sent. N3b'
 the dispatch ask `FinalStaging::make_room`, which takes the row on a first-use policy and answers
 as `has_room` on every other. The engine's own checks of room before a push are read the same way
 when N3c names `OnUse`.
+
+### 11.1 The preset's own library is laid out from its config
+
+The zenoh-pico preset turns on, beside the client role, the peer capability and zenoh-pico's
+multicast transport: `peer` and `multicast-transport` name zenoh-pico in their `upstream_on`
+(`deploy/wz-config.toml`, the two capabilities), so `configs/zenoh-pico_defconfig`, which lists
+only what differs from the Kconfig default, names neither, and the crate's default build, which
+is the preset, names both (`crates/wz-capi-pico/Cargo.toml`, `default`). Each turns
+`runtime-plan` on: `peer` names `wz-capi-coop?/listen` and `wz-capi-coop?/runtime-plan`
+(`crates/wz-capi-pico/Cargo.toml:229`), `multicast-transport` names `wz-capi-coop?/group-host`
+(`:244`), whose `group` names `runtime-plan` (`crates/wz-capi-coop/Cargo.toml:310`), as
+`listen` does (`:238`). Where both forms are named, `runtime-plan` wins (9.1). So the switch of
+section 9, declared as written, would write `CONFIG_WZ_TABLE_MEMORY_ON_USE=y` into the zenoh-pico
+defconfig and resolve `tables-on-use` into the preset's own library, and that library would build
+the D12 form whole: a statement the build does not keep, which the file's rule (an option that
+cannot be built is not declared) refuses. The on-use form reaches the client builds alone today
+(`os-host,link-udp` and the capabilities that bring no `runtime-plan`).
+
+What the runtime-plan form lends from its arena that the client form does not, tenant by tenant
+(`lend_session` and `assemble` at this branch):
+
+| tenant | the runtime-plan form today | on use |
+|--------|-----------------------------|--------|
+| the registry's tables and the faces' sets | `Registry::new` over the arena; the faces' sets in the pools it lends (`peer-row-pools`), a set given back to its pool when its face goes | made by value as `Registry::counted` is (`engine/registry/counted.rs`), its table of sets counted to the sets the plan counts, a face's set made at its attach by `FaceTables::rowless_in` and `count_rows` (N3b's constructors) and dropped when the face goes, its rows' memory back to the allocator; no pool is lent |
+| the key arena | `lend.keys`, a `KeySpace` of the arena | the `KeyBudget` in the state, as the client form |
+| the state's places (the planes, the round, the step places, the rooms' places) | each placed in the arena (`place_with`, `StepPlaces::placed_in`, `FacePlane::place_in`) | `OwnState` (`engine/state_places.rs`, compiled without `runtime-plan` alone today) |
+| the plain tables and the round's rows | lent (`StateTables`, `RoundRows::lent`, `HeldReplies::lent`) | `PlacedTables::counted`, `RoundRows::counted` |
+| the admission (`listen`) | its rows from the heap at the open, its value placed in the arena | its value in an allocation of its own beside its owner, its rows as today |
+| the read slots and send places of the faces past the dial role's (`direct::DirectFaces::taken_in`, a build without `wz_round`) | lent for `max_faces` at the open | taken at the face's attach; a refusal answered as a face past `max_faces` is, the link closed before it has a face |
+| the links' buffers, a port's rows (`udp-listen`), a group's receive buffers, the kept publishes (`HandedTable`) | lent by the plan for each admitted link, port and group | 3c's sources: at a link's accept or dial, a port's bind, a group's join |
+| the runtime | `RuntimeForm::Opening` placed in the arena, its added cells of the heap | `CoopRuntime::try_opening` (3b) |
+
+The steps, each a build of its own, the D12 forms' bytes and behaviour unchanged:
+
+- R1, the precedence and the registry. In a build of both features the form is the on-use one
+  laid out from its config: `RowPolicy` and `StatePolicy` are `OnUse` wherever
+  `tables-on-use` is named (`crates/wz-capi-coop/src/lib.rs`), the moment assertion reads
+  `AtFirstUse` there, and `form_precedence_tests` holds the opposite of what it holds today (red
+  if a build of both names `Lent` or `AtOpen`). The registry, the key budget and the state's
+  places move together, as N3c's first two steps moved them for the client form, because
+  `RowPolicy` types them all: `Registry::counted` takes the listening form's holders and makes
+  a set at each attach, and `state_places` compiles in the form; the arena still lends the
+  transport's tables, the admission's place, the direct faces' slots and the ABI's places. Every
+  item spelled `all(feature = "tables-on-use", not(feature = "runtime-plan"))` is read again:
+  what holds for both on-use forms takes `feature = "tables-on-use"` alone, and what is the client
+  form's own (the region's rows, `OpenFrom::Region`) keeps the negation. Every test that reads
+  where a value lies (`tests::arena::a_sessions_planes_lie_in_its_own_arena` reads the plane in
+  the arena under `runtime-plan`) reads the form's cfg. From R1 `--all-features` builds this form,
+  so pre-push gate 7's clippy and the census of the non-default tests (C1cn) read it, and a graph
+  that unifies `peer`, `listen` or `group` with `tables-on-use` takes every session's memory
+  on use: the C library stays the one graph that names the feature (9.1), and the resolver's guard
+  (9.2, 2) is what keeps the release out of it.
+- R2, the admission's value and the direct faces' slots taken per face (the table's fifth and
+  sixth rows); a face refused for want of memory at its attach is answered as one past
+  `max_faces` is.
+- R3, the links' memory of the listening and grouped stacks: 3c's sources for a port's rows, a
+  group's receive buffers and the kept publishes, and the runtime's `try_opening` (3b).
+- R4, the arena of the form leaves with 3d.
+
+### 11.2 The switch after R1
+
+N5 (section 9) declares `on-use` once R1 builds: from then the preset's library, built with
+`tables-on-use`, takes its tables' memory at their first rows, which is what the option states,
+while R2 to R4 change where the rest of its memory comes from and not when its tables take theirs.
+Until R1 the option would name a form the preset's library does not build (11.1). What N5 writes
+is section 9's: the axis and its two options in `deploy/wz-config.toml`, `wz-capi-pico`'s
+feature `tables-on-use = ["wz-capi-coop?/tables-on-use"]` (the census of public features and
+the prose names read a new feature name, as every new one), the release profiles' `at-open`
+lines with their reason (`configs/profiles/host-peer-ext.conf`, `host-peer.conf`; their base is
+the zenoh-pico defconfig), the resolver's features and the reference's leaving the feature out
+(`wz_config.py` `engine_features`, `pico_reference`), C1nh's refusal of a release form that
+resolved to on-use and its second reading (9.2), and the generated files, which the main session
+regenerates (`wz_config.py --emit`). The guards of 9.2 stand as written but for the first: from
+R1 the build-time assertion reads `AtFirstUse` in a build of both features too.
+
+The size case of the client's on-use form (`pico-client-coop-nostd-on-use`, 10.2) needs no axis,
+but it needs the pico crate's own feature: `case_build` names a case's features through the C
+library's dependency on the ABI crate (`abi/<feature>`, `artifact_features` in
+`scripts/lib/capability_cost_gate.py`), which reaches no feature of the engine's crate, so
+`wz-capi-pico`'s `tables-on-use` lands with the case, before N5, its list
+`os-host,link-udp,tables-on-use`. It is the one reading of what the moment costs in code before
+the preset's library is on use. Its first `--measure` is the main session's: the gate's own rule
+fails `--check` on a case with no budget, so the case and its first budget land in one commit.
+
+What this lane can win, stated against the gap of section 4 (32,525 bytes, the case at 203,025):
+the on-use form of the client takes off the open's lay-out (3d, group A, about 6,300 read), the
+link memory's lent arm (3c, 1,000 to 2,000) and the doors' pools (N4, 2,000 to 3,000), about 7,500
+to 13,200 together (section 4), between a quarter and two fifths of the gap. The lane alone does
+not close it, and no figure here is measured: the case of 10.2, read at each of 3d, 3c and N4, is
+what says how much of that range is real.
