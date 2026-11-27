@@ -21,7 +21,9 @@
 //! runs with today, so a snapshot that holds them changes nothing. Which limits' readers have moved
 //! is declared once, by each limit's `read` in the declaration
 //! ([`crate::limit_binding::LimitSpec::READ_FROM_SNAPSHOT`]), and a document that states a limit
-//! whose readers still read the build is refused by name.
+//! whose readers still read the build is refused by name. A limit only the machines of one
+//! capability read names that capability (`read_by`), and a build without it refuses a statement
+//! of the limit by name the same way.
 
 #[path = "limits_generated.rs"]
 mod generated;

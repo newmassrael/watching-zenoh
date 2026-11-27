@@ -91,6 +91,12 @@
 # hands its machines the runtime's snapshot it resolved. `scripts/lib/limit_read_gate.py` holds
 # this to the code both ways, so a limit moves to `snapshot` in the change that moves its readers.
 #
+# `read_by` names the capability whose machines alone read a limit read from the `snapshot`. A build
+# without that capability reads the limit nowhere, so a reader of a document refuses a statement of
+# it by name there, as for a limit read from the `build`. The generated `READ_FROM_SNAPSHOT` reads
+# the capability's cargo feature in the crate the limit snapshots are generated into, whose features
+# are named after the capabilities, and `wz_config.py --check` holds that crate to have it.
+#
 # `[limit.upstream]` names what the limit is in upstream zenoh. `zenoh` is the key of zenoh's
 # configuration that states the same number, as a path in its DEFAULT_CONFIG.json5, which
 # `wz_config.py` finds in wz-zenoh's byte copy of that file; `cite` is the upstream code that
@@ -1707,7 +1713,8 @@ id = "tx-expiry-run"
 kconfig = "WZ_CAP_TX_EXPIRY_RUN"
 # On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's send that cannot
 # write fails and leaves its session to the lease, and counts no run of such sends. The count it
-# serves, TX_EXPIRY_CLOSE_AFTER, is refused by name in a build without it.
+# serves, TX_EXPIRY_CLOSE_AFTER, is read by it (the limit's `read_by`), so a build without it
+# refuses a statement of the count by name.
 os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
@@ -4645,6 +4652,8 @@ scope = "session"
 binding_heap = "live"
 binding_fixed = "open"
 read = "snapshot"
+# Only a session that counts the run of expiries reads the count.
+read_by = "tx-expiry-run"
 wire = "timing"
 help = '''
 How many blocking messages in a row may find no room within their deadline

@@ -655,8 +655,10 @@ pub trait LimitSpec: 'static {
     /// Who makes the table a bound limits grow; `None` for a parameter.
     const DRIVEN: Option<Driven>;
     /// Whether the machines of the limit's scope read it from the snapshot their creator hands
-    /// them. Where they still read the build's value, a value a later stage states would be taken
-    /// and never read, so a reader of a document refuses a statement of the limit by name.
+    /// them, in this build. Where they still read the build's value, a value a later stage states
+    /// would be taken and never read, so a reader of a document refuses a statement of the limit
+    /// by name. A limit only the machines of one capability read (the declaration's `read_by`) is
+    /// read in a build with that capability's feature alone, and refused the same way in another.
     const READ_FROM_SNAPSHOT: bool;
     /// The capacity this build sized storage by, or `None` where it sized none by this limit.
     const CAPACITY: Option<usize>;
@@ -881,38 +883,6 @@ impl<S> fmt::Debug for LimitEntry<S> {
     }
 }
 
-/// Whether this build's machines read the limit `id` at all, beside where its declaration says
-/// they read it ([`LimitSpec::READ_FROM_SNAPSHOT`]). `TX_EXPIRY_CLOSE_AFTER` is the length of the
-/// run of expiries that closes a session, which a build without `tx-expiry-run` does not count, so
-/// there no machine reads it and a statement of it is refused by name, as for any limit no machine
-/// reads.
-const fn built_reads(id: &str) -> bool {
-    #[cfg(not(feature = "tx-expiry-run"))]
-    if same_text(id, "TX_EXPIRY_CLOSE_AFTER") {
-        return false;
-    }
-    #[cfg(feature = "tx-expiry-run")]
-    let _ = id;
-    true
-}
-
-/// Whether `a` and `b` are the same text, in a `const` context, where `==` on text is not.
-#[cfg(not(feature = "tx-expiry-run"))]
-const fn same_text(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut at = 0;
-    while at < a.len() {
-        if a[at] != b[at] {
-            return false;
-        }
-        at += 1;
-    }
-    true
-}
-
 impl<S> LimitEntry<S> {
     /// The entry of the limit whose type is `L`.
     pub const fn of<L: LimitField<S>>() -> Self {
@@ -933,7 +903,7 @@ impl<S> LimitEntry<S> {
                 id: L::LIMIT,
                 kind: <L::Value as LimitValueType>::KIND,
                 driven: L::DRIVEN,
-                read_from_snapshot: L::READ_FROM_SNAPSHOT && built_reads(L::LIMIT),
+                read_from_snapshot: L::READ_FROM_SNAPSHOT,
                 capacity: L::CAPACITY,
                 domain: L::DOMAIN,
                 word: L::WORD,
@@ -957,8 +927,8 @@ impl<S> LimitEntry<S> {
         self.row.driven
     }
 
-    /// Whether the machines of the limit's scope read it from the snapshot their creator hands
-    /// them ([`LimitSpec::READ_FROM_SNAPSHOT`]), in a build whose machines read it at all.
+    /// Whether, in this build, the machines of the limit's scope read it from the snapshot their
+    /// creator hands them ([`LimitSpec::READ_FROM_SNAPSHOT`]).
     pub const fn read_from_snapshot(&self) -> bool {
         self.row.read_from_snapshot
     }

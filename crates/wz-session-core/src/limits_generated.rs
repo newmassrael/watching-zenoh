@@ -1028,7 +1028,7 @@ impl LimitSpec for TxExpiryCloseAfter {
     type Value = Quota;
     const LIMIT: &'static str = "TX_EXPIRY_CLOSE_AFTER";
     const DRIVEN: Option<Driven> = Some(Driven::Remote);
-    const READ_FROM_SNAPSHOT: bool = true;
+    const READ_FROM_SNAPSHOT: bool = cfg!(feature = "tx-expiry-run");
     const CAPACITY: Option<usize> = None;
     const DOMAIN: LimitDomain =
         LimitDomain::of_bound_within(Self::CAPACITY, 65535, Self::DEFAULT, DEFAULTS_ONLY);
