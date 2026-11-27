@@ -1,0 +1,17 @@
+impact = ["watching-zenoh/local-ci-gates"]
+decision = '''
+Close debt-windows-x86-pico-ratchet-loss on two readings, hosted and measured directly on pc3-win, and repair what a Korean-locale Windows host broke on the way.
+'''
+changes = '''
+- wz_config reads cargo metadata as UTF-8; zenoh-pico-sys and the size reference pass /utf-8 to MSVC.
+- size_ceiling.ps1 reads cl's banner in English (VSLANG 1033).
+- debt-windows-x86-pico-ratchet-loss closed with both readings.
+'''
+verification = '''
+- pc3-win at 3b2aa88bd: package built, every x86 row PASS, pico-api-windows-x86 ratio 2.9144.
+- Hosted Platform 45972593479: every x86 row PASS, pico-api-windows-x86 ratio 3.0844.
+- wz_config selftest 583/583; zenoh-pico-sys builds on Linux.
+'''
+carry = '''
+- Rows are the hosted toolchain's; several read under ratchet by more than tolerance.
+'''
