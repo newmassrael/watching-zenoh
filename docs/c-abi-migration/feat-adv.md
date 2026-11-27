@@ -2,7 +2,7 @@
 
 Status: design of the lane. Its first step (A1 and A2, section 5), its second (A3 to A10 but
 A8, and the switches of section 6) and its third (A8, and A11 to A13 of section 9) and its fourth (A14 to A19 of section 9) are
-committed beside it; section 8 reads what remains and section 9 steps it. Nothing here was built by this lane. Every byte figure is either **read** or an **estimate**:
+committed beside it, and so is the plane's retraction (section 11.1); section 8 reads what remains and section 9 steps it. Nothing here was built by this lane. Every byte figure is either **read** or an **estimate**:
 read figures come from the libraries the size ledger's `--per-feature` run left on
 2026-11-27 (case `pico-api-coop-nostd`, pin 6a881c21dad1): the shipped library of the step
 before `advanced` and of the step that turns it on (symbol sizes), and the unstripped library of
@@ -258,21 +258,34 @@ the merge to run; none was run here):
 - A17. The grammar's numbers are read by a reader its caller names (`FloatRead`;
   `parse_range_with`, `parse_duration_with`), and a refusal is wz's `FloatError` in core's words,
   so `wz-zenoh-util` prints upstream's message whichever reader read it.
-  `time_range::decimal_text` checks `f64::from_str`'s grammar and writes the number as an integer
-  of at most 48 significant digits (one more, `1`, standing for any nonzero digit past them) and a
-  power of ten, with no radix character (no locale reads it otherwise) and a NUL, so the C reader
-  reads nothing past it; infinities, NaNs and zeros are answered without a reader. The pico plane's
-  cache reads with `libc::strtod` over it on a unix host (`CacheStore::query_handler_reading`);
-  Windows and the kernels keep core's reader, as neither the DLL's C runtime nor an image's C
-  library is a fact this lane established. zenoh-pico's own reader calls `strtod` on its
-  argument and not on the copy it makes (`src/utils/time_range.c` @
-  `double value = strtod(bound->start, &err);`), so it reads past the duration in the caller's
-  text. A literal past 48 significant digits that lies within a part in 10^48 of a halfway point
-  between two `f64`s may round the other way; a duration is then held to the nanosecond.
-  Tests `a_decimal_written_for_a_platform_reader_reads_as_core_reads_the_literal` and
-  `a_durations_number_is_read_by_the_reader_named` (`wz-session-core/src/time_range.rs`),
-  `answer_from_ring_reads_the_time_with_the_reader_named` (`advanced_cache/tests.rs`),
-  `time_number_tests::the_c_librarys_reader_reads_a_time_as_core_does` (`advanced_plane.rs`, unix).
+  As first landed, `time_range::decimal_text` wrote the number as an integer of at most 48
+  significant digits and a power of ten, and a literal within a part in 10^48 of a halfway point
+  between two `f64`s could round one ulp the other way. Main ruled that out, and the reader was
+  remade as zenoh-pico's (`fix(capi-pico): Hand strtod a time's literal as its own bytes`):
+  `decimal_text` checks `f64::from_str`'s grammar and copies the literal's own bytes and a NUL into
+  a stack buffer (`DECIMAL_TEXT`, 778 bytes), so `strtod` reads exactly the literal and rounds it
+  correctly, as zenoh-pico's copy is read (`src/utils/time_range.c` @
+  `double value = strtod(bound->start, &err);`; zenoh-pico reads its argument and not the copy
+  it makes, so it reads past the duration in the caller's text, which wz does not). Infinities,
+  NaNs and zeros are answered without a reader. Two cases are written as `decimal_digits` writes
+  them, with no radix character: a literal too long for the buffer, as its first 768 significant
+  digits and a sticky `1` for any nonzero digit past them, which round exactly as the literal does
+  (a halfway point between two `f64`s has at most 767 significant digits; core's reader keeps the
+  same 768); and a literal `strtod` stopped short of, which is a C library reading another radix
+  character in the locale the program set (zenoh-pico reads such a literal short). The buffer is a
+  frame of the query handler on a unix host only; the kernels and Windows keep core's reader, as
+  neither the DLL's C runtime nor an image's C library is a fact this lane established, and the
+  stack frame gates measure the MCU images, which take that path. Tests
+  `the_halfway_literals_round_to_even_and_away_from_the_halfway_point` (`1 + 2^-53`, which rounds
+  to even, the literals a last digit either side of it, and the halfway point followed by 778
+  zeros, with and without a last `1`: red with fewer digits kept than decide the rounding),
+  `a_literal_that_fits_is_handed_over_as_its_own_bytes` (red with a copy that changes a byte or
+  leaves off the NUL), `a_decimal_written_for_a_platform_reader_reads_as_core_reads_the_literal`
+  (the halfway literals added) and `a_durations_number_is_read_by_the_reader_named`
+  (`wz-session-core/src/time_range.rs`), `answer_from_ring_reads_the_time_with_the_reader_named`
+  (`advanced_cache/tests.rs`), and `time_number_tests::the_c_librarys_reader_reads_a_time_as_core_does`
+  (`advanced_plane.rs`, unix: the same halfway literals read by `strtod` to the bits core reads,
+  red with a reading short of their digits).
   The bytes go only if nothing else of the library calls `f64::from_str`: the explain report
   says.
 - A18. `wz-ext-pubsub`'s `cache-heap` (on by default; `wz-capi-pico`'s `engine-tokio` names it)
@@ -286,7 +299,10 @@ the merge to run; none was run here):
   hands one. The pico library's sample path is one indirect call with no branch; a Rust host's is
   one call more than before (the trampoline), a closure an allocation more at its declaration.
   Test `a_boxed_closure_is_called_through_the_lent_form_and_dropped_once`
-  (`advanced_subscriber/state/tests.rs`).
+  (`advanced_subscriber/state/tests.rs`). Measure-sensitive: main reads the receive instructions
+  of the tokio engine's sample path (the advanced subscriber of a Rust host) beside the pico
+  library's. If they grow, the step is cut back to the pico library: the lent form stays the one
+  form of the cooperative library, and the tokio host keeps its direct closure arm.
 
 What to read after they land: `declare_subscriber_state` and `ze_declare_advanced_subscriber`,
 `PicoSubscriberForms::form`, the cache queryable's closure and the language area (`f64::from_str`,
@@ -310,6 +326,66 @@ timer's tick (`Arc`), so its retraction has to wait for the last tick in flight 
 first, then `Arc::into_inner` on the composite's count). The admin space's two `PlainQueryable`s
 are held by its own state and retract on the engine its place reaches. The step lands on
 `l4-facade-1128` merged, as one commit across both ABIs.
+
+### 11.1 Landed
+
+`l4-facade-1128` was merged into this branch (the conflicts were the plane's fields, which F3
+made the engine, the role, the clock and the time, and A8's beacon sent through itself), and the
+retraction is one commit across both ABIs
+(`refactor(ext-pubsub): Retract an advanced publisher's entities by plane`):
+
+- `AdvancedPublisherPlane` has `retract_publisher`, `retract_queryable` and `retract_token`, by
+  default a drop, which the tokio runtime's plane and both zenoh-c planes keep. The composite
+  holds its publisher in a `ManuallyDrop` and its drop hands every entity to its plane through
+  one body (`Declared::retract_on`) in zenoh-pico's order: the publisher, the key no cached
+  sample took, the token, the beacon, the cache's queryable and then its store. A declaration
+  refused after the publisher stood hands what stands back through the same body, so a refusal
+  and a drop cannot retract in two orders. `AdvancedPublisherOn::plane` lends the plane.
+- The pico plane's publisher is `PlainPublisher`, its token a `TokenId` and its queryable a
+  `PlainQueryable` that keeps no engine: each is used and retracted on the plane's one count.
+  `KeptPublisher` and `KeptToken` are gone; `AdvPubState` keeps no engine of its own either and
+  reaches it through its plane (`AdvPubState::engine`), for the key it lends, the write filter
+  the matching doors read and the publisher's id.
+- The beacon's publisher (`BeaconPublisher`) keeps a count, because the timer's tick sends it
+  with no plane, and it retracts itself when its last holder lets it go. Its timer is stopped
+  first, after which no tick starts (`Tickers::stop_ticker`); the composite then lets go of its
+  hold. A tick running at that moment holds the publisher to its end and retracts it there, so
+  the retraction never precedes the last tick; the drop does not block on that tick, because the
+  tick may be the very caller (a beacon delivered to a subscriber of the session whose callback
+  undeclares the publisher) and no engine of this lane offers a wait for a running tick.
+  zenoh-pico's heartbeat state is cleared, its beacon publisher with it, by its last holder in
+  the same way (`src/api/advanced_publisher.c` @ `_ze_advanced_publisher_state_rc_drop(&state_rc);`
+  in the heartbeat handler). This is where the step differs from the plan above (`Arc::into_inner`
+  after an awaited tick).
+- The admin space's two queryables are retracted on the engine the session handle reaches, by
+  `zp_stop_admin_space` and by a start whose second declaration is refused. A session that
+  closes takes them with it, as zenoh-pico's close flushes the session's queryables and forgets
+  `_admin_space_queryable_id`; the handle's drive closes the session before its state, the admin
+  space with it, is let go of.
+
+Tests: `a_plane_sees_the_entities_declared_and_retracted_in_the_reference_order` and
+`a_plane_sees_the_beacon_publisher_declared_after_the_token_and_retracted_before_the_cache`
+(each entity is now handed back, `retract X` before `drop X`),
+`a_refused_declaration_hands_what_stands_back_to_the_plane_in_order` and
+`a_refused_beacon_hands_back_what_stands_before_it` (red with a refusal that lets an entity go
+without handing it to the plane, or in another order; `advanced_publisher/tests.rs`);
+`the_publishers_entities_are_retracted_on_the_planes_one_count` (`advanced_plane.rs`, tokio
+engine: the declaration adds the plane's one count, and after the drop no key the entities
+declared stands; red with an entity that keeps a count, or a plane that does not retract);
+`an_advanced_publisher_holds_its_engine_through_its_place_and_its_plane` (`advanced.rs`,
+cooperative engine through the C doors: two counts while declared, none after; red with a state,
+a publisher or a token that keeps a count again).
+
+Expected, unmeasured: `pico-api-coop-nostd` -200 to -500 (three counts' clones at the declaration
+and their releases with their last-holder tests at the undeclaration, and `KeptPublisher`'s and
+`KeptToken`'s drop glue, against one body that hands the entities back); the A17 correction
++200 to +400 (the copy, and the second reading for another radix). Receive Ir 0: no receive path
+is touched; an advanced put reads the engine from the plane where it read it from
+`KeptPublisher`, one load either way. `pico-client-coop-nostd` links neither.
+
+What remains of the plane's holders: the cache's ring (`SessionCacheBytes`) keeps a count of its
+own, as its store holds no plane, and the place's lender and the plane hold one each, as every
+entity of the session and its declaring task do.
 
 ## 10. Rows for `contract-switches.md`
 
