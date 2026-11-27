@@ -227,11 +227,14 @@ key-matching-listener = []
 # runtime's `udp-listen` too, which gives the host's links a `udp/` listener, one socket whose
 # peers each take a face of their own. A face dialled beside the dial role's (`attach_face`) is
 # this build's too: every build of more faces than one shares the faces' rows in the session's
-# pools (`peer-row-pools`), so a face that goes gives its set back at once.
+# pools (`peer-row-pools`), so a face that goes gives its set back at once. The open lends every
+# udp port the rows of its peers and the slots of its datagrams (`CoopEngine::assemble`), so the
+# runtime's ports are compiled in that form alone (`udp-port-lent-only`).
 listen = [
     "interest-answer",
     "runtime-plan",
     "wz-runtime-coop/listen",
+    "wz-runtime-coop/udp-port-lent-only",
     "wz-session-core/peer-row-pools",
 ]
 # The answering end of a peer's Interest (`wz-session-core`'s `interest-answer`): what the

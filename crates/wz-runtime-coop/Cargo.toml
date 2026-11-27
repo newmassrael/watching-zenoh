@@ -74,10 +74,15 @@ path = "src/lib.rs"
 # the heap forms for the static ones, so a build of every feature is the slot profile and compiles
 # none of the heap profile's links (`ip_stack::IpDial`, `ws_link::WsLinks`, `serial_link`'s,
 # `unixpipe_link`, `app_link`). Each profile is a set of its own, with every other feature.
+# `udp-port-lent-only` is a selector of the heap profile's udp ports, which takes their form of
+# their own memory out, so the heap profile is built with it and without it.
 [package.metadata.wz-docs]
 feature-sets = [
-    # The heap profile: every feature but the slot selector, every target.
-    { name = "heap", except = ["session-slot"] },
+    # The heap profile: every feature but the slot selector, every target, its udp ports in both
+    # forms.
+    { name = "heap", except = ["session-slot", "udp-port-lent-only"] },
+    # The heap profile whose udp ports keep only what their session lent.
+    { name = "heap-lent-ports", except = ["session-slot"] },
     # The slot profile, with every other feature beside it: the build `--all-features` makes.
     { name = "slot", except = [] },
 ]
@@ -197,6 +202,14 @@ session-slot = ["session-unicast", "rx-in-place", "wz-session-core/session-slot"
 # carry no second kind of datagram link. The links it listens with are the session shell's
 # (`ip_stack`, `udp_link`), compiled with `session-unicast`, so it asks for that too.
 udp-listen = ["alloc", "session-unicast"]
+# A SELECTOR for an engine that lends its udp ports what they keep at each open: the rows of their
+# peers and of the datagrams sorted for them, and the slots each datagram is read into and held in
+# (`SessionLinks::lend_port_rows`, `LinkTables::with_port_rx`). A port then keeps those alone, and
+# the form of its own memory (rows and buffers on the heap) is not compiled beside them: links lent
+# no rows or no slots refuse a `udp/` listener as exhausted, and `udp_link::UdpPort::new` makes no
+# port. Off by default, and nothing without `udp-listen`; the cooperative C engine names it with
+# its `listen`, as it lends both to every session whose config listens on `udp/`.
+udp-port-lent-only = []
 
 # `tx-stream-owed`: a stream link's send that never waits for its stream (`stream_link`). The
 # part of a frame the stream did not take is owed in the frame's slot and written by the next step
