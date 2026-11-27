@@ -852,6 +852,55 @@ the count or leaves an ended one on it).
   `session_tables::tests::a_walk_retires_each_get_its_pick_names_once_and_marks_it_first` (red
   if the walk reads a get twice, leaves one unmarked, or refuses one a call of which runs).
 
+**The switch, landed** (`refactor(capi-coop): Hold each get as a row of the session's tables`).
+`GetPresence` is `Present` under `query`; a get, a query's or a liveliness snapshot's, is a row of
+the tables (`ReplyRow`, `LatchedRow<ReplyCallback, GetShown, ()>`), its calls `GetCall`s begun on
+the row's latch. `get_plane.rs`, `LegHolders`, `Round::calls_legs_of`, `PlaneCalls::Captures`,
+the engine's plane, its `EndedLegs`, `LegRows` and `HeldReplies<LegId>`, the registry's `Dues`,
+`DueRow`, `write_gets` and `sweep_due_gets`, and the arena's parts of them go.
+
+- A face's `Gets` is two `GetLegs<PendingGetHandle>`: its queries' under their request ids and
+  its snapshots' under their Interest ids (`snapshot_leg`). It answers the observer's fan as a
+  session that asks nothing does but for `claims`, which keeps a pending snapshot's token from
+  the liveliness subscribers.
+- The engine hands every reply, token and Final its faces read, in both forms: the fan is
+  followed by a walk of the event in its order (`RegistryOf::take_answers_of`), which ends a
+  ResponseFinal's leg and a DeclFinal's snapshot leg (`end_get_leg`, `end_snapshot_leg`) and,
+  in the round's form, admits each Response and each claimed token to its row and offers the
+  round the call admission began (`offer_lent_reply`, `offer_token`, `offer_reply`). The
+  direct form hands Responses and tokens before the fan as it did (`replies`, `pinned`).
+- A snapshot's row has mode `None` and gate `ReplyAcceptance::Any`, as its old table had no key
+  gate, so it keeps no key in the key arena; its timeout is the row's, swept with the queries'.
+  Its DeclFinal stages no prune: the engine keeps no cache of the Interests it asked. The token's
+  key is resolved by `claim_answering_token` and `claim_answering_token_view`
+  (`declare/liveliness_get.rs`), which the registry's `claim_token` methods now call too.
+- The plan lends the tables a row of `pending_gets` for every query and snapshot the limits
+  admit and a row of `held_replies` for every held reply (`ArenaPlan::tables`, 0 and 0
+  before); a face's legs are laid out by `face_leg_bytes` (lent), `Gets::places` over
+  `GetRows` (region) and `Gets::counted` (on use).
+
+Tests: `get::tests::a_get_ended_by_its_answer_hands_the_calls_begun_before_its_row_was_retired`
+(red if a call reads the latch's retirement as the end of the delivery),
+`a_reply_racing_a_cancellation_never_reaches_the_callback_after_it` (red if `GetCall::hand` does
+not read the cancellation, or `ReplyRow::cancel` does not mark it),
+`tests::get::a_get_cancelled_before_its_answer_is_handed_nothing_after_the_cancel` (red if a
+cancellation keeps the row or the legs, so the reply read later reaches its callback),
+`tests::round::a_replys_record_holds_its_call_until_its_delivery_ends_it` and
+`a_reply_is_read_where_it_lies_and_one_lying_elsewhere_is_refused` (red if the round ends a
+record's call before its delivery, never ends it, or keeps a refused reply's call running),
+`tests::arena::the_tables_hold_a_row_for_each_get_and_each_held_reply` (red if the tables get
+no row of a snapshot, or a part of a get's own is laid out again), and `tests::get`,
+`tests::local_query` and `tests::snapshot` unchanged. The registry's test of the index of the
+deadlines goes with the index; the watermark is held by the session tables' tests.
+
+Expected: the api case down by the plane's bodies, its locks and capture, a key and a deadline a
+leg, `Dues`' leaves and the per-get rows apart from the tables; the client and peer cases 0
+(`query` not built). Receive: down by the plane's five lock sections per reply. Nothing was
+built or run; still owed: a test of the direct read whose delivery hands out a get ended by its
+Final (red if `note_ended_gets` after `dispatch_reply` is removed), and
+`crates/wz-capi-pico/link/run-text.ld` regenerated (`scripts/pico-compare.sh run-text`): its
+seven lines naming `get_plane` were taken out, and the legs' functions are not yet listed.
+
 ## 7. The receive
 
 None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message
