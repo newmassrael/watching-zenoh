@@ -1730,7 +1730,7 @@ mod zid_tests {
 /// `_zp_config_insert(config, Z_CONFIG_MODE_KEY, Z_CONFIG_MODE_PEER);`), so its mode is never
 /// refused.
 pub(crate) fn open_config(cfg: &ConfigState) -> Result<OpenConfig<'_>, ZResult> {
-    let listen = cfg.get(Z_CONFIG_LISTEN_KEY);
+    let [connect, listen] = endpoint_keys(cfg);
     let dial_whatami = match cfg.get(Z_CONFIG_MODE_KEY) {
         _ if listen.is_some() => WhatAmI::Peer,
         None | Some("client") => WhatAmI::Client,
@@ -1738,18 +1738,27 @@ pub(crate) fn open_config(cfg: &ConfigState) -> Result<OpenConfig<'_>, ZResult> 
         Some(_) => return Err(crate::result::Z_ERR_CONFIG_INVALID_MODE),
     };
     Ok(OpenConfig {
-        connect: cfg.get(Z_CONFIG_CONNECT_KEY),
+        connect,
         listen,
         dial_whatami,
         zid: cfg.get(Z_CONFIG_SESSION_ZID_KEY),
     })
 }
 
+/// The texts of the two keys an open's endpoints come from, read where `cfg` holds them: the
+/// connect locator, then the listen locator, the order the engine is handed them in. The one
+/// reading of them, for what the config tells the open ([`open_config`]) and for the cooperative
+/// engine's open, which holds the config until the engine wrote them.
+#[inline(always)]
+fn endpoint_keys(cfg: &ConfigState) -> [Option<&str>; 2] {
+    [Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY].map(|key| cfg.get(key))
+}
+
 #[cfg(test)]
 mod open_config_tests {
     use super::{
-        open_config, ConfigState, WhatAmI, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY,
-        Z_CONFIG_MODE_KEY,
+        endpoint_keys, open_config, ConfigState, WhatAmI, Z_CONFIG_CONNECT_KEY,
+        Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY,
     };
     use crate::prelude::*;
     use crate::result::Z_ERR_CONFIG_INVALID_MODE;
@@ -1828,6 +1837,30 @@ mod open_config_tests {
         assert_eq!(
             open_config(&config(&[])).map(|open| open.connect.is_none()),
             Ok(true)
+        );
+    }
+
+    /// The two keys an open's endpoints come from are read in one place, the connect locator
+    /// first, each where the config holds it, and a key the config does not state reads as none.
+    /// Turned red by a reading that swaps the two keys or copies a text.
+    #[test]
+    fn the_endpoint_keys_are_read_where_the_config_holds_them_connect_first() {
+        let cfg = config(&[
+            (Z_CONFIG_LISTEN_KEY, "udp/127.0.0.1:7448"),
+            (Z_CONFIG_CONNECT_KEY, "tcp/127.0.0.1:7447"),
+        ]);
+        let [connect, listen] = endpoint_keys(&cfg);
+        for (read, key) in [
+            (connect, Z_CONFIG_CONNECT_KEY),
+            (listen, Z_CONFIG_LISTEN_KEY),
+        ] {
+            let held = cfg.get(key).expect("stated");
+            assert!(read.is_some_and(|read| core::ptr::eq(read, held)), "{key}");
+        }
+        let only_listen = config(&[(Z_CONFIG_LISTEN_KEY, "udp/127.0.0.1:7448")]);
+        assert_eq!(
+            endpoint_keys(&only_listen),
+            [None, Some("udp/127.0.0.1:7448")]
         );
     }
 }
@@ -2497,14 +2530,13 @@ static PRESET_APP_REGION: Result<
 /// `zs` is a valid, null-initialised `z_owned_session_t`.
 #[cfg(not(feature = "engine-tokio"))]
 unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
-    // What the config names, read where it lies; the texts themselves are read and written into
-    // the engine's rows by the open (`unicast_endpoints` below), from where the config keeps them.
-    // The keys `open_config` reads them by: `open_request` read the config so and took its mode,
-    // which is not judged again.
-    let (stated, listen) = (
-        request.config.get(Z_CONFIG_CONNECT_KEY),
-        request.config.get(Z_CONFIG_LISTEN_KEY),
-    );
+    // The config is held from here until the engine has written its texts: the two keys its
+    // endpoints come from are read once, where it holds them, for the group, the endpoints' lists
+    // and the texts the open writes into the engine's rows (`unicast_endpoints` below). The keys
+    // `open_config` reads them by: `open_request` read the config so and took its mode, which is
+    // not judged again.
+    let config = request.config;
+    let [stated, listen] = endpoint_keys(&config);
     // A build without `peer` is a client build: `z_open` refused a listener and the peer role
     // before this.
     #[cfg(not(feature = "peer"))]
@@ -2574,7 +2606,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         )
     };
     let (unicast_listens, unicast_dials) = (listen_list.count, dial_list.count);
-    let (config, scouted) = (request.config, request.scouted);
+    let scouted = request.scouted;
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
     // negotiated, and a node pays its batch for each link and not the largest datagram.
@@ -2758,8 +2790,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         &wz_capi_coop::arena::AllocatorMemory;
     // The unicast endpoints where the config and the scout's answers keep them, none beside a
     // group: the engine reads and writes each into its row as it assembles the session.
-    let stated_texts = [Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY]
-        .map(|key| config.get(key).filter(|_| !joins_a_group));
+    let stated_texts = [stated, listen].map(|text| text.filter(|_| !joins_a_group));
     let found: &[String] = if joins_a_group { &[] } else { &scouted[..] };
     let assembled = wz_capi_coop::CoopEngine::assemble(
         links,

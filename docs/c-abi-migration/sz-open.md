@@ -1,7 +1,7 @@
 # Structural lane sz-open: the session's open, line by line
 
 Status: the reading and the design of the lane, with its steps carried in beside it as section 5
-onwards records them (O1, O2, O4, O5; O3 held, section 7).
+onwards records them (O1, O2, O4, O5, O6; O3 held, section 7).
 Nothing here was built or measured by this lane: every byte figure is either **read** (from the
 size ledger's explain document of the case, from the case's shipped library, or from a line table
 named below) or an **estimate** from the code, to be read on the explain document after the merge.
@@ -244,3 +244,15 @@ The test `engines_past_the_builds_rows_are_held_at_once_where_no_table_keeps_the
 refuses the last one. `tests/engine_rows.rs` is built only with the feature. What the main session
 reads: the case's total (the case builds none of the readers), `assemble`, `engine_of` and `close`
 in the explain document, and the receive at arm W.
+
+## 10. O6 as carried
+
+`crates/wz-capi-pico/src/session.rs`: `endpoint_keys` reads the connect and the listen key of a
+config, in that order, where the config holds them, and is the one reading of them: `open_config`
+(what the config tells `z_open` and `zext_config_device_requires`) reads them through it, and
+`open_on_coop` takes the config out of the request at its head and reads them through it once, for
+the group, the endpoints' lists and the texts the engine writes (`stated_texts`), where it read them
+twice before. The config's place is given back where it was, once the engine has written the texts.
+The test `the_endpoint_keys_are_read_where_the_config_holds_them_connect_first` holds the order
+and that the texts are the config's own. What the main session reads: `z_open` in the explain
+document (2,876 before).
