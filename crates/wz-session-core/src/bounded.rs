@@ -531,6 +531,13 @@ pub trait SeqBacking<T>: Sized + IntoIterator<Item = T> {
     /// when passed to [`Self::push`].
     fn push_with<F: FnOnce() -> T>(&mut self, make: F) -> bool;
 
+    /// The sequence as a lent table, where the policy's sequence is one ([`LentSeq`], of the
+    /// lent and the region policies), so a body compiled once for every row type can grow it by
+    /// the rows' stride. `None` for a sequence that grows by its own type.
+    fn as_lent(&mut self) -> Option<&mut LentSeq<T>> {
+        None
+    }
+
     /// Remove and return the last element, if any.
     fn pop(&mut self) -> Option<T>;
 
@@ -1212,6 +1219,11 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
         self.inner.free_slots()
     }
 
+    /// The policy's sequence as a lent table, where it is one ([`SeqBacking::as_lent`]).
+    pub(crate) fn as_lent(&mut self) -> Option<&mut LentSeq<T>> {
+        self.inner.as_lent()
+    }
+
     /// Append `value`. On [`Heap`] this always returns `Ok(())`. On [`Static`]
     /// it returns `Err(CapacityFull(value))` once `N` entries are present.
     pub fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
@@ -1638,6 +1650,39 @@ pub unsafe fn place_seqs(region: NonNull<u8>, places: &[SeqPlace]) {
     }
 }
 
+/// Put one row after the last of the lent table at `seq`, whose rows lie `stride` bytes apart:
+/// `write` writes it at its place, and the length counts it after. `false`, and `write` not
+/// called, when the table holds every row it was lent. One body for every row type, for a table
+/// that grows where only its rows' stride is known (a slot map's free slots).
+///
+/// # Safety
+/// `seq` points at a live [`LentSeq`] of rows of some `T` whose size is `stride`, reached by
+/// nothing else during the call, and `write` writes a whole `T` at the place it is handed.
+pub(crate) unsafe fn push_erased(
+    seq: NonNull<LentSeq<u8>>,
+    stride: usize,
+    write: unsafe fn(NonNull<u8>),
+) -> bool {
+    let seq = seq.as_ptr();
+    // SAFETY: the caller's contract. `LentSeq` is `repr(C)`, so its fields lie at the same offsets
+    // whatever its row type, and they are read and written through the raw pointer, so no
+    // reference to a table of another row type is made. `len < room`, so the row at `len` is one
+    // the table was lent, `len` strides from the first, and holds no value.
+    unsafe {
+        let len = (*seq).len;
+        if len == (*seq).room {
+            return false;
+        }
+        let Some(base) = (*seq).base else {
+            return false;
+        };
+        let at = base.as_ptr().add((len as usize).wrapping_mul(stride));
+        write(NonNull::new_unchecked(at));
+        (*seq).len = len.wrapping_add(1);
+    }
+    true
+}
+
 impl<T> Drop for LentSeq<T> {
     fn drop(&mut self) {
         self.drop_from(0);
@@ -1802,6 +1847,10 @@ impl<T> SeqBacking<T> for LentSeq<T> {
         unsafe { self.rows().as_ptr().add(self.len()).write(make()) };
         self.len = self.len.wrapping_add(1);
         true
+    }
+
+    fn as_lent(&mut self) -> Option<&mut LentSeq<T>> {
+        Some(self)
     }
 
     fn pop(&mut self) -> Option<T> {

@@ -283,6 +283,46 @@ fn tables_of_two_row_types_each_take_the_span_of_their_rows() {
     assert_eq!(words.get(b), Some(&[1, 2, 3, 4]));
 }
 
+/// A lent table adds each free slot through the one body every row type shares, its rows
+/// `STRIDE` apart: rows of a wide type and of a narrow type read back as they were written, and
+/// a table adds no slot past the rows it was lent or past its limit. Turned red by a stride other
+/// than the row's place in its column, a slot added past the rows lent, or one past the limit.
+#[test]
+fn a_lent_table_adds_its_free_slots_by_its_rows_stride() {
+    let wide = SlotMap::<Test, [u64; 4], 4, Lent>::arena_bytes(3).unwrap();
+    let narrow = SlotMap::<Test, u8, 4, Lent>::arena_bytes(3).unwrap();
+    let mut arena = arena(wide + 2 * narrow);
+    let mut words = SlotMap::<Test, [u64; 4], 4, Lent>::lent(&mut arena, 3).unwrap();
+    let mut bytes = SlotMap::<Test, u8, 4, Lent>::lent(&mut arena, 3).unwrap();
+    let mut held = std::vec::Vec::new();
+    for n in 0..3u8 {
+        let word = words.insert([u64::from(n) + 1; 4]).expect("a row lent");
+        let byte = bytes.insert(n + 1).expect("a row lent");
+        held.push((n, word, byte));
+    }
+    for (n, word, byte) in held {
+        assert_eq!(words.get(word), Some(&[u64::from(n) + 1; 4]));
+        assert_eq!(bytes.get(byte), Some(&(n + 1)));
+    }
+    assert_eq!(
+        (words.meta.len(), words.rows.len()),
+        (3, 3),
+        "a slot and a row's place for each row lent"
+    );
+    assert!(words.insert([9; 4]).is_err(), "no slot past the rows lent");
+    assert_eq!((words.meta.len(), words.rows.len()), (3, 3));
+
+    let mut limited = SlotMap::<Test, u8, 4, Lent>::lent(&mut arena, 3).unwrap();
+    limited.limit_to(1);
+    assert!(limited.insert(1).is_ok());
+    assert!(limited.insert(2).is_err(), "the limit is held");
+    assert_eq!(
+        (limited.meta.len(), limited.rows.len()),
+        (1, 1),
+        "no slot was added past the limit"
+    );
+}
+
 /// A table whose rows find no room once its metadata column was lent is refused, and the
 /// metadata's span stays lent: the arena keeps what was lent before a refusal.
 #[test]
