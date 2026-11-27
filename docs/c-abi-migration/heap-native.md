@@ -1604,7 +1604,35 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   library's `nm`), and `ON_USE_ROWS` FORBIDDEN in the D12 pico cases once the D12 `nm` shows no
   `take_rows`.
 
+### 7.33 The reds of hn21
+
+- `an_open_holding_the_handle_reserves_the_plan_with_its_place` (red on use at `d0cce9c186`):
+  the lent forms' alone since `f90e925543` (7.31), which gates it `not(wz_on_use)`; nothing
+  further.
+- `c849c5897b`: `tests::arena::an_open_s_plan_lays_out_a_listed_plan_s_sums_and_lists_no_row`
+  (`runtime-plan`, so on use with `listen`) took as its CONTROL that the listed plan lists rows,
+  which no plan does on use, each table taking its own memory (7.31). Its CONTROL is now the
+  plan's count of chains, which both forms count, and the rows CONTROL the lent form's; the sums
+  and `take_on` are held in both forms.
+- `62167084dc`: the on-use ring of the caches (7.29) took its bytes as a reserve and a resize by
+  zero, which clippy refuses (`slow_vector_initialization`, `tables-on-use,advanced`). Its bytes
+  are now `wz_runtime_coop::link_storage::zeroed_bytes`, the runtime's one fallible zeroed take,
+  which every heap buffer of a link, a port and a group already takes by (now `pub`, for the
+  engine), so a refused take leaves the ring empty as before. The test that holds it is
+  `engine::cache_ring::tests::an_on_use_ring_takes_its_bytes_zeroed_at_its_first_use_and_keeps_them`
+  (unchanged; red if the ring is not zeroed, taken at the open or taken again at each use).
+
 ## 8. What the main session runs
+
+- The reds of hn21 (`62167084dc`, `c849c5897b`), not built or run by this lane. `cargo clippy
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --features tables-on-use,advanced
+  --all-targets -- -D warnings`, `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
+  --features tables-on-use,advanced --lib cache_ring` (one), `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features listen,tables-on-use --lib tests::arena` and
+  `--features tables-on-use --lib`, the default set's `--lib tests::arena` (count unchanged),
+  clippy of wz-runtime-coop `--features alloc,session-unicast`, and the non-default features
+  gate. Size and receive Ir: unchanged in D12; on use the ring's zeroing is the runtime's
+  `write_bytes` where it was `resize`'s fill, the same bytes written.
 
 - N5 prepared (`8d3ca8c52b`, `e143a83856`), not built or run by this lane. `cargo build
   --manifest-path crates/Cargo.toml -p wz-capi-pico --no-default-features --features
