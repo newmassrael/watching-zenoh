@@ -560,6 +560,10 @@ impl SessionDatagramLink for NoStream {
         match *self {}
     }
 
+    fn owes_write_if_free(&self) -> Option<bool> {
+        match *self {}
+    }
+
     fn takes_input(&self) -> bool {
         match *self {}
     }
@@ -1858,6 +1862,11 @@ where
         self.owes()
     }
 
+    // A send half another holder has is that holder's to tell of as it lets go.
+    fn owes_write_if_free(&self) -> Option<bool> {
+        self.tx.try_hold().map(|tx| self.owes_held(&tx))
+    }
+
     #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self) {
         if let Some(tx) = self.tx.try_hold() {
@@ -2833,6 +2842,31 @@ mod tests {
         link.service();
         assert!(!link.owes());
         assert_eq!(link.socket.writes.borrow().concat(), batch(b"slow!"));
+    }
+
+    /// A link whose send half another holder has answers a wait as owing, and a teller of what its
+    /// writes left nothing: the holder tells it as it lets go. Once the half is free both answer
+    /// what the link owes. Turned red by an answer to a teller that reads a held half as owing
+    /// (`StreamDriver::owes_write_if_free` as `owes`), which the teller would count as a write
+    /// left owed past the mark the holder drains to (`faces::SiteFacts::read_wrote`).
+    #[test]
+    fn a_held_send_half_is_owing_to_a_wait_and_untold_to_a_teller() {
+        let link = link();
+        assert_eq!(
+            (link.owes_write(), link.owes_write_if_free()),
+            (false, Some(false)),
+            "CONTROL: a free half that owes nothing"
+        );
+        {
+            let _send = link.tx.hold();
+            assert!(link.owes_write(), "a held half answers a wait as owing");
+            assert_eq!(link.owes_write_if_free(), None, "and tells nothing");
+        }
+        assert_eq!(
+            (link.owes_write(), link.owes_write_if_free()),
+            (false, Some(false)),
+            "the half let go of"
+        );
     }
 
     #[test]

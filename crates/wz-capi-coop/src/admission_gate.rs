@@ -114,6 +114,10 @@ impl<P: SessionDatagramLink, C: ClockSource + 'static, K: LockKind> SessionDatag
         self.pump.owes_write()
     }
 
+    fn owes_write_if_free(&self) -> Option<bool> {
+        self.pump.owes_write_if_free()
+    }
+
     fn write_owed_now(&self) {
         self.pump.write_owed_now()
     }

@@ -209,6 +209,17 @@ pub trait SessionDatagramLink {
         false
     }
 
+    /// [`Self::owes_write`] as a writer of the link tells it to its face's facts once it has let
+    /// go of the link's send half: `None` while another holder has that half, which tells what
+    /// its own write left as it lets go. `owes_write` answers such a link as owing, since a wait
+    /// must not take for paid what that holder may still be writing; a teller that counted that
+    /// answer as a write it left owed would count it past the mark that holder drains to, and the
+    /// face would look owing after every byte left (`faces::SiteFacts::wrote`). The provided
+    /// form answers [`Self::owes_write`]: a link whose answer does not hang on another holder.
+    fn owes_write_if_free(&self) -> Option<bool> {
+        Some(self.owes_write())
+    }
+
     /// Write what the link owes its stack, as far as the stack takes it now, without waiting: what
     /// [`Self::service`] writes before it waits. A publish that finds every slot of its session's
     /// pool held asks it of every link, so a link whose stack has room by now gives its slot back
@@ -496,6 +507,10 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
         (**self).owes_write()
     }
 
+    fn owes_write_if_free(&self) -> Option<bool> {
+        (**self).owes_write_if_free()
+    }
+
     #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self) {
         (**self).write_owed_now()
@@ -573,6 +588,10 @@ impl<T: SessionDatagramLink + ?Sized, N: crate::link_cells::CountKind> SessionDa
 
     fn owes_write(&self) -> bool {
         (**self).owes_write()
+    }
+
+    fn owes_write_if_free(&self) -> Option<bool> {
+        (**self).owes_write_if_free()
     }
 
     #[cfg(feature = "session-unicast-accept")]
@@ -2738,6 +2757,10 @@ impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
 
     fn owes_write(&self) -> bool {
         self.0.owes_write()
+    }
+
+    fn owes_write_if_free(&self) -> Option<bool> {
+        self.0.owes_write_if_free()
     }
 
     #[cfg(feature = "session-unicast-accept")]

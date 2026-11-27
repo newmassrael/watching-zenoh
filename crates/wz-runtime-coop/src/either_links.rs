@@ -132,6 +132,10 @@ impl<P: SessionDatagramLink, Q: SessionDatagramLink> SessionDatagramLink for Eit
         on_side!(EitherPump, self, link => link.owes_write())
     }
 
+    fn owes_write_if_free(&self) -> Option<bool> {
+        on_side!(EitherPump, self, link => link.owes_write_if_free())
+    }
+
     #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self) {
         on_side!(EitherPump, self, link => link.write_owed_now())

@@ -1009,7 +1009,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
         // SAFETY: the records are held exactly while the pump is written in its place.
         let link = unsafe { self.pump.assume_init_ref() }.link();
         let facts = site.facts();
-        facts.wrote(mark, link.owes_write());
+        facts.read_wrote(mark, link);
         let actions = &records.actions;
         facts.tell(ReadFacts::of_link(
             link,
