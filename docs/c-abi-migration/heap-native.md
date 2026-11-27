@@ -466,10 +466,13 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   `MAX_KEYEXPR_BYTES` (red if a hold is counted against the budget, is not a copy, or is kept past
   the bound); and a subscriber declared after the open told to the router and handed what it pushes
   (red if the subscribers' table refuses its first row).
-- At the build: `crates/wz-capi-coop/src/lib.rs` asserts `RowPolicy::TAKEN` is `AtOpen` without
-  `tables-on-use` and `AtFirstUse` with it (9.2, 1), and refuses `tables-on-use` beside
-  `runtime-plan` by name until N3c covers that form; `region.rs` asserts the key budget has no drop,
-  which the region's drop would leave undone.
+- At the build: `crates/wz-capi-coop/src/lib.rs` asserts `RowPolicy::TAKEN` is `AtOpen` outside
+  the on-use form and `AtFirstUse` in it (9.2, 1), and refuses `tables-on-use` beside
+  `runtime-plan` by name until N3c covers that form. Every item of the on-use form outside
+  `region.rs` (which a build with `runtime-plan` does not compile) reads the feature beside
+  `not(feature = "runtime-plan")`, and its twin the negation of both, so the refused build is the
+  form that plans at the open and the refusal is its one error. `region.rs` asserts the key budget
+  has no drop, which the region's drop would leave undone.
 - Not tested: the open refused when the allocator has no room for the dial face's set
   (`ArenaRefused::NoMemory`); only a refusing allocator reaches it.
 
@@ -486,7 +489,7 @@ Nothing of N1, N2, N3a, N3b or N3c's first step was built or run by this lane.
   `scripts/lib/nondefault-tests-gate.sh`); `cargo clippy -p wz-capi-coop --features tables-on-use
   --all-targets -- -D warnings`; the client library in that form, `cargo build -p wz-capi-pico
   --no-default-features --features os-host,link-udp,wz-capi-coop/tables-on-use`; and a build of it
-  beside `peer` refused by name.
+  beside `peer` refused by name, the refusal its one error.
 
 - N3b, with the crate's default features: `cargo test -p wz-session-core --lib reply_stage::tests`
   51 (32 before: fifteen `on_first_use` bodies and four tests of the counted stages added);
@@ -571,8 +574,8 @@ features = ["tables-on-use"]
 ### 9.2 What keeps the release at D12
 
 1. At the build: `crates/wz-capi-coop/src/lib.rs` asserts `RowPolicy::TAKEN` is `AtOpen` (N1,
-   landed); N3c puts it under `#[cfg(not(feature = "tables-on-use"))]` beside its `AtFirstUse`
-   twin, so no form builds whose policy disagrees with its moment.
+   landed); N3c compiles it outside the on-use form (`tables-on-use` without `runtime-plan`)
+   beside its `AtFirstUse` twin, so no form builds whose policy disagrees with its moment.
 2. At the resolution: `layer_c1nh_no_heap_after_open` (`scripts/run-ci.sh`) resolves
    `configs/profiles/host-peer-ext.conf` and, before it builds, fails by name when the resolved
    arguments name `tables-on-use` ("the release form resolved to on-use"), so a profile that lost
