@@ -7107,7 +7107,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(feature = "link-admission")]
         let link_admission = unsafe { admission.share() }.map(as_link_admission::<C>);
         // The faces' links keep the places the registry lends their tables at: one table of them.
-        let places = lent.registry.places();
+        let places = lent.registry.face_places();
         // The waits a read makes at once, reserved here while the links hold nothing of what was
         // lent: none grows after.
         let room =

@@ -1247,7 +1247,7 @@ impl<H: Holders> RegistryOf<H> {
 
     /// How many places the open holds for the faces' sets, each set built when a face first takes
     /// its place: the places of every table of the session's faces.
-    pub(super) fn places(&self) -> usize {
+    pub(super) fn face_places(&self) -> usize {
         self.holders.rows().len()
     }
 
@@ -3498,7 +3498,7 @@ mod tests {
         let mut held = held(3);
         let lent = held.arena.arena_mut().high_water();
         assert_eq!(
-            (held.registry.sets.len(), held.registry.places()),
+            (held.registry.sets.len(), held.registry.face_places()),
             (1, 3),
             "the dial role's set alone is built at the open"
         );
@@ -3721,7 +3721,7 @@ mod tests {
         assert_eq!(face_ids(&held.registry), vec![DIAL_FACE, 9]);
         assert_eq!(walked(&held.registry), lying_at(&held.registry, &[0, 1]));
         assert_eq!(
-            (held.registry.sets.len(), held.registry.places()),
+            (held.registry.sets.len(), held.registry.face_places()),
             (4, 5),
             "a set for each place a face took, none made or dropped as faces went"
         );
@@ -4029,7 +4029,7 @@ mod tests {
             .add_face(6)
             .expect("the open lent a set for the face");
         assert_eq!(
-            (held.registry.places(), held.registry.sets.len()),
+            (held.registry.face_places(), held.registry.sets.len()),
             (16, 3),
             "CONTROL: sixteen places were reserved, a set built at each a face took"
         );
