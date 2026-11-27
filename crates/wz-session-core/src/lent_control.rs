@@ -619,6 +619,26 @@ pub fn token_declaration(
     ))
 }
 
+/// The answer to a member's interest in liveliness tokens for the held token `token_id` on its
+/// literal `keyexpr`, answering `interest_id`, as a declaration of that one kind
+/// ([`DeclarationOf`]): the bytes of the borrowed reply `declare::local_token::build_token_reply`
+/// builds, whose envelope carries no extension (no `Z` flag, no `ext_qos`), unlike the
+/// envelope of [`DeclarationOf::new`]. `LengthOutOfRange` for a keyexpr past the protocol's
+/// `u16` length, which is not answered.
+#[cfg(feature = "codec-declare")]
+pub fn token_reply_declaration(
+    token_id: u64,
+    keyexpr: &str,
+    interest_id: u64,
+) -> Result<DeclarationOf<'_, DeclToken<'_>>, CodecError> {
+    Ok(DeclarationOf {
+        header: wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
+        interest_id: Some(interest_id),
+        extensions: None,
+        body: token_body(token_id, 0, Some(keyexpr))?,
+    })
+}
+
 /// The body of [`declare_token`].
 #[cfg(feature = "codec-declare")]
 fn token_body(
@@ -1338,6 +1358,45 @@ mod tests {
         assert_eq!(
             compared,
             IDS.len() * (keys().len() * (2 + infos().len()) + 3)
+        );
+    }
+
+    /// The answer to an interest in tokens, as a declaration of one kind, is the borrowed reply
+    /// the token responder builds, byte for byte, and presents the token's arm; a keyexpr past the
+    /// protocol's `u16` length is refused by both. Turned red by an envelope that carries the
+    /// declare QoS or the `Z` flag, or a body of another header, id or key.
+    #[cfg(feature = "liveliness-token")]
+    #[test]
+    fn a_token_reply_of_one_kind_is_the_borrowed_reply_of_the_responder() {
+        use crate::declare::local_token::build_token_reply;
+        const TOKEN: u8 = 6;
+        let mut compared = 0usize;
+        for token_id in IDS {
+            for keyexpr in ["a/b", "x/y/**", "a/very/long/keyexpr/chunk/that/runs/on"] {
+                for interest_id in [0, 42, 1 << 40] {
+                    assert_eq!(
+                        one_kind(&token_reply_declaration(token_id, keyexpr, interest_id).unwrap()),
+                        (
+                            build_token_reply(token_id, keyexpr, interest_id)
+                                .unwrap()
+                                .encode_to_vec(),
+                            TOKEN
+                        ),
+                        "token reply {token_id} {keyexpr:?} {interest_id}"
+                    );
+                    compared += 1;
+                }
+            }
+        }
+        assert_eq!(compared, IDS.len() * 3 * 3);
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        assert_eq!(
+            token_reply_declaration(1, &past, 2).err(),
+            build_token_reply(1, &past, 2).err()
+        );
+        assert_eq!(
+            token_reply_declaration(1, &past, 2).err(),
+            Some(CodecError::LengthOutOfRange)
         );
     }
 

@@ -46,9 +46,7 @@ use wz_session_core::caps;
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::interest_build::InterestKinds;
-use wz_session_core::lent_control::{
-    interest_exact, interest_final, kexpr_declaration, undeclare_kexpr_declaration,
-};
+use wz_session_core::lent_control::{interest_exact, interest_final, kexpr_declaration};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::metadata::PushMetadata;
@@ -61,7 +59,7 @@ use wz_session_core::multicast_reply_sink::{
 };
 use wz_session_core::multicast_tx::{
     multicast_tx_declaration, multicast_tx_group_announcement, multicast_tx_group_retraction,
-    multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded,
+    multicast_tx_interest, multicast_tx_publication, GroupDeclare, MulticastTxEncoded,
 };
 #[cfg(any(wz_round, feature = "connectivity", feature = "queryable"))]
 use wz_session_core::placed::PlacedRef;
@@ -1569,10 +1567,18 @@ impl<W: LinkWaits> GroupFace<W> {
         if self.has_ended() || !self.join.declarations.declares_keyexprs() {
             return;
         }
-        if let Ok(declaration) = kexpr_declaration(declared, keyexpr) {
-            self.keyexprs.borrow_mut().declared(id, keyexpr);
-            multicast_tx_declaration(&declaration, |message| self.push_lent(message));
+        // A keyexpr the wire cannot carry is neither held for the members that ask nor sent.
+        if kexpr_declaration(declared, keyexpr).is_err() {
+            return;
         }
+        self.keyexprs.borrow_mut().declared(id, keyexpr);
+        multicast_tx_declaration(
+            GroupDeclare::Keyexpr {
+                mapping_id: declared,
+                keyexpr,
+            },
+            |message| self.push_lent(message),
+        );
     }
 
     /// Retract from the group the keyexpr [`Self::announce_keyexpr`] told it as `id`.
@@ -1581,9 +1587,10 @@ impl<W: LinkWaits> GroupFace<W> {
             return;
         }
         self.keyexprs.borrow_mut().retracted(id);
-        multicast_tx_declaration(&undeclare_kexpr_declaration(id), |message| {
-            self.push_lent(message)
-        });
+        multicast_tx_declaration(
+            GroupDeclare::UndeclareKeyexpr { mapping_id: id },
+            |message| self.push_lent(message),
+        );
     }
 
     /// Whether this join is still to ask the group for its members' keyexprs, which it is once,

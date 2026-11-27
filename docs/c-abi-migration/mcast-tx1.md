@@ -2,8 +2,8 @@
 
 Status: the reading of what a group sends with, beside what a link sends with and beside
 zenoh-pico's one transmit path; the design that makes the group a destination of the links' writer;
-its steps, each with the bytes it is expected to move on `pico-api-coop-nostd`; and step T1, which
-lands beside this note. Nothing here was built or measured by this lane. Every figure is **read**
+its steps, each with the bytes it is expected to move on `pico-api-coop-nostd`; and steps T1 and
+T2, which land beside this note. Nothing here was built or measured by this lane. Every figure is **read**
 from the library the cost gate's run of 2026-11-27 kept for `pico-api-coop-nostd`
 (`shipped/pico-api-coop-nostd/libwz_capi_pico.so` under the gate's target directory: `nm
 --defined-only -S -C` for the bodies, `objdump -d` for who calls each body by its address), or is
@@ -91,7 +91,7 @@ or the new walk to the old, wire by wire) and moves nothing on `pico-client-coop
 | step | change | bytes, expected (`pico-api-coop-nostd`) | basis | held by |
 |---|---|---|---|---|
 | **T1 (landed)** | every reply the group stages written from its parts by the links' writer of its kind: the declarations that answer a member's interest (final, subscriber, queryable, an aggregate's retraction, the session's keyexprs) as `multicast_tx::DeclarationReply`, the final of a query's replies from its two numbers; the stage's owned-item entry is reached by no path of the engine | -15,000 to -20,000 | read: 21,804 of bodies every caller of which is in the owned-item entry (section 2), and the group's drain and answer bodies above the links' (2,081 and part of 2,909); less, estimated, 2,000 to 4,000 for the one writer of the five reply kinds, the stage's two admits and the kind writers it outlines | `group_declarations_written_from_parts` and `push_tests` (the lent reply and final are the owned ones' bytes, framing, size and tally), `multicast_reply_sink::tests` (the sink hands parts; the default builds the builders' replies), `lent_control::tests` (the keyexpr answer is its builder's bytes), the stage's tests (framed as the owned reply at once and kept, the slot, the refusal) |
-| T2 | the group's remaining writers of the all-kinds `Declare`: the token reply as a declaration of one kind (`DeclarationOf`), and the announcements, retractions and keyexpr declarations through the one reply writer of T1 rather than one `multicast_tx_declaration` instance each | -1,500 to -3,000 | read: `multicast_tx_token_reply`'s closure 2,561 against the link's 738; estimate for the rest | the existing `group_declarations_written_from_parts` tests, unchanged |
+| **T2 (landed)** | the group's remaining writers of the all-kinds `Declare`: the token reply as a declaration of one kind (`DeclarationOf`), and the announcements, retractions and keyexpr declarations through the one reply writer of T1 rather than one `multicast_tx_declaration` instance each (section 6) | -1,500 to -3,000 | read: `multicast_tx_token_reply`'s closure 2,561 against the link's 738, and the eight instances of `multicast_tx_declaration` (`feat-mcast.md` row E, 1,202 together); estimate: the token reply's arm and the four instances left, 300 to 600 | the existing `group_declarations_written_from_parts` tests, unchanged, and `a_keyexpr_declared_to_the_group_is_its_builders_bytes`, `a_kind_without_its_plane_is_refused_before_it_is_written`; `lent_control::tests::a_token_reply_of_one_kind_is_the_borrowed_reply_of_the_responder` |
 | T3 | the group's stage as a `BoxedLinkDriver` of a writer of its own, so its messages take the links' walk (S2) | -4,000 to -7,000 | read: the framer 6,559; estimate: the driver's lend and send over the lanes, 1,500 to 2,500 | the group's wire held to the link's for the same items; `push_tests` moved onto the driver |
 | T4 | the stage keeps D2 alone (S3) | -10,000 to -15,000 | read: the stage 19,458; estimate: what D2 keeps, 3,000 to 6,000 | the stage's tests of a held datagram, the beacon's order and the quota |
 | T5 | F6, the group's leg out of line | -3,000 to -4,500 | `feat-mcast.md` F6 | `direct::held_operation_tests` |
@@ -129,7 +129,38 @@ the same seam's remainder. T3 and T4 are the large ones and are designed with
   and answers interests without `liveliness-token` keeps the owned declaration replies; the api twin
   and the Windows release have it.
 
-## 6. Verification (the main session's)
+## 6. Step T2, as landed
+
+- `multicast_tx::GroupDeclare` is every declaration a group sends, as the arguments of its writer:
+  an answer to a member's interest (T1's `DeclarationReply`, one arm of it), the answer to a
+  member's interest in tokens, an entity announced or retracted, and a keyexpr declared or
+  undeclared. Its one writer (`impl WireWrite`) is the body T1's reply writer was, with the arms of
+  the other kinds beside them; each arm writes a declaration of its one kind
+  (`lent_control::DeclarationOf`), so the encoder of each kind is compiled once into it.
+  `multicast_tx_declaration` takes this value and is generic over its caller's closure alone,
+  where it was generic over the declaration's type too (one instance per kind and caller: three
+  for the announcements, three for the retractions, two for the keyexprs);
+  `multicast_tx_declaration_reply`, `multicast_tx_token_reply`, `multicast_tx_group_announcement`
+  and `multicast_tx_group_retraction` keep their signatures and hand it their value, and the
+  engine's `GroupFace::announce_keyexpr` and `retract_keyexpr` hand it theirs.
+- The token reply is a declaration of one kind (`lent_control::token_reply_declaration`): the bytes
+  of the token responder's borrowed reply (`declare::local_token::build_token_reply`), whose
+  envelope carries no extension, in the type the token announcement is written in
+  (`DeclarationOf<DeclToken>`), so the two share one encoder and the group's writer reaches the
+  all-kinds `Declare` encoder from no reply.
+- Refusals are as before: a keyexpr past the protocol's bound is `None` (`LengthOutOfRange` from
+  the announcement and the retraction) with `f` not called; a kind with no declaration plane is
+  `FeatureDisabled`, read after the retraction's key as before; the writer handed such a kind
+  directly refuses it (`UndeclaredEnumValue`). `announce_keyexpr` holds a keyexpr for the members
+  that ask only when its writer takes it, as before.
+- Residue on the same seam, not this lane's: the link's token reply
+  (`SessionLinkActions::send_declare_token_reply`, its lend-only and its no-allocator arms) still
+  writes the all-kinds borrowed `Declare` (`build_token_reply(..).encode`). Written as
+  `lent_control::token_reply_declaration`, no token reply of a lend-only library would reach the
+  all-kinds encoder; whether that encoder then leaves the library is an `nm -C` reading. It is
+  the link's writer (`session_actions.rs`), planned with that lane.
+
+## 7. Verification (the main session's)
 
 - `cargo test -p wz-session-core --lib --features
   session-multicast,codec-frame,alloc,codec-push,codec-declare,declare-final,declare-subscriber,declare-queryable,declare-undeclare,liveliness-token,codec-response,codec-response-final,transport-stats`
@@ -149,3 +180,17 @@ the same seam's remainder. T3 and T4 are the large ones and are designed with
   `QueryWire>::write_source<...QueryIn<...Heap>`, `build_declare_kexpr_reply`.
 - `pico-client-coop-nostd` unchanged to the byte, and the perf matrix's receive Ir of it (arm W)
   unchanged.
+- T2: `cargo test -p wz-session-core --lib --features
+  session-multicast,codec-frame,alloc,codec-push,codec-declare,declare-final,declare-subscriber,declare-queryable,declare-undeclare,liveliness-token,codec-response,codec-response-final,transport-stats
+  group_declarations_written_from_parts`: 6 tests (5 that were, 1 new); the same with
+  `declare-subscriber` alone of the declaration planes (no `declare-queryable`, no
+  `liveliness-token`): 6 (`a_kind_without_its_plane_is_refused_before_it_is_written` in place of
+  the token reply's); `lent_control::tests::a_token_reply_of_one_kind_is_the_borrowed_reply_of_the_responder`
+  with the first set: 1. Build and clippy of `wz-session-core` with the first set, with
+  `declare-subscriber` alone, and with `codec-declare` and none of the three planes;
+  `wz-session-mcu`'s `group_drive::stage` and `wz-capi-coop`'s group tests as for T1, unchanged;
+  clippy of `wz-capi-coop` with `group`.
+- T2: `python3 scripts/lib/size_ledger_gate.py --measure pico-api-coop-nostd` lower by T2's range,
+  `multicast_tx_token_reply` and every `multicast_tx_declaration::<...DeclarationOf...>` gone from
+  `nm -C`, one `<GroupDeclare as WireWrite>::write_wire`; `pico-client-coop-nostd` unchanged to
+  the byte.
