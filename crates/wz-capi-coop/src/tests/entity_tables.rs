@@ -485,6 +485,69 @@ fn a_subscriber_that_finds_no_id_left_is_refused_and_lets_its_sink_go() {
     assert_eq!(dropped.load(Ordering::SeqCst), 1, "its sink is held");
 }
 
+/// A subscriber's declaration answers the id the tables numbered its row by, and that id names
+/// the row: undeclared by it, the row and its sink are let go of, and a table of one takes the
+/// next subscriber in the row given back. Turned red by an id read anywhere but off the row the
+/// tables put the subscriber in.
+#[test]
+fn a_subscriber_is_answered_the_id_its_row_was_numbered_by() {
+    let limits = lowered(|l| l.select_max_subscriptions(Quota::at_most(1)));
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, limits);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    engine.entity_ids_from(Some(7));
+    let first = declare_subscriber(&engine, "demo/i/1", &dropped).expect("a row is free");
+    assert!(first >= 7, "numbered by the ids handed out from 7 on");
+    engine.undeclare_subscriber(first);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the undeclaration found the row by the id the declaration answered"
+    );
+    let second =
+        declare_subscriber(&engine, "demo/i/2", &dropped).expect("the row given back is free");
+    assert!(second > first, "the next subscriber takes an id of its own");
+    assert_eq!(dropped.load(Ordering::SeqCst), 1, "its sink is held");
+}
+
+/// The tables answer a declaration's refusals in one order, room first: a subscriber that finds
+/// its table full is refused as a full table whether or not an id is left, and one that finds a
+/// row free and no id left is refused for the id; each one's sink goes with its refusal. Turned
+/// red by an id asked for ahead of the tables, which answers a full table as one out of ids.
+#[test]
+fn a_full_subscribers_table_is_answered_before_an_id_is_asked_for() {
+    let limits = lowered(|l| l.select_max_subscriptions(Quota::at_most(1)));
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, limits);
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let first = declare_subscriber(&engine, "demo/o/1", &dropped).expect("a row is free");
+    engine.entity_ids_from(None);
+    assert_eq!(
+        declare_subscriber(&engine, "demo/o/2", &dropped),
+        Err(Refusal::TableFull)
+    );
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the sink refused for the room is let go of"
+    );
+    engine.undeclare_subscriber(first);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        2,
+        "CONTROL: the undeclaration gave the row back"
+    );
+    assert_eq!(
+        declare_subscriber(&engine, "demo/o/2", &dropped),
+        Err(Refusal::NoEntityId)
+    );
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        3,
+        "the sink refused for the id is let go of"
+    );
+}
+
 /// The matching listeners' table at its limit refuses one more as a full table, before its Interest
 /// is asked; its sink goes with the refusal.
 #[cfg(feature = "key-matching-listener")]

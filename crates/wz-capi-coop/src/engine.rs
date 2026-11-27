@@ -11100,17 +11100,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // sent. What the key holds and the sink go back with either refusal, let go of after the
         // session in the one place both are. The row holds the key expression declaration its
         // key is named by for as long as it stands.
-        // Taken by the declaration once it has an id; let go of, with the session and the link's
-        // place, after it, whether it was declared or not.
+        // Taken by the declaration into the row it offers the tables; let go of, with the session
+        // and the link's place, after it, whether it was declared or not.
         let mut unmade = Some((wire, sink));
         // The row the tables refuse, let go of once the declaration let go of the session and the
         // link's place: the declaration answers only why, so its answer carries no row.
         let mut refused_row = None;
         let declared = self.live_on_link(|core, tx| {
-            let next = tables(&core.session.registry).next_entity_id();
-            let Some(id) = next else {
-                return Err(Declined::NoEntityId);
-            };
             // Taken once: the declaration runs once.
             let Some((wire, sink)) = unmade.take() else {
                 return Err(Declined::NoEntityId);
@@ -11142,10 +11138,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     return Err(Declined::from(refused.why));
                 }
             };
-            debug_assert_eq!(
-                declared.id, id,
-                "the tables number a row as they said they would"
-            );
+            // The id the tables numbered the row by: they mint it, after the room and the key, so
+            // a declaration is refused in their one order.
+            let id = declared.id;
             // The key as the tables read it off the row they put it in: its text is the row's own,
             // which does not move while the row stands.
             let lent = lent_key(tables(&core.session.registry), declared.key);
