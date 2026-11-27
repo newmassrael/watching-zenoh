@@ -52,7 +52,7 @@ use wz_command_seal::{
 };
 use wz_integration_tests::common::{
     assert_demo_binary_newer_than_sources, graceful_terminate, read_captured, wait_for_substring,
-    wz_ap_demo_binary, ChildGuard, PortReservation,
+    wait_for_tcp_accept, wz_ap_demo_binary, ChildGuard, PortReservation,
 };
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -722,6 +722,12 @@ impl HeapRun {
         drop(ports);
         let (router_child, router_out, port) =
             dialling_router(files.path(), &tls, router, &identity.cert_pem);
+        // The commander dials the router's tcp listener, which a router started a moment ago may
+        // not hold yet: a refused dial is the router's start, not the node's answer.
+        assert!(
+            wait_for_tcp_accept(port, Duration::from_secs(20)),
+            "zenohd never listened on 127.0.0.1:{port}"
+        );
         let way = Way {
             port,
             node: zid,
