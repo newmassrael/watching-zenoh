@@ -1126,8 +1126,8 @@ fn a_callback_inside_the_reads_step_finds_the_send_place_free() {
 /// it rests beside another, `DirectFace::rests`), and each past it whose row holds a face, and no
 /// row that holds none. A client that took no face turns its dial role's face alone, whatever rows
 /// its table keeps for faces to come. Turned red by a read that turns a face twice, a row no face
-/// holds, or no face at all, as a walk that reads the dial role's row by the marks of the rows
-/// past it would (`CoopEngine::read_faces` over `DirectFaces::turned`, or
+/// holds, or no face at all, as a dial role's row whose mark is not held for the table's life
+/// would (`DirectFace::init_at`, `CoopEngine::read_faces` over `DirectFaces::turned`, or
 /// `CoopEngine::read_dial` where the dial role's face is the only face).
 #[cfg(not(wz_round))]
 #[test]
@@ -1180,6 +1180,29 @@ fn a_client_reads_its_one_face_through_a_table_of_one_row() {
             "read {read} turns row 0 once"
         );
     }
+}
+
+/// The faces' table lies where the build's bound puts it: inline in the engine's place where the
+/// session listens on no port, its one row the dial role's, so a reach of that row is a constant
+/// offset of the engine; lent from the session's arena where it listens, the dial role's row the
+/// first of the table, so the engine holds no face of its own. Turned red by a table of one row
+/// lent from the arena (`FaceSlots`), or by a listening build that keeps the dial role's row in
+/// the engine beside the rows past it (`DirectFaces::lent_in` laying the rows past it alone).
+#[cfg(not(wz_round))]
+#[test]
+fn the_dial_roles_row_lies_where_the_faces_table_does() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let (rows, turned) = engine.direct_faces();
+    assert!(
+        rows >= 1 && turned >= 1,
+        "CONTROL: the table holds the dial role's row, which a read turns"
+    );
+    assert_eq!(
+        engine.dial_row_lies_in_the_engine(),
+        !cfg!(feature = "listen"),
+        "the dial role's row lies inline exactly where the session listens on no port"
+    );
 }
 
 /// What a read waits for is the earliest due of the faces as their slots hold it: each turn of a

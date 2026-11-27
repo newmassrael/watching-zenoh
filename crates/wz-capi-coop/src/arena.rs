@@ -2779,14 +2779,18 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         let _ = planes;
     }
 
-    /// Lay out the read slots and send places of the faces past the dial role's, a row of `bytes`
-    /// for each face read where it lies after the first (`read_faces`): the dial role's lies in
-    /// the engine's place. Laid out once, at the open, the plan not settled.
+    /// Lay out the table of the faces' read slots and send places where it is lent, a row of
+    /// `bytes` for each face read where it lies (`read_faces`), the dial role's among them: a
+    /// session that listens. Elsewhere the table is the dial role's one row, inline in the engine's
+    /// place, and nothing is laid out. Laid out once, at the open, the plan not settled.
     #[cfg(not(wz_round))]
     pub(crate) const fn lay_direct_faces(&mut self, bytes: usize) {
-        let rows = read_faces(self.session.peers.sets()).saturating_sub(1);
-        if rows != 0 {
-            self.put(ArenaPart::DirectFaces, rows, bytes);
+        if cfg!(feature = "listen") {
+            self.put(
+                ArenaPart::DirectFaces,
+                read_faces(self.session.peers.sets()),
+                bytes,
+            );
         }
     }
 

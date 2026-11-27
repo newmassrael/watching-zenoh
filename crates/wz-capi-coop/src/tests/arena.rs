@@ -3877,13 +3877,14 @@ fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
 
 /// Where each face is read where it lies (no `wz_round`), each face's Router stages its chains
 /// apart: the reassembly table holds one face's share for each face read where it lies, and the
-/// faces past the dial role's are laid out a row each, of one face's read slot and send place.
-/// Only a session that listens reads a face past the dial role's where it lies: a build without
-/// `listen`, groups and all, has one share and no such row whatever its face table's places, a
-/// group's place being read through the group's own session. Turned red by a table of one share
-/// whatever the faces of a build that listens (`ArenaPlan::lay_out`), by a row or a share for
-/// each place of a build that does not (`read_faces`), or by a row for the dial role's face,
-/// which lies in the engine's place (`ArenaPlan::lay_direct_faces`).
+/// faces are laid out a row each, of one face's read slot and send place, the dial role's among
+/// them. Only a session that listens reads a face past the dial role's where it lies: a build
+/// without `listen`, groups and all, has one share and no such row whatever its face table's
+/// places, its table being the dial role's one row inline in the engine's place, a group's place
+/// being read through the group's own session. Turned red by a table of one share whatever the
+/// faces of a build that listens (`ArenaPlan::lay_out`), by a row or a share for each place of a
+/// build that does not (`read_faces`), or, where the table is lent, by a table without the dial
+/// role's row (`ArenaPlan::lay_direct_faces`).
 #[cfg(not(wz_round))]
 #[test]
 fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
@@ -3905,14 +3906,14 @@ fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
         caps::REASSEMBLY_CHAINS * read
     );
     let direct = plan.rows().find(|row| row.part() == "direct faces");
-    if read > 1 {
-        let direct = direct.expect("a row of the faces past the dial role's");
-        assert_eq!(direct.count, read - 1);
+    if cfg!(feature = "listen") {
+        let direct = direct.expect("a row of the faces' table, the dial role's among them");
+        assert_eq!(direct.count, read);
         assert_eq!(direct.entry_bytes, Engine::DIRECT_FACE_BYTES);
     } else {
         assert!(
             direct.is_none(),
-            "the dial role's face lies in the engine's place"
+            "the table of one row lies in the engine's place"
         );
     }
 }

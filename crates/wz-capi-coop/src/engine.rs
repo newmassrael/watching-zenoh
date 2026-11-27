@@ -850,12 +850,13 @@ impl OpenKeyIds {
 /// What the open lent the engine apart from the session's state ([`CoopEngine::assemble`]): the
 /// place of the ABI's handle, the places of the publishes kept for the session's other faces,
 /// which a publish reaches with the session held by another, and the ring of the advanced
-/// publishers' caches, which the engine locks apart from the state. The read slots of the faces
-/// past the dial role's are handed beside it ([`CoopEngine::engine_of`]): they are the only part
-/// of the type of the links, and a build that takes no such face names none.
+/// publishers' caches, which the engine locks apart from the state. The faces' read slots, where
+/// their table is lent, are handed beside it ([`CoopEngine::engine_of`]): they are the only part
+/// of the type of the links, and a build whose table is its one row inline names none.
 struct LentApart {
-    /// The Router of the dial role's link, which the read steps itself (`direct`).
-    #[cfg(not(wz_round))]
+    /// The Router of the dial role's link, which the read steps itself (`direct`), where its row
+    /// lies inline in the engine's place; a table of the arena's rows makes each row's own.
+    #[cfg(all(not(wz_round), not(feature = "listen")))]
     router: SessionReassembly,
     /// The place the engine is written at.
     #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
@@ -878,11 +879,13 @@ struct SessionLent {
     /// The transport's tables, held as they were lent: taken apart here, they would be moved
     /// once into the open's frame and once more into this value.
     transport: TransportTables,
+    /// The Router of the round's links, or of the dial role's where its row lies inline.
+    #[cfg(any(wz_round, not(feature = "listen")))]
     router: SessionReassembly,
-    /// The rows of the faces past the dial role's the plan laid out for their read slots and send
-    /// places (`ArenaPlan::lay_direct_faces`), which the open lends and makes.
+    /// The rows of the faces' read slots and send places the plan laid out, the dial role's
+    /// first (`ArenaPlan::lay_direct_faces`), which the open lends and makes.
     #[cfg(all(not(wz_round), feature = "listen"))]
-    taken_faces: usize,
+    face_rows: usize,
     keys: KeyStore,
     registry: RegistryHold,
     /// After the registry, whose dispatch reaches it by a handle that counts nothing.
@@ -1004,7 +1007,7 @@ fn lend_session(
     from: &OpenFrom<'_>,
     memory: &'static dyn ArenaMemory,
     config: &CoopConfig<Counted>,
-    policy: &SessionPolicy,
+    #[cfg(any(wz_round, not(feature = "listen")))] policy: &SessionPolicy,
 ) -> Result<SessionLent, ArenaRefused> {
     #[cfg(feature = "runtime-plan")]
     let mut plan = OpenPlan::blank();
@@ -1140,6 +1143,7 @@ fn lend_session(
     let ClaimedPlaces {
         handle: handle_place,
     } = claimed;
+    #[cfg(any(wz_round, not(feature = "listen")))]
     let router: SessionReassembly = session_reassembly(
         policy,
         SessionChains::over(&transport.reassembly, transport.face_chains),
@@ -1309,6 +1313,7 @@ fn lend_session(
         steps,
         #[cfg(wz_round)]
         samples,
+        #[cfg(any(wz_round, not(feature = "listen")))]
         router,
         keys,
         #[cfg(feature = "queryable")]
@@ -1330,7 +1335,7 @@ fn lend_session(
         #[cfg(not(feature = "runtime-plan"))]
         state,
         #[cfg(all(not(wz_round), feature = "listen"))]
-        taken_faces: plan.peers().sets().saturating_sub(1),
+        face_rows: plan.peers().sets(),
         arena,
     })
 }
@@ -4735,7 +4740,8 @@ pub(crate) struct OpenHolds<'h> {
     /// The place of the admission the links of a session that listens ask ([`Admission`]).
     #[cfg(feature = "link-admission")]
     pub(crate) admission: usize,
-    /// The read slot and send place of one face past the dial role's (`direct`).
+    /// The read slot and send place of one face (`direct`), a row of the faces' table where it
+    /// is lent.
     #[cfg(not(wz_round))]
     pub(crate) direct_face: usize,
 }
@@ -7016,7 +7022,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             )),
         };
         let runtime_bytes = from.places().runtime;
-        let mut lent = lend_session(&from, memory, &config, &policy).map_err(OpenError::Arena)?;
+        let mut lent = lend_session(
+            &from,
+            memory,
+            &config,
+            #[cfg(any(wz_round, not(feature = "listen")))]
+            &policy,
+        )
+        .map_err(OpenError::Arena)?;
         // The texts of the endpoints, each read and written once into the row the plan laid out
         // for it: the session names an endpoint by its row from here, and a text that has no row
         // is refused here, before anything is bound or dialled.
@@ -7048,12 +7061,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let rooms_at = OwnPlaced::<LinkRooms<L::Waits>>::vacant().map_err(OpenError::Arena)?;
             Ok((wire, entropy, rooms_at))
         })?;
-        // The read slots and send places of the faces past the dial role's, each with a Router of
-        // its own over the session's chain buffers, lent to its pump in a cell of its own.
+        // The read slots and send places of the faces, the dial role's first, each with a Router
+        // of its own over the session's chain buffers, lent to its pump in a cell of its own.
         #[cfg(all(not(wz_round), feature = "listen"))]
-        let taken = direct::DirectFaces::<L, C>::taken_in(
+        let taken = direct::DirectFaces::<L, C>::lent_in(
             lent.arena.arena_mut(),
-            lent.taken_faces,
+            lent.face_rows,
             &policy,
             &lent.transport.reassembly,
             lent.transport.face_chains,
@@ -7286,7 +7299,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             arena: lent.arena,
         };
         let apart = LentApart {
-            #[cfg(not(wz_round))]
+            #[cfg(all(not(wz_round), not(feature = "listen")))]
             router: lent.router,
             engine: lent.engine,
             handle_place: lent.handle_place,
@@ -7312,13 +7325,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// the allocation of its own the open claimed for it (`claim`) where the tables take their
     /// memory on use, and counted by its holders there, put in the row `row` the open claimed for
     /// it, which reaches it without holding it (`EngineHandle`, in a build that keeps the table),
-    /// with what the open lent apart from the state (`apart`) and the read slots of the faces past
-    /// the dial role's (`taken`). Out of line, so the open's measure shows it apart.
+    /// with what the open lent apart from the state (`apart`) and the rows of the faces' read
+    /// slots where they are lent (`taken`). Out of line, so the open's measure shows it apart.
     #[inline(never)]
     fn engine_of(
         core: Core<L, C>,
         apart: LentApart,
-        #[cfg(all(not(wz_round), feature = "listen"))] taken: direct::TakenFaces<L, C>,
+        #[cfg(all(not(wz_round), feature = "listen"))] taken: direct::FaceSlots<L, C>,
         #[cfg(any(feature = "engine-rows", test))] row: RowClaim,
         #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))] claim: SharedClaim<
             Self,
@@ -7327,7 +7340,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // The place is a span of the arena, aligned as a span starts.
         const { assert!(Shared::<Self>::layout().align() <= wz_session_core::bounded::ARENA_ALIGN) };
         let LentApart {
-            #[cfg(not(wz_round))]
+            #[cfg(all(not(wz_round), not(feature = "listen")))]
             router,
             engine: place,
             handle_place,
@@ -7394,6 +7407,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 #[cfg(not(wz_round))]
                 direct::DirectFaces::init_at(
                     NonNull::new_unchecked(addr_of_mut!((*at).direct)),
+                    #[cfg(not(feature = "listen"))]
                     router,
                     #[cfg(feature = "listen")]
                     taken,
