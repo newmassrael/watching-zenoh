@@ -791,6 +791,11 @@ mod tests {
     //! `alloc` inbound-parse path is exercised through `InterestOwned`, and
     //! its tests carry its gate: the slot profile without `alloc` compiles
     //! neither the owned Interest nor the peer map they hand it.
+    //!
+    //! A pattern a test expects to match is a literal key or match-all: `*`
+    //! and `**` are the matcher's optional dialect (`keyexpr-wildcard-*`,
+    //! tested in `keyexpr_match`), and a build without it reads them as
+    //! literal chunks. What these tests hold is the staging, in every build.
 
     use super::*;
     #[cfg(feature = "alloc")]
@@ -836,7 +841,7 @@ mod tests {
         assert!(reg.register(1, "group1/zenoh-pico").unwrap());
         let mut pending = new_pending();
         let staged = reg
-            .respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending)
+            .respond_to_interest_borrowed(Some("group1/zenoh-pico"), 42, &mut pending)
             .expect("an empty buffer takes the chain");
         assert_eq!(staged, 1);
         assert_eq!(count(&pending), (1, 1));
@@ -874,7 +879,7 @@ mod tests {
         assert!(reg.register(1, "group1/zenoh-pico").unwrap());
         let mut pending = new_pending();
         assert_eq!(
-            reg.respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending)
+            reg.respond_to_interest_borrowed(Some("group1/zenoh-pico"), 42, &mut pending)
                 .ok(),
             Some(1),
             "a matching token must stage exactly one reply — a fixture that \
@@ -939,23 +944,30 @@ mod tests {
         assert!(reg.is_empty());
         assert!(!reg.unregister(1), "double-unregister is idempotent");
         let mut pending = new_pending();
-        reg.respond_to_interest_borrowed(Some("group1/**"), 5, &mut pending)
+        reg.respond_to_interest_borrowed(Some("group1/zenoh-pico"), 5, &mut pending)
             .expect("an empty buffer takes the chain");
         assert_eq!(count(&pending), (0, 1));
     }
 
+    /// Two tokens held on one key are two tokens, each answered with its own
+    /// `DeclToken`; the token on another key is not.
     #[test]
     fn multiple_matching_tokens_each_stage_a_token() {
         let mut reg = LocalTokenRegistry::new();
         reg.register(1, "group1/a").unwrap();
-        reg.register(2, "group1/b").unwrap();
+        reg.register(2, "group1/a").unwrap();
         reg.register(3, "other/c").unwrap();
         let mut pending = new_pending();
         let staged = reg
-            .respond_to_interest_borrowed(Some("group1/**"), 11, &mut pending)
+            .respond_to_interest_borrowed(Some("group1/a"), 11, &mut pending)
             .expect("an empty buffer takes the chain");
         assert_eq!(staged, 2);
         assert_eq!(count(&pending), (2, 1));
+        let ids = pending.iter().filter_map(|item| match item {
+            DeclResponseItem::Token { token_id, .. } => Some(*token_id),
+            DeclResponseItem::Final { .. } => None,
+        });
+        assert!(ids.eq([1, 2]), "each matching token once, in table order");
         // The Final is last (terminates the batch).
         assert!(matches!(
             pending.iter().last(),
@@ -984,8 +996,9 @@ mod tests {
                 .expect("below capacity");
         }
         let before = pending.len();
+        // Match-all: both tokens, so the chain is three items.
         assert!(
-            reg.respond_to_interest_borrowed(Some("group1/**"), 9, &mut pending)
+            reg.respond_to_interest_borrowed(None, 9, &mut pending)
                 .is_err(),
             "a chain that does not fit whole is refused"
         );
@@ -1097,8 +1110,10 @@ mod tests {
                     keyexpr: Some(WireexprOwned {
                         body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                             id: 0,
-                            suffix_len: Some(9),
-                            suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
+                            suffix_len: Some(17),
+                            suffix: Some(
+                                crate::codec_owned::owned_string("group1/zenoh-pico").unwrap(),
+                            ),
                         }),
                     }),
                 },
@@ -1136,8 +1151,10 @@ mod tests {
                     keyexpr: Some(WireexprOwned {
                         body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                             id: 0,
-                            suffix_len: Some(9),
-                            suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
+                            suffix_len: Some(17),
+                            suffix: Some(
+                                crate::codec_owned::owned_string("group1/zenoh-pico").unwrap(),
+                            ),
                         }),
                     }),
                 },
@@ -1275,8 +1292,8 @@ mod tests {
     /// wrong-space read changes which of our own tokens we hand back.
     ///
     /// THE DISCRIMINATOR is the collision plus two disjoint held tokens: id 7
-    /// resolves `ours/**` in our space and `theirs/**` in the peer's, and one
-    /// token is registered under each prefix. Reading the wrong space replays
+    /// resolves `ours/tok` in our space and `theirs/tok` in the peer's, and one
+    /// token is registered under each key. Reading the wrong space replays
     /// the OTHER token — a confident wrong answer, not silence.
     #[cfg(feature = "alloc")]
     #[test]
@@ -1291,9 +1308,9 @@ mod tests {
         reg.register(2, "theirs/tok").unwrap();
 
         let mut peer = HashMap::new();
-        peer.insert(7u64, "theirs/**".to_string());
+        peer.insert(7u64, "theirs/tok".to_string());
         let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
-        own.insert(7, "ours/**".to_string());
+        own.insert(7, "ours/tok".to_string());
 
         // M=0 (`WireexprNonlocal`) with no inline suffix: the id alone.
         let interest = InterestOwned {
@@ -1327,7 +1344,7 @@ mod tests {
         assert_eq!(
             count(&pending),
             (1, 1),
-            "exactly one token matches `ours/**` -- the interest resolved in \
+            "exactly one token matches `ours/tok` -- the interest resolved in \
              OUR space",
         );
         assert!(
@@ -1355,7 +1372,7 @@ mod tests {
         reg.register(2, "theirs/tok").unwrap();
 
         let mut peer = HashMap::new();
-        peer.insert(7u64, "theirs/**".to_string());
+        peer.insert(7u64, "theirs/tok".to_string());
 
         let interest = InterestOwned {
             header: 0x19 | 0x20,
