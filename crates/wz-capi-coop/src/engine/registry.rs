@@ -84,7 +84,7 @@ use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf, TakenAhead};
 
 #[cfg(feature = "query")]
-use super::{LegHold, LegSink};
+use super::{LegHold, LegId, LegSink};
 use super::{RoundDelivery, SubscriberRow};
 use crate::arena::MAX_FACE_SETS;
 #[cfg(feature = "runtime-plan")]
@@ -1111,17 +1111,21 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// End the first leg pending on any face, or on the session's own queryables, whose entry's
-    /// sink `pick` names: the entry is dropped where it lies, which says the leg's end. The leg,
-    /// for the caller to let its callback go with no lock held; `None` when no entry is named.
-    /// A leg is its entry alone, so a cancellation finds it here and nowhere else.
+    /// sink `pick` names: the entry is dropped where it lies, which says the leg's end. The row of
+    /// the leg's get, for the caller to let go of what the get held with no lock held; `None` when
+    /// no entry is named. A leg is its entry alone, so a cancellation finds it here and nowhere
+    /// else.
     #[cfg(feature = "query")]
-    pub(super) fn end_first_leg(&mut self, mut pick: impl FnMut(&LegSink) -> bool) -> Option<u64> {
+    pub(super) fn end_first_leg(
+        &mut self,
+        mut pick: impl FnMut(&LegSink) -> bool,
+    ) -> Option<LegId> {
         let mut ended = None;
         for gets in self.all_gets_mut() {
             let mut named = |sink: &LegSink| {
                 let hit = pick(sink);
                 if hit {
-                    ended = Some(sink.leg());
+                    ended = Some(sink.row());
                 }
                 hit
             };

@@ -58,7 +58,7 @@ use super::QueryPlane;
 #[cfg(wz_round)]
 use super::Registry;
 #[cfg(feature = "query")]
-use super::{Ended, LegRow, Rows};
+use super::{Ended, LegId, LegRow, Rows};
 #[cfg(feature = "query")]
 use super::{EndedLegs, LegRows};
 #[cfg(all(
@@ -111,7 +111,7 @@ pub(super) struct PlacedTables {
     #[cfg(feature = "query")]
     pub(super) leg_rows: Rows<Option<LegRow>, { usize::MAX }>,
     #[cfg(feature = "query")]
-    pub(super) held_replies: HeldReplies<u64, StatePolicy>,
+    pub(super) held_replies: HeldReplies<LegId, StatePolicy>,
     #[cfg(feature = "queryable")]
     pub(super) held_finals: query::HeldFinals<StatePolicy>,
     #[cfg(feature = "queryable")]
@@ -188,7 +188,7 @@ pub(crate) struct StatePlaces {
         feature = "query",
         not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
     ))]
-    held_replies: HeldReplyPlaces<u64>,
+    held_replies: HeldReplyPlaces<LegId>,
     #[cfg(all(
         feature = "queryable",
         not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
@@ -339,7 +339,7 @@ impl StatePlaces {
     pub(super) unsafe fn gets(
         at: NonNull<Self>,
         ended: EndedLegs<StatePolicy>,
-        replies: HeldReplies<u64, StatePolicy>,
+        replies: HeldReplies<LegId, StatePolicy>,
         legs: LegRows,
     ) -> Placed<GetPlane> {
         // SAFETY: the caller's contract; the field is aligned for the plane, the owner's alone,

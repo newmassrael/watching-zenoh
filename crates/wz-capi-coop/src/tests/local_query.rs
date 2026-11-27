@@ -249,6 +249,39 @@ fn a_get_for_any_destination_waits_for_the_peer_and_the_session() {
     assert_eq!(router.seen(|s| s.queries), 1);
 }
 
+/// A get for any destination that consolidates `Latest` hands its callback one reply of a key over
+/// its two legs, the peer's and the session's own, at its end, as zenoh consolidates a query over
+/// every Final; each leg consolidating apart handed one reply of the key from each. The CONTROL is
+/// the call's return, where the own leg's Final is in and its reply is still held for the get's
+/// end. Turned red by a leg's hold of its own (`LegHold` tagged with the leg), or by a leg's Final
+/// that flushes before the get's last.
+#[test]
+fn a_latest_get_of_two_legs_hands_one_reply_of_a_key_over_both() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Answer("demo/lq/**", b"peer"));
+    answering(&engine, "demo/lq/**", Locality::Any, b"own");
+    let latest = QueryOptions::get()
+        .with_consolidation(ConsolidationMode::Latest)
+        .with_allowed_destination(Locality::Any);
+    let (issued, leg) = ask(&engine, "demo/lq/a", &latest, None, None, None);
+    assert_eq!(
+        issued,
+        Ok(2),
+        "a leg to the peer and one to the session's own"
+    );
+    assert!(
+        leg.lock().unwrap().replies.is_empty(),
+        "CONTROL: the own reply is held back for the get's end"
+    );
+    until(&engine, "the get to end", || leg.lock().unwrap().ended);
+    let leg = leg.lock().unwrap();
+    assert_eq!(leg.replies.len(), 1, "one reply of the key over both legs");
+    assert_eq!(leg.replies[0].1, "demo/lq/a");
+    assert_eq!(leg.minted, 1);
+    assert_eq!(router.seen(|s| s.queries), 1);
+}
+
 /// A get made for peers alone asks no queryable of the session, which is the control of the
 /// destination, and a get for the session alone with no queryable that matches ends at once with
 /// no reply.

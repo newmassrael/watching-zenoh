@@ -1846,7 +1846,9 @@ fn the_arena_lends_a_row_for_the_end_of_each_get(plan: &ArenaPlan, legs: usize) 
     assert_eq!(held.count, plan.session().held_replies());
     assert_eq!(
         held.span(),
-        wz_session_core::reply_hold::HeldReplies::<u64, Lent>::arena_bytes(held.count)
+        wz_session_core::reply_hold::HeldReplies::<crate::engine::LegId, Lent>::arena_bytes(
+            held.count
+        )
     );
 }
 

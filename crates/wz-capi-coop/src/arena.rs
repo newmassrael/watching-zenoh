@@ -2217,7 +2217,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             );
         }
         // The replies the gets that consolidate hold to their Finals: a row for each reply, in one
-        // table shared by every get, each tagged with its leg (`engine::get::LegHold`).
+        // table shared by every get, each tagged with its get's row (`engine::get::LegHold`).
         // The limit is held either way, so a config over the build's is refused under its name.
         #[cfg(feature = "query")]
         {
@@ -2229,7 +2229,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             self.put(
                 ArenaPart::HeldReplies,
                 self.session.held_replies,
-                core::mem::size_of::<HeldReply<u64, Lent>>(),
+                core::mem::size_of::<HeldReply<crate::engine::LegId, Lent>>(),
             );
         }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
