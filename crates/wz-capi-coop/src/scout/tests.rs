@@ -129,16 +129,14 @@ impl Drop for Responder {
     }
 }
 
-/// A window member on a fresh loopback socket of the host's that writes its Scout to `peer`.
-fn member(peer: SocketAddr, asks: bool) -> ScoutMember<PosixUdpSocket> {
-    let socket =
-        PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind a member");
-    ScoutMember::new(socket, peer, asks)
+/// A fresh loopback socket of the host's for a window member.
+fn member_socket() -> PosixUdpSocket {
+    PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind a member")
 }
 
-/// A member that asks.
+/// An ask member on a fresh loopback socket that writes its Scout to `peer`.
 fn asking(peer: SocketAddr) -> ScoutMember<PosixUdpSocket> {
-    member(peer, true)
+    ScoutMember::new(member_socket(), peer)
 }
 
 fn params(timeout_ms: u64, exit_on_first: bool) -> ScoutParams {
@@ -159,7 +157,7 @@ fn a_survey_collects_every_answer_for_its_whole_budget() {
         hello_datagram(0, &[0x11; 4], &["tcp/10.0.0.1:7447"]),
         hello_datagram(1, &[0x22; 4], &["tcp/10.0.0.2:7447", "udp/10.0.0.2:7447"]),
     ]);
-    let members = ScoutMembers::from_parts(None, vec![asking(responder.at)]);
+    let members = ScoutMembers::asking([asking(responder.at)]);
     let started = Instant::now();
     let actions = run_window(&PosixClock, members, params(300, false));
     let took = started.elapsed();
@@ -190,7 +188,7 @@ fn a_lookup_ends_at_the_first_answer() {
         hello_datagram(0, &[0x11; 4], &["tcp/10.0.0.1:7447"]),
         hello_datagram(0, &[0x22; 4], &["tcp/10.0.0.2:7447"]),
     ]);
-    let members = ScoutMembers::from_parts(None, vec![asking(responder.at)]);
+    let members = ScoutMembers::asking([asking(responder.at)]);
     let started = Instant::now();
     let actions = run_window(&PosixClock, members, params(5_000, true));
     let took = started.elapsed();
@@ -281,7 +279,7 @@ fn the_window_over_one_datagram_socket_finds_nothing_when_nobody_answers() {
 #[test]
 fn a_window_nobody_answers_ends_empty_at_its_deadline() {
     let responder = Responder::start(Vec::new());
-    let members = ScoutMembers::from_parts(None, vec![asking(responder.at)]);
+    let members = ScoutMembers::asking([asking(responder.at)]);
     let started = Instant::now();
     let actions = run_window(&PosixClock, members, params(200, false));
 
@@ -306,7 +304,7 @@ fn a_datagram_that_is_not_an_answer_is_named_and_the_window_goes_on() {
     let locatorless = hello_datagram(0, &[0x33; 4], &[]);
     let answer = hello_datagram(0, &[0x44; 4], &["tcp/10.0.0.4:7447"]);
     let responder = Responder::start(vec![own_scout, truncated, locatorless, answer]);
-    let members = ScoutMembers::from_parts(None, vec![asking(responder.at)]);
+    let members = ScoutMembers::asking([asking(responder.at)]);
     let actions = run_window(&PosixClock, members, params(3_000, true));
 
     assert_eq!(
@@ -341,7 +339,7 @@ fn a_dead_ask_member_does_not_end_the_window() {
     let responder = Responder::start(vec![hello_datagram(0, &[0x55; 4], &["tcp/10.0.0.5:7447"])]);
     // A member whose peer is an address nothing can be sent to from an IPv4 socket.
     let dead = asking(SocketAddr::from(([0, 0, 0, 0], 0)));
-    let members = ScoutMembers::from_parts(None, vec![dead, asking(responder.at)]);
+    let members = ScoutMembers::asking([dead, asking(responder.at)]);
     let actions = run_window(&PosixClock, members, params(3_000, true));
 
     assert_eq!(
@@ -351,12 +349,13 @@ fn a_dead_ask_member_does_not_end_the_window() {
 }
 
 /// With no ask member the group socket asks, the floor a host whose interface enumeration fails
-/// still scouts on; with no member at all there is no window, and it ends at once with nothing.
+/// still scouts on.
+#[cfg(feature = "scout-group-socket")]
 #[test]
-fn the_group_socket_asks_when_nothing_else_can_and_no_member_is_no_window() {
+fn the_group_socket_asks_when_nothing_else_can() {
     let responder = Responder::start(vec![hello_datagram(0, &[0x66; 4], &["tcp/10.0.0.6:7447"])]);
-    let group = member(responder.at, false);
-    let members = ScoutMembers::from_parts(Some(group), Vec::new());
+    let members =
+        ScoutMembers::asking(Vec::new()).listening_on_group(member_socket(), responder.at);
     assert_eq!(
         members.askers(),
         1,
@@ -367,11 +366,15 @@ fn the_group_socket_asks_when_nothing_else_can_and_no_member_is_no_window() {
         actions.discovered_locator().as_deref(),
         Some("tcp/10.0.0.6:7447")
     );
+}
 
+/// With no member at all there is no window, and it ends at once with nothing.
+#[test]
+fn no_member_is_no_window() {
     let started = Instant::now();
     let none = run_window(
         &PosixClock,
-        ScoutMembers::<PosixUdpSocket>::from_parts(None, Vec::new()),
+        ScoutMembers::<PosixUdpSocket>::asking(Vec::new()),
         params(5_000, false),
     );
     assert!(none.scouted_hellos().is_empty());

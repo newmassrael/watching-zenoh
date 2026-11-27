@@ -114,6 +114,11 @@ session-slot = ["wz-runtime-coop/session-slot"]
 # on, and a scouting window's sockets, one for each interface that can carry multicast
 # (`scouting`). The heap profile's: the table and the members are lists the host sizes.
 host-multicast = ["alloc"]
+# A scouting window's socket joined to the scouting group beside its ask sockets (`scouting`), a
+# behaviour zenoh-pico's scout does not have: it hears a Hello sent to the group rather than to the
+# asker, and asks itself when no interface could be asked on. Without it a window has its ask
+# sockets alone. Read only with `host-multicast`, which holds the window.
+scout-group-socket = []
 # The host's ttys as the lines of the cooperative engine's `serial/` links (`serial`:
 # `PosixSerialLine`, set as zenoh-pico's POSIX tty sets one, on Linux and Android). The heap
 # profile's, as the engine's serial links are.

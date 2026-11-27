@@ -1035,6 +1035,23 @@ abis = ["core", "pico"]
 implies = []
 help = "The node clock an advanced publisher stamps from: a hybrid logical clock under the clock-quality-stamping policy, whose trusted-only refuses a sample while the clock is not trusted. Off, a sample takes the system clock's time, ordered by the session's last time given, as zenoh-pico's publisher stamps with z_timestamp_new, and trusted-only refuses none."
 
+# A scouting window's socket joined to the scouting group, beside its ask sockets. On in a build
+# that names nothing and off in the zenoh-pico preset: zenoh-pico's scout opens a unicast link per
+# interface and reads on those alone, failing with none
+# (`vendor/zenoh-pico/src/session/scout.c` @
+# `return _z_scout_links_size(&scout->_links) > 0 ? _Z_RES_OK : _Z_ERR_TRANSPORT_OPEN_FAILED;`).
+# A behaviour of the window, not a door, so it implies nothing: a default-on switch that selected
+# `scout` would turn the plane back on in a build that turned it off. Without `scout` there is no
+# window to add the socket to. The tokio engine scouts on the group whatever is named.
+[[capability]]
+id = "scout-group-socket"
+kconfig = "WZ_CAP_SCOUT_GROUP_SOCKET"
+os_needs = ["multicast"]
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "A scouting window also reads on a socket joined to the scouting group, and asks on it when no interface can be asked on (wz-own). Off, a window has its per-interface ask sockets alone, as zenoh-pico's scout does: a Hello sent to the group rather than to the asker is not heard, and a host that lists no interface finds nobody."
+
 # A clock the application registers (the observation plane's time, a clock with a quality): a
 # hardware clock or a time
 # master the device has, which the node reads in place of the system clock. wz's own door, with no

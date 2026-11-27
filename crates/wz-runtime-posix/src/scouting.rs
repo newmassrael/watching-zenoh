@@ -2,18 +2,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! A scouting window's sockets on a host: one ASK socket pinned to each interface that can carry
-//! multicast, and the socket joined to the scouting group, written once over either host's sockets
-//! ([`MulticastSocket`]).
+//! multicast and, with `scout-group-socket`, the socket joined to the scouting group, written once
+//! over either host's sockets ([`MulticastSocket`]).
 //!
-//! The group socket (joined, bound on the group port) is an extra RECEIVE member and not a
-//! condition of the window: upstream's `scout` receives on its per-interface sockets alone, and
+//! The Scout leaves by an ask socket pinned to each interface, and the Hello comes back to the
+//! socket the Scout left from, because both references' responders reply unicast to the asker:
 //! zenoh-pico opens a link per interface when its config names none
 //! (`vendor/zenoh-pico/src/session/scout.c` @
-//! `_z_udp_unicast_interface_iterator_next(&iter)`). So the Scout leaves by an ask socket pinned to
-//! each interface, and the Hello comes back to the socket the Scout left from, because both
-//! references' responders reply unicast to the asker. A window whose group socket cannot be bound
-//! goes on with the ask sockets; a host that lists no interface asks on the group socket alone, as
-//! a floor; a window with neither is empty.
+//! `_z_udp_unicast_interface_iterator_next(&iter)`), and reads on those links alone.
+//!
+//! The group socket (joined, bound on the group port) is a RECEIVE member beside them and not a
+//! condition of the window, a behaviour zenoh-pico does not have: it hears a Hello sent to the
+//! group rather than to the asker, and a host that lists no interface asks on it alone, as a
+//! floor. A window whose group socket cannot be bound goes on with the ask sockets. Without the
+//! switch a window has its ask sockets alone, and one with none has no member and ends at once,
+//! as zenoh-pico's scout fails with no link (`vendor/zenoh-pico/src/session/scout.c` @
+//! `return _z_scout_links_size(&scout->_links) > 0 ? _Z_RES_OK : _Z_ERR_TRANSPORT_OPEN_FAILED;`).
 //!
 //! A Scout is sent when AT LEAST ONE ask socket sent it (pico's rule, `scout.c` @
 //! `return sent ? _Z_RES_OK : _Z_ERR_TRANSPORT_TX_FAILED;`): a node with one dead interface among
@@ -27,26 +31,45 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use wz_runtime_coop::udp_link::DatagramSocket;
 
 use crate::group::MulticastSocket;
-use crate::multicast::{bind_scout_asker, bind_scout_group};
+use crate::multicast::bind_scout_asker;
+#[cfg(feature = "scout-group-socket")]
+use crate::multicast::bind_scout_group;
 
 /// One socket of a window: where it reads, where the Scout goes from it, and whether it asks.
 pub struct ScoutMember<S> {
     socket: S,
     /// Where the Scout is written from this member: the group, or in a test the responder.
     peer: SocketAddr,
+    /// Whether the Scout is written from it: every ask member does, and the group's socket only
+    /// when the window has no ask member.
+    #[cfg(feature = "scout-group-socket")]
     asks: bool,
     /// A read of the socket failed in this drain: the drain drops the member as it ends.
     lost: bool,
 }
 
 impl<S> ScoutMember<S> {
-    /// A member reading `socket`, which writes its Scout to `peer` when it `asks`.
-    pub fn new(socket: S, peer: SocketAddr, asks: bool) -> Self {
+    /// An ask member reading `socket`, which writes its Scout to `peer`.
+    pub fn new(socket: S, peer: SocketAddr) -> Self {
         Self {
             socket,
             peer,
-            asks,
+            #[cfg(feature = "scout-group-socket")]
+            asks: true,
             lost: false,
+        }
+    }
+
+    /// Whether the Scout is written from this member. A window without the group's socket holds
+    /// ask members alone.
+    fn asks(&self) -> bool {
+        #[cfg(feature = "scout-group-socket")]
+        {
+            self.asks
+        }
+        #[cfg(not(feature = "scout-group-socket"))]
+        {
+            true
         }
     }
 }
@@ -78,51 +101,65 @@ pub struct ScoutMembers<S: ReadableAmong> {
 }
 
 impl<S: MulticastSocket + ReadableAmong> ScoutMembers<S> {
-    /// Open the group socket on `group:port` and one ask socket for each address of `locals`
-    /// ([`Self::from_parts`] says what is kept when they fail). An ask socket is bound to its
-    /// address and leaves by it; the address is handed to the socket layer as it was read from the
-    /// interface table, so a window writes and reads no address text.
+    /// Open one ask socket for each address of `locals` and, with `scout-group-socket`, the
+    /// group socket on `group:port` after them ([`Self::listen_on_group`]). A socket that cannot
+    /// be opened is left out and the others stand. An ask socket is bound to its address and
+    /// leaves by it; the address is handed to the socket layer as it was read from the interface
+    /// table, so a window writes and reads no address text.
     pub fn open(group: IpAddr, port: u16, locals: &[Ipv4Addr]) -> Self {
-        let group_member = bind_scout_group::<S>(group, port)
-            .ok()
-            .map(|bound| ScoutMember::new(bound.socket, bound.peer, false));
-        let mut asking = Vec::new();
-        for local in locals {
-            // A refusal is the address's alone: it is left out and the others stand.
-            if let Ok(bound) = bind_scout_asker::<S>(group, port, *local) {
-                asking.push(ScoutMember::new(bound.socket, bound.peer, true));
-            }
-        }
-        Self::from_parts(group_member, asking)
+        let members = Self::asking(locals.iter().filter_map(|local| {
+            bind_scout_asker::<S>(group, port, *local)
+                .ok()
+                .map(|bound| ScoutMember::new(bound.socket, bound.peer))
+        }));
+        #[cfg(feature = "scout-group-socket")]
+        let members = match bind_scout_group::<S>(group, port) {
+            Ok(bound) => members.listening_on_group(bound.socket, bound.peer),
+            Err(_) => members,
+        };
+        wz_session_core::diag_debug!(
+            "scout: asking on {} of {} socket(s)",
+            members.askers(),
+            members.members.len()
+        );
+        members
     }
 }
 
 impl<S: ReadableAmong> ScoutMembers<S> {
-    /// The group member and the ask members as one window. With no ask member the group socket
-    /// asks, which is the floor a host that lists no interface still scouts on; with neither,
-    /// there is no window.
-    pub fn from_parts(group: Option<ScoutMember<S>>, ask: Vec<ScoutMember<S>>) -> Self {
-        let fell_back_to_group = ask.is_empty();
-        let mut members = Vec::with_capacity(ask.len() + 1);
-        if let Some(mut group) = group {
-            group.asks = fell_back_to_group;
-            members.push(group);
-        }
-        members.extend(ask);
-        let readable = members
-            .iter()
-            .map(|member| member.socket.readable_entry())
-            .collect();
-        let this = Self {
-            members,
-            readable,
+    /// A window of the ask members `ask`, in their order; with none, there is no window.
+    pub fn asking(ask: impl IntoIterator<Item = ScoutMember<S>>) -> Self {
+        let mut this = Self {
+            members: Vec::new(),
+            readable: Vec::new(),
             cursor: 0,
         };
-        wz_session_core::diag_debug!(
-            "scout: asking on {} socket(s); fell back to the group socket: {fell_back_to_group}",
-            this.askers()
-        );
+        for member in ask {
+            this.admit(member);
+        }
         this
+    }
+
+    /// The window with `socket`, joined to the scouting group, as a member that reads what the
+    /// group carries; it writes the Scout to `peer` too when no member of the window asks, the
+    /// floor a host that lists no interface still scouts on. Taken after the ask members, so that
+    /// it is known whether one does.
+    #[cfg(feature = "scout-group-socket")]
+    pub fn listening_on_group(mut self, socket: S, peer: SocketAddr) -> Self {
+        let asks = self.askers() == 0;
+        self.admit(ScoutMember {
+            socket,
+            peer,
+            asks,
+            lost: false,
+        });
+        self
+    }
+
+    /// Take `member` with its entry of the set the window waits on.
+    fn admit(&mut self, member: ScoutMember<S>) {
+        self.readable.push(member.socket.readable_entry());
+        self.members.push(member);
     }
 
     /// Whether the window has no socket at all.
@@ -132,13 +169,13 @@ impl<S: ReadableAmong> ScoutMembers<S> {
 
     /// How many of the members ask.
     pub fn askers(&self) -> usize {
-        self.members.iter().filter(|member| member.asks).count()
+        self.members.iter().filter(|member| member.asks()).count()
     }
 
     /// Write `scout` from every ask member: whether at least one sent it.
     pub fn send(&self, scout: &[u8]) -> bool {
         let mut sent = false;
-        for member in self.members.iter().filter(|member| member.asks) {
+        for member in self.members.iter().filter(|member| member.asks()) {
             match member.socket.send_to(member.peer, scout) {
                 Ok(()) => sent = true,
                 Err(error) => {
@@ -214,30 +251,49 @@ mod tests {
 
     /// A member on a fresh loopback socket that writes its Scout to `peer`.
     fn asking(peer: SocketAddr) -> ScoutMember<PosixUdpSocket> {
-        ScoutMember::new(loopback(), peer, true)
+        ScoutMember::new(loopback(), peer)
     }
 
-    /// With no ask member the group socket asks; with ask members it only listens; with neither
-    /// there is no window.
+    /// With no ask member the group socket asks; with ask members it only listens. Turned red by
+    /// a group socket that asks beside an ask member, or stays silent when it is the only member.
+    #[cfg(feature = "scout-group-socket")]
     #[test]
     fn the_group_socket_asks_only_when_nothing_else_can() {
         let responder = loopback();
-        let group = ScoutMember::new(loopback(), responder.local(), false);
-        let alone = ScoutMembers::from_parts(Some(group), Vec::new());
+        let alone =
+            ScoutMembers::asking(Vec::new()).listening_on_group(loopback(), responder.local());
         assert_eq!(alone.askers(), 1);
         assert!(alone.send(b"scout"), "the group socket asked");
 
-        let group = ScoutMember::new(loopback(), responder.local(), true);
-        let both = ScoutMembers::from_parts(Some(group), alloc::vec![asking(responder.local())]);
+        let both = ScoutMembers::asking([asking(responder.local())])
+            .listening_on_group(loopback(), responder.local());
         assert_eq!(
             both.askers(),
             1,
             "the ask socket asks, the group socket listens"
         );
+        assert_eq!(both.members.len(), 2);
+    }
 
-        let none = ScoutMembers::<PosixUdpSocket>::from_parts(None, Vec::new());
+    /// A window of no member is no window: nothing to ask with.
+    #[test]
+    fn a_window_of_no_member_asks_nobody() {
+        let none = ScoutMembers::<PosixUdpSocket>::asking(Vec::new());
         assert!(none.is_empty());
         assert!(!none.send(b"scout"), "nobody to ask with");
+    }
+
+    /// Without the group's socket a window holds the ask sockets its addresses gave and nothing
+    /// else, and one given no address has no member, as zenoh-pico's scout opens no link then.
+    /// Turned red by a window that joins the group without the switch.
+    #[cfg(not(feature = "scout-group-socket"))]
+    #[test]
+    fn a_window_without_the_group_socket_holds_its_ask_sockets_alone() {
+        let group = IpAddr::V4(Ipv4Addr::new(239, 255, 91, 77));
+        assert!(ScoutMembers::<PosixUdpSocket>::open(group, 47_477, &[]).is_empty());
+        let members = ScoutMembers::<PosixUdpSocket>::open(group, 47_477, &[Ipv4Addr::LOCALHOST]);
+        assert_eq!(members.members.len(), 1);
+        assert_eq!(members.askers(), 1);
     }
 
     /// A Scout is sent when one ask member sent it, past one that cannot: a member whose peer is an
@@ -246,7 +302,7 @@ mod tests {
     fn a_scout_is_sent_when_one_member_sent_it() {
         let responder = loopback();
         let dead = asking(SocketAddr::from(([0, 0, 0, 0], 0)));
-        let members = ScoutMembers::from_parts(None, alloc::vec![dead, asking(responder.local())]);
+        let members = ScoutMembers::asking([dead, asking(responder.local())]);
         assert!(members.send(b"scout"));
         let mut got = [0u8; 16];
         let (len, _) = responder
@@ -254,10 +310,7 @@ mod tests {
             .expect("no error")
             .expect("the Scout arrived");
         assert_eq!(&got[..len], b"scout");
-        let dead_alone = ScoutMembers::from_parts(
-            None,
-            alloc::vec![asking(SocketAddr::from(([0, 0, 0, 0], 0)))],
-        );
+        let dead_alone = ScoutMembers::asking([asking(SocketAddr::from(([0, 0, 0, 0], 0)))]);
         assert!(!dead_alone.send(b"scout"), "no member sent it");
     }
 
@@ -269,13 +322,8 @@ mod tests {
         let a = loopback();
         let b = loopback();
         let (a_at, b_at) = (a.local(), b.local());
-        let mut members = ScoutMembers::from_parts(
-            None,
-            alloc::vec![
-                ScoutMember::new(a, a_at, true),
-                ScoutMember::new(b, b_at, true)
-            ],
-        );
+        let mut members =
+            ScoutMembers::asking([ScoutMember::new(a, a_at), ScoutMember::new(b, b_at)]);
         let mut buffer = [0u8; 64];
         assert!(!members.drain(&mut buffer, |_| panic!("nothing was sent")));
 
@@ -387,7 +435,7 @@ mod tests {
                 broken: core::cell::Cell::new(broken),
                 id: port,
             };
-            ScoutMember::new(socket, at(port), true)
+            ScoutMember::new(socket, at(port))
         };
         let peers = |members: &ScoutMembers<Scripted>| -> Vec<SocketAddr> {
             let peers: Vec<SocketAddr> = members.members.iter().map(|member| member.peer).collect();
@@ -398,17 +446,14 @@ mod tests {
             );
             peers
         };
-        let mut members = ScoutMembers::from_parts(
-            None,
-            alloc::vec![
-                member(1, true, &[]),
-                member(2, false, &["two"]),
-                member(3, true, &[]),
-                member(4, false, &["four"]),
-                member(5, true, &[]),
-                member(6, false, &[]),
-            ],
-        );
+        let mut members = ScoutMembers::asking([
+            member(1, true, &[]),
+            member(2, false, &["two"]),
+            member(3, true, &[]),
+            member(4, false, &["four"]),
+            member(5, true, &[]),
+            member(6, false, &[]),
+        ]);
         assert_eq!(peers(&members), (1..=6).map(at).collect::<Vec<_>>());
         let mut buffer = [0u8; 16];
         let mut seen = Vec::new();
@@ -442,7 +487,7 @@ mod tests {
         let askers: Vec<SocketAddr> = members
             .members
             .iter()
-            .filter(|member| member.asks)
+            .filter(|member| member.asks())
             .map(|member| member.socket.local())
             .collect();
         assert_eq!(

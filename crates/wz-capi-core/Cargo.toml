@@ -109,6 +109,8 @@ default = [
     "advanced-source-retention",
     # The node clock an advanced publisher stamps from (`advanced-node-clock`).
     "advanced-node-clock",
+    # A scouting window's socket joined to the group (deploy/wz-config.toml, `scout-group-socket`).
+    "scout-group-socket",
     # The peer's behaviours zenoh-pico's peer does not have (deploy/wz-config.toml, `udp-listen`).
     # The peer's behaviours zenoh-pico's peer does not have (deploy/wz-config.toml, `udp-listen`,
     # `interest-answer`).
@@ -383,6 +385,10 @@ advanced-source-retention = []
 # engine's `advanced` holds it through `timestamping` whatever is named, so the feature only
 # carries the capability's name.
 advanced-node-clock = []
+# A scouting window's socket joined to the scouting group (`wz-capi-pico/scout-group-socket`):
+# this engine's runtime scouts on the group whatever is named, so the feature only carries the
+# capability's name.
+scout-group-socket = []
 # A unicast `udp/` endpoint a peer listens on (`wz-capi-pico/udp-listen`): this engine's runtime
 # listens on `udp/` whatever is named, so the feature only carries the capability's name.
 udp-listen = []

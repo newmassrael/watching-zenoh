@@ -8,7 +8,7 @@
 //! (`wz_session_core::scouting_host`: what a Scout says, which datagrams are answers and which are
 //! named and dropped, when it is over) and the sockets are the host's
 //! (`wz_runtime_posix::scouting`: an ask socket pinned to each interface that can carry multicast,
-//! and the group socket, over either host's sockets). What this module adds is the blocking host
+//! and with `scout-group-socket` the group socket, over either host's sockets). What this module adds is the blocking host
 //! that pumps the one with the other: it opens the sockets, sends the Scout, reads what arrives
 //! and reads the clock, on the calling thread, which is what a C program that calls `z_scout`
 //! expects, and what zenoh-pico's own `__z_scout_loop` does. It needs no `std`: a host library

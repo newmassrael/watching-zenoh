@@ -352,6 +352,7 @@ impl Plan {
 
     /// A plan of `group` that pins no interface and joins no other group: what a scouting window
     /// reads the group by, which no locator's keys shape.
+    #[cfg(feature = "scout-group-socket")]
     fn unpinned(group: IpAddr) -> Self {
         match group {
             IpAddr::V4(group) => Self::V4 {
@@ -711,6 +712,7 @@ fn joined_on<S: MulticastSocket>(
 /// membership passed over, and every option the system's. A window states no locator key, so none
 /// is read: [`bind_joined`] with a config that names nothing and [`RxBind::Group`], without the
 /// resolution of keys it would never be given.
+#[cfg(feature = "scout-group-socket")]
 pub fn bind_scout_group<S: MulticastSocket>(
     group: IpAddr,
     port: u16,
@@ -1542,6 +1544,7 @@ mod tests {
 
     /// A scouting window's group plan is the plan of a locator that states no key: no interface,
     /// no other group, of the group's family. Turned red by a plan that pins or joins anything.
+    #[cfg(feature = "scout-group-socket")]
     #[test]
     fn a_scouting_group_plan_is_a_plan_of_no_key() {
         for group in [
@@ -1555,6 +1558,11 @@ mod tests {
                 "{group:?}"
             );
         }
+    }
+
+    /// A scouting window's ask plan is the IPv4 plan pinned to the address it asks by.
+    #[test]
+    fn a_scouting_ask_plan_is_pinned_to_its_address() {
         assert_eq!(
             Plan::pinned_v4(IpAddr::V4(GROUP), Ipv4Addr::LOCALHOST),
             Ok(v4_plan(Some(Ipv4Addr::LOCALHOST)))
