@@ -4399,8 +4399,10 @@ mod tests {
 
     /// Each kind's places are laid out under the kind's own part, as many as the rows the session
     /// keeps of that kind and as large as the layout given for it, and a kind's rows are read at
-    /// its own index. Turned red by a count read at a neighbour's index, or a kind's places laid
-    /// out under another kind's part.
+    /// its own index; a kind the build keeps no row of is laid out nothing, though the ABI names
+    /// a place for it. The plan holds the rows of the build's kinds alone (`ENTITY_PLACE_ROWS`),
+    /// so only those are given rows. Turned red by a count read at a neighbour's index, a kind's
+    /// places laid out under another kind's part, or places laid out for a kind of no row.
     #[test]
     fn each_kinds_places_take_its_own_rows_and_part() {
         const NAMES: [&str; ENTITY_KINDS] = [
@@ -4419,20 +4421,28 @@ mod tests {
             "advanced subscriber places",
             "link events listener places",
         ];
+        let built = entity_rows(&SessionLimits::defaults()).expect("the build's limits");
         let mut plan = empty_plan();
         let mut held = HeldPlaces::NONE;
         for (at, kind) in EntityKind::ALL.into_iter().enumerate() {
-            plan.session.entities.kinds[at] = at + 1;
+            if built.of_kind(kind) != 0 {
+                plan.session.entities.kinds[at] = at + 1;
+            }
             let place = Layout::from_size_align(8 * (at + 1), 8).expect("a small layout");
             held = held.with_entity(kind, place);
         }
         plan.holding(&held).expect("the places fit");
         for (at, kind) in EntityKind::ALL.into_iter().enumerate() {
-            assert_eq!(plan.entities().of_kind(kind), at + 1, "{kind:?}");
             let laid = plan
                 .rows()
                 .find(|row| row.part() == NAMES[at])
                 .map(|row| (row.count, row.entry_bytes));
+            if built.of_kind(kind) == 0 {
+                assert_eq!(laid, None, "{kind:?}: a kind the build keeps no row of");
+                assert_eq!(plan.entity_bytes(kind), 0, "{kind:?}");
+                continue;
+            }
+            assert_eq!(plan.entities().of_kind(kind), at + 1, "{kind:?}");
             assert_eq!(laid, Some((at + 1, 8 * (at + 1))), "{kind:?}");
             assert_eq!(plan.entity_bytes(kind), 8 * (at + 1), "{kind:?}");
         }
