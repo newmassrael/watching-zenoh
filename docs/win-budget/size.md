@@ -836,6 +836,36 @@ Tests: no branch is new. `closed_links_are_read_as_the_stacks_one_type` and
 `a_closed_link_in_a_lent_cell_gives_it_back_whole` now reach `heap_link` on the closed set; the
 open set's tests of `IpLinks`, ws, unixpipe and app links reach `behind_tables`.
 
+### 9.8 What 9.7 left red, repaid (not built or run by this lane)
+
+Two commits, each the root of one compile red the merge found; no behaviour moves.
+
+- **The serial listener hands an accepted link on behind its tables**
+  (`serial_link/links.rs`): its `accept` still named the serial helper that 9.7 replaced by
+  `OpenedLink::behind_tables`, which its dial already called. No other link names the helper: the
+  `opened` left in the ws, unixpipe, app, ip and either links are parameters of their `From`
+  impls, and `LinkSet::opened` is the set's own method.
+- **A heap node asks its stack for an open set** (`session_drive.rs`, `wz-session-mcu`'s
+  `dial`, `admin_node`, `client_node`, the Zephyr admin node's `NodeNet`): since 9.5 a stack's
+  sink is the type its pump names (`SharedPump::Sink`), while the session shell's heap node opens
+  sessions of the default handle, whose driver is `dyn BoxedLinkDriver` (`spawn_session` takes
+  `SessionHandle<C>`). `OpenSetLinks` names that fact once: a `SessionLinks` whose pump's sink is
+  the driver's trait, given to every such stack by a blanket impl (lwIP's, Zephyr's, the in-memory
+  network, `IpLinks` at its default `OpenSet`). The dialer, the admin node, the client node and
+  the Zephyr node's `NodeNet::Links` are bounded by it; a closed set is refused there by type, and
+  is driven by what keys a link's actions on its own type (the coop engine). Keying the heap node on
+  the sink type as well would need `spawn_session` and `SessionHandle` keyed on it, which no stack
+  the node runs over asks for.
+
+Expected on the case: none. A bound and a trait with no items; no code is generated for either.
+Size and Ir unchanged. Not measured.
+
+Tests: `either_links`'s `a_dial_over_an_open_set_hands_on_the_drivers_trait` reads a dial's sink
+back as `CellRc<dyn BoxedLinkDriver>` through a function bounded only by `OpenSetLinks`, over both
+stacks of an either; red (it stops compiling) if an either's sink names a type of its own or if
+the bound is not implied where it is used. The dialer, admin and client node tests over the
+in-memory network instantiate the bound with a real stack.
+
 ## 10. Transport: the structure for what remains, and what SCE is asked for the machines
 
 Read from the same explain document as section 6 (2026-11-26, schema 5): transport 30,814 against
