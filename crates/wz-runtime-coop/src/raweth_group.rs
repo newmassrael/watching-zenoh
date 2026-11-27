@@ -217,7 +217,7 @@ mod tests {
                           demo/b/**#02:00:00:00:00:bb#0005";
 
     /// The medium the devices share: the frames written to it, the frames queued to be read, and
-    /// whether it takes no more for now.
+    /// whether it is full and takes no more.
     #[derive(Default)]
     struct Medium {
         sent: Vec<Vec<u8>>,

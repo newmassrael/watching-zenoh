@@ -29,7 +29,7 @@ pub(in crate::engine) struct FacesFull;
 /// What builds the set of a place no face has taken yet: the span the open reserved for the rows
 /// of every such set, and what each set is lent with, as the open lends the dial face's.
 pub(in crate::engine) struct SpareSets {
-    /// The rows of the sets not built yet, lent to each in turn as it is built.
+    /// The rows of the sets still to be built, lent to each in turn as it is built.
     pub(super) arena: Arena,
     /// The session's key arena, which a set's tables keep their keys in.
     keys: KeySpace,

@@ -1021,8 +1021,8 @@ fn a_filter_that_asks_nothing_holds_its_place_and_is_told_nothing() {
     });
 }
 
-/// A build that keeps no filter rows for a matching listener on a key refuses one as not built,
-/// its sink let go of. The CONTROL is a listener on an entity's filter, which every build takes.
+/// A build that keeps no filter rows for a matching listener on a key refuses one with
+/// `Refusal::NotBuilt`, its sink let go of. The CONTROL is a listener on an entity's filter, which every build takes.
 #[cfg(not(feature = "key-matching-listener"))]
 #[test]
 fn a_build_without_key_listeners_refuses_one_as_not_built() {

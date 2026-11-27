@@ -5,7 +5,7 @@
 //!
 //! A group endpoint is a `udp/` locator naming a multicast group, its config span carrying the
 //! socket keys upstream's multicast link reads (`io/zenoh-links/zenoh-link-udp/src/multicast.rs`
-//! @ `let join = endpoint.config().values(UDP_MULTICAST_JOIN);`): `iface`, `join`, `ttl`,
+//! @ `let join = config.values(UDP_MULTICAST_JOIN);`): `iface`, `join`, `ttl`,
 //! `bind` and `dscp`. [`parse_group_locator`] reads all of them here, and every engine opens its
 //! sockets from the [`GroupLocator`] it answers, so no socket layer reads the text again and no
 //! two read it differently.

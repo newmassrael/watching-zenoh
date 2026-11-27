@@ -22,6 +22,11 @@ what a check unit's run read). The audit takes a run's reads from either:
     --run            runs the lane's unit (`python3 scripts/lib/runci_plan.py --layer <lane>`)
                      under that strace, in this checkout, which must be HEAD and unmodified
 
+`--run` hands the lane the caller's environment as it is, `WZ_DECLINED_EXPECT` included: the
+audit is a local tool asking which files a run read, and arming the decline assertion here would
+turn a machine's missing oracle into a failed audit of declared inputs. The caller decides, the
+way `decline_arming_gate.py` reads a caller outside the workflows and the hooks.
+
 A read is an open that succeeded (`= <fd><path>` with `-y`), for reading (`O_RDONLY` or
 `O_RDWR`), of no directory. A path outside the checkout or untracked (a build product, a cache),
 or the dispatch script, the planner, a workflow the planner reads or a script the lane's spec holds

@@ -96,7 +96,9 @@ import tokenize
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
-HANDLE = re.compile(r"WZ_[A-Z0-9_]*_REQUIRE")
+#: A whole name: `WZ_DRIVER_STATES_REQUIREMENT` (facility_trace.py's door macro) is not a flag,
+#: and a substring match read it as one.
+HANDLE = re.compile(r"\bWZ_[A-Z0-9_]*_REQUIRE\b")
 
 #: `name() {` on a line of its own -- the shape every function in this tree's
 #: shell has. A one-line function body would not be a scope worth walking.

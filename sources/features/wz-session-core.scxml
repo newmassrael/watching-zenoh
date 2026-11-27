@@ -61,12 +61,14 @@
   <sce:feature name="keyexpr-wildcard-single"/>
   <sce:feature name="lifecycle-contract"/>
   <sce:feature name="limits-lent-at-open"/>
+  <sce:feature name="link-wire-reports"/>
   <sce:feature name="liveliness-get" requires="codec-declare rx-control"/>
   <sce:feature name="liveliness-subscriber" requires="codec-declare rx-control"/>
   <sce:feature name="liveliness-token" requires="codec-declare declare-final rx-control"/>
   <sce:feature name="log"/>
   <sce:feature name="multicast-declarations" requires="alloc codec-declare codec-push session-multicast"/>
   <sce:feature name="multicast-ingress-gate" requires="alloc session-multicast"/>
+  <sce:feature name="multicast-locator-keys"/>
   <sce:feature name="peer-row-pools" requires="storage-profile"/>
   <sce:feature name="policy-selection"/>
   <sce:feature name="pool-monitor"/>
@@ -85,6 +87,7 @@
   <sce:feature name="query-consolidation" requires="query-get"/>
   <sce:feature name="query-get" requires="rx-response"/>
   <sce:feature name="query-queryable" requires="codec-request codec-response"/>
+  <sce:feature name="query-replies-with-final"/>
   <sce:feature name="query-reply" requires="codec-response"/>
   <sce:feature name="query-reply-err"/>
   <sce:feature name="query-selector-parameters"/>

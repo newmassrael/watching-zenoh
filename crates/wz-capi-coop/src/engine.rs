@@ -6185,7 +6185,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         };
     }
 
-    /// Hold in the round what the declaration watches are owed and it has room for now
+    /// Hold in the round what the declaration watches are owed, as far as it has room
     /// (`DeclWatches::tell_owed`): each new watch's catch-up from the peers of the links up now,
     /// each declaration named as its link's peer, and the events a watch lost.
     #[cfg(all(

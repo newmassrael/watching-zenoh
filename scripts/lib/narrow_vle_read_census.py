@@ -184,27 +184,42 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "the same request id `walk_request` / `walk_response` read, skipped "
         "to reach the key expression; refused at the same width.",
     ),
-    "out/wz-codecs/wireexpr_local.rs::decode_into::": (
+    "out/wz-codecs/wireexpr_local.rs::read_into::": (
         "REFUSE",
         "the generated sibling of `walk_wireexpr`'s `id`: the scope is "
         "`Zenoh080Bounded::<ExprId>` upstream.",
     ),
-    "out/wz-codecs/wireexpr_nonlocal.rs::decode_into::": (
+    "out/wz-codecs/wireexpr_nonlocal.rs::read_into::": (
         "REFUSE",
         "as `wireexpr_local.rs`: the other mapping arm of the same scope.",
     ),
-    "out/wz-codecs/request.rs::decode_into::": (
+    "out/wz-codecs/request.rs::read_into::": (
         "REFUSE",
         "the generated sibling of `walk_request`'s `rid`: "
         "`Zenoh080Bounded::<RequestId>` upstream.",
     ),
-    "out/wz-codecs/response.rs::decode_into::": (
+    "out/wz-codecs/request.rs::read_with::": (
+        "REFUSE",
+        "the same field as `read_into` above, read where a chain hook drives "
+        "the decode.",
+    ),
+    "out/wz-codecs/response.rs::read_into::": (
         "REFUSE",
         "the generated sibling of `walk_response`'s `request_id`.",
     ),
-    "out/wz-codecs/response_final.rs::decode_into::": (
+    "out/wz-codecs/response.rs::read_with::": (
+        "REFUSE",
+        "the same field as `read_into` above, read where a chain hook drives "
+        "the decode.",
+    ),
+    "out/wz-codecs/response_final.rs::read_into::": (
         "REFUSE",
         "the generated sibling of `walk_response_final`'s `request_id`.",
+    ),
+    "out/wz-codecs/response_final.rs::read_with::": (
+        "REFUSE",
+        "the same field as `read_into` above, read where a chain hook drives "
+        "the decode.",
     ),
     "crates/wz-session-core/src/dissect.rs::vle_u32::": (
         "REFUSE",
@@ -221,8 +236,10 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
     # The generated rows below read in `decode_into`. Since the SCE pin 07cb8c5020
     # (the one-pass lent decode, R4249) a codec reads the frame once there, into
     # whatever the profile stores, and `store_into` reads nothing of its own; the
-    # `store_into` rows the two-pass decode needed left with it (R4253).
-    "out/wz-codecs/encoding.rs::decode_into::": (
+    # `store_into` rows the two-pass decode needed left with it (R4253). Since the codec tree
+    # was regenerated with cold entry points the read is in `read_into`, and in `read_with`
+    # where a chain hook drives it; `decode_into` reads nothing of its own.
+    "out/wz-codecs/encoding.rs::read_into::": (
         "REFUSE",
         "the generated sibling of `walk_encoding` above, and correct for the "
         "same reason: upstream's `Encoding` codec is `Zenoh080Bounded::<u32>` "
@@ -251,12 +268,17 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "(`zbuf.rs` `let kind: u8 = self.codec.read(..)`): a varint past "
         "u32 is refused there, and only then is the value cut to a byte.",
     ),
-    "out/wz-codecs/msg_put.rs::decode_into::": (
+    "out/wz-codecs/msg_put.rs::read_into::": (
         "REFUSE",
         "the generated sibling of `walk_msg_put`'s `slice_count`, correct for "
         "the same reason: the count is `Zenoh080Bounded::<u32>` upstream.",
     ),
-    "out/wz-codecs/zbuf_slice.rs::decode_into::": (
+    "out/wz-codecs/msg_put.rs::read_with::": (
+        "REFUSE",
+        "the same field as `read_into` above, read where a chain hook drives "
+        "the decode.",
+    ),
+    "out/wz-codecs/zbuf_slice.rs::read_into::": (
         "REFUSE",
         "the generated sibling of `walk_zbuf_slice`'s `kind`, correct for the "
         "same reason: the kind is `Zenoh080Bounded::<u32>` upstream.",
@@ -272,12 +294,46 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "`Zenoh080Bounded::<u32>` upstream as `walk_msg_put`'s is: a varint "
         "past u32 is `DidntRead` there too.",
     ),
-    "out/wz-codecs/query_value_zbuf.rs::decode_into::": (
+    "out/wz-codecs/query_value_zbuf.rs::read_into::": (
         "REFUSE",
         "the Query value's slice count, the sibling of `msg_put.rs`'s above: "
         "`ValueType`'s reader hands its payload to `Zenoh080Sliced::<u32>`, "
         "whose count is `Zenoh080Bounded::<u32>`, so a varint past u32 is "
         "`DidntRead` upstream too.",
+    ),
+    "out/wz-codecs/query_value_zbuf.rs::read_with::": (
+        "REFUSE",
+        "the same field as `read_into` above, read where a chain hook drives "
+        "the decode.",
+    ),
+    # The extension admission's readers (`ext_admit.rs`): each reads a field of a
+    # declared extension's body to judge that the body holds it, as upstream's codec reads it.
+    "crates/wz-session-core/src/ext_admit.rs::read_wire_expr::": (
+        "REFUSE",
+        "an undeclaration's scope, `Zenoh080Bounded::<ExprId>` upstream, as "
+        "`walk_wireexpr`'s "
+        "(`commons/zenoh-codec/src/core/wire_expr.rs` @ `let scope: ExprId = zodec.read(&mut *reader)?;`).",
+    ),
+    "crates/wz-session-core/src/ext_admit.rs::read_encoding::": (
+        "REFUSE",
+        "a Query value's encoding id, `Zenoh080Bounded::<u32>` upstream on both "
+        "sides, as `walk_encoding`'s `packed_id` above.",
+    ),
+    # The Push reader's own primitives and fields (`network_message/push_read.rs`).
+    "crates/wz-session-core/src/network_message/push_read.rs::vle_u16::": (
+        "REFUSE",
+        "the PRIMITIVE, not a field: a one-byte fast path in front of the cursor's "
+        "refusing `read_vle_u16`, called for a key expression's scope (`read_key`).",
+    ),
+    "crates/wz-session-core/src/network_message/push_read.rs::read_key::": (
+        "REFUSE",
+        "a Push key's scope, `Zenoh080Bounded::<ExprId>` upstream "
+        "(`commons/zenoh-codec/src/core/wire_expr.rs` @ `let scope: ExprId = zodec.read(&mut *reader)?;`).",
+    ),
+    "crates/wz-session-core/src/network_message/push_read.rs::read_put::": (
+        "REFUSE",
+        "a sliced Put payload's slice count, `Zenoh080Bounded::<u32>` through "
+        "`Zenoh080Sliced::<u32>` upstream, as `walk_msg_put`'s `slice_count`.",
     ),
 }
 

@@ -689,7 +689,7 @@ def selftest() -> int:
 def check(root: Path) -> int:
     """This tree's graph, both ways, the way Layer C0d holds the doc-link expansion: a real edge
     widens (a change to `wz-session-core` reaches `wz-runtime-tokio`) and a leaf stays alone
-    (nothing depends on `wz-ap-demo`). A reader that returned its input, or the workspace, fails
+    (`wz-ap-demo` is no crate's dependency). A reader that returned its input, or the workspace, fails
     one of the two."""
     tree = GitTree(root, "HEAD")
     spaces = workspaces(tree)

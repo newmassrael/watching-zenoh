@@ -1564,6 +1564,20 @@ round_fed_gates=(
     # release proof). Round-fed: its scenario table is held against the vendored tree's programs
     # and the release ledger's rows. Its selftest reads both, with no build and no zenohd.
     "pico_upstream_programs.py --selftest"
+    # The lane graph, the lanes' declarations, the digest a lane's verdict is keyed by and the
+    # author receipt store (RFC 0001, Layer C0's legs). Round-fed: they read the tracked
+    # corpus at HEAD, so a round that adds a lane or a crate moves what they hold. MEASURED
+    # about 30 s together, 23 s of it the digest of every lane; no build.
+    "git_tree.py --selftest"
+    "lane_graph.py --selftest"
+    "lane_graph.py --check"
+    "lane_decl.py --selftest"
+    "lanes_gate.py --selftest"
+    "lanes_gate.py --check"
+    "lane_digest.py --selftest"
+    "lane_digest.py --check"
+    "lane_input_closure.py --selftest"
+    "gate_ledger.py --selftest"
 )
 # ⚠ The module and its ARGUMENTS are expanded separately, and that too is
 # forced rather than chosen: `scripts/lib/"${cmd[@]}"` attaches the prefix to

@@ -22438,6 +22438,7 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     (cd crates && cargo build -p wz-capi-pico-lib "${mcdecl_coop_args[@]}" \
         $nostd_args --target-dir "$WZ_ARTIFACTS/crates/target/wz-capi-pico-mcdecl-coop" --quiet) \
         || return 1
+    wz_test_args wz-integration-tests pico_peer_multicast_on_wz_capi
     _runci_guarded_test "M pico multicast declarations on the cooperative engine" 5 \
         env WZ_PICO_ENGINE=coop \
         cargo test -p wz-integration-tests "${WZ_TEST_TARGET[@]}" \

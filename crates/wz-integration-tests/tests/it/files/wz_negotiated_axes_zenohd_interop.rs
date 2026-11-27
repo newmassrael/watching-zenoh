@@ -400,6 +400,15 @@ async fn dial_zenohd(arm: &Arm) -> ArmOutcome {
          sequence_number_resolution={resolution} (wire code {res_code}). wz \
          advertised code 2, so this reading can only come from the InitAck."
     );
+    // The same axis on the slot the InitAck populated, which the ring above is derived from:
+    // `init_ack_params()` reads the peer's caps where the session is alive, so the resolution
+    // zenohd answered is read off its wire and not only off what wz derived from it.
+    assert_eq!(
+        opened.actions.init_ack_params().seq_num_res.wire_code(),
+        res_code,
+        "wz did not read the resolution a genuine zenohd answered at \
+         sequence_number_resolution={resolution} (wire code {res_code}) off its InitAck"
+    );
 
     // AXIS 2, and the same discipline. `patch_was_negotiated` separates "wz
     // merged a peer announcement" from "wz defaulted": the slot starts `None`

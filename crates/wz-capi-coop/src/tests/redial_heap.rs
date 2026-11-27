@@ -405,7 +405,7 @@ fn rows_past_the_room_of_a_session_watched_after_its_open_are_told_lost_with_not
 }
 
 /// A session built without the connectivity plane tells no face, so a watch of the faces' rows is
-/// refused as not built, with nothing of the heap taken and the sink let go of with the refusal.
+/// refused with `Refusal::NotBuilt`, with nothing of the heap taken and the sink let go of with the refusal.
 /// Turned red by an engine that answers through the provided watch, which takes a place of the
 /// heap for the watcher before it is refused.
 #[cfg(not(feature = "connectivity"))]

@@ -55,7 +55,7 @@ impl<'a> PicoEndpoint<'a> {
     pub(crate) fn read(endpoint: &'a str, keys: &'static [&'static str]) -> Self {
         let (locator, config) = cut(endpoint, b'#').unwrap_or((endpoint, ""));
         let locator = cut(locator, b'?').map_or(locator, |(bare, _)| bare);
-        // Read into the value handed back, so the values are not built apart and then moved in.
+        // Read into the value handed back, so no value is built apart and then moved in.
         let mut read = Self {
             locator,
             keys,

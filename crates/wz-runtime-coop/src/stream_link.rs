@@ -104,7 +104,7 @@ pub trait StreamSocket: Sized {
     const WRITES_NOW: bool = false;
 
     /// Write `bytes`, in order, as far as the stream takes them: how many it took. A stream that
-    /// writes without waiting ([`Self::WRITES_NOW`]) takes what it has room for now, `0` when
+    /// writes without waiting ([`Self::WRITES_NOW`]) takes what it has room for, `0` when
     /// it has none and fewer than all when it has some; one that does not returns once it has
     /// taken them all.
     fn write(&self, bytes: &[u8]) -> Result<usize, Self::Error>;
