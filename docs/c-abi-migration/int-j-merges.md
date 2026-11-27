@@ -134,3 +134,7 @@ The lane states the tables' policy once, in the build script (`wz_lent`,
   `lend_port_rows` and `lend_group_rx`), so the merge left it without both
   fields. It now carries them over as every other reshaping constructor does;
   `port_slots` under `udp-listen`, which the failing builds did not enable.
+- `crates/wz-session-core/src/get_legs/tests.rs`: l3-queryable's region
+  test of `GetLegs::places` read peer-prop's `SeqPlace` offsets as `usize`.
+  peer-prop keeps a description's offsets in 32 bits; the test widens them,
+  as the observer's own description test does.

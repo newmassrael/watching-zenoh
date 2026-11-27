@@ -161,11 +161,11 @@ fn region_legs_describe_their_rows_inside_their_rows() {
     assert_eq!(lines.key_lines().len(), 0, "a leg keeps no key");
     let end = ROWS + core::mem::size_of::<super::GetLegsRows<u8>>();
     assert!(
-        (AT..ROWS).contains(&seqs[0].seq),
+        (AT..ROWS).contains(&(seqs[0].seq as usize)),
         "the table lies in itself"
     );
     assert!(
-        (ROWS..end).contains(&seqs[0].rows),
+        (ROWS..end).contains(&(seqs[0].rows as usize)),
         "its rows lie in their rows"
     );
 }
