@@ -752,8 +752,8 @@ impl<P: ChainPeers> ChainKey<P> {
         P::is(&self.peer, peer_key)
     }
 
-    fn matches(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> bool {
-        self.reliable == reliable && self.priority == priority && self.same_peer(peer_key)
+    fn on_channel(&self, reliable: bool, priority: Priority) -> bool {
+        self.reliable == reliable && self.priority == priority
     }
 }
 
@@ -980,6 +980,31 @@ impl Judged {
             idx,
             ending: SlotEnding::Abort(event),
             outcome: IngestOutcome::Aborted(reason),
+        }
+    }
+}
+
+/// What one walk of the slots answers for a fragment ([`ReassemblyDispatcher::census`]): the
+/// three questions a first fragment and a continuation ask of the pool, so neither walks it again.
+#[derive(Clone, Copy, Debug)]
+struct SlotCensus {
+    /// The slot of the open chain on the fragment's channel, at most one.
+    active: Option<usize>,
+    /// The first slot that holds no chain, which a chain start takes.
+    free: Option<usize>,
+    /// The open chains of the fragment's peer, which the quota is read against.
+    of_peer: u16,
+}
+
+impl SlotCensus {
+    /// The census once the open chain in `idx`, the fragment's channel's and so its peer's, has
+    /// been ended where it lay: no chain on the channel, the slot free, and one chain fewer the
+    /// peer's, as a second walk would find them.
+    fn ended(self, idx: usize) -> Self {
+        Self {
+            active: None,
+            free: Some(self.free.map_or(idx, |free| free.min(idx))),
+            of_peer: self.of_peer.saturating_sub(1),
         }
     }
 }
@@ -1338,17 +1363,17 @@ where
         hand: Hand,
         deliver: F,
     ) -> Judged {
-        let mut active = self.find_active(frag.peer_key, frag.reliable, frag.priority);
+        let mut census = self.census(frag.peer_key, frag.reliable, frag.priority);
         if self.config.fragmentation_markers {
-            active = match self.apply_chain_boundary_markers(&frag, active) {
-                Ok(active) => active,
+            census = match self.apply_chain_boundary_markers(&frag, census) {
+                Ok(census) => census,
                 Err(judged) => return judged,
             };
         }
-        let admitted = match active {
+        let admitted = match census.active {
             Some(idx) => self.admit_continuation(idx, &frag, ring),
             None => self
-                .admit_chain_start(&frag, now_ms)
+                .admit_chain_start(&frag, census, now_ms)
                 .map_err(Judged::Outcome),
         };
         match admitted {
@@ -1436,10 +1461,12 @@ where
     /// carries them ([`ReassemblyConfig::fragmentation_markers`]).
     ///
     /// `Err(judged)` means the fragment is CONSUMED here and must not
-    /// reach the staging path; `Ok(active)` means carry on to the normal
-    /// start / continuation split with the slot of the fragment's key that is
-    /// still open: `active` as it came, or none once this has evicted it, since
-    /// a key has at most one open chain.
+    /// reach the staging path; `Ok(census)` means carry on to the normal
+    /// start / continuation split with the slots as they stand after this:
+    /// `census` as it came, or, once this has evicted the key's open chain,
+    /// with no chain on the key, that slot free and one chain fewer the
+    /// peer's ([`SlotCensus::ended`]), since a key has at most one open chain
+    /// and the eviction frees its slot whichever way the machine answers.
     ///
     /// The order is zenoh's, and the order is load-bearing
     /// (`io/zenoh-transport/src/unicast/universal/rx.rs:155-170`):
@@ -1457,18 +1484,19 @@ where
     fn apply_chain_boundary_markers(
         &mut self,
         frag: &Fragment<'_>,
-        active: Option<usize>,
-    ) -> Result<Option<usize>, Judged> {
+        census: SlotCensus,
+    ) -> Result<SlotCensus, Judged> {
         if frag.markers.first {
             // A restart supersedes whatever is staged on this key: the open
-            // chain is evicted before the marked fragment is admitted.
-            if let Some(idx) = active {
-                self.evict_duplicate_first(idx);
-            }
-            // Fall through: the marked fragment itself now starts a chain.
-            return Ok(None);
+            // chain is evicted before the marked fragment is admitted, which
+            // then starts a chain of its own.
+            let Some(idx) = census.active else {
+                return Ok(census);
+            };
+            self.evict_duplicate_first(idx);
+            return Ok(census.ended(idx));
         }
-        let Some(idx) = active else {
+        let Some(idx) = census.active else {
             // No marker and no chain in progress: this is not a chain
             // start, whatever its SN says.
             return Err(Judged::Outcome(IngestOutcome::Refused(
@@ -1478,7 +1506,7 @@ where
         if frag.markers.dropped {
             return Err(Self::abort_peer_drop(idx));
         }
-        Ok(active)
+        Ok(census)
     }
 
     /// R311y578 — the SINGLE producer of the slot FSM's `fragment.drop`
@@ -1633,41 +1661,55 @@ where
         self.due_ms
     }
 
-    fn find_active(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> Option<usize> {
-        self.slots.iter().position(|s| {
-            s.open
-                .as_ref()
-                .is_some_and(|open| open.key.matches(peer_key, reliable, priority))
-        })
+    /// One walk of the slots for a fragment of `peer_key` on (`reliable`, `priority`): the slot
+    /// of the channel's open chain, the first free slot and the peer's open chains. Under
+    /// [`OnePeer`] every open chain is the peer's, so the count is of the open slots.
+    fn census(&self, peer_key: &[u8], reliable: bool, priority: Priority) -> SlotCensus {
+        let mut census = SlotCensus {
+            active: None,
+            free: None,
+            of_peer: 0,
+        };
+        for (idx, slot) in self.slots.iter().enumerate() {
+            match &slot.open {
+                None => census.free = census.free.or(Some(idx)),
+                Some(open) if open.key.same_peer(peer_key) => {
+                    census.of_peer = census.of_peer.saturating_add(1);
+                    if open.key.on_channel(reliable, priority) {
+                        census.active = census.active.or(Some(idx));
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        census
     }
 
+    /// The open chains of `peer_key`, as the walk a first fragment's admission reads counts them.
+    #[cfg(test)]
     fn peer_chain_count(&self, peer_key: &[u8]) -> u16 {
-        self.slots
-            .iter()
-            .filter(|s| {
-                s.open
-                    .as_ref()
-                    .is_some_and(|open| open.key.same_peer(peer_key))
-            })
-            .count() as u16
+        self.census(peer_key, true, Priority::DEFAULT).of_peer
     }
 
     /// Open a chain for `frag`, the first fragment of one: a slot found or made, the chain's
     /// staging reserved, and the chain set open in the slot before its machine is told of it, so
     /// that [`Self::drive_open_chain`] drives a first fragment and a continuation alike. The slot
     /// and that it starts a chain, or the outcome of a start refused before the machine is driven.
+    /// `census` is the pool as the fragment's judgement left it: the peer's count and the free
+    /// slot are read from it, not walked for again.
     fn admit_chain_start(
         &mut self,
         frag: &Fragment<'_>,
+        census: SlotCensus,
         now_ms: u64,
     ) -> Result<(usize, bool), IngestOutcome> {
         // §5.M quota-first: the per-peer cap is checked before slot
         // availability, so a flood from one peer is refused on quota even
         // while free slots remain for honest peers.
-        if self.peer_chain_count(frag.peer_key) >= self.config.per_peer_quota {
+        if census.of_peer >= self.config.per_peer_quota {
             return Err(IngestOutcome::Refused(RefuseReason::PeerQuota));
         }
-        let idx = match self.slots.iter().position(Slot::is_free) {
+        let idx = match census.free {
             Some(i) => i,
             None => match self.make_room() {
                 Some(i) => i,
@@ -1934,7 +1976,7 @@ where
     /// Returns whether a chain was cleared (`false` = nothing in
     /// progress on that channel — the common case).
     pub fn abort_channel(&mut self, peer_key: &[u8], priority: Priority, reliable: bool) -> bool {
-        match self.find_active(peer_key, reliable, priority) {
+        match self.census(peer_key, reliable, priority).active {
             Some(idx) => {
                 self.end_slot(idx, SlotEnding::Abort(ReassemblySlotEvent::FragmentOoo));
                 true
@@ -4597,5 +4639,116 @@ mod one_peer_tests {
         assert_eq!(size_of::<<OnePeer as ChainPeers>::Opened>(), 0);
         assert!(size_of::<ChainKey<OnePeer>>() + PEER_KEY_MAX <= size_of::<ChainKey<ManyPeers>>());
         assert!(size_of::<One>() < size_of::<Many>());
+    }
+
+    /// One walk of the slots answers a fragment: a continuation finds its chain in the second
+    /// slot with the first one free, and a start past the quota is refused with both slots as
+    /// they were. Turned red by a walk that answers the free slot as the chain's (the
+    /// continuation refused), or a count that misses an open chain (the start begun).
+    #[test]
+    fn one_walk_finds_a_continuations_chain_and_refuses_a_start_past_the_quota() {
+        let mut one = One::new(config(2));
+        for fragment in [
+            frag(PEER, true, Priority::DEFAULT, 1, 1, b"a"),
+            frag(PEER, false, Priority::DEFAULT, 1, 1, b"b"),
+        ] {
+            assert_eq!(one.ingest(fragment, MASK, 0, |_| {}), IngestOutcome::Begun);
+        }
+        assert_eq!(
+            one.ingest(
+                frag(PEER, true, Priority::DEFAULT, 2, 0, b"A"),
+                MASK,
+                0,
+                |_| {}
+            ),
+            IngestOutcome::Reassembled
+        );
+        assert!(one.slots[0].is_free(), "the completed chain's slot is free");
+        assert_eq!(
+            one.ingest(
+                frag(PEER, false, Priority::DEFAULT, 2, 1, b"B"),
+                MASK,
+                0,
+                |_| {}
+            ),
+            IngestOutcome::Continued
+        );
+        assert!(one.slots[0].is_free(), "the continuation took no free slot");
+        assert_eq!(one.slots[1].open.as_ref().map(|open| open.last_sn), Some(2));
+
+        let mut at_quota = One::new(config(1));
+        assert_eq!(
+            at_quota.ingest(
+                frag(PEER, true, Priority::DEFAULT, 1, 1, b"a"),
+                MASK,
+                0,
+                |_| {}
+            ),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            at_quota.ingest(
+                frag(PEER, true, Priority::RealTime, 1, 1, b"c"),
+                MASK,
+                0,
+                |_| {}
+            ),
+            IngestOutcome::Refused(RefuseReason::PeerQuota)
+        );
+        assert!(
+            at_quota.slots[1].is_free(),
+            "the refused start took no slot"
+        );
+        assert_eq!(
+            at_quota.slots[0].open.as_ref().map(|open| open.last_sn),
+            Some(1),
+            "the open chain is as it was"
+        );
+        assert_eq!(at_quota.staging_available(), 1);
+    }
+
+    /// A restart on a channel whose chain is open, in a full pool of one peer at its quota, is
+    /// admitted into the slot it ended, and the chain it begins completes: the walk taken before
+    /// the eviction is read as the slots stand after it. Turned red by a census that keeps the
+    /// ended chain's slot taken (the restart refused as a full pool) or its count (refused on
+    /// the quota).
+    #[test]
+    fn a_restart_in_a_full_pool_at_the_quota_takes_the_slot_it_ended() {
+        const FIRST: FragmentMarkers = FragmentMarkers {
+            first: true,
+            dropped: false,
+        };
+        let mut one = One::new(config(2).with_fragmentation_markers(true));
+        for fragment in [
+            frag(PEER, true, Priority::DEFAULT, 1, 1, b"a"),
+            frag(PEER, false, Priority::DEFAULT, 1, 1, b"b"),
+        ] {
+            let marked = Fragment {
+                markers: FIRST,
+                ..fragment
+            };
+            assert_eq!(one.ingest(marked, MASK, 0, |_| {}), IngestOutcome::Begun);
+        }
+        let restart = Fragment {
+            markers: FIRST,
+            ..frag(PEER, true, Priority::DEFAULT, 2, 1, b"A")
+        };
+        assert_eq!(one.ingest(restart, MASK, 0, |_| {}), IngestOutcome::Begun);
+        assert_eq!(
+            one.displaced_by_last_ingest(),
+            Some(DisplacedChain::Superseded)
+        );
+        assert_eq!(one.active_chains(), 2);
+        let mut delivered = None;
+        assert_eq!(
+            one.ingest(
+                frag(PEER, true, Priority::DEFAULT, 3, 0, b"!"),
+                MASK,
+                0,
+                |message| delivered = Some(message.to_vec())
+            ),
+            IngestOutcome::Reassembled
+        );
+        assert_eq!(delivered.as_deref(), Some(&b"A!"[..]));
     }
 }
