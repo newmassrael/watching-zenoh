@@ -1548,6 +1548,57 @@ which Layer Z runs; its fourth leg drives the verbs over the same channel). The
 dialling side, a zenohd that connects to a device with name verification
 off, is not measured.
 
+### 5b. Rulings (owner, 2026-11-27)
+
+The criterion of 5a, applied to the question D12 left and to what a command
+crossing a router can prove. Each ruling names its model; the work each leaves is
+built in the lanes after it, which this section records as they land.
+
+**D16. One reference monitor decides every verb on both profiles.** The
+reference monitor of Anderson (1972) over Lampson's access matrix (1971): one
+function judges a request (subject, verb, object, context), every entry point
+calls it (complete mediation), and it refuses by default (Saltzer and Schroeder,
+1975, fail-safe defaults). The subject is the `Commander` D12 defined: the owner
+of the pipe, a zid a link's key proved, a zid a sealed command proved (D17), or
+nobody shown. The verb is the `Verb`. The object is the parsed
+`LifecycleKey` (the peer, and the generation of a reset). The context is the
+channel the request came over. The heap profile's authority, keyed on the key
+expression alone until now, takes the commander: the two profiles keep one
+mechanism and differ only in where the policy lives, a table compiled from the
+node's declaration on the fixed profile, the same declaration's grants read at
+run time on the heap profile. The pipe, the in-band query, the admin write and
+the connect manager are entry points of that one function, and none judges a
+request apart from it. Upstream's access control judges subjects (zids,
+certificate names, user names, interfaces, link protocols) per message kind
+against a default permission (`commons/zenoh-config/src/lib.rs` @
+`pub cert_common_names: Option<NEVec<CertCommonName>>,`); this is that model
+at the granularity of a verb, with a subject only a key can prove.
+
+**D17. A command proves its commander end to end: object security.** A grant to
+a node behind a router is unusable today, because a channel proves only the
+next hop and the router's key stands for every commander behind it. The textbook
+answer is security of the object, not of the channel (OSCORE, RFC 8613, over
+COSE, RFC 9052): a command is a signed object, (verb, the commanded node's zid,
+the object, a counter), signed with the commander's key, which the object
+carries as its SubjectPublicKeyInfo, so the node derives the commander's zid
+from the key it verifies (the zid of D1 is the first sixteen bytes of the
+SHA-256 of that SPKI; a self-certifying name, as in SFS, with no certificate
+authority). A counter per commander that only rises refuses a replay (the
+replay window of RFC 8613, section 7.4). The router carries the object and
+holds no authority of its own over it. A sealed command's commander is the
+subject D16 judges, beside the commander a channel proves.
+
+**D18. A witness runs on what ships.** A behaviour of the fixed profile is
+witnessed on the image that ships it, not only on a host process built from the
+same profile. The same scenario is one test over a matrix of targets: the host
+process, the Zephyr image under QEMU, the kit. Residue (c) of the close-ingress
+atom closes on the Zephyr image; the host witness stays as the witness of the
+profile's logic. That needs the image that holds a secure listener and binds the
+verbs to its commanders, which is D12's step (4).
+
+Order: D16 first (the port every later piece feeds), D17 beside it (its codec
+and verification stand alone until D16's subject takes it), D18 beside both.
+
 ## 6. The contract for every verb (step 8; A, B and D built, C in part)
 
 Step 7e held the transports to one table for `open`. The other verbs of D6
