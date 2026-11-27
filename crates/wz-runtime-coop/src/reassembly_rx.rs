@@ -50,8 +50,14 @@
 //! [`ReassemblyDispatcher`]: wz_session_core::reassembly_dispatch::ReassemblyDispatcher
 //! [`BoundedVec`]: wz_session_core::bounded::BoundedVec
 
+use wz_session_core::bounded::Lent;
+#[cfg(feature = "alloc")]
+use wz_session_core::bounded::OnUse;
+use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
-use wz_session_core::chain_staging::LentStaging;
+#[cfg(feature = "alloc")]
+use wz_session_core::chain_staging::OwnStaging;
+use wz_session_core::chain_staging::{ChainStaging, LentStaging};
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::reassembly_dispatch::{
     ChainPeers, PoolOverflow, ReassemblyConfig, ReassemblyDispatcher,
@@ -163,6 +169,76 @@ pub const SESSION_REASSEMBLY_SLOTS: usize = LENT_CHAINS;
 /// The staging of a session's one Router: the session's chain table.
 pub type SessionChains = LentStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }>;
 
+/// The staging of a Router of a session whose tables take their memory on use: each chain a
+/// buffer of its own, taken of the allocator at its first fragment and given back when it ends.
+#[cfg(feature = "alloc")]
+pub type OwnSessionChains = OwnStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }>;
+
+/// Where the chains of a session's Routers take their buffers, as the storage policy of the
+/// session's tables says: a table the open lent ([`Lent`]), whose buffers the session's Routers
+/// share, or the allocator at each chain's first fragment ([`OnUse`]). The session holds a
+/// [`Self::Source`] for its life and makes each Router's staging of it.
+pub trait ChainStore {
+    /// What the session holds to make a Router's staging: a handle, copied into each.
+    type Source: Copy + 'static;
+    /// A Router's staging.
+    type Chains: ChainStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }> + 'static;
+    /// The staging of one Router, over `source`.
+    fn chains(source: &Self::Source) -> Self::Chains;
+}
+
+/// The chain buffers of a table a session's arena lent, which its Routers share, and the most
+/// chains one Router holds open at once in it.
+#[derive(Clone, Copy)]
+pub struct LentChainTable {
+    cells: LentByteCells,
+    chains: usize,
+}
+
+impl LentChainTable {
+    /// The table `cells`, each Router holding at most `chains` chains open in it.
+    pub const fn over(cells: LentByteCells, chains: usize) -> Self {
+        Self { cells, chains }
+    }
+}
+
+impl ChainStore for Lent {
+    type Source = LentChainTable;
+    type Chains = SessionChains;
+
+    fn chains(source: &LentChainTable) -> SessionChains {
+        SessionChains::over(&source.cells, source.chains)
+    }
+}
+
+/// The buffer each chain of a session whose tables take their memory on use takes of the
+/// allocator, as long as the session's bound on a rejoined message, and the most chains one
+/// Router holds open at once: what each Router's staging is sized by.
+#[cfg(feature = "alloc")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeapChains {
+    bytes: usize,
+    chains: usize,
+}
+
+#[cfg(feature = "alloc")]
+impl HeapChains {
+    /// Each chain a buffer of `bytes`, each Router holding at most `chains` chains open.
+    pub const fn sized(bytes: usize, chains: usize) -> Self {
+        Self { bytes, chains }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl ChainStore for OnUse {
+    type Source = HeapChains;
+    type Chains = OwnSessionChains;
+
+    fn chains(source: &HeapChains) -> OwnSessionChains {
+        OwnSessionChains::sized(source.bytes, source.chains)
+    }
+}
+
 // A Router of one link's peer (`OnePeer`) answers that peer's fragments as a Router of several
 // peers does while the quota leaves the pool no fuller than its slots (`ChainPeers`): a full pool
 // is then the peer at its quota, refused on the quota first under every overflow policy, so no
@@ -171,21 +247,23 @@ pub type SessionChains = LentStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG
 const _: () =
     assert!(crate::reassembly_pool_mcu::PER_PEER_QUOTA as usize <= SESSION_REASSEMBLY_SLOTS);
 
-/// A Router of a session's links, staging in the session's chain table, whose chains are those of
-/// the peers `P` says (`ChainPeers`): the peers of the several links that share it, each chain
-/// keyed by its peer, or the one peer of the one link it serves, keyed by its channel alone. Which
-/// it is follows from how the engine composes its links, so the engine names it.
-pub type SessionReassembly<P> =
-    ReassemblyDispatcher<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }, SessionChains, P>;
+/// A Router of a session's links, staging in `S` (the session's chain table, or each chain's own
+/// buffer, as its [`ChainStore`] says), whose chains are those of the peers `P` says
+/// (`ChainPeers`): the peers of the several links that share it, each chain keyed by its peer, or
+/// the one peer of the one link it serves, keyed by its channel alone. Which it is follows from how
+/// the engine composes its links, so the engine names it.
+pub type SessionReassembly<P, S = SessionChains> =
+    ReassemblyDispatcher<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }, S, P>;
 
 /// The Router of a session whose snapshot is `policy`, staging into `chains`, holding the chains
 /// of the peers `P` says. Its owner lends it to the receives of the links it serves for the length
 /// of each step (`wz_session_core::unicast_rx::RouterLend`).
-pub fn session_reassembly<P: ChainPeers>(
-    policy: &SessionPolicy,
-    chains: SessionChains,
-) -> SessionReassembly<P> {
-    SessionReassembly::<P>::with_staging(mcu_reassembly_config(policy), chains)
+pub fn session_reassembly<P, S>(policy: &SessionPolicy, chains: S) -> SessionReassembly<P, S>
+where
+    P: ChainPeers,
+    S: ChainStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }>,
+{
+    SessionReassembly::<P, S>::with_staging(mcu_reassembly_config(policy), chains)
 }
 
 /// [`lent_reassembly`] built in `place` and lent back: the Router a session's pump holds, made in
@@ -883,7 +961,7 @@ mod tests {
         let cells = arena
             .lend_byte_cells(32, LENT_CHAINS)
             .expect("the memory holds the table");
-        let mut router = session_reassembly::<ManyPeers>(
+        let mut router = session_reassembly::<ManyPeers, _>(
             &SessionPolicy::defaults(),
             SessionChains::over(&cells, LENT_CHAINS),
         );
@@ -959,7 +1037,7 @@ mod tests {
         let cells = arena
             .lend_byte_cells(32, LENT_CHAINS)
             .expect("the memory holds the table");
-        let mut router = session_reassembly::<OnePeer>(
+        let mut router = session_reassembly::<OnePeer, _>(
             &SessionPolicy::defaults(),
             SessionChains::over(&cells, LENT_CHAINS),
         );
@@ -1046,7 +1124,7 @@ mod tests {
             let cells = arena
                 .lend_byte_cells(16, buffers)
                 .expect("the memory holds the table");
-            let mut router = session_reassembly::<OnePeer>(
+            let mut router = session_reassembly::<OnePeer, _>(
                 &SessionPolicy::defaults(),
                 SessionChains::over(&cells, LENT_CHAINS),
             );
@@ -1125,6 +1203,67 @@ mod tests {
             IngestOutcome::Refused(RefuseReason::PoolExhausted),
             "CONTROL: with no buffer for the kept message, the next chain finds none"
         );
+    }
+
+    /// A Router of a session whose tables take their memory on use, its staging made by the
+    /// policy's [`ChainStore`]: each chain takes a buffer of its own of the session's bound, so a
+    /// chain past the bound ends as one past a lent buffer does; a rejoined message kept by its
+    /// reader takes its buffer with it, so the chain that starts meanwhile begins; and the Router
+    /// holds no more chains open than the count it was sized to. Turned red by a store that sizes
+    /// the staging to the build's ceiling and not to the source, or a keep that holds the chain's
+    /// place while its message is kept.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_on_use_router_stages_each_chain_in_a_buffer_of_its_own() {
+        use wz_session_core::bounded::OnUse;
+        use wz_session_core::reassembly_dispatch::{AbortReason, ChainBytes};
+
+        let mut router = session_reassembly::<OnePeer, _>(
+            &SessionPolicy::defaults(),
+            <OnUse as ChainStore>::chains(&HeapChains::sized(16, LENT_CHAINS)),
+        );
+        assert_eq!(router.staging_available(), LENT_CHAINS);
+        assert_eq!(
+            router.ingest(frag(1, 1, b"0123456789"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            router.ingest(frag(2, 0, b"0123456789"), MASK, 0, |_| {
+                panic!("past the bound, no deliver")
+            }),
+            IngestOutcome::Aborted(AbortReason::CapacityOverflow)
+        );
+        assert_eq!(router.staging_available(), LENT_CHAINS, "the place is free");
+
+        let best_effort = |sn: u64, more: u8, payload: &'static [u8]| Fragment {
+            reliable: false,
+            ..frag(sn, more, payload)
+        };
+        assert_eq!(
+            router.ingest(best_effort(1, 1, b"a"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        assert_eq!(
+            router.ingest(frag(3, 1, b"c-"), MASK, 0, |_| {}),
+            IngestOutcome::Begun
+        );
+        let mut kept = None;
+        let completed = router.ingest_keeping(frag(4, 0, b"end"), MASK, 0, |chain| {
+            if let ChainBytes::Kept(bytes) = chain {
+                kept = Some(bytes);
+            }
+        });
+        assert_eq!(completed, IngestOutcome::Reassembled);
+        let kept = kept.expect("a staging of its own buffers keeps a completed chain");
+        assert_eq!(kept.as_slice(), b"c-end");
+        assert_eq!(
+            router.ingest(frag(5, 1, b"b"), MASK, 0, |_| {}),
+            IngestOutcome::Begun,
+            "the kept message holds no place of the Router's chains"
+        );
+        assert_eq!(router.staging_available(), 0, "two chains open, its count");
+        drop(kept);
+        assert_eq!(router.active_chains(), LENT_CHAINS);
     }
 
     /// The build's default of a session's `REASSEMBLY_CHAINS` is the count of buffers at which no
