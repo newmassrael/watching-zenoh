@@ -148,3 +148,16 @@ The lane states the tables' policy once, in the build script (`wz_lent`,
   read of establishment lent its counting closure by reference; the closure
   borrows its counter alone, so it is `Copy` and passed by value
   (`clippy::needless_borrows_for_generic_args`).
+- `crates/wz-capi-coop/src/tests/on_use.rs`: main moved the module to the
+  simulated world (`2beb31c051`) while heap-native added on-use tests on the
+  host harness (`Router::start`, `open`, `until`), so the merge kept tests
+  naming items the module no longer imports. The face's room place, the
+  link admission and the link parts tests open in the sim (`opened`,
+  `Sim::steps_until`). The read slot test dials a second stand-in, which the
+  sim now makes at an address and node of a test's choosing
+  (`Sim::stand_in_as`; `Sim::stand_in` is that at `STAND_IN_AT`). The
+  listener test's subject is the host's accept of stream connections that
+  never speak, which the sim's datagram ends do not have: it moves, unchanged,
+  to `tests/on_use_listen.rs`, a system-layer module with its row in
+  `docs/deterministic-tests/system-layer.tsv`, so `tests::on_use` stays in
+  the unit layer and the `on_use` filter of the on-use legs still runs it.

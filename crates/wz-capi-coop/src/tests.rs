@@ -4374,6 +4374,9 @@ mod local_query;
 // A session whose tables take their memory at their first row.
 #[cfg(wz_on_use)]
 mod on_use;
+// The same session listening on the host, against raw connections of the host's.
+#[cfg(all(wz_on_use, feature = "listen"))]
+mod on_use_listen;
 // One face to a node is the link admission's (`link-admission`); without it each link is a face.
 #[cfg(all(
     feature = "link-admission",

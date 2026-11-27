@@ -650,18 +650,21 @@ impl Sim {
     /// A router stand-in accepting at [`STAND_IN_AT`], with the router's catch-all subscriber or
     /// without it.
     pub(super) fn stand_in(&self, catch_all: CatchAll) -> StandIn {
+        self.stand_in_as(STAND_IN_AT, ROUTER_ZID, catch_all)
+    }
+
+    /// A router stand-in that is the node `zid` (four bytes of it), accepting at `at`: a node
+    /// beside [`Self::stand_in`]'s, which a session dials as a face of its own.
+    pub(super) fn stand_in_as(&self, at: SocketAddr, zid: u8, catch_all: CatchAll) -> StandIn {
         let OpenedLink { sink, pump } = self
             .net
-            .bind::<OneTask>(Claim::At(STAND_IN_AT), None, false)
+            .bind::<OneTask>(Claim::At(at), None, false)
             .expect("the stand-in's address is free");
         let runtime = CoopRuntime::try_new(self.clock.clone()).expect("the heap has room");
         let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
-        let actions = new_session_actions(
-            sink,
-            params(WhatAmI::Router, ROUTER_ZID),
-            CoopTime::new(&runtime),
-        )
-        .expect("the heap has room");
+        let actions =
+            new_session_actions(sink, params(WhatAmI::Router, zid), CoopTime::new(&runtime))
+                .expect("the heap has room");
         let seen = Arc::new(Mutex::new(Seen::default()));
         let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
         if catch_all == CatchAll::Held {
@@ -721,7 +724,7 @@ impl Sim {
             seen,
             frozen: Cell::new(false),
             net: self.net.clone(),
-            at: STAND_IN_AT,
+            at,
         });
         WORLD.with(|world| {
             let mut stand_ins = world.stand_ins.borrow_mut();
