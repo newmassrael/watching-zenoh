@@ -93,7 +93,7 @@ it up is not landed.
 | 2 | **W2** (landed, section 7) | work: switch `dial-in-flight` | off: a dial connects and waits in one call, walking the host's addresses there, as `_z_tcp_open` does; `Dial::answer_on`'s later answer and `HostWalk::pass_on` go | 2,215 (+ part of the dial row) | -800 to -1,200 | 0 (an open, never a message) | base-driver, with arch-l0-driver 6b-1 to 6b-3 (the life's `DialStage::Pending`) |
 | 3 | S2 | shape: over-generalization | whether the owner waits for every link becomes the stack's type, so a driver of such a stack has no wait of its own (`size.md` 3.4, first item) | 798 + about 120 of the stream's `service` | -800 to -1,000 | 0 or less (the `owner_waits` load goes) | base-driver; touches every heap link family |
 | 4 | **S4** (changed into the switch `dial-address-reader`, section 8) | shape: overlapping layers | on a stack that `RESOLVES`, a literal address goes to the host's resolver (one `getaddrinfo` asked for a numeric host) and wz's literal parser is not linked; a stack without a resolver keeps it | 994 | -600 to -850 | 0 | base-driver |
-| 5 | S6 | shape: over-generalization | one table a link (the session's sends and the loop's pump through one `dyn` entry set), and `try_recv` out of the table of a build whose receive lends | 1,285 | -400 to -800 | must not rise: `recv_with` is reached through the table | base-driver |
+| 5 | **S6** (part landed with `size.md` 9.2 step 1, the rest is its steps 2 and 3; section 9) | shape: over-generalization | one table a link (the session's sends and the loop's pump through one `dyn` entry set), and `try_recv` out of the table of a build whose receive lends | 1,285 | -400 to -800 | must not rise: `recv_with` is reached through the table | base-driver |
 | 6 | S3 | shape: generic copy | one out-of-line drop path for the last holder of a kept value, the type's drop handed as a function | 909 | -300 to -450 | 0 (no kept value is let go on a message) | base-driver |
 | 7 | S5 | shape: moved by value | a link built where it lies: the driver's fields written once into the cell, not assembled and copied (273 B and 217 B of `MaybeUninit::write`) | 2,958 | -200 to -400 | 0 (an open) | base-driver |
 
@@ -274,3 +274,25 @@ the feature, which no resolver is asked about.
 Measured by the main session on the case's explain report: the driver row and the
 `wz_runtime_coop::locator_text` and `wz_runtime_coop::dial` owner lines; expected -600 to -900,
 the receive untouched (an open).
+
+## 9. Step S6: one table a link, carried by the closed link set's design
+
+S6's rows are four: the stream driver's and the datagram driver's other table entries (508 and 306
+in the reading of section 1), the link handle's forwarding entries (225) and the copying receive
+(246). The third went with `docs/win-budget/size.md` section 9.2, step 1 (`376f24146a`, "Read a
+link nothing holds back as its own gate"): the direct read's pump holds the driver's handle, so the
+case links no forwarder of `CellRc<dyn SessionDatagramLink>`, and the case's explain document read
+for this section (main of 2026-11-27, later than section 1's) has none. The others are what that
+design's steps 2 and 3 take out: one enum over the stack's links (one table a trait for the stack,
+not one a driver) and the stack's link type carried to the read and the send, under which a method
+only a table reached, each driver's copying `try_recv`, is not linked. In that reading the stream
+driver's other entries are about 520 bytes, the datagram driver's about 320 and the copying
+receive's three bodies (`copied_receive`, its closure and the closure's call shim) 332 in all areas.
+
+S6 as written here, the session's sends and the loop's pump through one `dyn` entry set a driver,
+is the same job by a second route: it would merge `SessionDatagramLink` into `BoxedLinkDriver`'s
+table in every driver and in the session core's `dyn BoxedLinkDriver` runtime, and size.md 9.2
+step 3 then leaves the closed set no table on the receive or the put at all. So this lane does not
+carry it: the rows are measured against size.md 9.2's steps in that lane, whose design already
+names the receive's count (`recv_with` reached through the table now, through the enum's match
+after step 3) as the instruction reading it must hold.
