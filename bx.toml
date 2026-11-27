@@ -220,6 +220,21 @@ install_inputs = ["scripts/install-cargo-mutants.sh", "deploy/mutation_ratchet.j
 prefix_file = "cargo-mutants"
 needed_by = ["--layer Cmut"]
 
+# THE ARM GNU TOOLCHAIN Layer Bc compiles and weighs the C11 emission with (scripts/c11-lane.sh):
+# Arm's tarball of the release SCE pins, checked against its SHA-256. The release is SCE's
+# (`ARM_GNU_TOOLCHAIN_REV` of its installer), because deploy/c11/footprint.tsv holds wz's units to
+# the compiler SCE's own C11 gate weighs with, and a distribution's arm-none-eabi-gcc of the same
+# name is another build (Ubuntu 22.04 carries 10.3). `needed_by` is the lane's own argument.
+[tools.arm-gnu-toolchain]
+version_file = "vendor/sce/scripts/install_arm_gnu_toolchain.sh"
+version_pattern = '^ARM_GNU_TOOLCHAIN_REV="([0-9]+\.[0-9]+\.rel[0-9]+)"'
+path = "~/.local/share/arm-gnu-toolchain/{version}/bin/arm-none-eabi-gcc"
+check = "Arm GNU Toolchain {version}"
+prefix_link = "~/.local/share/arm-gnu-toolchain/{version}"
+install = "ARM_GNU_TOOLCHAIN_ROOT={prefix} bash scripts/install-arm-gnu-toolchain.sh"
+install_inputs = ["scripts/install-arm-gnu-toolchain.sh", "vendor/sce/scripts/install_arm_gnu_toolchain.sh"]
+needed_by = ["--layer Bc"]
+
 [tools.mnemosyne-cli]
 version_file    = "mnemosyne.toml"
 version_pattern = 'pin = "([0-9a-f]{40})"'

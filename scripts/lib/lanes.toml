@@ -67,6 +67,13 @@ class = "E"
 reason = "its hosted job (codegen-verify) provisions what it runs against on the machine, which the key does not hold"
 
 [[lane]]
+id = "Bc"
+fn = "layer_bc_c11_freestanding"
+class = "E"
+reason = "it compiles with the Arm GNU Toolchain release SCE pins and runs vectors with the machine's cc, which the key does not hold"
+decl = ["sources/codecs/*.scxml", "sources/algorithms/*.scxml", "deploy/codec_node.yaml", "deploy/c11/*.tsv"]
+
+[[lane]]
 id = "C0"
 fn = "layer_c0_test_discipline"
 class = "E"
