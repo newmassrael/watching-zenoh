@@ -704,3 +704,70 @@ either transport.
 
 Next, in order: `LinkTx` out of `LinkState` (`transport_tx`, every reader of the six fields),
 the module's gate widened to a group, then T3b with D2.
+
+## 17. The link's transmit half, as landed
+
+- **The type.** `transport_tx::LinkTx<R>` is what a send reads and writes of the link it leaves
+  by: the driver (`driver`, `link_driver`), the send gate (`transport_available`), the speech
+  bit (`spoke`), the compression flag (`compresses`, `compresses_batches`,
+  `settle_compression`), the registry slot (`stats_slot`), the shared-memory handoff as a sender
+  (`shm_tx`) and the lent batch records (`batch_slots`, with `LentRecord`). `LinkState` holds
+  it as `tx`, made by `LinkTx::new` in `init_link`, and the drop that gives a link's held slots
+  back is the half's, where it was `LinkState`'s. `LinkTx::new` is public: a group makes the half
+  of its datagram driver with no session, as zenoh-pico's transport keeps its link and its
+  `_transmitted` bit beside its common state.
+- **The sender's shared-memory handoff is the seventh field.** Section 16.1 counted six. The
+  session's send reads `shm_tx` of the conduit's link through `TxRoute::with_conduit_link`
+  (`open_shm_tx`), so a route that lends the transmit half must find it there; it is written by
+  the Open message the link sends and read by the link's sends, a transmit fact of the link.
+  The receiver's half (`shm_rx`) stays on `LinkState`.
+- **The walk borrows the half.** `TxRoute::own` is `&LinkTx`, and so are the links
+  `emit_on_link`, `record_on_link`, `conduit_routes_to`, `send_lent_batch`,
+  `send_open_lent_batches`, `lease_on` and `send_lent_on` take and the closures of
+  `with_conduit_link` and `with_batch_holder` are lent; the session's `count_network_message`,
+  `drop_for_congestion` and `move_lent_batches_off` likewise. An aggregate's set stays
+  `Vec<Shared<LinkState>>` (`select_link` reads the declared reliability and the band), and a link
+  chosen from it is lent as its `tx`. `own_link` is gone: its three readers asked the driver,
+  which the session's `link_driver` answers.
+- **A compile fault of the walk's move is repaired with it.** `write_n_msg`, moved into
+  `transport_tx` with the walk (section 15), records a lent slot with `LentRecord::hold`, which
+  was private to `session_actions`; with `LentRecord` in `transport_tx` the call is the module's
+  own.
+- The readers outside the crate read the fields at `link.tx`: `wz-runtime-tokio`'s
+  `session_glue`, session tests, `shm_auth_segment` tests and the keepalive and multilink
+  integration tests, and `wz-session-lwip`'s `session_slot_allocations`.
+
+Expected: 0 code bytes on every case (a regroup of fields; the constructor is `#[inline]` and
+builds what `init_link` built field by field; the drop is the one `LinkState` had); RAM 0 to one
+word a link (the half is padded as a unit, so its two flags no longer share padding with
+`LinkState`'s); receive Ir none; arm W's send Ir unchanged (the same loads at other offsets).
+
+Held by every test that sends, unchanged, and by
+`bundle_tests::a_link_transmit_half_is_made_without_a_session` (red if `LinkTx::new` opens the
+send gate, marks the line or compresses before an establishment settles them, if `link_driver`
+answers another driver than the one the half was made over, or if the half keeps its driver past
+its drop).
+
+### 17.1 The gate for a group, read again: with T3c, not before
+
+Section 16.1 put the widening of the module's gate (the storage profile and either transport)
+after the split. Read in the code, the split is not all it needs:
+
+- Every `pub(crate)` item the module compiles in a build needs a reader in that build, and in a
+  build with `session-multicast`, a sending codec and no `session-unicast` none of the walk's
+  items has one (`TxRoute::write`, `emit_on_link`, the flush, the lend): the session is their
+  only caller. Widened alone, the module is dead code under `-D warnings` there. The reader is a
+  group that sends through the walk in such a build, which is T3c's; the items a group never calls
+  (`send_wire_this_link`, `send_wire_urgent_this_link`, the control arm of `send_lent_on`) then
+  take a `session-unicast` conjunct of their own.
+- `transport-multilink` does not imply `session-unicast` (it takes `session-extauth`), so
+  `TxRoute::links` and `select_link`, which name `LinkState`, take `session-unicast` too.
+- The module's doc links into `session_actions` (`SessionLinkActions::batch_stop`,
+  `hold_replies`, the three lend counts, `set_fragment_tx_budget`, `tx_refusals`) resolve only
+  with `session-unicast`; the reduced documentation configurations without it (Layer C1bzr)
+  would count each as a finding, so they become words where a group's build documents them.
+
+T3b does not need the widening (16.1: its group is `wz-session-mcu`'s, which takes
+`session-unicast`), so the widening lands with T3c, whose group is the reader that makes it whole.
+
+Next: T3b with D2.
