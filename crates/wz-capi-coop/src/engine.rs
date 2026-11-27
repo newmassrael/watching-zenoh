@@ -73,10 +73,7 @@ use crate::RowPolicy;
 use wz_runtime_coop::kept::Shared;
 #[cfg(wz_on_use)]
 use wz_runtime_coop::kept::{Kept, SharedClaim};
-#[cfg(any(
-    wz_lent,
-    all(not(wz_round), any(feature = "listen", feature = "group"))
-))]
+#[cfg(any(wz_lent, all(not(wz_round), feature = "listen", not(wz_on_use))))]
 use wz_session_core::bounded::Arena;
 #[cfg(not(wz_on_use))]
 use wz_session_core::bounded::KeyUnkept;
@@ -2138,7 +2135,10 @@ impl<W: LinkWaits> LinkRooms<W> {
     #[cfg(all(test, feature = "std", wz_on_use))]
     pub(crate) fn places_made(&self) -> (usize, usize) {
         let rooms = lock(&self.rooms);
-        (rooms.places.iter().count(), rooms.places.rows().len())
+        // Counted into locals, so no temporary of the tail borrows the guard past its drop.
+        let made = rooms.places.iter().count();
+        let rows = rooms.places.rows().len();
+        (made, rows)
     }
 
     /// Hold `on`, what a wait for room on the face at place `at` waits on, in place of what the
