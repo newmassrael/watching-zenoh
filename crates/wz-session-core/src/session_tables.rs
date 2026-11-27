@@ -4004,8 +4004,8 @@ impl<F: RowCallbacks> SessionTables<F, crate::bounded::OnUse> {
             next_expr: 1,
             next_request: 0,
             subscriber_epoch: 0,
-            // No key is remembered, as on the lent policy: each slot would be rows of its own, taken
-            // at the first delivery after the open, which the receive does not ask for.
+            // The memory a table of fixed size keeps (`memo_slots`): the build's
+            // `MATCH_MEMO_FIXED_SLOTS`, none unless the image asks for them.
             memo: MatchMemo::new(0),
             key_gate: KeyGate::of_build(),
             keyexprs: SlotMap::counted(rows.keyexprs),
