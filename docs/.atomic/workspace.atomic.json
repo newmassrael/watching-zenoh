@@ -8486,6 +8486,23 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4689": {
+      "decision_summary": "Pay two reds main carried: the Platform workflow did not run for a change\nto seven crates its lanes build, and the session-close-ingress reason was\nnot read again after four files it cites changed; it still holds.",
+      "changes_bullets": [
+        "platform.yml: paths entries for the seven wz-zenoh-* crates.",
+        "reason-review-pins: four session-close-ingress rows moved to their blobs."
+      ],
+      "verification_bullets": [
+        "platform_trigger_paths_gate --check and --selftest pass; actionlint clean.",
+        "reason_review_pin_gate --check OK after the reason was re-read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
