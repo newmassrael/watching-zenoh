@@ -1856,8 +1856,10 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// Hand `reply`, read by [`Self::lend_reply`] or projected by [`Self::project_reply`], to
-    /// the pending gets of face `face` it answers, as the face's dispatch hands a Response to
-    /// them. A face the session no longer holds hands it to none.
+    /// the pending get of face `face` it answers: the one entry its id names, found in the row the
+    /// id carries as the face's dispatch finds it (`ReplyRegistry::reply_to_one`), since every id
+    /// this engine puts in a face's table names one entry. A face the session no longer holds hands
+    /// it to none.
     #[cfg(all(feature = "query", not(wz_round)))]
     pub(super) fn fire_reply(
         &mut self,
@@ -1865,7 +1867,7 @@ impl<H: Holders> RegistryOf<H> {
         reply: &dyn wz_session_core::reply_sink::ReplyView,
     ) {
         if let Some(Split { face, .. }) = self.split_unwritten(self.place(face)) {
-            face.gets.replies.dispatch_borrowed(reply);
+            face.gets.replies.reply_to_one(reply);
         }
     }
 
