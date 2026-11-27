@@ -44,8 +44,8 @@ use wz_runtime_tokio::zenoh_config::{
     ConfigIngestError, ShmInitMode, ZenohConfigIngest, ZenohNodeConfig, UNHONOURED_READER_GAP,
     UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
 };
-#[cfg(feature = "routing-namespace")]
 use wz_session_core::ext_member;
+#[cfg(feature = "routing-namespace")]
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
 use wz_session_core::limits::{RuntimeLimits, SessionLimits};
 use wz_session_core::process_limits::ProcessStatement;
