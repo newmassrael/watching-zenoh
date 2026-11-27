@@ -7578,7 +7578,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         test,
         feature = "std",
         not(feature = "runtime-plan"),
-        any(feature = "queryable", feature = "query", feature = "connectivity")
+        any(feature = "queryable", feature = "connectivity")
     ))]
     pub(crate) fn state_holds(&self, at: *const u8) -> bool {
         let start = self.core.lock().0._state.as_ptr().as_ptr() as usize;
