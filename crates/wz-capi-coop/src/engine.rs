@@ -7500,7 +7500,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// task of the session's: the runtime is confined to that lock (`confine_tasks`), so the set
     /// is used under it and a handle of it taken out is used only once the engine has gone. A
     /// session whose read steps each face where it lies runs no link as a task.
-    #[cfg(all(test, feature = "std", feature = "listen", wz_round))]
+    // Its one reader is `tests::admission_heap`, compiled with the link admission.
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "listen",
+        feature = "link-admission",
+        wz_round
+    ))]
     pub(crate) fn with_local_set<R>(&self, f: impl FnOnce(&CoopLocalSet<C>) -> R) -> R {
         f(&self.core.lock().0.local)
     }
