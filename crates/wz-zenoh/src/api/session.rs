@@ -12519,6 +12519,8 @@ mod tests {
 
         use super::*;
 
+        /// How long a wait for what must come runs before the test fails as stalled: a guard
+        /// against a hang, by which no outcome is judged.
         const WAIT: Duration = Duration::from_secs(5);
 
         pub(super) fn on(id: &str, listen: &str, connect: &str) -> Session {
@@ -12599,6 +12601,47 @@ mod tests {
                 },
                 received,
             )
+        }
+
+        /// Everything a listener was told, read once its channel has ended: once the session has
+        /// let go of its callback, as an undeclaration and a close do, after which it can be told
+        /// nothing more. A callback never let go of fails the test as stalled.
+        fn everything_told(told: &mpsc::Receiver<String>) -> Vec<String> {
+            let mut all = Vec::new();
+            loop {
+                match told.recv_timeout(WAIT) {
+                    Ok(event) => all.push(event),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return all,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        panic!("stalled: the listener's callback was never let go of: {all:?}")
+                    }
+                }
+            }
+        }
+
+        /// Return once `session` holds a transport to the node `zid`, as a listener that asks for
+        /// the history is told: by the history when the transport is open as it is declared, by
+        /// the event of its opening when it opens after. What the session is told from then on
+        /// is what a listener declared then is told.
+        fn holding(session: &Session, zid: &str) {
+            let (callback, told) = transport_events();
+            let listener = session
+                .info()
+                .transport_events_listener()
+                .history(true)
+                .callback(callback)
+                .wait()
+                .expect("declares");
+            let held = format!("Put {zid}");
+            loop {
+                let event = told
+                    .recv_timeout(WAIT)
+                    .unwrap_or_else(|_| panic!("stalled: no transport to {zid}"));
+                if event == held {
+                    break;
+                }
+            }
+            listener.undeclare().wait().expect("undeclares");
         }
 
         #[test]
@@ -13056,10 +13099,10 @@ mod tests {
             assert_eq!(told.recv_timeout(WAIT), Ok("Put a1b2d7".to_owned()));
             reader.close().wait().expect("closes");
             assert_eq!(told.recv_timeout(WAIT), Ok("Delete a1b2d7".to_owned()));
-            assert_eq!(
-                told.recv_timeout(Duration::from_millis(200)),
-                Err(mpsc::RecvTimeoutError::Timeout)
-            );
+            // Nothing more up to the writer's close, which lets go of its listeners first.
+            writer.close().wait().expect("closes");
+            let more = everything_told(&told);
+            assert!(more.is_empty(), "told after the peer left: {more:?}");
         }
 
         #[test]
@@ -13096,7 +13139,7 @@ mod tests {
         fn the_history_is_what_is_open_when_the_listener_is_declared() {
             let (writer, endpoint) = listening("a1b2da");
             let reader = dialling("a1b2db", &endpoint);
-            assert_eq!(connected(&writer, 1).1.len(), 1, "the nodes are linked");
+            holding(&writer, "a1b2db");
             let (transport_callback, transported) = transport_events();
             let (link_callback, linked) = link_events();
             let _transports = writer
@@ -13121,9 +13164,9 @@ mod tests {
             );
             let link = linked.try_recv().expect("the link that is open");
             assert!(link.starts_with(&format!("Put {endpoint} tcp/127.0.0.1:")));
-            assert!(transported.try_recv().is_err() && linked.try_recv().is_err());
 
-            // A listener without the history is told of what is open only when it changes.
+            // A listener without the history is told of what is open only when it changes, and
+            // nothing changes up to the writer's close, which lets go of its listeners first.
             let (quiet_callback, quiet) = transport_events();
             let _quiet = writer
                 .info()
@@ -13131,7 +13174,17 @@ mod tests {
                 .callback(quiet_callback)
                 .wait()
                 .expect("declares");
-            assert!(quiet.try_recv().is_err());
+            writer.close().wait().expect("closes");
+            let quiet = everything_told(&quiet);
+            assert!(
+                quiet.is_empty(),
+                "a listener without the history was told {quiet:?}"
+            );
+            assert_eq!(
+                (everything_told(&transported), everything_told(&linked)),
+                (vec![], vec![]),
+                "the history is told once"
+            );
             drop(reader);
         }
 
@@ -13139,7 +13192,7 @@ mod tests {
         fn a_link_listener_for_a_transport_is_told_of_the_links_of_that_peer_only() {
             let (hub, endpoint) = listening("a1b2dc");
             let first = dialling("a1b2dd", &endpoint);
-            assert_eq!(connected(&hub, 1).1.len(), 1, "the nodes are linked");
+            holding(&hub, "a1b2dd");
             let of_first = transports(&hub).pop().expect("a transport to the first");
             let (callback, told) = link_events();
             let _listener = hub
@@ -13149,16 +13202,37 @@ mod tests {
                 .callback(callback)
                 .wait()
                 .expect("declares");
+            // A listener of every link, declared before the second peer dials: what it is told
+            // says that the hub has told its listeners of the second peer's link, and then of
+            // the first's going.
+            let (every_callback, every) = link_events();
+            let _every = hub
+                .info()
+                .link_events_listener()
+                .callback(every_callback)
+                .wait()
+                .expect("declares");
             let second = dialling("a1b2de", &endpoint);
-            assert_eq!(connected(&hub, 2).1.len(), 2, "the nodes are linked");
+            let added = every
+                .recv_timeout(WAIT)
+                .expect("the link of the second peer");
+            assert!(added.starts_with(&format!("Put {endpoint} ")), "{added}");
+            first.close().wait().expect("closes");
+            let removed = every
+                .recv_timeout(WAIT)
+                .expect("the link of the first peer");
+            assert!(
+                removed.starts_with(&format!("Delete {endpoint} ")),
+                "{removed}"
+            );
+            // The hub lets go of its listeners as it closes: what the first's listener was told
+            // by then is everything it is told.
+            hub.close().wait().expect("closes");
             assert_eq!(
-                told.recv_timeout(Duration::from_millis(300)),
-                Err(mpsc::RecvTimeoutError::Timeout),
+                everything_told(&told),
+                [removed],
                 "the link of the second peer is not the first's"
             );
-            first.close().wait().expect("closes");
-            let removed = told.recv_timeout(WAIT).expect("a link event");
-            assert!(removed.starts_with("Delete "));
             drop(second);
         }
 
@@ -13175,8 +13249,13 @@ mod tests {
             let id = listener.inner.id;
             listener.undeclare().wait().expect("undeclares");
             let reader = dialling("a1b2e0", &endpoint);
-            assert_eq!(connected(&writer, 1).1.len(), 1, "the nodes are linked");
-            assert!(told.recv_timeout(Duration::from_millis(300)).is_err());
+            holding(&writer, "a1b2e0");
+            // The undeclaration let go of the callback, so nothing is told it from then on.
+            let heard = everything_told(&told);
+            assert!(
+                heard.is_empty(),
+                "an undeclared listener was told {heard:?}"
+            );
             let again = writer
                 .downgrade()
                 .undeclare_transport_events_listener_inner(id);
@@ -13219,15 +13298,16 @@ mod tests {
         }
 
         /// Two connected nodes, one of which closes with a listener of each kind declared on it in
-        /// the background: what its listeners are told while it closes.
+        /// the background once it holds the link: everything its listeners are told, up to the
+        /// close that lets go of them.
         fn told_while_closing(
             closing_the_dialler: bool,
             ids: (&str, &str),
         ) -> (Vec<String>, Vec<String>) {
             let (writer, endpoint) = listening(ids.0);
             let reader = dialling(ids.1, &endpoint);
-            assert_eq!(connected(&writer, 1).1.len(), 1, "the nodes are linked");
-            assert_eq!(connected(&reader, 1).1.len(), 1, "the nodes are linked");
+            holding(&writer, ids.1);
+            holding(&reader, ids.0);
             let session = if closing_the_dialler {
                 &reader
             } else {
@@ -13250,13 +13330,14 @@ mod tests {
                 .wait()
                 .expect("declares");
             session.close().wait().expect("closes");
-            std::thread::sleep(Duration::from_millis(500));
-            (
-                transported.try_iter().collect(),
-                linked.try_iter().collect(),
-            )
+            (everything_told(&transported), everything_told(&linked))
         }
 
+        /// A listener declared once the session holds the link it accepted is told nothing of the
+        /// link's arrival, which came before it, nor of its closing: an arrival is told to the
+        /// listeners declared by the time the session lists the link, and not to one declared
+        /// between that and the telling. The two orders are forced in
+        /// `wz_capi_core::faces::face_watch_tests`.
         #[test]
         fn a_listener_of_the_session_that_accepted_a_link_is_told_nothing_of_its_closing() {
             let told = told_while_closing(false, ("a1b2e1", "a1b2e2"));
