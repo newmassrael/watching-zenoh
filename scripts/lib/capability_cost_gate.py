@@ -50,6 +50,16 @@ choosing it is what this gate exists to refuse. The sizes are `size` text on the
 (`rust-toolchain.toml`) and are comparable only to themselves: a different compiler moves them,
 which is why the margin is a percentage and not a byte count.
 
+A budget is set from a reading and from nothing else: a case added before any host read it has
+none (`max_text` None), and fails `--check` with the budget its reading sets (`budget_for`, the
+reading and two percent, rounded up to the hundred), which `--measure` prints too.
+
+A case may read its features from a registered profile (`Case.features_from`) where another lane
+builds a library from that profile: `pico-api-coop-nostd` is the Linux twin of the Windows
+like-for-like library (`pico_windows_package.LIKE_PROFILE`), built with the features that lane
+builds it with, resolved from the same profile when the case is built, so the two lanes hold one
+list and not two.
+
 ## Where and when the build ran
 
 Every build here (the size cases, the statement cases and the pico reference) runs in the
@@ -363,7 +373,8 @@ class Case:
     package: str
     lib: str
     features: str | None  # None: the crate's default features
-    max_text: int
+    # None: no budget yet, which `grade` refuses with the budget the reading sets.
+    max_text: int | None
     forbid: tuple[str, ...] = ()
     require: tuple[str, ...] = ()
     exports: int | None = None
@@ -381,10 +392,15 @@ class Case:
     # read by `case_config`), with the host's own target named (`--target`), so that what a file
     # gives the library's crates does not reach the build scripts. Empty: the profile alone.
     cargo_configs: tuple[str, ...] = ()
+    # The registered profile (`configs/profiles/<id>.conf`) whose resolved features the case is
+    # built with (`profile_features`), its `features` None beside it: a case that stands for a
+    # library another lane builds from a profile reads the list where that lane does and holds no
+    # copy of it.
+    features_from: str | None = None
     note: str = field(default="", compare=False)
 
 
-# Budgets are the measured text plus about two percent. See the module doc.
+# Budgets are the measured text plus about two percent (`budget_for`). See the module doc.
 CASES: tuple[Case, ...] = (
     # 2026-10-29 -- nine of the pico cases below and `capic-default` were moved to the hosted
     # reading of run 40729400547 (head `04d21adb3`) plus 3,500, to the hundred, because the clock
@@ -1086,6 +1102,26 @@ CASES: tuple[Case, ...] = (
               "moved to that reading and 5,500. 1,064,448 with the gate that gives a link's "
               "session nothing between its handshake and the decision (+888), the budget "
               "moved to that reading and 5,500 again"),
+    # The like-for-like library of the Windows release (`pico_windows_package.LIKE_PROFILE`, the
+    # release profile without wz's own doors, whose rows are `pico-api-windows-<width>`) built on
+    # Linux in the release client's form, so its bytes are read area by area by the size ledger,
+    # where a DLL's are not. Its features are that profile's, resolved when it is built:
+    # zenoh-pico's default build (the peer role, the multicast transport, the multi-threaded arm)
+    # with the advanced plane, the unstable API and connectivity, so its planes are held as
+    # pico-default's are.
+    Case("pico-api-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", None, None,
+         forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK,
+                 STD_RUNTIME),
+         require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
+         forbid_undefined=(r"^rust_eh_personality$", r"^_Unwind_Resume(@|$)"),
+         require_needed=(r"^libc\.so",),
+         profile="capi-nostd",
+         cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG),
+         features_from=pico_windows_package.LIKE_PROFILE,
+         note="pico-client-coop-nostd's form (profile, configuration files and the names it "
+              "defines) with the features of the library pico_windows_package.py --size-features "
+              "builds first, so the two lanes build one feature set, each on its own platform. No "
+              "budget and no ceiling row until the first reading: --measure prints both"),
     # 2026-11-03 -- `pico-peer` 2,946,185 on hosted run 41481900203, 185 over its budget of
     # 2,946,000, which the 2026-11-02 move of the coop cases had not reached; moved to that reading
     # plus 3,500, to the hundred. The growth is the day's, as the coop cases' was (the SCE pin
@@ -1856,7 +1892,13 @@ def grade(case: Case, got: Measured, stated: str | None = None, door: bool = Tru
             f"(wz-conformance-build) read another build than the one this case made, or the two "
             f"writers of the canonical form disagree (their fixture tests say which)."
         )
-    if got.text > case.max_text:
+    if case.max_text is None:
+        findings.append(
+            f"{case.id}: text is {got.text} bytes and the case has no budget yet: set its "
+            f"max_text to {budget_for(got.text)}, this reading and its margin (`budget_for`), "
+            f"with the reading stated in its note."
+        )
+    elif got.text > case.max_text:
         findings.append(
             f"{case.id}: text is {got.text} bytes, over its budget of {case.max_text} "
             f"({got.text - case.max_text} over). Either the size grew without anyone choosing it "
@@ -2272,10 +2314,11 @@ def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
             linker[target_linker_env(triple)] = config_link
         cmd += ["--target", triple]
         lib_dir = TARGET / triple / case.profile
-    if case.features is not None:
+    features = feature_list(case)
+    if features is not None:
         cmd += ["--no-default-features"]
-        if case.features:
-            cmd += ["--features", artifact_features(case.package, case.features)]
+        if features:
+            cmd += ["--features", artifact_features(case.package, features)]
     return CaseBuild(tuple(cmd), {**with_rustflags(limit_env(env, stated), flags),
                                   **wz_package.ship_debug_env(case.profile), **linker},
                      lib_dir / case.lib, tuple(link_args(flags)),
@@ -2353,11 +2396,48 @@ class Reference:
     code_moved: tuple[str, ...] = ()
 
 
-def case_features(case: Case) -> set[str]:
+@functools.cache
+def profile_features(profile: str) -> str:
+    """The features of the registered profile `profile` as a comma list, as the Windows package
+    lane builds its C library from it (`pico_windows_package.resolve_profile`, then
+    `library_features`). Resolved once a run. Raises `wz_config.PresetError` when the profile
+    does not resolve (the pinned Kconfig interpreter is not provisioned, among the reasons) or
+    names what that library cannot carry."""
+    try:
+        resolved = pico_windows_package.resolve_profile(wz_config.load_decl(), profile)
+        table = wz_config.manifest_features(wz_config.MANIFESTS["pico"])
+        return ",".join(pico_windows_package.library_features(resolved["features"], table))
+    except pico_windows_package.Refusal as e:
+        raise wz_config.PresetError(f"profile {profile}: {e}") from e
+
+
+def feature_list(case: Case | StatementCase) -> str | None:
+    """The features a case is built with, a comma list, or None for its crate's default: its own,
+    or those of the profile it reads them from (`Case.features_from`, `profile_features`)."""
+    if isinstance(case, Case) and case.features_from is not None:
+        return profile_features(case.features_from)
+    return case.features
+
+
+def case_features(case: Case | StatementCase) -> set[str]:
     """The features of the case's package its build turns on, as cargo resolves them."""
     feats = wz_config.manifest_features(CRATES / case.package / "Cargo.toml")
-    start = ["default"] if case.features is None else [f for f in case.features.split(",") if f]
+    listed = feature_list(case)
+    start = ["default"] if listed is None else [f for f in listed.split(",") if f]
     return wz_config.enabled_features(feats, start)
+
+
+# The margin a budget is set with over the reading it is set from (module doc, "What a budget
+# is"), in percent, and the step it is rounded up to.
+BUDGET_MARGIN_PERCENT = 2
+BUDGET_STEP = 100
+
+
+def budget_for(text: int) -> int:
+    """The budget a reading of `text` bytes sets: the reading and `BUDGET_MARGIN_PERCENT`
+    percent, rounded up to `BUDGET_STEP` bytes."""
+    steps = -(-(text * (100 + BUDGET_MARGIN_PERCENT)) // (100 * BUDGET_STEP))
+    return steps * BUDGET_STEP
 
 
 def first_line(cmd: list[str]) -> str:
@@ -2577,9 +2657,14 @@ def cmd_check(measure_only: bool, only: list[str], shard: tuple[int, int] | None
         return 2
     try:
         limits_of = {case.id: case_limits(case) for case in CASES if chosen(case.id)}
+        # Resolved before any build, so a profile that does not resolve stops the run here.
+        for case in CASES:
+            if chosen(case.id):
+                feature_list(case)
     except wz_config.PresetError as e:
-        print(f"  capability-cost: the limits of an ABI's own preset did not resolve "
-              f"(scripts/provision-kconfiglib.sh provisions the interpreter): {e}", file=sys.stderr)
+        print(f"  capability-cost: the limits of an ABI's own preset, or the features of a case's "
+              f"profile, did not resolve (scripts/provision-kconfiglib.sh provisions the "
+              f"interpreter): {e}", file=sys.stderr)
         return 2
     try:
         linker = gnu_ld_version(env)
@@ -2608,8 +2693,11 @@ def cmd_check(measure_only: bool, only: list[str], shard: tuple[int, int] | None
         door = digest_door(case, case_features(case))
         print(f"  capability-cost: {case.id}: built under {len(limits)} limit and policy value(s) "
               f"of its ABI's own preset")
-        print(f"  capability-cost: {case.id}: text {got.text} of {case.max_text} "
-              f"({100 * got.text // case.max_text}%), {got.exports} exports, conformance digest "
+        budget = (f"of no budget yet ({budget_for(got.text)} is the one it sets)"
+                  if case.max_text is None
+                  else f"of {case.max_text} ({100 * got.text // case.max_text}%)")
+        print(f"  capability-cost: {case.id}: text {got.text} {budget}, {got.exports} exports, "
+              f"conformance digest "
               f"{', '.join(got.digests) or 'none'} "
               f"({f'statement {stated}' if door else f'no door: {DIGEST_CAPABILITY} is off'})")
         ref, ref_findings = report_reference(case, got, env, prefixes)
@@ -3087,6 +3175,38 @@ def cmd_selftest() -> int:
            all(case_features(by_id[small]) == case_features(by_id[base])
                for small, base in (("pico-client-small", "pico-client"),
                                    ("capic-client-small", "capic-client"))))
+    # A case that reads its features from a profile: the twin of the Windows like-for-like library.
+    twin, release = by_id["pico-api-coop-nostd"], by_id["pico-client-coop-nostd"]
+    expect("the Linux twin of the Windows like-for-like library reads its features from that "
+           "lane's profile and is built in the release client's form",
+           twin.features is None and twin.features_from == pico_windows_package.LIKE_PROFILE
+           and (twin.package, twin.lib, twin.profile, twin.cargo_configs)
+           == (release.package, release.lib, release.profile, release.cargo_configs))
+    expect("only a pico case reads its features from a profile, and it states none of its own",
+           all(c.package == "wz-capi-pico" and c.features is None
+               for c in CASES if c.features_from is not None))
+    expect("a case of its own features is built with them, one of the crate's default with none",
+           feature_list(Case("t", "p", "l", "a,b", 1)) == "a,b"
+           and feature_list(Case("t", "p", "l", None, 1)) is None
+           and feature_list(STATEMENT_CASES[0]) == STATEMENT_CASES[0].features)
+    if wz_config.kconfiglib_module() is not None:
+        like = pico_windows_package.library_features(
+            pico_windows_package.resolve_profile(
+                wz_config.load_decl(), pico_windows_package.LIKE_PROFILE)["features"],
+            wz_config.manifest_features(wz_config.MANIFESTS["pico"]))
+        twin_build = case_build(twin, {}, "x86_64-unknown-linux-gnu", linux_gnu, limits={})
+        expect("the twin is built with the features the Windows lane builds its library with",
+               feature_list(twin) == ",".join(like)
+               and twin_build.cmd[-3:] == ("--no-default-features", "--features",
+                                           artifact_features(twin.package, ",".join(like)))
+               and {"os-host", "peer"} <= case_features(twin))
+    # A case with no budget yet: refused with the budget its reading sets.
+    expect("a budget is the reading and two percent, rounded up to the hundred",
+           budget_for(1_000_000) == 1_020_000 and budget_for(1_049_123) == 1_070_200
+           and budget_for(1) == 100)
+    expect("a case with no budget yet fails, naming the budget its reading sets",
+           len(found := grade(Case("t", "p", "l", "", None), Measured(900, [], 3))) == 1
+           and "no budget" in found[0] and str(budget_for(900)) in found[0])
     # STATEMENT: the digest is read from the binary's bytes as the C string the library stores, and
     # graded against the statement's; none, two, or another one are each a finding.
     a, b = "sha256:" + "a" * 64, "sha256:" + "b" * 64

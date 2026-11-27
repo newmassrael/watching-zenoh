@@ -156,6 +156,10 @@
         "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
+    "pico-api-coop-nostd": {
+      "ratio_at_most": null,
+      "debt": "debt-pico-host-size-ceiling"
+    },
     "pico-release-windows-x64": {
       "ratio_at_most": 4.797,
       "debt": "debt-pico-host-size-ceiling",
