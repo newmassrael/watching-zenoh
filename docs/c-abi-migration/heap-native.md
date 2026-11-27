@@ -302,6 +302,7 @@ session takes its row at its open, as every policy's does.
 | **R2, the rooms (landed on the lane: `e5ee0e0d5a`)** | the places of the faces' rooms on use as the faces' read slots are (`OnceRows`, moved to `engine`): rows counted to the plan's sets at the open, each face's place made at its first hold of a wait and kept; `FACE_SETS` the region form's alone (7.14) | `crates/wz-capi-coop` (`engine.rs`, `engine/once_rows.rs` (moved), `engine/direct.rs`, `engine/registry.rs`, `engine/state_places.rs`, `tests/{congestion,on_use}.rs`) | 0 for every D12 case | 0 | the on-use session: its rooms' places one row a set and one place a face it held, in place of `MAX_FACE_SETS` places in its state |
 | **R3's residues (landed on the lane: `17511020b8`, `92347c4f82`, `f59630b1bd`)** | the session's bounds of what its peers write held on use by the key budget (`KeyBudget::holding_peer_rows_to`, `take_peer_row`), a peer's ids a `CountedIdMap` taking its rows at its first id and a row of its kind from the budget for each NEW id, and a group's aliases counted to `GROUP_FACE_ALIASES` (`PeerIds::recount`) (7.15) | `crates/wz-session-core` (`on_use.rs`, `id_map.rs`, `bounded.rs`, `pubsub.rs`), `crates/wz-capi-coop` (`engine/state_places.rs`, `engine/registry/counted.rs`) | 0 for every D12 case; on use each face's set smaller by its peer's inline id rows | 0 | the on-use session: a peer's id rows from the allocator at its first write of each kind |
 | **R3's residues, the sequences (landed on the lane: `225c3f0b0e`)** | a peer's interests and repeats on use a `CountedSeq` (`Storage::Pooled`), each value a row of its kind of the session's key budget, so `SESSION_MAX_INBOUND_SUB_INTERESTS` and the repeats' share of `SESSION_MAX_REMOTE_DECLS` bind across faces; `RowList::take_rows`, so a repeat whose alias finds no memory is refused before its key is made or its id bound (7.16) | `crates/wz-session-core` (`row_pool.rs`, `bounded.rs`, `id_map.rs`, `declare/{subscriber,queryable}.rs`, `pubsub.rs`, `peer_tables.rs`) | 0 for every D12 case (`Lent` and `Region` keep their `Pooled`; `take_rows` answers `true` on them, a constant the check folds to); on use each face's set smaller by its inline interest and repeat rows | 0 | the on-use session: a peer's interest and repeat rows from the allocator at its first of each |
+| **R3, 3b: the runtime (landed on the lane: `a0a99b28b6`, `26217c7d5b`)** | the on-use session's runtime and local set of the allocator in the form the D12 forms place in the arena (`CoopRuntime::try_formed`, `try_taskless`; `RuntimeTables::made`); its plan lays out the count the arena is kept by alone (`ArenaPlan::lay_keep`), no runtime span; `OpenHolds::runtime`, `OpenPlaces::runtime`, `SessionLent::runtime`, `RuntimeTables::{runtime, placed_bytes, of_shape}`, `SessionArena::{runtime_place, kept_span}` are the D12 forms' alone (7.17) | `crates/wz-runtime-coop` (`executor.rs`, `runtime_impl.rs`, `table_tests.rs`), `crates/wz-capi-coop` (`arena.rs`, `engine.rs`, the tests of `arena`, `direct_runtime`, `on_use`, `runtime_tables`) | 0 for every D12 case (each predicate added reads `not(wz_on_use)` over the code it guarded); on use: `CoopRuntime::placed` and its span's reckoning (`PlacedParts`) leave the form, one heap maker of the build's form and `CoopLocalSet::try_new` come in | 0 | the on-use session: the runtime's state, task table and timer entries from the allocator at the open in place of the arena's span |
 | R3 and R4 | the zenoh-pico preset's own library (`peer`, `multicast-transport`, so `runtime-plan`) on use: the listening and grouped forms' holders, sets and owed tokens on use and `build.rs`'s `!takes_faces` dropped (R1b, landed), the admission and the direct faces' slots per face (R2, landed), the listening and grouped stacks' memory (R3), its arena out (R4) (11.1) | `crates/wz-capi-coop` (`lib.rs`, `engine.rs`, `engine/registry/counted.rs`, `engine/state_places.rs`, `engine/direct.rs`), `crates/wz-runtime-coop` (the stacks' ports and groups) | the preset's library, read once N5 resolves it so | 0 | section 5 |
 | N5, after R2 to R4 (11.2, 11.3) | the switch and its guards (section 9): the `table-memory` axis, the zenoh-pico defconfig's `on-use`, the release profiles' `at-open`, the size cases of both forms (section 10) and C1nh's second reading | `deploy/wz-config.toml` and what it generates, `configs/zenoh-pico_defconfig`, `configs/profiles/host-peer-ext.conf`, `host-peer.conf`, `scripts/lib/capability_cost_gate.py`, `deploy/size_ledger.json`, `deploy/pico_host_ceiling.json`, `scripts/run-ci.sh` (C1nh) | 0 for the release form; the on-use case reads N3 and N4's figures | 0 | 0 |
 
@@ -994,7 +995,62 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
     `take_rows` check is left out (the key's refusal would be counted by the budget) or moved
     after the bind (the repeat would stand).
 
+### 7.17 R3, 3b: an on-use session's runtime of the allocator
+
+- What it does (`a0a99b28b6`, `26217c7d5b`): the runtime has had a heap maker of each form but
+  the taskless one; `CoopRuntime::try_taskless` (over `ExecutorState::try_taskless`, a table of
+  no cell laid as one cell that holds none, as the placed one is) is the fourth, and
+  `CoopRuntime::try_formed` the heap's twin of `placed`: the maker of the form named, then the
+  local set (`CoopLocalSet::try_new`). It is always inlined, and the engine names its form by
+  constants of the build (`RuntimeTables::form`), so a build links the one maker of its form.
+- The engine's on-use form makes its runtime by `RuntimeTables::made` at the point the D12 forms
+  place theirs, refused as the heap's (`heap_refused` of the tables' `reserved_bytes`).
+  `lay_out_open` lays out no runtime span there (`ArenaPlan::lay_runtime` is the D12 forms'),
+  and lays out the count the arena is kept by alone (`ArenaPlan::lay_keep`), which the engine
+  still takes (`SessionArena::keep`, 3a) for what of the arena it holds until 3d. Every item
+  that carried the span (`OpenHolds::runtime`, `OpenPlaces::runtime`, `SessionLent::runtime`,
+  `RuntimeTables::{runtime, placed_bytes, of_shape}`, `SessionArena::{runtime_place,
+  kept_span}`, the `RuntimePlace` imports) reads `not(wz_on_use)`; `open_holds` takes the span's
+  bytes only there (a parameter under the same predicate).
+- D12: unchanged; each predicate added reads `not(wz_on_use)` over the code it guards.
+- Size, on use: `CoopRuntime::placed`, `PlacedParts::of` and the placed constructors of the
+  task store, the timer table and the local set's owner leave the form; one heap maker and
+  `CoopLocalSet::try_new` come in. The arena is smaller by the runtime's span; the allocator
+  gives the same bytes at the open, in three allocations (the state, the cells, the set's owner)
+  and the timer entries' where the build has timers.
+- Tests:
+  - `table_tests::a_runtime_made_of_the_heap_by_its_form_holds_that_forms_table`: red if
+    `try_formed` makes the taskless form with the rows' cells (the spawn would be taken), or the
+    form of one task with none (the CONTROL spawn would be refused).
+  - `table_tests::a_runtime_the_heap_has_no_room_for_is_not_made` asks `try_taskless` and
+    `try_formed` too: red if either ends the process on a refused allocation.
+  - `tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime`
+    (renamed from `..._for_the_engine_or_the_rooms`, 7.8): red if `lay_out_open` lays the
+    runtime's span in the on-use form, or leaves the arena's count out with it.
+  - `tests::runtime_tables` (`wz_round`) and `tests::direct_runtime` (the direct read) make
+    their runtime by `RuntimeTables::made` in an on-use build, so each on-use leg holds the made
+    runtime to the cells the D12 form's placed one holds.
+
 ## 8. What the main session runs
+
+- R3, 3b (`a0a99b28b6`, `26217c7d5b`), not built or run by this lane. `cargo test --manifest-path
+  crates/Cargo.toml -p wz-runtime-coop --lib table_tests` one more than before; `cargo clippy
+  --manifest-path crates/Cargo.toml -p wz-runtime-coop --all-targets -- -D warnings`. The on-use
+  legs of wz-capi-coop, each count unchanged (one test renamed): `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features tables-on-use --lib on_use`, `--features
+  liveliness,listen,tables-on-use --lib on_use`, `--features link-admission,tables-on-use --lib
+  on_use`, `--features runtime-plan,tables-on-use --lib on_use`; `--features tables-on-use --lib
+  tests::runtime_tables` and `--features liveliness,listen,tables-on-use --lib tests::direct_runtime`
+  (whichever of the two the leg's read compiles); the D12 forms' `--lib tests::runtime_tables`,
+  `--lib tests::direct_runtime` and `--lib arena::tests` with the crate's defaults. `cargo clippy
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --all-targets -- -D warnings` with the
+  crate's defaults, `--all-features`, `--features tables-on-use`, `--features
+  liveliness,listen,tables-on-use`, `--features link-admission,tables-on-use`, `--features
+  runtime-plan,tables-on-use` and `--features app-transport,group,multicast-declarations,liveliness,tables-on-use`
+  (the opening form, `RuntimeForm::Opening`); `cargo build --manifest-path crates/Cargo.toml -p
+  wz-capi-pico --no-default-features --features os-host,link-udp,wz-capi-coop/tables-on-use`.
+  Size: C1cs's D12 readings unchanged; the on-use case should not grow (the placed runtime's
+  makers leave, one heap maker comes in).
 
 - R3's residues, the sequences (`225c3f0b0e`), not built or run by this lane. `cargo test
   --manifest-path crates/Cargo.toml -p wz-session-core --lib row_pool::tests` two more than
@@ -1398,7 +1454,8 @@ The order that builds at each step:
      body of the open's lay-out leaves yet: the arena still lends the transport's tables, the
      ABI's places and the runtime's span, and the form's code grows by the claim (one maker and one
      drop, instantiated for the engine alone) until 3d.
-   - 3b, the runtime: the heap makers the runtime has (`CoopRuntime::try_reserved`,
+   - 3b, the runtime (written, 7.17: `CoopRuntime::try_formed` and `try_taskless`, the on-use
+     plan's count laid alone by `ArenaPlan::lay_keep`): the heap makers the runtime has (`CoopRuntime::try_reserved`,
      `try_reserved_for_one`, `try_opening`, `crates/wz-runtime-coop/src/runtime_impl.rs`), and a
      fourth for the form the one-link read runs on (`RuntimeForm::Taskless`), which has none: an
      `ExecutorState::try_taskless` over a `TaskStore` of no cell, as `taskless_in` is over a
