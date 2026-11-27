@@ -1087,7 +1087,7 @@ mod tests {
         primary
             .shm_send_open_ack()
             .expect("the first link's Open declares the counters");
-        let first = TokioRuntime::with_mutex_mut(&primary.link.shm_tx, |slot| slot.clone())
+        let first = TokioRuntime::with_mutex_mut(&primary.link.tx.shm_tx, |slot| slot.clone())
             .expect("the first link keeps the handoff its Open declared");
         let payload = crate::shm_buffer::IssuedBuffer::alloc(16).expect("alloc");
         let (_, chunk) = sent_descriptor(&payload);
@@ -1109,7 +1109,7 @@ mod tests {
             1,
             "and the second link's Open does not zero what the first link's peer was told of"
         );
-        let second = TokioRuntime::with_mutex_mut(&second_link.link.shm_tx, |slot| slot.clone())
+        let second = TokioRuntime::with_mutex_mut(&second_link.link.tx.shm_tx, |slot| slot.clone())
             .expect("the second link keeps a handoff of its own");
         assert_ne!(
             first.counters(),
@@ -1117,7 +1117,7 @@ mod tests {
             "with counters of its own, which the first link's peer does not lower"
         );
         assert_eq!(
-            TokioRuntime::with_mutex_mut(&primary.link.shm_tx, |slot| slot
+            TokioRuntime::with_mutex_mut(&primary.link.tx.shm_tx, |slot| slot
                 .as_ref()
                 .map(|kept| kept.counters())),
             Some(first.counters()),
@@ -1142,7 +1142,7 @@ mod tests {
         actions.negotiate_shm_against_peer(true);
 
         actions.shm_send_open_ack().expect("the first Open");
-        let first = TokioRuntime::with_mutex_mut(&actions.link.shm_tx, |slot| slot.clone())
+        let first = TokioRuntime::with_mutex_mut(&actions.link.tx.shm_tx, |slot| slot.clone())
             .expect("the link keeps a handoff");
         let first_counters = first.counters();
         let watching_first = Arc::downgrade(&first);
@@ -1157,7 +1157,7 @@ mod tests {
             watching_first.upgrade().is_none(),
             "the second Open replaced it, and nothing else held it"
         );
-        let second = TokioRuntime::with_mutex_mut(&actions.link.shm_tx, |slot| slot.clone())
+        let second = TokioRuntime::with_mutex_mut(&actions.link.tx.shm_tx, |slot| slot.clone())
             .expect("and the link keeps the new one");
         assert_ne!(
             second.counters(),
@@ -1198,11 +1198,11 @@ mod tests {
             .shm_send_open_ack()
             .expect("the datagram link's Open");
         assert!(
-            TokioRuntime::with_mutex_mut(&primary.link.shm_tx, |slot| slot.is_some()),
+            TokioRuntime::with_mutex_mut(&primary.link.tx.shm_tx, |slot| slot.is_some()),
             "the stream link keeps a handoff"
         );
         assert!(
-            TokioRuntime::with_mutex_mut(&datagram_link.link.shm_tx, |slot| slot.is_none()),
+            TokioRuntime::with_mutex_mut(&datagram_link.link.tx.shm_tx, |slot| slot.is_none()),
             "and the datagram link joined to the same session keeps none"
         );
     }
@@ -1246,7 +1246,7 @@ mod tests {
         datagram_link
             .shm_send_open_ack()
             .expect("the datagram link's Open");
-        let ids = TokioRuntime::with_mutex_mut(&stream.link.shm_tx, |slot| slot.clone())
+        let ids = TokioRuntime::with_mutex_mut(&stream.link.tx.shm_tx, |slot| slot.clone())
             .expect("the stream link keeps a handoff")
             .counters();
         let owed = || -> u32 {

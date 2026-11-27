@@ -7959,7 +7959,7 @@ mod reconnect_tx_tests {
         actions.begin_paced_replay();
         assert_eq!(actions.replay_turn(1).expect("turn").emitted, 1);
         // The link goes down again before the second entry.
-        actions.link.transport_available.close();
+        actions.link.tx.transport_available.close();
         assert!(
             actions.replay_turn(2).is_err(),
             "the send is refused and the turn says so"

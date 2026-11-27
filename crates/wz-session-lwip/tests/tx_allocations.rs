@@ -751,7 +751,7 @@ mod refusal {
     use wz_session_core::link::LinkDropCause;
     use wz_session_core::qos::Priority;
     use wz_session_core::send_wire_error::SendWireError;
-    use wz_session_core::session_actions::TxRefusalCounts;
+    use wz_session_core::transport_tx::TxRefusalCounts;
 
     /// Take every slot the driver will lend, and hold them: the driver has
     /// `LENT_MAX` (one, the slot it reserves for its link), and it is exactly

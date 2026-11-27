@@ -24,7 +24,7 @@ use wz_session_core::limits::{SessionLimits, CAPACITY_LIMITS, SESSION_LIMITS};
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::publish_options::PublishOptions;
-use wz_session_core::session_actions::{BatchLendCounts, FrameLendCounts};
+use wz_session_core::transport_tx::{BatchLendCounts, FrameLendCounts};
 
 use super::entity_tables::{lowered, open_under};
 use super::{

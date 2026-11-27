@@ -53,3 +53,12 @@ kept: the description walk is the lend, and it walks l3-queryable's layout.
   feat-adv's reach of an entity's engine through its place, with
   l3-queryable's `EntityRow` for what is retracted and `entity_id_of` for an
   identity; the advanced plane's token is an `EntityRow`.
+
+## group-link-writer (8794590753)
+
+- `crates/wz-session-core/src/session_actions.rs`: the lane moves
+  `LentDeclaration` into `lent_control` as the one writer a link and a group
+  send declarations with, which supersedes debt-repay's token-reply arm and
+  `qos` in the session's own copy (`798f8720aa`); the lane's version is
+  kept. Debt-repay's `lent_declaration_tests` is kept and reads the shared
+  writer: `write_wire` (`WireWrite`) in place of the copy's `encode`.

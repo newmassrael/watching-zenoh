@@ -1825,6 +1825,128 @@ pub(crate) fn parse_fragment_in_place(
     Some(decode_fragment_head(unit))
 }
 
+/// The conduit and channel a `Frame` or a `Fragment` at the front of a unit was numbered on, and
+/// its sequence number: what a transmitter that holds a frame it wrote reads back off it
+/// ([`frame_lane`]).
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "storage-profile",
+    feature = "session-unicast"
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameLane {
+    /// The priority its QoS extension carries, [`Priority::DEFAULT`](crate::qos::Priority) when
+    /// it carries none.
+    pub priority: crate::qos::Priority,
+    /// Whether it rides the reliable channel.
+    pub reliable: bool,
+    /// Its sequence number as written.
+    pub sn: u64,
+}
+
+/// The lane of the `Frame` or `Fragment` at the front of `unit`, read by the head decodes the
+/// receive path reads a unit with, so the layout a writer writes is read here and nowhere else.
+/// `None` for a unit that begins with neither, or whose head does not decode; a fragment is read
+/// only where the build reassembles (`reassembly`), the one build that writes one.
+#[cfg(all(
+    feature = "codec-frame",
+    feature = "storage-profile",
+    feature = "session-unicast"
+))]
+pub fn frame_lane(unit: &[u8]) -> Option<FrameLane> {
+    if let Some(head) = parse_frame_in_place(unit) {
+        let (head, _) = head.ok()?;
+        return Some(FrameLane {
+            priority: head.priority(),
+            reliable: head.reliable,
+            sn: head.sn,
+        });
+    }
+    #[cfg(feature = "reassembly")]
+    if let Some(head) = parse_fragment_in_place(unit) {
+        let (head, _) = head.ok()?;
+        return Some(FrameLane {
+            priority: head.priority(),
+            reliable: head.reliable,
+            sn: head.sn,
+        });
+    }
+    None
+}
+
+#[cfg(all(
+    test,
+    feature = "codec-frame",
+    feature = "storage-profile",
+    feature = "session-unicast"
+))]
+mod frame_lane_tests {
+    use super::{frame_lane, FrameLane};
+    use crate::qos::Priority;
+
+    /// A reliable Frame's lane is its header's channel and its VLE sequence number, on the
+    /// default priority when it carries no QoS extension. Turned red by a read of the wrong flag
+    /// or of the SN's bytes as anything but the VLE.
+    #[test]
+    fn a_frame_is_read_as_its_head_says() {
+        assert_eq!(
+            frame_lane(&[0x25, 0x07, 0xAA, 0xBB]),
+            Some(FrameLane {
+                priority: Priority::DEFAULT,
+                reliable: true,
+                sn: 7,
+            })
+        );
+        assert_eq!(
+            frame_lane(&[0x05, 0x80, 0x01, 0xAA]),
+            Some(FrameLane {
+                priority: Priority::DEFAULT,
+                reliable: false,
+                sn: 0x80,
+            }),
+            "a best-effort frame whose SN takes two bytes"
+        );
+    }
+
+    /// A unit that is not a Frame or a Fragment, and one cut inside its SN, have no lane. Turned
+    /// red by a lane read off a JOIN or off a head that does not decode.
+    #[test]
+    fn a_unit_that_is_no_frame_has_no_lane() {
+        assert_eq!(frame_lane(&[0x07, 0x00]), None, "a JOIN's header");
+        assert_eq!(frame_lane(&[0x25, 0x80]), None, "an SN cut short");
+        assert_eq!(frame_lane(&[]), None);
+    }
+
+    /// A frame's QoS extension names its priority. Turned red by a lane that ignores the chain.
+    #[cfg(feature = "transport-qos")]
+    #[test]
+    fn a_frame_names_its_priority_by_its_qos_extension() {
+        let lane = frame_lane(&[0x80 | 0x25, 0x03, 0x31, 0x02, 0xAA]);
+        assert_eq!(
+            lane,
+            Some(FrameLane {
+                priority: Priority::from_wire(2),
+                reliable: true,
+                sn: 3,
+            })
+        );
+    }
+
+    /// A Fragment's lane is read as a Frame's. Turned red by a fragment read as no frame.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_fragment_is_read_as_its_head_says() {
+        assert_eq!(
+            frame_lane(&[0x06 | 0x40 | 0x20, 0x09, 0xAA]),
+            Some(FrameLane {
+                priority: Priority::DEFAULT,
+                reliable: true,
+                sn: 9,
+            })
+        );
+    }
+}
+
 /// The one decode behind [`parse_inbound_consuming`] and
 /// [`parse_inbound_consuming_in`]. `origin`, when there is one, is the
 /// [`RxBytes`] that `bytes` was taken from, and is only consulted by the arm

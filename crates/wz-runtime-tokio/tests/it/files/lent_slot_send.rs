@@ -645,7 +645,7 @@ fn chain_over(
 ) -> (
     Vec<Vec<u8>>,
     Result<(), wz_session_core::send_wire_error::SendWireError>,
-    wz_session_core::session_actions::FragmentLendCounts,
+    wz_session_core::transport_tx::FragmentLendCounts,
 ) {
     let actions = new_session_actions(
         link.clone(),
@@ -688,7 +688,7 @@ fn a_frame_past_the_mtu_leaves_as_a_chain_of_lent_slots_the_heap_chain_byte_for_
             assert_eq!(link.aborts(), 1, "only the whole frame's slot came back");
             assert_eq!(
                 counts,
-                wz_session_core::session_actions::FragmentLendCounts {
+                wz_session_core::transport_tx::FragmentLendCounts {
                     slot_fragments: control.len() as u32,
                     ..Default::default()
                 },
@@ -725,7 +725,7 @@ fn a_pool_that_runs_dry_mid_chain_sends_the_rest_from_the_heap_and_counts_it() {
     assert_eq!(doors, expected, "two lent, then the heap");
     assert_eq!(
         counts,
-        wz_session_core::session_actions::FragmentLendCounts {
+        wz_session_core::transport_tx::FragmentLendCounts {
             slot_fragments: 2,
             heap_no_slot: control.len() as u32 - 2,
             heap_short_slot: 0,
@@ -859,7 +859,7 @@ fn a_window_leaves_as_one_lent_slot_and_its_flush_copies_nothing() {
     );
     assert_eq!(
         actions.batch_lend_counts(),
-        wz_session_core::session_actions::BatchLendCounts {
+        wz_session_core::transport_tx::BatchLendCounts {
             slot_frames: 1,
             ..Default::default()
         }
@@ -1123,7 +1123,7 @@ fn a_dry_pool_stages_the_window_on_the_heap_and_counts_it() {
     assert!(link.lent().is_empty());
     assert_eq!(
         actions.batch_lend_counts(),
-        wz_session_core::session_actions::BatchLendCounts {
+        wz_session_core::transport_tx::BatchLendCounts {
             heap_no_slot: 1,
             ..Default::default()
         }

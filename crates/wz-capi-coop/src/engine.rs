@@ -7842,8 +7842,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     pub(crate) fn lend_counts(
         &self,
     ) -> Option<(
-        wz_session_core::session_actions::BatchLendCounts,
-        wz_session_core::session_actions::FrameLendCounts,
+        wz_session_core::transport_tx::BatchLendCounts,
+        wz_session_core::transport_tx::FrameLendCounts,
     )> {
         self.live().and_then(|core| {
             let (_, wire) = core.0.up_wires_at().next()?;

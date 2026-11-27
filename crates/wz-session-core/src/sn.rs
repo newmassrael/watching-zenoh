@@ -472,7 +472,7 @@ pub const fn reacts_to_gap(
 /// [`RxSn`] per `Priority` conduit when `transport-qos` compiles (zenoh's
 /// per-(priority,reliability) `TransportPriorityRx`,
 /// `io/zenoh-transport/src/unicast/universal/rx.rs`), else the single R311ke
-/// conduit. The RX mirror of [`crate::session_actions::FrameTxConduits`]: the
+/// conduit. The RX mirror of [`crate::transport_tx::FrameTxConduits`]: the
 /// array SHAPE is compile-time behind the feature (no runtime `is_qos` heap
 /// sizing on an MCU no-alloc build), and a non-QoS session admits only
 /// `conduit[Priority::DEFAULT]` (the send seam forces `priority = Data` when
@@ -510,7 +510,7 @@ impl Default for RxConduits {
 impl RxConduits {
     /// The `(priority)` conduit — `conduits[priority]` under `transport-qos`,
     /// the single conduit otherwise (priority ignored, no cfg-skew — mirrors
-    /// [`crate::session_actions::FrameTxConduits::select`]).
+    /// [`crate::transport_tx::FrameTxConduits::select`]).
     #[inline]
     fn select_mut(&mut self, _priority: crate::qos::Priority) -> &mut RxSn {
         #[cfg(feature = "transport-qos")]
@@ -734,7 +734,7 @@ impl<W: WordCell> RxConduitWords<W> {
 
 /// R311y227 (transport-qos) — the multicast TX per-priority SN conduits: ONE
 /// [`TxSn`] per `Priority` conduit when `transport-qos` compiles (the multicast
-/// mirror of the unicast [`crate::session_actions::FrameTxConduits`] and the RX
+/// mirror of the unicast [`crate::transport_tx::FrameTxConduits`] and the RX
 /// [`RxConduits`]), else the single 2-channel [`TxSn`] — the pico-faithful
 /// multicast default (zenoh-pico multicast is ALWAYS non-qos, its JOIN sends
 /// `_is_qos = false`, `src/transport/multicast/transport.c:125`). The array SHAPE
@@ -754,7 +754,7 @@ impl<W: WordCell> RxConduitWords<W> {
 /// `Join.ext_qos`, `commons/zenoh-protocol/src/transport/join.rs`
 /// @ `pub ext_qos: Option<ext::QoSType>`).
 ///
-/// DIVERGENCE from the unicast [`crate::session_actions::FrameTxConduits`]: that
+/// DIVERGENCE from the unicast [`crate::transport_tx::FrameTxConduits`]: that
 /// mirror is shared through `&` (the runtime's word: atomic where the writer task
 /// and the caller are threads); the multicast drive loop is a SINGLE task
 /// that owns `&mut` its conduits, so a plain non-atomic [`TxSn`] is sufficient
@@ -835,6 +835,20 @@ impl MulticastTxConduits {
     /// stale when it arrives.
     pub fn written(&mut self, priority: crate::qos::Priority, reliable: bool, sn: Sn) {
         self.select_mut(priority).written(reliable, sn);
+    }
+
+    /// The next SN the `(priority, reliable)` conduit will write is `next`, on its ring: what a
+    /// sender whose numbers are kept elsewhere (a group's transmit state) tells the announcer its
+    /// JOIN is encoded from.
+    pub fn set_next(&mut self, priority: crate::qos::Priority, reliable: bool, next: Sn) {
+        let conduit = self.select_mut(priority);
+        let mask = conduit.mask;
+        let slot = if reliable {
+            &mut conduit.next_reliable
+        } else {
+            &mut conduit.next_best_effort
+        };
+        *slot = next & mask;
     }
 
     /// The DEFAULT-priority conduit as a plain [`TxSn`] snapshot — the source of
@@ -1563,6 +1577,24 @@ mod tests {
             "one shared ring: the second mint is +1"
         );
         assert_eq!(tx.advertise_default().next_reliable, 2);
+    }
+
+    /// A next SN set on one channel of a conduit is what that channel advertises, held to the
+    /// ring, and the other channel keeps its own. Turned red by a set that writes the other
+    /// channel, or one that leaves a number past the ring.
+    #[test]
+    fn mcast_tx_conduits_advertise_a_next_set_from_outside() {
+        use crate::qos::Priority;
+        let mask = mask_from_res(0x00);
+        let mut tx = MulticastTxConduits::new(mask);
+        tx.set_next(Priority::DEFAULT, true, mask + 5);
+        let advertised = tx.advertise_default();
+        assert_eq!(advertised.next_reliable, 4, "held to the ring");
+        assert_eq!(
+            advertised.next_best_effort, 0,
+            "the other channel is its own"
+        );
+        assert_eq!(tx.mint(Priority::DEFAULT, true), 4);
     }
 
     /// R311y227 — the multicast per-peer RX conduits gate INDEPENDENTLY (the RX

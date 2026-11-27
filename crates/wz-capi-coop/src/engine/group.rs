@@ -978,9 +978,17 @@ impl<W: LinkWaits> GroupFace<W> {
         .with_tx_stage(tx.clone())
         .with_due(due.clone());
         // The round's room for a record of the group's batch gates what the group is handed; a
-        // read that hands each record out as it is read needs no room for it.
+        // read that hands each record out as it is read needs no room for it. Nothing is handed
+        // either while a message of the session holds the group's conduits: this task runs inside
+        // that message's wait for room, and a reply its dispatch stages then could take no
+        // sequence number until the message lets them go, so the input stays in the socket.
         #[cfg(wz_round)]
-        let seed = seed.with_input_gate(input_gate);
+        let seed = {
+            let stage = tx.clone();
+            seed.with_input_gate(GroupInputGate::new(move || {
+                !stage.sending() && input_gate.takes()
+            }))
+        };
         #[cfg(feature = "transport-stats")]
         let seed = seed.with_stats(Rc::clone(&stats));
         #[cfg(feature = "resource-snapshot")]
