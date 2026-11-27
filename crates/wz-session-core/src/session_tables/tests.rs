@@ -2056,6 +2056,86 @@ fn a_subscriber_undeclared_while_its_callback_runs_names_its_retraction_past_the
     );
 }
 
+/// A queryable's undeclaration names its retraction off the row it removes, as a subscriber's
+/// does: against the row's own key, which it hands over with it, the declaration the retraction
+/// names named by its id though the row was its last holder and it went with the row. One
+/// retracted by its id alone names nothing.
+///
+/// # Control
+///
+/// Reading the retraction in `undeclare_entity` after the row's holds are let go of names the key
+/// whole; handing the retraction no key of the row that left (`undeclare_retracted`) names
+/// nothing.
+#[test]
+fn a_queryables_undeclaration_names_its_retraction_off_the_row_it_removes() {
+    let mut tables = Tables::new();
+    let own = tables.declare_keyexpr("demo/qr").unwrap();
+    let key = "demo/qr/**";
+    let named = KeyForm {
+        prefix: None,
+        own: None,
+        retraction: Retraction::Named(RetractionKey::declared(own.id, "/**")),
+    };
+    let qbl = tables
+        .declare_queryable(key, Locality::Any, false, named, 1)
+        .unwrap();
+    assert_eq!(
+        tables.undeclare_keyexpr(own.handle),
+        None,
+        "the queryable holds it"
+    );
+    let undeclared = tables.undeclare_queryable(qbl.handle).unwrap();
+    assert_eq!(undeclared.named, Some(own.id), "it went with the row");
+    assert_eq!(tables.keyexpr_by_id(own.id), None);
+    assert_eq!(
+        undeclared.retraction.as_ref().map(Retracting::names),
+        Some((own.id, "/**")),
+        "the retraction names it as the row did"
+    );
+    assert_eq!(undeclared.taken, Some(1));
+    let quiet = tables
+        .declare_queryable(key, Locality::Any, false, KeyForm::default(), 2)
+        .unwrap();
+    let undeclared = tables.undeclare_queryable(quiet.handle).unwrap();
+    assert!(undeclared.retraction.is_none(), "retracted by its id alone");
+    assert_eq!(undeclared.taken, Some(2));
+}
+
+/// A queryable undeclared while a call of its callback runs names its retraction as one whose row
+/// its undeclaration takes out does: the row keeps its key in its slot until the call ends, and
+/// the retraction holds the key once more, so the key reads after the row left every lookup and
+/// after the call that ended last let the row go.
+///
+/// # Control
+///
+/// Taking no hold of the key of a row a call keeps (`kept` always `None` in
+/// `undeclare_retracted`) leaves the retraction nothing to name.
+#[test]
+fn a_queryable_undeclared_while_its_callback_runs_names_its_retraction_past_the_row() {
+    let mut tables = latched_tables();
+    let own = tables.declare_keyexpr("demo/qc").unwrap();
+    let key = "demo/qc/x";
+    let named = KeyForm {
+        prefix: None,
+        own: None,
+        retraction: Retraction::Named(RetractionKey::declared(own.id, "/x")),
+    };
+    let qbl = tables
+        .declare_queryable(key, Locality::Any, false, named, latched(7))
+        .unwrap();
+    let call = tables.begin_queryable(qbl.handle).unwrap();
+    let undeclared = tables.undeclare_queryable(qbl.handle).unwrap();
+    assert!(undeclared.taken.is_none(), "a call of it runs");
+    assert!(ended::<CClosure<u32>>(call), "the last call lets it go");
+    assert!(tables.release_queryable(qbl.handle).is_some());
+    assert!(!tables.queryables().holds_slot(qbl.handle));
+    assert_eq!(
+        undeclared.retraction.as_ref().map(Retracting::names),
+        Some((own.id, "/x")),
+        "the retraction's own hold reads the key past the row"
+    );
+}
+
 /// A declaration an entity's key is named by and its retraction names alike is held once, and
 /// retracted once with it.
 ///

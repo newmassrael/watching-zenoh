@@ -607,11 +607,6 @@ impl<Key: KeyBacking> EntityKey<Key> {
     pub fn retraction(&self) -> Retraction {
         self.retraction
     }
-
-    /// The key as the row keeps it: a clone is one more holder of it, for a reader past the row.
-    pub fn backing(&self) -> &Key {
-        &self.key
-    }
 }
 
 impl<Key: KeyBacking> EntityKey<Key> {
@@ -926,12 +921,6 @@ impl<Key, Cb> SubscriberRow<Key, Cb> {
     /// Its callback, the row let go of.
     pub fn into_callback(self) -> Cb {
         self.callback
-    }
-
-    /// Its callback and its key, the row let go of: the key for the retraction to name once the
-    /// row went from the tables.
-    fn into_parts(self) -> (Cb, Key) {
-        (self.callback, self.key.key)
     }
 }
 
@@ -1956,6 +1945,42 @@ impl<Key: KeyBacking> Entity for TokenRow<Key> {
     }
 }
 
+/// A row whose undeclaration reads its retraction off it ([`Retracting`]): what it was keyed by,
+/// and what the caller drops and the key the retraction holds once the row leaves the tables.
+trait RetractedEntity: Entity {
+    /// The key's backing.
+    type Key: KeyBacking;
+    /// What the caller drops where it holds no lock.
+    type Callback;
+    /// The key as the row keeps it.
+    fn entity_key(&self) -> &EntityKey<Self::Key>;
+    /// Its callback and its key, the row let go of: the key for the retraction to name once the
+    /// row went from the tables.
+    fn into_parts(self) -> (Self::Callback, Self::Key);
+}
+
+impl<Key: KeyBacking, Cb: RowCallback> RetractedEntity for SubscriberRow<Key, Cb> {
+    type Key = Key;
+    type Callback = Cb;
+    fn entity_key(&self) -> &EntityKey<Key> {
+        &self.key
+    }
+    fn into_parts(self) -> (Cb, Key) {
+        (self.callback, self.key.key)
+    }
+}
+
+impl<Key: KeyBacking, Cb: RowCallback> RetractedEntity for QueryableRow<Key, Cb> {
+    type Key = Key;
+    type Callback = Cb;
+    fn entity_key(&self) -> &EntityKey<Key> {
+        &self.key
+    }
+    fn into_parts(self) -> (Cb, Key) {
+        (self.callback, self.key.key)
+    }
+}
+
 impl<Key: KeyBacking, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
@@ -2045,6 +2070,46 @@ fn undeclare_entity<K, R: Entity, T, V, P: Storage, const N: usize>(
         taken: removal.taken().map(hand),
         keyexpr,
         named,
+        retraction,
+    })
+}
+
+/// Remove the entity `handle` names from `table` as [`undeclare_entity`] does, with what its
+/// retraction names read off the row it removes ([`Retracting`]). The row's key goes to the
+/// retraction: moved out of a row that leaves its slot now, held once more for one a call of which
+/// runs, which keeps its key in its slot until that call ends.
+fn undeclare_retracted<K, R, P, const N: usize>(
+    table: &mut SlotMap<K, R, N, P>,
+    keyexprs: &mut Keyexprs<P>,
+    handle: Handle<K>,
+) -> Option<RetractedUndeclared<R::Callback, P::Key>>
+where
+    R: RetractedEntity<Key = P::Key>,
+    P: Storage,
+{
+    let undeclared = undeclare_entity(
+        table,
+        keyexprs,
+        handle,
+        |keyexprs, row, leaves| {
+            let key = row.entity_key();
+            let names = retraction_names(keyexprs, key)?;
+            Some((names, (!leaves).then(|| key.key.clone())))
+        },
+        R::into_parts,
+    )?;
+    let (taken, key) = undeclared.taken.unzip();
+    let retraction = undeclared.retraction.and_then(|(names, kept)| {
+        Some(Retracting {
+            names,
+            key: kept.or(key)?,
+        })
+    });
+    Some(Undeclared {
+        id: undeclared.id,
+        taken,
+        keyexpr: undeclared.keyexpr,
+        named: undeclared.named,
         retraction,
     })
 }
@@ -2649,33 +2714,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         &mut self,
         handle: SubscriberHandle,
     ) -> Option<RetractedUndeclared<F::Subscriber, P::Key>> {
-        let undeclared = undeclare_entity(
-            &mut self.subscribers,
-            &mut self.keyexprs,
-            handle,
-            |keyexprs, row, leaves| {
-                let names = retraction_names(keyexprs, &row.key)?;
-                // A row a call keeps holds its key until the call ends, so the retraction holds it
-                // once more; a row that leaves hands its key over with it.
-                Some((names, (!leaves).then(|| row.key.key.clone())))
-            },
-            SubscriberRow::into_parts,
-        )?;
+        let undeclared = undeclare_retracted(&mut self.subscribers, &mut self.keyexprs, handle)?;
         self.subscriber_epoch = self.subscriber_epoch.wrapping_add(1);
-        let (taken, key) = undeclared.taken.unzip();
-        let retraction = undeclared.retraction.and_then(|(names, kept)| {
-            Some(Retracting {
-                names,
-                key: kept.or(key)?,
-            })
-        });
-        Some(Undeclared {
-            id: undeclared.id,
-            taken,
-            keyexpr: undeclared.keyexpr,
-            named: undeclared.named,
-            retraction,
-        })
+        Some(undeclared)
     }
 
     /// Declare a queryable on `key`, answering what `origin` admits, `complete` or not.
@@ -2713,20 +2754,16 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         })
     }
 
-    /// Undeclare the queryable `handle` names, its callback handed back.
+    /// Undeclare the queryable `handle` names, its callback handed back, as a subscriber is
+    /// ([`Self::undeclare_subscriber`]): what its retraction names is read off the row it removes,
+    /// with the row's key.
     pub fn undeclare_queryable(
         &mut self,
         handle: QueryableHandle,
-    ) -> Option<Undeclared<F::Queryable>> {
+    ) -> Option<RetractedUndeclared<F::Queryable, P::Key>> {
         let queryables =
             <F::QueryablePresence as Presence>::get_mut::<Queryables<F, P>>(&mut self.queryables)?;
-        undeclare_entity(
-            queryables,
-            &mut self.keyexprs,
-            handle,
-            |_, _, _| (),
-            QueryableRow::into_callback,
-        )
+        undeclare_retracted(queryables, &mut self.keyexprs, handle)
     }
 
     /// Declare a liveliness token on `key`.
