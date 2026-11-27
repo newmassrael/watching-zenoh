@@ -848,28 +848,10 @@ const PORT_PARTS: [&str; 4] = [
 /// batch a group it names sends, under the build's multicast batch, after the links' tables: the
 /// stack claims one when a group is joined. Turned red by a buffer for each group asked past the
 /// task cells, or one shorter than the largest group's batch.
-#[cfg(feature = "group")]
+#[cfg(all(feature = "group", not(wz_on_use)))]
 #[test]
 fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
-    use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-
-    let join = |batch_size: u16| GroupJoin {
-        endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
-        profile: GroupProfile {
-            lease_ms: 10_000,
-            join_interval_ms: 2_500,
-            max_sessions: None,
-            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
-            req_id_res: 0x02,
-            batch_size,
-            is_qos: false,
-            compression: false,
-            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
-        },
-        is_shm: false,
-        declarations: GroupDeclarations::Entities,
-    };
-    let groups = vec![join(1_024), join(2_048)];
+    let groups = vec![group_join(1_024), group_join(2_048)];
     let asked = groups.len().min(caps::MAX_TASKS);
     let plan = ArenaPlan::of(
         &CoopConfig {
@@ -887,7 +869,6 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
     let mut session =
         SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    #[cfg(not(wz_on_use))]
     let _links = plan.transport().links_from(&mut lend);
     let groups = plan.transport().group_rx_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
@@ -903,11 +884,66 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
     let mut session =
         SessionArena::reserve(&none, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    #[cfg(not(wz_on_use))]
     let _links = none.transport().links_from(&mut lend);
     let groups = none.transport().group_rx_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
     assert!(groups.is_none(), "and lends none");
+}
+
+/// A group the config names, `udp/239.7.7.7:7447` on `lan7`, sending batches of `batch_size`.
+#[cfg(feature = "group")]
+fn group_join(batch_size: u16) -> wz_capi_port::group::GroupJoin {
+    use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
+
+    GroupJoin {
+        endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
+        profile: GroupProfile {
+            lease_ms: 10_000,
+            join_interval_ms: 2_500,
+            max_sessions: None,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
+            req_id_res: 0x02,
+            batch_size,
+            is_qos: false,
+            compression: false,
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+        },
+        is_shm: false,
+        declarations: GroupDeclarations::Entities,
+    }
+}
+
+/// Where the tables take their memory on use, a session that joins groups lays out no buffer for
+/// them and sizes each group's own to the largest group's batch under the build's multicast batch,
+/// the length the arena would lend; one that names no group sizes none. Turned red by a plan that
+/// still lays the groups' buffers out on use, or a source sized to another length.
+#[cfg(all(feature = "group", wz_on_use))]
+#[test]
+fn an_on_use_session_sizes_its_groups_buffers_and_lays_out_none() {
+    use wz_runtime_coop::group_transport::HeapGroups;
+
+    let plan = ArenaPlan::of(
+        &CoopConfig {
+            groups: vec![group_join(1_024), group_join(2_048)],
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    assert!(
+        plan.rows()
+            .all(|row| !row.part().starts_with("link group receive")),
+        "an on-use plan lays out no buffer of a group: {plan:?}"
+    );
+    let bytes = 2_048_usize.min(caps::PICO_MULTICAST_BATCH_BYTES);
+    assert_eq!(plan.transport().groups_sized(), HeapGroups::sized(bytes));
+
+    let none = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
+    assert_eq!(
+        none.transport().groups_sized(),
+        HeapGroups::default(),
+        "a config that names no group sizes none"
+    );
 }
 
 /// The tokens of faces that went before each was retracted are owed apart from the sets those

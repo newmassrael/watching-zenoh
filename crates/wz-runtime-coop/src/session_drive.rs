@@ -1181,14 +1181,15 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
         Ok(())
     }
 
-    /// The receive buffers of the multicast groups the stack joins from now on, for the session
-    /// the groups serve, one for each group it may join: a group joined claims one and gives it
-    /// back when it is left, and a group that finds every one held is
-    /// [`LinkOpenError::Exhausted`]. Flagged as cells whatever `N` is: a group is held by the one
-    /// task that drives it. The default ignores them, as a stack that joins no group does; a
-    /// stack never lent them gives a joined group a buffer of its own.
-    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
-        let _ = buffers;
+    /// Where the receive buffers of the multicast groups the stack joins from now on come from,
+    /// for the session the groups serve
+    /// ([`CountKind::Groups`](crate::link_cells::CountKind::Groups)): a table the session lent, one buffer for each group it may join, which a group joined
+    /// claims and gives back when it is left, a group that finds every one held being
+    /// [`LinkOpenError::Exhausted`]; or the length of each group's buffer of its own, the
+    /// session's group batch. The default ignores it, as a stack that joins no group does; a
+    /// stack never given one gives a joined group the transport's own buffer.
+    fn lend_groups(&mut self, groups: N::Groups) {
+        let _ = groups;
     }
 
     /// [`Self::open_initiator`], begun without waiting for the link's connection to be made: the

@@ -51,7 +51,9 @@
 //!   transport takes its buffers (`TransportRows::lent_from`);
 //! - with `group`, a receive buffer for each group the session may join, of the largest batch a
 //!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
-//!   when it is joined, lent after the links' tables (`TransportRows::group_rx_from`);
+//!   when it is joined, lent after the links' tables (`TransportRows::group_rx_from`); where the
+//!   tables take their memory on use none is laid out, each group taking its own of that length
+//!   as it is joined (`HeapGroups`);
 //! - with `udp-listen`, for a session that listens on a `udp/` endpoint, the slots its udp ports
 //!   read their datagrams into and hold them in until the links of their peers take them
 //!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
@@ -127,6 +129,8 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 use wz_runtime_coop::faces::EndpointTexts;
+#[cfg(all(feature = "group", wz_on_use))]
+use wz_runtime_coop::group_transport::HeapGroups;
 use wz_runtime_coop::kept::Kept;
 use wz_runtime_coop::link_cells::CountKind;
 #[cfg(wz_on_use)]
@@ -1398,10 +1402,12 @@ pub(crate) struct TransportTables {
     /// buffers and, where the links share pools, their places; where the tables take their memory
     /// on use, the heap, each link a buffer and slots of the session's batch of its own.
     pub(crate) links: LinkSource,
-    /// The receive buffers of the groups the session may join, one for each; none for a plan
-    /// that counts no group.
+    /// Where the receive buffers of the groups the session may join come from, as the links' kind
+    /// names it (`wz_runtime_coop::link_cells::CountKind::Groups`): a buffer of the arena for each
+    /// group the plan counts, none for a plan that counts no group; where the tables take their
+    /// memory on use, each group's own of the plan's group batch, taken as it is joined.
     #[cfg(feature = "group")]
-    pub(crate) group_rx: Option<LentByteCells>,
+    pub(crate) groups: <crate::LinkCount as CountKind>::Groups,
     /// Where the session's udp ports keep their peers and the datagrams sorted for them, which the
     /// ports share (`SessionLinks::lend_ports`), as the links' kind names it
     /// (`wz_runtime_coop::link_cells::CountKind::Ports`): the rows and the slots the arena lends,
@@ -1462,8 +1468,11 @@ impl TransportRows {
             // Laid out in no row: each link takes its own as it opens.
             #[cfg(wz_on_use)]
             links: HeapBuffers::sized(self.link_bytes, LINK_TX_SLOTS),
-            #[cfg(feature = "group")]
-            group_rx: self.group_rx_from(lend),
+            #[cfg(all(feature = "group", not(wz_on_use)))]
+            groups: self.group_rx_from(lend),
+            // Laid out in no row: each group takes its buffer as it is joined.
+            #[cfg(all(feature = "group", wz_on_use))]
+            groups: self.groups_sized(),
             #[cfg(all(feature = "udp-listen", not(wz_on_use)))]
             ports: self.ports_from(lend),
             // Laid out in no row: the ports take their rows and buffers as they use them.
@@ -1525,10 +1534,23 @@ impl TransportRows {
     /// tables: a buffer of the groups' batch for each group the plan counts, which a group claims
     /// when it is joined, so a joined group's datagram is read where the session's memory holds
     /// it. `None` for a plan that counts no group, which laid no table of them out.
-    #[cfg(feature = "group")]
+    #[cfg(all(feature = "group", not(wz_on_use)))]
     pub(crate) fn group_rx_from(&self, lend: &mut TableLender<'_>) -> Option<LentByteCells> {
         let (buffers, bytes) = self.group_rx;
         (buffers > 0).then(|| lend.byte_cells(bytes, buffers))
+    }
+
+    /// The groups' buffers where the tables take their memory on use: each group's own, as long
+    /// as the buffer the arena would lend it (`Self::group_rx_from`), the plan's group batch;
+    /// unsized for a plan that counts no group, which joins none.
+    #[cfg(all(feature = "group", wz_on_use))]
+    pub(crate) fn groups_sized(&self) -> HeapGroups {
+        let (buffers, bytes) = self.group_rx;
+        if buffers > 0 {
+            HeapGroups::sized(bytes)
+        } else {
+            HeapGroups::default()
+        }
     }
 
     /// The slots the session's udp ports read their datagrams into and hold them in until the
@@ -2078,6 +2100,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             let buffers = least(shape.groups, caps::MAX_TASKS);
             let bytes = least(shape.group_batch, limits.pico_multicast_batch_bytes());
             self.transport.group_rx = (buffers, bytes);
+            // Where the tables take their memory on use none is laid out: each group takes its
+            // own buffer of the batch as it is joined (`TransportRows::groups_sized`).
+            #[cfg(not(wz_on_use))]
             self.put_table(
                 [
                     ArenaPart::LinkGroupReceiveFlags,

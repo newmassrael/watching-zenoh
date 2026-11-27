@@ -71,7 +71,7 @@ use wz_session_core::app_transport::{AppTransport, SessionTransport};
 use wz_session_core::byte_cells::ByteBuf;
 use wz_session_core::group_locator::{GroupLocator, UdpGroup};
 
-use crate::group_transport::{GroupRx, GroupSend, GroupTransport};
+use crate::group_transport::{GroupBuffer, GroupRx, GroupSend, GroupSource, GroupTransport};
 use crate::ip_stack::{heap_link, HeapLink};
 use crate::link_cells::{CellRc, CellSource, CountKind, OneTask};
 use crate::link_storage::{BufferSource, LinkBuffers, RxOf, RxStore, TxOf, TxStore};
@@ -1096,19 +1096,22 @@ impl AppGroupTransport {
         waits: &AppWaits,
         locator: &str,
     ) -> Result<Self, LinkOpenError> {
-        Self::join_bounded(transport, waits, locator, None, None)
+        Self::join_bounded(transport, waits, locator, None, GroupBuffer::Unsized)
     }
 
     /// [`Self::join`] whose open waits on `bound`, a sleep of the session's clock, when there is
-    /// one ([`AppLinks::with_open_bound`]), receiving into `rx` when the session lent a buffer
-    /// (`SessionLinks::lend_group_rx`).
+    /// one ([`AppLinks::with_open_bound`]), receiving into what the session gave the group
+    /// (`SessionLinks::lend_groups`): a buffer it lent, or one of the group's own of the length it
+    /// sized or of the widest datagram. A buffer of its own the heap refuses is
+    /// [`LinkOpenError::Exhausted`], before the program is asked.
     pub fn join_bounded(
         transport: &SessionTransport,
         waits: &AppWaits,
         locator: &str,
         bound: Option<&OpenBound>,
-        rx: Option<ByteBuf>,
+        rx: GroupBuffer,
     ) -> Result<Self, LinkOpenError> {
+        let rx = GroupRx::of_heap(rx, DATAGRAM_MAX).ok_or(LinkOpenError::Exhausted)?;
         Ok(Self {
             held: Some(open_link(
                 transport,
@@ -1117,7 +1120,7 @@ impl AppGroupTransport {
                 locator,
                 bound,
             )?),
-            rx: GroupRx::lent_or_own(rx, || alloc::vec![0; DATAGRAM_MAX]),
+            rx,
             len: 0,
             lent_from: None,
             kept: false,
@@ -1302,9 +1305,10 @@ pub struct AppLinks<N: CountKind = OneTask> {
     /// Where every link is placed ([`SessionLinks::lend_cells`]): in a cell of the session's
     /// table when it lent the links one, and none on the heap; on the heap otherwise.
     cells: N::Cells,
-    /// The receive buffers of the groups the links join, when the session lent some
-    /// ([`SessionLinks::lend_group_rx`]); a group of links lent none has a buffer of its own.
-    group_rx: Option<wz_session_core::byte_cells::LentByteCells>,
+    /// Where the receive buffers of the groups the links join come from, as the session gave it
+    /// ([`SessionLinks::lend_groups`]): a table it lent, or the length of each group's own; a
+    /// group of links given none has the transport's own buffer.
+    group_rx: N::Groups,
 }
 
 /// Whether the links of an [`AppLinks`] are waited on by their owner
@@ -1393,7 +1397,9 @@ impl<N: CountKind> AppLinks<N> {
     /// session is opened over them, which is when it lends them its cells.
     pub fn counted_by<M: CountKind>(self) -> AppLinks<M> {
         debug_assert!(
-            self.cells.table().is_none() && self.lent.tables().is_none(),
+            self.cells.table().is_none()
+                && self.lent.tables().is_none()
+                && self.group_rx.table().is_none(),
             "cells and buffers are lent after the links are made"
         );
         AppLinks {
@@ -1405,7 +1411,7 @@ impl<N: CountKind> AppLinks<N> {
             lent: Default::default(),
             owner_waits: self.owner_waits,
             cells: Default::default(),
-            group_rx: self.group_rx,
+            group_rx: Default::default(),
         }
     }
 
@@ -1578,9 +1584,9 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
         self.cells = cells;
     }
 
-    /// Every group the links join from now on claims its receive buffer from `buffers`.
-    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
-        self.group_rx = Some(buffers);
+    /// Every group the links join from now on takes its receive buffer through `groups`.
+    fn lend_groups(&mut self, groups: N::Groups) {
+        self.group_rx = groups;
     }
 
     // A group the program joins names the interface it is joined on, as a listen on a group's
@@ -1594,11 +1600,9 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
             return Err(LinkOpenError::Unsupported);
         }
         // A session that lent a table of group buffers gives the group one of them, and a group
-        // that finds every one held is not joined; without the table the group makes its own.
-        let rx = match self.group_rx {
-            Some(table) => Some(table.claim().ok_or(LinkOpenError::Exhausted)?),
-            None => None,
-        };
+        // that finds every one held is not joined; one that sized them has the group make its own
+        // of that length; given none, the group makes its own of the widest datagram.
+        let rx = self.group_rx.buffer()?;
         Ok(Box::new(AppGroupTransport::join_bounded(
             &self.transport,
             &self.waits,
@@ -2457,7 +2461,7 @@ mod tests {
             .expect("joined")
         };
 
-        let mut own = join(None);
+        let mut own = join(GroupBuffer::Unsized);
         let handle = own.held.as_ref().unwrap().handle;
         transport
             .received(handle, b"ten bytes!", Some("udp/198.51.100.20:7447"))
@@ -2479,7 +2483,7 @@ mod tests {
 
         let buf = CELLS.claim().expect("the cell");
         let base = buf.raw().0 as usize;
-        let mut lent = join(Some(buf));
+        let mut lent = join(GroupBuffer::Lent(buf));
         assert!(lent.lends_until_next_receive());
         let handle = lent.held.as_ref().unwrap().handle;
         for bytes in [b"ten bytes!".as_slice(), b"member".as_slice()] {
@@ -2533,7 +2537,7 @@ mod tests {
 
         let (script, transport) = transport();
         let mut links = AppLinks::new(session(&transport, 64));
-        links.lend_group_rx(groups);
+        links.lend_groups(Some(groups));
         let group = group_of(GROUP);
         let mut first = links
             .open_group(GROUP, &group)

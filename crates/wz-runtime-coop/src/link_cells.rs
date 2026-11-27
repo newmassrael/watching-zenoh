@@ -97,6 +97,14 @@ pub trait CountKind: Sized + 'static {
     #[cfg(feature = "udp-listen")]
     type Ports: crate::udp_link::PortSource<Self::Flag>;
 
+    /// Where the receive buffers of the groups a stack of this kind joins come from, which a
+    /// session hands the stack once
+    /// ([`SessionLinks::lend_groups`](crate::session_drive::SessionLinks::lend_groups)): a table
+    /// a session lent, for a kind whose sessions lend their links tables; the length of a buffer
+    /// of each group's own on the heap, the session's group batch, for [`OnHeap`]'s. Flagged as
+    /// cells whatever the kind: a group is held by the one task that drives it.
+    type Groups: crate::group_transport::GroupSource;
+
     /// The word as it stands.
     fn read(word: &CountWord) -> usize;
 
@@ -132,6 +140,7 @@ impl CountKind for OneTask {
     type Buffers = Option<LinkTables<Cell<bool>>>;
     #[cfg(feature = "udp-listen")]
     type Ports = Option<crate::udp_link::LentPorts<Cell<bool>>>;
+    type Groups = Option<LentByteCells>;
 
     #[inline]
     fn read(word: &CountWord) -> usize {
@@ -181,6 +190,7 @@ impl CountKind for Atomic {
     type Buffers = Option<LinkTables<AtomicBool>>;
     #[cfg(feature = "udp-listen")]
     type Ports = Option<crate::udp_link::LentPorts<AtomicBool>>;
+    type Groups = Option<LentByteCells>;
 
     #[inline]
     fn read(word: &CountWord) -> usize {
@@ -257,6 +267,7 @@ impl CountKind for OneFace {
     type Buffers = Option<LinkTables<AtomicBool>>;
     #[cfg(feature = "udp-listen")]
     type Ports = Option<crate::udp_link::LentPorts<AtomicBool>>;
+    type Groups = Option<LentByteCells>;
 
     #[inline]
     fn read(word: &CountWord) -> usize {
@@ -287,10 +298,11 @@ impl CountKind for OneFace {
 }
 
 /// Counted as `N` counts, every cell made on the heap ([`HeapCells`]), every link's buffers its
-/// own ([`HeapBuffers`]) and its udp ports' rows and buffers the heap's (`udp_link::HeapPorts`):
-/// the kind of a session that takes its links' memory as each link opens and lends its links no
-/// table of cells, of buffers or of a port's rows, so no maker of a link's part names a table or
-/// a claim of one. What its links share is counted as `N`'s is.
+/// own ([`HeapBuffers`]), its udp ports' rows and buffers the heap's (`udp_link::HeapPorts`) and
+/// each group's receive buffer its own (`group_transport::HeapGroups`): the kind of a session that
+/// takes its links' memory as each link opens and lends its links no table of cells, of buffers,
+/// of a port's rows or of a group's buffers, so no maker of a link's part names a table or a claim
+/// of one. What its links share is counted as `N`'s is.
 pub struct OnHeap<N: CountKind>(PhantomData<fn() -> N>);
 
 impl<N: CountKind> CountKind for OnHeap<N> {
@@ -300,6 +312,7 @@ impl<N: CountKind> CountKind for OnHeap<N> {
     type Buffers = HeapBuffers;
     #[cfg(feature = "udp-listen")]
     type Ports = crate::udp_link::HeapPorts;
+    type Groups = crate::group_transport::HeapGroups;
 
     #[inline]
     fn read(word: &CountWord) -> usize {

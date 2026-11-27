@@ -39,7 +39,7 @@ use wz_session_core::reliability::Reliability;
 use wz_session_core::session_slot::SlotDriver;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::group_transport::{GroupJoiner, GroupTransport, NoGroups};
+use crate::group_transport::{GroupJoiner, GroupSource, GroupTransport, NoGroups};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_cells::{CellClaim, CellRc, CellSource, CountKind, OneTask};
 use crate::link_storage::TxStore;
@@ -389,9 +389,10 @@ pub struct IpLinks<U, D, L = NoDial, G = NoGroups, N: CountKind = OneTask, W = W
     /// lent, or the heap's memory counted to what it stated. Links given nothing open no port.
     #[cfg(feature = "udp-listen")]
     ports: Option<crate::udp_link::SharedBook<N::Shared, N::Ports>>,
-    /// The receive buffers of the groups these links join, when the session lent some
-    /// ([`SessionLinks::lend_group_rx`]); a group of links lent none has a buffer of its own.
-    group_rx: Option<wz_session_core::byte_cells::LentByteCells>,
+    /// Where the receive buffers of the groups these links join come from, as the session gave it
+    /// ([`SessionLinks::lend_groups`]): a table it lent, or the length of each group's own; a
+    /// group of links given none has the transport's own buffer.
+    group_rx: N::Groups,
     datagrams: core::marker::PhantomData<fn() -> U>,
     waiter: core::marker::PhantomData<fn() -> W>,
 }
@@ -570,7 +571,7 @@ where
             shape: LinkShape::default(),
             #[cfg(feature = "udp-listen")]
             ports: None,
-            group_rx: None,
+            group_rx: Default::default(),
             datagrams: core::marker::PhantomData,
             waiter: core::marker::PhantomData,
         }
@@ -596,6 +597,10 @@ where
             self.ports.is_none(),
             "a port's memory is given after the links are made"
         );
+        debug_assert!(
+            self.group_rx.table().is_none(),
+            "the groups' buffers are lent after the links are made"
+        );
         IpLinks {
             local: self.local,
             dial: self.dial,
@@ -604,7 +609,7 @@ where
             shape: self.shape.counted_by(),
             #[cfg(feature = "udp-listen")]
             ports: None,
-            group_rx: self.group_rx,
+            group_rx: Default::default(),
             datagrams: self.datagrams,
             waiter: self.waiter,
         }
@@ -827,9 +832,9 @@ where
         Ok(())
     }
 
-    /// Every group these links join from now on claims its receive buffer from `buffers`.
-    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
-        self.group_rx = Some(buffers);
+    /// Every group these links join from now on takes its receive buffer through `groups`.
+    fn lend_groups(&mut self, groups: N::Groups) {
+        self.group_rx = groups;
     }
 
     /// A `tcp/` dial begins its connection and a `tls/` one its channel's (the connection under
@@ -933,19 +938,17 @@ where
     }
 
     /// The group `group` names, joined by the host's joiner the links were given
-    /// ([`IpLinks::with_groups`]); links given none refuse it as unsupported. A group of links
-    /// whose session lent a table of group buffers ([`SessionLinks::lend_group_rx`]) receives into
-    /// one of them, and finding every one held is [`LinkOpenError::Exhausted`]; without the table
-    /// the transport makes its own.
+    /// ([`IpLinks::with_groups`]); links given none refuse it as unsupported. A group receives into
+    /// what the session gave the links' groups ([`SessionLinks::lend_groups`]): a buffer of the
+    /// table it lent, finding every one held being [`LinkOpenError::Exhausted`] before the joiner
+    /// is asked, or one of the transport's own of the length it sized; given none, the
+    /// transport's own of the largest datagram it reads whole.
     fn open_group(
         &self,
         _endpoint: &str,
         group: &GroupLocator,
     ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
-        let rx = match self.group_rx {
-            Some(table) => Some(table.claim().ok_or(LinkOpenError::Exhausted)?),
-            None => None,
-        };
+        let rx = self.group_rx.buffer()?;
         self.groups.join(group, rx)
     }
 
@@ -2218,10 +2221,14 @@ mod tests {
             fn join(
                 &self,
                 _group: &wz_session_core::group_locator::GroupLocator,
-                rx: Option<ByteBuf>,
+                rx: crate::group_transport::GroupBuffer,
             ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
-                self.lent.borrow_mut().push(rx.is_some());
-                Ok(Box::new(Held(rx)))
+                let lent = match rx {
+                    crate::group_transport::GroupBuffer::Lent(buf) => Some(buf),
+                    _ => None,
+                };
+                self.lent.borrow_mut().push(lent.is_some());
+                Ok(Box::new(Held(lent)))
             }
         }
         let joiner = || Joiner {
@@ -2256,7 +2263,7 @@ mod tests {
             .expect("the group table");
 
         let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial).with_groups(joiner());
-        links.lend_group_rx(groups);
+        links.lend_groups(Some(groups));
         let mut first = links
             .open_group(GROUP, &group)
             .expect("a group in the table's buffer");
@@ -2285,6 +2292,72 @@ mod tests {
             .open_group(GROUP, &group)
             .expect("the buffer serves the next group");
         assert_eq!(*links.groups.lent.borrow(), [true, true]);
+    }
+
+    /// Links whose kind takes their memory on use hand each group the length of its own buffer
+    /// their session sized, the session's group batch, and lend it no buffer; given none, the
+    /// widest. Turned red by links that hand the joiner no length, which leaves each group the
+    /// widest datagram's buffer, or by links of that kind that claim a table.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn on_use_links_hand_each_group_the_length_its_session_sized() {
+        use crate::group_transport::{GroupBuffer, HeapGroups};
+        use crate::link_cells::{OnHeap, OneTask};
+        use alloc::vec::Vec;
+        use core::cell::RefCell;
+
+        /// A group that carries nothing, for the joiner below to hand out.
+        struct Quiet;
+        impl GroupTransport for Quiet {
+            fn open(&mut self) -> bool {
+                true
+            }
+            fn close(&mut self) {}
+            fn service(&self) {}
+            fn carrier_up(&self) -> bool {
+                true
+            }
+            fn send_to_group(&mut self, _datagram: &[u8]) {}
+            fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+                false
+            }
+        }
+
+        /// Joins every group, and records the length of each buffer it was handed, `None` for
+        /// the widest and for a lent one.
+        struct Sizes {
+            seen: RefCell<Vec<Option<usize>>>,
+        }
+        impl GroupJoiner for Sizes {
+            fn join(
+                &self,
+                _group: &wz_session_core::group_locator::GroupLocator,
+                rx: GroupBuffer,
+            ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
+                let sized = match rx {
+                    GroupBuffer::Sized(bytes) => Some(bytes),
+                    _ => None,
+                };
+                self.seen.borrow_mut().push(sized);
+                Ok(Box::new(Quiet))
+            }
+        }
+
+        const GROUP: &str = "udp/239.1.2.3:7447#iface=lo";
+        let group = group_of(GROUP);
+        let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial)
+            .with_groups(Sizes {
+                seen: RefCell::new(Vec::new()),
+            })
+            .counted_by::<OnHeap<OneTask>>();
+        let _widest = links
+            .open_group(GROUP, &group)
+            .expect("CONTROL: a group given no length");
+        links.lend_groups(HeapGroups::sized(48));
+        let _sized = links
+            .open_group(GROUP, &group)
+            .expect("a group of the session's batch");
+        assert_eq!(*links.groups.seen.borrow(), [None, Some(48)]);
     }
 
     /// Links given a joiner hand it the group as the transport read it and answer what it answers:
@@ -2322,9 +2395,12 @@ mod tests {
             fn join(
                 &self,
                 group: &GroupLocator,
-                rx: Option<ByteBuf>,
+                rx: crate::group_transport::GroupBuffer,
             ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
-                assert!(rx.is_none(), "links lent no group table");
+                assert!(
+                    matches!(rx, crate::group_transport::GroupBuffer::Unsized),
+                    "links given no group buffers"
+                );
                 let at = group.udp().expect("a udp group").group();
                 self.asked.borrow_mut().push(at);
                 if at.ip() == Ipv4Addr::new(239, 1, 2, 3) {

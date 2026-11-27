@@ -7299,9 +7299,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // holds the ports' book.
         links.lend_buffers(lent.transport.links);
         #[cfg(feature = "group")]
-        if let Some(groups) = lent.transport.group_rx {
-            links.lend_group_rx(groups);
-        }
+        links.lend_groups(lent.transport.groups);
         #[cfg(feature = "udp-listen")]
         links
             .lend_ports(lent.transport.ports)

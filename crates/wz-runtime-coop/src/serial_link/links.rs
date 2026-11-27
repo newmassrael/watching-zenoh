@@ -1059,8 +1059,8 @@ where
         self.links.lend_ports(ports)
     }
 
-    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
-        self.links.lend_group_rx(buffers);
+    fn lend_groups(&mut self, groups: N::Groups) {
+        self.links.lend_groups(groups);
     }
 
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {

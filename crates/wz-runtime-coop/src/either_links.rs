@@ -290,8 +290,8 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
         on_side!(EitherLinks, self, links => links.lend_ports(ports))
     }
 
-    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
-        on_side!(EitherLinks, self, links => links.lend_group_rx(buffers))
+    fn lend_groups(&mut self, groups: N::Groups) {
+        on_side!(EitherLinks, self, links => links.lend_groups(groups))
     }
 
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
