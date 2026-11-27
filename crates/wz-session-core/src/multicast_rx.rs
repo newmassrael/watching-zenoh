@@ -220,15 +220,34 @@ fn multicast_message_len(msg: &[u8]) -> Option<usize> {
             .filter(|consumed| *consumed > 0 && *consumed < msg.len()),
         // A KeepAlive, a Close and an OAM are stepped over by their view: the message was
         // dispatched already, and an owned decode of it here would copy an OAM's body to learn
-        // its length.
+        // its length. An Init, an Open and an id no view reads are `handshake_extent`'s.
         _ => match crate::inbound::control_extent(msg) {
             Some(read) => read.ok(),
-            None => crate::inbound::parse_inbound_consuming(msg)
-                .ok()
-                .map(|(_, consumed)| consumed),
+            None => handshake_extent(msg),
         }
         .filter(|consumed| *consumed > 0 && *consumed < msg.len()),
     }
+}
+
+/// How far an Init, an Open or a message of an id no view of `control_extent` reads reaches, for
+/// the walk to step past it: a group acts on neither handshake message, as zenoh-pico's multicast
+/// receive reads each and does nothing with it (`vendor/zenoh-pico/src/transport/multicast/rx.c` @
+/// `case _Z_MID_T_INIT:`). Read where it lies by the session's reader of a control message
+/// (`inbound::read_control`), which answers the extent and the refusals of the owned decode, so a
+/// build that has that reader links no owned decode of a transport message for its groups alone.
+/// `0`, an extent that reader cannot know, is the owned decode's `0` too.
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+fn handshake_extent(msg: &[u8]) -> Option<usize> {
+    crate::inbound::read_control(msg).ok().map(|(_, used)| used)
+}
+
+/// `handshake_extent` of a build without the session's reader of a control message in place: the
+/// owned decode's extent.
+#[cfg(not(all(feature = "alloc", feature = "session-unicast")))]
+fn handshake_extent(msg: &[u8]) -> Option<usize> {
+    crate::inbound::parse_inbound_consuming(msg)
+        .ok()
+        .map(|(_, consumed)| consumed)
 }
 
 /// R311y633 (§17.6) — dispatch EVERY transport message the datagram carried.
@@ -2631,7 +2650,8 @@ mod batch_walk_tests {
 }
 
 /// The walk of a group datagram steps over a Close, a KeepAlive and a transport OAM by the view of
-/// each, as far as the owned decode reads it, and stops where that decode refuses.
+/// each, and over an Init and an Open by the reader `handshake_extent` names, as far as the owned
+/// decode reads it, and stops where that decode refuses.
 #[cfg(test)]
 mod control_extent_tests {
     use super::multicast_message_len;
@@ -2643,6 +2663,10 @@ mod control_extent_tests {
     #[cfg(feature = "alloc")]
     use crate::wire_const::T_MID_OAM;
     use crate::wire_const::{FLAG_T_CLOSE_S, T_MID_CLOSE, T_MID_FRAME};
+    #[cfg(feature = "codec-init-body")]
+    use crate::wire_const::{FLAG_T_INIT_A, T_MID_INIT};
+    #[cfg(feature = "codec-open-body")]
+    use crate::wire_const::{FLAG_T_OPEN_A, T_MID_OPEN};
 
     /// A byte behind the message, so that a known extent is short of the unit.
     const NEXT: u8 = 0x1E;
@@ -2696,6 +2720,64 @@ mod control_extent_tests {
     #[test]
     fn a_frame_is_left_to_the_walk_and_ends_it() {
         let unit = [T_MID_FRAME, 0x01, NEXT];
+        assert!(control_extent(&unit).is_none());
+        assert_eq!(multicast_message_len(&unit), None);
+    }
+
+    /// `unit`, a message no view of `control_extent` reads, is stepped over to where its owned
+    /// decode ends.
+    #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+    fn handshake_steps_as_decoded(unit: &[u8]) {
+        let owned = parse_inbound_consuming(unit).ok().map(|(_, used)| used);
+        assert!(owned.is_some(), "{unit:02x?}: the fixture decodes");
+        assert!(control_extent(unit).is_none(), "{unit:02x?}");
+        assert_eq!(multicast_message_len(unit), owned, "{unit:02x?}");
+    }
+
+    /// An InitSyn and an InitAck with a cookie are stepped over as far as their decode reads them,
+    /// and an Init whose zid names no node ends the walk, as its decode refuses it. Turned red by a
+    /// reader of the handshake's extent that reads it otherwise than the decode does, or that stops
+    /// the walk at a handshake the decode reads.
+    #[cfg(feature = "codec-init-body")]
+    #[test]
+    fn an_init_is_stepped_over_as_far_as_its_decode_reads_and_a_refused_one_ends_the_walk() {
+        handshake_steps_as_decoded(&[T_MID_INIT, 0x09, 0x01, 0xAA, NEXT]);
+        handshake_steps_as_decoded(&[
+            T_MID_INIT | FLAG_T_INIT_A,
+            0x09,
+            0x12,
+            0xAA,
+            0xBB,
+            0x03,
+            0x01,
+            0x02,
+            0x03,
+            NEXT,
+        ]);
+        let unnamed = [T_MID_INIT, 0x09, 0x01, 0x00, NEXT];
+        assert!(parse_inbound_consuming(&unnamed).is_err());
+        assert!(control_extent(&unnamed).is_none());
+        assert_eq!(multicast_message_len(&unnamed), None);
+    }
+
+    /// An OpenAck and an OpenSyn that echoes a cookie are stepped over as far as their decode reads
+    /// them, and an Open whose cookie is cut short ends the walk.
+    #[cfg(feature = "codec-open-body")]
+    #[test]
+    fn an_open_is_stepped_over_as_far_as_its_decode_reads_and_a_cut_one_ends_the_walk() {
+        handshake_steps_as_decoded(&[T_MID_OPEN | FLAG_T_OPEN_A, 0x0A, 0x01, NEXT]);
+        handshake_steps_as_decoded(&[T_MID_OPEN, 0x0A, 0x01, 0x02, 0xC1, 0xC2, NEXT]);
+        let cut = [T_MID_OPEN, 0x0A, 0x01, 0x05, 0xC1];
+        assert!(parse_inbound_consuming(&cut).is_err());
+        assert_eq!(multicast_message_len(&cut), None);
+    }
+
+    /// A message of an id no reader of the build takes has no extent the walk could step by, so the
+    /// walk ends there rather than stepping by nothing. Turned red by a reader whose unknown extent,
+    /// `0`, reaches the walk as a step.
+    #[test]
+    fn a_message_of_an_id_no_reader_takes_ends_the_walk() {
+        let unit = [0x1F, NEXT];
         assert!(control_extent(&unit).is_none());
         assert_eq!(multicast_message_len(&unit), None);
     }

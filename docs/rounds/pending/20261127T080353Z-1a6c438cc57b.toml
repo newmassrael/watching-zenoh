@@ -1,0 +1,16 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Step past a group's handshake by the lent reader, so the group transport
+links no owned decoder to learn one message's length (feature lane, F1).
+'''
+changes = '''
+- session-core multicast_rx: Init and Open stepped over by read_control.
+- docs/c-abi-migration/feat-mcast.md: the pairing with zenoh-pico, F1-F8.
+'''
+verification = '''
+- size ledger pico-api-coop-nostd 930,535 -> 921,051 B (-9,484); client same.
+- control_extent_tests 7, control_read_tests 6; nondefault-features pass.
+'''
+carry = '''
+- none for this lane.
+'''
