@@ -43,7 +43,7 @@ use crate::region::RegionField;
 struct GetRows {
     legs: GetLegsRows<PendingGetHandle>,
     #[cfg(feature = "liveliness-get")]
-    snapshots: GetLegsRows<PendingGetHandle>,
+    snapshots: GetLegsRows<PendingGetHandle, { super::SNAPSHOT_LEGS }>,
 }
 
 // SAFETY: each field is rows of `MaybeUninit` (`ZeroEmpty`), holding no value until placed.
@@ -74,7 +74,7 @@ impl super::Gets {
         );
         #[cfg(feature = "liveliness-get")]
         let lines = lines.with(
-            &GetLegs::<PendingGetHandle, Region>::places(
+            &GetLegs::<PendingGetHandle, Region, { super::SNAPSHOT_LEGS }>::places(
                 at.wrapping_add(offset_of!(super::Gets, snapshots)),
                 rows.wrapping_add(offset_of!(GetRows, snapshots)),
             ),

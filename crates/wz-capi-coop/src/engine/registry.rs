@@ -133,8 +133,13 @@ pub(super) struct Gets {
     pub(super) legs: GetLegs<PendingGetHandle, RowPolicy>,
     /// The legs of the session's liveliness snapshots on the face, under their Interest ids.
     #[cfg(feature = "liveliness-get")]
-    pub(super) snapshots: GetLegs<PendingGetHandle, RowPolicy>,
+    pub(super) snapshots: GetLegs<PendingGetHandle, RowPolicy, SNAPSHOT_LEGS>,
 }
+
+/// The most legs of the session's liveliness snapshots one face holds: a snapshot has at most one
+/// leg on a face, so no more than the session holds pending.
+#[cfg(feature = "liveliness-get")]
+const SNAPSHOT_LEGS: usize = wz_session_core::caps::MAX_PENDING_LIVELINESS_GETS;
 
 #[cfg(feature = "query")]
 impl Gets {
@@ -201,7 +206,9 @@ impl Gets {
     pub(super) const fn arena_bytes(rows: RequesterRows) -> Option<usize> {
         let legs = GetLegs::<PendingGetHandle, RowPolicy>::arena_bytes(rows.queries);
         #[cfg(feature = "liveliness-get")]
-        let snapshots = GetLegs::<PendingGetHandle, RowPolicy>::arena_bytes(rows.liveliness_gets);
+        let snapshots = GetLegs::<PendingGetHandle, RowPolicy, SNAPSHOT_LEGS>::arena_bytes(
+            rows.liveliness_gets,
+        );
         #[cfg(not(feature = "liveliness-get"))]
         let snapshots = Some(0);
         match (legs, snapshots) {

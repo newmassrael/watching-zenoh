@@ -13,8 +13,11 @@
 //! back for the caller to end on the get's row, which counts legs and not Finals; a get its row
 //! retires before that is forgotten here.
 //!
-//! The table is bounded by the gets it names: a get has at most one leg on a face, so a face never
-//! holds more legs than the session holds gets, and the table states no quota of its own.
+//! The table is bounded by the gets of its kind (`N`): a get has at most one leg on a face, so a
+//! face never holds more legs of a kind than the session holds gets of it, and the table states no
+//! quota of its own. A table of the queries' legs is bound by `MAX_PENDING_QUERIES`, its default;
+//! a caller that keeps the legs of another kind of get (a liveliness snapshot's) names that kind's
+//! bound.
 
 use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
 use crate::caps;
@@ -31,13 +34,14 @@ struct GetLeg<H> {
     finals: u32,
 }
 
-/// The legs of the gets pending on one face, and the read of its peer's Responses. See the module.
-pub struct GetLegs<H, P: Storage = Profile> {
-    legs: BoundedVec<GetLeg<H>, { caps::MAX_PENDING_QUERIES }, P>,
+/// The legs of the gets pending on one face, at most `N`, and the read of its peer's Responses.
+/// See the module.
+pub struct GetLegs<H, P: Storage = Profile, const N: usize = { caps::MAX_PENDING_QUERIES }> {
+    legs: BoundedVec<GetLeg<H>, N, P>,
     receive: ReplyReceive,
 }
 
-impl<H, P: Storage> Default for GetLegs<H, P> {
+impl<H, P: Storage, const N: usize> Default for GetLegs<H, P, N> {
     fn default() -> Self {
         Self {
             legs: BoundedVec::default(),
@@ -47,11 +51,11 @@ impl<H, P: Storage> Default for GetLegs<H, P> {
 }
 
 #[cfg(feature = "alloc")]
-impl<H> GetLegs<H, crate::bounded::OnUse> {
-    /// An empty table of at most `rows` legs, under `MAX_PENDING_QUERIES`, taken at its first
-    /// leg: the gets a session holds pending on one face, at its open. Nothing is taken, so
-    /// nothing is refused here: a leg past the count, or one the allocator has no room for, is
-    /// refused when it is held.
+impl<H, const N: usize> GetLegs<H, crate::bounded::OnUse, N> {
+    /// An empty table of at most `rows` legs, under `N`, taken at its first leg: the gets of its
+    /// kind a session holds pending on one face, at its open. Nothing is taken, so nothing is
+    /// refused here: a leg past the count, or one the allocator has no room for, is refused when it
+    /// is held.
     pub fn counted(rows: usize) -> Self {
         Self {
             legs: BoundedVec::counted(rows),
@@ -61,38 +65,35 @@ impl<H> GetLegs<H, crate::bounded::OnUse> {
 }
 
 /// The rows of a [`GetLegs`] of the region policy, which a region lays out beside it: its legs',
-/// at the build's bound.
-pub struct GetLegsRows<H> {
-    legs: [core::mem::MaybeUninit<GetLeg<H>>; caps::MAX_PENDING_QUERIES],
+/// at the table's bound `N`.
+pub struct GetLegsRows<H, const N: usize = { caps::MAX_PENDING_QUERIES }> {
+    legs: [core::mem::MaybeUninit<GetLeg<H>>; N],
 }
 
 // SAFETY: the rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
-unsafe impl<H> crate::bounded::ZeroEmpty for GetLegsRows<H> {}
+unsafe impl<H, const N: usize> crate::bounded::ZeroEmpty for GetLegsRows<H, N> {}
 
 /// The lines a region's description holds for one [`GetLegs`] of the region policy: its legs'
 /// rows. A leg keeps no key, so the table holds no handle to the region's key arena.
 pub const GET_LEGS_LINES: usize = 1;
 
-impl<H> GetLegs<H, crate::bounded::Region> {
+impl<H, const N: usize> GetLegs<H, crate::bounded::Region, N> {
     /// The description of a table of the region policy at `at` in a region and its
     /// [`GetLegsRows`] at `rows`: the line of its legs' rows. The table is written as
     /// [`Default`] makes one before the region is placed, since the receive's key gate is not
     /// zero bytes. The table states no quota of its own (see the module), so nothing holds it to
     /// the session's limits after.
     pub const fn places(at: usize, rows: usize) -> crate::bounded::RegionLines<GET_LEGS_LINES> {
-        crate::bounded::RegionLines::EMPTY.seq(crate::bounded::SeqPlace::of_room::<
-            GetLeg<H>,
-            { caps::MAX_PENDING_QUERIES },
-        >(
+        crate::bounded::RegionLines::EMPTY.seq(crate::bounded::SeqPlace::of_room::<GetLeg<H>, N>(
             at.wrapping_add(core::mem::offset_of!(Self, legs)),
-            rows.wrapping_add(core::mem::offset_of!(GetLegsRows<H>, legs)),
+            rows.wrapping_add(core::mem::offset_of!(GetLegsRows<H, N>, legs)),
         ))
     }
 }
 
-impl<H> GetLegs<H, Lent> {
-    /// An empty table whose legs are `rows` rows lent from `arena`, at most
-    /// `MAX_PENDING_QUERIES`: the gets the session holds pending on one face, at its open.
+impl<H, const N: usize> GetLegs<H, Lent, N> {
+    /// An empty table whose legs are `rows` rows lent from `arena`, at most `N`: the gets of
+    /// its kind the session holds pending on one face, at its open.
     /// Refused, taking nothing, past that ceiling or past what the arena has left.
     pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
         Ok(Self {
@@ -107,7 +108,7 @@ impl<H> GetLegs<H, Lent> {
     }
 }
 
-impl<H: Copy + Eq, P: Storage> GetLegs<H, P> {
+impl<H: Copy + Eq, P: Storage, const N: usize> GetLegs<H, P, N> {
     /// How a Response of the face's peer is read: its key gate and shared memory.
     pub fn receive(&self) -> &ReplyReceive {
         &self.receive

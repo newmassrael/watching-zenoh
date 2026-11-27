@@ -109,6 +109,25 @@ fn a_table_lent_one_row_refuses_a_second_leg_until_the_first_ends() {
     assert!(legs.hold(request_id_at(2, 0), 2), "the row is free again");
 }
 
+/// A table of a kind of get bound below the queries' (`N`, a liveliness snapshot's) is lent its
+/// bound's rows and refused one past them, and its region rows are that bound's. Turned red by a
+/// table bound by `MAX_PENDING_QUERIES` whatever its kind, which lends the row past `N` and lays
+/// out the queries' rows.
+#[test]
+fn a_table_of_legs_is_bound_by_its_kind_of_get() {
+    use crate::bounded::Region;
+    const N: usize = 1;
+    let bytes = GetLegs::<u8, Lent, N>::arena_bytes(N + 1).expect("two rows");
+    let mut past = arena(bytes);
+    assert!(GetLegs::<u8, Lent, N>::lent(&mut past, N + 1).is_err());
+    let mut within = arena(bytes);
+    let mut legs = GetLegs::<u8, Lent, N>::lent(&mut within, N).expect("the bound's rows");
+    assert!(legs.hold(request_id_at(1, 0), 1));
+    assert!(!legs.hold(request_id_at(1, 1), 2), "no row past the bound");
+    let lines = GetLegs::<u8, Region, N>::places(0, 64);
+    assert_eq!(lines.seq_lines()[0].room as usize, N);
+}
+
 /// A leg owing a Final of each of a group's members ends at the last of them, handed back once,
 /// and a Final past the last finds nothing; a leg owing none is not held. Turned red by a leg that
 /// ends at its first Final (`end_leg` not counting), or by one held owing none.
