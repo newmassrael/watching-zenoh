@@ -30,14 +30,21 @@ use wz_session_core::link::{BoxedLinkDriver, LostCause, RxFrame};
 /// link's cell of the session's table, and the engine's wire for the link holds a handle on that
 /// cell, so a link made after the open takes no memory of the heap for its admission. `K` is how
 /// the session's runtime holds what it lends the link's session.
-pub(crate) struct AdmissionGate<P, C: ClockSource + 'static, K: LockKind = Shared> {
+pub(crate) struct AdmissionGate<
+    P,
+    C: ClockSource + 'static,
+    K: LockKind = Shared,
+    D: ?Sized + BoxedLinkDriver + 'static = dyn BoxedLinkDriver,
+> {
     pump: P,
-    actions: SessionHandle<C, dyn BoxedLinkDriver, K>,
+    actions: SessionHandle<C, D, K>,
     admitted: Cell<bool>,
 }
 
-impl<P, C: ClockSource + 'static, K: LockKind> AdmissionGate<P, C, K> {
-    pub(crate) fn new(pump: P, actions: SessionHandle<C, dyn BoxedLinkDriver, K>) -> Self {
+impl<P, C: ClockSource + 'static, K: LockKind, D: ?Sized + BoxedLinkDriver + 'static>
+    AdmissionGate<P, C, K, D>
+{
+    pub(crate) fn new(pump: P, actions: SessionHandle<C, D, K>) -> Self {
         Self {
             pump,
             actions,
@@ -57,8 +64,12 @@ impl<P, C: ClockSource + 'static, K: LockKind> AdmissionGate<P, C, K> {
     }
 }
 
-impl<P: SessionDatagramLink, C: ClockSource + 'static, K: LockKind> SessionDatagramLink
-    for AdmissionGate<P, C, K>
+impl<P, C, K, D> SessionDatagramLink for AdmissionGate<P, C, K, D>
+where
+    P: SessionDatagramLink,
+    C: ClockSource + 'static,
+    K: LockKind,
+    D: ?Sized + BoxedLinkDriver + 'static,
 {
     fn service(&self) {
         self.pump.service()

@@ -147,6 +147,19 @@ impl SessionDatagramLink for Feed {
     }
 }
 
+/// The pump is put behind a cell's handle of the heap when its session shares it, and read as its
+/// own type.
+impl<N: wz_runtime_coop::link_cells::CountKind> wz_runtime_coop::session_drive::SharedPump<N>
+    for Feed
+{
+    type Link = Self;
+    type Sink = dyn BoxedLinkDriver;
+
+    fn share(self) -> Option<wz_runtime_coop::link_cells::CellRc<Self, N>> {
+        wz_runtime_coop::link_cells::CellRc::try_on_heap(self)
+    }
+}
+
 /// A client that dials the far end and waits for nothing: no listener, no redial, no idle wait,
 /// so a read returns as soon as its link has nothing more.
 fn config() -> CoopConfig {

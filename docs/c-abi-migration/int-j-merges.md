@@ -62,3 +62,29 @@ kept: the description walk is the lend, and it walks l3-queryable's layout.
   `qos` in the session's own copy (`798f8720aa`); the lane's version is
   kept. Debt-repay's `lent_declaration_tests` is kept and reads the shared
   writer: `write_wire` (`WireWrite`) in place of the copy's `encode`.
+
+## base-td (fcf3273d01)
+
+- `crates/wz-capi-coop/src/engine.rs`, `engine/replay.rs`: the lane gives a
+  link's actions and transmit handle the stack's sink type
+  (`LinkActions<C, SinkOf<L>>`, `LinkTx<'_, C, SinkOf<L>>`, `Wire<C, D>`).
+  The get and snapshot legs l3-queryable moved into `ask_get_legs` and
+  `ask_snapshot_legs`, and the single-link publish path
+  (`alone_run`, `send_leg_alone`), take the same types; the
+  `wz_interest_answer` gates of the integration are kept.
+- `crates/wz-session-core/src/session_actions.rs`,
+  `crates/wz-session-core/src/transport_tx.rs`: group-link-writer moved the
+  transmit walk into `transport_tx.rs`; the lane's change to that walk (a
+  joined message is written where the open frame lies, through
+  `OpenSlot::frame_mut`, and the slot is picked up only to be sent; a lease
+  is written through `TxLease::frame_mut`, no longer a `TxBuf` itself) is
+  applied there, line for line.
+- `crates/wz-runtime-coop/src/ip_stack.rs`, `ip_link.rs`: the lane makes a
+  stack's links one closed type (`IpLink`), with a variant for a `udp/`
+  port's peer; peer-prop made a dialled socket and a port's peer one driver
+  (`LinkSocket`, F6 of `peer-proportion.md`). Both are kept: in a build
+  that listens on `udp/` the `Udp` variant is a driver over `LinkSocket`
+  and a port's peer opens as that variant (`LinkSocket::Port`), so the
+  enum has no `Peer` variant and the driver is one body. `IpLink` and
+  `ClosedLink` forward `owes_write_if_free`, which an earlier lane added to
+  `SessionDatagramLink`.

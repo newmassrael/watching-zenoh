@@ -6,7 +6,7 @@
 //! session that only dials holds its dial role's face alone, and its text has none of this.
 
 use super::*;
-use wz_runtime_coop::faces::Dial;
+use wz_runtime_coop::faces::{Dial, DialNamed};
 // The work form's engine names these for every build; a read that steps each face where it lies
 // names them here.
 #[cfg(not(wz_round))]
@@ -182,7 +182,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if core.push_face(held, Link::Idle, 1) {
             core.transport
                 .links
-                .put_dial(at, Dial::begun(DialEndpoint::Named(named), begun));
+                .put_dial(at, Dial::named(DialNamed::apart(named), begun));
             // The read turns the face from its next turn on, which asks the dial where it lies.
             #[cfg(not(wz_round))]
             self.direct.hold_face(at, true);

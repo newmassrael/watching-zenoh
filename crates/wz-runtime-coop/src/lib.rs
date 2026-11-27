@@ -239,6 +239,15 @@ pub mod stream_link;
 #[cfg(feature = "session-unicast")]
 pub mod ip_stack;
 
+// The heap profile's links of that stack as one closed type, read as it or behind a table as the
+// build closes the set of links or leaves it open. Documented in its own `//!`.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+pub mod ip_link;
+
 // The faces of a session as its driver holds them: each face's link and where it stands, the dials
 // under way, the ports listened on, and the wait a read makes on all of them. Documented in its own
 // `//!`.

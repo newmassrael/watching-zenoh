@@ -62,7 +62,7 @@ use wz_session_core::session_fsm_unicast::SessionFsmUnicastEvent;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::text_out::{FixedText, TextOut};
 use wz_session_core::unicast_rx::RxReassembly;
-use wz_session_core::unicast_transport::{InputTurn, LinkWake, MadeLink, UnicastTransport};
+use wz_session_core::unicast_transport::{InputTurn, UnicastTransport};
 
 // The units a pump dispatched in place, by the path they took: the session receive's count.
 #[cfg(feature = "rx-in-place")]
@@ -1076,12 +1076,144 @@ pub enum LinkOpenError {
 /// profile is a driver moved into a slot of the session table with a pump over a
 /// handle to it (fixed-memory step S9c; `wz_session_lwip::session_host::SessionHost`).
 #[cfg(not(feature = "session-slot"))]
-pub struct OpenedLink<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
+pub struct OpenedLink<
+    P: SharedPump<N>,
+    N: crate::link_cells::CountKind = crate::link_cells::OneTask,
+> {
     /// What the session's actions send through: a counted handle on the cell the link's driver
-    /// lives in (`crate::link_cells`), counted as `N` counts the session's handles.
-    pub sink: crate::link_cells::CellRc<dyn BoxedLinkDriver, N>,
+    /// lives in (`crate::link_cells`), counted as `N` counts the session's handles, of the type the
+    /// pump names for it ([`SharedPump::Sink`]).
+    pub sink: crate::link_cells::CellRc<P::Sink, N>,
     /// What the drive loop services and takes datagrams from.
     pub pump: P,
+}
+
+/// A link of a stack whose set of links is open, as the session holds it: each handle reads the
+/// link behind the table of its trait.
+#[cfg(not(feature = "session-slot"))]
+impl<N: crate::link_cells::CountKind>
+    OpenedLink<crate::link_cells::CellRc<dyn SessionDatagramLink, N>, N>
+{
+    /// The two handles on `link`, the one cell they share: the sink the session's actions send
+    /// through behind [`BoxedLinkDriver`]'s table and the pump its loop reads behind
+    /// [`SessionDatagramLink`]'s, the last of them to go giving the cell back.
+    pub fn behind_tables<K: BoxedLinkDriver + SessionDatagramLink + 'static>(
+        link: crate::link_cells::CellRc<K, N>,
+    ) -> Self {
+        Self {
+            sink: link.clone().into_sink(),
+            pump: link.into_link(),
+        }
+    }
+}
+
+/// A link as a handle on its cell can be read behind the table of [`SessionDatagramLink`]: what
+/// keeps a link to wait on it reads it so whatever type the stack's links are read as by the session
+/// that pumps them (`crate::faces::Wire`).
+#[cfg(not(feature = "session-slot"))]
+pub trait DynLink: SessionDatagramLink + 'static {
+    /// `link` read behind the table of [`SessionDatagramLink`].
+    fn into_dyn<N: crate::link_cells::CountKind>(
+        link: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn SessionDatagramLink, N>;
+}
+
+/// A link of a type of its own is read behind its type's table.
+#[cfg(not(feature = "session-slot"))]
+impl<T: SessionDatagramLink + 'static> DynLink for T {
+    fn into_dyn<N: crate::link_cells::CountKind>(
+        link: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn SessionDatagramLink, N> {
+        link.into_link()
+    }
+}
+
+/// A link already read behind the table is read so as it is.
+#[cfg(not(feature = "session-slot"))]
+impl DynLink for dyn SessionDatagramLink {
+    fn into_dyn<N: crate::link_cells::CountKind>(
+        link: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn SessionDatagramLink, N> {
+        link
+    }
+}
+
+/// What a session's actions send through, as a handle on its cell, can be sent through behind the
+/// table of [`BoxedLinkDriver`]: what joins the sinks of two stacks into one type sends through
+/// them so (`crate::either_links::EitherLinks`).
+#[cfg(not(feature = "session-slot"))]
+pub trait DynSink: BoxedLinkDriver + 'static {
+    /// `sink` sent through behind the table of [`BoxedLinkDriver`].
+    fn into_dyn_sink<N: crate::link_cells::CountKind>(
+        sink: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn BoxedLinkDriver, N>;
+}
+
+/// A driver of a type of its own is sent through behind its type's table.
+#[cfg(not(feature = "session-slot"))]
+impl<T: BoxedLinkDriver + 'static> DynSink for T {
+    fn into_dyn_sink<N: crate::link_cells::CountKind>(
+        sink: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn BoxedLinkDriver, N> {
+        sink.into_sink()
+    }
+}
+
+/// A sink already behind the table is sent through so as it is.
+#[cfg(not(feature = "session-slot"))]
+impl DynSink for dyn BoxedLinkDriver {
+    fn into_dyn_sink<N: crate::link_cells::CountKind>(
+        sink: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn BoxedLinkDriver, N> {
+        sink
+    }
+}
+
+/// What a stack's pump ([`SessionLinks::Pump`]) is once whatever reads the link shares it: one
+/// handle on a cell, whose clones the session's gates over the link and its loop read the same link
+/// through, of the type the link is read as ([`Self::Link`]). A pump that is such a handle already
+/// is shared as it is, so its link is behind one pointer and not two, and read as the type it names:
+/// a stack whose links are one closed type has them read as that type, with no table.
+#[cfg(not(feature = "session-slot"))]
+pub trait SharedPump<N: crate::link_cells::CountKind = crate::link_cells::OneTask>:
+    SessionDatagramLink + Sized + 'static
+{
+    /// The type the shared handle reads the link as.
+    type Link: ?Sized + DynLink;
+
+    /// The type the session's actions send through the link as ([`OpenedLink::sink`]): the
+    /// stack's own type where its set of links is closed, the driver's trait where it is open.
+    type Sink: ?Sized + DynSink;
+
+    /// The pump as one shared handle; `None`, with the pump let go of, when the heap has no room
+    /// for the handle's cell.
+    fn share(self) -> Option<crate::link_cells::CellRc<Self::Link, N>>;
+}
+
+/// A link in a cell is shared already: the pump is the handle the sink is a clone of.
+#[cfg(not(feature = "session-slot"))]
+impl<T: ?Sized + DynLink, N: crate::link_cells::CountKind> SharedPump<N>
+    for crate::link_cells::CellRc<T, N>
+{
+    type Link = T;
+    type Sink = dyn BoxedLinkDriver;
+
+    fn share(self) -> Option<Self> {
+        Some(self)
+    }
+}
+
+/// A pump behind a counted pointer of its own is shared behind a cell's handle of the heap.
+#[cfg(not(feature = "session-slot"))]
+impl<T: ?Sized + SessionDatagramLink + 'static, N: crate::link_cells::CountKind> SharedPump<N>
+    for Rc<T>
+{
+    type Link = Self;
+    type Sink = dyn BoxedLinkDriver;
+
+    fn share(self) -> Option<crate::link_cells::CellRc<Self, N>> {
+        crate::link_cells::CellRc::try_on_heap(self)
+    }
 }
 
 /// What a network stack gives a session shell that is written once for all of
@@ -1099,8 +1231,9 @@ pub struct OpenedLink<P, N: crate::link_cells::CountKind = crate::link_cells::On
 /// stack serves the sessions whose lock kind counts them so (`LockKind::LinkCount`).
 #[cfg(not(feature = "session-slot"))]
 pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
-    /// What the drive loop pumps for a link this stack opened.
-    type Pump: SessionDatagramLink + 'static;
+    /// What the drive loop pumps for a link this stack opened, and how whatever reads the link
+    /// shares it ([`SharedPump`]).
+    type Pump: SharedPump<N>;
 
     /// A dial this stack began ([`Self::begin_initiator`]), held by value where the session holds
     /// its face: one type for each stack, so a dial is neither boxed nor called through a table of
@@ -1235,18 +1368,21 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
         let _ = (endpoint, group);
         Err(LinkOpenError::Unsupported)
     }
-
-    /// The link `pump` as one handle that whatever reads it shares: a session's gates over it and
-    /// its loop reach the same link through clones of this. The default puts the
-    /// pump behind a pointer of its own; a stack whose pump is already a shared handle hands that
-    /// handle back, so its link is behind one pointer and not two. `None`, with `pump` let go
-    /// of, when the heap has no room for the pointer.
-    fn share_pump(
-        pump: Self::Pump,
-    ) -> Option<crate::link_cells::CellRc<dyn SessionDatagramLink, N>> {
-        crate::link_cells::CellRc::<Self::Pump, N>::try_on_heap(pump).map(|cell| cell.into_link())
-    }
 }
+
+/// A stack whose set of links is open: the sink of each link it opens is read behind
+/// [`BoxedLinkDriver`]'s table ([`SharedPump::Sink`]), which is the driver a session of the
+/// heap profile's handle sends through ([`SessionHandle`] at its default driver, the handle
+/// [`spawn_session`] runs). A node that opens such sessions over whichever stack it is given asks
+/// its stack for this; a stack whose set is closed sends through its own type, and a session over
+/// it is one whose actions are keyed on that type.
+///
+/// Absent under `session-slot`, with [`SessionLinks`].
+#[cfg(not(feature = "session-slot"))]
+pub trait OpenSetLinks: SessionLinks<Pump: SharedPump<Sink = dyn BoxedLinkDriver>> {}
+
+#[cfg(not(feature = "session-slot"))]
+impl<L: SessionLinks<Pump: SharedPump<Sink = dyn BoxedLinkDriver>>> OpenSetLinks for L {}
 
 /// The accepting end of a stream protocol: a port a node listens on, and the links of the
 /// connections that arrive on it. It is a value the node holds and polls from its loop, like the
@@ -1256,7 +1392,11 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
 ///
 /// Absent under `session-slot`, with [`OpenedLink`] (see there).
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub trait LinkListener<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
+pub trait LinkListener<
+    P: SharedPump<N>,
+    N: crate::link_cells::CountKind = crate::link_cells::OneTask,
+>
+{
     /// The locator the listener is bound to, with the port the stack chose when the one asked
     /// for was 0.
     fn local(&self) -> Locator;
@@ -1287,7 +1427,11 @@ pub trait LinkListener<P, N: crate::link_cells::CountKind = crate::link_cells::O
 /// A dial begun and not yet answered ([`SessionLinks::begin_initiator`]), asked without waiting
 /// whether its link has been made.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub trait PendingDial<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
+pub trait PendingDial<
+    P: SharedPump<N>,
+    N: crate::link_cells::CountKind = crate::link_cells::OneTask,
+>
+{
     /// The link, once its connection is made; the refusal, once the other end or the stack has
     /// refused it; `None` while it is still being made, and after it has answered.
     fn poll(&mut self) -> Option<Result<OpenedLink<P, N>, LinkOpenError>>;
@@ -1296,12 +1440,12 @@ pub trait PendingDial<P, N: crate::link_cells::CountKind = crate::link_cells::On
 /// A dial whose link was made by the time it was begun: what a stack whose dials do not wait
 /// answers [`SessionLinks::begin_initiator`] with.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub struct Dialled<P, N: crate::link_cells::CountKind = crate::link_cells::OneTask>(
+pub struct Dialled<P: SharedPump<N>, N: crate::link_cells::CountKind = crate::link_cells::OneTask>(
     Option<OpenedLink<P, N>>,
 );
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<P, N: crate::link_cells::CountKind> Dialled<P, N> {
+impl<P: SharedPump<N>, N: crate::link_cells::CountKind> Dialled<P, N> {
     /// The dial whose link is `opened`.
     pub fn new(opened: OpenedLink<P, N>) -> Self {
         Self(Some(opened))
@@ -1309,14 +1453,14 @@ impl<P, N: crate::link_cells::CountKind> Dialled<P, N> {
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<P, N: crate::link_cells::CountKind> PendingDial<P, N> for Dialled<P, N> {
+impl<P: SharedPump<N>, N: crate::link_cells::CountKind> PendingDial<P, N> for Dialled<P, N> {
     fn poll(&mut self) -> Option<Result<OpenedLink<P, N>, LinkOpenError>> {
         self.0.take().map(Ok)
     }
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<P, N: crate::link_cells::CountKind> From<OpenedLink<P, N>> for Dialled<P, N> {
+impl<P: SharedPump<N>, N: crate::link_cells::CountKind> From<OpenedLink<P, N>> for Dialled<P, N> {
     fn from(opened: OpenedLink<P, N>) -> Self {
         Self::new(opened)
     }
@@ -1512,7 +1656,7 @@ pub struct SessionPump<
     /// the pump asks how long its link may wait and hands the time, keeping no deadline of its
     /// own. Under `session-slot` it lives in the pump, and the pump in a cell of a `PumpSlots`
     /// table, so a datagram costs the heap nothing.
-    transport: UnicastTransport<R, MadeLink>,
+    transport: UnicastTransport<R>,
 }
 
 /// The session of one link a pump steps, apart from the transport it is stepped with: the
@@ -1683,13 +1827,13 @@ impl<
     ) -> Option<&mut Self> {
         let at = place.as_mut_ptr();
         // SAFETY: `at` is `place`, valid for writes of a `Self`, and the transport's field is lent
-        // as the uninitialised place `MaybeUninit<UnicastTransport<R, MadeLink>>` lays out as a
-        // `UnicastTransport<R, MadeLink>`.
+        // as the uninitialised place `MaybeUninit<UnicastTransport<R>>` lays out as a
+        // `UnicastTransport<R>`.
         let transport = unsafe {
             &mut *core::ptr::addr_of_mut!((*at).transport)
-                .cast::<MaybeUninit<UnicastTransport<R, MadeLink>>>()
+                .cast::<MaybeUninit<UnicastTransport<R>>>()
         };
-        UnicastTransport::init_made_in(transport, fields.config.timeouts, make_router)?;
+        UnicastTransport::init_in(transport, fields.config.timeouts, make_router)?;
         // SAFETY: the transport is written, and the session is written by `build_in`.
         unsafe {
             Self::build_in(place, runtime, fields, |_, _| {});
@@ -1711,7 +1855,7 @@ impl<
     ) -> Self {
         let mut place = MaybeUninit::<Self>::uninit();
         // SAFETY: the transport is written in the place it is handed: `MaybeUninit::write` lends
-        // back the place it wrote, so `init_made_in` takes it as written. Then `build_in` has
+        // back the place it wrote, so `init_in` takes it as written. Then `build_in` has
         // written every field of the pump into `place`.
         unsafe {
             Self::build_in(
@@ -1725,9 +1869,8 @@ impl<
                     config,
                 },
                 |transport, timeouts| {
-                    let _ = UnicastTransport::init_made_in(transport, timeouts, |slot| {
-                        slot.write(reasm)
-                    });
+                    let _ =
+                        UnicastTransport::init_in(transport, timeouts, |slot| slot.write(reasm));
                 },
             );
             place.assume_init()
@@ -1748,7 +1891,7 @@ impl<
         place: &mut MaybeUninit<Self>,
         runtime: CoopRuntime<C, D, K>,
         fields: PumpFields<C, L, D, K>,
-        write_transport: impl FnOnce(&mut MaybeUninit<UnicastTransport<R, MadeLink>>, SessionTimeouts),
+        write_transport: impl FnOnce(&mut MaybeUninit<UnicastTransport<R>>, SessionTimeouts),
     ) {
         let at = place.as_mut_ptr();
         // SAFETY: `at` is valid for writes of a `Self` (it is `place`), and each of its two fields
@@ -1757,7 +1900,7 @@ impl<
         unsafe {
             write_transport(
                 &mut *core::ptr::addr_of_mut!((*at).transport)
-                    .cast::<MaybeUninit<UnicastTransport<R, MadeLink>>>(),
+                    .cast::<MaybeUninit<UnicastTransport<R>>>(),
                 fields.config.timeouts,
             );
             LinkSession::init_in(
@@ -1914,16 +2057,13 @@ impl<
     /// How long the loop may wait for a datagram before something of this session's, its
     /// transport's or this runtime's falls due, in milliseconds, rounded UP so the wait never
     /// ends before the deadline it was computed from: the earliest of the handshake deadline, the
-    /// lease deadline, the keep-alive deadline, the link's next look and the next registered
-    /// timer, less now. A deadline already past is 0, and `u64::MAX` is nothing due at all.
+    /// lease deadline, the keep-alive deadline and the next registered timer, less now. A
+    /// deadline already past is 0, and `u64::MAX` is nothing due at all.
     ///
     /// The session's deadlines are its transport's ([`UnicastTransport::due_ms`]), whose timers
     /// arm the handshake deadline of a state they see for the first time from this instant; the
     /// runtime's next timer is the driver's own.
-    fn wake_budget_ms<R: RxReassembly, Lf: LinkWake>(
-        &mut self,
-        transport: &mut UnicastTransport<R, Lf>,
-    ) -> u64 {
+    fn wake_budget_ms<R: RxReassembly>(&mut self, transport: &mut UnicastTransport<R>) -> u64 {
         let now_ms = self.clock.now_monotonic_ms();
         let due_ms = transport
             .due_ms(&self.engine, &self.actions, now_ms)
@@ -1951,9 +2091,9 @@ impl<
     /// ([`UnicastTransport::begin_input`]): what falls due before input is raised, one unit is
     /// taken, and the timers are handed the time after it, so the lease is judged after what the
     /// peer sent last.
-    pub fn step<R: RxReassembly, Lf: LinkWake, F: EventSink>(
+    pub fn step<R: RxReassembly, F: EventSink>(
         &mut self,
-        transport: &mut UnicastTransport<R, Lf>,
+        transport: &mut UnicastTransport<R>,
         on_event: &mut F,
     ) -> Option<DriverOutcome> {
         match self.open_step(transport) {
@@ -1990,9 +2130,9 @@ impl<
     /// the pump itself calls when something of the session is due ([`Self::due_ms`],
     /// [`Self::owes_out_of_band`]) and not at every unit of input. `Some(outcome)` once the
     /// session is finished.
-    pub fn service_due<R: RxReassembly, Lf: LinkWake, F: EventSink>(
+    pub fn service_due<R: RxReassembly, F: EventSink>(
         &mut self,
-        transport: &mut UnicastTransport<R, Lf>,
+        transport: &mut UnicastTransport<R>,
         now_ms: u64,
         on_event: &mut F,
     ) -> Option<DriverOutcome> {
@@ -2009,9 +2149,9 @@ impl<
     /// none of the bookkeeping of [`Self::service_due`] ([`UnicastTransport::input_at`]): whether
     /// a unit was taken. None is taken while the Router is not lent to the receive, when the link
     /// holds nothing, or when the link is gone, which the session is then told.
-    pub fn take_input_now<R: RxReassembly, Lf, F: EventSink>(
+    pub fn take_input_now<R: RxReassembly, F: EventSink>(
         &mut self,
-        transport: &mut UnicastTransport<R, Lf>,
+        transport: &mut UnicastTransport<R>,
         now_ms: u64,
         on_event: &mut F,
     ) -> bool {
@@ -2021,12 +2161,12 @@ impl<
 
     /// The first instant, in the session's monotonic milliseconds, at which this session's
     /// bookkeeping falls due ([`Self::service_due`]): its transport's ([`UnicastTransport::due_ms`]:
-    /// the handshake's, the lease's, the keep-alive's, the application layer's and the link's next
-    /// look) and the runtime's next timer. A Router the transport is lent keeps the deadline of
+    /// the handshake's, the lease's, the keep-alive's and the application layer's) and the
+    /// runtime's next timer. A Router the transport is lent keeps the deadline of
     /// its chains with its owner, which sweeps it. `None` when nothing is armed.
-    pub fn due_ms<R: RxReassembly, Lf: LinkWake>(
+    pub fn due_ms<R: RxReassembly>(
         &mut self,
-        transport: &mut UnicastTransport<R, Lf>,
+        transport: &mut UnicastTransport<R>,
         now_ms: u64,
     ) -> Option<u64> {
         let session = transport.due_ms(&self.engine, &self.actions, now_ms);
@@ -2050,10 +2190,7 @@ impl<
     /// The part of an iteration before the clock is read: the role's deferred activation, the end
     /// of a finished session or of the test iteration cap, a request from outside the loop, which
     /// ends the iteration once raised, and the link's own service.
-    fn open_step<R: RxReassembly, Lf: LinkWake>(
-        &mut self,
-        transport: &mut UnicastTransport<R, Lf>,
-    ) -> Opened {
+    fn open_step<R: RxReassembly>(&mut self, transport: &mut UnicastTransport<R>) -> Opened {
         // The role's activation, deferred from the pump's making (`session-slot`).
         #[cfg(feature = "session-slot")]
         if let Some(role) = self.pending_role.take() {
@@ -2092,11 +2229,11 @@ impl<
     /// (a stream whose peer closed it), tell the session, after everything queued before the end
     /// was read, which ends the turn: `None`. Otherwise the turn back, with whether a unit was
     /// taken.
-    fn take_or_lose<'t, R: RxReassembly, Lf, F: EventSink>(
+    fn take_or_lose<'t, R: RxReassembly, F: EventSink>(
         &mut self,
-        mut turn: InputTurn<'t, R, Lf>,
+        mut turn: InputTurn<'t, R>,
         on_event: &mut F,
-    ) -> Option<(InputTurn<'t, R, Lf>, bool)> {
+    ) -> Option<(InputTurn<'t, R>, bool)> {
         let took = self.take_input(&mut turn, on_event);
         // What the link let go of before the session could read it is charged before the link
         // is judged gone, so the drops of its last receives are counted with the session's.
@@ -2117,9 +2254,9 @@ impl<
     /// Hand the session one unit of input through `turn`, when the link has one: the parked
     /// remainder of the last unit first, then the link's next datagram. Whether a unit was handed.
     #[cfg(any(feature = "alloc", feature = "rx-in-place"))]
-    fn take_input<R: RxReassembly, Lf, F: EventSink>(
+    fn take_input<R: RxReassembly, F: EventSink>(
         &mut self,
-        turn: &mut InputTurn<'_, R, Lf>,
+        turn: &mut InputTurn<'_, R>,
         on_event: &mut F,
     ) -> bool {
         // R311y632 (§17) — the parked remainder of the LAST unit first. A unit
@@ -2178,9 +2315,9 @@ impl<
 
     /// A build with neither receive takes no input.
     #[cfg(not(any(feature = "alloc", feature = "rx-in-place")))]
-    fn take_input<R: RxReassembly, Lf, F: EventSink>(
+    fn take_input<R: RxReassembly, F: EventSink>(
         &mut self,
-        _turn: &mut InputTurn<'_, R, Lf>,
+        _turn: &mut InputTurn<'_, R>,
         _on_event: &mut F,
     ) -> bool {
         false
@@ -2321,9 +2458,9 @@ impl<D, H> MakeRouter<wz_session_core::unicast_rx::RouterLend<D, H>>
 /// Out of line: the task's future is built here, apart from the frame and body of the caller.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 #[inline(never)]
-pub fn spawn_session_with_router<C, L, R, M, F, K>(
+pub fn spawn_session_with_router<C, L, R, M, F, K, D>(
     local: &CoopLocalSet<C>,
-    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
+    fields: PumpFields<C, L, D, K>,
     make_router: M,
     on_event: F,
 ) -> Result<CoopLocalJoinHandle<DriverOutcome>, crate::executor::SpawnRefusal>
@@ -2334,10 +2471,12 @@ where
     M: MakeRouter<R> + 'static,
     F: EventSink + 'static,
     K: LockKind,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
-    let mut task = local.claim_local::<RouterSessionTask<C, L, R, M, F, K>>()?;
-    // The local set's runtime, read under the lock type of the session's values.
-    let runtime: CoopRuntime<C, dyn BoxedLinkDriver, K> = local.runtime().retyped();
+    let mut task = local.claim_local::<RouterSessionTask<C, L, R, M, F, K, D>>()?;
+    // The local set's runtime, read under the lock type of the session's values and as sending
+    // through the type of its link's sink.
+    let runtime: CoopRuntime<C, D, K> = local.runtime().retyped();
     let at = task.as_mut_ptr();
     // SAFETY: the place is this claim's alone, long enough and aligned for the task. Every field of
     // the task is written in it here, once, before the task starts: the parts whole, in the place
@@ -2363,18 +2502,19 @@ where
 /// frame.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
 #[inline(never)]
-pub fn place_session_with_router<C, L, R, M, K>(
-    place: &mut MaybeUninit<SessionPump<C, L, dyn BoxedLinkDriver, R, K>>,
-    runtime: CoopRuntime<C, dyn BoxedLinkDriver, K>,
-    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
+pub fn place_session_with_router<C, L, R, M, K, D>(
+    place: &mut MaybeUninit<SessionPump<C, L, D, R, K>>,
+    runtime: CoopRuntime<C, D, K>,
+    fields: PumpFields<C, L, D, K>,
     make_router: M,
-) -> Option<&mut SessionPump<C, L, dyn BoxedLinkDriver, R, K>>
+) -> Option<&mut SessionPump<C, L, D, R, K>>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
     M: MakeRouter<R>,
     K: LockKind,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
     SessionPump::with_router_in(place, runtime, fields, |router| make_router.make_in(router))
 }
@@ -2385,15 +2525,16 @@ where
 /// opens. It builds the session's pump in its own memory at its first poll, then steps the session
 /// once each poll and yields, as a loop of [`SessionPump::step`] and [`yield_now`] does.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-pub struct RouterSessionTask<C, L, R, M, F, K = crate::sync::Shared>
+pub struct RouterSessionTask<C, L, R, M, F, K = crate::sync::Shared, D = dyn BoxedLinkDriver>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
     R: RxReassembly + 'static,
     K: LockKind,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
     /// What the pump is made of until the task first runs, and then the pump, in the same bytes.
-    place: TaskPlace<C, L, R, M, K>,
+    place: TaskPlace<C, L, R, M, K, D>,
     on_event: F,
     /// The pump is built in `place` and points into itself: the task stays where it is polled.
     _pinned: core::marker::PhantomPinned,
@@ -2401,19 +2542,19 @@ where
 
 /// The place a [`RouterSessionTask`] holds its pump's parts in, and then its pump.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-type TaskPlace<C, L, R, M, K> =
-    Becomes<PumpParts<C, L, M, K>, SessionPump<C, L, dyn BoxedLinkDriver, R, K>>;
+type TaskPlace<C, L, R, M, K, D> = Becomes<PumpParts<C, L, M, K, D>, SessionPump<C, L, D, R, K>>;
 
 /// What a [`RouterSessionTask`] builds its pump of.
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-struct PumpParts<C: ClockSource + 'static, L, M, K: LockKind> {
-    runtime: CoopRuntime<C, dyn BoxedLinkDriver, K>,
-    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
+struct PumpParts<C: ClockSource + 'static, L, M, K: LockKind, D: BoxedLinkDriver + ?Sized + 'static>
+{
+    runtime: CoopRuntime<C, D, K>,
+    fields: PumpFields<C, L, D, K>,
     make_router: M,
 }
 
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-impl<C, L, R, M, F, K> core::future::Future for RouterSessionTask<C, L, R, M, F, K>
+impl<C, L, R, M, F, K, D> core::future::Future for RouterSessionTask<C, L, R, M, F, K, D>
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
@@ -2421,6 +2562,7 @@ where
     M: MakeRouter<R>,
     F: EventSink,
     K: LockKind,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
     type Output = DriverOutcome;
 
@@ -2459,7 +2601,7 @@ where
 /// gives its cells, so that a layer that grows is a number that follows and not a spawn that is
 /// refused ([`crate::executor::SpawnRefusal::TooLarge`]).
 #[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
-pub const fn router_session_task_bytes<C, L, R, M, F, K>() -> usize
+pub const fn router_session_task_bytes<C, L, R, M, F, K, D>() -> usize
 where
     C: ClockSource + 'static,
     L: SessionDatagramLink + 'static,
@@ -2467,8 +2609,9 @@ where
     M: MakeRouter<R>,
     F: EventSink,
     K: LockKind,
+    D: BoxedLinkDriver + ?Sized + 'static,
 {
-    crate::executor::cell_bytes_for::<RouterSessionTask<C, L, R, M, F, K>>()
+    crate::executor::cell_bytes_for::<RouterSessionTask<C, L, R, M, F, K, D>>()
 }
 
 /// The bytes a task's pump is built in, which hold what the pump is made of until it is: the parts
@@ -2939,14 +3082,12 @@ impl<
                 // `MaybeUninit::write` lends back the place it wrote, so the transport is written.
                 #[cfg(feature = "reassembly")]
                 |transport, timeouts| {
-                    let _ = UnicastTransport::init_made_in(transport, timeouts, |slot| {
-                        slot.write(reasm)
-                    });
+                    let _ =
+                        UnicastTransport::init_in(transport, timeouts, |slot| slot.write(reasm));
                 },
                 #[cfg(not(feature = "reassembly"))]
                 |transport, timeouts| {
-                    let _ =
-                        UnicastTransport::init_made_in(transport, timeouts, |slot| slot.write(()));
+                    let _ = UnicastTransport::init_in(transport, timeouts, |slot| slot.write(()));
                 },
             );
         }
@@ -3749,6 +3890,7 @@ mod wake_budget_tests {
             CountedRouter,
             Sink,
             crate::sync::Shared,
+            dyn BoxedLinkDriver,
         >();
         for (cell, fits) in [(bytes, true), (bytes - 1, false)] {
             let runtime = CoopRuntime::try_reserved(
@@ -3898,6 +4040,7 @@ mod wake_budget_tests {
             CountedRouter,
             Sink,
             crate::sync::Shared,
+            dyn BoxedLinkDriver,
         >();
         let runtime = CoopRuntime::try_opening(
             Released,
@@ -4077,14 +4220,11 @@ mod wake_budget_tests {
         );
     }
 
-    /// A session stepped with a transport its owner keeps, over a link whose life the transport
-    /// holds, is due when the life asks for a look as well as when its own timers are: a life
-    /// that owes a dial a report makes it due at once. Turned red by a `LinkSession::due_ms` that
-    /// reads the session's timers and leaves the transport's life out.
+    /// A session stepped with a transport its owner keeps is due when that transport's timers
+    /// are: at the application layer's deadline its actions hold. Turned red by a
+    /// `LinkSession::due_ms` that leaves the transport it is handed out.
     #[test]
-    fn a_session_stepped_with_its_owners_transport_is_due_at_the_links_look() {
-        use wz_session_core::link_life::{LinkInput, LinkTimes, UnicastLink};
-
+    fn a_session_stepped_with_its_owners_transport_is_due_at_that_transports_timers() {
         let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
         let clock = CoopTime::new(&runtime);
         let sink = crate::link_cells::heap_sink(Null).expect("the heap has room");
@@ -4104,35 +4244,23 @@ mod wake_budget_tests {
         };
         let mut session_place = MaybeUninit::<LinkSession<Stopped, Rc<Recording>>>::uninit();
         let session = LinkSession::init_in(&mut session_place, runtime, fields);
-        let mut transport_place = MaybeUninit::<UnicastTransport<(), UnicastLink>>::uninit();
+        let mut transport_place = MaybeUninit::<UnicastTransport<()>>::uninit();
         let transport = UnicastTransport::init_in(
             &mut transport_place,
-            LinkTimes {
-                open_timeout_ms: 1_000,
-                redial_ms: None,
-                dial_look_ms: 10,
-                accept_timeout_ms: 1_000,
-            },
-            1,
             SessionTimeouts::from_build(),
             |slot| slot.write(()),
         )
         .expect("built");
         assert_ne!(
             session.due_ms(transport, now_ms),
-            Some(now_ms),
-            "an idle life and a handshake just begun are not due now"
+            Some(now_ms + 3),
+            "nothing of the session's is due at that instant yet"
         );
-        assert_eq!(
-            transport
-                .input(LinkInput::Open, now_ms.saturating_mul(1000))
-                .dial(),
-            Some(0)
-        );
+        session.actions.set_app_wake_deadline_ms(Some(now_ms + 3));
         assert_eq!(
             session.due_ms(transport, now_ms),
-            Some(now_ms),
-            "a dial owed a report is looked at now"
+            Some(now_ms + 3),
+            "the deadline the owner's transport reads"
         );
     }
 

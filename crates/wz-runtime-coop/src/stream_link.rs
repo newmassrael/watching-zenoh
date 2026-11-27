@@ -66,7 +66,9 @@ use crate::link_storage::HeapTx;
 use crate::link_storage::{RxStore, TxStore};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::session_drive::WaitOn;
-use crate::session_drive::{LinkOpenError, LinkProto, SessionDatagramLink};
+use crate::session_drive::{
+    InputWaiter, LinkOpenError, LinkProto, SessionDatagramLink, WaitsInLoop,
+};
 use crate::udp_link::{ends_fit, SERVICE_WAIT_MS};
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
@@ -83,9 +85,10 @@ pub trait StreamSocket: Sized {
     type Error: Copy + Debug;
 
     /// The link a stack holds over this stream: [`StreamDriver`] over it, for every stream there
-    /// is one of. [`NoStream`] names itself, a link there is none of, so the case a stack keeps
-    /// for a protocol it does not carry holds nothing and no code serves it.
-    type Link<B: RxStore + 'static, X: TxStore + 'static>: StreamLink<Self, B, X>
+    /// is one of, of the type that says who waits for its input (`W`, the stack's). [`NoStream`]
+    /// names itself, a link there is none of, so the case a stack keeps for a protocol it does not
+    /// carry holds nothing and no code serves it.
+    type Link<B: RxStore + 'static, X: TxStore + 'static, W: InputWaiter>: StreamLink<Self, B, X>
     where
         Self: 'static;
 
@@ -102,6 +105,13 @@ pub trait StreamSocket: Sized {
     /// makes the next frame ask ([`Self::wait_writable`]). A stream whose write waits is asked
     /// before every frame, its write saying nothing of the room left.
     const WRITES_NOW: bool = false;
+
+    /// Whether every stream of this type names a wait its link's owner can make for its input
+    /// (`input_wait` answers one for each stream opened). A constant, so that a link over
+    /// such a stream, made by a stack whose owner waits for every link ([`InputWaiter`]), is
+    /// compiled with no wait of its own. The provided answer is no: a link over the stream then
+    /// asks it when the link is made.
+    const NAMES_INPUT_WAIT: bool = false;
 
     /// Write `bytes`, in order, as far as the stream takes them: how many it took. A stream that
     /// writes without waiting ([`Self::WRITES_NOW`]) takes what it has room for, `0` when
@@ -286,6 +296,13 @@ pub trait StreamLink<S, B, X>: BoxedLinkDriver + SessionDatagramLink + Sized {
     /// The link over the connected `socket`, receiving into `rx` and building its frames in `tx`.
     fn over(socket: S, rx: B, tx: X) -> Self;
 
+    /// [`Self::over`] written in `place`, where the link stays, and lent: what a stack that
+    /// opens the link in a cell makes it with. A link that writes itself field by field there
+    /// ([`StreamDriver::framed_in`]) builds no whole value in its maker's frame to move in.
+    fn over_in(place: &mut MaybeUninit<Self>, socket: S, rx: B, tx: X) -> &mut Self {
+        place.write(Self::over(socket, rx, tx))
+    }
+
     /// Have the link's owner wait on it, where the link lies ([`StreamDriver::wait_by_owner`]).
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn wait_by_owner(&mut self);
@@ -406,14 +423,32 @@ impl<'a> StreamEnds<'a> {
     }
 }
 
-/// The link a stack holds over the connected `socket` ([`StreamSocket::Link`]).
-pub fn link_over<S, B, X>(socket: S, rx: B, tx: X) -> S::Link<B, X>
+/// The link a stack holds over the connected `socket`, whose input `W` waits for
+/// ([`StreamSocket::Link`]).
+pub fn link_over<S, B, X, W>(socket: S, rx: B, tx: X) -> S::Link<B, X, W>
 where
     S: StreamSocket + 'static,
     B: RxStore + 'static,
     X: TxStore + 'static,
+    W: InputWaiter,
 {
-    <S::Link<B, X> as StreamLink<S, B, X>>::over(socket, rx, tx)
+    <S::Link<B, X, W> as StreamLink<S, B, X>>::over(socket, rx, tx)
+}
+
+/// [`link_over`] written in `place`, where the link stays, and lent ([`StreamLink::over_in`]).
+pub fn link_over_in<S, B, X, W>(
+    place: &mut MaybeUninit<S::Link<B, X, W>>,
+    socket: S,
+    rx: B,
+    tx: X,
+) -> &mut S::Link<B, X, W>
+where
+    S: StreamSocket + 'static,
+    B: RxStore + 'static,
+    X: TxStore + 'static,
+    W: InputWaiter,
+{
+    <S::Link<B, X, W> as StreamLink<S, B, X>>::over_in(place, socket, rx, tx)
 }
 
 /// The dial of a stream protocol a stack does not carry: an image with no secure channel names
@@ -428,7 +463,7 @@ pub enum NoStream {}
 impl StreamSocket for NoStream {
     type Error = core::convert::Infallible;
 
-    type Link<B: RxStore + 'static, X: TxStore + 'static>
+    type Link<B: RxStore + 'static, X: TxStore + 'static, W: InputWaiter>
         = NoStream
     where
         Self: 'static;
@@ -838,7 +873,18 @@ fn front(held: &[u8], capacity: usize) -> Front {
 /// The peer is the other end of the connection, so the link has no binding to make: what arrives
 /// is the peer's. The receive buffer bounds the batch the link takes, and so the batch the session
 /// advertises ([`BoxedLinkDriver::link_rx_capacity`]).
-pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming = LengthPrefix> {
+///
+/// `W` is who waits for the link's input ([`InputWaiter`]), as the stack that made it says: a
+/// link of a stack whose owner waits for every link, over a stream that always names its wait
+/// ([`StreamSocket::NAMES_INPUT_WAIT`]), has no wait of its own, and its service writes what it
+/// owes and nothing else.
+pub struct StreamDriver<
+    S: StreamSocket,
+    B: RxStore,
+    T: TxStore,
+    F: StreamFraming = LengthPrefix,
+    W = WaitsInLoop,
+> {
     socket: S,
     /// How batches lie on the stream.
     framing: F,
@@ -854,6 +900,8 @@ pub struct StreamDriver<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFramin
     /// Whether the link's owner waits on its stream ([`Self::waited_by_owner`]), so its loop does
     /// not.
     owner_waits: bool,
+    /// Who waits for the link's input, as the stack that made it says.
+    waiter: core::marker::PhantomData<fn() -> W>,
 }
 
 /// The half of a [`StreamDriver`] a receive reaches: the buffer the stream is read into and what
@@ -1169,18 +1217,61 @@ impl<S: StreamSocket, B: RxStore, T: TxStore> StreamDriver<S, B, T> {
     pub fn over(socket: S, rx_buf: B, tx: T) -> Self {
         Self::framed(socket, rx_buf, 0, tx, LengthPrefix)
     }
+
+    /// [`Self::over`] written in `place`, where the link stays, and lent
+    /// ([`Self::framed_in`]).
+    pub fn over_in(place: &mut MaybeUninit<Self>, socket: S, rx_buf: B, tx: T) -> &mut Self {
+        Self::framed_in(place, socket, rx_buf, 0, tx, LengthPrefix)
+    }
 }
 
-impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, B, T, F> {
+impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming, W: InputWaiter>
+    StreamDriver<S, B, T, F, W>
+{
     /// The link over the connected `socket`, its batches framed by `framing`, receiving into
     /// `rx_buf`, whose first `held` bytes were read off the stream already (what followed a
     /// handshake the link's maker ran in it), and building its frames in `tx`.
-    pub fn framed(socket: S, mut rx_buf: B, held: usize, tx: T, framing: F) -> Self {
+    pub fn framed(socket: S, rx_buf: B, held: usize, tx: T, framing: F) -> Self {
+        let mut place = MaybeUninit::uninit();
+        Self::framed_in(&mut place, socket, rx_buf, held, tx, framing);
+        // SAFETY: `framed_in` wrote every field of the driver in `place`.
+        unsafe { place.assume_init() }
+    }
+
+    /// [`Self::framed`] written field by field in `place`, where the link stays, and lent: a
+    /// stack that opens the link in a cell writes it there, and no whole driver is built in its
+    /// frame and moved into the cell. `place` is overwritten without dropping what it held.
+    pub fn framed_in(
+        place: &mut MaybeUninit<Self>,
+        socket: S,
+        mut rx_buf: B,
+        held: usize,
+        tx: T,
+        framing: F,
+    ) -> &mut Self {
+        // A field added to the driver and not written below would be read uninitialised. This
+        // names every field with no `..`, so adding one without naming it here (and so without
+        // writing it below) does not compile.
+        let _every_field_is_written = |driver: &Self| {
+            let Self {
+                socket: _,
+                framing: _,
+                rx: _,
+                tx: _,
+                lost: _,
+                error: _,
+                owner_waits: _,
+                waiter: _,
+            } = driver;
+        };
         let rx_len = rx_buf.capacity();
-        Self {
-            socket,
-            framing,
-            rx: RxHalf {
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is the place, aligned for the driver and this call's alone; each field is
+        // written once, in place, and then the driver is whole.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).socket).write(socket);
+            core::ptr::addr_of_mut!((*at).framing).write(framing);
+            core::ptr::addr_of_mut!((*at).rx).write(RxHalf {
                 buf: RefCell::new(rx_buf),
                 len: rx_len,
                 held: Cell::new(held.min(rx_len)),
@@ -1195,11 +1286,13 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
                 keeping: Cell::new(false),
                 #[cfg(feature = "alloc")]
                 drops: crate::link_storage::RxDrops::new(),
-            },
-            tx: TxHalf::new(tx),
-            lost: Lost::standing(),
-            error: FirstError::none(),
-            owner_waits: false,
+            });
+            core::ptr::addr_of_mut!((*at).tx).write(TxHalf::new(tx));
+            core::ptr::addr_of_mut!((*at).lost).write(Lost::standing());
+            core::ptr::addr_of_mut!((*at).error).write(FirstError::none());
+            core::ptr::addr_of_mut!((*at).owner_waits).write(false);
+            core::ptr::addr_of_mut!((*at).waiter).write(core::marker::PhantomData);
+            place.assume_init_mut()
         }
     }
 
@@ -1219,6 +1312,14 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     pub fn wait_by_owner(&mut self) {
         self.owner_waits = self.socket.input_wait().is_some();
+    }
+
+    /// Whether the link's owner waits on its stream, so its loop does not: always for a link of a
+    /// stack whose owner waits for every link, over a stream that always names its wait, so no
+    /// wait of the loop's is compiled into it; otherwise as the link was set when it was made
+    /// (`wait_by_owner`).
+    fn owner_waits_input(&self) -> bool {
+        (W::OWNER && S::NAMES_INPUT_WAIT) || self.owner_waits
     }
 
     /// The failure the socket reported first, the one that ended the link, if it has failed.
@@ -1590,12 +1691,13 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
     }
 }
 
-impl<S, B, T, F> BoxedLinkDriver for StreamDriver<S, B, T, F>
+impl<S, B, T, F, W> BoxedLinkDriver for StreamDriver<S, B, T, F, W>
 where
     S: StreamSocket + 'static,
     B: RxStore + 'static,
     T: TxStore + 'static,
     F: StreamFraming + 'static,
+    W: InputWaiter,
 {
     // The bytes are copied into a slot the link lends and sent as one, so a frame handed over as
     // bytes takes the steps of a lent one, and the stream's answer to it is a lent frame's.
@@ -1821,12 +1923,13 @@ where
     }
 }
 
-impl<S, B, T, F> SessionDatagramLink for StreamDriver<S, B, T, F>
+impl<S, B, T, F, W> SessionDatagramLink for StreamDriver<S, B, T, F, W>
 where
     S: StreamSocket + 'static,
     B: RxStore + 'static,
     T: TxStore + 'static,
     F: StreamFraming + 'static,
+    W: InputWaiter,
 {
     fn service(&self) {
         // What the link owes the stream is written as far as the stream takes it, every step, unless
@@ -1839,7 +1942,7 @@ where
         // A whole batch already held (the last read brought two) is read without waiting, and a
         // link its owner waits on does not wait here. A link that still owes the stream waits its
         // tick for room instead of for input, and writes on when it has some.
-        if self.lost.get().is_none() && !self.batch_held() && !self.owner_waits {
+        if self.lost.get().is_none() && !self.batch_held() && !self.owner_waits_input() {
             if !self.owes() {
                 self.socket.wait_readable(SERVICE_WAIT_MS);
             } else if self.socket.wait_writable(SERVICE_WAIT_US).0 {
@@ -1896,7 +1999,7 @@ where
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn input_wait(&self) -> Option<WaitOn> {
-        if self.owner_waits {
+        if self.owner_waits_input() {
             self.socket.input_wait()
         } else {
             None
@@ -1932,14 +2035,19 @@ where
     }
 }
 
-impl<S, B, X> StreamLink<S, B, X> for StreamDriver<S, B, X>
+impl<S, B, X, W> StreamLink<S, B, X> for StreamDriver<S, B, X, LengthPrefix, W>
 where
     S: StreamSocket + 'static,
     B: RxStore + 'static,
     X: TxStore + 'static,
+    W: InputWaiter,
 {
     fn over(socket: S, rx: B, tx: X) -> Self {
-        StreamDriver::over(socket, rx, tx)
+        Self::framed(socket, rx, 0, tx, LengthPrefix)
+    }
+
+    fn over_in(place: &mut MaybeUninit<Self>, socket: S, rx: B, tx: X) -> &mut Self {
+        Self::framed_in(place, socket, rx, 0, tx, LengthPrefix)
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -2105,8 +2213,12 @@ mod tests {
     impl<const TRIES: bool> StreamSocket for Pipe<TRIES> {
         type Error = Broken;
 
-        type Link<B: RxStore + 'static, X: crate::link_storage::TxStore + 'static>
-            = crate::stream_link::StreamDriver<Self, B, X>
+        type Link<
+            B: RxStore + 'static,
+            X: crate::link_storage::TxStore + 'static,
+            W: crate::session_drive::InputWaiter,
+        >
+            = crate::stream_link::StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
         where
             Self: 'static;
 
@@ -2199,6 +2311,91 @@ mod tests {
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     const PIPE_HANDLE: usize = 7;
 
+    /// A link of a stack whose owner waits for every link, over a stream that always names its
+    /// wait, waits in no loop of its own though nothing was set on it when it was made: its
+    /// service leaves the stream unasked and it names its owner the stream's wait. The CONTROL is
+    /// the same link of a stack whose links wait in their own loop, whose service waits on the
+    /// stream and which names its owner no wait. Turned red by a link that reads its stack's type
+    /// as a loop's (`owner_waits_input` without `W::OWNER && S::NAMES_INPUT_WAIT`).
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_link_of_a_stack_its_owner_waits_for_has_no_wait_of_its_own() {
+        use crate::session_drive::WaitedByOwner;
+
+        /// The test's pipe, as a stream that always names its wait for its link's owner.
+        struct Named(Pipe);
+
+        impl StreamSocket for Named {
+            type Error = Broken;
+
+            type Link<B: RxStore + 'static, X: TxStore + 'static, W: InputWaiter>
+                = StreamDriver<Self, B, X, LengthPrefix, W>
+            where
+                Self: 'static;
+
+            const NAMES_INPUT_WAIT: bool = true;
+
+            fn ends(&self) -> StreamEnds<'_> {
+                self.0.ends()
+            }
+
+            fn write(&self, bytes: &[u8]) -> Result<usize, Broken> {
+                self.0.write(bytes)
+            }
+
+            fn wait_readable(&self, timeout_ms: c_int) {
+                self.0.wait_readable(timeout_ms);
+            }
+
+            fn try_read(&self, buf: &mut [u8]) -> Result<Option<usize>, Broken> {
+                self.0.try_read(buf)
+            }
+
+            fn shutdown(&self) {
+                self.0.shutdown();
+            }
+
+            fn input_wait(&self) -> Option<WaitOn> {
+                Some(WaitOn::Socket(PIPE_HANDLE))
+            }
+        }
+
+        /// The link a stack whose input `W` waits for makes over a fresh stream.
+        fn made<W: InputWaiter>() -> StreamDriver<Named, [u8; 34], Slots, LengthPrefix, W> {
+            <StreamDriver<Named, [u8; 34], Slots, LengthPrefix, W> as StreamLink<
+                Named,
+                [u8; 34],
+                Slots,
+            >>::over(
+                Named(Pipe::default()),
+                [0u8; 34],
+                Slots(UnsafeCell::new([0; 64])),
+            )
+        }
+
+        let waited = made::<WaitedByOwner>();
+        waited.service();
+        assert_eq!(waited.socket.0.waits.get(), 0, "no wait on the stream");
+        assert_eq!(
+            waited.input_wait(),
+            Some(WaitOn::Socket(PIPE_HANDLE)),
+            "the owner waits on the stream"
+        );
+
+        let looped = made::<WaitsInLoop>();
+        looped.service();
+        assert_eq!(
+            looped.socket.0.waits.get(),
+            1,
+            "CONTROL: the loop waits on the stream"
+        );
+        assert_eq!(
+            looped.input_wait(),
+            None,
+            "CONTROL: and names its owner no wait"
+        );
+    }
+
     /// A link names its socket's handle for a wait on its room whether or not its owner waits for
     /// its input (none does here), and names nothing for its input then. Turned red by a link
     /// whose room wait follows its owner's wait for input, or that names a handle for its input
@@ -2233,6 +2430,35 @@ mod tests {
     /// A link whose buffer takes a batch of 32 bytes behind its length.
     fn link() -> Link {
         StreamDriver::over(Pipe::default(), [0u8; 34], Slots(UnsafeCell::new([0; 64])))
+    }
+
+    /// A link written where it lies, as a stack opens one in a cell, is the link a value is: it
+    /// lies where it was handed, its receive holds nothing over the buffer it was given, and its
+    /// loop waits on its stream as a link made by value does. Turned red by a field
+    /// `framed_in` leaves unwritten or writes other than `framed` did.
+    #[test]
+    fn a_stream_link_written_where_it_lies_is_the_link_a_value_is() {
+        let mut place = core::mem::MaybeUninit::<Link>::uninit();
+        let at = place.as_ptr();
+        let link = <Link as StreamLink<Pipe, [u8; 34], Slots>>::over_in(
+            &mut place,
+            Pipe::default(),
+            [0u8; 34],
+            Slots(UnsafeCell::new([0; 64])),
+        );
+        assert!(core::ptr::eq(link, at), "the link lies where it was handed");
+        let value = self::link();
+        assert_eq!(link.rx.len, value.rx.len, "the buffer it was given");
+        assert_eq!(link.rx.held.get(), 0, "nothing read off the stream yet");
+        assert!(!SessionDatagramLink::holds_input(link));
+        SessionDatagramLink::service(link);
+        assert_eq!(
+            link.socket.waits.get(),
+            1,
+            "its own loop waits on its stream"
+        );
+        // SAFETY: `over_in` wrote the driver whole in `place`, dropped once, here.
+        unsafe { place.assume_init_drop() };
     }
 
     /// A write that must have every byte taken waits for room whenever the stream takes none, and

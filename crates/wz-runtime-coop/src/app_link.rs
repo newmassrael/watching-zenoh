@@ -728,8 +728,9 @@ impl StreamSocket for AppStreamSocket {
     type Link<
         B: crate::link_storage::RxStore + 'static,
         X: crate::link_storage::TxStore + 'static,
+        W: crate::session_drive::InputWaiter,
     >
-        = crate::stream_link::StreamDriver<Self, B, X>
+        = crate::stream_link::StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
     where
         Self: 'static;
 
@@ -1348,8 +1349,11 @@ impl OwnerWaits {
         rx: RxBuffer<N::Flag>,
         tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
-        heap_link::<_, N>(cells, datagram_ends_fit(&socket, Some(peer)))?
-            .open(|place| self.datagram(place.write(UdpDriver::initiator_in(socket, peer, rx, tx))))
+        let link =
+            heap_link::<_, N>(cells, datagram_ends_fit(&socket, Some(peer)))?.made(|place| {
+                self.datagram(place.write(UdpDriver::initiator_in(socket, peer, rx, tx)))
+            })?;
+        Ok(OpenedLink::behind_tables(link))
     }
 
     /// The stream link over `stream`, placed as [`Self::place_datagram`] places a datagram link,
@@ -1362,8 +1366,9 @@ impl OwnerWaits {
         rx: RxBuffer<N::Flag>,
         tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
-        heap_link::<_, N>(cells, stream_ends_fit(&stream))?
-            .open(|place| self.stream(place.write(StreamDriver::over(stream, rx, tx))))
+        let link = heap_link::<_, N>(cells, stream_ends_fit(&stream))?
+            .made(|place| self.stream(StreamDriver::over_in(place, stream, rx, tx)))?;
+        Ok(OpenedLink::behind_tables(link))
     }
 }
 
@@ -1598,13 +1603,6 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
             self.open_bound.as_ref(),
             rx,
         )?))
-    }
-
-    /// A link of these is shared already: the pump is the handle the sink is a clone of.
-    fn share_pump(
-        pump: Self::Pump,
-    ) -> Option<crate::link_cells::CellRc<dyn crate::session_drive::SessionDatagramLink, N>> {
-        Some(pump)
     }
 }
 

@@ -4447,8 +4447,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "transport-tx-lend"
     ))]
     fn move_lent_batches_off(&self, link: &crate::transport_tx::LinkTx<R>) {
-        #[cfg(not(feature = "tx-lend-only"))]
-        use crate::tx_buf::TxBuf;
         for idx in 0..crate::transport_tx::TX_CONDUITS {
             let priority = crate::transport_tx::TxConduits::<R>::conduit_priority(idx);
             R::with_mutex_mut(self.tx.conduits.conduit(priority), |batch| {

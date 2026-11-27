@@ -945,12 +945,40 @@ type SocketLinks = SecuredLinks;
 #[cfg(not(feature = "engine-tokio"))]
 type WaitedSocketLinks = <SocketLinks as wz_capi_coop::ComposedLinks>::WaitedByOwner;
 
+/// [`WaitedSocketLinks`] as the session reads them: the one type the host's links are, with no
+/// table between a read and its link, where the build adds no links of its own beside the host's
+/// sockets ([`open_on_coop`]); behind their tables where it does, as the links it adds are.
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "transport-link-ws",
+        feature = "transport-link-serial",
+        all(
+            feature = "transport-link-unixpipe",
+            any(target_os = "linux", target_os = "android")
+        )
+    ))
+))]
+type ReadSocketLinks = <WaitedSocketLinks as wz_capi_coop::ComposedLinks>::Closed;
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    any(
+        feature = "transport-link-ws",
+        feature = "transport-link-serial",
+        all(
+            feature = "transport-link-unixpipe",
+            any(target_os = "linux", target_os = "android")
+        )
+    )
+))]
+type ReadSocketLinks = WaitedSocketLinks;
+
 /// The links a cooperative session opens over the host's network: its sockets', and WebSocket
 /// links over its TCP beside them where the build has them (`transport-link-ws`).
 #[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-ws"))]
-type NetLinks = crate::coop_host::WithWs<WaitedSocketLinks>;
+type NetLinks = crate::coop_host::WithWs<ReadSocketLinks>;
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "transport-link-ws")))]
-type NetLinks = WaitedSocketLinks;
+type NetLinks = ReadSocketLinks;
 
 /// The links a cooperative session opens over the host's network and lines: its network's, and
 /// its ttys' beside them where the build has serial links (`transport-link-serial`).
@@ -2682,6 +2710,17 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // that takes the session (a get takes it more than once) would wait behind the read task
     // turn after turn.
     let links = links.waited_by_owner();
+    // A build that adds no links of its own beside the host's sockets reads each link as the one
+    // type they are (`ReadSocketLinks`).
+    #[cfg(not(any(
+        feature = "transport-link-ws",
+        feature = "transport-link-serial",
+        all(
+            feature = "transport-link-unixpipe",
+            any(target_os = "linux", target_os = "android")
+        )
+    )))]
+    let links = links.closed();
     // WebSocket links run over the host's TCP beside its sockets, waited for as those are, each
     // listener answering as many opening requests at once as the session admits handshakes.
     #[cfg(feature = "transport-link-ws")]

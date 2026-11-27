@@ -39,11 +39,11 @@ use crate::ip_stack::{heap_link, HeapLink};
 use crate::link_cells::{CellRc, CountKind, OneTask};
 use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, RxStore, TxBuffer, TxStore};
 use crate::session_drive::{
-    LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionDatagramLink,
-    SessionLinks, UnixpipeLocator, WaitOn,
+    LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionLinks, UnixpipeLocator,
+    WaitOn,
 };
 use crate::stream_link::{
-    link_over, stream_ends_fit, StreamDriver, StreamEnds, StreamSocket, STREAM_RX_CAPACITY,
+    link_over_in, stream_ends_fit, StreamDriver, StreamEnds, StreamSocket, STREAM_RX_CAPACITY,
 };
 
 /// The mode a link's FIFOs are created with when its locator names none: owner only.
@@ -161,8 +161,8 @@ pub struct PipeStream<F: Fifo> {
 impl<F: Fifo> StreamSocket for PipeStream<F> {
     type Error = F::Error;
 
-    type Link<B: RxStore + 'static, X: TxStore + 'static>
-        = StreamDriver<Self, B, X>
+    type Link<B: RxStore + 'static, X: TxStore + 'static, W: crate::session_drive::InputWaiter>
+        = StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
     where
         Self: 'static;
 
@@ -330,13 +330,16 @@ impl<N: CountKind> PipeShape<N> {
             self.tx_slots,
             self.tx_capacity,
         )?;
-        heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&pipe))?.open(|place| {
-            let link = place.write(link_over(pipe, rx, tx));
-            if self.owner_waits {
-                link.wait_by_owner();
-            }
-            link
-        })
+        let link =
+            heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&pipe))?.made(|place| {
+                let link =
+                    link_over_in::<_, _, _, crate::session_drive::WaitsInLoop>(place, pipe, rx, tx);
+                if self.owner_waits {
+                    link.wait_by_owner();
+                }
+                link
+            })?;
+        Ok(OpenedLink::behind_tables(link))
     }
 }
 
@@ -810,10 +813,6 @@ where
         group: &GroupLocator,
     ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         self.links.open_group(endpoint, group)
-    }
-
-    fn share_pump(pump: HeapLink<N>) -> Option<CellRc<dyn SessionDatagramLink, N>> {
-        S::share_pump(pump)
     }
 }
 

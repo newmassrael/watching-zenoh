@@ -4193,7 +4193,7 @@ mod rx_sn_gate {
     }
 }
 
-/// The one value of a one-face session's transport, over a real session's machine and actions: what
+/// The one value of a link's session's transport, over a real session's machine and actions: what
 /// it raises before input is read, the order it hands a datagram and the time to the session, and
 /// when it is next due.
 mod unicast_transport {
@@ -4204,17 +4204,9 @@ mod unicast_transport {
     use super::{bundle, NoEntropy, PlainRuntime, StillClock};
     use crate::drive::{new_session_engine, SessionEngine};
     use crate::driver_loop::IterationEvent;
-    use crate::link_life::{LinkInput, LinkTimes};
     use crate::session_actions::SessionLinkActions;
     use crate::session_timeouts::SessionTimeouts;
-    use crate::unicast_transport::{MadeLink, UnicastTransport};
-
-    const TIMES: LinkTimes = LinkTimes {
-        open_timeout_ms: 1_000,
-        redial_ms: Some(500),
-        dial_look_ms: 10,
-        accept_timeout_ms: 1_000,
-    };
+    use crate::unicast_transport::UnicastTransport;
 
     /// The session's machine over `actions`, entered in its initial state and given no role.
     fn engine(
@@ -4233,14 +4225,11 @@ mod unicast_transport {
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
         let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
-        let transport = UnicastTransport::init_in(
-            &mut place,
-            TIMES,
-            1,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
+        let transport =
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
         actions.set_app_wake_deadline_ms(Some(0));
         let mut wakes = 0usize;
         let mut count = |event: IterationEvent<'_, '_>| {
@@ -4254,34 +4243,25 @@ mod unicast_transport {
         assert_eq!(actions.app_wake_deadline_ms(), None, "and spent");
     }
 
-    /// The transport is due at the first of what its link and its session have due: the session's
-    /// application deadline while the link waits on nothing, and the link's look at once when a
-    /// dial it asked for is owed. Turned red by a due instant that leaves the link's wake out.
+    /// The transport is due when its session is: at the application layer's deadline when no
+    /// timer of the session's is nearer. Turned red by a `due_ms` that leaves the session's
+    /// deadline out.
     #[test]
-    fn the_transport_is_due_at_the_first_of_its_links_and_its_sessions() {
+    fn the_transport_is_due_when_its_session_is() {
         let (actions, _link) = bundle();
         let engine = engine(&actions);
         let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
-        let transport = UnicastTransport::init_in(
-            &mut place,
-            TIMES,
-            1,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
+        let transport =
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
         actions.set_app_wake_deadline_ms(Some(9));
         assert!(
             transport
                 .due_ms(&engine, &*actions, 0)
                 .is_some_and(|due_ms| due_ms <= 9),
-            "an idle link leaves the session's deadline to bound the look"
-        );
-        assert_eq!(transport.input(LinkInput::Open, 0).dial(), Some(0));
-        assert_eq!(
-            transport.due_ms(&engine, &*actions, 0),
-            Some(0),
-            "a dial owed a report is looked at now"
+            "the session's deadline bounds the look"
         );
     }
 
@@ -4296,14 +4276,11 @@ mod unicast_transport {
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
         let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
-        let transport = UnicastTransport::init_in(
-            &mut place,
-            TIMES,
-            1,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
+        let transport =
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
         actions.set_app_wake_deadline_ms(Some(0));
         let mut wakes: Vec<bool> = Vec::new();
         let path = transport.on_datagram(
@@ -4338,14 +4315,11 @@ mod unicast_transport {
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
         let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
-        let transport = UnicastTransport::init_in(
-            &mut place,
-            TIMES,
-            1,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
+        let transport =
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
         assert_eq!(actions.link.fact_last_inbound_at(|slot| *slot), None);
         // A reliable `Frame` at SN 1 that carries no record.
         let frame = [T_MID_FRAME | FLAG_T_FRAME_R, 0x01];
@@ -4432,9 +4406,9 @@ mod unicast_transport {
 
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
-        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
         let transport =
-            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
                 slot.write(())
             })
             .expect("built");
@@ -4473,53 +4447,15 @@ mod unicast_transport {
         );
     }
 
-    /// A transport over a link handed to it made is due when its session is, and a life that
-    /// asks for a look moves only the transport that holds it. Turned red by a made link that adds
-    /// a wake of its own, or a due instant that reads another transport's life.
-    #[test]
-    fn a_transport_over_a_made_link_is_due_when_its_session_is() {
-        let (actions, _link) = bundle();
-        let engine = engine(&actions);
-        let mut made_place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
-        let made = UnicastTransport::init_made_in(
-            &mut made_place,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
-        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
-        let dialling = UnicastTransport::init_in(
-            &mut place,
-            TIMES,
-            1,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
-        actions.set_app_wake_deadline_ms(Some(9));
-        assert_eq!(
-            made.due_ms(&engine, &*actions, 0),
-            dialling.due_ms(&engine, &*actions, 0),
-            "an idle life adds nothing to the session's own"
-        );
-        assert_eq!(dialling.input(LinkInput::Open, 0).dial(), Some(0));
-        assert_eq!(dialling.due_ms(&engine, &*actions, 0), Some(0));
-        assert!(
-            made.due_ms(&engine, &*actions, 0)
-                .is_some_and(|due_ms| due_ms <= 9),
-            "the session's deadline still bounds the made link's transport"
-        );
-    }
-
     /// A turn that raises nothing first leaves the application layer's deadline for the time its
     /// owner hands apart, and a turn begun raises it. Turned red by an `input_at` that raises.
     #[test]
     fn a_turn_that_raises_nothing_leaves_the_deadline_for_the_time() {
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
-        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
         let transport =
-            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
                 slot.write(())
             })
             .expect("built");
@@ -4552,9 +4488,9 @@ mod unicast_transport {
 
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
-        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
         let transport =
-            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
                 slot.write(())
             })
             .expect("built");

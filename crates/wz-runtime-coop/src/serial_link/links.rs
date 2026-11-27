@@ -691,16 +691,6 @@ impl<D, M: CountKind> Drop for LineLease<D, M> {
     }
 }
 
-/// `link`, its handshake made, as the session shell holds a link.
-fn opened<D: SerialDevice + 'static, N: CountKind>(
-    link: SerialCellOf<D, N>,
-) -> OpenedLink<HeapLink<N>, N> {
-    OpenedLink {
-        sink: link.clone().into_sink(),
-        pump: link.into_link(),
-    }
-}
-
 /// What every serial link of a [`SerialLinks`] is given besides its line: the session's tables
 /// and cells when it lent them, the slots its frames are encoded into, and whether its owner
 /// waits.
@@ -776,7 +766,7 @@ where
     fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         let answer = self.link.as_ref()?.dial_step(self.opener.now_us())?;
         let link = self.link.take()?;
-        Some(answer.map(|()| opened(link)))
+        Some(answer.map(|()| OpenedLink::behind_tables(link)))
     }
 }
 
@@ -898,7 +888,11 @@ where
         };
         match step {
             Ok(false) => Ok(None),
-            Ok(true) => Ok(self.waiting.borrow_mut().take().map(opened)),
+            Ok(true) => Ok(self
+                .waiting
+                .borrow_mut()
+                .take()
+                .map(OpenedLink::behind_tables)),
             // A line that failed is let go, kept or not, and opened again by the next call.
             Err(_) => {
                 self.waiting.borrow_mut().take();
@@ -1112,10 +1106,6 @@ where
         group: &GroupLocator,
     ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         self.links.open_group(endpoint, group)
-    }
-
-    fn share_pump(pump: HeapLink<N>) -> Option<CellRc<dyn SessionDatagramLink, N>> {
-        S::share_pump(pump)
     }
 }
 

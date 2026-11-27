@@ -718,6 +718,171 @@ unsizes such a handle) and `TransportState::build_wire`'s lines in the engine's 
 message, which falls by the forwarder's share of each call on the link. The test is
 `wz-capi-coop`'s `tests::arena::a_link_nothing_holds_back_takes_no_cell_of_the_gates`.
 
+### 9.5 Steps 2 and 3 as built (not built or run by this lane)
+
+One commit, "Read a closed stack's links as its own type", with two changes of shape against 9.2
+that the code asked for.
+
+- **The set is closed where the build closes it, not by the stack.** The stacks that add links
+  beside `IpLinks` (`WsLinks`, `SerialLinks`, `UnixpipeLinks`) take it as `S: SessionLinks<N,
+  Pump = HeapLink<N>>` and hand its dials and listeners on as they are, so `IpLinks` cannot read its
+  links as its own type in every build. It takes a seventh parameter, the set `F`
+  (`ip_link::LinkSet`): `OpenSet`, the default, hands each link behind its variant's table, as
+  before; `IpLinks::closed` gives `ClosedSet`, whose pump is `CellRc<IpLink<..>>`. `wz-capi-pico`
+  closes the host's links (`ReadSocketLinks`, `open_on_coop`) where the build adds none of ws,
+  serial or a unixpipe host; `app-transport`'s `EitherLinks` takes either form.
+- **The type the transport reads is the pump's, not a new item of every stack.** `SessionLinks`
+  keeps its items but `share_pump`; its `Pump` is `SharedPump<N>`, which names the type the
+  shared handle reads the link as (`Link`): a `CellRc<T>` pump is shared as it is and read as
+  `T`, a pump of another form is put in a cell of the heap and read as its own type, and
+  `EitherPump` is read behind the table. `TransportState` reads `LinkOf<T>`, `CellRc` of that
+  type; `LinkCalls` takes it as a parameter and names what its gates are read as (`Link`): the
+  link itself in the direct read, the round's gates (`dyn`, as before) where `wz_round` is on.
+  What a face keeps to wait on the link stays `dyn` (`DynLink::into_dyn`), and the read's facts
+  take the pump's type (`ReadFacts::of_link`).
+
+`IpLink` (`crates/wz-runtime-coop/src/ip_link.rs`) is a `repr(u8)` sum of the stack's `Udp`,
+`Peer` (`udp-listen`), `Tcp` and `Tls` drivers. A link is written where its cell holds it: the
+variant's field `align_of::<V>()` bytes in, by the driver's own in-place maker, then the tag, so no
+driver is built in a frame and moved. The send half of step 3 is not in this commit: the sink is
+the variant's field read behind the variant's own table (`CellRc::part`), so a send is what it
+was, with no tag test; the enum states `BoxedLinkDriver` with the step that keys the actions on the
+stack (`SessionHandle<C, D, K>`, `LinkRuntime`), which removes the variants' sending tables too.
+
+Expected on the case: the read's calls on the link (service, `takes_input`, `recv_with`,
+`take_rx_dropped`, `lost`, `keep`) lose their indirect call; the variants' `SessionDatagramLink`
+tables give way to the enum's one (the face's waits), about -150 to -300 relocated; text by 9.2's
+step 3 less the bodies the enum's table still reaches (its `try_recv` holds both drivers' copying
+receive), so nearer the low end of -1,500 to -3,000. Receive Ir lower by an indirect call a call on
+the link; send Ir unchanged. Not measured.
+
+Tests: `ip_stack::tests::closed_links_are_read_as_the_stacks_one_type` (red if a variant is written
+under another tag, its field anywhere but `align_of::<V>()` in, or `ClosedSet` pumps the variant;
+its CONTROL the open set's pump and sink naming the same field) and
+`a_closed_link_in_a_lent_cell_gives_it_back_whole` (red if the drop reads another variant); the
+open set's tests of `IpLinks` are unchanged and cover `OpenSet`; `either_links`'s
+`a_pump_is_shared_as_its_own_stack_shares_it` now shares through `SharedPump`.
+
+### 9.6 Step 3's send half as built (not built or run by this lane)
+
+One commit, "Send through a closed stack's links as its type". The sink's type is named where the
+read's is, by the pump, and the actions are keyed on it as 9.2's step 3 says.
+
+- **`SharedPump::Sink`** (`session_drive.rs`) names the type a session's actions send through:
+  `OpenedLink<P, N>`'s sink is `CellRc<P::Sink, N>`, so `OpenedLink`, `PendingDial`,
+  `LinkListener` and `Dialled` are bounded by `P: SharedPump<N>`. A `CellRc<T>` or `Rc<T>` pump
+  names `dyn BoxedLinkDriver`, as before, so the simulated, Zephyr and MCU stacks keep their form.
+  `DynSink` (a blanket impl over every sized driver, and one for `dyn BoxedLinkDriver`, the same
+  coherence shape as `DynLink`) turns either into the table's handle where two stacks' sinks meet.
+- **The closed set's pump is `ClosedLink<E, N>`** (`ip_link.rs`), a newtype over the link's
+  `CellRc<E, N>` whose `Link` and `Sink` are both `E`: the blanket `SharedPump` of `CellRc`
+  keeps `Sink = dyn` for every other cell pump, so the closed set needs a pump of its own type.
+  `IpLink` states `BoxedLinkDriver` by one match a method over the set `IpDriver` forwards (the
+  sends, the slot calls, `wait_for_room`, the ends and the subject), and `LinkSet::opened` hands
+  both handles on: the open set the variant's, behind its tables, as before; the closed set the
+  whole link for both.
+- **The actions are keyed on the sink's type.** `spawn_session_with_router`,
+  `place_session_with_router`, `RouterSessionTask` and `router_session_task_bytes` take `D`; the
+  transport's `TransportSession<C, K, D>` and `LinkCalls<C, K, L, D>`; the state's `SinkOf<T>`.
+  `wz-capi-coop` keys its free items on `(C, D)` and reads `SinkOf<L>` inside the items generic
+  over the stack (`LinkGates<D>`, `AdmissionGate<P, C, K, D>`, `HeldLink<C>`, `cells_of<C, D>`).
+  `link_task_bytes` stays on `C` with `D = dyn`: the task holds the actions by a one-word handle,
+  and a `dyn` handle's two words are the upper bound, as its comment says.
+- **`EitherLinks` sends behind the table** (`EitherPump::Sink = dyn`): `left_link` and
+  `right_link` turn each side's sink through `DynSink`. A link made at once is no longer handed
+  back to the side that made it, whose sink may be its own type and cannot be had again from a
+  `dyn` one: `EitherDial<D, E, M>` holds it as `Made(Dialled)`, a dial answered already.
+
+Expected on the case: the variants' `BoxedLinkDriver` tables leave the closed build (the enum's
+is linked only where `EitherLinks` unsizes a sink, which the case does not build), and every
+send through the link, the slot calls of the lent frame included, loses its indirect call for a
+tag test and the variant's body; about -200 to -400 relocated by the tables, text by the bodies
+only those tables reached and the call sequences at each send site. Together with 9.5 this is
+9.2's step 3, so the pair is read against its -1,500 to -3,000. Send Ir lower by an indirect call
+a call on the link (a put makes three or more: acquire, storage, send); receive Ir unchanged by
+this half. Not measured.
+
+Tests: `ip_stack::tests::closed_links_are_read_as_the_stacks_one_type` now holds that the sink is
+the same handle on the whole link as the pump and that `batch_length_prefixed` through it answers
+as the variant (false for `Udp`, true for `Tcp`); red if the closed set sends through the
+variant behind its table, or the enum answers a send itself. `either_links`'s
+`a_link_made_at_once_is_a_dial_answered_already` holds that the made link is answered once,
+whichever stack made it; red if it is handed to a side's dial or answered twice.
+
+### 9.7 What 9.5 and 9.6 left red, repaid (not built or run by this lane)
+
+Three commits, each the root of one red the merge found; no behaviour moves.
+
+- **A face's pump is a `SharedPump`** (`faces.rs`): `FaceRecord::Pump` is bounded as
+  `SessionLinks::Pump` is, since `PendingDial<P, N>` and `OpenedLink<P, N>` ask it of `P`
+  since 9.6. The two session-task tests name the sink type `router_session_task_bytes` takes.
+- **Every heap link's cell is claimed through `heap_link`** (`ip_stack.rs`): `IpLink::open_as`
+  claims its cell by `heap_link` and writes the variant by `LinkCell::made`, which answers the
+  handle on the cell, so the claim and its two refusals are stated once wherever a heap stack is
+  built. `OpenedLink::behind_tables` (`session_drive.rs`) is the open set's two handles on a cell,
+  which the open `LinkSet` and the ws, serial, unixpipe and app links hand on. Before, the closed
+  set's claim was a copy of `heap_link`, which only the unixpipe and app links reached, so a build
+  of neither had it dead.
+- **The heap stack's opened link and a wire's parts are named** (`ip_stack.rs`,
+  `transport/state.rs`): `SetOpened` (what a link's opening answers), `StreamMade`, `StackBeside`
+  (a listener's other link types), `LinkFields` (a link pump's fields over `T`), and
+  `WireBuilt<T, K>` keyed on the session's calls in place of four of their types.
+
+Expected on the case: none. The claim, the refusals and the handles are the same calls, inlined
+at the same sites (`LinkCell::made` is `#[inline]`, `behind_tables` a generic of two moves), and
+the names are aliases. Size and Ir unchanged. Not measured.
+
+Tests: no branch is new. `closed_links_are_read_as_the_stacks_one_type` and
+`a_closed_link_in_a_lent_cell_gives_it_back_whole` now reach `heap_link` on the closed set; the
+open set's tests of `IpLinks`, ws, unixpipe and app links reach `behind_tables`.
+
+### 9.8 What 9.7 left red, repaid (not built or run by this lane)
+
+Two commits, each the root of one compile red the merge found; no behaviour moves.
+
+- **The serial listener hands an accepted link on behind its tables**
+  (`serial_link/links.rs`): its `accept` still named the serial helper that 9.7 replaced by
+  `OpenedLink::behind_tables`, which its dial already called. No other link names the helper: the
+  `opened` left in the ws, unixpipe, app, ip and either links are parameters of their `From`
+  impls, and `LinkSet::opened` is the set's own method.
+- **A heap node asks its stack for an open set** (`session_drive.rs`, `wz-session-mcu`'s
+  `dial`, `admin_node`, `client_node`, the Zephyr admin node's `NodeNet`): since 9.5 a stack's
+  sink is the type its pump names (`SharedPump::Sink`), while the session shell's heap node opens
+  sessions of the default handle, whose driver is `dyn BoxedLinkDriver` (`spawn_session` takes
+  `SessionHandle<C>`). `OpenSetLinks` names that fact once: a `SessionLinks` whose pump's sink is
+  the driver's trait, given to every such stack by a blanket impl (lwIP's, Zephyr's, the in-memory
+  network, `IpLinks` at its default `OpenSet`). The dialer, the admin node, the client node and
+  the Zephyr node's `NodeNet::Links` are bounded by it; a closed set is refused there by type, and
+  is driven by what keys a link's actions on its own type (the coop engine). Keying the heap node on
+  the sink type as well would need `spawn_session` and `SessionHandle` keyed on it, which no stack
+  the node runs over asks for.
+
+Expected on the case: none. A bound and a trait with no items; no code is generated for either.
+Size and Ir unchanged. Not measured.
+
+Tests: `either_links`'s `a_dial_over_an_open_set_hands_on_the_drivers_trait` reads a dial's sink
+back as `CellRc<dyn BoxedLinkDriver>` through a function bounded only by `OpenSetLinks`, over both
+stacks of an either; red (it stops compiling) if an either's sink names a type of its own or if
+the bound is not implied where it is used. The dialer, admin and client node tests over the
+in-memory network instantiate the bound with a real stack.
+
+### 9.9 What 9.8 left red, repaid (not built or run by this lane)
+
+One commit, the root of one compile red of the round build (`wz_round`: `threads` with the host's
+value locks withheld, `WZ_COOP_VALUE_LOCKS=off`), which no default or all-features build compiles.
+
+- **A round's read dial is bounded as its answer needs** (`wz-capi-coop`'s `engine.rs`):
+  `ReadDial<P>` holds a dial's answer, `DialAnswer<P, LinkCount>`, whose `OpenedLink<P, N>`
+  asks `P: SharedPump<N>` since 9.5 keyed a link's sink on its pump. The struct and its impl now
+  state the same bound; every use names `L::Pump` of a `CoopLinks` stack, which carries it.
+
+Expected on the case: none. A bound; no code is generated for it. Size and Ir unchanged. Not
+measured.
+
+Tests: no branch is new. The round leg's `tests::round::` and the whole suite in that form
+(`nondefault-tests-gate.sh`'s two `WZ_COOP_VALUE_LOCKS=off` rows) compile `ReadDial` through
+`RoundLinkIo`; red (it stops compiling) if the bound is dropped again.
+
 ## 10. Transport: the structure for what remains, and what SCE is asked for the machines
 
 Read from the same explain document as section 6 (2026-11-26, schema 5): transport 30,814 against

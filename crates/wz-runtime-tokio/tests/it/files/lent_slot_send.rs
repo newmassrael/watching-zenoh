@@ -492,7 +492,6 @@ fn a_lowlatency_link_that_lends_nothing_gets_the_heap_message() {
 
 use wz_runtime_tokio::runtime_impl::TokioRuntime;
 use wz_session_core::reconnect::{LocalSwappableLink, SwappableLink};
-use wz_session_core::tx_buf::TxBuf;
 use wz_session_core::tx_lease::TxLease;
 
 type Sink = Arc<dyn BoxedLinkDriver + Send + Sync>;
@@ -538,7 +537,7 @@ fn a_lender_behind_the_single_task_seam_still_lends() {
         SLOT_LEN - HEADROOM,
         "the grant's headroom survives"
     );
-    lease.append(b"frame").expect("fits");
+    lease.frame_mut().append(b"frame").expect("fits");
     assert_eq!(
         lease.send(Reliability::Reliable, Priority::DEFAULT),
         LinkSendOutcome::Sent
@@ -557,7 +556,7 @@ fn a_swap_mid_encode_sends_the_frame_to_the_link_that_lent_the_slot() {
     let new = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
     let seam = SwappableLink::<TokioRuntime>::new(old.clone());
     let mut lease = TxLease::acquire(&seam, 64, Priority::DEFAULT).expect("old link lends");
-    lease.append(b"in flight").expect("fits");
+    lease.frame_mut().append(b"in flight").expect("fits");
     seam.swap(new.clone());
     assert_eq!(
         lease.send(Reliability::Reliable, Priority::DEFAULT),
@@ -588,10 +587,10 @@ fn the_single_task_seam_keeps_two_links_slot_numbers_apart() {
     let new = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
     let seam = LocalSwappableLink::<TokioRuntime>::new(old.clone());
     let mut first = TxLease::acquire(&seam, 64, Priority::DEFAULT).expect("old lends");
-    first.append(b"from old").expect("fits");
+    first.frame_mut().append(b"from old").expect("fits");
     let _ = seam.swap(new.clone());
     let mut second = TxLease::acquire(&seam, 64, Priority::DEFAULT).expect("new lends");
-    second.append(b"from new").expect("fits");
+    second.frame_mut().append(b"from new").expect("fits");
     // Both links number their only slot 0; the seam must not confuse them.
     assert_eq!(
         second.send(Reliability::Reliable, Priority::DEFAULT),

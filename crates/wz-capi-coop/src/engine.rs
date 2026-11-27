@@ -152,13 +152,15 @@ use wz_runtime_coop::session_drive::router_session_task_bytes;
 use wz_runtime_coop::session_drive::LinkWait;
 #[cfg(feature = "time-base")]
 use wz_runtime_coop::session_drive::StackWake;
+use wz_runtime_coop::session_drive::{
+    DynLink, DynSink, OpenedLink, SessionDatagramLink, SessionLinks, SessionRole, SharedPump,
+};
 use wz_runtime_coop::session_drive::{LinkWaits, WaitOn};
-use wz_runtime_coop::session_drive::{OpenedLink, SessionDatagramLink, SessionLinks, SessionRole};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::sync::Lend;
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::transport::{
-    LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
+    LinkCalls, TransportFaces, TransportRefusal, TransportSession, WalkRefusal, WireMaking,
 };
 use wz_runtime_coop::{
     ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimePlace, RuntimeRows,
@@ -179,7 +181,9 @@ use wz_session_core::limits::SessionLimits;
 #[cfg(feature = "link-admission")]
 use wz_session_core::link_admission::{LinkAdmission, LinkBook, LinkRegistry};
 #[cfg(wz_round)]
-use wz_session_core::link_life::{Effects, LinkInput, LinkPhase, Refused as HandshakeRefusal};
+use wz_session_core::link_life::{
+    carry, Effects, LinkInput, LinkIo, LinkPhase, Refused as HandshakeRefusal, SessionEnded,
+};
 use wz_session_core::link_life::{LinkRole, LinkTimes, UnicastLink};
 use wz_session_core::locality::Locality;
 
@@ -2444,9 +2448,9 @@ impl LinkLeg<'_> {
     /// Send the put over the link of `actions`, as `how` says it is sent
     /// ([`CoopEngine::send_on_links`]). A link that does not take the plain form (one that
     /// rewrites the keys the session originates) is sent the owned message in its place.
-    fn send_to<C: ClockSource + 'static>(
+    fn send_to<C: ClockSource + 'static, D: ?Sized + DynSink>(
         &self,
-        actions: &LinkActions<C>,
+        actions: &LinkActions<C, D>,
         how: FaceSend,
     ) -> LegSent {
         let LinkLeg {
@@ -2557,7 +2561,7 @@ impl LinkLeg<'_> {
 #[inline(always)]
 fn publish_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
     wire: &direct::DirectWire<L, C>,
-    tx: LinkTx<'_, C>,
+    tx: LinkTx<'_, C, SinkOf<L>>,
     leg: &LinkLeg<'_>,
     how: FaceSend,
 ) -> Option<LegSent> {
@@ -2571,9 +2575,9 @@ fn publish_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
 /// session's lock alone reaches where each record holds its link ([`publish_on`]).
 #[cfg(wz_round)]
 #[inline(always)]
-fn publish_through<C: ClockSource + 'static>(
-    wire: &impl LendsSession<Session = LinkSession<C>>,
-    _tx: LinkTx<'_, C>,
+fn publish_through<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    wire: &impl LendsSession<Session = LinkSession<C, D>>,
+    _tx: LinkTx<'_, C, D>,
     leg: &LinkLeg<'_>,
     how: FaceSend,
 ) -> Option<LegSent> {
@@ -2582,8 +2586,8 @@ fn publish_through<C: ClockSource + 'static>(
 
 /// Send `leg` over the link `wire` holds as `how` says, the link's session lent as [`send_on`]
 /// lends it. `None` while the link is not lent.
-fn publish_on<C: ClockSource + 'static>(
-    wire: &impl LendsSession<Session = LinkSession<C>>,
+fn publish_on<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    wire: &impl LendsSession<Session = LinkSession<C, D>>,
     leg: &LinkLeg<'_>,
     how: FaceSend,
 ) -> Option<LegSent> {
@@ -2650,14 +2654,19 @@ pub trait CoopLinks: SessionLinks<LinkCount> {}
 
 impl<L: SessionLinks<LinkCount> + ?Sized> CoopLinks for L {}
 
-/// The runtime a link's session runs on, read under [`SessionLock`].
-type LinkRuntime<C> = CoopRuntime<C, dyn wz_session_core::link::BoxedLinkDriver, SessionLock>;
+/// The type the actions of a link of the stack `L` send through the link as: the stack's own type
+/// where its set of links is closed, the driver's trait where it is open (`SharedPump::Sink`).
+pub(crate) type SinkOf<L> = <<L as SessionLinks<LinkCount>>::Pump as SharedPump<LinkCount>>::Sink;
+
+/// The runtime a link's session runs on, read under [`SessionLock`], sending through its link as
+/// `D`.
+type LinkRuntime<C, D> = CoopRuntime<C, D, SessionLock>;
 
 /// The actions of one link's session.
-type LinkActions<C> = SessionLinkActions<LinkRuntime<C>, CoopTime<C>>;
+type LinkActions<C, D> = SessionLinkActions<LinkRuntime<C, D>, CoopTime<C>>;
 
 /// The handle on the actions of one link's session.
-type LinkHandle<C> = SessionHandle<C, dyn wz_session_core::link::BoxedLinkDriver, SessionLock>;
+type LinkHandle<C, D> = SessionHandle<C, D, SessionLock>;
 
 /// What a link's session is lent its values in, where one thread steps the session: the value
 /// alone, with no lock of its own. Named so that a runtime of another lock type fails the build
@@ -2665,7 +2674,7 @@ type LinkHandle<C> = SessionHandle<C, dyn wz_session_core::link::BoxedLinkDriver
 #[cfg(not(feature = "threads"))]
 fn _a_link_session_lends_its_values_unlocked<C: ClockSource>(
     held: <SessionLock as wz_runtime_coop::sync::LockKind>::Mutex<u8>,
-    _runtime: core::marker::PhantomData<LinkRuntime<C>>,
+    _runtime: core::marker::PhantomData<LinkRuntime<C, dyn wz_session_core::link::BoxedLinkDriver>>,
 ) -> wz_runtime_coop::sync::OwnerHeld<u8, UnderCoreLock> {
     held
 }
@@ -3223,7 +3232,7 @@ impl UpFacts {
     /// What `session`, whose handshake completed, says of its peer, read in place: the record
     /// holds the session itself where each link runs as a task.
     #[cfg(wz_round)]
-    fn of<C: ClockSource + 'static>(session: &LinkSession<C>) -> Self {
+    fn of<C: ClockSource + 'static, D: ?Sized + DynSink>(session: &LinkSession<C, D>) -> Self {
         let facts = Self::of_actions(&*session.actions);
         #[cfg(feature = "queryable")]
         {
@@ -3238,7 +3247,9 @@ impl UpFacts {
     /// What `actions`, a link's whose handshake completed, say of its peer, through whichever
     /// handle on them the caller holds; the link's generation is the caller's to add
     /// (`Self::under`).
-    fn of_actions<C: ClockSource + 'static>(actions: &LinkActions<C>) -> Self {
+    fn of_actions<C: ClockSource + 'static, D: ?Sized + DynSink>(
+        actions: &LinkActions<C, D>,
+    ) -> Self {
         #[cfg(feature = "connectivity")]
         let row = {
             let mut first = None;
@@ -3390,14 +3401,14 @@ fn link_times<E>(config: &CoopConfig<E>) -> LinkTimes {
 
 /// One link's half of the session: the actions that send over it. The task that runs the link,
 /// the link itself and its owner's waits for it are the driver's (`Wire`).
-struct LinkSession<C: ClockSource + 'static> {
-    actions: LinkHandle<C>,
+struct LinkSession<C: ClockSource + 'static, D: ?Sized + DynSink> {
+    actions: LinkHandle<C, D>,
     /// The link's gates, whose admission is granted when the face is brought up (`bring_up`);
     /// until then the link gives the session nothing past its handshake, so the watchers hear the
     /// face come up before anything its link carried. A session of several links tells them what
     /// each wait found in the link's stack (`input_seen`).
     #[cfg(all(any(feature = "listen", feature = "group"), wz_round))]
-    gate: CellRc<LinkGate<C>, LinkCount>,
+    gate: CellRc<LinkGate<C, D>, LinkCount>,
     /// The link's generation, which the queries it carries are answered under (`query`). Read
     /// where the link's session is read in place (`UpFacts::of`); the read that steps it itself
     /// reads its records' (`direct`).
@@ -3405,7 +3416,7 @@ struct LinkSession<C: ClockSource + 'static> {
     generation: u64,
 }
 
-impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
+impl<C: ClockSource + 'static, D: ?Sized + DynSink> FaceSession for LinkSession<C, D> {
     fn established(&self) -> bool {
         self.actions.is_established()
     }
@@ -3448,39 +3459,41 @@ impl<C: ClockSource + 'static> FaceSession for LinkSession<C> {
     }
 }
 
-impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<C> {
-    fn actions(&self) -> &LinkHandle<C> {
+impl<C: ClockSource + 'static, D: ?Sized + DynSink> TransportSession<C, SessionLock, D>
+    for LinkSession<C, D>
+{
+    fn actions(&self) -> &LinkHandle<C, D> {
         &self.actions
     }
 }
 
 /// One link of the session: its session half ([`LinkSession`]) and what the driver holds of it.
-type Wire<C> = wz_runtime_coop::faces::Wire<LinkSession<C>, FaceEnd, LinkCount>;
+type Wire<C, D> = wz_runtime_coop::faces::Wire<LinkSession<C, D>, FaceEnd, LinkCount>;
 
 /// What an operation that holds a face's send place sends through under the session's lock,
 /// taken inside that place (`CoopEngine::live_on_link`): the face held and its wire, while the
 /// place holds one; every other face is reached by a try of its own place.
 #[cfg(not(wz_round))]
-type LinkTx<'a, C> = direct::FaceTx<'a, C>;
+type LinkTx<'a, C, D> = direct::FaceTx<'a, C, D>;
 
 /// What an operation sends through where each face's record holds its link: nothing beside the
 /// record, which the session's lock alone reaches. That form goes with the record that holds a
 /// link, and this with it.
 #[cfg(wz_round)]
-type LinkTx<'a, C> = core::marker::PhantomData<&'a Wire<C>>;
+type LinkTx<'a, C, D> = core::marker::PhantomData<&'a Wire<C, D>>;
 
 /// What a face holds of its link while the link is up or in its handshake: the link's session
 /// itself where each link runs as a task, or a handle on the face's place that holds the session
 /// apart from the session's state where the read steps the one link itself (`direct`). Every
 /// send of the session on a face lends the link's session through it (`send_on`).
-trait HeldLink<C: ClockSource + 'static> {
+trait HeldLink<C: ClockSource + 'static>: CoopLinks {
     /// The link as the face holds it.
-    type Wire: LendsSession<Session = LinkSession<C>>;
+    type Wire: LendsSession<Session = LinkSession<C, SinkOf<Self>>>;
 }
 
 impl<C: ClockSource + 'static, L: CoopLinks + 'static> HeldLink<C> for L {
     #[cfg(wz_round)]
-    type Wire = Wire<C>;
+    type Wire = Wire<C, SinkOf<L>>;
     #[cfg(not(wz_round))]
     type Wire = direct::DirectWire<L, C>;
 }
@@ -3516,9 +3529,9 @@ fn found_held<U>(lent: &Lend<U>) {
 /// lent through it too.
 // Out of line and over `dyn`: one body lends a link for every send of the session.
 #[inline(never)]
-fn send_on<C: ClockSource + 'static>(
-    wire: &impl LendsSession<Session = LinkSession<C>>,
-    send: &dyn SendTo<C>,
+fn send_on<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    wire: &impl LendsSession<Session = LinkSession<C, D>>,
+    send: &dyn SendTo<C, D>,
 ) -> Option<bool> {
     let send = OnThisThread(send);
     let lent = wire.try_session(move |session| send.get().send_to(&session.actions));
@@ -3609,10 +3622,10 @@ impl SubscriberRow {
 
     /// Declare subscriber `id`, the id its row in the tables holds, on `key`, over `actions`:
     /// whether the link took it.
-    fn declare<C: ClockSource + 'static>(
+    fn declare<C: ClockSource + 'static, D: ?Sized + DynSink>(
         id: SubId,
         key: NamedKey<'_>,
-        actions: &LinkActions<C>,
+        actions: &LinkActions<C, D>,
     ) -> bool {
         actions
             .send_declare_subscriber(id, key_on_link(actions, key))
@@ -3622,10 +3635,10 @@ impl SubscriberRow {
     /// Retract subscriber `id` over `actions`, naming its key as `names` says (the declaration's
     /// id and the rest of the key) when its declaration asked to. Read off the row before it is
     /// undeclared: a row a call of which runs is kept out of every lookup until the call ends.
-    fn retract<C: ClockSource + 'static>(
+    fn retract<C: ClockSource + 'static, D: ?Sized + DynSink>(
         id: SubId,
         names: Option<(ExprId, &str)>,
-        actions: &LinkActions<C>,
+        actions: &LinkActions<C, D>,
     ) {
         match names {
             Some((mapping, suffix)) => {
@@ -3893,8 +3906,8 @@ fn abi_names<'a>(wire: &'a WireKey, keyexpr: &'a str) -> (ExprId, Option<&'a str
 /// `f` on the key `keyexpr` of a get as the link of `actions` names it: by the link's key-wire
 /// form, and as the ABI made it, `abi` ([`abi_names`]), for a link of the declared form.
 #[cfg(all(feature = "shared-key-ids", feature = "query"))]
-fn get_key_on_link<C: ClockSource + 'static, U>(
-    actions: &LinkActions<C>,
+fn get_key_on_link<C: ClockSource + 'static, D: ?Sized + DynSink, U>(
+    actions: &LinkActions<C, D>,
     keyexpr: &str,
     abi: (ExprId, Option<&str>),
     f: impl FnOnce(ExprId, Option<&str>) -> U,
@@ -3912,8 +3925,8 @@ fn get_key_on_link<C: ClockSource + 'static, U>(
 /// A build without the shared key ids names a get's key on every link as the ABI made it.
 #[cfg(all(not(feature = "shared-key-ids"), feature = "query"))]
 #[inline(always)]
-fn get_key_on_link<C: ClockSource + 'static, U>(
-    _actions: &LinkActions<C>,
+fn get_key_on_link<C: ClockSource + 'static, D: ?Sized + DynSink, U>(
+    _actions: &LinkActions<C, D>,
     _keyexpr: &str,
     abi: (ExprId, Option<&str>),
     f: impl FnOnce(ExprId, Option<&str>) -> U,
@@ -3929,8 +3942,8 @@ fn get_key_on_link<C: ClockSource + 'static, U>(
 #[cfg(not(wz_round))]
 fn send_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
     wire: &direct::DirectWire<L, C>,
-    tx: LinkTx<'_, C>,
-    send: &dyn SendTo<C>,
+    tx: LinkTx<'_, C, SinkOf<L>>,
+    send: &dyn SendTo<C, SinkOf<L>>,
 ) -> Option<bool> {
     match tx.held_wire(wire) {
         Some(held) => held.map(|held| send.send_to(&held.actions)),
@@ -3941,10 +3954,10 @@ fn send_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
 /// Send `send` over the link `wire` holds, through the face's record, which the session's lock
 /// alone reaches where each record holds its link ([`send_on`]).
 #[cfg(wz_round)]
-fn send_through<C: ClockSource + 'static>(
-    wire: &impl LendsSession<Session = LinkSession<C>>,
-    _tx: LinkTx<'_, C>,
-    send: &dyn SendTo<C>,
+fn send_through<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    wire: &impl LendsSession<Session = LinkSession<C, D>>,
+    _tx: LinkTx<'_, C, D>,
+    send: &dyn SendTo<C, D>,
 ) -> Option<bool> {
     send_on(wire, send)
 }
@@ -3955,8 +3968,8 @@ fn send_through<C: ClockSource + 'static>(
 #[cfg(all(feature = "query", not(wz_round)))]
 fn lend_through<L: CoopLinks + 'static, C: ClockSource + 'static, U: Send>(
     wire: &direct::DirectWire<L, C>,
-    tx: LinkTx<'_, C>,
-    f: impl FnOnce(&LinkActions<C>) -> U + Send,
+    tx: LinkTx<'_, C, SinkOf<L>>,
+    f: impl FnOnce(&LinkActions<C, SinkOf<L>>) -> U + Send,
 ) -> Option<U> {
     match tx.held_wire(wire) {
         Some(held) => held.map(|held| f(&*held.actions)),
@@ -3967,10 +3980,10 @@ fn lend_through<L: CoopLinks + 'static, C: ClockSource + 'static, U: Send>(
 /// `f` on the actions of the link `wire` holds, through the face's record, which the session's
 /// lock alone reaches where each record holds its link ([`lend_actions`]).
 #[cfg(all(feature = "query", wz_round))]
-fn lend_through<C: ClockSource + 'static, U: Send>(
-    wire: &impl LendsSession<Session = LinkSession<C>>,
-    _tx: LinkTx<'_, C>,
-    f: impl FnOnce(&LinkActions<C>) -> U + Send,
+fn lend_through<C: ClockSource + 'static, D: ?Sized + DynSink, U: Send>(
+    wire: &impl LendsSession<Session = LinkSession<C, D>>,
+    _tx: LinkTx<'_, C, D>,
+    f: impl FnOnce(&LinkActions<C, D>) -> U + Send,
 ) -> Option<U> {
     lend_actions(wire, f)
 }
@@ -3996,9 +4009,9 @@ enum LegTurn {
     feature = "transport-stats",
     all(test, any(feature = "std", feature = "liveliness-get"))
 ))]
-fn lend_actions<C: ClockSource + 'static, U: Send>(
-    wire: &impl LendsSession<Session = LinkSession<C>>,
-    f: impl FnOnce(&LinkActions<C>) -> U + Send,
+fn lend_actions<C: ClockSource + 'static, D: ?Sized + DynSink, U: Send>(
+    wire: &impl LendsSession<Session = LinkSession<C, D>>,
+    f: impl FnOnce(&LinkActions<C, D>) -> U + Send,
 ) -> Option<U> {
     let lent = wire.try_session(|session| f(&session.actions));
     found_held(&lent);
@@ -4013,8 +4026,8 @@ fn lend_actions<C: ClockSource + 'static, U: Send>(
 /// subscriber's Interest names its key by the ABI's form still, beside a get
 /// (`get_key_on_link`).
 #[cfg(all(feature = "shared-key-ids", feature = "liveliness"))]
-fn on_link<'w, C: ClockSource + 'static>(
-    actions: &LinkActions<C>,
+fn on_link<'w, C: ClockSource + 'static, D: ?Sized + DynSink>(
+    actions: &LinkActions<C, D>,
     keyexpr: &str,
     wire: &'w WireKey,
 ) -> wz_capi_port::LinkKey<'w> {
@@ -4027,8 +4040,8 @@ fn on_link<'w, C: ClockSource + 'static>(
 /// `key` as the link of `actions` names it: the link's key-wire form decides, and the declared
 /// form keeps `key` as the session names it (`shared-key-ids`).
 #[cfg(feature = "shared-key-ids")]
-fn key_on_link<'k, C: ClockSource + 'static>(
-    actions: &LinkActions<C>,
+fn key_on_link<'k, C: ClockSource + 'static, D: ?Sized + DynSink>(
+    actions: &LinkActions<C, D>,
     key: NamedKey<'k>,
 ) -> NamedKey<'k> {
     actions.named_on_link(key)
@@ -4037,8 +4050,8 @@ fn key_on_link<'k, C: ClockSource + 'static>(
 /// A build without the shared key ids names every key on every link as the session names it.
 #[cfg(not(feature = "shared-key-ids"))]
 #[inline(always)]
-fn key_on_link<'k, C: ClockSource + 'static>(
-    _actions: &LinkActions<C>,
+fn key_on_link<'k, C: ClockSource + 'static, D: ?Sized + DynSink>(
+    _actions: &LinkActions<C, D>,
     key: NamedKey<'k>,
 ) -> NamedKey<'k> {
     key
@@ -4047,8 +4060,8 @@ fn key_on_link<'k, C: ClockSource + 'static>(
 /// A build without the shared key ids names every key on every link as the ABI made it.
 #[cfg(all(not(feature = "shared-key-ids"), feature = "liveliness"))]
 #[inline(always)]
-fn on_link<'w, C: ClockSource + 'static>(
-    _actions: &LinkActions<C>,
+fn on_link<'w, C: ClockSource + 'static, D: ?Sized + DynSink>(
+    _actions: &LinkActions<C, D>,
     _keyexpr: &str,
     wire: &'w WireKey,
 ) -> wz_capi_port::LinkKey<'w> {
@@ -4060,8 +4073,8 @@ fn on_link<'w, C: ClockSource + 'static>(
 /// declaration; `None` for a link of the declared form, which names it as the Interest's row does
 /// (`shared-key-ids`).
 #[cfg(feature = "shared-key-ids")]
-fn interest_on_link<C: ClockSource + 'static>(
-    actions: &LinkActions<C>,
+fn interest_on_link<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    actions: &LinkActions<C, D>,
     keyexpr: &str,
     aggregate: bool,
 ) -> Option<InterestForm> {
@@ -4077,8 +4090,8 @@ fn interest_on_link<C: ClockSource + 'static>(
 /// A build without the shared key ids names the key of every Interest as its row does.
 #[cfg(not(feature = "shared-key-ids"))]
 #[inline(always)]
-fn interest_on_link<C: ClockSource + 'static>(
-    _actions: &LinkActions<C>,
+fn interest_on_link<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    _actions: &LinkActions<C, D>,
     _keyexpr: &str,
     _aggregate: bool,
 ) -> Option<InterestForm> {
@@ -4087,9 +4100,9 @@ fn interest_on_link<C: ClockSource + 'static>(
 
 /// Send `interest` open over `actions`, for what is declared now and what is declared later,
 /// naming its key as the link's key-wire form says: whether the link took it.
-fn send_interest<C: ClockSource + 'static>(
+fn send_interest<C: ClockSource + 'static, D: ?Sized + DynSink>(
     interest: FilterInterest<'_>,
-    actions: &LinkActions<C>,
+    actions: &LinkActions<C, D>,
 ) -> bool {
     let linked = interest_on_link(actions, interest.key, interest.aggregate);
     let (mapping_id, suffix) = match &linked {
@@ -4150,7 +4163,10 @@ fn counts_own(plane: FilterPlane, count_local: bool) -> bool {
 /// the links that asks each is one loop: with the step's match inlined in it, the compiler writes
 /// the walk out once per step.
 #[inline(never)]
-fn batch_link<C: ClockSource + 'static>(actions: &LinkActions<C>, step: BatchStep) -> bool {
+fn batch_link<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    actions: &LinkActions<C, D>,
+    step: BatchStep,
+) -> bool {
     match step {
         BatchStep::Start => actions.batch_start(),
         BatchStep::Flush => actions.batch_flush(),
@@ -4493,12 +4509,12 @@ fn lent_reply<'e, 'a, 'f>(
 /// it staged (the replies of a queryable that answers in place, declare replies, get prunes) goes
 /// out at once. Without it everything the dispatch staged goes out at once.
 #[cfg(wz_round)]
-pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
+pub(crate) struct FaceDispatch<C: ClockSource + 'static, D: ?Sized + DynSink> {
     /// The session's registry, lent for each pass of the session's tasks.
     registry: RegistryLend,
     /// The face the link serves, its set found by its place for every frame and not looked for.
     face: HeldFace,
-    actions: LinkHandle<C>,
+    actions: LinkHandle<C, D>,
     #[cfg(feature = "queryable")]
     plane: PlacedRef<QueryPlane>,
     /// The link's generation, which the queries it carries are answered under.
@@ -4513,7 +4529,7 @@ pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
 }
 
 #[cfg(wz_round)]
-impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
+impl<C: ClockSource + 'static, D: ?Sized + DynSink> EventSink for FaceDispatch<C, D> {
     #[cfg(feature = "queryable")]
     fn event(&mut self, event: IterationEvent<'_, '_>) {
         let face = self.face;
@@ -4662,15 +4678,15 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 /// session places in the link's cell of its table (`TransportState::gate_cells`): the round's, and with
 /// `listen` the admission's under it, which carries the clock; where the read hands each record
 /// out as it is read, the link alone, which takes no cell (`HeldGate`).
-trait LinkGates {
+trait LinkGates<D: ?Sized> {
     /// The gates.
     type Gate;
 }
 
-impl<C: ClockSource + 'static> LinkGates for C {
+impl<C: ClockSource + 'static, D: ?Sized + DynSink> LinkGates<D> for C {
     #[cfg(all(feature = "listen", wz_round))]
     type Gate =
-        RoundGate<AdmissionGate<CellRc<dyn SessionDatagramLink, LinkCount>, C, SessionLock>>;
+        RoundGate<AdmissionGate<CellRc<dyn SessionDatagramLink, LinkCount>, C, SessionLock, D>>;
     #[cfg(all(not(feature = "listen"), wz_round))]
     type Gate = RoundGate<CellRc<dyn SessionDatagramLink, LinkCount>>;
     // The read steps the one link itself and hands each record out as it is read, so nothing
@@ -4680,19 +4696,15 @@ impl<C: ClockSource + 'static> LinkGates for C {
     type Gate = CellRc<dyn SessionDatagramLink, LinkCount>;
 }
 
-/// The gates of a link of a session on the clock `C` ([`LinkGates`]).
-type LinkGate<C> = <C as LinkGates>::Gate;
+/// The gates of a link of a session on the clock `C` whose actions send through it as `D`
+/// ([`LinkGates`]).
+type LinkGate<C, D> = <C as LinkGates<D>>::Gate;
 
 /// The gates of a link as its session and its pump hold them (`LinkCalls::Gate`): a handle on
 /// their cell of the session's table where the round holds the link back, and where nothing does
 /// the link's own handle, which the pump reads the link through with no cell of gates between.
 #[cfg(wz_round)]
-type HeldGate<C> = CellRc<LinkGate<C>, LinkCount>;
-/// The gates of a link as its session and its pump hold them (`LinkCalls::Gate`): a handle on
-/// their cell of the session's table where the round holds the link back, and where nothing does
-/// the link's own handle, which the pump reads the link through with no cell of gates between.
-#[cfg(not(wz_round))]
-type HeldGate<C> = LinkGate<C>;
+type HeldGate<C, D> = CellRc<LinkGate<C, D>, LinkCount>;
 
 /// The table of cells a link's gates are placed in where they hold the link back
 /// (`TransportState::gate_cells`).
@@ -4703,27 +4715,29 @@ type GateCells = wz_session_core::byte_cells::LentByteCells<
 /// The two halves the actions of a link of a session on the clock `C` hold, which the session
 /// places together in the link's cell of its table (`TransportState::halves_cells`): the link's
 /// own state and the session's kernel.
-type LinkHalves<C> = (
-    LinkState<LinkRuntime<C>>,
-    SessionCore<LinkRuntime<C>, CoopTime<C>>,
+type LinkHalves<C, D> = (
+    LinkState<LinkRuntime<C, D>>,
+    SessionCore<LinkRuntime<C, D>, CoopTime<C>>,
 );
 
 /// The bytes of each link's cells a session over `links` on the clock `C` lays out: a cell for
 /// each link's driver as large as the largest the links open, one for its gates, one for its
 /// actions and one for the two halves they hold.
-pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl CoopLinks) -> LinkCells<usize> {
-    cells_of::<C>(links.link_cell_bytes())
+pub(crate) fn link_cells<C: ClockSource + 'static, L: CoopLinks>(links: &L) -> LinkCells<usize> {
+    cells_of::<C, SinkOf<L>>(links.link_cell_bytes())
 }
 
 /// The bytes of each link's cells a session on the clock `C` lays out, a cell of `driver` bytes
 /// for each link's driver among them: a `const fn`, as a region laid out when the build is
 /// compiled reads them off the links' type (`SessionLinks::LINK_CELL_BYTES`).
-pub(crate) const fn cells_of<C: ClockSource + 'static>(driver: usize) -> LinkCells<usize> {
+pub(crate) const fn cells_of<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    driver: usize,
+) -> LinkCells<usize> {
     LinkCells {
         driver,
-        gate: CellRc::<LinkGate<C>>::cell_bytes(),
-        actions: CellRc::<LinkActions<C>>::cell_bytes(),
-        halves: CellRc::<LinkHalves<C>>::cell_bytes(),
+        gate: CellRc::<LinkGate<C, D>>::cell_bytes(),
+        actions: CellRc::<LinkActions<C, D>>::cell_bytes(),
+        halves: CellRc::<LinkHalves<C, D>>::cell_bytes(),
     }
 }
 
@@ -4855,7 +4869,10 @@ pub(crate) const fn lay_out_open<const ROWS: usize>(
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
 /// link's gates, the place the session lends its one reassembly Router in and `FaceDispatch`.
 /// What each cell the open reserves for a link holds, so a link's session is never refused a cell
-/// for its size.
+/// for its size. Taken for actions that send through the link behind its table: the task holds its
+/// actions by a handle of one word whatever the type they send through, and a handle on a sink
+/// behind a table is at least as large as one on a sink of its own type, so the cell holds the task
+/// of any stack's link.
 #[cfg(wz_round)]
 pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
     router_session_task_bytes::<
@@ -4863,8 +4880,9 @@ pub(crate) const fn link_task_bytes<C: ClockSource + 'static>() -> usize {
         CellRc<dyn SessionDatagramLink, LinkCount>,
         RouterLend<SessionReassembly, RouterPlace>,
         RouterLend<SessionReassembly, RouterPlace>,
-        FaceDispatch<C>,
+        FaceDispatch<C, dyn wz_session_core::link::BoxedLinkDriver>,
         SessionLock,
+        dyn wz_session_core::link::BoxedLinkDriver,
     >()
 }
 
@@ -5076,16 +5094,31 @@ struct LinkMaking<'a> {
     limits: &'a SessionLimits,
 }
 
-impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
-    type Gate = HeldGate<C>;
+impl<C: ClockSource + 'static, L: ?Sized + DynLink, D: ?Sized + DynSink>
+    LinkCalls<C, SessionLock, L, D> for LinkMaking<'_>
+{
     #[cfg(wz_round)]
-    type Dispatch = FaceDispatch<C>;
+    type Gate = HeldGate<C, D>;
+    // The link is its own gate (`gate`), read as the type the stack's links are.
+    #[cfg(not(wz_round))]
+    type Gate = CellRc<L, LinkCount>;
+    #[cfg(wz_round)]
+    type Link = dyn SessionDatagramLink;
+    #[cfg(not(wz_round))]
+    type Link = L;
+    #[cfg(wz_round)]
+    type Dispatch = FaceDispatch<C, D>;
     // What the read hands each step of the link it steps itself (`direct`).
     #[cfg(not(wz_round))]
-    type Dispatch = direct::LinkRecords<C>;
-    type Session = LinkSession<C>;
+    type Dispatch = direct::LinkRecords<C, D>;
+    type Session = LinkSession<C, D>;
 
-    fn link_made(&mut self, face: FaceId, actions: &LinkHandle<C>, key_form: Option<KeyWireForm>) {
+    fn link_made(
+        &mut self,
+        face: FaceId,
+        actions: &LinkHandle<C, D>,
+        key_form: Option<KeyWireForm>,
+    ) {
         // The session keeps its declarations in its one table set and names each key it sends
         // itself, so the link keeps none and reads none; what the peer sends by the session's
         // ids is read from the same tables, which the dispatch of every face reads.
@@ -5117,29 +5150,31 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
     }
 
     // Each record is handed out as it is read, so nothing holds the link back: the link is its own
-    // gate, read through its own table, and takes no cell of the gates.
+    // gate, read as the stack's links are, and takes no cell of the gates.
     #[cfg(not(wz_round))]
     fn gate(
         &self,
-        pump: CellRc<dyn SessionDatagramLink, LinkCount>,
-        _actions: &LinkHandle<C>,
+        pump: CellRc<L, LinkCount>,
+        _actions: &LinkHandle<C, D>,
         _cells: Option<&GateCells>,
-    ) -> Option<HeldGate<C>> {
+    ) -> Option<CellRc<L, LinkCount>> {
         Some(pump)
     }
 
     #[cfg(not(wz_round))]
-    fn gated_link(gate: &HeldGate<C>) -> CellRc<dyn SessionDatagramLink, LinkCount> {
+    fn gated_link(gate: &CellRc<L, LinkCount>) -> CellRc<L, LinkCount> {
         gate.clone()
     }
 
     #[cfg(wz_round)]
     fn gate(
         &self,
-        pump: CellRc<dyn SessionDatagramLink, LinkCount>,
-        actions: &LinkHandle<C>,
+        pump: CellRc<L, LinkCount>,
+        actions: &LinkHandle<C, D>,
         cells: Option<&GateCells>,
-    ) -> Option<HeldGate<C>> {
+    ) -> Option<HeldGate<C, D>> {
+        // The round's gates are one type for every stack, so they read the link behind its table.
+        let pump = L::into_dyn(pump);
         // The session is handed a record of a link only while its round of deliveries has the room
         // one record can take (decision Q4), and with `listen` only once the engine admitted it:
         // the link gives the session nothing between its handshake and the face table's decision
@@ -5161,16 +5196,16 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
 
     // The gates' cell, read as the link it gates.
     #[cfg(wz_round)]
-    fn gated_link(gate: &HeldGate<C>) -> CellRc<dyn SessionDatagramLink, LinkCount> {
+    fn gated_link(gate: &HeldGate<C, D>) -> CellRc<dyn SessionDatagramLink, LinkCount> {
         gate.clone().into_link()
     }
 
     fn wire_parts(
         &self,
         face: FaceId,
-        actions: LinkHandle<C>,
-        gate: &HeldGate<C>,
-    ) -> (Self::Dispatch, LinkSession<C>) {
+        actions: LinkHandle<C, D>,
+        gate: &Self::Gate,
+    ) -> (Self::Dispatch, LinkSession<C, D>) {
         #[cfg(feature = "queryable")]
         let generation = self.session.plane.next_generation();
         // What the link's records are dispatched with: the registry is lent to a task's dispatch
@@ -5228,9 +5263,9 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
 }
 
 /// The session ends, for the reason the caller's `last` was left holding: what the moves of the
-/// links answer (`Core::poll_links`, `Core::carry_out`). The reason holds an endpoint's text, the
-/// largest value of a move, so it is written once where the caller keeps it rather than handed
-/// back through every call between.
+/// links answer (`Core::poll_links`, `Core::carry_out`). The reason is the walk's refusal, a
+/// value of a few words with no text, written where the caller keeps it; its text is read once,
+/// when the session ends with it (`Core::walk_ended`).
 #[cfg(wz_round)]
 struct SessionEnds;
 
@@ -5239,13 +5274,13 @@ struct SessionEnds;
 /// leaves. One value, so what a step read is carried through the arms of its life's effects
 /// (`Core::carry_out`) whole; a step that read no dial carries [`Self::none`].
 #[cfg(wz_round)]
-struct ReadDial<P> {
+struct ReadDial<P: SharedPump<LinkCount>> {
     answer: DialAnswer<P, LinkCount>,
     dialled: Option<DialEndpoint>,
 }
 
 #[cfg(wz_round)]
-impl<P> ReadDial<P> {
+impl<P: SharedPump<LinkCount>> ReadDial<P> {
     /// No dial read: no answer and no endpoint.
     fn none() -> Self {
         Self {
@@ -5255,12 +5290,93 @@ impl<P> ReadDial<P> {
     }
 }
 
+/// What a pass over the faces holds of the face at `at`, numbered `id`, while it carries out
+/// its life's effects (`link_life::carry`): the session, the face's dial as the step read it, and
+/// the refusal the pass ends with.
+#[cfg(wz_round)]
+struct RoundLinkIo<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
+    core: &'a mut Core<L, C>,
+    at: usize,
+    id: FaceId,
+    read: &'a mut ReadDial<L::Pump>,
+    last: &'a mut Option<WalkRefusal>,
+}
+
+#[cfg(wz_round)]
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> LinkIo for RoundLinkIo<'_, L, C> {
+    const TAKES_FACES: bool = cfg!(feature = "listen");
+
+    fn life(&mut self) -> Option<&mut UnicastLink> {
+        self.core
+            .transport
+            .links
+            .face_mut(self.at)
+            .map(|face| &mut face.life)
+    }
+
+    fn now_us(&mut self) -> u64 {
+        self.core.now_us()
+    }
+
+    /// A dial the life walked past with no answer read is over, and its endpoint names the
+    /// reason.
+    fn give_up_dial(&mut self, row: usize) {
+        if let Some(endpoint) = self.core.transport.links.end_dial(self.at, row) {
+            *self.last = Some(WalkRefusal::endpoint(
+                Some(endpoint),
+                Refusal::NoAnswerInTime,
+            ));
+        }
+    }
+
+    /// The link's task, told to stop, ends in the pass of the tasks before its link goes.
+    fn end_handshake(&mut self, row: usize) {
+        let why = self.core.transport.end_handshake(self.at);
+        self.core.run_tasks();
+        self.core.transport.links.put_link(self.at, Link::Idle);
+        *self.last = Some(WalkRefusal::endpoint(Some(DialEndpoint::Listed(row)), why));
+    }
+
+    /// zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read that
+    /// failed, a Close from the router (`vendor/zenoh-pico/src/transport/unicast/read.c` @
+    /// `return _zp_unicast_failed_result(ztu, executor);`).
+    fn lose(&mut self, ends_session: bool) {
+        self.core.lose_face_link(self.at, self.id);
+        if ends_session {
+            *self.last = Some(WalkRefusal::endpoint(None, Refusal::LinkLost));
+        }
+    }
+
+    /// The face table decides whether the node is held already.
+    fn bring_up(&mut self, now_us: u64) {
+        self.core.bring_up(self.at, now_us);
+    }
+
+    /// A session whose table holds the dial role's face alone has no face taken beside it
+    /// (`FacePlaces::TAKES`).
+    fn take_out(&mut self) {
+        #[cfg(feature = "listen")]
+        if self.core.transport.links.takes_faces() {
+            self.core.remove_face(self.at);
+        }
+    }
+
+    fn begin_handshake(&mut self) -> LinkInput {
+        self.core
+            .begin_handshake(self.at, self.id, self.read, self.last)
+    }
+
+    fn dial(&mut self, row: usize) -> LinkInput {
+        self.core.dial_endpoint(self.at, row, self.read, self.last)
+    }
+}
+
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Run a session over `opened` as face `face`, in `role`: the handshake begun, its task
     /// spawned on the session's local set and stepped once so that an initiator's InitSyn is sent
     /// now and not after the wait of the next read. The link is the same whichever end opened
-    /// it; the role is the handshake's alone. [`OpenError::EntropyUnavailable`] when the platform
-    /// gives no cookie key for the attempt.
+    /// it; the role is the handshake's alone. [`TransportRefusal::EntropyUnavailable`] when the
+    /// platform gives no cookie key for the attempt.
     #[cfg(wz_round)]
     fn open_wire(
         &mut self,
@@ -5268,7 +5384,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         opened: OpenedLink<L::Pump, LinkCount>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-    ) -> Result<Wire<C>, OpenError> {
+    ) -> Result<Wire<C, SinkOf<L>>, TransportRefusal> {
         let wire = self.start_wire(face, opened, role, endpoint)?;
         self.run_tasks();
         Ok(wire)
@@ -5288,7 +5404,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         opened: OpenedLink<L::Pump, LinkCount>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-    ) -> Result<Wire<C>, OpenError> {
+    ) -> Result<Wire<C, SinkOf<L>>, TransportRefusal> {
         let params = self.link_params()?;
         // The link's session is the transport's to make; what the session's tables keep of the
         // link, its gates and what its task hands its reads to are the session's (`LinkMaking`).
@@ -5297,36 +5413,35 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             registry_lend: &self.registry_lend,
             limits: resolve_limits(&self.config),
         };
-        self.transport
-            .make_wire(
-                &mut calls,
-                face,
-                opened,
-                role,
-                endpoint,
-                WireMaking {
-                    params,
-                    local: &self.local,
-                    entropy: &mut self.entropy,
-                    clock: &self.session_time,
-                    timeouts: self.config.timeouts,
-                },
-            )
-            .map_err(OpenError::from)
+        self.transport.make_wire(
+            &mut calls,
+            face,
+            opened,
+            role,
+            endpoint,
+            WireMaking {
+                params,
+                local: &self.local,
+                entropy: &mut self.entropy,
+                clock: &self.session_time,
+                timeouts: self.config.timeouts,
+            },
+        )
     }
 
     /// The parameters a link's session is opened with, with a cookie key of its own.
-    /// [`OpenError::EntropyUnavailable`] when the platform gives no cookie key for the attempt.
+    /// [`TransportRefusal::EntropyUnavailable`] when the platform gives no cookie key for the
+    /// attempt: a refusal of the link's making, as the transport's are.
     // Always inlined: the parameters are built in the frame of the making of the link.
     #[inline(always)]
-    fn link_params(&mut self) -> Result<SessionInitParams, OpenError> {
+    fn link_params(&mut self) -> Result<SessionInitParams, TransportRefusal> {
         // The cookie key of the attempt is drawn before the parameters are read off the config:
         // drawn among them, its refusal would leave every field read before it in a temporary
         // of its own, moved again into the parameters once the key is there. A build whose
         // session machine has no accepting role, or whose acceptor mints no cookie (no
         // `accept-cookie`), holds no key, and its draw takes nothing.
         let cookie_signing_key =
-            CookieKey::draw(&mut self.entropy).map_err(|_| OpenError::EntropyUnavailable)?;
+            CookieKey::draw(&mut self.entropy).map_err(|_| TransportRefusal::EntropyUnavailable)?;
         // The parameters the tokio engine gives a session (`wz-capi-core`'s `init_params`), with a
         // cookie key of its own per attempt.
         let params = SessionInitParams {
@@ -5362,19 +5477,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// input of the face's life. A dial the network has not answered yet is left under way in the
     /// face and asked at the steps that follow, so no dial is waited for while the session is
     /// held; one answered at once with a link has it kept in `read`, with its endpoint, for the
-    /// handshake the life asks for next. A refusal is kept in `last`. A dial names its endpoint
-    /// by its row of the session's endpoint texts, which holds the text.
+    /// handshake the life asks for next. A refusal is kept in `last`, with no text. A dial names
+    /// its endpoint by its row of the session's endpoint texts, which holds the text.
     #[cfg(wz_round)]
     fn dial_endpoint(
         &mut self,
         at: usize,
         row: usize,
         read: &mut ReadDial<L::Pump>,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> LinkInput {
         match self.transport.dial_row(at, row) {
             Err(refused) => {
-                *last = OpenError::from(refused);
+                *last = Some(WalkRefusal::of(Some(DialEndpoint::Listed(row)), refused));
                 LinkInput::DialRefused
             }
             // Put in the face where it was asked (`LinkSupervisor::ask_dial`).
@@ -5385,28 +5500,24 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 LinkInput::DialMade
             }
             Ok(Some(Err(refused))) => {
-                self.refuse(
-                    last,
-                    Some(&DialEndpoint::Listed(row)),
+                *last = Some(WalkRefusal::endpoint(
+                    Some(DialEndpoint::Listed(row)),
                     Refusal::Link(refused),
-                );
+                ));
                 LinkInput::DialRefused
             }
         }
     }
 
-    /// Leave in `last` that `endpoint` could not be reached, for `why`: the reason a face's step
-    /// goes on with when its dial, its handshake or its link failed. Out of line and cold: each of
-    /// those arms of a face's step would otherwise build the refusal, the endpoint's text in it,
-    /// and copy it into `last` itself.
-    #[cfg(wz_round)]
+    /// The refusal a session whose walk over its endpoints ended ends with: the walk's last,
+    /// `refusal`, its endpoint's text read now, once; no endpoint at all when the walk passed
+    /// none. Out of line and cold: the open and the read end a session here.
     #[cold]
     #[inline(never)]
-    fn refuse(&self, last: &mut OpenError, endpoint: Option<&DialEndpoint>, why: Refusal) {
-        *last = OpenError::Unreachable(EndpointRefusal::new(
-            self.transport.endpoint_text(endpoint),
-            why,
-        ));
+    fn walk_ended(&self, refusal: Option<WalkRefusal>) -> OpenError {
+        refusal.map_or(OpenError::NoEndpoint, |refusal| {
+            OpenError::from(self.transport.walk_refused(&refusal))
+        })
     }
 
     /// Begin the handshake of the link the dial of the face at `at`, numbered `id`, made: the
@@ -5420,16 +5531,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         at: usize,
         id: FaceId,
         read: &mut ReadDial<L::Pump>,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> LinkInput {
         let endpoint = read.dialled.take();
         let Some(answered) = read.answer.take() else {
             return LinkInput::HandshakeRefused(HandshakeRefusal::Endpoint);
         };
-        let opened = match self.transport.dialled(endpoint.as_ref(), answered) {
-            Ok(opened) => self.open_wire(id, opened, SessionRole::Initiator, endpoint.as_ref()),
-            Err(refused) => Err(OpenError::from(refused)),
-        };
+        let opened = self
+            .transport
+            .dialled(endpoint.as_ref(), answered)
+            .and_then(|opened| {
+                self.open_wire(id, opened, SessionRole::Initiator, endpoint.as_ref())
+            });
         match opened {
             Ok(wire) => {
                 self.transport.links.put_link(at, Link::Wire(wire));
@@ -5437,11 +5550,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
             Err(refused) => {
                 let why = match refused {
-                    OpenError::EntropyUnavailable => HandshakeRefusal::Fatal,
-                    OpenError::NoTask(_) => HandshakeRefusal::Task,
+                    TransportRefusal::EntropyUnavailable => HandshakeRefusal::Fatal,
+                    TransportRefusal::NoTask(_) => HandshakeRefusal::Task,
                     _ => HandshakeRefusal::Endpoint,
                 };
-                *last = refused;
+                *last = Some(WalkRefusal::of(endpoint, refused));
                 LinkInput::HandshakeRefused(why)
             }
         }
@@ -5458,7 +5571,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         redial_ms: Option<u64>,
         now_us: u64,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> Result<(), SessionEnds> {
         let links = &self.transport.links;
         if self.links_settled.is_some_and(|settled| {
@@ -5595,7 +5708,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         redial_ms: Option<u64>,
         now_us: u64,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> Result<(), SessionEnds> {
         #[cfg(test)]
         self.link_polls.set(self.link_polls.get() + 1);
@@ -5630,7 +5743,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         at: usize,
         now_us: u64,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> Result<(), SessionEnds> {
         let now_ms = now_us / 1000;
         let Some(face) = self.transport.links.face(at) else {
@@ -5670,7 +5783,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         at: usize,
         input: LinkInput,
         now_us: u64,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> Result<(), SessionEnds> {
         let Some(face) = self.transport.links.face_mut(at) else {
             return Ok(());
@@ -5679,85 +5792,46 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.carry_out(at, effects, &mut ReadDial::none(), now_us, last)
     }
 
-    /// Carry out what the life of the face at `at` asks for (`effects`), each naming the endpoint
-    /// it is about, in the order [`Effects`] names, reporting the dial or the handshake it asks
-    /// for back to it as its next input, read at the clock after the I/O, until it asks for no
-    /// more. `read` holds the face's dial as the step read it ([`ReadDial`]). `Err` when the
-    /// session ends, the reason the last endpoint tried gave left in `last`, which every arm
-    /// writes rather than hands back.
+    /// Carry out what the life of the face at `at` asks for (`effects`) with what a pass over the
+    /// faces holds of its link (`RoundLinkIo`, `link_life::carry`). `read` holds the face's dial
+    /// as the step read it ([`ReadDial`]). `Err` when the session ends, the reason the last
+    /// endpoint tried gave left in `last`, which every arm writes rather than hands back.
     #[cfg(wz_round)]
     fn carry_out(
         &mut self,
         at: usize,
-        mut effects: Effects,
+        effects: Effects,
         read: &mut ReadDial<L::Pump>,
         now_us: u64,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> Result<(), SessionEnds> {
         let Some(id) = self.transport.links.face(at).map(|face| face.id) else {
             return Ok(());
         };
-        *last = OpenError::NoEndpoint;
-        // The dial the step read the refusal of, and one the life walked past or let go of with
-        // no answer read: either is over, and its endpoint names the reason.
+        *last = None;
+        // The dial the step read the refusal of is over, and its endpoint names the reason; one
+        // the life gave up on with no answer read is given up by the I/O
+        // (`RoundLinkIo::give_up_dial`).
         if matches!(read.answer, Some(Err(_))) {
             if let Some(Err(refused)) = read.answer.take() {
-                self.refuse(last, read.dialled.as_ref(), Refusal::Link(refused));
+                *last = Some(WalkRefusal::endpoint(
+                    read.dialled.take(),
+                    Refusal::Link(refused),
+                ));
             }
-        } else if let Some(endpoint) = self.transport.links.end_dial(at) {
-            self.refuse(last, Some(&endpoint), Refusal::NoAnswerInTime);
         }
-        loop {
-            if effects.let_go() {
-                self.transport.links.abort_link(at);
-                self.transport.links.put_link(at, Link::Idle);
-            }
-            // The link's task, told to stop, ends in the pass of the tasks before its link goes.
-            if let Some(row) = effects.end_handshake() {
-                let why = self.transport.end_handshake(at);
-                self.run_tasks();
-                self.transport.links.put_link(at, Link::Idle);
-                self.refuse(last, Some(&DialEndpoint::Listed(row)), why);
-            }
-            // zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read
-            // that failed, a Close from the router
-            // (`vendor/zenoh-pico/src/transport/unicast/read.c` @
-            // `return _zp_unicast_failed_result(ztu, executor);`).
-            if effects.lose() {
-                self.lose_face_link(at, id);
-                self.refuse(last, None, Refusal::LinkLost);
-            }
-            // The face table decides whether the node is held already.
-            if effects.bring_up() {
-                self.bring_up(at, now_us);
-            }
-            if effects.ends_session() {
-                return Err(SessionEnds);
-            }
-            // A face taken beside the dial role's goes with its link; a session whose table holds
-            // the dial role's face alone has no such face (`FacePlaces::TAKES`).
-            #[cfg(feature = "listen")]
-            if effects.removes() {
-                if self.transport.links.takes_faces() {
-                    self.remove_face(at);
-                }
-                return Ok(());
-            }
-            let input = if effects.begin_handshake() {
-                self.begin_handshake(at, id, read, last)
-            } else if let Some(row) = effects.dial() {
-                self.dial_endpoint(at, row, read, last)
-            } else {
-                // A wait to dial again is the life's: its wake (`UnicastLink::wake_at`) brings
-                // the face's next step.
-                return Ok(());
-            };
-            let now_us = self.now_us();
-            let Some(face) = self.transport.links.face_mut(at) else {
-                return Ok(());
-            };
-            effects = face.life.input(input, now_us);
-        }
+        let mut io = RoundLinkIo {
+            core: self,
+            at,
+            id,
+            read,
+            last,
+        };
+        // The round reads each face's wake off its life when it plans its wait
+        // (`LinkSupervisor::idle_wait`), so the answer's is not kept here.
+        carry(&mut io, effects, now_us)
+            .map(|_wake_us| ())
+            .map_err(|SessionEnded| SessionEnds)
     }
 
     /// What a lost link of the face at `at`, numbered `id`, takes with it: its peer's chains,
@@ -5831,7 +5905,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// next pass over the faces takes it as lost (`poll_face`). `tx` is what the caller holds
     /// of the one link, taken with its place before the session's lock
     /// (`CoopEngine::live_on_link`), through which that link is told.
-    fn redeclare(&mut self, tx: LinkTx<'_, C>) -> usize {
+    fn redeclare(&mut self, tx: LinkTx<'_, C, SinkOf<L>>) -> usize {
         let now_ms = self.clock.now_us() / 1000;
         let places = self.transport.links.places();
         (0..places)
@@ -5842,7 +5916,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Tell the peer of the face at `at` everything the session holds again (`redeclare`),
     /// through `tx`: whether it was told, which a place with no face, or a face whose link is not
     /// up, is not.
-    fn redeclare_on(&mut self, at: usize, now_ms: u64, tx: LinkTx<'_, C>) -> bool {
+    fn redeclare_on(&mut self, at: usize, now_ms: u64, tx: LinkTx<'_, C, SinkOf<L>>) -> bool {
         let up = self
             .transport
             .links
@@ -5870,7 +5944,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// `tx` is what the caller holds of a face, taken with its place before the session's lock
     /// (`CoopEngine::live_on_link`), through which that face is settled.
     #[cfg(wz_interest_answer)]
-    fn settle_faces(&mut self, tx: LinkTx<'_, C>) {
+    fn settle_faces(&mut self, tx: LinkTx<'_, C, SinkOf<L>>) {
         #[cfg(wz_round)]
         let _ = tx;
         for at in 0..self.transport.links.places() {
@@ -5881,7 +5955,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 continue;
             };
             let carried = OnThisThread((HeldFace::new(at, face.id), &mut self.session.registry));
-            let settle = move |actions: &LinkActions<C>| {
+            let settle = move |actions: &LinkActions<C, SinkOf<L>>| {
                 let (held, registry) = carried.get();
                 registry.settle(held, actions);
             };
@@ -6259,7 +6333,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Give back one hold of the declaration `row` names, the last retracting it: its place read
     /// while it stands, then its row let go of, then the links told. The one body of a key's
     /// release, for a holder the program keeps and for a write filter's row alike.
-    fn let_go_of_keyexpr(&mut self, row: KeyexprHandle, tx: LinkTx<'_, C>) {
+    fn let_go_of_keyexpr(&mut self, row: KeyexprHandle, tx: LinkTx<'_, C, SinkOf<L>>) {
         let place = self.prefix_retraction(Some(row));
         let retracted = tables_mut(&mut self.session.registry).undeclare_keyexpr(row);
         // The row went before the links are told: a send never finds the table borrowed.
@@ -6275,7 +6349,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         place: Option<usize>,
         mapping_id: Option<ExprId>,
-        tx: LinkTx<'_, C>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
     ) {
         let (Some(place), Some(mapping_id)) = (place, mapping_id) else {
             return;
@@ -6292,7 +6366,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// history's callback undeclared asks nothing: its row is gone, and so is its place in the
     /// replay's order.
     #[cfg(feature = "liveliness")]
-    fn ask_liveliness_subscriber(&mut self, handle: LivelinessSubscriberHandle, tx: LinkTx<'_, C>) {
+    fn ask_liveliness_subscriber(
+        &mut self,
+        handle: LivelinessSubscriberHandle,
+        tx: LinkTx<'_, C, SinkOf<L>>,
+    ) {
         let stands = tables(&self.session.registry)
             .liveliness_subscribers()
             .get(handle)
@@ -6894,7 +6972,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// the runtime's span of `runtime` bytes, the engine's own place and its planes'.
     const fn open_holds(driver: usize, held: &HeldPlaces, runtime: usize) -> OpenHolds<'_> {
         OpenHolds {
-            cells: cells_of::<C>(driver),
+            cells: cells_of::<C, SinkOf<L>>(driver),
             #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
             rooms: link_rooms_bytes::<L>(),
             held,
@@ -7014,7 +7092,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             PlanFrom::Region(region) => {
                 // Laid out with the places of this engine over the links its maker named
                 // (`Self::open_region_over`): those this open is handed.
-                debug_assert_eq!(region.cell_bytes(), link_cells::<C>(&links));
+                debug_assert_eq!(region.cell_bytes(), link_cells::<C, L>(&links));
                 debug_assert_eq!(region.places().engine, Shared::<Self>::layout().size());
                 OpenFrom::Region(region)
             }
@@ -7566,13 +7644,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         ) {
             // An open that no endpoint answers ends here: the link has not been up, so its life
             // dials none again.
-            let mut last = OpenError::NoEndpoint;
+            let mut last = None;
             let now_us = core.now_us();
             if core
                 .give_face(0, LinkInput::Open, now_us, &mut last)
                 .is_err()
             {
-                return Err(last);
+                return Err(core.walk_ended(last));
             }
             // Open once the dial's link is up, or once the node it reached is held by a face that
             // came first (a peer that listens and dials its own listener's peer).
@@ -7583,7 +7661,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 core.run_tasks();
                 let now_us = core.now_us();
                 if core.poll_links(None, now_us, &mut last).is_err() {
-                    return Err(last);
+                    return Err(core.walk_ended(last));
                 }
             }
         }
@@ -7847,7 +7925,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     )> {
         self.live().and_then(|core| {
             let (_, wire) = core.0.up_wires_at().next()?;
-            lend_actions(wire, |actions: &LinkActions<C>| {
+            lend_actions(wire, |actions: &LinkActions<C, SinkOf<L>>| {
                 (actions.batch_lend_counts(), actions.frame_lend_counts())
             })
         })
@@ -8182,7 +8260,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// (`LinkTx`): the session's lock alone, where each face's record holds its link and is
     /// reached under it. `None` once the session is closed.
     #[cfg(wz_round)]
-    fn live_on_link<U>(&self, f: impl FnOnce(&mut Core<L, C>, LinkTx<'_, C>) -> U) -> Option<U> {
+    fn live_on_link<U>(
+        &self,
+        f: impl FnOnce(&mut Core<L, C>, LinkTx<'_, C, SinkOf<L>>) -> U,
+    ) -> Option<U> {
         let mut guard = self.live()?;
         Some(f(&mut guard.0, core::marker::PhantomData))
     }
@@ -8195,7 +8276,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     fn on_faces(
         &self,
         _droppable: bool,
-        leg: impl FnOnce(LinkTx<'_, C>) -> Result<usize, FanoutError>,
+        leg: impl FnOnce(LinkTx<'_, C, SinkOf<L>>) -> Result<usize, FanoutError>,
     ) -> Result<usize, FanoutError> {
         leg(core::marker::PhantomData)
     }
@@ -8314,7 +8395,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let mut report = wz_session_core::stats::TransportStatsReport::default();
         if let Some(core) = self.live() {
             for (_, wire) in core.0.up_wires_at() {
-                lend_actions(wire, |actions: &LinkActions<C>| {
+                lend_actions(wire, |actions: &LinkActions<C, SinkOf<L>>| {
                     report.absorb(&actions.stats_report());
                 });
             }
@@ -8866,7 +8947,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         put: &PutOn<'_>,
         opts: &PublishOptions,
         asked: &Asked,
-        tx: LinkTx<'_, C>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
     ) -> Result<usize, FanoutError> {
         if asked.stops() {
             return Ok(0);
@@ -8973,7 +9054,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         &self,
         put: &PutOn<'_>,
         asked: &Asked,
-        tx: LinkTx<'_, C>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
     ) -> Result<usize, FanoutError> {
         if asked.stops() {
             return Ok(0);
@@ -9242,7 +9323,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         put: &PutOn<'_>,
         epoch: u64,
         named: NamedKey<'_>,
-        tx: LinkTx<'_, C>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
     ) {
         let Some(row) = Self::filter_row(core, put.filter) else {
             return;
@@ -9258,7 +9339,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if !core.up_wires_at().all(|(_, wire)| {
             #[cfg(all(test, feature = "std"))]
             core.plan_links.set(core.plan_links.get() + 1);
-            send_through(wire, tx, &|actions: &LinkActions<C>| {
+            send_through(wire, tx, &|actions: &LinkActions<C, SinkOf<L>>| {
                 key_on_link(actions, named).wire() == named.wire()
             }) == Some(true)
         }) {
@@ -9287,7 +9368,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         mut waits: OwingWaits,
         mut left_us: u64,
         mut outcome: Result<usize, FanoutError>,
-        tx: LinkTx<'_, C>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
     ) -> Result<usize, FanoutError> {
         loop {
             let waited = !waits.is_empty();
@@ -9355,7 +9436,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         put: &Publication<'_>,
         skip: Option<&DroppedOn>,
         pass: Pass,
-        tx: LinkTx<'_, C>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
     ) -> (Result<usize, FanoutError>, Option<u64>) {
         // An empty key names nothing a link carries.
         let Some(link_leg) = Self::leg_of(core, put) else {
@@ -9376,7 +9457,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         leg: &LinkLeg<'_>,
         skip: Option<&DroppedOn>,
         pass: Pass,
-        tx: LinkTx<'_, C>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
     ) -> (Result<usize, FanoutError>, Option<u64>) {
         let (outcome, stuck) = self.send_on_links(core, leg, skip, pass, tx);
         if stuck.is_some() {
@@ -9431,7 +9512,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         put: &Publication<'_>,
         send: wz_session_core::session_actions::SendAs,
         skip: Option<&DroppedOn>,
-        tx: LinkTx<'_, C>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
     ) -> Result<usize, FanoutError> {
         #[cfg(not(wz_round))]
         if !tx.reaches_groups() {
@@ -9514,8 +9595,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         &self,
         core: LiveCore<'_, L, C>,
         put: &Publication<'_>,
-        alone: &Wire<C>,
-        tx: LinkTx<'_, C>,
+        alone: &Wire<C, SinkOf<L>>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
         probe: bool,
     ) -> Result<usize, FanoutError> {
         let Some(leg) = Self::leg_of(&core.0, put) else {
@@ -9541,7 +9622,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// link `tx` holds is up, as a fan-out sends only the faces that are, and the publish run its
     /// send is made in (`probe` as [`Self::publish_alone`] takes it).
     #[cfg(not(wz_round))]
-    fn alone_run(core: &Core<L, C>, tx: LinkTx<'_, C>, probe: bool) -> (bool, PublishRun) {
+    fn alone_run(
+        core: &Core<L, C>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
+        probe: bool,
+    ) -> (bool, PublishRun) {
         let up = core.up_wires_at().any(|(_, link)| tx.reaches(link));
         let run = PublishRun::new(
             false,
@@ -9560,8 +9645,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     fn send_leg_alone(
         &self,
         leg: &LinkLeg<'_>,
-        alone: &Wire<C>,
-        tx: LinkTx<'_, C>,
+        alone: &Wire<C, SinkOf<L>>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
         up: bool,
         run: PublishRun,
         mut outcome: Result<usize, FanoutError>,
@@ -9593,7 +9678,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     fn send_alone(
         &self,
         leg: &LinkLeg<'_>,
-        alone: &Wire<C>,
+        alone: &Wire<C, SinkOf<L>>,
         how: FaceSend,
         outcome: &mut Result<usize, FanoutError>,
     ) -> bool {
@@ -9619,7 +9704,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     fn wait_alone(
         &self,
         leg: &LinkLeg<'_>,
-        alone: &Wire<C>,
+        alone: &Wire<C, SinkOf<L>>,
         mut run: PublishRun,
         place: u64,
         mut outcome: Result<usize, FanoutError>,
@@ -9668,7 +9753,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         leg: &LinkLeg<'_>,
         skip: Option<&DroppedOn>,
         pass: Pass,
-        tx: LinkTx<'_, C>,
+        tx: LinkTx<'_, C, SinkOf<L>>,
     ) -> (Result<usize, FanoutError>, Option<u64>) {
         let mut outcome = Ok(0);
         #[cfg(not(all(wz_round, any(feature = "listen", feature = "group"))))]
@@ -10267,7 +10352,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 asked = Some(face);
                 // A serial the face's actions allocate, which the entry's row is put below.
                 let Some(serial) = core.up_wire(face).and_then(|link| {
-                    lend_through(link, tx, |actions: &LinkActions<C>| {
+                    lend_through(link, tx, |actions: &LinkActions<C, SinkOf<L>>| {
                         actions.alloc_next_request_id()
                     })
                 }) else {
@@ -10304,7 +10389,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 let abi = abi_names(wire, keyexpr);
                 let refused = core::cell::Cell::new(None);
                 let sent = core.up_wire(face).and_then(|link| {
-                    send_through(link, tx, &|actions: &LinkActions<C>| {
+                    send_through(link, tx, &|actions: &LinkActions<C, SinkOf<L>>| {
                         get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
                             wz_session_core::wire_key::WireKey::from_parts(mapping_id, suffix)
                                 .is_some_and(|key| {
@@ -10497,7 +10582,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 let Some(interest_id) = core
                     .up_wire(face)
                     .and_then(|link| {
-                        lend_through(link, tx, |actions: &LinkActions<C>| {
+                        lend_through(link, tx, |actions: &LinkActions<C, SinkOf<L>>| {
                             actions.alloc_next_interest_id()
                         })
                     })
@@ -10551,7 +10636,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 // does.
                 let abi = abi_names(wire, keyexpr);
                 let sent = core.up_wire(face).and_then(|link| {
-                    send_through(link, tx, &|actions: &LinkActions<C>| {
+                    send_through(link, tx, &|actions: &LinkActions<C, SinkOf<L>>| {
                         get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
                             actions
                                 .send_interest_liveliness_get(interest_id, mapping_id, suffix)
@@ -10734,7 +10819,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             if let Some(link) = core.answer_wire(generation) {
                 let hold = !*raised;
-                let held = send_through(link, tx, &|actions: &LinkActions<C>| {
+                let held = send_through(link, tx, &|actions: &LinkActions<C, SinkOf<L>>| {
                     let held = hold && actions.hold_replies();
                     wz_session_core::response_sink::ResponseSink::send_reply_parts(actions, parts);
                     held
@@ -10807,7 +10892,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // The Final joins the frame the turn's replies were held in, and the hold the turn
             // raised is let go of after it, so the replies and the Final leave in one send.
             if let Some(link) = core.answer_wire(generation) {
-                send_through(link, tx, &|actions: &LinkActions<C>| {
+                send_through(link, tx, &|actions: &LinkActions<C, SinkOf<L>>| {
                     if let Some(qos) = due {
                         actions.send_response_final(rid, qos);
                     }
@@ -11005,7 +11090,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         core.sweep_gets(now_us);
         let redial_ms = core.config.redial_ms;
         // Why the session ends is no reader's here: a handle finds it closed.
-        let mut last = OpenError::NoEndpoint;
+        let mut last = None;
         if core.move_links(redial_ms, now_us, &mut last).is_err() {
             // A handle reads the session closed from its row from here on, as after a close.
             #[cfg(any(feature = "engine-rows", test))]
@@ -11107,7 +11192,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         while let Some(face) = core.transport.next_up_face(true, asked) {
             asked = Some(face);
             if let Some(link) = core.up_wire(face) {
-                lend_actions(link, |actions: &LinkActions<C>| {
+                lend_actions(link, |actions: &LinkActions<C, SinkOf<L>>| {
                     actions
                         .next_outbound_interest_id
                         .store(u64::from(u32::MAX) + 1, Ordering::Relaxed);
@@ -12302,7 +12387,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             let links = core
                 .up_wires_at()
                 .filter(|(_, wire)| {
-                    send_through(*wire, tx, &|actions: &LinkActions<C>| {
+                    send_through(*wire, tx, &|actions: &LinkActions<C, SinkOf<L>>| {
                         batch_link(actions, step)
                     }) == Some(true)
                 })
@@ -12942,7 +13027,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         self.live_on_link(|core, tx| {
             // A link that is down has no lease to keep; the session is not closed.
             for (_, wire) in core.up_wires_at() {
-                send_through(wire, tx, &|actions: &LinkActions<C>| {
+                send_through(wire, tx, &|actions: &LinkActions<C, SinkOf<L>>| {
                     actions.send_keep_alive();
                     true
                 });
@@ -13191,13 +13276,16 @@ pub trait ComposedLinks {
     type WithGroups<J>;
     /// The links `waited_by_owner` makes.
     type WaitedByOwner;
+    /// The links `closed` makes, which their sessions read as the one type they are: what an ABI
+    /// names where its build adds no links of its own beside these.
+    type Closed;
 }
 
-impl<U, D, L, G, N: wz_runtime_coop::link_cells::CountKind, W> ComposedLinks
-    for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G, N, W>
+impl<U, D, L, G, N: wz_runtime_coop::link_cells::CountKind, W, F> ComposedLinks
+    for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G, N, W, F>
 {
-    type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G, N, W>;
-    type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J, N, W>;
+    type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G, N, W, F>;
+    type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J, N, W, F>;
     type WaitedByOwner = wz_runtime_coop::ip_stack::IpLinks<
         U,
         D,
@@ -13205,7 +13293,10 @@ impl<U, D, L, G, N: wz_runtime_coop::link_cells::CountKind, W> ComposedLinks
         G,
         N,
         wz_runtime_coop::session_drive::WaitedByOwner,
+        F,
     >;
+    type Closed =
+        wz_runtime_coop::ip_stack::IpLinks<U, D, L, G, N, W, wz_runtime_coop::ip_link::ClosedSet>;
 }
 
 #[cfg(all(feature = "queryable", wz_round))]

@@ -2307,9 +2307,8 @@ pub mod unicast_rx;
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod transport_place;
 
-/// The unicast transport of a session that holds one face as one value: its link's life, its
-/// receive and its timers, handed the link's reports, its datagrams and the time. Gated like
-/// [`unicast_rx`].
+/// The unicast transport of the session over one link as one value: its receive and its timers,
+/// handed the link's datagrams and the time. Gated like [`unicast_rx`].
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod unicast_transport;
 

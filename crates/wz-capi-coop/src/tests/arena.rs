@@ -250,7 +250,7 @@ fn held_plan(
     crate::engine::lay_out_open(
         &mut plan,
         &crate::engine::OpenHolds {
-            cells: crate::engine::link_cells::<PosixClock>(&links),
+            cells: crate::engine::link_cells::<PosixClock, _>(&links),
             #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
             rooms: crate::engine::link_rooms_bytes::<crate::tests::PosixLinks>(),
             held,

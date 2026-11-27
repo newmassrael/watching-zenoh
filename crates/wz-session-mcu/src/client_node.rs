@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use wz_runtime_coop::link_cells::CellRc;
-use wz_runtime_coop::session_drive::SessionLinks;
+use wz_runtime_coop::session_drive::OpenSetLinks;
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalSet};
 use wz_session_core::limits::SessionLimits;
@@ -57,7 +57,7 @@ enum Declaration {
 /// A client of a router that answers queries and receives pushes.
 pub struct ClientNode<'a, L, C, P>
 where
-    L: SessionLinks,
+    L: OpenSetLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
 {
@@ -74,7 +74,7 @@ where
 
 impl<'a, L, C, P> ClientNode<'a, L, C, P>
 where
-    L: SessionLinks,
+    L: OpenSetLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
 {
@@ -232,7 +232,7 @@ mod tests {
         Query, Request, RequestVariant, Wireexpr, WireexprNonlocal, WireexprVariant,
     };
     use wz_runtime_coop::session_drive::{
-        spawn_session, OpenedLink, SessionDriveConfig, SessionRole,
+        spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
     };
     use wz_runtime_coop::session_runtime::new_session_actions;
     use wz_runtime_coop::{CoopRuntime, CoopTime};
