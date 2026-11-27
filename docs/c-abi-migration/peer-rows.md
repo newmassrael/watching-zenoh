@@ -532,6 +532,67 @@ and each holds a decision the code does not settle yet.
   (`crates/wz-capi-coop/src/engine/direct.rs` @ `let count = KernelCount(CellRc::clone(&wire.actions.core));`):
   three crates and every feature that reaches a kernel.
 
+### 7.4 R6 landed: the held set as data
+
+**What changed** (`crates/wz-capi-coop/src/engine/direct.rs`, the form `wz_face_places`: a build
+that takes faces past the dial role's with `face-send-places` or `threads`). An operation that
+holds every face's send place runs in its caller, as the dial role's operation already did
+(`DialHeld`): `CoopEngine::live_on_link` takes one hold (`CoopEngine::hold_faces`, out of line,
+one body for every operation) and calls the operation's closure with the session's state and a
+`FaceTx` in its own body. The hold walks the face table in its order, holds each face's send place
+that holds parts, and keeps that hold in the face (`KeptSend`: the place's `SiteSend` and the wire
+it reaches, found once) under the hold's mark, then takes the session's lock (`FacesHeld`). Its
+drop lets the session go first, then each kept place, in the reverse of the table's order
+(`FacesMark`'s drop). `HeldOperation`, the trait `UnderHeldFaces` whose `run` was compiled once an
+operation, and the chain of holds on the stack (`HeldSend`, one frame of `hold_faces_from` a face)
+are gone. A send under the hold finds its face's wire by the face its link's end names and the
+hold's mark in it (`FacesMark::wire_of`), reached through the table of that one method, so the
+operations' sends stay one body each whatever the engine's links. A publish's leg names its one
+face in the hold (`Held::Alone`), and the groups' leg holds none (`Held::Groups`).
+
+**The premise, read in the code: a mask of rows becomes a mark in each row.** The rows' bound is
+the session's `max_faces`, a run-time limit, not a word's width: a bit mask of a fixed word
+would cap the faces an operation can hold, and one sized by the limit is storage an operation would
+have to be lent. So the held set is a column of the face table: each face names the hold that
+keeps its place (`KeptSend::by`, a mark no two holds alive share), written by the holder of the
+place alone. A hold that reads its own mark keeps the place; one that reads another's does not, so
+an operation never reaches a place another operation took after this one passed the row with no
+link (the rows are taken in one order, so the two never wait on each other, as before). It is
+`peer-proportion.md` F2's form ("the held face found by a mark in the face"), and the same column R3
+writes for the declarations a face's peer made.
+
+**`feat-mcast.md` F6 is inside it.** F6 counted the group's leg inlined into each of the copies of
+`HeldOperation::run`. Those copies are gone: each operation's closure is compiled once, in its
+caller, with whatever leg it takes, so there is no copy of a wrapper for the leg to be inlined
+into. Whether an operation's group leg is worth a call of its own is then a question of the
+operation's own body, read in the explain report after this step, not a wrapper's.
+
+**Expected** (estimates, `peer-proportion.md` F2's basis). The zenoh-pico preset's peer case
+(`face-send-places` off, `wz_one_send_place`): 0, as nothing of this form is compiled there.
+`pico-api-coop-nostd` (`threads`): the 21 copies of `run` (22,902 B) leave and their closures
+come into their callers, -4,500 to -6,000, less the hold's own bodies (`hold_faces`, the two drops,
+`wire_of`, `KeptSend::keep`: about 600 to 900). A build with `face-send-places` and the peer role
+(the release form, W6 on) -2,100 to -2,900. Memory: each face carries a word for the mark and an
+`Option` of a hold and a pointer (about 5 words on a 64-bit host) where W6 is on; an operation
+takes no stack a face. Receive Ir: none, as no operation is the read; a publish's leg carries its
+face in the hold (`Held::Alone`) where it carried a pointer to a hold of one face.
+
+**Tests.** `direct::held_operation_tests` tested the wrapper's state machine (run once, an unrun
+operation dropped, an unwound one let go of), which is gone with it; the guard is the engine's and
+holds faces, so its tests are the engine's, over a listening session with two clients
+(`tests::listen`, compiled with `std`, `listen`, `query`, `queryable` and `threads`, and run in
+the direct form):
+`an_operation_holds_every_face_with_a_link_and_lets_each_go` (both faces held and reached through
+the kept wire, none by a try, and no place held after: red if `FacesMark`'s drop keeps a place or
+`hold_faces` skips a face), `a_face_held_by_an_operation_is_found_by_that_hold_alone` (inside an
+operation a hold under another mark finds neither face: red if `KeptSend::wire_for` answers
+whatever the mark), and `an_operation_on_a_closed_listener_runs_nothing_and_holds_nothing` (red if
+`hold_faces` runs the operation without `CoopEngine::live` or keeps its places). The dial role's
+twins in `tests::direct_receive` stand. The cost gate (`scripts/lib/capability_cost_gate.py`)
+FORBIDS `HeldOperation|UnderHeldFaces` in `pico-peer-coop` and `pico-api-coop-nostd`; no build can
+link a form the source no longer defines, so the pattern's control is the source: its selftest
+holds every crate to defining none of those names (`REMOVED_FORMS`, `removed_form_defined`).
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)
