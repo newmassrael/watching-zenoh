@@ -916,6 +916,10 @@ const WINDOW_LINK: u64 = 1 << 1;
 /// at once, after what the replies left open, so a hold opens no window for them.
 #[cfg(feature = "transport-batching")]
 const WINDOW_REPLIES: u64 = 1 << 2;
+/// Whether a face's read holds its replies at all (`query-replies-with-final`): read as a constant,
+/// so a build without it raises no hold and its replies' conduits are never held.
+#[cfg(feature = "transport-batching")]
+const REPLIES_HOLD: bool = cfg!(feature = "query-replies-with-final");
 /// One drain under way of a window just closed, counted above the window bits: while one is, a
 /// frame the window left open may still stand in a conduit the drain has not reached.
 #[cfg(feature = "transport-batching")]
@@ -14419,12 +14423,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// was a frame and a send of its own. No window opens: every message that is not a reply,
     /// from this thread or another, is sent at once, and the frame the replies left open goes
     /// out before it. Answers whether this call raised the hold, to be handed to the release; a
-    /// hold already raised is left to the call that raised it. Without `transport-batching`
-    /// nothing is held and this answers `false`.
+    /// hold already raised is left to the call that raised it. Without `transport-batching`, or
+    /// without `query-replies-with-final` (the zenoh-pico preset), nothing is held and this
+    /// answers `false`: each reply leaves as it is made.
     pub fn hold_replies(&self) -> bool {
         #[cfg(feature = "transport-batching")]
         {
-            self.tx_conduits.set_window(WINDOW_REPLIES, true)
+            REPLIES_HOLD && self.tx_conduits.set_window(WINDOW_REPLIES, true)
         }
         #[cfg(not(feature = "transport-batching"))]
         false
@@ -14436,7 +14441,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// joined it, leave with it.
     pub fn release_replies(&self, raised: bool) {
         #[cfg(feature = "transport-batching")]
-        if raised {
+        if REPLIES_HOLD && raised {
             self.tx_conduits.close_and_drain(WINDOW_REPLIES, || {
                 if !self.tx_conduits.caller_window_open() && !self.tx_conduits.is_auto() {
                     self.flush_open_batch();
@@ -14462,7 +14467,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Conduit {
                 priority,
                 reliable,
-                held: self.tx_conduits.replies_held(),
+                held: REPLIES_HOLD && self.tx_conduits.replies_held(),
             }
         }
         #[cfg(not(feature = "transport-batching"))]

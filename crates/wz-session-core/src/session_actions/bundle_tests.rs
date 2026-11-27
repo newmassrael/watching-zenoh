@@ -312,6 +312,26 @@ fn a_bundle_the_heap_has_no_room_for_is_refused() {
     assert!(made.is_ok(), "room for all three pointers is the bundle");
 }
 
+/// A face's read raises the hold of its replies only in a build with `query-replies-with-final`:
+/// without it, as the zenoh-pico preset builds the session core, the hold answers that it raised
+/// nothing, so each reply leaves as it is made and the Final after them. With it the first hold
+/// raises the replies' window, a second leaves it to the first, and the release lowers it so the
+/// next hold raises it again. Turned red by a `hold_replies` that raises the window whatever the
+/// build (`REPLIES_HOLD`), or by a release that leaves it raised.
+#[cfg(feature = "transport-batching")]
+#[test]
+fn the_reply_hold_is_raised_only_with_its_switch() {
+    let switched = cfg!(feature = "query-replies-with-final");
+    let (actions, _link) = bundle();
+    let raised = actions.hold_replies();
+    assert_eq!(raised, switched, "the first hold");
+    assert!(!actions.hold_replies(), "a second hold raises nothing");
+    actions.release_replies(raised);
+    let again = actions.hold_replies();
+    assert_eq!(again, switched, "a hold after the release");
+    actions.release_replies(again);
+}
+
 /// A datagram the link let go of before the session read it is charged to the session's receive
 /// drops, once for each, and to nothing it sends. Turned red by `drive::note_rx_dropped`
 /// charging no counter, or the transmit side's.

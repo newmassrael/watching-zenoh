@@ -100,6 +100,7 @@ default = [
     "tx-held-wait",
     "multicast-locator-keys",
     "link-wire-reports",
+    "query-replies-with-final",
 ]
 
 # `log`: the session core's diagnostics (`diag`), the warnings an operator reads when a peer sends
@@ -1333,6 +1334,13 @@ tx-fragment-credit = []
 # message is dropped at once and the sender told (`HeldDrop::DropAtOnce`), whatever the queue
 # profile, as zenoh-pico's dropping send fails on a transmit lock another send holds.
 tx-held-wait = []
+# `query-replies-with-final`: the replies a queryable's callbacks make wait in their conduits'
+# open frames while the face's read holds them (`SessionLinkActions::hold_replies`), and leave
+# with the query's Final in one send. A behaviour of the query plane that zenoh-pico does not have,
+# on in a build that names nothing and named by the pico ABI's capability of the same name, which
+# the zenoh-pico preset leaves off. Without it nothing is held: each reply leaves as it is made,
+# and the Final after them, as zenoh-pico's `_z_send_reply` sends each.
+query-replies-with-final = []
 
 # `multicast-locator-keys`: a group endpoint's `#ttl=`, `#bind=` and `#dscp=`, read into the group a
 # session joins (`group_locator::UdpGroup`) for its sockets. Without it each of the three is refused
