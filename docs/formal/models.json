@@ -90,6 +90,59 @@
       "decision": "docs/zenoh-logic-as-sce-kinds.md, W16 (S7 13)",
       "runs": [],
       "abstract": true
+    },
+    {
+      "module": "ResetGenerations",
+      "decision": "docs/zenoh-logic-as-sce-kinds.md, section 7.1 (S5 M5, S2 30)",
+      "parts": {
+        "Remember": "TRUE",
+        "Latest": "TRUE",
+        "NeverEvict": "TRUE",
+        "RefuseFull": "TRUE"
+      },
+      "runs": [
+        {
+          "config": "ResetGenerations.cfg",
+          "expect": "holds"
+        },
+        {
+          "config": "ResetGenerations_without_remember.cfg",
+          "expect": "violates",
+          "invariant": "AtMostOnce",
+          "without": "Remember",
+          "promise": "broken"
+        },
+        {
+          "config": "ResetGenerations_without_latest.cfg",
+          "expect": "violates",
+          "invariant": "AtMostOnce",
+          "without": "Latest",
+          "promise": "broken"
+        },
+        {
+          "config": "ResetGenerations_without_never_evict.cfg",
+          "expect": "violates",
+          "invariant": "AtMostOnce",
+          "without": "NeverEvict",
+          "promise": "broken"
+        },
+        {
+          "config": "ResetGenerations_without_refusal.cfg",
+          "expect": "violates",
+          "invariant": "Bounded",
+          "without": "RefuseFull",
+          "promise": "kept",
+          "why": "a table past its room ends no session twice; the bound is what the node's fixed memory is promised"
+        }
+      ],
+      "promise": "Refines",
+      "refines": "ResetOnceService"
+    },
+    {
+      "module": "ResetOnceService",
+      "decision": "docs/zenoh-logic-as-sce-kinds.md, section 7.1 (S5 M5, S2 30)",
+      "runs": [],
+      "abstract": true
     }
   ]
 }

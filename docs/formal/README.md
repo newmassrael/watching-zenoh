@@ -16,6 +16,9 @@ promises those levels will be held to.
 | `QueryFinalService.tla` | 1, promise | A query that reached a session is refused whole (no callback ran, nothing sent, not even a Final) or answered: each queryable's callback at most once, replies only after a callback ran, then exactly one Final and nothing after it |
 | `QueryFinals.tla` | 2, protocol | How the session keeps that promise: the table of held Finals (`FinalHolds`, `crates/wz-session-core/src/query_plane.rs`), the Final the dispatch owes, a query a program keeps, the own get's row. `Refines` checks it against the promise |
 | `QueryFinals*.cfg` | bounded exploration | Two queries (one in the two live runs), two queryables, one row; one configuration per part taken out |
+| `ResetOnceService.tla` | 1, promise | A peer's reset ends its session only when its generation is later than every one that ended a session of that peer; a retransmission or an older reset ends nothing and is a duplicate of the last; a peer is refused for want of room only when none of its resets was taken |
+| `ResetGenerations.tla` | 2, protocol | How a node keeps it: the table of reset generations (`sources/algorithms/take_generation.scxml`, `crates/wz-session-core/src/reset_generations.rs`), which both profiles run. `Refines` checks it against the promise |
+| `ResetGenerations*.cfg` | bounded exploration | Two peers, generations 0 to 2, a table of one; one configuration per part taken out |
 | `models.json` | manifest | Every module and configuration, in the format of SCE's `schemas/sce-formal-models.v1.schema.json` (`"v": 1`, no tool pin) |
 
 ## 2. Each part of the query's Final has a configuration that fails without it
@@ -42,6 +45,24 @@ without its fairness (`QueryFinals_live_without_fairness.cfg`).
 
 Not modelled: a query's link lost, under which nothing is sent (`query_plane.rs` lines 32-37); a
 second keep of a kept query; the own get's answers, of which only its row is modelled.
+
+## 2a. Each part of the reset's duplicate suppression has a configuration that fails without it
+
+The mechanism is S5 M5 and S2 30 of `docs/zenoh-logic-as-sce-kinds.md` (section 7.1): the table
+of reset generations, whose rule is the SCE algorithm `take_generation`, run by the heap profile
+over a map in `Heap` storage (S2 30); the fixed-memory profile's connect manager keeps the same rule
+over its own table (S5 M5), so the model is of both. Neither upstream preset has a lifecycle reset; the promise is that of at-most-once
+calls (Birrell and Nelson, 1984), decision D6 of `docs/session-lifecycle-intent.md`.
+
+| Part (constant) | What it keeps | Without it TLC is to find | Promise |
+|---|---|---|---|
+| `Remember` | a later generation is written over the one held | a later generation taken twice (`AtMostOnce`) | broken |
+| `Latest` | a reset is a duplicate when the generation held is as late, not only equal | an older reset ending a session after a later one (`AtMostOnce`) | broken |
+| `NeverEvict` | a full table refuses a new peer and evicts none it holds | an evicted peer's retransmission taken again (`AtMostOnce`) | broken |
+| `RefuseFull` | a full table takes no new peer | a table past its room (`Bounded`) | kept |
+
+Not modelled: progress, since a reset is asked by a peer and answered in the same step; the
+lifecycle permit, which `lifecycle_verdict` judges before the table is asked.
 
 ## 3. The judge is SCE's, and the SCE revision wz pins cannot run it on this manifest
 
