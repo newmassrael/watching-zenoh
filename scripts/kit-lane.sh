@@ -12,6 +12,7 @@
 #   scripts/kit-lane.sh preflight [--deep]   the host is ready: workspace, tools, console, interface, router
 #   scripts/kit-lane.sh build <image>        west build, pad to the region, the stack gate on the ELF
 #   scripts/kit-lane.sh run <image>          flash, boot, ask, and hold the run to its row
+#   scripts/kit-lane.sh passive <image>      an admin image under the passive-hold scenario (needs cargo)
 #   scripts/kit-lane.sh all <image>...       preflight, then build and run each
 #   scripts/kit-lane.sh compare [--boots N] <image>...   answering images side by side, alternating boots
 #   scripts/kit-lane.sh build-responder      the host node that answers the asking image (needs cargo)
@@ -461,16 +462,26 @@ build() {
             return 1
         fi
         local peer_id="$ROUTER_ID"
+        # The commander of the passive-hold scenario (`passive`), a key of its own listed for open, close
+        # and status: the router above stays the commander of status and open alone, so its refusal of
+        # close is still the run's control.
+        if ! bash "$ROOT/scripts/zephyr-passive-witness.sh" keys "$out/commander" >"$out/commander.log" 2>&1; then
+            bad "$key" "the passive commander's key could not be made ($out/commander.log)"
+            return 1
+        fi
+        local passive_id
+        passive_id="$(cat "$out/commander/commander.zid")"
         {
-            printf 'CONFIG_WZ_COMMANDERS_STATUS="%s"\n' "$commander_id"
-            printf 'CONFIG_WZ_COMMANDERS_OPEN="%s"\n' "$commander_id"
+            printf 'CONFIG_WZ_COMMANDERS_STATUS="%s,%s"\n' "$commander_id" "$passive_id"
+            printf 'CONFIG_WZ_COMMANDERS_OPEN="%s,%s"\n' "$commander_id" "$passive_id"
+            printf 'CONFIG_WZ_COMMANDERS_CLOSE="%s"\n' "$passive_id"
             printf 'CONFIG_WZ_PEER_NODE_ZID="%s"\n' "$peer_id"
             printf 'CONFIG_WZ_PEER_NODE_LOCATOR="tls/%s:%s"\n' "$PEER_HOST" "$PEER_PORT"
         } >"$out/commanders.conf"
         echo "$commander_id" >"$out/router.zid"
         echo "$peer_id" >"$out/peer.zid"
         confs="${confs:+$confs;}$out/commanders.conf"
-        ok "$key" "the router's key names zid $commander_id, built in as the commander of status and of open and of no other verb; the peer it opens is $peer_id at tls/$PEER_HOST:$PEER_PORT"
+        ok "$key" "the router's key names zid $commander_id, built in as the commander of status and of open and of no other verb; the peer it opens is $peer_id at tls/$PEER_HOST:$PEER_PORT; the passive scenario's commander is $passive_id, of open, close and status"
     fi
     local avail
     avail="$(LC_ALL=C free -m | awk '/^Mem:/ {print $7}')"
@@ -656,7 +667,7 @@ RUN_PRODUCTS=(
     console.raw console.boot console.run console.err
     cap.err cap.out cap.txt node.pcap
     reset.log ip.log probe.log
-    verdict.txt verdict.err pool-verdict.txt pool-verdict.err
+    verdict.txt verdict.err pool-verdict.txt pool-verdict.err passive.log
 )
 clear_run_products() {
     local name
@@ -1243,6 +1254,95 @@ EOF
     hold_the_arena "$key" "$OUT/console.run"
 }
 
+# The passive hold on the kit (decision D18 of docs/session-lifecycle-intent.md): the admin image, built
+# with the passive commander listed for open, close and status (`build`), is flashed and reset, and the
+# kit leg of crates/wz-integration-tests/tests/it/files/wz_declared_commander_zenohd_target_matrix.rs runs
+# against it: a zenohd holding that commander's key dials the image and asks the verbs through it, and
+# stock clients dial the image's listener on the cable, one claiming the peer's zid with another key and
+# then the peer with its own. The leg reads the console this run captures from the byte the reset's boot
+# begins at. It needs cargo on this host, and the zenoh examples beside KIT_ZENOHD (or in the directory
+# KIT_ZENOH_EXAMPLES names).
+PASSIVE_TEST="files::wz_declared_commander_zenohd_target_matrix::zenohd_kit_zephyr_image_passive_intent_holds_the_session_a_stock_client_opens_and_not_a_claim_of_its_zid"
+passive() {
+    local key="$1" before="$fails"
+    image_spec "$key" || { bad "$key" "not an image of this lane (scripts/kit-lane.sh list)"; return 1; }
+    if [[ "$KIND" != admin ]]; then
+        bad "$key" "the passive scenario runs on an admin image, and $key is a $KIND image"
+        return 1
+    fi
+    load_lab || return 1
+    local built
+    built="$(cat "$LANE_HOME/last-out-$key" 2>/dev/null || true)"
+    if [[ -z "$built" || ! -f "$built/m7.bin" ]]; then
+        bad "$key" "no built image for $key: scripts/kit-lane.sh build $key first"
+        return 1
+    fi
+    OUT="$built"
+    if [[ ! -f "$OUT/commander/commander.pem" || ! -f "$OUT/commander/commander.key" ]]; then
+        bad "$key" "the passive commander's key is not in $OUT/commander: build the image again"
+        return 1
+    fi
+    if ! command -v cargo >/dev/null 2>&1; then
+        bad "$key" "cargo is not on PATH: the scenario is a test of crates/wz-integration-tests"
+        return 1
+    fi
+    take_kit "$key" || return 1
+    clear_run_products
+    flash_region "$OUT/m7.bin" "$(cat "$OUT/m7.sha256")" "$key" || return 1
+    PIDS=()
+    ADDR_ADDED=""
+    trap stop_all EXIT
+    run_passive "$key"
+    stop_all
+    trap - EXIT
+    [[ "$fails" -eq "$before" ]]
+}
+
+run_passive() {
+    local key="$1"
+    if ! sudo -n ip addr add "$KIT_HOST_IP/24" dev "$KIT_IFACE" 2>"$OUT/ip.log"; then
+        bad "$key" "the interface $KIT_IFACE did not take $KIT_HOST_IP ($OUT/ip.log)"
+        return 1
+    fi
+    ADDR_ADDED=1
+    stty -F "$KIT_CONSOLE" 115200 raw -echo -hupcl
+    setsid timeout 1800 cat "$KIT_CONSOLE" >"$OUT/console.raw" 2>"$OUT/console.err" </dev/null &
+    PIDS+=("$!")
+    sleep 2
+    local mark
+    mark="$(stat -c %s "$OUT/console.raw")"
+    if timeout 60 "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" \
+        -f interface/kitprog3.cfg -f target/infineon/cyt4bf.cfg -c "init" -c "reset run" -c "shutdown" \
+        >"$OUT/reset.log" 2>&1; then
+        ok "$key" "the kit was reset ($OUT/reset.log)"
+    else
+        bad "$key" "the reset failed ($OUT/reset.log)"
+        return 1
+    fi
+    (
+        cd "$ROOT/crates" &&
+            WZ_ZEPHYR_PASSIVE_KIT_CONSOLE="$OUT/console.raw" \
+                WZ_ZEPHYR_PASSIVE_KIT_MARK="$mark" \
+                WZ_ZEPHYR_PASSIVE_COMMANDER_CERT="$OUT/commander/commander.pem" \
+                WZ_ZEPHYR_PASSIVE_COMMANDER_KEY="$OUT/commander/commander.key" \
+                WZ_ZENOHD_BIN="$KIT_ZENOHD" \
+                WZ_ZENOH_CORE_EXAMPLES_DIR="${KIT_ZENOH_EXAMPLES:-$(dirname "$KIT_ZENOHD")}" \
+                cargo test -p wz-integration-tests --test it "$PASSIVE_TEST" -- \
+                --ignored --exact --test-threads=1
+    ) >"$OUT/passive.log" 2>&1
+    # A filter that matches nothing runs nothing and exits 0: the verdict is the count.
+    if grep -q '^test result: ok\. 1 passed' "$OUT/passive.log"; then
+        ok "$key" "a passive intent held the session the peer opened with its own key, not the claimant's, and close ended it ($OUT/passive.log)"
+    else
+        bad "$key" "the passive scenario did not pass, or did not run ($OUT/passive.log)"
+    fi
+    local said
+    said="$(tail -c +"$((mark + 1))" "$OUT/console.raw" | tr -d '\r' | grep -a 'wz: FAIL' | head -n 1)"
+    if [[ -n "$said" ]]; then
+        bad "$key" "the console says 'wz: FAIL' ($said)"
+    fi
+}
+
 # Where, in the console file, the boot that began after the byte $1 starts, printed as a byte offset: the
 # first Zephyr banner at or after $1, taken back to the cache line of the same boot (the one early line the
 # firmware prints before the banner), when that line is also at or after $1. The console is the only thing
@@ -1671,6 +1771,14 @@ PY
             bad selftest "$key waits for '$READY_TAG', which deploy/$APP never prints with a zid and a locator"
         fi
     done
+    # The scenario `passive` runs is a test of the matrix file, named here by its path: a renamed test
+    # would make the filter match nothing.
+    if grep -qF "fn ${PASSIVE_TEST##*::}(" \
+        "$ROOT/crates/wz-integration-tests/tests/it/files/wz_declared_commander_zenohd_target_matrix.rs"; then
+        ok selftest "the passive scenario's test is in the matrix file (${PASSIVE_TEST##*::})"
+    else
+        bad selftest "the matrix file has no test ${PASSIVE_TEST##*::}, which \`passive\` runs"
+    fi
     for key in "${NODE_IMAGES[@]}"; do
         if ! image_spec "$key" || [[ "$KIND" != node ]]; then
             bad selftest "$key is listed as a node image and the table does not say so"
@@ -1775,6 +1883,7 @@ case "$cmd" in
     preflight) preflight "${1:-}" ;;
     build) [[ $# -ge 1 ]] || { echo "usage: $0 build <image>" >&2; exit 64; }; build "$1" ;;
     run) [[ $# -ge 1 ]] || { echo "usage: $0 run <image>" >&2; exit 64; }; run "$1" ;;
+    passive) [[ $# -ge 1 ]] || { echo "usage: $0 passive <image>" >&2; exit 64; }; passive "$1" ;;
     all)
         [[ $# -ge 1 ]] || { echo "usage: $0 all <image>..." >&2; exit 64; }
         preflight "" || exit 1
@@ -1789,7 +1898,7 @@ case "$cmd" in
     parts) python3 "$ROOT/scripts/lib/pico_ceiling_gate.py" --parts "${KITLESS_IMAGES[@]}" ;;
     --selftest) selftest ;;
     *)
-        sed -n '12,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+        sed -n '12,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
         exit 64
         ;;
 esac
