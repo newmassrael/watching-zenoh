@@ -169,21 +169,23 @@ fn an_on_use_face_takes_its_read_slot_at_its_places_first_face() {
     until(&engine, "both faces to be up", || engine.faces_up() == 2);
 }
 
-/// A session whose tables take their memory on use holds the place of a face's room from the
-/// face's first hold of a wait, and none for a place no face held: with its one face up it holds
-/// one place, whatever the rows its plan counts (one for each face it may hold at once where it
-/// listens). Turned red by an open that makes every row's place (`RoomTable::over` making a place
-/// for each row, as the forms that lay the places out write one), or by a face that comes up and
-/// makes none (`RoomTable::taken` reading through `row_mut` in place of `made_mut`).
+/// A session whose tables take their memory on use makes no place of its faces' rooms at its open,
+/// and none for a face whose link names no wait for room: with its one face up over a datagram
+/// link, which names none (`UdpDriver` answers no `room_wait`), it holds no place of the rows its
+/// plan counts. That a face's first hold of a wait makes its place, and that one alone, is
+/// `congestion::an_on_use_rooms_place_is_made_at_its_faces_first_hold`'s to hold. Turned red by
+/// an open that makes every row's place (`RoomTable::over` making a place for each row, as the
+/// forms that lay the places out write one), or by a face that comes up and makes a place for a
+/// wait its link does not name.
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
-fn an_on_use_session_with_one_face_holds_one_room_place() {
+fn an_on_use_session_makes_no_room_place_its_faces_do_not_hold() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     until(&engine, "the face to be up", || engine.faces_up() == 1);
     let (made, rows) = engine.room_places_made();
     assert!(rows >= 1, "CONTROL: a row for the dial role's face");
-    assert_eq!(made, 1, "one place, the face's");
+    assert_eq!(made, 0, "a datagram link names no wait for room: no place");
 }
 
 /// A session whose tables take their memory on use holds the admission its links ask while their
