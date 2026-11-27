@@ -91,14 +91,14 @@
       }
     },
     "pico-client-coop-query": {
-      "ratio_at_most": 1.0199,
+      "verdict": "win",
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
         "date": "2026-11-27",
-        "wz_text": 446389,
+        "wz_text": 436397,
         "pico_text": 437696,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"
+        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.5"
       }
     },
     "pico-client-coop-local-queryable": {
