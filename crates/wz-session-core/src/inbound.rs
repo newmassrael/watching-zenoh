@@ -700,7 +700,9 @@ pub trait ExtChainRead: Copy + core::fmt::Debug {
 
     /// An Init's patch level and region identity, as one walk of its chain answers them
     /// ([`crate::extregion::peer_patch_and_region_in`]): a held chain is walked for them, and a
-    /// chain read where it lies gives what the walk of its read found.
+    /// chain read where it lies gives what the walk of its read found. A build without
+    /// `handshake-regions` reads no region: the entry is an extension it does not know, and the
+    /// region answers as none, whatever the entry holds.
     #[cfg(feature = "codec-init-body")]
     fn patch_and_region(
         self,
@@ -710,7 +712,8 @@ pub trait ExtChainRead: Copy + core::fmt::Debug {
     );
 
     /// The remote bound an Open's chain announces ([`crate::extbound::peer_remote_bound_in`]),
-    /// answered as `Self::patch_and_region` is.
+    /// answered as `Self::patch_and_region` is, and as none by a build without
+    /// `handshake-regions`.
     #[cfg(feature = "codec-open-body")]
     fn remote_bound(self) -> Result<Option<crate::extbound::Bound>, crate::extbound::InvalidBound>;
 }
@@ -734,7 +737,7 @@ impl<'f> ExtChainRead for HeldChain<'f> {
         self.0
     }
 
-    #[cfg(feature = "codec-init-body")]
+    #[cfg(all(feature = "codec-init-body", feature = "handshake-regions"))]
     fn patch_and_region(
         self,
     ) -> (
@@ -744,9 +747,24 @@ impl<'f> ExtChainRead for HeldChain<'f> {
         crate::extregion::peer_patch_and_region_in(self.entries())
     }
 
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "codec-init-body", not(feature = "handshake-regions")))]
+    fn patch_and_region(
+        self,
+    ) -> (
+        crate::extpatch::PatchLevel,
+        Result<Option<crate::extregion::RegionName>, crate::extregion::RegionNameError>,
+    ) {
+        (crate::extpatch::peer_patch_in(self.entries()), Ok(None))
+    }
+
+    #[cfg(all(feature = "codec-open-body", feature = "handshake-regions"))]
     fn remote_bound(self) -> Result<Option<crate::extbound::Bound>, crate::extbound::InvalidBound> {
         crate::extbound::peer_remote_bound_in(self.entries())
+    }
+
+    #[cfg(all(feature = "codec-open-body", not(feature = "handshake-regions")))]
+    fn remote_bound(self) -> Result<Option<crate::extbound::Bound>, crate::extbound::InvalidBound> {
+        Ok(None)
     }
 }
 
@@ -804,7 +822,7 @@ impl<'f> ExtChainRead for ReadChain<'f> {
             .collect()
     }
 
-    #[cfg(feature = "codec-init-body")]
+    #[cfg(all(feature = "codec-init-body", feature = "handshake-regions"))]
     fn patch_and_region(
         self,
     ) -> (
@@ -820,9 +838,27 @@ impl<'f> ExtChainRead for ReadChain<'f> {
         )
     }
 
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "codec-init-body", not(feature = "handshake-regions")))]
+    fn patch_and_region(
+        self,
+    ) -> (
+        crate::extpatch::PatchLevel,
+        Result<Option<crate::extregion::RegionName>, crate::extregion::RegionNameError>,
+    ) {
+        (
+            self.answers.patch.unwrap_or(crate::extpatch::NO_PATCH),
+            Ok(None),
+        )
+    }
+
+    #[cfg(all(feature = "codec-open-body", feature = "handshake-regions"))]
     fn remote_bound(self) -> Result<Option<crate::extbound::Bound>, crate::extbound::InvalidBound> {
         self.answers.bound.transpose()
+    }
+
+    #[cfg(all(feature = "codec-open-body", not(feature = "handshake-regions")))]
+    fn remote_bound(self) -> Result<Option<crate::extbound::Bound>, crate::extbound::InvalidBound> {
+        Ok(None)
     }
 }
 
@@ -941,10 +977,10 @@ pub(crate) struct ChainAnswers<'a> {
     patch: Option<crate::extpatch::PatchLevel>,
     /// The bytes of an Init's region name, where they lie in the unit; judged as a name by the
     /// reader that asks.
-    #[cfg(feature = "codec-init-body")]
+    #[cfg(all(feature = "codec-init-body", feature = "handshake-regions"))]
     region: Option<&'a [u8]>,
     /// An Open's remote bound, or its refusal.
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "codec-open-body", feature = "handshake-regions"))]
     bound: Option<Result<crate::extbound::Bound, crate::extbound::InvalidBound>>,
     _unit: core::marker::PhantomData<&'a ()>,
 }
@@ -965,9 +1001,9 @@ impl<'a> ChainAnswers<'a> {
     pub(crate) const NONE: Self = Self {
         #[cfg(feature = "codec-init-body")]
         patch: None,
-        #[cfg(feature = "codec-init-body")]
+        #[cfg(all(feature = "codec-init-body", feature = "handshake-regions"))]
         region: None,
-        #[cfg(feature = "codec-open-body")]
+        #[cfg(all(feature = "codec-open-body", feature = "handshake-regions"))]
         bound: None,
         _unit: core::marker::PhantomData,
     };
@@ -980,17 +1016,21 @@ impl<'a> ChainAnswers<'a> {
             if let Some(patch) = crate::extpatch::patch_of_entry(entry) {
                 self.patch = Some(patch);
             }
+            #[cfg(feature = "handshake-regions")]
             if crate::extregion::is_region_entry(entry) {
                 if let Some(region) = crate::ext_view::ExtEntryBytes::plain_zbuf_in(entry) {
                     self.region = Some(region);
                 }
             }
         }
-        #[cfg(feature = "codec-open-body")]
+        #[cfg(all(feature = "codec-open-body", feature = "handshake-regions"))]
         if let Some(bound) = crate::extbound::bound_of_entry(entry) {
             self.bound = Some(bound);
         }
-        #[cfg(not(any(feature = "codec-init-body", feature = "codec-open-body")))]
+        #[cfg(not(any(
+            feature = "codec-init-body",
+            all(feature = "codec-open-body", feature = "handshake-regions")
+        )))]
         let _ = entry;
     }
 }
@@ -3829,7 +3869,9 @@ mod control_read_tests {
 
     /// The readers every build links read the chain of an Init read where it lies, and it reads
     /// as the decoded message's owned chain does: the patch level (a z64 at id 0x7) and the
-    /// region name (a ZBuf at id 0x8), with nothing of the chain copied out of the unit.
+    /// region name (a ZBuf at id 0x8), with nothing of the chain copied out of the unit. A build
+    /// without `handshake-regions` answers the region as none from either form of the chain.
+    /// Turned red by a reader that reads the region in a build without it, or not in one with it.
     #[cfg(feature = "codec-init-body")]
     #[test]
     fn the_chain_read_in_place_answers_the_readers_as_the_held_chain_does() {
@@ -3868,7 +3910,12 @@ mod control_read_tests {
                 crate::extregion::peer_region_in(chain.entries()),
                 Ok(Some(north.clone()))
             );
-            assert_eq!(chain.patch_and_region(), (1, Ok(Some(north))));
+            let region = if cfg!(feature = "handshake-regions") {
+                Ok(Some(north))
+            } else {
+                Ok(None)
+            };
+            assert_eq!(chain.patch_and_region(), (1, region));
             assert_eq!(chain.held().len(), 2);
         }
         answers(read);
@@ -3880,8 +3927,11 @@ mod control_read_tests {
     /// chain the rule refuses still answers the patch level and the region name its entries carry,
     /// and of an extension carried twice the last entry is the answer, as upstream's decoder
     /// assigns each entry it meets (`commons/zenoh-codec/src/transport/open.rs` @
-    /// `ext_remote_bound = Some(q);`), the refused value of a remote bound included. Turned red by
-    /// a walk that stops at the refused header, or that keeps an earlier entry over a later one.
+    /// `ext_remote_bound = Some(q);`), the refused value of a remote bound included. A build
+    /// without `handshake-regions` judges the same admission and answers the region and the bound
+    /// as none, a malformed bound too. Turned red by a walk that stops at the refused header, that
+    /// keeps an earlier entry over a later one, or that reads a region or a bound in a build
+    /// without the handshake's regions.
     #[test]
     fn the_walk_of_a_read_answers_the_admission_and_the_readers_together() {
         #[cfg(feature = "codec-init-body")]
@@ -3909,7 +3959,12 @@ mod control_read_tests {
                 crate::ext_admit::ExtAdmission::UnknownMandatory { eid: 0x1F }
             );
             let north = crate::extregion::RegionName::new("north").expect("a region name");
-            assert_eq!(message.chain().patch_and_region(), (1, Ok(Some(north))));
+            let region = if cfg!(feature = "handshake-regions") {
+                Ok(Some(north))
+            } else {
+                Ok(None)
+            };
+            assert_eq!(message.chain().patch_and_region(), (1, region));
         }
         #[cfg(feature = "codec-open-body")]
         for (first, last, read) in [
@@ -3930,6 +3985,11 @@ mod control_read_tests {
                 message.ext_admission(),
                 crate::ext_admit::ExtAdmission::Admissible
             );
+            let read = if cfg!(feature = "handshake-regions") {
+                read
+            } else {
+                Ok(None)
+            };
             assert_eq!(message.chain().remote_bound(), read);
             let (frame, _) = parse_inbound_consuming(&wire).expect("decoded");
             assert_eq!(frame.control_chain().remote_bound(), read);

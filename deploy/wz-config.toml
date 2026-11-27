@@ -1969,6 +1969,24 @@ abis = ["core", "pico"]
 implies = ["peer"]
 help = "Each face its own send place: a put to one peer does not wait behind a send to another, a droppable one passes over a peer another send holds, and a declaration holds every peer's place before the session's (wz-own). Off, in the single-threaded library, every face shares one send place, the session's lock, as zenoh-pico sends to every peer under one transmit lock: a put is one leg that writes each peer in turn, and a declaration runs under that lock alone. The multi-threaded library keeps each face's place either way."
 
+[[capability]]
+id = "handshake-regions"
+kconfig = "WZ_CAP_HANDSHAKE_REGIONS"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's transport has no
+# region extension (its Init and Open decoders skip an extension that is not mandatory, and both of
+# these are not: `vendor/zenoh-pico/src/protocol/codec/transport.c` @
+# `z_result_t _z_init_decode_ext(`), so it reads no peer's region name or bound and announces no
+# bound. It changes
+# what a malformed peer is refused for and is off in that preset all the same, the preset's
+# contract being zenoh-pico's. A behaviour of the session core (its feature of the same name,
+# through wz-capi-coop's), not a door; the tokio engine's runtime reads and decides them whatever
+# is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "The region extensions of the unicast establishment (wz-own): the peer's region name on its Init and the bound it announces for this node on its Open, each read and a malformed one refusing the handshake, and the bound this node announces for the peer decided before its Open, as zenoh's establishment does. Off, neither is read, each skipped as an extension the build does not know, as zenoh-pico's decoder skips it, so a malformed one refuses nothing, and no bound is announced."
+
 # ## The upstream switches (a complete map: every upstream switch is classified)
 #
 # Every build switch of zenoh-pico (each `Z_FEATURE_*` its CMakeLists defines) and of zenoh-c

@@ -92,6 +92,7 @@ default = [
     "request-put-del",
     "log",
     "south-subregions",
+    "handshake-regions",
     "interest-answer",
     "accept-cookie",
     "policy-selection",
@@ -129,10 +130,21 @@ policy-selection = []
 # pin's `gateway/south` given as a list): `region_partition::SouthPartition::Custom`, its filters,
 # and the bound a session decides from them and announces on its Open. Without it the one partition
 # is `Auto`, which places no remote by a rule, so a session announces no bound, as zenoh-pico's never
-# does; the peer's region name and the bound it announces are still read and refused when malformed.
-# It needs the heap profile, a rule being owned text and zids. On by default; named by the runtime
-# and the C ABI engine that read a partition from a config.
-south-subregions = ["alloc"]
+# does. A bound decided is one announced, so it needs the handshake's regions below. It needs the
+# heap profile, a rule being owned text and zids. On by default; named by the runtime and the C ABI
+# engine that read a partition from a config.
+south-subregions = ["alloc", "handshake-regions"]
+
+# `handshake-regions`: the region extensions of the unicast establishment, which zenoh-pico's
+# transport does not have. The peer's region name (`0x8` on an Init) and the bound it announces for
+# this node (`0x7` on an Open) are read, and a malformed one refuses the handshake as upstream
+# refuses it; the bound this node announces for the peer is decided before its Open is sent. Without
+# it neither extension is read: each is one this build does not know, skipped as zenoh-pico's
+# decoder skips an extension that is not mandatory, so the peer's region and bound read as none and
+# a malformed value refuses nothing, and no bound is decided, so none is announced. On by default; the
+# pico ABI turns it on through its capability of the same name (deploy/wz-config.toml), which the
+# zenoh-pico preset leaves off.
+handshake-regions = []
 
 # The Put and Del bodies of a Request, which zenoh-pico's decoder takes and zenoh 1.10.1's does not
 # (its `RequestBody` has the Query alone): the arms of `wz-codecs/request-put-del` and the code that

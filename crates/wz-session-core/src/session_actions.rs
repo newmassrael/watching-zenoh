@@ -1321,8 +1321,9 @@ enum ControlBody<
         #[cfg(wz_ext_chains)]
         has_ext: bool,
         /// The bound announced for the peer, the one entry of the chain of a build that stages no
-        /// handshake extension (`ext_chain`).
-        #[cfg(not(wz_ext_chains))]
+        /// handshake extension (`ext_chain`). A build without `handshake-regions` announces none,
+        /// so its Open has no chain.
+        #[cfg(all(not(wz_ext_chains), feature = "handshake-regions"))]
         bound: Option<crate::extbound::Bound>,
         role: ExtChainRole,
     },
@@ -7806,13 +7807,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 echo_inbound_cookie,
                 #[cfg(wz_ext_chains)]
                 has_ext,
-                #[cfg(not(wz_ext_chains))]
+                #[cfg(all(not(wz_ext_chains), feature = "handshake-regions"))]
                 bound,
                 role,
             } => {
                 use crate::handshake_encode::encode_open_head_into;
-                #[cfg(not(wz_ext_chains))]
+                #[cfg(all(not(wz_ext_chains), feature = "handshake-regions"))]
                 let has_ext = bound.is_some();
+                #[cfg(all(not(wz_ext_chains), not(feature = "handshake-regions")))]
+                let has_ext = false;
                 // The head under the cookie's mutex when it echoes one, then the staged chain
                 // under the chain's: the two scopes stay disjoint.
                 if echo_inbound_cookie {
@@ -7836,7 +7839,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         crate::ext_chain::ChainRef::from(&*chain),
                     )
                 })?;
-                #[cfg(not(wz_ext_chains))]
+                #[cfg(all(not(wz_ext_chains), feature = "handshake-regions"))]
                 crate::handshake_encode::encode_open_bound_into(buf, bound)?;
                 answer = holds_answer(role);
             }
@@ -7981,13 +7984,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         role: ExtChainRole,
     ) -> Result<(), crate::link::LinkDropCause> {
         // The bound this node announces for the peer (Item 751, decided when the peer's Init or
-        // OpenSyn was admitted) and the Open's origin are read in one hold of the facts.
+        // OpenSyn was admitted) and the Open's origin are read in one hold of the facts. A build
+        // that stages no handshake extension and announces no bound (`handshake-regions`) writes
+        // its Open with no chain, so it reads the origin alone.
+        #[cfg(any(wz_ext_chains, feature = "handshake-regions"))]
         let (bound, derived) = self.with_facts(|f| {
             (
                 f.handshake.local_remote_bound,
                 self.derive_open_initial_sn(f),
             )
         });
+        #[cfg(not(any(wz_ext_chains, feature = "handshake-regions")))]
+        let derived = self.with_facts(|f| self.derive_open_initial_sn(f));
         let initial_sn = self
             .reseed_tx_sn(derived)
             .map(crate::sn::to_wire)
@@ -8023,7 +8031,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 echo_inbound_cookie,
                 #[cfg(wz_ext_chains)]
                 has_ext,
-                #[cfg(not(wz_ext_chains))]
+                #[cfg(all(not(wz_ext_chains), feature = "handshake-regions"))]
                 bound,
                 role,
             },

@@ -117,6 +117,7 @@ default = [
     "tx-stream-owed",
     "dial-in-flight",
     "dial-address-reader",
+    "handshake-regions",
     "config-limits",
     "multicast-locator-keys",
     "query-replies-with-final",
@@ -694,6 +695,14 @@ dial-in-flight = ["wz-capi-core?/dial-in-flight", "wz-capi-coop?/dial-in-flight"
 # address as well as a name, as zenoh-pico hands it to `getaddrinfo`, so a dial links no reader of
 # addresses and reads one by the C library's grammar.
 dial-address-reader = ["wz-capi-core?/dial-address-reader", "wz-capi-coop?/dial-address-reader"]
+# `handshake-regions`: the region extensions of the unicast establishment, which zenoh-pico's
+# transport does not have: the peer's region name and the bound it announces for this node read,
+# a malformed one refusing the handshake, and the bound this node announces for the peer decided
+# before its Open. Off, neither extension is read, each skipped as one the build does not know,
+# as zenoh-pico's decoder skips it, and no bound is announced. The session core's feature of the
+# same name, through the cooperative engine's; the tokio engine's runtime reads them whatever is
+# named, so it selects neither.
+handshake-regions = ["wz-capi-core?/handshake-regions", "wz-capi-coop?/handshake-regions"]
 # `config-limits`: the numbered key `ZEXT_CONFIG_LIMITS_KEY` (`zext.h`) by which a config states
 # its session's limits and, with process pools, the values a program holds apart from any
 # session, judged at the insert and read by the open (`src/config_limits.rs`). A parity contract

@@ -5,6 +5,7 @@ was built, run or measured by this lane: every byte and instruction figure of a 
 **estimate** from the code, to be read on the size ledger's explain document of the case and on
 the perf matrix's receive line. Section 5 reads B3's and B4's bodies line by line in a built
 library, splits each step by what the lines hold, and records B3a, the first of them, as built.
+Section 6 records the work steps as they were built against the code.
 
 The case is `pico-client-coop-nostd` (`wz-capi-pico` without its defaults, `os-host,link-udp`,
 profile `capi-nostd`): one thread, the dial face alone, the four send behaviours beyond
@@ -98,7 +99,7 @@ too: the preset's contract is zenoh-pico's.
 | B3 | T7, T8, T9 | form | for a single-threaded lend-only build, a frame written in place into the link's one batch slot held for the batch: no counting pass (`CountTxBuf`, `try_encoded_len`), no per-frame `TxLease`; a fragment written into the same slot. Split by its lines into B3a to B3d (section 5.3) | -640 to -1,105 | none (send only) | B3a built; B3b first, with a build loop (section 5.3) |
 | B4 | T4 | form | for a session of one peer, the rejoin of a fragment chain into one lent chain per reliability, with the slot machine kept (P8) and the router's ingest folded into it. Split into B4a and B4b (section 5.3) | -350 to -650 | none per sample (a fragment is the cold path) | a line reading of the case's own Router, which the build read in section 5 cannot give (section 5.2) |
 | B1 | T5 (and T7's `emit_on_link`) | form | the four write facts of a link driver (whether it reports its writes, its last write, a class carried apart, that carriage's last write) compiled only with `link-wire-reports`, which only the tokio runtime names | -350 to -500 | lower: no clock read and four indirect calls fewer at each keep-alive deadline read; two fewer at each frame handed over | **built, `248c36d42d`** |
-| W1 | T3, T9 | work | the handshake's regions: the peer's region name and remote bound read and refused when malformed, the bound the session decides and stages on its Open | -250 to -450 | none | owner's key path for the capability |
+| W1 | T3, T9 | work | the handshake's regions: the peer's region name and remote bound read and refused when malformed, the bound the session decides and stages on its Open | -250 to -450 | none | **built** (section 6.1) |
 | W5 | T5 | work | the watch of the peer's initial declarations (its deadline in the lease, its expiry in `judge_lease`) | -250 to -400 | none | as W1 |
 | W2 | T3 | work | the node's admission of a link (`LinkAdmission`, `LinkLease`) and the `MaxLinks` close | -200 to -400 | none | as W1 |
 | B2 | T5 | form | the lease's deadlines read once, out of line, for `fire_due` and `next_due_ms` | -150 to -300 | must not rise: a call per turn is added, so only with a per-turn Ir reading | the perf matrix arm W |
@@ -235,3 +236,39 @@ lent chain, after for a borrowed one).
 B3 is -640 to -1,105 by these lines, below the earlier -800 to -1,300 at both ends; B4 is -350
 to -650, below the earlier -600 to -1,000. None of the steps touches the receive's hot path (a
 frame's records are walked as before), and none adds a call to the send path.
+
+## 6. The work steps as built
+
+Each work step follows the owner's ruling of section 3 and the shape of the send's four
+(`tx-probe` and its siblings): the session core's feature, on by default, which the tokio engine's
+runtime keeps whatever is named; the pico ABI's capability of the same name (`deploy/wz-config.toml`,
+`upstream_off = ["zenoh-pico"]`), forwarded by `wz-capi-pico`, `wz-capi-core` and
+`wz-capi-coop`; off in the zenoh-pico preset and on in the release profiles (`host-peer`,
+`host-peer-ext`, `host-peer-raweth`). A step whose reading here did not match the code is
+changed or stopped, and the reason is written under it. Nothing below was built or measured by this
+lane.
+
+### 6.1 W1, the handshake's regions (`handshake-regions`)
+
+Without the feature neither region extension is read: each is one the build does not know, which
+zenoh-pico's decoders skip as they skip any extension that is not mandatory
+(`vendor/zenoh-pico/src/protocol/codec/transport.c` @ `z_result_t _z_init_decode_ext(`), and
+neither is.
+
+- the readers of a chain, held or read where it lies (`inbound::ExtChainRead`), answer the
+  region and the bound as none whatever the entries hold, so an InitSyn or an InitAck with a
+  malformed region name and an Open with a bound of neither value refuse nothing, and the session
+  holds no region and no bound of its peer; the walk of a chain read in place keeps no answer for
+  either (`ChainAnswers`), and the slot profile's keeper keeps neither entry;
+- the acceptor's admission of the OpenSyn's bound and the decision of the bound announced on the
+  Open (`decide_local_remote_bound`) are not compiled into the dispatch, so no bound is decided and
+  none is announced, as zenoh-pico's Open carries none;
+- a build that stages no handshake extension (`ext_chains_cfg`) writes its Open with no chain;
+  a build that holds the chains keeps their staging of the bound, which shares the patch level's
+  place in the chain machinery (`ext_chain::StagedExt`): with nothing decided it stages none.
+
+`south-subregions` implies the feature, a bound decided by a rule being one announced. The receive's
+hot path is untouched: every line removed reads a handshake message. The tests that hold it are the
+readers' (`inbound::control_read_tests`) and the lent Open's
+(`session_actions::bundle_tests::lent_handshake`), each stating what both builds read and write,
+run without the feature by two legs of `scripts/lib/nondefault-tests-gate.sh`.

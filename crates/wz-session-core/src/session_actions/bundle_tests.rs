@@ -1021,8 +1021,10 @@ mod lent_handshake {
 
     /// A lend-only Open stages the bound the session decided where it writes the Open, so the
     /// peer reads it off the OpenSyn, and an OpenSyn sent once the decision went to none carries
-    /// none. Turned red by a lend-only Open that leaves the bound unstaged, which no other step of
-    /// a lend-only session stages.
+    /// none. A build that stages no handshake extension and has no `handshake-regions` writes its
+    /// Open with no chain, whatever the facts hold, as zenoh-pico's Open carries none. Turned red
+    /// by a lend-only Open that leaves the bound unstaged, which no other step of a lend-only
+    /// session stages, or one of a build without the regions that writes it.
     #[cfg(all(
         feature = "alloc",
         feature = "codec-frame",
@@ -1045,9 +1047,23 @@ mod lent_handshake {
             let (read, _) = read_control(bytes).expect("an Open the reader reads");
             read.chain().remote_bound().ok()
         };
+        // The reader of a build without the regions answers none whatever the Open carries, so
+        // the bytes say what was written: a chain, the Z flag of the header.
+        let has_chain = |bytes: &[u8]| bytes[0] & wz_codecs::wire_const::FLAG_T_Z != 0;
+        let writes = cfg!(any(wz_ext_chains, feature = "handshake-regions"));
+        assert_eq!(
+            has_chain(sent[0].as_slice()),
+            writes,
+            "a chain on the first OpenSyn exactly where the build writes the bound"
+        );
+        let decided = if cfg!(feature = "handshake-regions") {
+            Some(Some(Bound::South))
+        } else {
+            Some(None)
+        };
         assert_eq!(
             bound_of(sent[0].as_slice()),
-            Some(Some(Bound::South)),
+            decided,
             "the bound the session decided"
         );
         assert_eq!(
@@ -1061,8 +1077,10 @@ mod lent_handshake {
     /// for its chains: the patch level on the InitSyn, and on the OpenSyn the bound the session
     /// decided. A build that stages no handshake extension writes both from its parameters
     /// (`encode_init_patch_into`, `encode_open_bound_into`) and one that stages writes them from
-    /// its chains, and each lend-only leg runs this. Turned red by either writer putting another
-    /// entry, header or value on the wire, or leaving the bound off.
+    /// its chains, and each lend-only leg runs this. A build that stages none and has no
+    /// `handshake-regions` writes no bound, so its OpenSyn is the heap encoder's with no chain.
+    /// Turned red by either writer putting another entry, header or value on the wire, or leaving
+    /// the bound off where the build announces one.
     #[test]
     fn a_lent_opening_handshake_writes_the_bytes_of_its_chains() {
         use crate::extbound::{encode_remote_bound_ext, Bound};
@@ -1088,7 +1106,13 @@ mod lent_handshake {
             sent[0], init_syn,
             "the InitSyn carries the patch level alone"
         );
-        let bound = [encode_remote_bound_ext(Bound::South)];
+        // A build that stages no handshake extension and has no `handshake-regions` writes no
+        // bound, so its OpenSyn has no chain.
+        let bound: Vec<_> = if cfg!(any(wz_ext_chains, feature = "handshake-regions")) {
+            alloc::vec![encode_remote_bound_ext(Bound::South)]
+        } else {
+            Vec::new()
+        };
         let open_syn =
             encode_open(&params, false, None, &bound).expect("the OpenSyn the heap encoder writes");
         assert_eq!(sent[1], open_syn, "the OpenSyn carries the bound alone");

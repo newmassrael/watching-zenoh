@@ -1931,6 +1931,75 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
         transport-keepalive,\
         tx-lend-only\
         |session_actions::bundle_tests::the_reply_hold_is_raised_only_with_its_switch"
+    # The handshake's region extensions left out (`handshake-regions`, a default of the crate, and
+    # `south-subregions`, which needs it), every other default spelled out, so one behaviour is
+    # what the two rows differ by from the lend-only rows above. The first is the accepting
+    # lend-only row's build, whose readers of a chain read where it lies and of a held one answer
+    # the region and the bound as none (`inbound::control_read_tests::`); the second the client's
+    # build that stages no handshake extension, whose Open carries no chain whatever the facts
+    # hold (`session_actions::bundle_tests::lent_handshake::`). NOT YET MEASURED.
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        interest-answer,\
+        policy-selection,\
+        tx-probe,\
+        tx-expiry-run,\
+        tx-fragment-credit,\
+        tx-held-wait,\
+        multicast-locator-keys,\
+        link-wire-reports,\
+        query-replies-with-final,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-keepalive,\
+        tx-lend-only\
+        |inbound::control_read_tests::"
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        interest-answer,\
+        policy-selection,\
+        tx-probe,\
+        tx-expiry-run,\
+        tx-fragment-credit,\
+        tx-held-wait,\
+        multicast-locator-keys,\
+        link-wire-reports,\
+        query-replies-with-final,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-fixed-storage,\
+        session-unicast,\
+        session-unicast-open,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_actions::bundle_tests::lent_handshake::"
     # The COMPACT initial-sequence-number derivation, a row of its own because
     # `initial-sn-compact` is a selector, not an addition: it swaps the SHAKE
     # derivation for the FNV-1a and SplitMix64 one and compiles the tests of the

@@ -689,14 +689,16 @@ pub(crate) fn encode_held_chain_into(
 /// presented from the value with no chain held for it. The bytes are those
 /// `encode_held_chain_into` writes for the chain of that one entry
 /// ([`crate::extbound::encode_remote_bound_ext`]), and nothing for none, which is what such a
-/// build staged on the Open it sent.
+/// build staged on the Open it sent. A build without `handshake-regions` announces no bound and
+/// writes no chain on its Open, so it has no use for it.
 #[cfg(any(
     all(
         not(wz_ext_chains),
         feature = "storage-profile",
         feature = "session-unicast",
         feature = "codec-open-body",
-        feature = "session-unicast-open"
+        feature = "session-unicast-open",
+        feature = "handshake-regions"
     ),
     all(
         test,

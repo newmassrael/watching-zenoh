@@ -140,6 +140,7 @@ default = [
     "tx-stream-owed",
     "dial-in-flight",
     "dial-address-reader",
+    "handshake-regions",
     "multicast-locator-keys",
     "query-replies-with-final",
     "accept-cookie",
@@ -314,6 +315,12 @@ dial-in-flight = ["wz-runtime-coop/dial-in-flight"]
 # name. Without it every host a dial names, an address as well as a name, is handed to the
 # resolver of a network that has one, as zenoh-pico hands it to `getaddrinfo`.
 dial-address-reader = ["wz-runtime-coop/dial-address-reader"]
+# `handshake-regions`: the region extensions of the unicast establishment, the session core's
+# feature of the same name: the peer's region name and bound read, a malformed one refusing the
+# handshake, and the bound announced for the peer decided. Without it each is an extension the
+# session does not know, skipped as zenoh-pico's decoder skips it, and no bound is announced, so
+# a face meets its peer as it would an `Auto` node's.
+handshake-regions = ["wz-session-core/handshake-regions"]
 # `multicast-locator-keys`: a host group's `#ttl=`, `#bind=` and `#dscp=`, read by the session
 # core's feature of the same name and given to the group's sockets (`host_group`). Without it the
 # three are refused when the group's endpoint is read, and no send socket is marked.

@@ -2156,13 +2156,15 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 # tests and the runners built on it read (`trace_snapshot`).
 # `south-subregions`: the partitioned south a node reads from `gateway/south`
 # (`zenoh_config`, `RouterForwarder::with_south_partition`).
+# `handshake-regions`: the region name and the bound of each handshake, which this runtime's nodes
+# place their faces by.
 # `interest-answer`: a session of this runtime answers the Interests its peer asks, in every
 # mode; its nodes take sessions and join groups.
 # `policy-selection`: the runtime resolves the policies of a zenoh document (`zenoh_config`), so
 # every value a build does not leave out of a policy's domain stays selectable.
 # `link-wire-reports`: this runtime's drivers queue their writes (the writer queues) and a QUIC
 # link carries best-effort frames on a companion, which they report through the link trait.
-wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend", "action-trace", "south-subregions", "interest-answer", "policy-selection", "link-wire-reports"] }
+wz-session-core = { path = "../wz-session-core", features = ["alloc", "deferred-fire", "rx-shared-bytes", "transport-tx-lend", "action-trace", "south-subregions", "handshake-regions", "interest-answer", "policy-selection", "link-wire-reports"] }
 # The admin space a node answers from (§5.23): the `local_data` view, every admin leg and the
 # config-write decoder, the server layer's (server-layer split, step 7). Pulled by
 # `adminspace-core`, which every admin feature here composes.

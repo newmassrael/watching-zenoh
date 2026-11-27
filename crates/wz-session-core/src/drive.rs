@@ -1182,7 +1182,14 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // the facts (`admit_open_ack`); it is dropped silently, as any frame not admitted is, when
     // none is awaited (R2782: a replay after `Established` was measured to reset the RX
     // baseline).
-    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
+    //
+    // A build without `handshake-regions` reads no bound off either Open: the chain answers none,
+    // so an OpenSyn has nothing to refuse and an OpenAck takes none.
+    #[cfg(all(
+        feature = "codec-open-body",
+        feature = "session-unicast-accept",
+        feature = "handshake-regions"
+    ))]
     if let crate::inbound::ControlFacts::Open(crate::inbound::OpenFacts { is_ack: false, .. }) =
         facts
     {
@@ -1525,8 +1532,14 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     // OpenSyn it just rebuilt from the cookie. Last, so every fact the
     // decision reads (the peer's zid, role and region name) is the
     // admitted one, and before the event, because upstream fails the
-    // handshake on an error here instead of sending its Open.
-    #[cfg(all(feature = "codec-init-body", feature = "codec-open-body"))]
+    // handshake on an error here instead of sending its Open. A build
+    // without `handshake-regions` decides none and so announces none, as
+    // zenoh-pico's Open carries none.
+    #[cfg(all(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "handshake-regions"
+    ))]
     {
         use crate::session_fsm_unicast::SessionFsmUnicastState as S;
         let sends_an_open = match facts {

@@ -821,13 +821,16 @@ const RECEIVED_EXTENSIONS: [(u8, bool); 12] = {
     let multilink = cfg!(feature = "transport-multilink") || PASSIVE_READS_EVERY_OFFER;
     let lowlatency = cfg!(feature = "transport-lowlatency") || PASSIVE_READS_EVERY_OFFER;
     let compression = cfg!(feature = "session-extcompression") || PASSIVE_READS_EVERY_OFFER;
+    // The handshake's region extensions, which a build without `handshake-regions` does not read.
+    let regions = cfg!(feature = "handshake-regions");
     [
         // `init::ext::Patch`, `zextz64!(0x7, false)` (`crate::extpatch`).
         (ext_identity(id::PATCH, false, EXT_ENC_Z64), true),
-        // `open::ext::RemoteBound`, `zextz64!(0x7, false)` (`crate::extbound`).
-        (ext_identity(id::PATCH, false, EXT_ENC_Z64), true),
+        // `open::ext::RemoteBound`, `zextz64!(0x7, false)` (`crate::extbound`), the patch
+        // level's identity, which every build reads.
+        (ext_identity(id::PATCH, false, EXT_ENC_Z64), regions),
         // `init::ext::RegionName`, `zextzbuf!(0x8, false)` (`crate::extregion`).
-        (ext_identity(id::REGION_NAME, false, EXT_ENC_ZBUF), true),
+        (ext_identity(id::REGION_NAME, false, EXT_ENC_ZBUF), regions),
         // `init::ext::QoS` and `QoSLink`, a unit and a z64 at 0x1 (`crate::extqos_offer`).
         (ext_identity(id::QOS, false, EXT_ENC_UNIT), qos),
         (ext_identity(id::QOS, false, EXT_ENC_Z64), qos),
@@ -976,8 +979,9 @@ const _: () = assert!(
 /// admission rule refuses for the message, which is all the rule's verdict depends on.
 ///
 /// Its size does not depend on the chain's length, which the protocol does not bound: a chain
-/// keeps one entry for each identity a build reads (two in the smallest) and one header. The
-/// entries are in the order of each identity's last entry on the wire.
+/// keeps one entry for each identity a build reads (one in the smallest, the patch level's, and
+/// the region name's beside it with `handshake-regions`) and one header. The entries are in the
+/// order of each identity's last entry on the wire.
 #[cfg(feature = "session-slot")]
 #[derive(Debug, Default)]
 pub struct ReceivedExtChain {
