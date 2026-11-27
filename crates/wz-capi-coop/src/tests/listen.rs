@@ -876,14 +876,15 @@ fn a_row_a_face_left_wakes_for_the_face_an_attach_gives_it() {
     );
 }
 
-/// A listener's one client face, up with nothing owed while the dial role's face rests, is found
-/// quiet by its look; no face is while a second client's face is up beside it, and the first is
-/// again once the second has gone. CONTROL: a listener with no client has no quiet face. Turned
-/// red by a look that never marks its face quiet (`CoopEngine::quiet_until`), or one that marks
-/// a face quiet beside another that does not rest.
+/// A listener's client face, up with nothing owed while the dial role's face rests, is found quiet
+/// by its own look, and so is each of two beside each other: what one face is decides nothing of
+/// another's mark, the quiet read reading every face that does not rest. Once one client has gone
+/// the other is quiet still. CONTROL: a listener with no client has no quiet face. Turned red by a
+/// look that never marks its face quiet (`CoopEngine::quiet_until`), or one that holds a face
+/// unquiet for another that does not rest.
 #[cfg(not(wz_round))]
 #[test]
-fn a_lone_face_is_found_quiet_by_its_look_and_not_beside_another() {
+fn each_face_is_found_quiet_by_its_own_look_beside_another() {
     let (listener, endpoint) = listening(|config| config.max_faces = 2);
     assert_eq!(
         listener.quiet_faces(),
@@ -895,14 +896,75 @@ fn a_lone_face_is_found_quiet_by_its_look_and_not_beside_another() {
     eventually("the lone face found quiet", || listener.quiet_faces() == 1);
     let second = client(&endpoint, 0xc2);
     eventually("the second client's face", || listener.faces_up() == 2);
-    eventually("no face found quiet beside another", || {
-        listener.quiet_faces() == 0
+    eventually("both faces found quiet beside each other", || {
+        listener.quiet_faces() == 2
     });
     drop(second);
-    eventually("the first face alone, and quiet again", || {
+    eventually("the first face alone, and quiet still", || {
         listener.faces_up() == 1 && listener.quiet_faces() == 1
     });
     drop(first);
+}
+
+/// A listener's read task reads its two quiet client faces in one run to the looks' deadline: puts
+/// from each client in turn, each its own batch, are each read by a step of its own face in that
+/// run, and cost the faces a few turns between them, not one a batch. The CONTROL is the takes,
+/// one a put at least. Turned red by a run entered for one face alone (`CoopEngine::read_quiet`
+/// returning where a second face does not rest), or a kept set that leaves a face's link out
+/// (`LinkSupervisor::run_waits`), whose puts would then wait for the deadline.
+#[cfg(not(wz_round))]
+#[test]
+fn a_quiet_read_of_two_faces_turns_them_once_a_deadline_not_once_a_batch() {
+    const PUTS: usize = 40;
+    let (listener, endpoint) = listening(|config| {
+        config.max_faces = 2;
+        config.idle_wait_ms = 1_000;
+        config.lease_ms = 60_000;
+    });
+    let heard = Arc::new(AtomicUsize::new(0));
+    let count = heard.clone();
+    listener
+        .declare_subscriber_on_wire("demo/quiet/**", WireKey::literal(), Locality::Any, None, {
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .expect("the listener declares the subscriber");
+    let peers = [client(&endpoint, 0xc1), client(&endpoint, 0xc2)];
+    let put = |peer: &Stepped| {
+        peer.publish_on_wire_all(
+            "demo/quiet/x",
+            &WireKey::literal(),
+            b"q",
+            &PublishOptions::put().with_locality(Locality::Remote),
+        )
+        .expect("a put the link carries");
+    };
+    for peer in &peers {
+        let before = heard.load(Ordering::SeqCst);
+        eventually("a put heard once the client knows the subscriber", || {
+            put(peer);
+            std::thread::sleep(Duration::from_millis(10));
+            heard.load(Ordering::SeqCst) > before
+        });
+    }
+    eventually("both faces found quiet", || listener.quiet_faces() == 2);
+    let from = heard.load(Ordering::SeqCst);
+    let (turns, takes) = (
+        listener.takes.face_turns.load(Ordering::SeqCst),
+        listener.takes.pump_reads.load(Ordering::SeqCst),
+    );
+    for n in 1..=PUTS {
+        put(&peers[n % 2]);
+        eventually("the put heard", || heard.load(Ordering::SeqCst) >= from + n);
+    }
+    let turns = listener.takes.face_turns.load(Ordering::SeqCst) - turns;
+    let takes = listener.takes.pump_reads.load(Ordering::SeqCst) - takes;
+    assert!(takes >= PUTS, "CONTROL: one take a put at least, {takes}");
+    assert!(
+        turns * 4 < PUTS,
+        "the faces were turned {turns} times for {PUTS} batches"
+    );
 }
 
 /// A listener's read task reads its one quiet client face alone to the look's deadline: a run of
@@ -967,7 +1029,7 @@ fn a_quiet_read_turns_its_face_once_a_deadline_not_once_a_batch() {
 /// read's own deadline. The first client's lease is long, so the listener's keep-alive to it is
 /// due past that deadline too, and the puts it makes are what the listener reads. CONTROL: the
 /// first face was found quiet. Turned red by a quiet read that waits on its face's link alone
-/// (`LinkSupervisor::lone_waits` leaving the port out).
+/// (`LinkSupervisor::run_waits` leaving the port out).
 #[cfg(not(wz_round))]
 #[test]
 fn a_connection_arriving_during_a_quiet_read_is_taken_at_once() {

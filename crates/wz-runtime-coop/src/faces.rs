@@ -1747,9 +1747,10 @@ impl IdleWait {
 #[cfg(feature = "session-unicast-accept")]
 pub type OwingWaits = BoundedVec<LinkWait, OWING_WAITS, Static>;
 
-/// What a read of one face alone waits on ([`LinkSupervisor::lone_waits`]), in the reading
-/// thread's own frame for the whole run of such reads: the face's link, each port and a wake of
-/// the stack's. A session with more ports than its room leaves has its faces read whole.
+/// What a quiet read of its faces waits on ([`LinkSupervisor::run_waits`]), in the reading
+/// thread's own frame for the whole run of such reads: each face's link, each port and a wake of
+/// the stack's. A session with more faces and ports than its room leaves has its faces read whole,
+/// as zenoh-pico's read waits on a set its platform bounds.
 pub type LoneWaits = BoundedVec<LinkWait, LONE_WAITS, Static>;
 
 /// The room of [`LoneWaits`].
@@ -2838,28 +2839,42 @@ impl<
         waits
     }
 
-    /// What a read of the face at place `at` alone waits on: its link's input first, then a
-    /// connection on each port, then `beside` (a wake of the stack's). Made once for a run of
-    /// such reads and kept for its whole length, none of it written anew a wait. `None` where a
-    /// wait on these alone would miss what a wait over the whole session finds
-    /// ([`Self::idle_wait`]): the face's link is not [`WireLook::Quiet`] or waits in its own
-    /// loop, a port gives no wait or the link's own (a datagram port its faces share), or the
-    /// entries are more than [`LoneWaits`] holds.
-    pub fn lone_waits(&self, at: usize, beside: Option<LinkWait>) -> Option<LoneWaits> {
-        let wire = self.faces.get(at)?.link().wire()?;
-        if wire.look() != WireLook::Quiet {
+    /// What a quiet read of the faces at the places `rows` waits on: each face's link's input
+    /// first, in the order of `rows`, then a connection on each port, then `beside` (a wake of
+    /// the stack's). Made once for a run of such reads and kept for its whole length, none of it
+    /// written anew a wait. `None` where a wait on these alone would miss what a wait over the
+    /// whole session finds ([`Self::idle_wait`]): no row is named, a face's link is not
+    /// [`WireLook::Quiet`] or waits in its own loop, two of them or a port and a link give one
+    /// wait (a datagram port its faces share), a port gives no wait, or the entries are more than
+    /// [`LoneWaits`] holds.
+    pub fn run_waits(
+        &self,
+        rows: impl IntoIterator<Item = usize>,
+        beside: Option<LinkWait>,
+    ) -> Option<LoneWaits> {
+        let mut waits = LoneWaits::new_static();
+        for at in rows {
+            let wire = self.faces.get(at)?.link().wire()?;
+            if wire.look() != WireLook::Quiet {
+                return None;
+            }
+            let own = wire.input_wait()?;
+            if waits.iter().any(|wait| wait.on == own) {
+                return None;
+            }
+            waits.push(LinkWait::input(own)).ok()?;
+        }
+        let links = waits.len();
+        if links == 0 {
             return None;
         }
-        let own = wire.input_wait()?;
-        let mut waits = LoneWaits::new_static();
-        waits.push(LinkWait::input(own)).ok()?;
         #[cfg(feature = "listen")]
         for listening in &self.listeners {
             let on = listening
                 .listener
                 .input_wait()
                 .filter(|_| listening.listener.asked_when_ready())?;
-            if on == own {
+            if waits[..links].iter().any(|wait| wait.on == on) {
                 return None;
             }
             waits.push(LinkWait::input(on)).ok()?;
