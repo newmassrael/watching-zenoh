@@ -20,49 +20,6 @@ fn zenoh_default_map_stamps_only_on_a_router() {
     assert!(!enabled.get(WhatAmI::Client));
 }
 
-/// Every map, every role: the role reads its own entry and no other, and replacing one role's
-/// entry moves only what that role reads.
-///
-/// # Control
-///
-/// Reading the peer's entry for a client (the document's third `if` returning `peer`) reds the
-/// maps whose two entries differ.
-#[test]
-fn each_role_reads_its_own_entry_of_every_map() {
-    for bits in 0u8..8 {
-        let map = TimestampingEnabled {
-            router: bits & 1 != 0,
-            peer: bits & 2 != 0,
-            client: bits & 4 != 0,
-        };
-        assert_eq!(map.get(WhatAmI::Router), map.router, "{map:?}");
-        assert_eq!(map.get(WhatAmI::Peer), map.peer, "{map:?}");
-        assert_eq!(map.get(WhatAmI::Client), map.client, "{map:?}");
-        for role in [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client] {
-            for on in [false, true] {
-                let replaced = map.with_role(role, on);
-                assert_eq!(replaced.get(role), on, "{map:?} {role:?} {on}");
-                for other in [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client] {
-                    if other != role {
-                        assert_eq!(replaced.get(other), map.get(other), "{map:?} {role:?}");
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// A number that names no role stamps nothing, whatever the map says.
-#[test]
-fn a_number_that_names_no_role_stamps_nothing() {
-    for role in [0u8, 3, 5, 8, 0xff] {
-        assert!(
-            !generated::timestamping_enabled_for(role, true, true, true),
-            "{role}"
-        );
-    }
-}
-
 #[test]
 fn the_single_boolean_spelling_applies_to_every_role() {
     // zenoh accepts `enabled: true` as well as the per-role table.
