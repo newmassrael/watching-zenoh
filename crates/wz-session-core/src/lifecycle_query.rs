@@ -1762,7 +1762,7 @@ mod tests {
                 Verb::Close => self.permits.close,
                 Verb::Reset => self.permits.reset,
                 Verb::Status => self.permits.status,
-                Verb::Open => false,
+                Verb::Open | Verb::Configure => false,
             };
             if granted {
                 visit(Grant {
