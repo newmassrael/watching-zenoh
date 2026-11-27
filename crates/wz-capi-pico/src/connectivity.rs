@@ -667,10 +667,14 @@ const _: () = assert!(
     core::mem::size_of::<Option<Held>>() < core::mem::size_of::<z_loaned_transport_event_t>() * 2
 );
 
-/// What arrives while a history is replayed, waiting behind it in order, in [`REPLAY_ROWS`] rows
-/// reserved with the listener. What arrives of a row already waiting is folded into it, so a row
-/// waits at most twice, its DEL and then its PUT.
-struct Pending {
+/// Whether a listener's history is being replayed, and what arrives meanwhile, waiting behind it
+/// in order, in [`REPLAY_ROWS`] rows reserved with the listener whether it replays or not. What
+/// arrives of a row already waiting is folded into it, so a row waits at most twice, its DEL and
+/// then its PUT.
+struct Replay {
+    /// The history is being replayed on the declaring thread and what arrives waits here; once
+    /// not, deliveries go straight to the closure.
+    replaying: bool,
     rows: [Option<Held>; REPLAY_ROWS],
     len: usize,
     /// A change found every row held: it and what follows it are not held, and the listener is
@@ -679,9 +683,10 @@ struct Pending {
     overflowed: bool,
 }
 
-impl Pending {
-    fn new() -> Self {
+impl Replay {
+    fn new(replaying: bool) -> Self {
         Self {
+            replaying,
             rows: [None; REPLAY_ROWS],
             len: 0,
             overflowed: false,
@@ -754,26 +759,17 @@ impl Pending {
     }
 }
 
-/// Where a listener's deliveries stand.
-enum Phase {
-    /// The history is being replayed on the declaring thread; what arrives
-    /// meanwhile waits here, in order.
-    Replaying(Pending),
-    /// Deliveries go straight to the closure.
-    Live,
-}
-
 /// One declared listener's way to its closure.
 ///
 /// `gate` holds the closure and is held for the length of every call, so the
 /// thread that undeclares can take the closure out under it and know nothing is
-/// running; `phase` is only ever held briefly and never across a call, so a peer
+/// running; `replay` is only ever held briefly and never across a call, so a peer
 /// arriving during a replay is queued rather than made to wait.
 pub(crate) struct Delivery {
     /// The plane whose events the closure reads.
     plane: ToldPlane,
     gate: Mutex<Option<CClosure<EventCall>>>,
-    phase: Mutex<Phase>,
+    replay: Mutex<Replay>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -801,13 +797,10 @@ impl Delivery {
             mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).gate)), |gate| {
                 gate.write(Some(closure))
             });
-            mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).phase)), |phase| {
-                phase.write(if replaying {
-                    Phase::Replaying(Pending::new())
-                } else {
-                    Phase::Live
-                })
-            });
+            mutex_in(
+                NonNull::new_unchecked(addr_of_mut!((*at).replay)),
+                |replay| replay.write(Replay::new(replaying)),
+            );
         }
     }
 
@@ -816,9 +809,9 @@ impl Delivery {
     /// ([`Self::finish_replay`]).
     fn deliver(&self, key: ToldKey, came: bool, event: impl FnOnce() -> ConnEvent) {
         {
-            let mut phase = lock(&self.phase);
-            if let Phase::Replaying(pending) = &mut *phase {
-                pending.hold(key, came);
+            let mut replay = lock(&self.replay);
+            if replay.replaying {
+                replay.hold(key, came);
                 return;
             }
         }
@@ -853,9 +846,9 @@ impl Delivery {
     /// only when `tell`, asked whether its row `came` and of which row, writes its event, which
     /// it does from the row the engine keeps when the listener is to hear it
     /// (`SessionEngine::tell_came`, `SessionEngine::tell_went`); once the queue is drained after
-    /// it ran out of rows, `converge` brings the listener to the faces as they stand. The phase
-    /// is switched only when the queue is found empty and whole under its lock, so an event
-    /// cannot be delivered ahead of one still held.
+    /// it ran out of rows, `converge` brings the listener to the faces as they stand. The replay
+    /// ends only when the queue is found empty and whole under its lock, so an event cannot be
+    /// delivered ahead of one still held.
     fn finish_replay(
         &self,
         mut tell: impl FnMut(bool, &ToldKey) -> Option<ConnEvent>,
@@ -863,17 +856,17 @@ impl Delivery {
     ) {
         loop {
             let next = {
-                let mut phase = lock(&self.phase);
-                match &mut *phase {
-                    Phase::Replaying(pending) => match pending.next() {
-                        Some(held) => Some(held),
-                        None if pending.take_overflow() => None,
-                        None => {
-                            *phase = Phase::Live;
-                            return;
-                        }
-                    },
-                    Phase::Live => return,
+                let mut replay = lock(&self.replay);
+                if !replay.replaying {
+                    return;
+                }
+                match replay.next() {
+                    Some(held) => Some(held),
+                    None if replay.take_overflow() => None,
+                    None => {
+                        replay.replaying = false;
+                        return;
+                    }
                 }
             };
             match next {
@@ -893,7 +886,7 @@ impl Delivery {
         let closure = lock(&self.gate).take();
         drop(closure);
         // What was still held is told to no one: a held change owns nothing to let go of.
-        *lock(&self.phase) = Phase::Live;
+        *lock(&self.replay) = Replay::new(false);
     }
 }
 
