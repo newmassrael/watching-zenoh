@@ -18,7 +18,9 @@
 //!   holds `a` and not `b`.
 //! - a time is either `now(<-?><duration?>)` or an RFC3339 UTC timestamp, read as humantime's
 //!   `parse_rfc3339_weak` reads it ([`parse_rfc3339_weak`]).
-//! - a duration is a float of seconds, or a float with one of `u ms s m h d w`.
+//! - a duration is a float of seconds, or a float with one of `u ms s m h d w`. The float is
+//!   `f64::from_str`'s grammar, read by the reader the caller names ([`FloatRead`]): core's
+//!   ([`core_float`]), or a platform's C reader handed the literal as [`decimal_text`] writes it.
 //!
 //! ## Where this differs from upstream
 //!
@@ -38,7 +40,6 @@
 //! each platform).
 
 use core::fmt;
-use core::num::ParseFloatError;
 use core::time::Duration;
 
 const U_TO_SECS: f64 = 0.000001;
@@ -136,6 +137,191 @@ impl fmt::Display for Rfc3339Error {
 
 impl core::error::Error for Rfc3339Error {}
 
+/// Why the number of a duration is refused: the two refusals of `f64::from_str`, in its words, so
+/// a refusal reads the same whichever reader read the number.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FloatError {
+    /// The number is empty.
+    Empty,
+    /// The text is not a float literal.
+    Invalid,
+}
+
+impl fmt::Display for FloatError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            FloatError::Empty => "cannot parse float from empty string",
+            FloatError::Invalid => "invalid float literal",
+        })
+    }
+}
+
+impl core::error::Error for FloatError {}
+
+/// A reader of the number of a duration: it admits what `f64::from_str` admits and reads it to
+/// the same value.
+pub type FloatRead = fn(&str) -> Result<f64, FloatError>;
+
+/// Core's reader, `f64::from_str`.
+pub fn core_float(text: &str) -> Result<f64, FloatError> {
+    text.parse::<f64>().map_err(|_| {
+        if text.is_empty() {
+            FloatError::Empty
+        } else {
+            FloatError::Invalid
+        }
+    })
+}
+
+/// The bytes [`decimal_text`] writes a literal in: a sign, [`DECIMAL_DIGITS`] digits and a sticky
+/// one, an `e`, the exponent's sign and five digits, and the terminating NUL.
+pub const DECIMAL_TEXT: usize = 64;
+
+/// The significant digits [`decimal_text`] keeps of a literal.
+pub const DECIMAL_DIGITS: usize = 48;
+
+/// The largest power of ten [`decimal_text`] writes: past it every `f64` is an infinity or a zero.
+const DECIMAL_EXPONENT: i64 = 99_999;
+
+/// What [`decimal_text`] made of a literal.
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum Decimal {
+    /// Read with no reader: an infinity, a NaN or a zero.
+    Read(f64),
+    /// Written in the buffer, this many bytes before its NUL.
+    Written(usize),
+}
+
+/// `text` checked against `f64::from_str`'s grammar, and a number in it written in `out` for a
+/// platform's C reader (`strtod`): an integer of its significant digits and a power of ten, with no
+/// radix character, so no locale reads it otherwise, NUL-terminated, so the reader reads nothing
+/// past it. Past [`DECIMAL_DIGITS`] significant digits a nonzero one, if any, is written as one more
+/// digit `1`, which rounds as the digits it stands for do unless the literal lies within a part in
+/// 10^48 of a halfway point between two `f64`s.
+pub fn decimal_text(text: &str, out: &mut [u8; DECIMAL_TEXT]) -> Result<Decimal, FloatError> {
+    let bytes = text.as_bytes();
+    let (negative, rest) = match bytes.first() {
+        None => return Err(FloatError::Empty),
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        Some(_) => (false, bytes),
+    };
+    if rest.eq_ignore_ascii_case(b"inf") || rest.eq_ignore_ascii_case(b"infinity") {
+        return Ok(Decimal::Read(if negative {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        }));
+    }
+    if rest.eq_ignore_ascii_case(b"nan") {
+        return Ok(Decimal::Read(if negative { -f64::NAN } else { f64::NAN }));
+    }
+    let mut at = usize::from(negative);
+    if negative {
+        out[0] = b'-';
+    }
+    let first_digit = at;
+    // The literal is the integer of the digits kept times ten to `scale`.
+    let mut scale: i64 = 0;
+    let mut sticky = false;
+    let mut seen = false;
+    let mut i = 0;
+    let mut keep = |digit: u8, fraction: bool, at: &mut usize, scale: &mut i64| {
+        if *at == first_digit && digit == b'0' {
+            // A leading zero: in the fraction it moves the point.
+            if fraction {
+                *scale -= 1;
+            }
+        } else if *at - first_digit < DECIMAL_DIGITS {
+            out[*at] = digit;
+            *at += 1;
+            if fraction {
+                *scale -= 1;
+            }
+        } else {
+            sticky |= digit != b'0';
+            if !fraction {
+                *scale += 1;
+            }
+        }
+    };
+    while let Some(&digit) = rest.get(i).filter(|b| b.is_ascii_digit()) {
+        keep(digit, false, &mut at, &mut scale);
+        seen = true;
+        i += 1;
+    }
+    if rest.get(i) == Some(&b'.') {
+        i += 1;
+        while let Some(&digit) = rest.get(i).filter(|b| b.is_ascii_digit()) {
+            keep(digit, true, &mut at, &mut scale);
+            seen = true;
+            i += 1;
+        }
+    }
+    if !seen {
+        return Err(FloatError::Invalid);
+    }
+    let mut exponent: i64 = 0;
+    if matches!(rest.get(i), Some(b'e' | b'E')) {
+        i += 1;
+        let exponent_negative = match rest.get(i) {
+            Some(b'-') => {
+                i += 1;
+                true
+            }
+            Some(b'+') => {
+                i += 1;
+                false
+            }
+            _ => false,
+        };
+        let digits_from = i;
+        while let Some(&digit) = rest.get(i).filter(|b| b.is_ascii_digit()) {
+            exponent = (exponent * 10 + i64::from(digit - b'0')).min(i64::from(u32::MAX));
+            i += 1;
+        }
+        if i == digits_from {
+            return Err(FloatError::Invalid);
+        }
+        if exponent_negative {
+            exponent = -exponent;
+        }
+    }
+    if i != rest.len() {
+        return Err(FloatError::Invalid);
+    }
+    if at == first_digit {
+        return Ok(Decimal::Read(if negative { -0.0 } else { 0.0 }));
+    }
+    if sticky {
+        out[at] = b'1';
+        at += 1;
+        scale -= 1;
+    }
+    let power = (scale + exponent).clamp(-DECIMAL_EXPONENT, DECIMAL_EXPONENT);
+    if power != 0 {
+        out[at] = b'e';
+        at += 1;
+        if power < 0 {
+            out[at] = b'-';
+            at += 1;
+        }
+        let magnitude = power.unsigned_abs();
+        let mut divisor = 1;
+        while divisor * 10 <= magnitude {
+            divisor *= 10;
+        }
+        while divisor > 0 {
+            // A digit of the magnitude, below ten.
+            out[at] = b'0' + (magnitude / divisor % 10) as u8;
+            at += 1;
+            divisor /= 10;
+        }
+    }
+    out[at] = 0;
+    Ok(Decimal::Written(at))
+}
+
 /// Why a duration is refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DurationError<'a> {
@@ -146,7 +332,7 @@ pub enum DurationError<'a> {
         /// The duration's whole text, unit included.
         text: &'a str,
         /// What the float reader said.
-        error: ParseFloatError,
+        error: FloatError,
     },
 }
 
@@ -263,8 +449,16 @@ impl<I: Copy + PartialOrd> TimeRange<I> {
     }
 }
 
-/// Parse a `_time` value.
+/// Parse a `_time` value, its numbers read by core's reader.
 pub fn parse_range<C: Clock>(s: &str) -> Result<TimeRange<TimeExpr<C::Instant>>, RangeError<'_>> {
+    parse_range_with::<C>(s, core_float)
+}
+
+/// Parse a `_time` value, its numbers read by `read`.
+pub fn parse_range_with<C: Clock>(
+    s: &str,
+    read: FloatRead,
+) -> Result<TimeRange<TimeExpr<C::Instant>>, RangeError<'_>> {
     // The shortest range is `[..]`.
     let len = s.len();
     if len < 4 {
@@ -284,13 +478,13 @@ pub fn parse_range<C: Clock>(s: &str) -> Result<TimeRange<TimeExpr<C::Instant>>,
     let inner = chars.as_str();
     if let Some((start, end)) = inner.split_once("..") {
         Ok(TimeRange {
-            start: parse_edge::<C>(start, inclusive_start)?,
-            end: parse_edge::<C>(end, inclusive_end)?,
+            start: parse_edge::<C>(start, inclusive_start, read)?,
+            end: parse_edge::<C>(end, inclusive_end, read)?,
         })
     } else if let Some((start, duration)) = inner.split_once(';') {
         // Upstream reads the start, then the duration, then asks whether there was a start.
-        let start = parse_edge::<C>(start, inclusive_start)?;
-        let secs = parse_duration(duration).map_err(RangeError::Duration)?;
+        let start = parse_edge::<C>(start, inclusive_start, read)?;
+        let secs = parse_duration_with(duration, read).map_err(RangeError::Duration)?;
         let end_time = match start {
             Edge::Inclusive(t) | Edge::Exclusive(t) => t
                 .checked_add::<C>(secs)
@@ -311,11 +505,12 @@ pub fn parse_range<C: Clock>(s: &str) -> Result<TimeRange<TimeExpr<C::Instant>>,
 fn parse_edge<C: Clock>(
     s: &str,
     inclusive: bool,
+    read: FloatRead,
 ) -> Result<Edge<TimeExpr<C::Instant>>, RangeError<'_>> {
     if s.is_empty() {
         return Ok(Edge::Unbounded);
     }
-    let t = parse_time::<C>(s).map_err(RangeError::Time)?;
+    let t = parse_time_with::<C>(s, read).map_err(RangeError::Time)?;
     Ok(if inclusive {
         Edge::Inclusive(t)
     } else {
@@ -323,8 +518,16 @@ fn parse_edge<C: Clock>(
     })
 }
 
-/// Parse one time: `now(...)` or an RFC3339 UTC timestamp.
+/// Parse one time: `now(...)` or an RFC3339 UTC timestamp, its numbers read by core's reader.
 pub fn parse_time<C: Clock>(s: &str) -> Result<TimeExpr<C::Instant>, TimeError<'_>> {
+    parse_time_with::<C>(s, core_float)
+}
+
+/// Parse one time, its numbers read by `read`.
+pub fn parse_time_with<C: Clock>(
+    s: &str,
+    read: FloatRead,
+) -> Result<TimeExpr<C::Instant>, TimeError<'_>> {
     let parsed = if let Some(inner) = s
         .strip_prefix("now(")
         .and_then(|rest| rest.strip_suffix(')'))
@@ -332,11 +535,11 @@ pub fn parse_time<C: Clock>(s: &str) -> Result<TimeExpr<C::Instant>, TimeError<'
         if inner.is_empty() {
             Ok(TimeExpr::Now { offset_secs: 0.0 })
         } else if let Some(magnitude) = inner.strip_prefix('-') {
-            parse_duration(magnitude)
+            parse_duration_with(magnitude, read)
                 .map(|f| TimeExpr::Now { offset_secs: -f })
                 .map_err(TimeCause::Duration)
         } else {
-            parse_duration(inner)
+            parse_duration_with(inner, read)
                 .map(|f| TimeExpr::Now { offset_secs: f })
                 .map_err(TimeCause::Duration)
         }
@@ -349,25 +552,30 @@ pub fn parse_time<C: Clock>(s: &str) -> Result<TimeExpr<C::Instant>, TimeError<'
 }
 
 /// A duration literal in seconds: a bare float, or a float followed by one of `u` (microseconds),
-/// `ms`, `s`, `m`, `h`, `d`, `w`.
+/// `ms`, `s`, `m`, `h`, `d`, `w`, its number read by core's reader.
 pub fn parse_duration(s: &str) -> Result<f64, DurationError<'_>> {
+    parse_duration_with(s, core_float)
+}
+
+/// [`parse_duration`], its number read by `read`.
+pub fn parse_duration_with(s: &str, read: FloatRead) -> Result<f64, DurationError<'_>> {
     let Some(&unit) = s.as_bytes().last() else {
         return Err(DurationError::Empty);
     };
     // The text before the unit; the unit is the text's last byte, so it is there to strip.
     let number = |unit: &str| s.strip_suffix(unit).unwrap_or(s);
     match unit {
-        b'u' => number("u").parse::<f64>().map(|u| U_TO_SECS * u),
+        b'u' => read(number("u")).map(|u| U_TO_SECS * u),
         // A lone `s` has nothing before the unit: upstream asks for the byte before it and
         // panics; here the whole text is read as a float, which it is not.
-        b's' if s.len() == 1 => s.parse::<f64>(),
-        b's' if s.ends_with("ms") => number("ms").parse::<f64>().map(|ms| MS_TO_SECS * ms),
-        b's' => number("s").parse::<f64>(),
-        b'm' => number("m").parse::<f64>().map(|m| M_TO_SECS * m),
-        b'h' => number("h").parse::<f64>().map(|h| H_TO_SECS * h),
-        b'd' => number("d").parse::<f64>().map(|d| D_TO_SECS * d),
-        b'w' => number("w").parse::<f64>().map(|w| W_TO_SECS * w),
-        _ => s.parse::<f64>(),
+        b's' if s.len() == 1 => read(s),
+        b's' if s.ends_with("ms") => read(number("ms")).map(|ms| MS_TO_SECS * ms),
+        b's' => read(number("s")),
+        b'm' => read(number("m")).map(|m| M_TO_SECS * m),
+        b'h' => read(number("h")).map(|h| H_TO_SECS * h),
+        b'd' => read(number("d")).map(|d| D_TO_SECS * d),
+        b'w' => read(number("w")).map(|w| W_TO_SECS * w),
+        _ => read(s),
     }
     .map_err(|error| DurationError::Float { text: s, error })
 }
@@ -628,6 +836,130 @@ mod tests {
             std::format!("{OutOfRange} / {InvalidDigit} / {InvalidFormat}"),
             "numeric component is out of range / bad character where digit is expected / \
              timestamp format is invalid"
+        );
+    }
+
+    /// What [`decimal_text`] writes reads, with a correctly rounding reader, to the value
+    /// `f64::from_str` reads the literal to, and it admits and refuses what that does, in its
+    /// words. Turned red by a grammar that admits a text core refuses or the reverse, a digit or a
+    /// power of ten written wrong, or a radix character written.
+    #[test]
+    fn a_decimal_written_for_a_platform_reader_reads_as_core_reads_the_literal() {
+        let corpus = [
+            "0",
+            "1",
+            "-1",
+            "+1",
+            "1.",
+            ".5",
+            "-.5",
+            "1.5",
+            "0.1",
+            "123.456",
+            "000123",
+            "1e5",
+            "1E5",
+            "1e+5",
+            "1e-5",
+            "1.e1",
+            ".5e1",
+            "2.5e-3",
+            "1e400",
+            "-1e400",
+            "1e-400",
+            "4.9e-324",
+            "2.2250738585072014e-308",
+            "1.7976931348623157e308",
+            "9007199254740993",
+            "0.30000000000000004",
+            "1e00000000000000000000003",
+            "0e999999999999",
+            "0.000",
+            "-0",
+            "-0.0",
+            "inf",
+            "-inf",
+            "+INF",
+            "Infinity",
+            "-infinity",
+            "nan",
+            "NaN",
+            "-nan",
+            "0.000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+            "123456789012345678901234567890123456789012345678901234567890123456789",
+            "1000000000000000000000000000000000000000000000000000000000000",
+            "1.000000000000000000000000000000000000000000000000000000000001",
+            "",
+            ".",
+            "e1",
+            ".e1",
+            "1e",
+            "1e+",
+            "1x",
+            " 1",
+            "1 ",
+            "0x10",
+            "1_000",
+            "--1",
+            "+-1",
+            "in",
+            "infin",
+            "nanx",
+            "1.2.3",
+            "1e5.5",
+        ];
+        for text in corpus {
+            let mut out = [0u8; DECIMAL_TEXT];
+            let ours = decimal_text(text, &mut out).map(|decimal| match decimal {
+                Decimal::Read(value) => value,
+                Decimal::Written(len) => {
+                    assert_eq!(out[len], 0, "{text:?} ends in a NUL");
+                    let written = core::str::from_utf8(&out[..len]).expect("ASCII");
+                    assert!(!written.contains('.'), "{text:?} written with no radix");
+                    written.parse::<f64>().expect("a literal core reads")
+                }
+            });
+            match (ours, core_float(text)) {
+                (Ok(a), Ok(b)) => assert!(
+                    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                    "{text:?}: {a} against {b}"
+                ),
+                (a, b) => assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits), "{text:?}"),
+            }
+        }
+    }
+
+    /// A duration's number is read by the reader the caller names, and refused in that reader's
+    /// words. Turned red by a parse that reads with core's reader whatever it is handed.
+    #[test]
+    fn a_durations_number_is_read_by_the_reader_named() {
+        fn seven(_text: &str) -> Result<f64, FloatError> {
+            Ok(7.0)
+        }
+        fn refuses(_text: &str) -> Result<f64, FloatError> {
+            Err(FloatError::Invalid)
+        }
+        assert_eq!(parse_duration_with("1.5s", seven), Ok(7.0));
+        assert_eq!(parse_duration_with("2m", seven), Ok(420.0));
+        assert_eq!(
+            parse_duration_with("1.5s", refuses),
+            Err(DurationError::Float {
+                text: "1.5s",
+                error: FloatError::Invalid
+            })
+        );
+        assert_eq!(
+            parse_range_with::<Epoch>("[now(-1s)..]", seven).map(|r| r.start),
+            Ok(Edge::Inclusive(TimeExpr::Now { offset_secs: -7.0 }))
+        );
+        assert_eq!(
+            std::format!("{} / {}", FloatError::Empty, FloatError::Invalid),
+            std::format!(
+                "{} / {}",
+                "".parse::<f64>().unwrap_err(),
+                "x".parse::<f64>().unwrap_err()
+            ),
+            "refused in core's words"
         );
     }
 

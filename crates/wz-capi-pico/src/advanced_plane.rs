@@ -182,7 +182,10 @@ impl AdvancedPublisherPlane for PicoPlane {
     ) -> Result<PlainQueryable, AdvancedPublisherError> {
         // One handler for the queryable, kept in its row: it needs no face's session, as a reply
         // goes out on the query's own.
-        let answer = store.query_handler(wz_node_time::timestamp_source::wall_clock_ntp64);
+        let answer = store.query_handler_reading(
+            wz_node_time::timestamp_source::wall_clock_ntp64,
+            time_number,
+        );
         let sink = QueryableSink::shared(
             move |query: &dyn QueryView, out: &mut dyn ReplyOut, _face: &dyn QueryHolder| {
                 answer(query, out)
@@ -271,6 +274,63 @@ impl AdvancedPublisherPlane for PicoPlane {
         // the key stays declared until the ring lets the sample go. A key whose declaration's
         // count has no room keeps nothing, as a plane whose key is not a declaration does.
         Some(Retained::new(Arc::new(publisher.key_copy().ok()?)))
+    }
+}
+
+/// The number of a `_time` selector, read by the C library's own reader, as zenoh-pico reads it
+/// (`strtod`), from the literal wz's grammar admitted and wrote with no radix character: the
+/// library links no float reader of its own.
+#[cfg(unix)]
+fn time_number(text: &str) -> Result<f64, wz_session_core::time_range::FloatError> {
+    use wz_session_core::time_range::{decimal_text, Decimal, DECIMAL_TEXT};
+    let mut written = [0u8; DECIMAL_TEXT];
+    match decimal_text(text, &mut written)? {
+        Decimal::Read(value) => Ok(value),
+        // SAFETY: `decimal_text` wrote a number in `written` and a NUL after it, so the reader
+        // reads inside the array.
+        Decimal::Written(_) => {
+            Ok(unsafe { libc::strtod(written.as_ptr().cast(), core::ptr::null_mut()) })
+        }
+    }
+}
+
+/// A host whose C library's reader is not named here reads with core's.
+#[cfg(not(unix))]
+use wz_session_core::time_range::core_float as time_number;
+
+/// The C library's reader reads a `_time` number as core's does, and refuses what core refuses.
+/// Turned red by a literal handed to the reader in another form than the one it reads, or a
+/// grammar the platform reader admits more of.
+#[cfg(all(test, unix))]
+mod time_number_tests {
+    use wz_session_core::time_range::core_float;
+
+    #[test]
+    fn the_c_librarys_reader_reads_a_time_as_core_does() {
+        for text in [
+            "30",
+            "1.5",
+            "-0.25",
+            "2.5e-3",
+            "1e400",
+            "4.9e-324",
+            "0.30000000000000004",
+            "123456789012345678901234567890123456789012345678901234567890",
+            "inf",
+            "nan",
+            "",
+            "1,5",
+            "0x10",
+            " 1",
+        ] {
+            match (super::time_number(text), core_float(text)) {
+                (Ok(a), Ok(b)) => assert!(
+                    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                    "{text:?}: {a} against {b}"
+                ),
+                (a, b) => assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits), "{text:?}"),
+            }
+        }
     }
 }
 

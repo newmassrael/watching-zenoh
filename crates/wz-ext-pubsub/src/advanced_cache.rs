@@ -633,11 +633,21 @@ impl CacheStore {
         &self,
         now: impl Fn() -> u64 + Send + Sync + 'static,
     ) -> impl Fn(&dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static {
+        self.query_handler_reading(now, wz_session_core::time_range::core_float)
+    }
+
+    /// [`Self::query_handler`], the numbers of a `_time` selector read by `read`: a C library
+    /// reads them with its platform's reader, as zenoh-pico does, and links no reader of its own.
+    pub fn query_handler_reading(
+        &self,
+        now: impl Fn() -> u64 + Send + Sync + 'static,
+        read: wz_session_core::time_range::FloatRead,
+    ) -> impl Fn(&dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static {
         let ring = Arc::clone(&self.ring);
         let replies_config = self.replies_config;
         move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             let guard = lock_or_panic(&ring, RING_POISONED);
-            answer_from_ring(&guard.samples, view, out, now(), replies_config);
+            answer_from_ring(&guard.samples, view, out, now(), replies_config, read);
         }
     }
 
@@ -747,6 +757,7 @@ fn answer_from_ring<R: HeldSamples + ?Sized>(
     out: &mut dyn ReplyOut,
     now_ntp64: u64,
     replies_config: RepliesConfig,
+    read: wz_session_core::time_range::FloatRead,
 ) {
     let params = view.parameters();
     let sn_range = param_value(params, "_sn").map(parse_sn_range);
@@ -760,7 +771,7 @@ fn answer_from_ring<R: HeldSamples + ?Sized>(
     // rejects, leaves this `None` = unfiltered, which is what upstream does with
     // a range it cannot read.
     let time_range = param_value(params, "_time")
-        .and_then(time_range::parse)
+        .and_then(|value| time_range::parse_with(value, read))
         .map(|r| time_range::resolve(r, ntp64_to_system_time(now_ntp64)));
     let matches = |s: &Held<'_>| {
         sample_matches_sn(s.source_info.as_ref().map(|si| si.sn), sn_range)
