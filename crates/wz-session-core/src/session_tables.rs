@@ -1207,6 +1207,16 @@ impl<'r> PlannedPut<'r> {
         self.head
     }
 
+    /// The filter's key as [`Self::key`] names it, lent by `text`, a text equal to it that the
+    /// caller holds itself (the put's own key): a send made once the tables are let go of names the
+    /// key as the plan does. `None` for a text that is not the filter's key.
+    pub fn key_on<'k>(&self, text: &'k str) -> Option<crate::named_key::NamedKey<'k>> {
+        if text != self.key.text() {
+            return None;
+        }
+        crate::named_key::NamedKey::by_head(text, &self.head)
+    }
+
     /// The facts the Put is sent from.
     pub fn params(&self) -> crate::publish_options::PlainPutParams {
         self.params

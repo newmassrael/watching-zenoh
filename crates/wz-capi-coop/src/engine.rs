@@ -9063,6 +9063,40 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                         asked.answer_first(Answer::Through);
                         #[cfg(test)]
                         self.takes.plans.fetch_add(1, Ordering::Relaxed);
+                        // A blocking put whose leg holds its face alone is sent with that face's
+                        // send place held and nothing of the session, as a put by options is
+                        // (`Self::publish_alone`) and as zenoh-pico's blocking put sends under its
+                        // transmit lock alone: a send under the session's lock holds the read up
+                        // for the whole system call, through which a loopback peer may already
+                        // have answered, and for as long as the sending thread is off its CPU.
+                        #[cfg(not(wz_round))]
+                        if <CoopForm as ThreadForm>::OTHER_THREADS
+                            && !face_send::droppable(
+                                params.reliable,
+                                params.qos.unwrap_or(QosLevel::DEFAULT).congestion(),
+                            )
+                        {
+                            if let (Some(alone), Some(named)) =
+                                (tx.alone_wire(), planned.key_on(put.keyexpr))
+                            {
+                                let leg = LinkLeg {
+                                    named,
+                                    payload: put.payload,
+                                    kind: SampleKind::Put,
+                                    meta: &plain_meta,
+                                    send,
+                                    head: Some(planned.head()),
+                                    planned: true,
+                                };
+                                #[cfg(feature = "listen")]
+                                let short = probes(false, core.0.transport.tx_pool_short);
+                                #[cfg(not(feature = "listen"))]
+                                let short = false;
+                                let (up, run) = Self::alone_run(&core.0, tx, short);
+                                drop(core);
+                                return self.send_leg_alone(&leg, alone, tx, up, run, Ok(0));
+                            }
+                        }
                         let leg = LinkLeg {
                             named: planned.key(),
                             payload: put.payload,
@@ -9489,13 +9523,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let Some(leg) = Self::leg_of(&core.0, put) else {
             return Err(FanoutError::ExceedsCapacity);
         };
-        let up = core.0.up_wires_at().any(|(_, link)| tx.reaches(link));
-        let run = PublishRun::new(
-            false,
-            probe,
-            core.0.config.tx_queue.wait_before_close_us,
-            FIRST_FACE,
-        );
+        let (up, run) = Self::alone_run(&core.0, tx, probe);
         #[cfg(feature = "group")]
         let (core, groups) = {
             let mut core = core;
@@ -9508,12 +9536,44 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if groups.is_err() {
             outcome = groups;
         }
+        self.send_leg_alone(&leg, alone, tx, up, run, outcome)
+    }
+
+    /// What a leg sent with nothing of the session held reads of the session first: whether the
+    /// link `tx` holds is up, as a fan-out sends only the faces that are, and the publish run its
+    /// send is made in (`probe` as [`Self::publish_alone`] takes it).
+    #[cfg(not(wz_round))]
+    fn alone_run(core: &Core<L, C>, tx: LinkTx<'_, C>, probe: bool) -> (bool, PublishRun) {
+        let up = core.up_wires_at().any(|(_, link)| tx.reaches(link));
+        let run = PublishRun::new(
+            false,
+            probe,
+            core.config.tx_queue.wait_before_close_us,
+            FIRST_FACE,
+        );
+        (up, run)
+    }
+
+    /// Send `leg` over `alone`, the one link `tx` holds, with nothing of the session held, in
+    /// `run` (`Self::alone_run`): nothing when the link was not `up`, and a link with no
+    /// outbound slot waited on as [`Self::wait_alone`] waits. `outcome` is what the publish
+    /// came to before the leg, which a failed send replaces.
+    #[cfg(not(wz_round))]
+    fn send_leg_alone(
+        &self,
+        leg: &LinkLeg<'_>,
+        alone: &Wire<C>,
+        tx: LinkTx<'_, C>,
+        up: bool,
+        run: PublishRun,
+        mut outcome: Result<usize, FanoutError>,
+    ) -> Result<usize, FanoutError> {
         if !up {
             return outcome;
         }
         let place = mark_of_place(tx.leg_place().unwrap_or(0));
         let stopped = self.send_alone(
-            &leg,
+            leg,
             alone,
             run.begin().pass.face_send(place, false),
             &mut outcome,
@@ -9522,7 +9582,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // makes.
         #[cfg(feature = "listen")]
         if stopped {
-            return self.wait_alone(&leg, alone, run, place, outcome);
+            return self.wait_alone(leg, alone, run, place, outcome);
         }
         #[cfg(not(feature = "listen"))]
         let _ = stopped;
