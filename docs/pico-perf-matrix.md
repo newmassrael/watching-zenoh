@@ -16,12 +16,14 @@ API and is compiled from the same source for each arm:
 | arm | library | headers | carries |
 |---|---|---|---|
 | P | zenoh-pico at the submodule's pin, built as the same build (below) | that build's own (`include` of the export with the `config.h` its CMake generated) | tcp, multicast |
-| W | `wz-capi-pico` for zenoh-pico's preset (`configs/zenoh-pico_defconfig`, below) on the engine of the run, in the form the release ships (without `std`), built as the size gate builds that form (below) | arm P's headers, the pinned pico's, with the `config.h` of its own feature list (`wz_config.pico_config_header`) in place of P's | tcp, multicast; udp when its build has the `udp/` listener (below) |
+| W | `wz-capi-pico` for zenoh-pico's preset (`configs/zenoh-pico_defconfig`, below) on the engine of the run, in the form the release ships (without `std`), built as the size gate builds that form (below) | arm P's headers, the pinned pico's, with the `config.h` of its own feature list (`wz_config.pico_config_header`) in place of P's | tcp, multicast |
 | W (program transport) | the same build with `app-transport` | the same, for that feature list | the program transport |
+| W (udp) | the same build with `udp-listen` | the same, for that feature list | udp |
 | X | an external library of the pico API, named by the environment (below); measured only when named | its own, with its own `config.h` | tcp, udp, multicast |
 
-The program-transport cell is measured on its own build because a capability that is off adds
-nothing to a build, so the preset's build is the one the other transports are measured on.
+The program-transport cell and the udp cells are measured on builds of their own because a capability that
+is off adds nothing to a build, so the preset's build is the one the other transports are measured on; wz
+measures what it carries beyond the preset on the preset with that capability alone.
 
 **The preset.** Arm W carries the capabilities zenoh-pico's own default build has, no more:
 `configs/zenoh-pico_defconfig`, generated from the declaration's `upstream_on` and `upstream_off`
@@ -137,12 +139,13 @@ with that reason, as its program cells are. The accept task of a listening pico 
 
 `vendor/zenoh-pico/src/transport/unicast/accept.c` @ `_z_tcp_accept(`
 
-Arm W listens on a `udp/` unicast locator only when its build has the `udp/` listener (`wz-capi-pico`'s
-`udp-listen`, `CONFIG_WZ_CAP_UDP_LISTEN`). zenoh-pico's preset leaves it off, as pico's own peer has
-none, and a build without it refuses a `udp/` endpoint to listen on: the server side's open fails with
--102. The run reads which build arm W is from the features its record lists (`wz_features`) and, for a
-build without the listener, records arm W's udp cells as not applicable with that reason
-(`perf_matrix.py` `not_applicable`), so the preset's run measures udp for arm X alone. The refusal:
+zenoh-pico's preset has no `udp/` listener either (`wz-capi-pico`'s `udp-listen`,
+`CONFIG_WZ_CAP_UDP_LISTEN=n` in `configs/zenoh-pico_defconfig`), as pico's peer has none, and a build without
+it refuses a `udp/` endpoint to listen on: the server side's open fails with -102. Arm W's udp cells therefore
+run on a build of their own, the preset with `udp-listen` (`perf_probe_Wudp`, `wz-arm --arm Wudp --features
+udp-listen`), as its program cells run on the preset with `app-transport`. The record states that build's
+features (`wz_udp_features`), and a record whose udp build has no listener records arm W's udp cells as not
+applicable with that reason (`perf_matrix.py` `not_applicable`) rather than losing them. The refusal:
 
 `crates/wz-capi-coop/src/tests.rs` @ `fn a_build_without_the_udp_listener_refuses_a_udp_endpoint_to_listen_on(`
 
@@ -295,9 +298,8 @@ share does not tell a performance core from an efficiency core; both arms run on
 the comparison stays fair, but the absolute figures belong to the cores named in the record.
 
 A full run is every transport, both batching settings, both workloads and three sizes, for both arms,
-three times: 288 cells, of which the 72 of arm P on udp and the program transport are not applicable, and the
-36 of arm W on udp too when its build has no `udp/` listener, as the preset's has not; arm X adds as many
-again, its program cells not applicable. Narrow it with the variables above when a question
+three times: 288 cells, of which the 72 of arm P on udp and the program transport are not applicable; arm X
+adds as many again, its program cells not applicable. Narrow it with the variables above when a question
 needs fewer; the gate then reports the rows the run did not measure (section 5). The selftest of the reader
 and of the gate runs anywhere and builds nothing:
 
@@ -513,14 +515,14 @@ Linux build as it was), the cells and their order, the alternation of the arms, 
 warm-up, window, round trips and timeout, the validity rule and its second pass, the reading's shape
 (`wz-pico-perf/1`) and the gate's rule. The plan carries the figures, the reasons a cell is not applicable and
 the rules of a cell from `perf_matrix.py` itself, so the runner states none of its own. The plan is of schema
-`wz-pico-perf-windows-plan/3` and the runner reads no other, so a plan and the runner it is handed are of one
+`wz-pico-perf-windows-plan/4` and the runner reads no other, so a plan and the runner it is handed are of one
 tree.
 
 **What differs, and why.**
 
 | | Linux | Windows |
 |---|---|---|
-| arm W | `wz-capi-pico` built by the run in the form the release ships, as the size gate builds that form (section 1) | the package's release DLL as shipped, without `std` as a release ships it; its features are its manifest's, its engine its build statement's and its standard library its manifest's `stdlib`, which `windows-plan` holds its features to |
+| arm W | `wz-capi-pico` built by the run in the form the release ships, as the size gate builds that form (section 1); its udp cells on the same build with `udp-listen` (`Wudp`) | the package's release DLL as shipped, without `std` as a release ships it; its features are its manifest's, its engine its build statement's and its standard library its manifest's `stdlib`, which `windows-plan` holds its features to; its udp cells on the udp package, the same build with `udp-listen` (`--with udp-listen`), which `windows-plan` holds to the package (`windows_udp_plan`) |
 | arm P | pico as the same build as the bench's build, linked and compiled by the size gate's rule for arm W's form | pico as the same build as the package: its switches derived from the package's features by the same rule (`windows-plan`), built by CMake's Visual Studio generator, x64, Release, shared, without examples and tests; the Windows library without `std` keeps its unwind tables (`crates/.cargo/capi-nostd.toml`), so no flag of the Linux rule for that form is added |
 | what pico was built as | `reference.json` | `record.builds`: the switches asked, any pico built otherwise, and the CMake cache entries of pico's own options and of the build's type, generator and flags (`reference_cache`) |
 | build rule | `build_normalization.py` | none: its words are GCC's |
@@ -559,15 +561,23 @@ preset's, so a plan of it says `wz_preset` `zenoh-pico` and the run's rows are j
 release package (`package-windows`, the profile `host-peer-ext`) runs the same matrix, but its plan states no
 preset, the runner says so, and the gate judges no row of it against this table. The preset package runs none of
 the examples in its test (they call wz's own doors, which the preset is built without) and no release carries it.
+Arm W's udp cells run on a second package of the same commit, the preset with `udp-listen`
+(`package-windows-preset-udp`, `pico_windows_package.py --build OUT --preset zenoh-pico --with udp-listen --arch
+x64`), because the preset has no `udp/` listener (section 1); `windows-plan` takes it beside the preset's package
+and refuses it unless it is that build with the listener alone, and the runner builds `perf_probe_Wudp` against it
+in a directory of its own (`bin\udp`), beside its own DLL. The release package has the listener, so it is its own
+udp package.
 
 ```sh
 out=target/perf-win; mkdir -p "$out"
 gh run download <platform run id> -n pico-windows-preset-zenoh-pico-x64 -D "$out"
+gh run download <platform run id> -n pico-windows-preset-zenoh-pico-with-udp-listen-x64 -D "$out"
 zip="$(ls "$out"/wz-capi-pico-*-zenoh-pico-preset-windows-x64-*.zip)"
-python3 scripts/host-bench/perf_matrix.py windows-plan "$zip" "$out/plan.json"
+udp_zip="$(ls "$out"/wz-capi-pico-*-zenoh-pico-preset-with-udp-listen-windows-x64-*.zip)"
+python3 scripts/host-bench/perf_matrix.py windows-plan "$zip" "$udp_zip" "$out/plan.json"
 git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$PWD/$out/zenoh-pico.zip" HEAD
 ssh pc3-win "if not exist C:\wzperf mkdir C:\wzperf"
-scp "$out/plan.json" "$out/zenoh-pico.zip" "$zip" scripts/host-bench/perf_probe.c \
+scp "$out/plan.json" "$out/zenoh-pico.zip" "$zip" "$udp_zip" scripts/host-bench/perf_probe.c \
     scripts/host-bench/windows/perf_matrix.ps1 pc3-win:C:/wzperf/
 ```
 
@@ -576,7 +586,7 @@ pinning it printed. `-Mode build` and `-Mode run` do the two halves apart.
 
 ```sh
 ssh pc3-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\wzperf\perf_matrix.ps1 -Mode idle-cpus"
-ssh pc3-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\wzperf\perf_matrix.ps1 -Mode all -Plan C:\wzperf\plan.json -PicoSource C:\wzperf\zenoh-pico.zip -Package C:\wzperf\<the zip's name> -Probe C:\wzperf\perf_probe.c -Work C:\wzperf\work -ClientCpus <...> -ServerCpus <...> > C:\wzperf\run.log 2>&1"
+ssh pc3-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\wzperf\perf_matrix.ps1 -Mode all -Plan C:\wzperf\plan.json -PicoSource C:\wzperf\zenoh-pico.zip -Package C:\wzperf\<the zip's name> -UdpPackage C:\wzperf\<the udp zip's name> -Probe C:\wzperf\perf_probe.c -Work C:\wzperf\work -ClientCpus <...> -ServerCpus <...> > C:\wzperf\run.log 2>&1"
 ```
 
 The run is left in `C:\wzperf\work\runs\windows-<UTC time>` with the files of section 4 (`perf.json`,
@@ -590,7 +600,6 @@ python3 scripts/host-bench/perf_matrix.py --gate "$out/<run>/perf.json" --withou
 ```
 
 A full run is 3 repetitions of tcp, udp and multicast, both batchings, both workloads and three sizes: 216 cells,
-of which the 36 of arm P on udp are not applicable, and the 36 of arm W on udp too for a package without the
-`udp/` listener (the plan says which, `not_applicable`), so about 144 measured for the preset's package, at some 8 s a round-trip cell and 14 s a
+of which the 36 of arm P on udp are not applicable, about 180 measured, at some 8 s a round-trip cell and 14 s a
 throughput cell, so about 35 minutes with the build, more when cells are disturbed. Filling the table is as in
 section 5, with `deploy/pico_perf_ceiling_windows.json` in place of the Linux table.

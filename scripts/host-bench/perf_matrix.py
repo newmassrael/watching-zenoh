@@ -27,7 +27,7 @@ committed rows.
         configuration) to DIR/reference.json, the engine (`wz_engine`) and the standard library
         (`wz_stdlib`) among it, which the run's record and the gate read
     perf_matrix.py wz-arm --out DIR --arm ARM --engine ENGINE --stdlib STDLIB [--features F,...]
-        arm ARM (W, or Wapp with app-transport), wz-capi-pico-lib: zenoh-pico's preset on ENGINE with STDLIB
+        arm ARM (W, Wapp with app-transport, or Wudp with udp-listen), wz-capi-pico-lib: zenoh-pico's preset on ENGINE with STDLIB
         and the capabilities F over it (`wz_config.preset_named_features`), built as the size gate builds
         the case of that form
         (SHAPE_CASES, `capability_cost_gate.case_build` in the gate's `build_env`: its profile, its cargo
@@ -71,7 +71,7 @@ committed rows.
                        [--batching off,on] [--workloads rtt,thr] [--client-cpus 4-7] [--server-cpus 8-11]
                        [--pings 20000] [--warmup-ms 3000] [--window-s 5] [--timeout-ms 100]
                        [--reference-record FILE] [--external-record FILE] [--trace-text DIR]
-        the matrix; DIR (--bin-dir) holds perf_probe_P, perf_probe_W and perf_probe_Wapp, and perf_probe_X
+        the matrix; DIR (--bin-dir) holds perf_probe_P, perf_probe_W, perf_probe_Wapp and perf_probe_Wudp, and perf_probe_X
         when the external record says arm X was built. With --trace-text every probe runs under callgrind
         (TEXT_TRACE_TOOL), its profile written to DIR by cell, role and pid, for `run-text`: the figures of
         such a run are the tracer's, its record says so (`text_trace`) and the gate refuses it
@@ -86,7 +86,7 @@ committed rows.
         measured (--without-external: a run without arm X is not that)
     perf_matrix.py --check-table TABLE
         the committed table's shape, and that its rows are the population of the default matrix
-    perf_matrix.py windows-plan PACKAGE OUT
+    perf_matrix.py windows-plan PACKAGE UDP_PACKAGE OUT
         the plan of a run on Windows (scripts/host-bench/windows/perf_matrix.ps1), written to OUT: arm W is
         the library of the Windows package PACKAGE (the zip pico_windows_package.py builds, without `std`
         as a release ships it unless built otherwise; its manifest's `stdlib` is recorded as the Linux
@@ -97,7 +97,10 @@ committed rows.
         the preset's build (its features, its conformance digest) is refused; with the figures, the
         reasons a cell is not applicable and the rules of a cell the runner applies, so the runner states
         none of its own. A package built from a commit whose inputs of that derivation differ from this
-        tree's is refused
+        tree's is refused. UDP_PACKAGE is arm W's udp build (`windows_udp_plan`): PACKAGE's build with the udp/
+        listener and nothing else (`pico_windows_package.py --build OUT --preset zenoh-pico --with udp-listen`),
+        from the same commit, which arm W's udp cells run on, as Wudp runs them on Linux; PACKAGE itself when
+        its build has the listener
     perf_matrix.py idle-cpus [SECONDS] [PER_SIDE]
         each CPU's busy share over SECONDS (default 5) and its physical core, and a pinning of two sides of
         at least PER_SIDE (default 4) CPUs of whole cores, the least busy first, printed as the words
@@ -118,10 +121,11 @@ started afresh, the server side (pong, sub) pinned to --server-cpus and the clie
 
   * tcp        the server listens on tcp/127.0.0.1:<port>, the client connects;
   * udp        the same over udp/127.0.0.1:<port>; arms W and X, since a zenoh-pico peer accepts streams
-               only and arm P records the cell as not applicable (NOT_APPLICABLE says why); arm W only
-               when its build has the udp/ listener (wz-capi-pico's udp-listen, which zenoh-pico's preset
-               leaves off), and otherwise records the cell as not applicable (not_applicable); an external
-               library is asked, and a cell it cannot open is its lost cell;
+               only and arm P records the cell as not applicable (NOT_APPLICABLE says why); arm W from its
+               own build (perf_probe_Wudp), arm W's with the udp/ listener (wz-capi-pico's udp-listen),
+               which zenoh-pico's preset leaves off as pico's peer has none, and a build whose record lacks
+               the listener records the cell as not applicable (not_applicable); an external library is
+               asked, and a cell it cannot open is its lost cell;
   * multicast  both listen on the group udp/224.0.0.224:<port>#iface=lo;
   * program    wz only (perf_probe_Wapp, built with the `app-transport` capability): every link goes
                over a transport the program supplies, an AF_UNIX stream of its own (perf_probe.c, -T);
@@ -256,18 +260,21 @@ NOT_APPLICABLE = {
 #: and a build without it refuses a udp/ endpoint to listen on (`IpLinks::open_listener`; the open fails with
 #: -102): `crates/wz-capi-coop/src/tests.rs` @
 #: `fn a_build_without_the_udp_listener_refuses_a_udp_endpoint_to_listen_on(`
+#: So arm W's udp cells run on a build of their own, the preset with the listener (perf_probe_Wudp: `wz-arm
+#: --arm Wudp --features udp-listen` on Linux, `pico_windows_package.py --preset zenoh-pico --with udp-listen`
+#: on Windows), as the program transport's run on the preset with app-transport (perf_probe_Wapp).
 UDP_LISTENER_FEATURE = "udp-listen"
-W_UDP_WITHOUT_LISTENER = ("arm W's build has no udp/ listener (wz-capi-pico's udp-listen is off, as in zenoh-pico's "
-                          "preset), so its server side refuses a udp/ endpoint to listen on (its open fails with "
-                          "-102)")
+W_UDP_WITHOUT_LISTENER = ("arm W's udp build has no udp/ listener (wz-capi-pico's udp-listen), so its server side "
+                          "refuses a udp/ endpoint to listen on (its open fails with -102)")
 
 
-def not_applicable(w_features) -> dict[tuple[str, str], str]:
-    """The cells an arm has no such transport for, and why, for a run whose arm W is built with `w_features`
-    (the wz-capi-pico features its build turns on, as cargo resolves them): NOT_APPLICABLE, and arm W's udp
-    cells when that build has no udp/ listener (UDP_LISTENER_FEATURE)."""
+def not_applicable(w_udp_features) -> dict[tuple[str, str], str]:
+    """The cells an arm has no such transport for, and why, for a run whose arm W runs its udp cells on a build
+    with `w_udp_features` (the wz-capi-pico features that build turns on, as cargo resolves them; the record's
+    `wz_udp_features`): NOT_APPLICABLE, and arm W's udp cells when that build has no udp/ listener
+    (UDP_LISTENER_FEATURE)."""
     absent = dict(NOT_APPLICABLE)
-    if UDP_LISTENER_FEATURE not in set(w_features):
+    if UDP_LISTENER_FEATURE not in set(w_udp_features):
         absent[("W", "udp")] = W_UDP_WITHOUT_LISTENER
     return absent
 
@@ -1002,7 +1009,11 @@ def binary_name(arm: str, transport: str, absent: dict[tuple[str, str], str]) ->
     """The program a cell runs, or None when the arm has no such transport (`absent`, of `not_applicable`)."""
     if (arm, transport) in absent:
         return None
-    return "perf_probe_Wapp" if transport == "program" else f"perf_probe_{arm}"
+    if transport == "program":
+        return "perf_probe_Wapp"
+    if (arm, transport) == ("W", "udp"):
+        return "perf_probe_Wudp"
+    return f"perf_probe_{arm}"
 
 
 #: The probe's source, and the switch of its builds against wz's library, which state before the open the
@@ -1557,12 +1568,13 @@ def cmd_run(args: argparse.Namespace) -> int:
               "engine and its standard library (--reference-record, written by `reference --engine --stdlib`)",
               flush=True)
         return 2
-    w_features = (record.get("builds") or {}).get("wz_features")
-    if not isinstance(w_features, list):
-        print("perf-matrix: NOT-MEASURED, the record of the build the run measures lists no features of arm W "
-              "(`wz_features`, written by `reference`), so which transports arm W carries is unknown", flush=True)
+    w_udp_features = (record.get("builds") or {}).get("wz_udp_features")
+    if not isinstance(w_udp_features, list):
+        print("perf-matrix: NOT-MEASURED, the record of the build the run measures lists no features of arm W's udp "
+              "build (`wz_udp_features`, written by `reference`), so whether arm W listens on udp/ is unknown",
+              flush=True)
         return 2
-    absent = not_applicable(w_features)
+    absent = not_applicable(w_udp_features)
     arms = run_arms(record["external"])
     wanted = {binary_name(arm, t, absent) for arm in arms for t in transports} - {None}
     missing = sorted(b for b in wanted if not os.access(pathlib.Path(args.bin_dir) / b, os.X_OK))
@@ -1704,6 +1716,7 @@ def cmd_reference(out: pathlib.Path, engine: str, stdlib: str) -> int:
         kconf = wz_config.pico_bench_configuration()
         features = wz_config.preset_features(engine, [], table, stdlib, decl, kconf)
         program_features = wz_config.preset_features(engine, ["app-transport"], table, stdlib, decl, kconf)
+        udp_features = wz_config.preset_features(engine, [UDP_LISTENER_FEATURE], table, stdlib, decl, kconf)
         shape = bench_case("W", engine, stdlib,
                            wz_config.preset_named_features(engine, [], table, stdlib, decl, kconf))
     except (wz_config.PresetError, KeyError, ValueError, OSError, Refused) as error:
@@ -1746,6 +1759,7 @@ def cmd_reference(out: pathlib.Path, engine: str, stdlib: str) -> int:
     record = {"reference_pin": pin, "reference_toolchain": toolchain, "reference_switches": asked,
               "reference_refused": refused, "reference_link_args": list(link), "reference_cflags": list(cflags),
               "wz_features": sorted(features), "wz_program_transport_features": sorted(program_features),
+              "wz_udp_features": sorted(udp_features),
               "wz_engine": engine, "wz_stdlib": stdlib, "wz_preset": wz_config.PICO_BENCH_ORIGINAL,
               "wz_build": {"size_case": shape_name(engine, stdlib), "profile": shape.profile,
                            "cargo_configs": list(shape.cargo_configs), "link_args": list(plan.link_args)}}
@@ -2478,7 +2492,7 @@ def check_table(path: pathlib.Path) -> int:
 # -- a run on Windows ----------------------------------------------------------------------------------------
 
 #: What `windows-plan` writes and scripts/host-bench/windows/perf_matrix.ps1 reads.
-WINDOWS_PLAN_SCHEMA = "wz-pico-perf-windows-plan/3"
+WINDOWS_PLAN_SCHEMA = "wz-pico-perf-windows-plan/4"
 WINDOWS_PLATFORM = "windows-x64"
 #: The width of Windows a plan is made for, by the package's name for it (pico_windows_package.ARCHES).
 WINDOWS_ARCH = "x64"
@@ -2560,11 +2574,45 @@ def windows_plan(manifest: dict, statement: dict, table: dict, decl: dict, targe
     return {"wz_features": sorted(features), "wz_engine": engine, "wz_stdlib": stdlib,
             "wz_preset": named,
             "wz_beyond_preset": beyond, "wz_short_of_preset": short,
-            "reference_switches": wz_config.pico_reference(decl, enabled),
-            # The runner reads which cells to record as not applicable from here, so a package whose build has
-            # no udp/ listener is planned no udp cell of arm W, which it could not open.
+            "reference_switches": wz_config.pico_reference(decl, enabled)}
+
+
+def windows_udp_plan(manifest: dict, statement: dict, udp_manifest: dict, udp_statement: dict, table: dict) -> dict:
+    """What arm W's udp cells run on Windows: the package of `udp_manifest` and `udp_statement`, which is arm W's
+    build (`manifest`, `statement`) with the udp/ listener (UDP_LISTENER_FEATURE) and nothing else, as `wz-arm
+    --arm Wudp --features udp-listen` builds it on Linux: the same target, standard library and build (the preset
+    or the profile its manifest states), the same engine, limits and policies (its statement's engine and
+    digest), and as cargo resolves them the features of arm W's build and the listener. Arm W's own package is
+    its udp build when its build has the listener. Returns the udp build's features (`wz_udp_features`) and the
+    cells the runner records as not applicable (`not_applicable`, by `arm/transport`); any other package is
+    refused (Refused)."""
+    import wz_config
+
+    for key in ("target", "stdlib", "preset", "profile"):
+        if udp_manifest.get(key) != manifest.get(key):
+            raise Refused(f"the udp package's {key} is {udp_manifest.get(key)!r} and arm W's {manifest.get(key)!r}: "
+                          f"arm W's udp cells run on arm W's build with the udp/ listener")
+    for key in ("engine", "digest"):
+        if udp_statement.get(key) != statement.get(key):
+            raise Refused(f"the udp package's build statement states {key} {udp_statement.get(key)!r} and arm W's "
+                          f"{statement.get(key)!r}: arm W's udp build has arm W's engine, limits and policies")
+    named = manifest.get("features") or []
+    udp_named = udp_manifest.get("features")
+    if not isinstance(udp_named, list) or not all(isinstance(f, str) for f in udp_named):
+        raise Refused("the udp package's manifest lists no features of the build")
+    try:
+        wanted = wz_config.enabled_features(table, [*named, UDP_LISTENER_FEATURE])
+        udp_enabled = wz_config.enabled_features(table, udp_named)
+    except KeyError as error:
+        raise Refused(f"the udp package names a feature this tree's wz-capi-pico does not have: {error}") from None
+    if udp_enabled != wanted:
+        raise Refused(f"the udp package is not arm W's build with the udp/ listener alone (beyond it: "
+                      f"{', '.join(sorted(udp_enabled - wanted)) or 'none'}; short of it: "
+                      f"{', '.join(sorted(wanted - udp_enabled)) or 'none'})")
+    return {"wz_udp_features": sorted(udp_named),
+            # The runner reads which cells to record as not applicable from here (Get-NotApplicable).
             "not_applicable": {f"{arm}/{transport}": why
-                               for (arm, transport), why in not_applicable(enabled).items()}}
+                               for (arm, transport), why in not_applicable(udp_enabled).items()}}
 
 
 def plan_input_drift(commit: str) -> list[str]:
@@ -2583,21 +2631,29 @@ def plan_input_drift(commit: str) -> list[str]:
     return drift
 
 
-def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
-    """The plan of a run on Windows, from the package zip `package`, written to `out`."""
+def cmd_windows_plan(package: pathlib.Path, udp_package: pathlib.Path, out: pathlib.Path) -> int:
+    """The plan of a run on Windows, from the package zip `package` and arm W's udp build `udp_package`
+    (`windows_udp_plan`), written to `out`."""
     import pico_windows_package as pwp
     import wz_config
 
-    try:
+    def opened(archive: pathlib.Path) -> tuple[dict, dict, str]:
         with tempfile.TemporaryDirectory() as scratch:
-            top = pwp.extract_zip(package, pathlib.Path(scratch))
+            top = pwp.extract_zip(archive, pathlib.Path(scratch))
             findings = pwp.verify_findings(top)
             if findings:
-                raise Refused(f"{package.name} does not match its manifest: {'; '.join(findings)}")
-            manifest = json.loads((top / pwp.MANIFEST).read_text(encoding="utf-8"))
-            statement = json.loads((top / pwp.STATEMENT).read_text(encoding="utf-8"))
-            name = top.name
+                raise Refused(f"{archive.name} does not match its manifest: {'; '.join(findings)}")
+            return (json.loads((top / pwp.MANIFEST).read_text(encoding="utf-8")),
+                    json.loads((top / pwp.STATEMENT).read_text(encoding="utf-8")), top.name)
+
+    try:
+        manifest, statement, name = opened(package)
+        udp_manifest, udp_statement, udp_name = opened(udp_package)
         commit = (manifest.get("built_from") or {}).get("commit", "")
+        udp_commit = (udp_manifest.get("built_from") or {}).get("commit", "")
+        if udp_commit != commit:
+            raise Refused(f"the udp package was built from {udp_commit[:12]} and the package from {commit[:12]}: "
+                          "arm W's two builds are of one commit")
         drift = plan_input_drift(commit)
         if drift:
             raise Refused(f"the package was built from {commit[:12]}, and this tree differs from it in "
@@ -2613,6 +2669,7 @@ def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
         # The digest names the build alone, not where it was read from, so the derivation's words are none.
         preset_digest = wz_config.resolved_statement(decl, "pico", kconf, {"kind": "presets", "inputs": []})["digest"]
         plan = windows_plan(manifest, statement, table, decl, pwp.ARCHES[WINDOWS_ARCH][0], preset_of, preset_digest)
+        udp_plan = windows_udp_plan(manifest, statement, udp_manifest, udp_statement, table)
     except (OSError, ValueError, KeyError, zipfile.BadZipFile, pwp.Refusal, Refused, wz_config.PresetError) as why:
         print(f"perf-matrix: windows-plan refused: {why}", file=sys.stderr, flush=True)
         return 2
@@ -2627,8 +2684,13 @@ def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
                     "form": manifest.get("form"), "libraries": manifest.get("libraries"),
                     "target": manifest.get("target"), "rustc": (manifest.get("toolchain") or {}).get("rustc"),
                     "statement_digest": manifest.get("statement_digest")},
+        "udp_package": {"name": udp_name, "zip": udp_package.name, "sha256": sha256_of(udp_package),
+                        "commit": udp_commit, "with": udp_manifest.get("with", []),
+                        "libraries": udp_manifest.get("libraries"),
+                        "statement_digest": udp_manifest.get("statement_digest")},
         "reference_pin": first_line(["git", "-C", str(ROOT / "vendor" / "zenoh-pico"), "rev-parse", "HEAD"]),
         **plan,
+        **udp_plan,
         # What the runner applies and records, stated once here so the two runners cannot drift apart.
         "metrics": METRICS,
         "transports": list(TRANSPORTS), "workloads": list(WORKLOADS), "arms": ["P", "W"],
@@ -2641,7 +2703,7 @@ def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
     }
     out.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     print(f"perf-matrix: the plan of a run on Windows: arm W {name} on the {plan['wz_engine']} engine, "
-          f"{plan['wz_stdlib']}, arm P "
+          f"{plan['wz_stdlib']}, its udp cells on {udp_name}, arm P "
           f"zenoh-pico {doc['reference_pin'][:12]} with {len(plan['reference_switches'])} switches set; {out}",
           flush=True)
     return 0
@@ -3009,7 +3071,7 @@ def cmd_selftest() -> int:
            all("-M" in endpoint_args(t, 1, "n")[1] and "-M" not in endpoint_args(t, 1, "n")[0]
                for t in ("tcp", "udp", "program")))
     expect("an unknown transport is refused", lost_value(lambda: endpoint_args("serial", 1, "n")))
-    # Arm W's build as zenoh-pico's preset has it (no udp/ listener), and one with the listener.
+    # A record whose udp build has no udp/ listener, and one whose udp build has it, as `reference` writes it.
     preset_absent = not_applicable(["os-host", "peer"])
     listening_absent = not_applicable(["os-host", "peer", UDP_LISTENER_FEATURE])
     expect("arm P has no program transport and arm W runs it from its own build",
@@ -3017,10 +3079,10 @@ def cmd_selftest() -> int:
            and binary_name("W", "program", preset_absent) == "perf_probe_Wapp"
            and binary_name("P", "tcp", preset_absent) == "perf_probe_P"
            and binary_name("W", "multicast", preset_absent) == "perf_probe_W")
-    expect("arm P has no udp cell; arm W runs udp from a build with a udp/ listener and records a build without "
-           "one as not applicable, saying why",
+    expect("arm P has no udp cell; arm W runs udp from its own build with the udp/ listener, and records a udp "
+           "build without one as not applicable, saying why",
            binary_name("P", "udp", listening_absent) is None
-           and binary_name("W", "udp", listening_absent) == "perf_probe_W"
+           and binary_name("W", "udp", listening_absent) == "perf_probe_Wudp"
            and binary_name("W", "udp", preset_absent) is None
            and preset_absent[("W", "udp")] == W_UDP_WITHOUT_LISTENER
            and set(preset_absent) - set(listening_absent) == {("W", "udp")}
@@ -3051,16 +3113,18 @@ def cmd_selftest() -> int:
            lost_value(lambda: probe_session_limits(f'#define {PROBE_LIMITS_MACRO} "MAX_PUBLISHERS"\n'))
            and lost_value(lambda: probe_session_limits("")))
     builds = probe_builds((ROOT / "scripts" / "pico-compare.sh").read_text(encoding="utf-8"))
-    expect("both wz probes are built with the switch and zext.h, and the reference's without the switch",
-           set(builds) == {"P", "W", "Wapp"}
+    expect("every wz probe is built with the switch and zext.h, and the reference's without the switch",
+           set(builds) == {"P", "W", "Wapp", "Wudp"}
            and all(f"-D{WZ_PROBE_SWITCH}" in builds[arm] and "crates/wz-capi-core/include" in builds[arm]
-                   for arm in ("W", "Wapp"))
+                   for arm in ("W", "Wapp", "Wudp"))
            and f"-D{WZ_PROBE_SWITCH}" not in builds["P"])
     windows = (HERE / "windows" / "perf_matrix.ps1").read_text(encoding="utf-8").splitlines()
-    windows_arms = {arm: [line for line in windows if f"@{{ Arm = '{arm}';" in line] for arm in ("P", "W")}
-    expect("the Windows matrix builds arm W's probe with the switch and the reference's without it",
+    windows_arms = {arm: [line for line in windows if f"@{{ Arm = '{arm}';" in line] for arm in ("P", "W", "Wudp")}
+    expect("the Windows matrix builds arm W's probes (its udp build's too) with the switch and the reference's "
+           "without it",
            all(len(found) == 1 for found in windows_arms.values())
-           and f"/D{WZ_PROBE_SWITCH}" in windows_arms["W"][0] and f"/D{WZ_PROBE_SWITCH}" not in windows_arms["P"][0]
+           and all(f"/D{WZ_PROBE_SWITCH}" in windows_arms[arm][0] for arm in ("W", "Wudp"))
+           and f"/D{WZ_PROBE_SWITCH}" not in windows_arms["P"][0]
            and any("$cl + $arm.Defines" in line for line in windows))
 
     built = json.dumps({"reason": "build-script-executed", "package_id": "path+file:///x#zenoh-pico-sys@1.0",
@@ -3580,13 +3644,33 @@ def cmd_selftest() -> int:
     same = windows_plan(profile_manifest, package_statement, feature_table, switch_rows, x64, package_preset, digest)
     expect("a package of a profile is planned as no preset even when its features are the preset's",
            same["wz_preset"] is None and same["wz_beyond_preset"] == [] and same["wz_short_of_preset"] == [])
-    listening = windows_plan(dict(profile_manifest, features=["os-host", "peer-ext"]), package_statement,
-                             feature_table, switch_rows, x64, package_preset, digest)
-    expect("a plan records arm W's udp cells as not applicable when the package has no udp/ listener, and plans "
-           "them when a feature it names brings one",
-           planned["not_applicable"] == {f"{a}/{t}": why for (a, t), why in not_applicable([]).items()}
-           and planned["not_applicable"]["W/udp"] == W_UDP_WITHOUT_LISTENER
-           and listening["not_applicable"] == {f"{a}/{t}": why for (a, t), why in NOT_APPLICABLE.items()})
+    every_cell = {f"{a}/{t}": why for (a, t), why in NOT_APPLICABLE.items()}
+    udp_manifest = dict(package_manifest, features=["os-host", "app-transport", "udp-listen"], **{"with": ["udp-listen"]})
+    udp_planned = windows_udp_plan(package_manifest, package_statement, udp_manifest, package_statement, feature_table)
+    expect("arm W's udp cells run on arm W's build with the udp/ listener, and the plan runs them",
+           udp_planned["wz_udp_features"] == ["app-transport", "os-host", "udp-listen"]
+           and udp_planned["not_applicable"] == every_cell and "W/udp" not in udp_planned["not_applicable"])
+    listening_manifest = dict(profile_manifest, features=["os-host", "peer-ext"])
+    expect("a package whose build has the listener already is its own udp build",
+           windows_udp_plan(listening_manifest, package_statement, listening_manifest, package_statement,
+                            feature_table)["not_applicable"] == every_cell)
+
+    def udp_refused(udp, udp_statement=package_statement):
+        try:
+            windows_udp_plan(package_manifest, package_statement, udp, udp_statement, feature_table)
+        except Refused:
+            return True
+        return False
+
+    expect("a udp package that is not arm W's build with the udp/ listener alone is refused",
+           udp_refused(package_manifest)
+           and udp_refused(dict(udp_manifest, features=["os-host", "app-transport", "peer-ext"]))
+           and udp_refused(dict(udp_manifest, features=["os-host", "udp-listen"]))
+           and udp_refused(dict(udp_manifest, target="i686-pc-windows-msvc"))
+           and udp_refused(dict(udp_manifest, preset=None, profile="p"))
+           and udp_refused(udp_manifest, dict(package_statement, digest="sha256:" + "2" * 64))
+           and udp_refused(udp_manifest, {"engine": "tokio", "digest": digest})
+           and udp_refused(dict(udp_manifest, features=["os-host", "app-transport", "gone"])))
     tokio_manifest = {"target": x64, "features": ["engine-tokio", "app-transport"], "stdlib": "std"}
 
     def plan_refused(manifest, statement, preset_of=package_preset):
@@ -3659,8 +3743,8 @@ def main(argv: list[str]) -> int:
         return cmd_gate(gate.parse_args(argv[2:]))
     if len(argv) in (3, 4) and argv[1] == "external-record":
         return cmd_external_record(pathlib.Path(argv[2]), argv[3] if len(argv) == 4 else "")
-    if len(argv) == 4 and argv[1] == "windows-plan":
-        return cmd_windows_plan(pathlib.Path(argv[2]), pathlib.Path(argv[3]))
+    if len(argv) == 5 and argv[1] == "windows-plan":
+        return cmd_windows_plan(pathlib.Path(argv[2]), pathlib.Path(argv[3]), pathlib.Path(argv[4]))
     if len(argv) == 3 and argv[1] == "pico-sys-include":
         try:
             print(pico_sys_include(pathlib.Path(argv[2]).read_text(encoding="utf-8").splitlines()))
