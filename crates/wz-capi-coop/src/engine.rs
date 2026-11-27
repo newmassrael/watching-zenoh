@@ -159,7 +159,7 @@ use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::sync::Lend;
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::transport::{
-    LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
+    LinkCalls, TransportFaces, TransportRefusal, TransportSession, WalkRefusal, WireMaking,
 };
 use wz_runtime_coop::{
     ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimePlace, RuntimeRows,
@@ -5218,9 +5218,9 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
 }
 
 /// The session ends, for the reason the caller's `last` was left holding: what the moves of the
-/// links answer (`Core::poll_links`, `Core::carry_out`). The reason holds an endpoint's text, the
-/// largest value of a move, so it is written once where the caller keeps it rather than handed
-/// back through every call between.
+/// links answer (`Core::poll_links`, `Core::carry_out`). The reason is the walk's refusal, a
+/// value of a few words with no text, written where the caller keeps it; its text is read once,
+/// when the session ends with it (`Core::walk_ended`).
 #[cfg(wz_round)]
 struct SessionEnds;
 
@@ -5254,7 +5254,7 @@ struct RoundLinkIo<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static>
     at: usize,
     id: FaceId,
     read: &'a mut ReadDial<L::Pump>,
-    last: &'a mut OpenError,
+    last: &'a mut Option<WalkRefusal>,
 }
 
 #[cfg(wz_round)]
@@ -5277,8 +5277,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> LinkIo for RoundL
     /// reason.
     fn give_up_dial(&mut self, row: usize) {
         if let Some(endpoint) = self.core.transport.links.end_dial(self.at, row) {
-            self.core
-                .refuse(self.last, Some(&endpoint), Refusal::NoAnswerInTime);
+            *self.last = Some(WalkRefusal::endpoint(
+                Some(endpoint),
+                Refusal::NoAnswerInTime,
+            ));
         }
     }
 
@@ -5287,8 +5289,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> LinkIo for RoundL
         let why = self.core.transport.end_handshake(self.at);
         self.core.run_tasks();
         self.core.transport.links.put_link(self.at, Link::Idle);
-        self.core
-            .refuse(self.last, Some(&DialEndpoint::Listed(row)), why);
+        *self.last = Some(WalkRefusal::endpoint(Some(DialEndpoint::Listed(row)), why));
     }
 
     /// zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read that
@@ -5297,7 +5298,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> LinkIo for RoundL
     fn lose(&mut self, ends_session: bool) {
         self.core.lose_face_link(self.at, self.id);
         if ends_session {
-            self.core.refuse(self.last, None, Refusal::LinkLost);
+            *self.last = Some(WalkRefusal::endpoint(None, Refusal::LinkLost));
         }
     }
 
@@ -5329,8 +5330,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Run a session over `opened` as face `face`, in `role`: the handshake begun, its task
     /// spawned on the session's local set and stepped once so that an initiator's InitSyn is sent
     /// now and not after the wait of the next read. The link is the same whichever end opened
-    /// it; the role is the handshake's alone. [`OpenError::EntropyUnavailable`] when the platform
-    /// gives no cookie key for the attempt.
+    /// it; the role is the handshake's alone. [`TransportRefusal::EntropyUnavailable`] when the
+    /// platform gives no cookie key for the attempt.
     #[cfg(wz_round)]
     fn open_wire(
         &mut self,
@@ -5338,7 +5339,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         opened: OpenedLink<L::Pump, LinkCount>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-    ) -> Result<Wire<C>, OpenError> {
+    ) -> Result<Wire<C>, TransportRefusal> {
         let wire = self.start_wire(face, opened, role, endpoint)?;
         self.run_tasks();
         Ok(wire)
@@ -5358,7 +5359,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         opened: OpenedLink<L::Pump, LinkCount>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-    ) -> Result<Wire<C>, OpenError> {
+    ) -> Result<Wire<C>, TransportRefusal> {
         let params = self.link_params()?;
         // The link's session is the transport's to make; what the session's tables keep of the
         // link, its gates and what its task hands its reads to are the session's (`LinkMaking`).
@@ -5367,22 +5368,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             registry_lend: &self.registry_lend,
             limits: resolve_limits(&self.config),
         };
-        self.transport
-            .make_wire(
-                &mut calls,
-                face,
-                opened,
-                role,
-                endpoint,
-                WireMaking {
-                    params,
-                    local: &self.local,
-                    entropy: &mut self.entropy,
-                    clock: &self.session_time,
-                    timeouts: self.config.timeouts,
-                },
-            )
-            .map_err(OpenError::from)
+        self.transport.make_wire(
+            &mut calls,
+            face,
+            opened,
+            role,
+            endpoint,
+            WireMaking {
+                params,
+                local: &self.local,
+                entropy: &mut self.entropy,
+                clock: &self.session_time,
+                timeouts: self.config.timeouts,
+            },
+        )
     }
 
     /// The parameters a link's session is opened with, with a cookie key of its own.
@@ -5433,19 +5432,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// input of the face's life. A dial the network has not answered yet is left under way in the
     /// face and asked at the steps that follow, so no dial is waited for while the session is
     /// held; one answered at once with a link has it kept in `read`, with its endpoint, for the
-    /// handshake the life asks for next. A refusal is kept in `last`. A dial names its endpoint
-    /// by its row of the session's endpoint texts, which holds the text.
+    /// handshake the life asks for next. A refusal is kept in `last`, with no text. A dial names
+    /// its endpoint by its row of the session's endpoint texts, which holds the text.
     #[cfg(wz_round)]
     fn dial_endpoint(
         &mut self,
         at: usize,
         row: usize,
         read: &mut ReadDial<L::Pump>,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> LinkInput {
         match self.transport.dial_row(at, row) {
             Err(refused) => {
-                *last = OpenError::from(refused);
+                *last = Some(WalkRefusal::of(Some(DialEndpoint::Listed(row)), refused));
                 LinkInput::DialRefused
             }
             // Put in the face where it was asked (`LinkSupervisor::ask_dial`).
@@ -5456,28 +5455,24 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 LinkInput::DialMade
             }
             Ok(Some(Err(refused))) => {
-                self.refuse(
-                    last,
-                    Some(&DialEndpoint::Listed(row)),
+                *last = Some(WalkRefusal::endpoint(
+                    Some(DialEndpoint::Listed(row)),
                     Refusal::Link(refused),
-                );
+                ));
                 LinkInput::DialRefused
             }
         }
     }
 
-    /// Leave in `last` that `endpoint` could not be reached, for `why`: the reason a face's step
-    /// goes on with when its dial, its handshake or its link failed. Out of line and cold: each of
-    /// those arms of a face's step would otherwise build the refusal, the endpoint's text in it,
-    /// and copy it into `last` itself.
-    #[cfg(wz_round)]
+    /// The refusal a session whose walk over its endpoints ended ends with: the walk's last,
+    /// `refusal`, its endpoint's text read now, once; no endpoint at all when the walk passed
+    /// none. Out of line and cold: the open and the read end a session here.
     #[cold]
     #[inline(never)]
-    fn refuse(&self, last: &mut OpenError, endpoint: Option<&DialEndpoint>, why: Refusal) {
-        *last = OpenError::Unreachable(EndpointRefusal::new(
-            self.transport.endpoint_text(endpoint),
-            why,
-        ));
+    fn walk_ended(&self, refusal: Option<WalkRefusal>) -> OpenError {
+        refusal.map_or(OpenError::NoEndpoint, |refusal| {
+            OpenError::from(self.transport.walk_refused(&refusal))
+        })
     }
 
     /// Begin the handshake of the link the dial of the face at `at`, numbered `id`, made: the
@@ -5491,16 +5486,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         at: usize,
         id: FaceId,
         read: &mut ReadDial<L::Pump>,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> LinkInput {
         let endpoint = read.dialled.take();
         let Some(answered) = read.answer.take() else {
             return LinkInput::HandshakeRefused(HandshakeRefusal::Endpoint);
         };
-        let opened = match self.transport.dialled(endpoint.as_ref(), answered) {
-            Ok(opened) => self.open_wire(id, opened, SessionRole::Initiator, endpoint.as_ref()),
-            Err(refused) => Err(OpenError::from(refused)),
-        };
+        let opened = self
+            .transport
+            .dialled(endpoint.as_ref(), answered)
+            .and_then(|opened| {
+                self.open_wire(id, opened, SessionRole::Initiator, endpoint.as_ref())
+            });
         match opened {
             Ok(wire) => {
                 self.transport.links.put_link(at, Link::Wire(wire));
@@ -5508,11 +5505,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
             Err(refused) => {
                 let why = match refused {
-                    OpenError::EntropyUnavailable => HandshakeRefusal::Fatal,
-                    OpenError::NoTask(_) => HandshakeRefusal::Task,
+                    TransportRefusal::EntropyUnavailable => HandshakeRefusal::Fatal,
+                    TransportRefusal::NoTask(_) => HandshakeRefusal::Task,
                     _ => HandshakeRefusal::Endpoint,
                 };
-                *last = refused;
+                *last = Some(WalkRefusal::of(endpoint, refused));
                 LinkInput::HandshakeRefused(why)
             }
         }
@@ -5529,7 +5526,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         redial_ms: Option<u64>,
         now_us: u64,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> Result<(), SessionEnds> {
         let links = &self.transport.links;
         if self.links_settled.is_some_and(|settled| {
@@ -5666,7 +5663,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         redial_ms: Option<u64>,
         now_us: u64,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> Result<(), SessionEnds> {
         #[cfg(test)]
         self.link_polls.set(self.link_polls.get() + 1);
@@ -5701,7 +5698,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         at: usize,
         now_us: u64,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> Result<(), SessionEnds> {
         let now_ms = now_us / 1000;
         let Some(face) = self.transport.links.face(at) else {
@@ -5741,7 +5738,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         at: usize,
         input: LinkInput,
         now_us: u64,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> Result<(), SessionEnds> {
         let Some(face) = self.transport.links.face_mut(at) else {
             return Ok(());
@@ -5761,18 +5758,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         effects: Effects,
         read: &mut ReadDial<L::Pump>,
         now_us: u64,
-        last: &mut OpenError,
+        last: &mut Option<WalkRefusal>,
     ) -> Result<(), SessionEnds> {
         let Some(id) = self.transport.links.face(at).map(|face| face.id) else {
             return Ok(());
         };
-        *last = OpenError::NoEndpoint;
+        *last = None;
         // The dial the step read the refusal of is over, and its endpoint names the reason; one
         // the life gave up on with no answer read is given up by the I/O
         // (`RoundLinkIo::give_up_dial`).
         if matches!(read.answer, Some(Err(_))) {
             if let Some(Err(refused)) = read.answer.take() {
-                self.refuse(last, read.dialled.as_ref(), Refusal::Link(refused));
+                *last = Some(WalkRefusal::endpoint(
+                    read.dialled.take(),
+                    Refusal::Link(refused),
+                ));
             }
         }
         let mut io = RoundLinkIo {
@@ -7599,13 +7599,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         ) {
             // An open that no endpoint answers ends here: the link has not been up, so its life
             // dials none again.
-            let mut last = OpenError::NoEndpoint;
+            let mut last = None;
             let now_us = core.now_us();
             if core
                 .give_face(0, LinkInput::Open, now_us, &mut last)
                 .is_err()
             {
-                return Err(last);
+                return Err(core.walk_ended(last));
             }
             // Open once the dial's link is up, or once the node it reached is held by a face that
             // came first (a peer that listens and dials its own listener's peer).
@@ -7616,7 +7616,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 core.run_tasks();
                 let now_us = core.now_us();
                 if core.poll_links(None, now_us, &mut last).is_err() {
-                    return Err(last);
+                    return Err(core.walk_ended(last));
                 }
             }
         }
@@ -10518,7 +10518,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         core.sweep_gets(now_us);
         let redial_ms = core.config.redial_ms;
         // Why the session ends is no reader's here: a handle finds it closed.
-        let mut last = OpenError::NoEndpoint;
+        let mut last = None;
         if core.move_links(redial_ms, now_us, &mut last).is_err() {
             // A handle reads the session closed from its row from here on, as after a close.
             #[cfg(any(feature = "engine-rows", test))]

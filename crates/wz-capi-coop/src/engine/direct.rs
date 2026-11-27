@@ -67,7 +67,6 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::session_drive::LinkWait;
 #[cfg(not(feature = "threads"))]
 use wz_runtime_coop::sync::ConfinedOwner;
-use wz_runtime_coop::transport::WalkRefusal;
 use wz_runtime_coop::transport::{LinkPump, OpenedAs, PlacedWire, PumpPlace};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::link_life::{carry, LinkInput, LinkIo, LinkPhase, Refused, SessionEnded};
@@ -2934,12 +2933,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             Err(SessionEnded) => {
                 io.slot.life_due_us = u64::MAX;
-                let refused = io
-                    .slot
-                    .refusal
-                    .take()
-                    .map(|refusal| OpenError::from(io.core.transport.walk_refused(&refusal)));
-                Err(refused.unwrap_or(OpenError::NoEndpoint))
+                Err(io.core.walk_ended(io.slot.refusal.take()))
             }
         }
     }
