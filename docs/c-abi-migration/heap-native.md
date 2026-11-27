@@ -11,9 +11,10 @@ under its feature `tables-on-use`, its registry made by value and its keys count
 `KeyBudget`, guarded by the session's lock as the key arena is; then its second step (section
 11, 2): the places of the state's own values and the key budget in a state of the session's own,
 one allocation the open takes from the allocator apart from its arena, `region.rs` no longer in
-the form. The owner's ruling of 2026-11-27 chose the form of section 6 (c), per preset: the rest
-of the cooperative engine's on-use form (the plain tables and the round's rows counted, N3c's step
-3, N3d, N3e), the doors' (N4) and the switch with its guards (section 9) are designed here and not
+the form; and that step's second half: the state's plain tables and the round's tables counted on
+`OnUse`, their policy the one the engine's calls name, each refusal of a first row answered as a
+value (section 11, the audit). The owner's ruling of 2026-11-27 chose the form of section 6 (c),
+per preset: the rest of the cooperative engine's on-use form (N3c's step 3, N3d, N3e), the doors' (N4) and the switch with its guards (section 9) are designed here and not
 written yet, because a switch that cannot be built is not declared; section 11 reads what N3c has to give a home to, and why it is the next step and not
 a part of N3b. Nothing here was built or
 measured by this lane: a byte figure is either **read** from the size ledger's explain document or
@@ -504,9 +505,88 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
 - Not tested: the open refused when the allocator has no room for the state
   (`OwnBlock::take`, `ArenaRefused::NoMemory`); only a refusing allocator reaches it.
 
+### 7.7 N3c, step 2, second half
+
+- The policy: the session core's planes and round read the policy of their tables from the
+  engine's calls, `RoundCalls::TablePolicy` (`crates/wz-session-core/src/round.rs`).
+  `EndedLegs<P>` and `FinalHolds<P>` (`HeldFinals<P>`, `RefusedFinals<P>`) take it as a parameter;
+  `LegRows`, the get plane's `HeldReplies<u64, _>` and `RoundRows` (whose records are
+  `RecordForm::Records<T, P>`) read it. The engine names it once, `StatePolicy`
+  (`crates/wz-capi-coop/src/lib.rs`): `Lent` in every form but the on-use one, where the open
+  lends or the region places those rows as before, and `OnUse` there; its note of each pending
+  leg (`Rows`, `engine.rs`) follows it. In the on-use form the state's places keep none of those
+  rows: `PlacedTables::counted` and `RoundRows::counted` count each table from what the plan
+  resolved, and each takes its rows at its first row.
+- The two defects. `EndedLegs::note` pushes where nothing can answer a refusal (the drop of the
+  leg's entry), and on `OnUse` its first push asked the allocator there: the end was lost and the
+  leg's callback never let go of. `GetPlane::open_leg` now has the ends take their rows before it
+  keeps a leg, and a refusal is `None`, which the engine answers as a get no row holds
+  (`hold_leg`'s `LegHeld::NoRoom`, a liveliness snapshot's `LegTurn::Skipped`); the push left in
+  `note` can no longer be refused (its rows taken at the open and never given back, the ends never
+  more than the legs' rows, which `GetPlane::init_at` checks in a debug build), and its debug
+  assertion states that. `FinalHolds::admit` dropped a refusal its list could not note
+  (`let _ =`): it now answers `Admitted` (`Held`, `Refused`, `Unnoted`), and on a first-use
+  policy has the list take its rows before it asks the first hold (`rows_for_refusals`), so a
+  refusal after one request was held is always noted; `Unnoted` (the allocator refused the list's
+  rows, or the list is past its count) is counted and begins no call (`QueryPlane::admit_call`),
+  and with nothing noted its dispatch owes its Final as one that reached no queryable.
+- The round: an offer that found room by count has its records' and its callbacks' rows taken
+  (`Round::take_rows`) before it writes, and a refusal of the allocator is counted as a record with
+  a part that found no place (`RoundCounts::unplaced`), not as a record the gate let through past
+  its room. Each arm added reads `Storage::TAKEN` as a constant and folds away on `Lent` and
+  `Region`.
+- Tests, in the session core's unit tests, which run on an allocator that refuses every
+  allocation of a thread that asks it to (`crates/wz-session-core/src/test_heap.rs`, `refused`):
+  - `get_plane::tests::a_leg_whose_ends_rows_the_heap_refuses_is_refused_at_its_open` (red if
+    `open_leg` keeps a leg before the ends took their rows, `EndedLegs::make_room` left out) and
+    `a_legs_end_finds_the_row_its_open_had_taken_whatever_the_heap_holds` (red the same way: the
+    end then asks the heap at the entry's drop); `an_end_past_the_rows_is_a_defect` reads the
+    assertion's new words.
+  - `query_plane::tests::a_refusal_with_no_row_to_be_noted_in_is_unnoted_and_owes_its_final`
+    (count 0; red if `admit` answers a refusal it could not note as noted),
+    `a_refusal_finds_the_row_the_first_hold_had_taken_whatever_the_heap_holds` (red if
+    `rows_for_refusals` is left out of `admit`),
+    `a_request_whose_refusals_rows_the_heap_refuses_is_refused_unnoted` (red if a request is held
+    while its refusal could not be noted, or the heap's refusal is answered as noted) and
+    `a_query_refused_unnoted_begins_no_call_and_is_counted` (red if `admit_call` begins a call for
+    `Unnoted` or counts none); the three tests that read `admit` read `Admitted`.
+  - `round::tests::a_round_counted_on_use_takes_its_rows_at_its_first_record` (red if
+    `RoundRows::counted` makes tables that take their rows when made, or holds the build's bound in
+    place of the count) and `a_record_whose_rows_the_heap_refuses_is_counted_unplaced` (red if an
+    offer writes before `Round::take_rows`: the record is then lost uncounted, or a debug build
+    stops at the round's check of its room).
+  - `on_use::tests::what_the_heap_has_no_room_for_is_handed_back_and_takes_nothing` (red if a
+    refused `take_memory` is answered as rows taken, or a refused key's bytes stay counted).
+  - In the engine's on-use form with `query` or `queryable`,
+    `engine::state_places::tests::the_plain_tables_on_use_hold_the_plans_counts_and_no_row` (red
+    if a table is counted with the build's bound in place of the plan's count, or takes its rows
+    when made); the region's test of its places compiles in the region's form alone.
+- Not tested: the engine's answers to a leg refused at its open and to an unnoted query on
+  `OnUse` end to end (the session core's tests reach both values; the engine's arms are the ones a
+  full table takes); and the round in the engine's on-use form, which only a build with
+  `WZ_COOP_VALUE_LOCKS=off` or an image without host locks compiles (`wz_round`).
+- D12: every arm added reads the policy's `TAKEN` as a constant or is a type the D12 forms name
+  as `Lent`, as before; `admit`'s answer is an enum whose two refusals take one arm in
+  `admit_call`. The D12 cases' bytes are not expected to move: C1cs's reading of them is the check,
+  and a move there is a finding.
+
 ## 8. What the main session runs
 
 Nothing of N1, N2, N3a, N3b or N3c's first two steps was built or run by this lane.
+
+- N3c, step 2, second half (7.7). The session core with its default features: `cargo test -p
+  wz-session-core --lib get_plane::tests` 16 (14 before), `--lib query_plane::tests` 16 (12
+  before), `--lib round::tests` two more than before (31 in a debug build), `--lib on_use::tests`
+  15 in a debug build (13 without debug assertions); `cargo clippy -p wz-session-core --all-targets
+  -- -D warnings`, and the same with `--no-default-features`, which compiles neither the planes nor
+  `test_heap`. The engine's on-use legs: `cargo test -p wz-capi-coop --features tables-on-use --lib
+  on_use` 6 (the test added needs `query` or `queryable`), the same with `--features
+  liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use` 7, and `cargo clippy` of
+  both legs with `--all-targets -- -D warnings`; the round of that form, `WZ_COOP_VALUE_LOCKS=off
+  cargo clippy -p wz-capi-coop --features query,queryable,tables-on-use --all-targets -- -D
+  warnings`. The D12 forms as for step 2's first half below (`StatePolicy` is `Lent` there,
+  `--all-features` among them), and `python3 scripts/lib/logic_census_coverage_gate.py`
+  (`test_heap.rs` has its row in `files.md`).
 
 - N3c, step 2, the D12 form, whose behaviour and bytes it does not change (the region's form
   calls the same bodies through `StateLayout` and `StateHold`): the crate's suites of
@@ -753,9 +833,40 @@ The order that builds at each step:
    refused request's push go (`query_plane.rs:223`), and the round pushes on the receive. Each is
    given its room before the push, as `FinalStaging::make_room` is (below), or a refusal its
    caller answers.
+   Written (7.7): the policy is the engine's calls' (`RoundCalls::TablePolicy`, the engine's
+   `StatePolicy`), the state's places keep none of those rows in the on-use form
+   (`PlacedTables::counted`, `RoundRows::counted`), the ends take their rows at the leg's open,
+   `FinalHolds::admit` answers `Admitted`, and an offer to the round takes its rows before it
+   writes. Every push of those tables is read in the audit below.
 3. N3d, then the runtime, the engine and the rooms boxed; `arena.rs` leaves the form and the
    size case reads group A's figure.
 4. N4, then N5: the switch is declared once the form it selects builds.
+
+The pushes of the tables step 2's second half counts, and of the tables beside them in the same
+planes, each with what a refusal reaches (read at the step's own commits):
+
+| table | push | a refusal | answered |
+|-------|------|-----------|----------|
+| `EndedLegs` | `GetPlane::open_leg` asks `EndedLegs::make_room` on a first-use policy | `None`: the get is refused as one no row holds (`LegHeld::NoRoom`, `LegTurn::Skipped`), nothing minted | yes, added |
+| `EndedLegs` | `EndedLegs::note`, from the drop of the leg's entry | none can come: its rows were taken at the open and are kept, and the ends waiting, each holding a leg's row, are never more than the legs' rows (`GetPlane::init_at` checks it in a debug build); the debug assertion states that | yes; before, on `OnUse` the first end asked the heap here and a refusal lost the end and the callback |
+| `LegRows` | `LegRows::open` | `None`, as the row above | yes |
+| `HeldReplies<u64, _>` (the get plane's) | `HeldReplies::hold` | `HoldRefused::Full`, counted; `consolidate` hands the reply on at once | yes |
+| `HeldFinals` | `FinalHolds::take` | `false`: `admit` notes the refusal (`Admitted::Refused`); `OwnFinalHold::take` is `None` and the session's own get is refused before a leg is issued | yes |
+| `RefusedFinals` | `FinalHolds::rows_for_refusals` on a first-use policy, before the first hold | `Admitted::Unnoted`: counted, no call begun, its Final owed as one that reached no queryable | yes, added |
+| `RefusedFinals` | `FinalHolds::admit`'s note of a refusal | `Admitted::Unnoted` past the list's count | yes; before, `let _ =` dropped it |
+| `RoundRows`, records and callbacks | the first write of a record, in each of the five offers | `Round::take_rows` is `false`: `refuse_unplaced` counts it (`unplaced`, and `dropped` or `held_over`) and ends its call | yes, added; before, a debug build stopped and a release build lost the record uncounted |
+| `RoundRows`, callbacks | a later call joining a record | the rows were taken by the record's first write; past the count, `refuse` and the call settled | yes |
+| `RoundRows`, keys | `Table::place_key` | `None`: counted unplaced | yes |
+| the engine's pending legs (`Rows<PendingGet>`) | `SessionState::note_pending` | the leg is unregistered, which says its end, and counted (`unheld`) | yes; on `OnUse` the first row is asked after the Request went out, so that get ends with no reply |
+| `GetPlane::held` (a `VecDeque`, every policy) | `GetPlane::keep_held`, `push_back` | the infallible push: the allocator's refusal ends the process | **no**: outside this step's tables, an owned reply's path; a debt of its own |
+| `LocalAsking::asked` (`Static`) | `QueryPlane::arrive`, `arrive_own` | no allocator: `arrive` hands a call past the list to the round; `arrive_own` reads the room first under the session's lock | yes |
+| the round's captured calls (`Static`) | `Round::offer_sample_ref` under a capture | no allocator: past the session's subscribers the call is ended uncounted, and a debug build stops | by the table's bound |
+
+One window stays open on a first-use policy: a request whose refusal found no row (`Unnoted`) is
+not remembered, so if the allocator refuses the list's rows at one queryable's admission and gives
+them at the next queryable of the same request in the same dispatch, that queryable is answered
+where the first was not. It is reachable only before the session's first held request, after
+which the list keeps its rows.
 
 A table that answers whether it has room before the push that would take its memory cannot take
 the memory when it answers (`FinalStaging::has_room`, `&self`): the query dispatch asks before the
