@@ -129,11 +129,11 @@ says where a step is larger there.
 | step | what changes | peer case, B | release case `pico-api-coop-nostd`, B | receive Ir, and why | turns red | owner |
 |---|---|---:|---:|---|---|---|
 | **F1 (landed with this note)** | the runtime's task table of a build whose read steps every face itself is no table (`RuntimeForm::Taskless`) whether it dials, listens or reads on a thread: chosen by the fact that no link runs as a task (`not(wz_round)`), not by the feature `listen` or `threads`; a build that joins groups keeps its cells | -2,500 to -2,700: `run_among` 1,209, `claim_among` 540, `drop_among` 341, `settle` 160, `classify` 147, the wakers 67, `TaskCell::write_owned` 53, `RuntimeTables::runtime`'s 240, less the no-cell table's 102 | 0: it joins groups, whose sessions are tasks | none: the direct form runs no pass (`Core::run_tasks` is `wz_round`'s), and the read never calls the executor | `tests::direct_runtime::a_listening_session_whose_read_steps_its_faces_opens_a_runtime_of_no_cell` | this lane |
-| F4 | the accepting session machine of the reactive class: its eventless step from `SentOpenAck` to `Established` made an evented one in its SCXML source, so the reactive turn SCE is asked for (`docs/win-budget/size.md` section 10.3) covers the accepting build too | -1,500 to -2,500 (`Turn::run` 664 -> 1,336, `event_queue` +502, the general turn's other bodies) | -1,500 to -2,500 | per transport event fewer checks, never per sample | `machine_class_tests` with `session-unicast-accept`: the accepting machine of the class | the SCXML source here, the turn SCE's |
+| **F4 (landed, section 9.1)** | the accepting session machine of the reactive class: its eventless step from `SentOpenAck` to `Established` made an evented one in its SCXML source, so the reactive turn SCE is asked for (`docs/win-budget/size.md` section 10.3) covers the accepting build too | -1,500 to -2,500 (`Turn::run` 664 -> 1,336, `event_queue` +502, the general turn's other bodies) | -1,500 to -2,500 | per transport event fewer checks, never per sample | `machine_class_tests` with `session-unicast-accept`: the accepting machine of the class | the SCXML source here, the turn SCE's |
 | F5 | the read of many faces: `read_faces`, `wait_on_faces` and `face_turn` hold 10,949 against the client's 5,008 for the same face's turn; the inlined attribution of the three bodies says which part is the walk and which a form | to be measured; at most -3,000 | as the peer case | to be held to none | the read's tests over several faces | this lane, after a measurement cell |
 | F2 | the held operations as one hold and the operation in its caller where every face keeps its send place (W6 on): each face's hold kept by its site and let go of in reverse by one guard's drop, the held face found by a mark in the face rather than by the chain on the stack | 0 in the zenoh-pico preset (W6 off compiles none); today -2,100 to -2,900 (11 copies, 8,745 B: `declare_write_filter` 2,354, `undeclare_subscriber` 1,916, `declare_subscriber_on_wire` 1,126, `face_turn`'s replay 991; eight of them measured at 2,137 B over their client callers) | -4,500 to -6,000 (21 copies, 22,902 B) | none: an operation is a declaration, a query or a reply, never the read; `face_turn`'s replay hold is a turn's, not a message's | `direct::held_operation_tests`, the engine's declaration tests over faces | this lane; the send place's protocol is `wz-runtime-coop`'s `FaceSite` |
-| F3 | the plan form's lend by a description walked once (as the region's `place_region` walks `RegionLines`), not each table's constructor inlined into the registry's | 0 on the on-use twin (no plan); today -4,000 to -7,000 (`RegistryOf<ManyHolders>::new` 4,925, `ArenaPlan::lay_out` 2,284, `lend_set` 1,286, `pool_rows` 616) | -4,000 to -7,000 | none: the open only | the arena's plan tests, and a description's lines test as the region's | the arena's owner (D12 form) |
-| F6 | one UDP driver for a dialled socket and a port's peer (`feat-peer.md` S2) | 0 (`udp-listen` off) | -1,500 to -2,500 (`UdpDriver<PortPeer<..>>` 3,699 beside `UdpDriver<PosixUdpSocket>` 1,836) | none: `recv_with` an arm per socket kind | the driver's tests over both sockets | lane T-LINK |
+| F3 (designed, not landed: section 9.3) | the plan form's lend by a description walked once (as the region's `place_region` walks `RegionLines`), not each table's constructor inlined into the registry's | 0 on the on-use twin (no plan); today -4,000 to -7,000 (`RegistryOf<ManyHolders>::new` 4,925, `ArenaPlan::lay_out` 2,284, `lend_set` 1,286, `pool_rows` 616) | -4,000 to -7,000 | none: the open only | the arena's plan tests, and a description's lines test as the region's | the arena's owner (D12 form) |
+| **F6 (landed, section 9.2)** | one UDP driver for a dialled socket and a port's peer (`feat-peer.md` S2) | 0 (`udp-listen` off) | -1,500 to -2,500 (`UdpDriver<PortPeer<..>>` 3,699 beside `UdpDriver<PosixUdpSocket>` 1,836) | none: `recv_with` an arm per socket kind | the driver's tests over both sockets | lane T-LINK |
 
 No two forms of one thing are compiled side by side in the peer case: the client's region and the
 peer's plan are one each (`capi_coop::region` leaves with `listen`), and the session tables are
@@ -235,3 +235,103 @@ and, where each link runs as a task, `Reserved` for a listener and `ForOne` for 
 - The perf matrix's receive arm on `pico-client-coop-nostd`: its receive Ir as its last reading.
 - `python3 scripts/lib/size_ledger_gate.py --per-feature pico-api-coop-nostd pico-peer-coop` again,
   so the head of `feat-peer.md` reads the step without W3, W4 and S1.
+
+## 9. The steps landed after F1, and where F3 stands
+
+### 9.1 F4: the acceptor's OpenAck on the OpenSyn's own step
+
+`sources/session/session_fsm_unicast.scxml` had `Accepting.SentOpenAck`, entered by the admitted
+`open_syn.received` (its entry sending the OpenAck) and left at once by an eventless transition to
+`Established`: `docs/session-fsm.md` section 2.2 gives that state an immediate exit, so no event
+ever found it current (`drive.rs`'s `awaited_in` said so). It was the machine's only eventless
+transition, and it kept the accepting build's session machine out of the reactive class. The state
+is now the transition's effect: `SentInitAck` takes `open_syn.received` to `Established` with
+`send_open_ack` on the transition. The order of effects is the same (the OpenAck, then
+`Established`'s entry; neither `SentInitAck` nor `Accepting` has an exit action), the admission
+of the OpenSyn is the dispatcher's as before, and the accepting deadline keys on the two
+`Accepting` children left (`session_timeouts`). The generated machine
+(`out/wz-session-core/session_fsm_unicast_sm.rs`) was regenerated with the pinned generator (the
+store's build of `vendor/sce` at its pin, the xtask's arguments and strip); the regeneration also
+carries three `compile_error!` guards the feature model gained since the file was last made, each
+already implied by the crate's own features.
+
+- What SCE provides at the pin, read from `vendor/sce`: the reactive turn of ADR 0148 is there.
+  `DocumentTables::reactive_class` and `StatePolicy::REACTIVE_TURN` decide it, and
+  `Turn::run(initial, reactive)` skips the macrostep completion for a reactive machine. With F4
+  every machine the peer case links (session, link, reassembly slot, scouting) is of the class, so
+  every call of the one out-of-line `Turn::run` hands it `true`; the general turn's
+  `complete_macrostep` and the internal queue's drain have no caller left in the case when the
+  compiler folds the constant through the shared body, which the runtime's own comment relies on.
+- What SCE is still asked (SCE ADR 0155, an SCE session's): the reactive turn as a body of its own
+  for a policy whose `REACTIVE_TURN` is `true` (the compiled reactive machine), so that the general
+  turn's bodies leave the image by construction rather than by the compiler's constant
+  propagation through an out-of-line function, and section 10.3 items 2 and 3 of
+  `docs/win-budget/size.md`. Nothing on the wz side waits on it: the machines' sources are of the
+  class and the tests hold them there.
+- Expected: `pico-peer-coop` and `pico-api-coop-nostd` -1,500 to -2,500 in transport where the
+  fold happens (`Turn::run` back towards its 664-byte client form, the `event_queue` internal
+  half); 0 where it does not, until ADR 0155. Receive Ir: per transport event the eventless
+  selection and the internal queue's check fewer; never per sample.
+- Tests (`wz-session-core`'s `machine_class_tests`):
+  `the_session_machine_is_of_the_reactive_class` now runs in every build (it replaced the accepting
+  build's test that asserted the eventless step) and asserts the runtime's `reactive_class` beside
+  the file's own reading: red, with `session-unicast-accept`, on any accepting state left without
+  an event. `the_acceptors_open_syn_takes_it_to_established_sending_the_open_ack` reads the
+  OpenSyn's candidate from `SentInitAck`: red on a target other than `Established` or a transition
+  with no content. `the_scouting_machine_is_of_the_reactive_class` (`scouting-active`): red on an
+  eventless or raising step in the scouting source. `session_timeouts` keeps its accepting tests
+  over the two children; `wz-runtime-tokio`'s accepting-path tests assert the same traces as
+  before (`send_open_ack` once, Established's entry actions once).
+
+### 9.2 F6: one UDP driver for a dialled socket and a port's peer
+
+`IpLinks` made `UdpDriver<U, ..>` for a dial and an acceptor bound to a port of its own, and
+`UdpDriver<PortPeer<U, ..>, ..>` for each peer a `udp/` port took: two instances of the whole
+driver and its two tables (`BoxedLinkDriver`, `SessionDatagramLink`). `udp_link::LinkSocket` is
+now the one socket type of every datagram link of a stack that listens on `udp/`: `Own(U)` or
+`Port(PortPeer<U, N>)`, each call a match on the kind that forwards to the kind's own answer
+(the share's `times_out` and `set_receive_timeout` stay `false`, so a peer's link still waits the
+tick and never arms the port's socket). `LinkPlace::own_datagram` wraps a socket of the stack's own
+where the build listens on `udp/` and hands it on unchanged otherwise, so a build without
+`udp-listen` compiles what it compiled before; `LINK_CELL_BYTES` reads the one driver type.
+
+- Expected: `pico-api-coop-nostd` (and every case with `udp-listen`) -1,500 to -2,500 in the
+  driver area: `UdpDriver<PortPeer<..>>`'s 3,699 less the matches added to the remaining instance;
+  `pico-peer-coop` 0 (no `udp-listen`). Receive Ir: one match on the kind per socket call of a
+  `udp/` link, no call added; none on `tcp/`.
+- Test: `udp_link::tests::one_driver_reads_a_socket_of_its_own_and_a_ports_share_alike` makes both
+  links through one function returning one type, reads a datagram over each, and asserts the share
+  answers its own `times_out` and `set_receive_timeout` (`false`) and leaves the port's socket
+  unarmed: red on a kind that forwards to the other's path. Compiled with `udp-listen`, with and
+  without `udp-port-lent-only` (the port is made over lent rows and slots, which both have).
+
+### 9.3 F3: what reading the plan form found, and the design
+
+The premise holds for part of the bytes and not for the rest. `RegistryOf::new` (the plan form,
+`runtime-plan`) builds each table by value through its type's `lent` (`App::lent`,
+`PeerPools::lent`, `Gets::lent`, `FaceTables::lend` through `lend_set`), each `?` after a table
+leaving a drop path for what was built before it, and moves them into the registry; the region form
+(`placed.rs`) places the zeroed registry by one walk of `RegistryRegion::places`. But the plan
+form's lends already go through one untyped, out-of-line body (`Arena::lend_rows`,
+`TableLender::lend_stride`), and a share of the bodies named for F3 is not placement at all:
+`ArenaPlan::lay_out` and `pool_rows` are the plan's own count, which a description of the lend does
+not remove; the pools' hand-out (`keep_rows_in`), the spare sets reserved for faces to come
+(`adding::SpareSets`) and the declaration watches are values built at the open, not rows placed.
+
+The design that closes it is one description for both forms, not a second family beside the
+region's: each table type's `places` gives, for each of its sequences, the sequence's offset, its
+row's stride and alignment, and which count of the plan sets its room (a count slot), and its key
+handles; the region form reads each room as its type's constant and its rows at the region's
+offsets, as now, and the plan form lends each line's rows from the arena in order and reads its
+room from the plan's counts, writing the sequences of a registry placed zeroed where it lies, as
+`place_region` does. The plan's byte count is then the same lines summed (one fact in one layer:
+`arena_bytes` of each type goes), and `RegistryOf::new` becomes `write_parts`, one walk and
+`bind`, the form `placed.rs` has. It touches the fifteen `places` of `wz-session-core`'s tables
+(`session_tables`, `slot_observer` twice, `peer_tables`, `reply`, `reply_stage` twice,
+`reply_hold`, `slot_map`, `decl_sink`, `pubsub`, and the `declare` tables), `RegionLines` and
+`place_seqs`, the arena plan's count of the registry's rows, and the registry's two forms. It is
+the next step of this lane: it was not written blind in this run, because every line of it is a
+layout the region's and the plan's tests must hold together, and the plan form is the release
+case's (`pico-api-coop-nostd`); a description wrong in one offset writes a sequence over another.
+Expected as section 5 says (-4,000 to -7,000 on the release case, 0 on the on-use twin, which has
+no plan); receive Ir none.
