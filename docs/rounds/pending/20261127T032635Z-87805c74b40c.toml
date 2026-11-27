@@ -1,0 +1,17 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Shrink the doors area of the no_std pico preset: a payload's segment ends
+are read from one top word, and a callback table of one entry is read
+where it lies, with no counter or claim loop in a one-thread build.
+'''
+changes = '''
+- capi-pico bytes: end_table; segment and append_segments over it.
+- capi-pico ffi: Threads<1> claims its one entry directly.
+'''
+verification = '''
+- size ledger: total 214,351 B vs main 214,870 (-519; doors -516).
+- capi-pico lib tests incl. two new pass; clippy default and multi-thread.
+'''
+carry = '''
+- none for this lane.
+'''

@@ -574,6 +574,11 @@ mod callback_table {
         /// A free entry claimed for `thread`: the first free one among those claimed before, or
         /// else the next one past them, none past the room.
         fn claim(&self, thread: usize) -> Option<usize> {
+            if N == 1 {
+                // A table of one entry has no entries past those claimed to count: its one entry
+                // is free or another thread's.
+                return self.entries.first()?.claim(thread).then_some(0);
+            }
             loop {
                 let used = self.used.load(Ordering::Relaxed);
                 if let Some(at) = self
@@ -609,7 +614,13 @@ mod callback_table {
         /// The entry `thread` holds. Relaxed: a thread looks for its own word, which it wrote
         /// itself, below a `used` it reads no lower than when it claimed the entry.
         fn held_by(&self, thread: usize) -> Option<(usize, &Entry)> {
-            let used = self.used.load(Ordering::Relaxed);
+            // A table of one entry is read whether claimed or not: a free entry holds no thread's
+            // word.
+            let used = if N == 1 {
+                1
+            } else {
+                self.used.load(Ordering::Relaxed)
+            };
             self.entries
                 .iter()
                 .take(used)
@@ -755,6 +766,41 @@ mod tests {
             .expect("the entry let go of takes the refused thread");
         assert_eq!(three, one, "the freed entry is claimed before any past it");
         assert!(threads.here(3));
+        assert_eq!(threads.refused(), 1, "nothing more was refused");
+    }
+
+    /// A table of one entry, the single-threaded build's: the thread that claims it counts its
+    /// nested callbacks there, another thread is refused and counted until it is let go of, and
+    /// then claims it. Turned red by a one-entry claim that takes an entry another thread holds,
+    /// or a lookup that finds a thread in an entry it does not hold.
+    #[test]
+    fn a_table_of_one_entry_takes_one_thread_at_a_time() {
+        let threads = callback_table::Threads::<1>::new();
+        assert!(!threads.here(1), "no thread is in the free entry");
+        let one = threads
+            .enter(1)
+            .expect("the first thread takes the one entry");
+        assert_eq!(one, 0);
+        assert!(
+            threads.enter(2).is_none(),
+            "a second thread is refused while the first runs a callback"
+        );
+        assert!(!threads.here(2), "the refused thread is not counted");
+        assert_eq!(threads.refused(), 1);
+        let nested = threads
+            .enter(1)
+            .expect("a nested callback takes no entry of its own");
+        assert_eq!(nested, one);
+        threads.leave(nested);
+        assert!(threads.here(1), "the outer callback still runs");
+        threads.leave(one);
+        assert!(!threads.here(1));
+        assert_eq!(
+            threads.enter(2),
+            Some(0),
+            "the entry let go of takes the next thread"
+        );
+        assert!(threads.here(2) && !threads.here(1));
         assert_eq!(threads.refused(), 1, "nothing more was refused");
     }
 
