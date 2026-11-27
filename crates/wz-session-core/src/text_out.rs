@@ -141,8 +141,10 @@ fn push_ipv4<W: TextOut + ?Sized>(out: &mut W, ip: Ipv4Addr) {
     }
 }
 
-/// The longest IPv6 text [`ipv6_text`] writes: eight groups of four digits and seven colons.
-const IPV6_TEXT_LEN: usize = 39;
+/// The longest text [`TextOut::push_ip`] writes: an IPv6 address of eight groups of four digits
+/// and seven colons. An IPv4 address and an IPv4-mapped one are shorter, so a [`FixedText`] of this
+/// many bytes holds the text of any address.
+pub const IPV6_TEXT_LEN: usize = 39;
 
 /// The groups of an IPv6 address that is not IPv4-mapped, as [`TextOut::push_ip`] writes them,
 /// written at the front of `text`: the text of the address. One body for every sink, out of line,
