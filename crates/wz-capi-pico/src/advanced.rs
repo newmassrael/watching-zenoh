@@ -602,7 +602,12 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let publisher = match AdvancedPublisherOn::declare_on(
-            Arc::new(PicoPlane::new(session.clone(), declared)),
+            Arc::new(PicoPlane::new(
+                session,
+                handle.ext.hlc.clone(),
+                handle.ext.time.clone(),
+                declared,
+            )),
             ke,
             advanced_publisher_options(options),
             engine.session_zid(),
@@ -1263,7 +1268,7 @@ unsafe fn let_go_miss_place(context: *mut c_void) {
 /// are declared, and no forms are lodged in it yet.
 unsafe fn lodge_forms(
     state: *mut AdvSubState,
-    session: &PicoSession,
+    session: PicoSession<'_>,
     base: DeclaredKeyexpr,
 ) -> Strong<PicoSubscriberForms> {
     // SAFETY: the caller's; the keep is written before the forms are lodged, and the forms and

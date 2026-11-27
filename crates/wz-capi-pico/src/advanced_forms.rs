@@ -187,7 +187,7 @@ impl PicoSubscriberForms {
     /// the forms are not moved from it until they are dropped there.
     pub(crate) unsafe fn write_in(
         at: NonNull<Self>,
-        session: &PicoSession,
+        session: PicoSession<'_>,
         base: DeclaredKeyexpr,
         rooms: NonNull<AnchorRooms>,
         place: Option<CountIn>,
@@ -196,8 +196,7 @@ impl PicoSubscriberForms {
         // SAFETY: the caller's: each field is written once through a pointer to it, not null as
         // it is inside the place, the locks made there.
         unsafe {
-            addr_of_mut!((*at).shared)
-                .write(crate::session::EngineHold::downgrade(&session.engine));
+            addr_of_mut!((*at).shared).write(crate::session::EngineHold::downgrade(session.engine));
             addr_of_mut!((*at).mode).write(session.mode);
             addr_of_mut!((*at).base).write(base);
             mutex_in(
@@ -341,7 +340,6 @@ mod tests {
 
     use wz_capi_core::faces::SharedSession;
     use wz_capi_core::runtime::runtime_impl::TokioTime;
-    use wz_node_time::node_clock::NodeHlc;
 
     /// The forms of an advanced subscriber on `key`, over a registry with no
     /// face: what they declare is read back from the registry's key table, which
@@ -361,11 +359,10 @@ mod tests {
             )
             .expect("test host entropy"),
         );
+        let engine = shared.as_engine();
         let session = PicoSession {
-            engine: shared.as_engine(),
+            engine: &engine,
             mode: WhatAmI::Peer,
-            hlc: NodeHlc::default(),
-            time: crate::last_timestamp::SessionTime::new(),
         };
         let rooms = Box::new(AnchorRooms::new());
         let base = DeclaredKeyexpr::literal_only(key).expect("the test's heap");
@@ -376,7 +373,7 @@ mod tests {
         let forms = unsafe {
             PicoSubscriberForms::write_in(
                 NonNull::from(&mut *place).cast::<PicoSubscriberForms>(),
-                &session,
+                session,
                 base,
                 NonNull::from(&*rooms),
                 None,

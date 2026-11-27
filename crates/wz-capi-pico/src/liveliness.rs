@@ -149,11 +149,11 @@ impl crate::object_slot::SessionEntity for TokenState {
 /// `existing` is the caller's own key when it is already a declaration,
 /// which is shared rather than declared again.
 pub(crate) fn declare_token(
-    session: &PicoSession,
+    session: PicoSession<'_>,
     keyexpr: &str,
     existing: Option<&DeclaredKeyexpr>,
 ) -> Result<TokenId, ZResult> {
-    let key = EntityKey::whole(&session.engine, keyexpr, existing)?;
+    let key = EntityKey::whole(session.engine, keyexpr, existing)?;
     let id = session
         .engine
         .declare_liveliness_token_on_wire(keyexpr, key.wire(), Some(key.retraction_key()))
@@ -230,7 +230,7 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         let state = match declare_token(session, ke, declared_of(keyexpr)) {
             Ok(id) => slot.fill(TokenState {
                 #[cfg(feature = "engine-tokio")]
-                shared: EngineHold::clone(&session.engine),
+                shared: EngineHold::clone(session.engine),
                 id,
             }),
             Err(rc) => return rc,

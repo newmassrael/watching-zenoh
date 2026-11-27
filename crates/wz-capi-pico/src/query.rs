@@ -1563,14 +1563,14 @@ unsafe fn declare_queryable_in(
         .fill_answering(
             QueryableState {
                 #[cfg(feature = "engine-tokio")]
-                engine: crate::session::EngineHold::clone(&session.engine),
+                engine: crate::session::EngineHold::clone(session.engine),
                 declared: None,
                 loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             },
             QueryableKept {
                 closure,
                 _session: background.then(|| crate::session::session_count(zs).hold()),
-                engine: crate::session::EngineHold::downgrade(&session.engine),
+                engine: crate::session::EngineHold::downgrade(session.engine),
             },
         )
         .cast::<QueryableState>();
@@ -1629,16 +1629,16 @@ unsafe fn declare_queryable_in(
 /// reaches a peer is decided here once, and the sink is the only thing that
 /// differs.
 pub(crate) fn declare_queryable_on(
-    session: &crate::write_filter::PicoSession,
+    session: crate::write_filter::PicoSession<'_>,
     keyexpr: &str,
     existing: Option<&DeclaredKeyexpr>,
     complete: bool,
     allowed_origin: wz_session_core::locality::Locality,
     sink: QueryableSink,
 ) -> Result<wz_capi_port::Declared<QblId>, ZResult> {
-    let key = crate::keyexpr::EntityKey::non_wild_prefix(&session.engine, keyexpr, existing)?;
+    let key = crate::keyexpr::EntityKey::non_wild_prefix(session.engine, keyexpr, existing)?;
     let declared = wz_capi_port::SessionEngine::declare_queryable_on_wire(
-        &*session.engine,
+        crate::session::EngineHold::as_ref(session.engine),
         keyexpr,
         key.wire(),
         complete,
@@ -1668,7 +1668,7 @@ pub(crate) struct PlainQueryable {
 impl PlainQueryable {
     /// Declare a queryable on `keyexpr` answered by `sink`.
     pub(crate) fn declare(
-        session: &crate::write_filter::PicoSession,
+        session: crate::write_filter::PicoSession<'_>,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
         complete: bool,

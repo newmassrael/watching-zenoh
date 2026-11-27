@@ -429,7 +429,7 @@ pub unsafe extern "C" fn z_declare_querier(
         // The querier's place is taken from its session before anything is declared, so a
         // session with no place left refuses the querier and nothing is declared.
         let Some(slot) = crate::object_slot::Slot::take_entity(
-            &session.engine,
+            session.engine,
             crate::object_slot::Kind::Querier,
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
@@ -461,8 +461,7 @@ pub unsafe extern "C" fn z_declare_querier(
             // through a pointer to it, not null as it is inside the place, the token made there.
             unsafe {
                 #[cfg(feature = "engine-tokio")]
-                addr_of_mut!((*at).shared)
-                    .write(crate::session::EngineHold::clone(&session.engine));
+                addr_of_mut!((*at).shared).write(crate::session::EngineHold::clone(session.engine));
                 addr_of_mut!((*at).entity).write(filtered);
                 addr_of_mut!((*at).loaned_keyexpr).write(crate::abi::z_loaned_keyexpr_t::borrowed(
                     core::ptr::null(),

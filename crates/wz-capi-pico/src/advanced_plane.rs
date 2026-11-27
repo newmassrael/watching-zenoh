@@ -33,6 +33,7 @@ use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
+use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;
 use crate::prelude::*;
@@ -44,11 +45,18 @@ use crate::write_filter::{FilterOn, PicoSession};
 
 /// The plane of one pico session.
 pub(crate) struct PicoPlane {
-    session: PicoSession,
+    /// The session's engine, which the plane declares on from a task of its own and so keeps a
+    /// count of where it keeps it.
+    engine: EngineHold,
+    /// The session's role, which its declarations follow.
+    mode: WhatAmI,
     /// The session's own clock ([`crate::session_ext::PicoSessionExt::new`]): it
     /// proposes the plane's stamps, which the session's times then order
     /// ([`AdvancedPublisherPlane::order_stamp`]).
     hlc: NodeHlc,
+    /// Every time the session gives, which the plane's stamps are ordered through, as a
+    /// program's `z_timestamp_new` is.
+    time: crate::last_timestamp::SessionTime,
     /// What the advanced publisher's own publisher is declared with: the
     /// `publisher_options` the program embedded in its advanced options, which
     /// pico hands to the `z_declare_publisher` that builds it. The heartbeat
@@ -59,13 +67,28 @@ pub(crate) struct PicoPlane {
 }
 
 impl PicoPlane {
-    /// The plane of `session`, whose advanced publisher's publisher is declared
-    /// with `declared`.
-    pub(crate) fn new(session: PicoSession, declared: PublisherQos) -> Self {
+    /// The plane of `session`, whose clock is `hlc` and whose times are `time`, and whose
+    /// advanced publisher's publisher is declared with `declared`.
+    pub(crate) fn new(
+        session: PicoSession<'_>,
+        hlc: NodeHlc,
+        time: crate::last_timestamp::SessionTime,
+        declared: PublisherQos,
+    ) -> Self {
         Self {
-            hlc: session.hlc.clone(),
-            session,
+            engine: session.engine.clone(),
+            mode: session.mode,
+            hlc,
+            time,
             declared,
+        }
+    }
+
+    /// The session the plane declares on, lent from what it keeps.
+    fn session(&self) -> PicoSession<'_> {
+        PicoSession {
+            engine: &self.engine,
+            mode: self.mode,
         }
     }
 
@@ -87,7 +110,7 @@ pub(crate) struct KeptPublisher {
 impl KeptPublisher {
     /// Declare a publisher on `keyexpr` of `session` that sends with `declared`.
     fn declare(
-        session: &PicoSession,
+        session: PicoSession<'_>,
         keyexpr: &str,
         declared: PublisherQos,
     ) -> Result<Self, ZResult> {
@@ -194,7 +217,7 @@ impl AdvancedPublisherPlane for PicoPlane {
     ) -> Option<Ticker<crate::session::EngineHold>> {
         // A period under a millisecond is raised to one by the engine, as the composite does.
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        Ticker::start_on(self.session.engine.clone(), period_ms, tick).ok()
+        Ticker::start_on(self.engine.clone(), period_ms, tick).ok()
     }
 
     /// Always: a pico session stamps from its own clock and zid with no
@@ -213,7 +236,7 @@ impl AdvancedPublisherPlane for PicoPlane {
     /// a sample's time and a program's are one strictly increasing sequence of the session, and a
     /// session with no time left refuses the sample as pico refuses the put.
     fn order_stamp(&self, proposed: u64) -> Result<u64, PublishError> {
-        self.session.time.order_data_stamp(proposed)
+        self.time.order_data_stamp(proposed)
     }
 
     fn declare_publisher(
@@ -231,7 +254,7 @@ impl AdvancedPublisherPlane for PicoPlane {
             .declared
             .try_clone()
             .ok_or_else(|| Self::refusal("publisher", crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY))?;
-        let publisher = KeptPublisher::declare(&self.session, keyexpr, declared)
+        let publisher = KeptPublisher::declare(self.session(), keyexpr, declared)
             .map_err(|code| Self::refusal("publisher", code))?;
         Ok(DeclaredPublisher {
             eid: publisher.publisher.entity_id(),
@@ -254,7 +277,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         );
         // INCOMPLETE, which is the only honest answer a bounded ring can give
         // (R2556, the tokio runtime's `AdvancedCache::declare` answers the same).
-        PlainQueryable::declare(&self.session, keyexpr, None, false, sink)
+        PlainQueryable::declare(self.session(), keyexpr, None, false, sink)
             .map_err(|code| Self::refusal("cache queryable", code))
     }
 
@@ -262,23 +285,23 @@ impl AdvancedPublisherPlane for PicoPlane {
     /// which reserved it at its open), so a put takes no memory; a ring that holds no record
     /// refuses the cache. On the heap on an engine that keeps none.
     fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
-        if SessionEngine::cache_bytes(&*self.session.engine).is_none() {
+        if SessionEngine::cache_bytes(&*self.engine).is_none() {
             return Ok(CacheStore::new(config));
         }
         CacheStore::in_ring(
             config,
             Box::new(SessionCacheBytes(crate::session::EngineHold::clone(
-                &self.session.engine,
+                &self.engine,
             ))),
         )
         .ok_or(AdvancedPublisherError::CacheRingUnavailable)
     }
 
     fn declare_token(&self, keyexpr: &str) -> Result<KeptToken, AdvancedPublisherError> {
-        let id = crate::liveliness::declare_token(&self.session, keyexpr, None)
+        let id = crate::liveliness::declare_token(self.session(), keyexpr, None)
             .map_err(|code| Self::refusal("liveliness token", code))?;
         Ok(KeptToken {
-            engine: self.session.engine.clone(),
+            engine: self.engine.clone(),
             id,
         })
     }
@@ -288,7 +311,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         keyexpr: &str,
         _sporadic: bool,
     ) -> Result<KeptPublisher, AdvancedPublisherError> {
-        KeptPublisher::declare(&self.session, keyexpr, PublisherQos::pico_default())
+        KeptPublisher::declare(self.session(), keyexpr, PublisherQos::pico_default())
             .map_err(|code| Self::refusal("beacon publisher", code))
     }
 
@@ -335,7 +358,7 @@ impl AdvancedPublisherPlane for PicoPlane {
             // An on-demand beacon from a publisher that declared none: on the
             // key itself.
             None => {
-                let _ = self.session.engine.publish_on_wire_all(
+                let _ = self.engine.publish_on_wire_all(
                     keyexpr,
                     &WireKey::literal(),
                     payload,
@@ -455,11 +478,11 @@ mod tests {
         );
         let plane = PicoPlane::new(
             PicoSession {
-                engine: shared.as_engine(),
+                engine: &shared.as_engine(),
                 mode: WhatAmI::Peer,
-                hlc: NodeHlc::default(),
-                time: crate::last_timestamp::SessionTime::new(),
             },
+            NodeHlc::default(),
+            crate::last_timestamp::SessionTime::new(),
             PublisherQos::pico_default(),
         );
         let ticks = Arc::new(AtomicUsize::new(0));
@@ -522,11 +545,11 @@ mod tests {
         );
         let plane = Arc::new(PicoPlane::new(
             PicoSession {
-                engine: shared.as_engine(),
+                engine: &shared.as_engine(),
                 mode: WhatAmI::Peer,
-                hlc: hlc.clone(),
-                time: time.clone(),
             },
+            hlc.clone(),
+            time.clone(),
             PublisherQos::pico_default(),
         ));
         // The options are non-exhaustive, so they are built from their default and set.

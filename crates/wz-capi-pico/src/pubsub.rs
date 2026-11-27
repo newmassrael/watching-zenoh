@@ -1585,7 +1585,7 @@ impl PlainPublisher {
     /// itself: `declare_entity_at` with a key of its own.
     #[cfg(feature = "advanced")]
     pub(crate) fn declare(
-        session: &PicoSession,
+        session: PicoSession<'_>,
         keyexpr: &str,
         declared: PublisherQos,
     ) -> Result<Self, ZResult> {
@@ -1611,7 +1611,7 @@ impl PlainPublisher {
     /// `at` is valid for the write of a `FilteredKey` and holds none.
     unsafe fn declare_entity_at(
         at: *mut FilteredKey,
-        session: &PicoSession,
+        session: PicoSession<'_>,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
         declared: &PublisherQos,
@@ -1632,7 +1632,7 @@ impl PlainPublisher {
         // was declared with, when a declaration names the whole key: the filter's row keeps it.
         let wire = &filtered.wire;
         filtered.filter.keep_plain(
-            &session.engine,
+            session.engine,
             matches!(wire.names_in(filtered.keyexpr()), (id, None) if id != 0)
                 .then(|| {
                     let mut bare = put_options();
@@ -3648,7 +3648,7 @@ pub unsafe extern "C" fn z_declare_publisher(
         // The publisher's place is taken from its session before it is declared, so a session
         // with no place left refuses the declaration and nothing is declared.
         let Some(slot) = crate::object_slot::Slot::take_entity(
-            &session.engine,
+            session.engine,
             crate::object_slot::Kind::Publisher,
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
@@ -3667,7 +3667,7 @@ pub unsafe extern "C" fn z_declare_publisher(
             core::ptr::addr_of_mut!((*plain).declared).write(declared);
             #[cfg(feature = "engine-tokio")]
             core::ptr::addr_of_mut!((*at).shared)
-                .write(crate::session::EngineHold::clone(&session.engine));
+                .write(crate::session::EngineHold::clone(session.engine));
             core::ptr::addr_of_mut!((*at).loaned_keyexpr)
                 .write(z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0));
             core::ptr::addr_of_mut!((*at).record).write(crate::keyexpr::RecordKey::UNLENT);

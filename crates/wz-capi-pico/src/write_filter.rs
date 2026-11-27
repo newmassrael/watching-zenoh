@@ -48,8 +48,6 @@
 use wz_capi_port::{
     FilterId, FilterPlane, FilteredPut, KeyView, MatchId, MatchingSink, Refusal, WireKey,
 };
-#[cfg(feature = "advanced")]
-use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::WhatAmI;
 
@@ -69,51 +67,31 @@ pub(crate) fn session_mode(handle: &PicoSessionHandle) -> WhatAmI {
     handle.ext.mode
 }
 
-/// What an entity needs of the session it is declared on, OWNED: the key table
-/// and the role.
+/// What an entity needs of the session it is declared on, lent from the session's handle for
+/// the length of a declaring call: the engine the session's drive holds, which the key
+/// declarations and the entities live in, and the session's role, which the write filter and the
+/// retractions follow. Both are the handle's own; the view keeps no copy of either.
 ///
-/// A declaring entry point borrows the session handle out of the C handle for
-/// the length of its call, and that is all it needs. A composite that declares
-/// more entities later — an advanced publisher beaconing from a task, say — has
-/// to keep what it declares them with, and the borrowed state cannot be kept. So
-/// the two facts every declaration reads are lifted out: the registry the key
-/// declarations and the entities live in, and the role the write filter and the
-/// retractions follow.
+/// A composite that declares more entities later (an advanced publisher beaconing from a task)
+/// keeps a count of the engine and the role where it keeps them, and lends the same view from
+/// those.
 ///
 /// The registry is the port's [`Engine`], which is all the client surface (keys,
 /// publishers, subscribers, matching, write filters) and the advanced plane may
 /// name (`docs/capi-pico-on-coop-engine.md`).
-#[derive(Clone)]
-pub(crate) struct PicoSession {
-    pub(crate) engine: EngineHold,
+#[derive(Clone, Copy)]
+pub(crate) struct PicoSession<'a> {
+    pub(crate) engine: &'a EngineHold,
     pub(crate) mode: WhatAmI,
-    /// The session's clock — `NodeHlc::disabled()` for a session this ABI did
-    /// not open, which no C entry point can hand it. Read by the advanced plane alone, whose
-    /// publisher stamps with it.
-    #[cfg(feature = "advanced")]
-    pub(crate) hlc: NodeHlc,
-    /// Every time the session gives, which the advanced plane's publisher stamps through, as a
-    /// program's `z_timestamp_new` does.
-    #[cfg(feature = "advanced")]
-    pub(crate) time: crate::last_timestamp::SessionTime,
 }
 
-impl PicoSession {
-    /// The session behind a borrowed handle, as its open made it once: a door that declares on it
-    /// borrows it, and one that keeps it clones it where it keeps it.
-    pub(crate) fn of(handle: &PicoSessionHandle) -> &Self {
-        &handle.pico
-    }
-
-    /// The session running on `engine` whose pico-side state is `ext`: made once, by the open.
-    pub(crate) fn over(engine: EngineHold, ext: &crate::session_ext::PicoSessionExt) -> Self {
+impl<'a> PicoSession<'a> {
+    /// The session behind a borrowed handle: its drive's engine and its role, where the handle
+    /// keeps them.
+    pub(crate) fn of(handle: &'a PicoSessionHandle) -> Self {
         Self {
-            engine,
-            mode: ext.mode,
-            #[cfg(feature = "advanced")]
-            hlc: ext.hlc.clone(),
-            #[cfg(feature = "advanced")]
-            time: ext.time.clone(),
+            engine: crate::session::engine_held(handle),
+            mode: handle.ext.mode,
         }
     }
 }
@@ -162,13 +140,13 @@ impl WriteFilter {
     /// Beside the filter, its key as the session's record of it keeps it, valid until the filter
     /// is undeclared.
     pub(crate) fn declare(
-        session: &PicoSession,
+        session: PicoSession<'_>,
         plane: FilterPlane,
         keyexpr: &str,
         wire: &WireKey,
         count_local: bool,
     ) -> Result<(Self, KeyView), ZResult> {
-        let engine = &session.engine;
+        let engine = session.engine;
         let ask = interest_ask(engine, session.mode, keyexpr, wire);
         let declared = engine
             .declare_write_filter(plane, keyexpr, wire, ask, count_local)
@@ -301,7 +279,7 @@ impl FilteredKey {
         all(test, not(feature = "engine-tokio"), feature = "peer")
     ))]
     pub(crate) fn declare(
-        session: &PicoSession,
+        session: PicoSession<'_>,
         plane: FilterPlane,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
@@ -330,13 +308,13 @@ impl FilteredKey {
     /// `at` is valid for the write of a `FilteredKey` and holds none.
     pub(crate) unsafe fn declare_at(
         at: *mut Self,
-        session: &PicoSession,
+        session: PicoSession<'_>,
         plane: FilterPlane,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
         count_local: bool,
     ) -> Result<(), ZResult> {
-        let key = crate::keyexpr::EntityKey::whole(&session.engine, keyexpr, existing)?;
+        let key = crate::keyexpr::EntityKey::whole(session.engine, keyexpr, existing)?;
         let eid = session.engine.next_entity_id().ok_or(Z_ERR_GENERIC)?;
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
@@ -347,7 +325,7 @@ impl FilteredKey {
         // and an engine that keeps none refuses the entity, its filter undeclared.
         drop(key);
         if lent.is_absent() {
-            filter.retract(&session.engine);
+            filter.retract(session.engine);
             return Err(Z_ERR_GENERIC);
         }
         // SAFETY: the caller's: `at` is room for one, written field by field, once each.
@@ -444,26 +422,28 @@ mod tests {
         z_session_move,
     };
 
-    /// A door that declares on a session borrows the one view its open made: the same each time,
-    /// over the engine the session's entities keep and in the session's role. Turned red by a view
-    /// made per call, or over another engine.
+    /// A door that declares on a session borrows the handle's own facts: the engine where the
+    /// session's drive holds it, and the session's role; the view is made of those each time and
+    /// keeps no count of the engine. Turned red by a view kept beside the drive (its engine at
+    /// another address), or one that takes a count when it is made.
     #[test]
     fn a_door_borrows_the_view_its_session_was_opened_with() {
         let mut session = listening_on_loopback();
         // SAFETY: the session is live and owned by this frame.
         let handle = unsafe { session_handle(z_session_loan(&session)) }
             .expect("an open session has its handle");
+        let held = crate::session::EngineHold::holders(engine_held(handle));
+        let view = PicoSession::of(handle);
         assert!(
-            core::ptr::eq(PicoSession::of(handle), PicoSession::of(handle)),
-            "one view, lent each time"
+            core::ptr::eq(view.engine, engine_held(handle)),
+            "the drive's own count, lent"
         );
-        let kept = engine_held(handle).clone();
-        assert!(
-            crate::session::EngineHold::ptr_eq(&PicoSession::of(handle).engine, &kept),
-            "over the session's engine"
+        assert_eq!(
+            crate::session::EngineHold::holders(view.engine),
+            held,
+            "the view takes no count"
         );
-        assert!(PicoSession::of(handle).mode == session_mode(handle));
-        drop(kept);
+        assert!(view.mode == session_mode(handle));
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };
     }
@@ -486,16 +466,18 @@ mod tests {
         assert_ne!(id, 0, "the wire names the key's own declaration");
         assert_eq!(rest, None, "the declaration names the whole key");
         assert!(
-            filtered.filter.active(&pico.engine),
+            filtered.filter.active(pico.engine),
             "nothing matches on a session with no peer"
         );
         #[cfg(feature = "unstable-api")]
         {
-            let next = wz_capi_port::SessionEngine::next_entity_id(&*pico.engine)
-                .expect("the session has ids left");
+            let next = wz_capi_port::SessionEngine::next_entity_id(
+                crate::session::EngineHold::as_ref(pico.engine),
+            )
+            .expect("the session has ids left");
             assert!(next > filtered.eid, "the entity's id was taken first");
         }
-        filtered.retract(&pico.engine);
+        filtered.retract(pico.engine);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };
     }
