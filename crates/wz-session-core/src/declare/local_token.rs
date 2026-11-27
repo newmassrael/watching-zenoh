@@ -788,9 +788,12 @@ mod tests {
     //! `std` is available under `#[cfg(test)]` per the wz-codecs sibling
     //! convention; production stays no_std + (optionally) alloc. The
     //! no-heap `respond_to_interest_borrowed` is exercised directly; the
-    //! `alloc` inbound-parse path is exercised through `InterestOwned`.
+    //! `alloc` inbound-parse path is exercised through `InterestOwned`, and
+    //! its tests carry its gate: the slot profile without `alloc` compiles
+    //! neither the owned Interest nor the peer map they hand it.
 
     use super::*;
+    #[cfg(feature = "alloc")]
     use hashbrown::HashMap;
 
     /// Count `(tokens, finals)` staged in `pending`.
@@ -1018,7 +1021,7 @@ mod tests {
     /// `alloc` inbound-parse path: an InterestFinal (C/F both clear) is
     /// the subscriber's own terminator, not a request — the declarer
     /// stages nothing.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn final_interest_is_noop() {
         let mut reg = LocalTokenRegistry::new();
@@ -1038,7 +1041,7 @@ mod tests {
     /// `alloc` inbound-parse path: a non-final Interest whose body does
     /// NOT target tokens is out of scope for the liveliness-token
     /// declarer.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn non_tokens_interest_is_noop() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -1074,7 +1077,7 @@ mod tests {
     /// pre-fix gate was "non-final" (C|F), which wrongly replied to a
     /// FUTURE-only (C-clear) interest; this pins the corrected
     /// CURRENT-only gate.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn future_only_interest_stages_nothing() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -1113,7 +1116,7 @@ mod tests {
 
     /// `alloc` inbound-parse path: a non-final TOKENS Interest funnels
     /// through to the no-heap staging SSOT.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn tokens_interest_stages_matching_response() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -1151,7 +1154,7 @@ mod tests {
     /// it: an Interest is answered with the tokens of the holder the registry is handed, and a
     /// token the registry alone holds is not staged. Turned red by an answer read from the
     /// registry's own rows whatever holder it is handed.
-    #[cfg(all(feature = "storage-profile", feature = "alloc"))]
+    #[cfg(feature = "alloc")]
     #[test]
     fn an_interest_is_answered_with_the_tokens_of_the_holder_it_is_handed() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -1220,7 +1223,7 @@ mod tests {
     /// buffer holds chains of, under the build's own bounds. The chains that fit
     /// are staged whole, the last is refused whole and reported, and every staged
     /// chain still ends in its own `Final`.
-    #[cfg(all(feature = "storage-profile", feature = "bounded-heapless"))]
+    #[cfg(all(feature = "alloc", feature = "bounded-heapless"))]
     #[test]
     fn a_frame_of_interests_past_the_buffer_refuses_the_chain_that_does_not_fit() {
         use crate::bounded::BoundedString;
@@ -1275,7 +1278,7 @@ mod tests {
     /// resolves `ours/**` in our space and `theirs/**` in the peer's, and one
     /// token is registered under each prefix. Reading the wrong space replays
     /// the OTHER token — a confident wrong answer, not silence.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn an_own_space_alias_resolves_in_our_space_on_the_local_token_interest_plane() {
         use alloc::string::ToString;
@@ -1339,7 +1342,7 @@ mod tests {
     /// ANTI-VACUITY twin: with only the peer's space the same Interest
     /// resolves nothing, so NO token is replayed (the bare `Final` still
     /// terminates the chain — an unresolvable interest is not a hang).
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn without_an_own_space_the_local_token_interest_plane_refuses_the_same_alias() {
         use alloc::string::ToString;
