@@ -4247,8 +4247,9 @@ mod program_clock;
 mod queryable;
 pub(crate) mod redial_heap;
 mod redial_wait;
-// The state of a session whose shape the build fixes: a build that plans at the open has none.
-#[cfg(not(feature = "runtime-plan"))]
+// The state of a session whose shape the build fixes: a build that plans at the open has none,
+// and one whose tables take their memory on use holds a state of its own instead (`on_use`).
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 mod region;
 mod replay;
 #[cfg(wz_round)]

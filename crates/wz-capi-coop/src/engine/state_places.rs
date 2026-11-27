@@ -8,7 +8,14 @@
 //! the cells its registry and its Router are lent in for a step. Each lies in a `MaybeUninit` field, which the region's drop does not drop: the
 //! [`Placed`] owner written there does, wherever the session holds it, so each value is let go in
 //! the order the session lets its owner go, as one the arena held was.
+//!
+//! Where the tables take their memory at their first row (`tables-on-use`), the same places lie
+//! in a state of the session's own (`OwnState`), beside the budget its keys are counted against:
+//! one allocation the open takes from the allocator apart from its arena, held by `OwnBlock`,
+//! which gives it back after every owner written in it.
 
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+use core::alloc::Layout;
 use core::mem::MaybeUninit;
 use core::ptr::{addr_of_mut, NonNull};
 
@@ -46,6 +53,13 @@ use crate::calls::CoopCalls;
 use crate::round::{Round, RoundRowCounts, RoundRows};
 #[cfg(feature = "query")]
 use wz_session_core::bounded::Lent;
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+use wz_session_core::limits::SessionLimits;
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+use wz_session_core::on_use::{BudgetKeys, KeyBudget};
+
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+use crate::arena::ArenaRefused;
 
 /// The legs a region keeps a row of each table of for: one for each get its tables of pending gets
 /// hold, the dial role's face's and, with `local-queryable`, the session's own
@@ -300,6 +314,129 @@ impl StatePlaces {
     }
 }
 
+/// The state of a session whose tables take their memory at their first row (`tables-on-use`),
+/// held apart from its arena: the places of the state's own values and the budget the session's
+/// keys are counted against. The allocator gives it zeroed at the open ([`OwnBlock::take`]),
+/// every place holding no value until its owner writes it, and it is reached through a pointer,
+/// each field projected from it, as a region is.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+pub(crate) struct OwnState {
+    places: StatePlaces,
+    /// The budget the session's keys are counted against, written by the open ([`Self::place`]):
+    /// a key is an allocation of its own, which points at its budget, so the budget lies where it
+    /// never moves while a key of it lives.
+    keys: MaybeUninit<KeyBudget>,
+}
+
+// SAFETY: the places are `ZeroEmpty`, and the key budget is a `MaybeUninit`, valid as any bytes.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+unsafe impl ZeroEmpty for OwnState {}
+
+// The budget lies in a `MaybeUninit`, which the state's drop leaves alone: a budget whose drop did
+// anything would not have it done.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+const _: () = assert!(
+    !core::mem::needs_drop::<KeyBudget>(),
+    "the state's drop leaves the key budget as it lies"
+);
+
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+impl OwnState {
+    /// Write the budget the session's keys are counted against in the zeroed state at `state`:
+    /// its keys at most `limits`' `MAX_KEYEXPR_BYTES` long and together at most its
+    /// `KEY_ARENA_BYTES`, counted as the key arena would count them; and hand back the handle the
+    /// session's tables make their keys through. The state's places are written by their owners
+    /// after.
+    ///
+    /// # Safety
+    /// `state` points at an `OwnState` of all zero bytes, aligned, that nothing else reaches, and
+    /// which neither moves nor is given back while a key counted against its budget, or a table or
+    /// a handle holding the budget, lives.
+    pub(crate) unsafe fn place(state: NonNull<Self>, limits: &SessionLimits) -> BudgetKeys {
+        // SAFETY: the caller's contract: the budget's field is the state's, aligned for a budget,
+        // and reached by this write and the reference after it alone, before any key exists; it is
+        // not written again.
+        let budget = unsafe {
+            let field = addr_of_mut!((*state.as_ptr()).keys).cast::<KeyBudget>();
+            field.write(KeyBudget::new(
+                limits.key_arena_bytes(),
+                limits.max_keyexpr_bytes_held(),
+            ));
+            &*field
+        };
+        // SAFETY: the caller's contract: the state, and the budget in it, neither moves nor is
+        // given back while a key, a table or a handle of the budget lives.
+        unsafe { budget.keys() }
+    }
+
+    /// Where the places of the state's own values in the state at `state` lie.
+    ///
+    /// # Safety
+    /// `state` points at an `OwnState`.
+    pub(crate) unsafe fn places_at(state: NonNull<Self>) -> NonNull<StatePlaces> {
+        // SAFETY: the caller's contract: a field of a value that lies at a pointer that is not null
+        // is not null either.
+        unsafe { NonNull::new_unchecked(addr_of_mut!((*state.as_ptr()).places)) }
+    }
+}
+
+/// The zeroed `T` in an allocation of its own the allocator gave, every field of it empty
+/// (`ZeroEmpty`) until its owner writes it, dropped in place and given back when this is. It
+/// holds the pointer and never a reference to the whole `T`: what lies in it is reached by
+/// fields projected from [`Self::as_ptr`], as a region's block is reached.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+pub(crate) struct OwnBlock<T: ZeroEmpty> {
+    at: NonNull<T>,
+}
+
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+impl<T: ZeroEmpty> OwnBlock<T> {
+    /// A `T` of all zero bytes in an allocation of its own. Refused, having taken nothing, when
+    /// the allocator has no room for it.
+    pub(crate) fn take() -> Result<Self, ArenaRefused> {
+        const {
+            assert!(
+                core::mem::size_of::<T>() != 0,
+                "an allocation of its own holds some bytes"
+            )
+        };
+        let layout = Layout::new::<T>();
+        // SAFETY: the layout's size is not zero (above).
+        let at = NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) }.cast::<T>()).ok_or(
+            ArenaRefused::NoMemory {
+                bytes: layout.size(),
+            },
+        )?;
+        Ok(Self { at })
+    }
+
+    /// Where the `T` lies, aligned and of all zero bytes until its owner writes it.
+    pub(crate) fn as_ptr(&self) -> NonNull<T> {
+        self.at
+    }
+}
+
+// SAFETY: the block owns the `T` at its pointer, which nothing else reaches, as a `Box` owns its
+// value.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+unsafe impl<T: ZeroEmpty + Send> Send for OwnBlock<T> {}
+// SAFETY: a shared block hands out nothing but its pointer, as above.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+unsafe impl<T: ZeroEmpty + Sync> Sync for OwnBlock<T> {}
+
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+impl<T: ZeroEmpty> Drop for OwnBlock<T> {
+    fn drop(&mut self) {
+        // SAFETY: the block holds a `T` (zero bytes are one, and every write since kept one),
+        // dropped once, here, in place; the allocation is given back after it with the layout it
+        // was taken with, and nothing reaches it after.
+        unsafe {
+            core::ptr::drop_in_place(self.at.as_ptr());
+            alloc::alloc::dealloc(self.at.as_ptr().cast::<u8>(), Layout::new::<T>());
+        }
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
@@ -383,5 +520,41 @@ mod tests {
             assert!(within.contains(&(tables.refused_finals.as_ptr() as usize)));
         }
         drop(tables);
+    }
+
+    /// The state a session whose tables take their memory on use holds apart from its arena is an
+    /// allocation of its own: it holds the session's key budget, which the open writes at the
+    /// session's `KEY_ARENA_BYTES`, a key made through the handle it hands back counted there as
+    /// its arena block and given back, and the places of the state's own values lie inside it.
+    /// Turned red by a budget of other bytes than the limits state, by a handle of no budget
+    /// (`BudgetKeys::default` in place of `budget.keys()`), which keeps no key, or by places
+    /// projected anywhere but the state.
+    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[test]
+    fn an_on_use_state_holds_the_sessions_key_budget_and_its_places() {
+        use wz_session_core::bounded::KeyMaker;
+        use wz_session_core::key_arena::block_bytes;
+        let state = OwnBlock::<OwnState>::take().expect("the test allocator answers");
+        let limits = SessionLimits::BUILD;
+        // SAFETY: the state is zeroed, aligned and this test's alone, and is given back after the
+        // last key counted against its budget.
+        let keys = unsafe { OwnState::place(state.as_ptr(), &limits) };
+        assert_eq!(keys.counts().bytes, limits.key_arena_bytes());
+        assert_eq!(keys.counts().used, 0);
+        let key = keys.key("demo/state").expect("room for a key");
+        assert_eq!(
+            keys.counts().used,
+            block_bytes("demo/state".len()).expect("a short key's block")
+        );
+        drop(key);
+        assert_eq!(keys.counts().used, 0, "the key's bytes went back");
+        let start = state.as_ptr().as_ptr() as usize;
+        // SAFETY: the state is the one taken above.
+        let places = unsafe { OwnState::places_at(state.as_ptr()) }.as_ptr() as usize;
+        assert!(
+            (start..start + core::mem::size_of::<OwnState>()).contains(&places),
+            "the places lie in the state"
+        );
+        drop(state);
     }
 }

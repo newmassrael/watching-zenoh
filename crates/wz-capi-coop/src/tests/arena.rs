@@ -276,8 +276,9 @@ fn an_open_whose_arena_the_memory_refuses_dials_nothing() {
         .expect("the build's limits lay an arena out");
     let bytes = plan.reserved_bytes().expect("within the address space");
     // A session of the region's form asks for its region and its arena as one block, the arena
-    // after the region on a span's alignment.
-    #[cfg(not(feature = "runtime-plan"))]
+    // after the region on a span's alignment; one whose tables take their memory on use takes its
+    // state from the allocator apart, and asks the memory for its arena alone.
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     let bytes = bytes
         + wz_session_core::bounded::Arena::span(core::mem::size_of::<crate::region::StateRegion>())
             .expect("a region within the address space");
@@ -3707,11 +3708,13 @@ fn a_groups_face_counts_every_members_aliases_in_the_pool() {
     );
 }
 
-/// The planes the session's state owns lie in the session's own block, reached by its engine and
+/// The planes the session's state owns lie in the session's own memory, reached by its engine and
 /// its tasks through handles that count nothing: each in the place its plan laid out for it in the
-/// arena where the open lays the plan out, and in its field of the region, the head of the block
-/// the arena is the tail of, where the build fixes the session's shape (`StatePlaces`). Turned red
-/// by a plane made on the heap, or by one placed anywhere but where its build puts it.
+/// arena where the open lays the plan out, and in its field of the state (`StatePlaces`) where it
+/// does not: the region, the head of the block the arena is the tail of, where the build fixes the
+/// session's shape, or the session's own state where its tables take their memory on use. Turned
+/// red by a plane made on the heap apart from that state, or by one placed anywhere but where its
+/// build puts it.
 #[test]
 #[cfg(any(feature = "queryable", feature = "query", feature = "connectivity"))]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
@@ -3724,7 +3727,7 @@ fn a_sessions_planes_lie_in_its_own_arena() {
         #[cfg(feature = "runtime-plan")]
         assert!(engine.arena_holds(at), "the plane lies in the arena");
         #[cfg(not(feature = "runtime-plan"))]
-        assert!(engine.region_holds(at), "the plane lies in the region");
+        assert!(engine.state_holds(at), "the plane lies in the state");
     }
 }
 

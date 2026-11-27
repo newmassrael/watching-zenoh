@@ -124,16 +124,17 @@ mod calls;
 mod engine;
 // The places a session's arena lends for values lodged by counts, given back from any thread.
 mod lodging;
-// The state of a session whose shape the build fixes, one struct the allocator hands zeroed.
-#[cfg(not(feature = "runtime-plan"))]
+// The state of a session whose shape the build fixes, one struct the allocator hands zeroed: a
+// session whose tables take their memory on use holds a state of its own instead.
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub mod region;
 // The tables take their memory on use in a session whose shape the build fixes. Features add, so a
 // build may name `tables-on-use` beside `runtime-plan` (`listen` and `group` turn it on, and
 // `--all-features` names both): the session laid out at the open from its config wins, its faces'
 // tables kept in the pools that arena lends, and the build is the `runtime-plan` form whole. Each
 // item of the on-use form reads the feature beside `not(feature = "runtime-plan")`, and its twin
-// the negation of both (`region`, compiled only without `runtime-plan`, reads the feature alone),
-// so no item of the on-use form is compiled into that build (`form_precedence_tests`).
+// the negation of both, so no item of the on-use form is compiled into that build
+// (`form_precedence_tests`).
 /// The storage policy of the session's registry, named once so every table of it and the rows each
 /// is given agree on it: lent from the arena where the open lays the arena out from its config
 /// (`runtime-plan`), placed in the region the build lays out otherwise (`region`), and taken from

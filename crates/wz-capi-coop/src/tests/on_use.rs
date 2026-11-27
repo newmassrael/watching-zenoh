@@ -4,8 +4,9 @@
 //! A session whose tables take their memory at their first row (`tables-on-use`), against the
 //! router stand-in: its keys are counted against a budget of the session's `KEY_ARENA_BYTES`, a
 //! declaration's key as the block the key arena would give it, given back with the declaration;
-//! the keys the program's objects hold are copies of their own; and a subscriber declared after the
-//! open is told to the router and handed what it pushes.
+//! the keys the program's objects hold are copies of their own; a subscriber declared after the
+//! open is told to the router and handed what it pushes; and the state the session's own values and
+//! its key budget lie in is taken from the allocator apart from its arena.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -28,7 +29,7 @@ fn keys(engine: &Engine) -> &dyn SessionKeys {
 /// The session's keys are counted against a budget of its `KEY_ARENA_BYTES`: a key expression it
 /// declares takes the block the key arena would give it, and gives it back with its last hold.
 /// Turned red by an open that hands the session's state a budget of other bytes than its limits
-/// state (`StateRegion::place`), by a declaration whose key the budget does not count, or by one
+/// state (`OwnState::place`), by a declaration whose key the budget does not count, or by one
 /// whose bytes do not go back with it.
 #[test]
 fn a_declarations_key_is_counted_against_the_sessions_budget_and_given_back() {
@@ -120,4 +121,86 @@ fn a_subscriber_declared_after_the_open_is_told_and_handed_a_push() {
     });
     router.send(Command::Push("demo/a", b"hello"));
     until(&engine, "the push", || received.load(Ordering::SeqCst) == 1);
+}
+
+/// A session whose tables take their memory on use takes the state its own values and its key
+/// budget lie in from the allocator, apart from its arena: its memory is asked for one block, the
+/// arena its plan lays out and nothing before it, and every plane the state owns lies in that
+/// state and not in the arena. Turned red by an open that lays the state at the head of the
+/// arena's block (`SessionArena::reserve_after`), which asks the memory for the state's bytes too,
+/// or by a plane placed anywhere but the state.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart() {
+    use super::{host_links, LOOPBACK};
+    use crate::arena::{
+        AllocatorMemory, ArenaMemory, ArenaRegion, HeldPlaces, OpenRegion, OpenStorage, PlanFrom,
+        PlanShape,
+    };
+    use wz_runtime_posix::stream::PosixTcpDial;
+    use wz_runtime_posix::{PosixClock, PosixEntropy};
+    use wz_session_core::bounded::ARENA_ALIGN;
+
+    /// The allocator, counting its reservations and keeping the bytes it was last asked for.
+    struct Counted {
+        reserves: AtomicUsize,
+        last: AtomicUsize,
+    }
+
+    impl ArenaMemory for Counted {
+        fn reserve(&self, layout: core::alloc::Layout) -> Option<core::ptr::NonNull<u8>> {
+            self.reserves.fetch_add(1, Ordering::SeqCst);
+            self.last.store(layout.size(), Ordering::SeqCst);
+            AllocatorMemory.reserve(layout)
+        }
+
+        unsafe fn release(&self, base: core::ptr::NonNull<u8>, layout: core::alloc::Layout) {
+            // SAFETY: the caller's contract: the allocator gave `base` for `layout`, given back
+            // once.
+            unsafe { AllocatorMemory.release(base, layout) }
+        }
+    }
+
+    static BLOCK: Counted = Counted {
+        reserves: AtomicUsize::new(0),
+        last: AtomicUsize::new(0),
+    };
+    let router = Router::start(CatchAll::None);
+    let config = super::config(&router);
+    let region: &'static OpenRegion = Box::leak(Box::new(
+        Engine::open_region(
+            ArenaRegion::of(PlanShape::of(&config), config.limits)
+                .expect("the client's limits lay a region out"),
+            HeldPlaces::NONE,
+        )
+        .expect("the engine's places lay out"),
+    ));
+    let engine = Engine::open_made_in(
+        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        || super::config(&router),
+        wz_session_core::policy::SessionPolicy::defaults(),
+        crate::OpenKeyIds::none(),
+        OpenStorage {
+            memory: &BLOCK,
+            plan: PlanFrom::Region(region),
+        },
+    )
+    .expect("the session opens");
+    assert_eq!(
+        BLOCK.reserves.load(Ordering::SeqCst),
+        1,
+        "one block, the arena's"
+    );
+    assert_eq!(
+        BLOCK.last.load(Ordering::SeqCst),
+        engine.arena_bytes().max(ARENA_ALIGN),
+        "the block is the plan's arena alone"
+    );
+    #[cfg(any(feature = "queryable", feature = "query", feature = "connectivity"))]
+    for at in engine.plane_places() {
+        assert!(engine.state_holds(at), "the plane lies in the state");
+        assert!(!engine.arena_holds(at), "and not in the arena");
+    }
 }

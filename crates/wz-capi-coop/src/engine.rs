@@ -266,7 +266,7 @@ mod queries;
 mod registry;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 use crate::region::RegionField;
-#[cfg(not(feature = "runtime-plan"))]
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 use crate::region::{RegionBlock, StateRegion};
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(crate) use registry::placed::{RegistryRegion, REGISTRY_REGION_LINES};
@@ -287,6 +287,25 @@ use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
 use state_places::PlacedTables;
 #[cfg(not(feature = "runtime-plan"))]
 pub(crate) use state_places::StatePlaces;
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+use state_places::{OwnBlock, OwnState};
+
+/// The state the places of the session's own values and the store of its keys lie in where the
+/// open lends neither from its arena: the region at the head of the arena's block where the build
+/// fixes the session's shape, which holds the registry too, or a state of the session's own the
+/// allocator gives where its tables take their memory on use.
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
+type StateLayout = StateRegion;
+/// See the form of a build without `tables-on-use`.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+type StateLayout = OwnState;
+/// What holds that state and drops it in place after every owner written in it: the region's
+/// block, whose memory its arena gives back, or the state's own allocation, which it gives back.
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
+type StateHold = RegionBlock<StateRegion>;
+/// See the form of a build without `tables-on-use`.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+type StateHold = OwnBlock<OwnState>;
 
 /// How the session's state holds its registry: by value where the open lent its tables from the
 /// arena or where they take their memory at their first row, and by the handle of the field of the
@@ -301,7 +320,7 @@ type RegistryHold = RegionField<Registry>;
 #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
 type KeyStore = KeySpace;
 /// See the form of a build without `tables-on-use`: the handle of the session's key budget, which
-/// its region holds, where the tables take their memory at their first row.
+/// its own state holds, where the tables take their memory at their first row.
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 type KeyStore = wz_session_core::on_use::BudgetKeys;
 
@@ -842,11 +861,12 @@ struct SessionLent {
     runtime: RuntimePlace,
     /// The place the session's engine is written at, and the count of the arena it is kept by.
     engine: EnginePlace,
-    /// The region the session's registry and its key arena lie in, or its key budget alone where
-    /// the tables take their memory on use: after the registry, which its handle drops in place
-    /// where it lies there, and every table that keeps a key there.
+    /// The state the places of the session's own values and its keys lie in (`StateHold`): the
+    /// region, which holds the registry too, or the session's own state where the tables take
+    /// their memory on use. After the registry, which its handle drops in place where it lies in the
+    /// region, and every table that keeps a key there.
     #[cfg(not(feature = "runtime-plan"))]
-    state: RegionBlock<StateRegion>,
+    state: StateHold,
     arena: SessionArena,
 }
 
@@ -937,19 +957,24 @@ fn lend_session(
         runtime: runtime_bytes,
         engine: engine_bytes,
     } = from.places();
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(any(feature = "runtime-plan", feature = "tables-on-use"))]
     let mut arena = SessionArena::reserve(&plan, memory)?;
     // The registry and the key arena lie in the region the build lays out, the head of the one
     // block the open reserves, zeroed, the arena of what it sizes at run time after it: the
     // session's tables are the region's fields, placed over their rows by one walk.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     let (mut arena, state) = SessionArena::reserve_after::<StateRegion>(&plan, memory)?;
     // SAFETY: the head is a zeroed `StateRegion` this open alone reaches; the arena gives the
     // block back only after its last holder, and the region's block is dropped before the arena
     // wherever both are held (here, being made after it, then `SessionLent` and `Core`, whose
     // arena is their last field).
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     let state = unsafe { RegionBlock::<StateRegion>::within(state) };
+    // Where the tables take their memory on use, the places of the state's own values and the key
+    // budget lie in a state of the session's own, zeroed by the allocator apart from the arena;
+    // a refusal here gives the arena back.
+    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    let state = OwnBlock::<OwnState>::take()?;
     let mut lend = arena.lender();
     // Held whole to the end, as the value handed back holds it; the state's tables, which the
     // open moves into what it makes one by one, are taken apart at once instead: a table held as
@@ -987,19 +1012,19 @@ fn lend_session(
     let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
     #[cfg(not(feature = "runtime-plan"))]
     lend.finish().map_err(ArenaRefused::Lend)?;
-    // SAFETY: the block is a zeroed `StateRegion` this open alone reaches; it neither moves nor goes
-    // back before the registry and every key of it are let go of, being held after them by what
-    // this hands back and then by the session's state.
+    // SAFETY: the block is a zeroed state (`StateLayout`) this open alone reaches; it neither moves
+    // nor goes back before the registry and every key of it are let go of, being held after them
+    // by what this hands back and then by the session's state.
     #[cfg(not(feature = "runtime-plan"))]
-    let keys = unsafe { StateRegion::place(state.as_ptr(), resolve_limits(config)) };
+    let keys = unsafe { StateLayout::place(state.as_ptr(), resolve_limits(config)) };
     // The plane, the round, the step places, the queryables' plane and the plain tables' rows lie
-    // in the region where the build fixes the session's shape, each in a field of it no other
-    // owner reaches.
-    // SAFETY: the region was placed above, and nothing reaches its places' fields but this open,
+    // in the region where the build fixes the session's shape, or in the session's own state where
+    // its tables take their memory on use, each in a field of it no other owner reaches.
+    // SAFETY: the state was placed above, and nothing reaches its places' fields but this open,
     // which writes each once; the block is held after every owner written in it (`SessionLent`,
     // then `Core`), and neither moves nor goes back before them.
     #[cfg(not(feature = "runtime-plan"))]
-    let region_places = unsafe { StateRegion::places_at(state.as_ptr()) };
+    let region_places = unsafe { StateLayout::places_at(state.as_ptr()) };
     // SAFETY: as above, for the plain tables' fields: each table is held by the plane or the
     // state it is moved into, both dropped before the block.
     #[cfg(all(
@@ -2920,12 +2945,13 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// drop alone.
     #[cfg(feature = "listen")]
     _admission: Placed<Admission<C>>,
-    /// The region the session's registry and its key arena lie in (`crate::region`): after the
-    /// session's state, whose handle of the registry drops it in place, and every table that keeps
-    /// a key in it. Held for its owner's drop alone: the session reaches the region through those
-    /// handles.
+    /// The state the places of the session's own values and its keys lie in (`StateHold`): the
+    /// region, which holds its registry too (`crate::region`), or the session's own state where
+    /// its tables take their memory on use. After the session's state, whose handle of the registry
+    /// drops it in place, and every table that keeps a key in it. Held for its owner's drop alone:
+    /// the session reaches the state through those handles.
     #[cfg(not(feature = "runtime-plan"))]
-    _state: RegionBlock<StateRegion>,
+    _state: StateHold,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -6897,18 +6923,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // No watcher yet: the plane holds its watchers and its rows itself, so a program that
         // watches after the open is told its faces with nothing allocated. The plane is built in
         // the row the plan laid out for it (`ArenaPlan::lay_planes`), never in this frame,
-        // or in the region where the build fixes the session's shape.
+        // or in the region where the build fixes the session's shape, or in the session's own state
+        // where its tables take their memory on use.
         #[cfg(feature = "connectivity")]
         let face_rows = face_event_rows(config.max_faces, config.groups.len());
         #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
         let watchers = FacePlane::place_in(lent.arena.arena_mut(), face_rows)
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
-        // SAFETY: the region's places were placed by the open's lend and its faces' field is
+        // SAFETY: the state's places were placed by the open's lend and its faces' field is
         // reached by this write alone; the block is held by `Core` after the session's state,
         // which holds the plane's owner, and neither moves nor goes back before it.
         #[cfg(all(feature = "connectivity", not(feature = "runtime-plan")))]
         let watchers =
-            unsafe { StatePlaces::faces(StateRegion::places_at(lent.state.as_ptr()), face_rows) };
+            unsafe { StatePlaces::faces(StateLayout::places_at(lent.state.as_ptr()), face_rows) };
         // A row for each link the plan holds buffers for, reserved here: a link the session takes
         // after its open is admitted in place. The admission lies in the row the plan laid out for
         // it (`ArenaPlan::lay_admission`); its rows are the heap's, and a heap that refuses them
@@ -7374,17 +7401,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.core.lock().0.arena.holds(at)
     }
 
-    /// Whether `at` is a byte of the region the build fixes the session's shape in, the head of
-    /// the block its arena is the tail of.
+    /// Whether `at` is a byte of the state the places of the session's own values lie in: the
+    /// region the build fixes the session's shape in, the head of the block its arena is the tail
+    /// of, or the session's own state where its tables take their memory on use.
     #[cfg(all(
         test,
         feature = "std",
         not(feature = "runtime-plan"),
         any(feature = "queryable", feature = "query", feature = "connectivity")
     ))]
-    pub(crate) fn region_holds(&self, at: *const u8) -> bool {
+    pub(crate) fn state_holds(&self, at: *const u8) -> bool {
         let start = self.core.lock().0._state.as_ptr().as_ptr() as usize;
-        (start..start + core::mem::size_of::<StateRegion>()).contains(&(at as usize))
+        (start..start + core::mem::size_of::<StateLayout>()).contains(&(at as usize))
     }
 
     /// Where the planes the session's state owns lie, each where its feature is.
