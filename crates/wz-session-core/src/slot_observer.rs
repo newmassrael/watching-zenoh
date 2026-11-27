@@ -244,37 +244,19 @@ mod requester_region_tests {
     /// by `arena_bytes` counting what the lend does not take.
     #[test]
     fn lent_requesters_lie_where_their_description_counts_them() {
+        use super::lent_tests::{arena, keys};
         use super::RequesterRows;
-        use crate::bounded::{Arena, Lent, ARENA_ALIGN};
+        use crate::bounded::Lent;
         type LentRequesters = Requesters<BoxedReplySink, BoxedReplySink, Lent>;
-        /// A span an arena may start on.
-        #[derive(Clone, Copy)]
-        #[repr(align(16))]
-        struct Block([u8; ARENA_ALIGN]);
-        /// An arena of `bytes`, its memory leaked, so it outlives every table it lends.
-        fn leaked(bytes: usize) -> Arena {
-            let blocks = bytes.div_ceil(ARENA_ALIGN).max(1);
-            let memory: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
-            // SAFETY: the memory is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
-            // leaked, so nothing else uses it.
-            unsafe { Arena::over(core::ptr::NonNull::from(memory).cast::<u8>(), bytes) }
-        }
         let rows = RequesterRows {
             queries: caps::MAX_PENDING_QUERIES.min(2),
             liveliness_gets: caps::MAX_PENDING_LIVELINESS_GETS.min(1),
         };
-        let space = crate::key_arena::KeySpace::span_bytes(256).expect("small");
-        let keys = leaked(space)
-            .lend_keys(
-                256,
-                crate::limits::SessionLimits::defaults().max_keyexpr_bytes_held(),
-            )
-            .expect("the key arena");
         let bytes = LentRequesters::arena_bytes(rows).expect("small");
-        let mut arena = leaked(bytes);
+        let mut arena = arena(bytes);
         let requesters = LentRequesters::lent(
             &mut arena,
-            keys,
+            keys(256),
             rows,
             &crate::limits::SessionLimits::defaults(),
         )
@@ -3726,7 +3708,7 @@ mod lent_tests {
     struct Block([u8; ARENA_ALIGN]);
 
     /// An arena over `bytes` bytes the test process leaks, so it outlives every table lent from it.
-    fn arena(bytes: usize) -> Arena {
+    pub(super) fn arena(bytes: usize) -> Arena {
         let blocks = bytes.div_ceil(ARENA_ALIGN);
         let region: &'static mut [Block] = std::vec![Block([0; ARENA_ALIGN]); blocks].leak();
         // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least
@@ -3736,7 +3718,7 @@ mod lent_tests {
 
     /// A key arena of `bytes` bytes of blocks, lent from an arena of its own, so an arena tables
     /// are lent from is laid out by their plan alone.
-    fn keys(bytes: usize) -> KeySpace {
+    pub(super) fn keys(bytes: usize) -> KeySpace {
         arena(KeySpace::span_bytes(bytes).expect("a small key arena"))
             .lend_keys(bytes, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena is the key arena's span")
