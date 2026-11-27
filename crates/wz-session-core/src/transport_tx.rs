@@ -10,12 +10,13 @@
 //! the same state and is written by the same walk. What its emit counts is part of it too: the
 //! wire counters, the registry partition its links' cells are in and the refusals of a lend-only
 //! send. The link a frame leaves by is not: a session's core is shared by every link of an
-//! aggregate, so it cannot own one binding's link, and what a link compresses is the link's.
+//! aggregate, so it cannot own one binding's link, and what a link compresses is the link's. The
+//! walk borrows the links with the state for each send ([`TxRoute`]).
 
 use crate::link::SessionRuntime;
 #[cfg(feature = "tx-lend-only")]
 use crate::session_actions::TxRefusalCounts;
-use crate::session_actions::{FrameTxConduits, TxConduits};
+use crate::session_actions::{FrameTxConduits, LinkState, TxConduits};
 
 /// The transmit state of one transport.
 pub struct TransportTx<R: SessionRuntime> {
@@ -434,6 +435,323 @@ impl<R: SessionRuntime> TransportTx<R> {
             no_slot: read(&self.refused_no_slot),
             oversize: read(&self.refused_oversize),
         }
+    }
+}
+
+/// One transport's transmit state with the links its frames leave by, borrowed for a send: the
+/// routing of the walk is this value's, and the walk is one body a build whatever made it.
+///
+/// A unicast session makes it of its core's state, its binding's own link and, when it aggregates
+/// links, the core's set of them; nothing in it is a session's. No invariant binds the three: each
+/// is a borrow its maker holds already, so they are its fields.
+pub struct TxRoute<'a, R: SessionRuntime> {
+    /// The transmit state the frames are numbered, staged and counted in.
+    pub tx: &'a TransportTx<R>,
+    /// The link a frame leaves by when no set routes it, and every per-link control message's.
+    pub own: &'a LinkState<R>,
+    /// An aggregated session's links, from which each conduit's link is chosen
+    /// (`TxRoute::select_link`); empty while the session drives one link.
+    #[cfg(feature = "transport-multilink")]
+    pub links: &'a std::sync::Mutex<alloc::vec::Vec<R::Shared<LinkState<R>>>>,
+}
+
+impl<R: SessionRuntime> TxRoute<'_, R> {
+    /// Reliability-routed link selection — the wz mirror of zenoh's per-channel
+    /// `select` (`unicast/universal/tx.rs`): pick, among the ALIVE links of the
+    /// aggregation set, the one preferring `reliability`'s channel; failing that,
+    /// the first alive link (homogeneous / failover). `None` when the set is
+    /// EMPTY (a single-link, non-aggregating session — [`Self::send_wire`] then
+    /// uses `self.own`) OR when every link is dead (the send then falls through
+    /// to `self.own`, whose F2 gate rejects it typed). Reads each link's
+    /// `transport_available` (liveness) + its reliability class
+    /// (`LinkState::reliability`) under their mutexes.
+    ///
+    /// R311y205 (slice-1 MF-E) — gated on the EXACT codec union of its sole caller
+    /// [`Self::send_wire`]: codec-close + transport-keepalive are EXCLUDED (those
+    /// TX paths route through `send_wire_this_link`, not `send_wire`, so a build
+    /// with ONLY codec-close / transport-keepalive has no `select_link` caller and
+    /// must not carry the dead seam — the same cfg-skew class run-ci caught for
+    /// `send_wire`). It names `Reliability` (codec-union-gated import), so a
+    /// `transport-multilink`-only build with no data-send codec omits it too.
+    #[cfg(all(
+        feature = "transport-multilink",
+        any(
+            feature = "codec-init-body",
+            feature = "codec-open-body",
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-interest",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "liveliness-token",
+            feature = "transport-batching",
+        )
+    ))]
+    pub(crate) fn select_link(
+        &self,
+        reliability: crate::reliability::Reliability,
+        priority: crate::qos::Priority,
+    ) -> Option<R::Shared<LinkState<R>>> {
+        let links = self
+            .links
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if links.is_empty() {
+            return None;
+        }
+        // A non-qos build carries no per-link priority band, so selection degrades
+        // to the reliability-only 2-tier (byte-identical to pre-y217); `priority`
+        // is then unused (workspace warnings=deny).
+        #[cfg(not(feature = "transport-qos"))]
+        let _ = priority;
+        let mut first_alive: Option<&R::Shared<LinkState<R>>> = None;
+        // partial tier: a reliability-pref match with NO covering priority band
+        // (in a non-qos build this IS the pre-y217 "preferred" tier).
+        let mut partial: Option<&R::Shared<LinkState<R>>> = None;
+        // full tier (qos only): reliability-pref match AND the band contains the
+        // priority; keep the SMALLEST band (most specific), ties -> first-seen.
+        #[cfg(feature = "transport-qos")]
+        let mut full: Option<(&R::Shared<LinkState<R>>, usize)> = None;
+        for l in links.iter() {
+            if !l.transport_available.is_open() {
+                continue;
+            }
+            if first_alive.is_none() {
+                first_alive = Some(l);
+            }
+            if l.reliability() != Some(reliability) {
+                // Wrong reliability class -> only ever a first-alive fallback,
+                // zenoh's concrete-reliability primacy: a non-matching link can
+                // never be a full/partial pick. A link with no class at all (a
+                // driver that names no kind, nothing declared) lands here too.
+                continue;
+            }
+            // Reliability matches. In a qos build a covering band promotes this
+            // link to the full tier.
+            #[cfg(feature = "transport-qos")]
+            if let Some(band) = R::with_mutex_mut(&l.priority_range, |r| *r) {
+                if band.contains(priority) {
+                    let width = band.width();
+                    // Strict `>` (zenoh tx.rs:56): a later equal-width band does
+                    // NOT displace the incumbent, so ties resolve to first-seen =
+                    // a stable, non-flapping pin (one-conduit=one-link).
+                    if full.is_none_or(|(_, prev)| prev > width) {
+                        full = Some((l, width));
+                    }
+                    continue;
+                }
+            }
+            // partial: reliability matches, no covering band.
+            if partial.is_none() {
+                partial = Some(l);
+            }
+        }
+        #[cfg(feature = "transport-qos")]
+        let selected = full.map(|(l, _)| l).or(partial).or(first_alive);
+        #[cfg(not(feature = "transport-qos"))]
+        let selected = partial.or(first_alive);
+        selected.cloned()
+    }
+
+    /// R311kw — the one wire-emit seam: mark the link's line as spoken in its
+    /// keepalive tick and forward to the link driver. Every production TX path routes
+    /// here (handshake t_msg senders, CLOSE, Frame / Fragment emits, the
+    /// batch flush) so the keepalive emitter's idle window sees EVERY
+    /// send — zenoh-pico parity: `_z_transport_tx_send_t_msg` /
+    /// `_send_n_msg_inner` set `_transmitted = true` for every sender
+    /// (common/tx.c:98/153); a TX path that bypassed the seam would
+    /// make the emitter inject a redundant KeepAlive after real traffic.
+    /// The stamp is read outside the slot closure (R294 discipline) and
+    /// the slot guard drops before the blocking send so the
+    /// non-reentrant MCU mutex never spans link IO.
+    ///
+    /// cfg = the union of the routed emit bodies (the `Reliability`
+    /// import union above): the handshake / close encoders, the
+    /// frame_encode consumer-plane union, the batch flush, and the
+    /// keepalive emitter. A build with no active wire-emit body must
+    /// not carry the dead seam (CI denies warnings on the minimal MCU
+    /// lanes).
+    // R311y205 — codec-close / transport-keepalive are NOT in this union: the
+    // close + keepalive + link-close TX paths route through
+    // [`Self::send_wire_this_link`] (per-link control, not reliability-routed),
+    // so a build that enables ONLY codec-close / transport-keepalive (e.g. a
+    // bare `transport-multicast` MCU lane) has no `send_wire` caller and must
+    // not compile the dead seam. `emit_on_link` keeps the full union (both
+    // send_wire and send_wire_this_link funnel through it).
+    //
+    // R311y516 — the establishment codecs are ROLE-CONJOINED here for the same
+    // reason one level over: `codec-init-body` / `codec-open-body` describe a
+    // CODEC, not an emit. The four senders that route INIT/OPEN through this
+    // seam — `send_init_syn` / `send_open_syn` (`session-unicast-open`) and
+    // `send_init_ack_with_cookie` / `send_open_ack`
+    // (`session-unicast-accept`) — each carry a role conjunct of their own, so
+    // a build with an establishment codec and NEITHER role encodes nothing and
+    // must not compile the dead seam (`--features session-extqos,
+    // codec-init-body` was the combination that reded `-D warnings`).
+    //
+    // Fixed-memory step S4 — `not(tx-lend-only)`: the lend-only profile has no
+    // byte door for a frame built elsewhere. Every message it sends is written
+    // into a slot the link lends and leaves through `emit_on_link` directly (the
+    // keep-alive, a one-byte constant, through `send_wire_this_link`).
+    #[cfg(all(
+        not(feature = "tx-lend-only"),
+        any(
+            all(
+                any(feature = "codec-init-body", feature = "codec-open-body"),
+                any(feature = "session-unicast-open", feature = "session-unicast-accept")
+            ),
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-interest",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "liveliness-token",
+            feature = "transport-batching",
+        )
+    ))]
+    pub(crate) fn send_wire(
+        &self,
+        bytes: &[u8],
+        reliability: crate::reliability::Reliability,
+        priority: crate::qos::Priority,
+    ) {
+        // R311y205 (transport-multilink IMPL-2b-iii) — reliability-routed data
+        // send: an AGGREGATING session (`select_link` -> Some) emits on the
+        // reliability-pref link (else first alive = failover) from the shared
+        // link set — the wz mirror of zenoh's per-channel `select`; a SINGLE-link
+        // session (empty set -> None) and every NON-feature build emit on this
+        // route's own link, byte-identical to today. Keepalive / close
+        // are per-link and bypass routing ([`Self::send_wire_this_link`]).
+        //
+        // R311y217 — `priority` is the SECOND routing key: `select_link` pins each
+        // `(priority, reliability)` conduit to one link. Callers MUST pass the
+        // priority of the FRAME being emitted (for a batch flush that is the open
+        // frame's `batch.priority`, NOT the triggering message's priority — else
+        // one conduit splits across links and the peer's per-conduit RX SN gate
+        // drops the reorder). A non-multilink build never routes, so the key is
+        // unused there.
+        //
+        // R2919 — and in every build it is the key the link's writer orders its
+        // queue by (`BoxedLinkDriver::send_prioritized`).
+        #[cfg(feature = "transport-multilink")]
+        if let Some(target) = self.select_link(reliability, priority) {
+            self.tx
+                .emit_on_link(&target, bytes, None, reliability, priority, false);
+            return;
+        }
+        self.tx
+            .emit_on_link(self.own, bytes, None, reliability, priority, false);
+    }
+
+    /// R311y205 (transport-multilink IMPL-2b-iii) — emit on THIS binding's own
+    /// link, bypassing reliability routing. Keepalive and CLOSE are per-link
+    /// control (zenoh keepalives each link on its own timer; a link-only close
+    /// targets that link), so they must reach the physical link the drive loop
+    /// monitors — NOT the reliability-selected data link. At N=1 identical to
+    /// [`Self::send_wire`].
+    ///
+    /// R2919 — `priority` is the lane the link's writer queues the frame on,
+    /// and the two callers differ on purpose, as zenoh's do: a keepalive goes
+    /// at `crate::qos::Priority::Control` (zenoh's tx task writes it directly, ahead of any
+    /// queued batch — `io/zenoh-transport/src/unicast/universal/link.rs`
+    /// @ `let n = link.send(&message, Some(crate::qos::Priority::Control)).await?;`), and a
+    /// close at `Priority::Background`, BEHIND everything already queued, so
+    /// the data a caller sent before closing leaves before the close does
+    /// (`io/zenoh-transport/src/unicast/universal/transport.rs`
+    /// @ `p.push_transport_message(msg, Priority::Background);`).
+    // Fixed-memory step S4 — under `tx-lend-only` a close leaves through
+    // `send_control_lent`, so this byte door is the close's alone; the keep-alive
+    // leaves through `send_wire_urgent_this_link`.
+    // `send_link_close` (multilink) reaches it whichever the profile.
+    #[cfg(all(
+        feature = "codec-close",
+        any(not(feature = "tx-lend-only"), feature = "transport-multilink"),
+    ))]
+    pub(crate) fn send_wire_this_link(
+        &self,
+        bytes: &[u8],
+        reliability: crate::reliability::Reliability,
+        priority: crate::qos::Priority,
+    ) {
+        self.tx
+            .emit_on_link(self.own, bytes, None, reliability, priority, false);
+    }
+
+    /// [`Self::send_wire_this_link`] for a message that may overtake what the link has queued
+    /// ([`BoxedLinkDriver::send_urgent`](crate::link::BoxedLinkDriver::send_urgent)): the keepalive, which carries no sequence number.
+    #[cfg(feature = "transport-keepalive")]
+    pub(crate) fn send_wire_urgent_this_link(
+        &self,
+        bytes: &[u8],
+        reliability: crate::reliability::Reliability,
+    ) {
+        self.tx.emit_on_link(
+            self.own,
+            bytes,
+            None,
+            reliability,
+            crate::qos::Priority::Control,
+            true,
+        );
+    }
+
+    /// R2923 — run `f` on the link a `(reliability, priority)` conduit's frames
+    /// are written to: the one [`Self::send_wire`] routes them to, so a
+    /// question asked of it (is there room, count this message) is asked of
+    /// the link the frame will actually take. An aggregating session picks it
+    /// from its link set; a single-link session and every non-multilink build
+    /// has only its own link.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    pub(crate) fn with_conduit_link<O>(
+        &self,
+        reliability: crate::reliability::Reliability,
+        priority: crate::qos::Priority,
+        f: impl FnOnce(&LinkState<R>) -> O,
+    ) -> O {
+        #[cfg(feature = "transport-multilink")]
+        if let Some(target) = self.select_link(reliability, priority) {
+            return f(&target);
+        }
+        #[cfg(not(feature = "transport-multilink"))]
+        let _ = (reliability, priority);
+        f(self.own)
+    }
+
+    /// Whether [`Self::send_wire`] would put a `(reliability, priority)` frame
+    /// on `link`: the same routing, asked as a question.
+    #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
+    pub(crate) fn conduit_routes_to(
+        &self,
+        link: &LinkState<R>,
+        reliability: crate::reliability::Reliability,
+        priority: crate::qos::Priority,
+    ) -> bool {
+        #[cfg(feature = "transport-multilink")]
+        if let Some(target) = self.select_link(reliability, priority) {
+            return core::ptr::eq(&*target, link);
+        }
+        #[cfg(not(feature = "transport-multilink"))]
+        let _ = (reliability, priority);
+        core::ptr::eq(self.own, link)
     }
 }
 

@@ -2410,7 +2410,7 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// holds as `self.link`, so a per-link F2 / lease write through the binding is
     /// seen here, and vice-versa. EMPTY for a non-aggregating session (feature-off
     /// builds omit the field; feature-on single-link sessions never push into it)
-    /// — `Self::select_link` then returns `None` and `send_wire` keeps its
+    /// — `TxRoute::select_link` then returns `None` and `send_wire` keeps its
     /// single-link `self.link` path. The reliability-routed send selects a target
     /// from this set; the session-send gate is the OR over these links'
     /// `transport_available`, so the session survives until the set empties.
@@ -2765,7 +2765,7 @@ pub struct SessionFacts {
     /// against the peer's InitSyn / InitAck offer
     /// (`SessionLinkActions::negotiate_compression_against_peer`, zenoh
     /// `is_compression &= other_ext.is_some()`). When true post-establishment,
-    /// every outbound batch is lz4-wrapped at `SessionLinkActions::send_wire` and every
+    /// every outbound batch is lz4-wrapped at `TransportTx::emit_on_link` and every
     /// inbound batch is un-wrapped at [`crate::drive::dispatch_link_event`]
     /// (the wz mirror of zenoh's per-batch compression).
     #[cfg(feature = "transport-compression")]
@@ -3123,7 +3123,7 @@ pub struct LinkState<R: SessionRuntime> {
     #[cfg(feature = "transport-multilink")]
     pub declared_reliability: R::Mutex<Option<Reliability>>,
     /// R311y217 (transport-multilink + transport-qos) — the QoS-priority band this
-    /// link carries, so `SessionCore::select_link` pins each `(priority,
+    /// link carries, so `TxRoute::select_link` pins each `(priority,
     /// reliability)` conduit to ONE link (the priority tier of zenoh's per-channel
     /// `select`). `None` (the default until set) = no priority preference: the
     /// link is a reliability-only PARTIAL-tier candidate (still the primary route
@@ -3283,7 +3283,7 @@ impl<W: crate::runtime_cell::WordCell> LentRecord<W> {
 }
 
 /// R311y217 (transport-multilink + transport-qos) — the inclusive QoS-priority
-/// band a physical link carries, so `SessionCore::select_link` can pin one
+/// band a physical link carries, so `TxRoute::select_link` can pin one
 /// `(priority, reliability)` conduit to one link (the wz mirror of zenoh's
 /// per-link `PriorityRange`, `commons/zenoh-protocol/src/core/mod.rs:315`).
 /// Inclusive on both ends over the wire-order [`Priority`]
@@ -3642,7 +3642,7 @@ impl<R: SessionRuntime> LinkState<R> {
     /// only ever the any-tier fallback, which is fail-closed rather than a
     /// guess.
     ///
-    /// Gated on the EXACT union of its sole caller, [`SessionCore::select_link`],
+    /// Gated on the EXACT union of its sole caller, [`TxRoute::select_link`],
     /// and not on `transport-multilink` alone. The field it reads and the setter
     /// that writes it need only that feature, but this reader has one caller, and
     /// a `transport-multilink`-only build with no data-send codec omits that
@@ -3666,7 +3666,7 @@ impl<R: SessionRuntime> LinkState<R> {
             feature = "transport-batching",
         )
     ))]
-    fn reliability(&self) -> Option<Reliability> {
+    pub(crate) fn reliability(&self) -> Option<Reliability> {
         R::with_mutex_mut(&self.declared_reliability, |d| *d).or_else(|| {
             self.link_driver()
                 .link_subject()
@@ -6034,39 +6034,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
     }
 
-    /// R2923 — run `f` on the link a `(reliability, priority)` conduit's frames
-    /// are written to: the one [`Self::send_wire`] routes them to, so a
-    /// question asked of it (is there room, count this message) is asked of
-    /// the link the frame will actually take. An aggregating session picks it
-    /// from its link set; a single-link session and every non-multilink build
-    /// has only `self.link`.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    fn with_conduit_link<O>(
-        &self,
-        reliability: Reliability,
-        priority: Priority,
-        f: impl FnOnce(&LinkState<R>) -> O,
-    ) -> O {
-        #[cfg(feature = "transport-multilink")]
-        if let Some(target) = self.select_link(reliability, priority) {
-            return f(&target);
-        }
-        #[cfg(not(feature = "transport-multilink"))]
-        let _ = (reliability, priority);
-        f(&self.link)
-    }
-
     /// The lend for a path that writes its own frame (a lean frame, a fragment): the link
     /// `send_wire` would route to lends the slot ([`Self::send_lent_on`]). A `Frame`'s lend is
     /// [`Self::write_n_msg`].
@@ -6100,9 +6067,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         want: usize,
         write: &dyn LentWrite,
     ) -> Lend<sce_forge_runtime::codec::CodecError> {
-        self.with_conduit_link(reliability, priority, |link| {
-            self.send_lent_on(link, reliability, priority, want, write)
-        })
+        self.route()
+            .with_conduit_link(reliability, priority, |link| {
+                self.send_lent_on(link, reliability, priority, want, write)
+            })
     }
 
     /// The lend of one transport message written whole into a slot `link` lends, a frame the
@@ -6341,7 +6309,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// copies nothing. When it does not (an aggregated session moved the conduit
     /// to another link meanwhile), the frame is copied out, the slot goes back
     /// to its lender, and the bytes take the route the heap stage's frame would
-    /// take ([`Self::send_wire`]), counted `moved_to_heap`.
+    /// take (`TxRoute::send_wire`), counted `moved_to_heap`.
     ///
     /// The lease is borrowed and settled here, handed over or given back, so its drop where the
     /// caller picked it up finds nothing to give back. Taken by value it would be copied whole into
@@ -6357,7 +6325,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) {
         #[cfg(not(feature = "tx-lend-only"))]
         use crate::tx_buf::TxBuf;
-        if self.conduit_routes_to(link, channel, priority) {
+        if self.route().conduit_routes_to(link, channel, priority) {
             self.tx
                 .emit_on_link(link, &[], Some(slot), channel, priority, false);
             return;
@@ -6379,26 +6347,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let bytes = slot.as_slice().to_vec();
             slot.give_back();
             lend.moved_to_heap = lend.moved_to_heap.wrapping_add(1);
-            self.send_wire(&bytes, channel, priority);
+            self.route().send_wire(&bytes, channel, priority);
         }
-    }
-
-    /// Whether [`Self::send_wire`] would put a `(reliability, priority)` frame
-    /// on `link`: the same routing, asked as a question.
-    #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-    fn conduit_routes_to(
-        &self,
-        link: &LinkState<R>,
-        reliability: Reliability,
-        priority: Priority,
-    ) -> bool {
-        #[cfg(feature = "transport-multilink")]
-        if let Some(target) = self.select_link(reliability, priority) {
-            return core::ptr::eq(&*target, link);
-        }
-        #[cfg(not(feature = "transport-multilink"))]
-        let _ = (reliability, priority);
-        core::ptr::eq(self.own_link(), link)
     }
 
     /// ARCHITECTURE section 9.1 -- the batch slots a reopen discards. A reopen
@@ -6564,7 +6514,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.tx
             .stats
             .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
-        self.with_conduit_link(reliability, route, |link| {
+        self.route().with_conduit_link(reliability, route, |link| {
             self.drop_for_congestion(link, message_priority, class)
         });
     }
@@ -6632,10 +6582,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         let wire_reliability = Reliability::from_reliable_bool(reliable);
         let wait_us = self.params.tx_queue.wait_before_drop_us;
-        let granted = self.with_conduit_link(wire_reliability, route, |link| {
-            link.link_driver()
-                .block_first_acquire_for(wire_reliability, qos.priority(), wait_us)
-        });
+        let granted = self
+            .route()
+            .with_conduit_link(wire_reliability, route, |link| {
+                link.link_driver().block_first_acquire_for(
+                    wire_reliability,
+                    qos.priority(),
+                    wait_us,
+                )
+            });
         if !granted {
             #[cfg(feature = "transport-stats")]
             self.count_congestion_drop(wire_reliability, route, priority, &stats_class);
@@ -6649,10 +6604,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if let Err(refused) = encoded {
             // The body refused its message: the slot taken for it goes back, and the caller
             // answers the refusal as a send it made itself would.
-            self.with_conduit_link(wire_reliability, route, |link| {
-                link.link_driver()
-                    .block_first_release_for(wire_reliability, qos.priority())
-            });
+            self.route()
+                .with_conduit_link(wire_reliability, route, |link| {
+                    link.link_driver()
+                        .block_first_release_for(wire_reliability, qos.priority())
+                });
             return Err(refused);
         }
         let job = BlockFirstJob {
@@ -6718,7 +6674,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }),
         );
         let class = Reliability::from_reliable_bool(reliable);
-        self.with_conduit_link(class, route, |link| {
+        self.route().with_conduit_link(class, route, |link| {
             link.link_driver()
                 .block_first_release_for(class, qos.priority())
         });
@@ -6933,136 +6889,43 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         );
     }
 
-    /// R311kw — the one wire-emit seam: mark the link's line as spoken in its
-    /// keepalive tick and forward to the link driver. Every production TX path routes
-    /// here (handshake t_msg senders, CLOSE, Frame / Fragment emits, the
-    /// batch flush) so the keepalive emitter's idle window sees EVERY
-    /// send — zenoh-pico parity: `_z_transport_tx_send_t_msg` /
-    /// `_send_n_msg_inner` set `_transmitted = true` for every sender
-    /// (common/tx.c:98/153); a TX path that bypassed the seam would
-    /// make the emitter inject a redundant KeepAlive after real traffic.
-    /// The stamp is read outside the slot closure (R294 discipline) and
-    /// the slot guard drops before the blocking send so the
-    /// non-reentrant MCU mutex never spans link IO.
-    ///
-    /// cfg = the union of the routed emit bodies (the `Reliability`
-    /// import union above): the handshake / close encoders, the
-    /// frame_encode consumer-plane union, the batch flush, and the
-    /// keepalive emitter. A build with no active wire-emit body must
-    /// not carry the dead seam (CI denies warnings on the minimal MCU
-    /// lanes).
-    // R311y205 — codec-close / transport-keepalive are NOT in this union: the
-    // close + keepalive + link-close TX paths route through
-    // [`Self::send_wire_this_link`] (per-link control, not reliability-routed),
-    // so a build that enables ONLY codec-close / transport-keepalive (e.g. a
-    // bare `transport-multicast` MCU lane) has no `send_wire` caller and must
-    // not compile the dead seam. `emit_on_link` keeps the full union (both
-    // send_wire and send_wire_this_link funnel through it).
-    //
-    // R311y516 — the establishment codecs are ROLE-CONJOINED here for the same
-    // reason one level over: `codec-init-body` / `codec-open-body` describe a
-    // CODEC, not an emit. The four senders that route INIT/OPEN through this
-    // seam — `send_init_syn` / `send_open_syn` (`session-unicast-open`) and
-    // `send_init_ack_with_cookie` / `send_open_ack`
-    // (`session-unicast-accept`) — each carry a role conjunct of their own, so
-    // a build with an establishment codec and NEITHER role encodes nothing and
-    // must not compile the dead seam (`--features session-extqos,
-    // codec-init-body` was the combination that reded `-D warnings`).
-    //
-    // Fixed-memory step S4 — `not(tx-lend-only)`: the lend-only profile has no
-    // byte door for a frame built elsewhere. Every message it sends is written
-    // into a slot the link lends and leaves through `emit_on_link` directly (the
-    // keep-alive, a one-byte constant, through `send_wire_this_link`).
-    #[cfg(all(
-        not(feature = "tx-lend-only"),
-        any(
-            all(
-                any(feature = "codec-init-body", feature = "codec-open-body"),
-                any(feature = "session-unicast-open", feature = "session-unicast-accept")
-            ),
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-interest",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "liveliness-token",
-            feature = "transport-batching",
-        )
+    /// The transport's transmit state with the links this binding's frames leave by: its own link
+    /// and, when the session aggregates links, the core's set, from which each conduit is routed.
+    /// Gated on the union of its callers: the routed sends and their questions, the per-link
+    /// control sends and the batch flush.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+        feature = "transport-batching",
+        feature = "transport-keepalive",
+        all(
+            not(feature = "tx-lend-only"),
+            any(
+                all(
+                    any(feature = "codec-init-body", feature = "codec-open-body"),
+                    any(feature = "session-unicast-open", feature = "session-unicast-accept")
+                ),
+                feature = "codec-close",
+            )
+        ),
+        all(feature = "codec-close", feature = "transport-multilink"),
     ))]
-    fn send_wire(&self, bytes: &[u8], reliability: Reliability, priority: Priority) {
-        // R311y205 (transport-multilink IMPL-2b-iii) — reliability-routed data
-        // send: an AGGREGATING session (`select_link` -> Some) emits on the
-        // reliability-pref link (else first alive = failover) from the shared
-        // link set — the wz mirror of zenoh's per-channel `select`; a SINGLE-link
-        // session (empty set -> None) and every NON-feature build emit on this
-        // binding's own `self.link`, byte-identical to today. Keepalive / close
-        // are per-link and bypass routing ([`Self::send_wire_this_link`]).
-        //
-        // R311y217 — `priority` is the SECOND routing key: `select_link` pins each
-        // `(priority, reliability)` conduit to one link. Callers MUST pass the
-        // priority of the FRAME being emitted (for a batch flush that is the open
-        // frame's `batch.priority`, NOT the triggering message's priority — else
-        // one conduit splits across links and the peer's per-conduit RX SN gate
-        // drops the reorder). A non-multilink build never routes, so the key is
-        // unused there.
-        //
-        // R2919 — and in every build it is the key the link's writer orders its
-        // queue by (`BoxedLinkDriver::send_prioritized`).
-        #[cfg(feature = "transport-multilink")]
-        if let Some(target) = self.select_link(reliability, priority) {
-            self.tx
-                .emit_on_link(&target, bytes, None, reliability, priority, false);
-            return;
+    #[inline]
+    fn route(&self) -> crate::transport_tx::TxRoute<'_, R> {
+        crate::transport_tx::TxRoute {
+            tx: &self.tx,
+            own: &self.link,
+            #[cfg(feature = "transport-multilink")]
+            links: &self.links,
         }
-        self.tx
-            .emit_on_link(&self.link, bytes, None, reliability, priority, false);
-    }
-
-    /// R311y205 (transport-multilink IMPL-2b-iii) — emit on THIS binding's own
-    /// link, bypassing reliability routing. Keepalive and CLOSE are per-link
-    /// control (zenoh keepalives each link on its own timer; a link-only close
-    /// targets that link), so they must reach the physical link the drive loop
-    /// monitors — NOT the reliability-selected data link. At N=1 identical to
-    /// [`Self::send_wire`].
-    ///
-    /// R2919 — `priority` is the lane the link's writer queues the frame on,
-    /// and the two callers differ on purpose, as zenoh's do: a keepalive goes
-    /// at `Priority::Control` (zenoh's tx task writes it directly, ahead of any
-    /// queued batch — `io/zenoh-transport/src/unicast/universal/link.rs`
-    /// @ `let n = link.send(&message, Some(Priority::Control)).await?;`), and a
-    /// close at `Priority::Background`, BEHIND everything already queued, so
-    /// the data a caller sent before closing leaves before the close does
-    /// (`io/zenoh-transport/src/unicast/universal/transport.rs`
-    /// @ `p.push_transport_message(msg, Priority::Background);`).
-    // Fixed-memory step S4 — under `tx-lend-only` a close leaves through
-    // `send_control_lent`, so this byte door is the close's alone; the keep-alive
-    // leaves through `send_wire_urgent_this_link`.
-    // `send_link_close` (multilink) reaches it whichever the profile.
-    #[cfg(all(
-        feature = "codec-close",
-        any(not(feature = "tx-lend-only"), feature = "transport-multilink"),
-    ))]
-    fn send_wire_this_link(&self, bytes: &[u8], reliability: Reliability, priority: Priority) {
-        self.tx
-            .emit_on_link(&self.link, bytes, None, reliability, priority, false);
-    }
-
-    /// [`Self::send_wire_this_link`] for a message that may overtake what the link has queued
-    /// ([`BoxedLinkDriver::send_urgent`]): the keepalive, which carries no sequence number.
-    #[cfg(feature = "transport-keepalive")]
-    fn send_wire_urgent_this_link(&self, bytes: &[u8], reliability: Reliability) {
-        self.tx.emit_on_link(
-            &self.link,
-            bytes,
-            None,
-            reliability,
-            Priority::Control,
-            true,
-        );
     }
 
     /// Fixed-memory step S4 — the lend-only form of the handshake and close
@@ -7394,7 +7257,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "tx-lend-only"))]
         {
             let bytes = encode_close(reason, self.close_scope_is_session());
-            self.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
+            self.route()
+                .send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
         }
         #[cfg(feature = "tx-lend-only")]
         let _ = self.send_close_lent(reason);
@@ -8903,7 +8767,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R2943 — write this link's DECLARED reliability class, the egress twin of
     /// [`Self::set_link_priority_range`]: the negotiation's outcome is what
     /// writes it (`settle_qos_link`), and `None` returns the link to its
-    /// intrinsic class. `SessionCore::select_link` reads the pair through
+    /// intrinsic class. `TxRoute::select_link` reads the pair through
     /// `LinkState::reliability`.
     #[cfg(feature = "transport-multilink")]
     pub fn set_link_reliability(&self, declared: Option<Reliability>) {
@@ -8913,7 +8777,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R311y217 — set this binding's link QoS-priority band at bring-up (before
     /// the drive loop spins), through the shared `R::Shared<LinkState>` handle —
     /// the [`Self::set_link_reliability`] slot discipline. Read by
-    /// `Self::select_link` to pin each `(priority, reliability)` conduit to one
+    /// `TxRoute::select_link` to pin each `(priority, reliability)` conduit to one
     /// link. `None` clears the band (reliability-only, partial-tier candidate).
     #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
     pub fn set_link_priority_range(&self, range: Option<LinkPriorityRange>) {
@@ -8946,110 +8810,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     // ─────────── R311y205 transport-multilink aggregation (IMPL-2b-iii) ──────
 
-    /// Reliability-routed link selection — the wz mirror of zenoh's per-channel
-    /// `select` (`unicast/universal/tx.rs`): pick, among the ALIVE links of the
-    /// aggregation set, the one preferring `reliability`'s channel; failing that,
-    /// the first alive link (homogeneous / failover). `None` when the set is
-    /// EMPTY (a single-link, non-aggregating session — [`Self::send_wire`] then
-    /// uses `self.link`) OR when every link is dead (the send then falls through
-    /// to `self.link`, whose F2 gate rejects it typed). Reads each link's
-    /// `transport_available` (liveness) + its reliability class
-    /// (`LinkState::reliability`) under their mutexes.
-    ///
-    /// R311y205 (slice-1 MF-E) — gated on the EXACT codec union of its sole caller
-    /// [`Self::send_wire`]: codec-close + transport-keepalive are EXCLUDED (those
-    /// TX paths route through `send_wire_this_link`, not `send_wire`, so a build
-    /// with ONLY codec-close / transport-keepalive has no `select_link` caller and
-    /// must not carry the dead seam — the same cfg-skew class run-ci caught for
-    /// `send_wire`). It names [`Reliability`] (codec-union-gated import), so a
-    /// `transport-multilink`-only build with no data-send codec omits it too.
-    #[cfg(all(
-        feature = "transport-multilink",
-        any(
-            feature = "codec-init-body",
-            feature = "codec-open-body",
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "declare-interest",
-            feature = "declare-keyexpr",
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "declare-token",
-            feature = "liveliness-token",
-            feature = "transport-batching",
-        )
-    ))]
-    fn select_link(
-        &self,
-        reliability: Reliability,
-        priority: Priority,
-    ) -> Option<R::Shared<LinkState<R>>> {
-        let links = self
-            .links
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if links.is_empty() {
-            return None;
-        }
-        // A non-qos build carries no per-link priority band, so selection degrades
-        // to the reliability-only 2-tier (byte-identical to pre-y217); `priority`
-        // is then unused (workspace warnings=deny).
-        #[cfg(not(feature = "transport-qos"))]
-        let _ = priority;
-        let mut first_alive: Option<&R::Shared<LinkState<R>>> = None;
-        // partial tier: a reliability-pref match with NO covering priority band
-        // (in a non-qos build this IS the pre-y217 "preferred" tier).
-        let mut partial: Option<&R::Shared<LinkState<R>>> = None;
-        // full tier (qos only): reliability-pref match AND the band contains the
-        // priority; keep the SMALLEST band (most specific), ties -> first-seen.
-        #[cfg(feature = "transport-qos")]
-        let mut full: Option<(&R::Shared<LinkState<R>>, usize)> = None;
-        for l in links.iter() {
-            if !l.transport_available.is_open() {
-                continue;
-            }
-            if first_alive.is_none() {
-                first_alive = Some(l);
-            }
-            if l.reliability() != Some(reliability) {
-                // Wrong reliability class -> only ever a first-alive fallback,
-                // zenoh's concrete-reliability primacy: a non-matching link can
-                // never be a full/partial pick. A link with no class at all (a
-                // driver that names no kind, nothing declared) lands here too.
-                continue;
-            }
-            // Reliability matches. In a qos build a covering band promotes this
-            // link to the full tier.
-            #[cfg(feature = "transport-qos")]
-            if let Some(band) = R::with_mutex_mut(&l.priority_range, |r| *r) {
-                if band.contains(priority) {
-                    let width = band.width();
-                    // Strict `>` (zenoh tx.rs:56): a later equal-width band does
-                    // NOT displace the incumbent, so ties resolve to first-seen =
-                    // a stable, non-flapping pin (one-conduit=one-link).
-                    if full.is_none_or(|(_, prev)| prev > width) {
-                        full = Some((l, width));
-                    }
-                    continue;
-                }
-            }
-            // partial: reliability matches, no covering band.
-            if partial.is_none() {
-                partial = Some(l);
-            }
-        }
-        #[cfg(feature = "transport-qos")]
-        let selected = full.map(|(l, _)| l).or(partial).or(first_alive);
-        #[cfg(not(feature = "transport-qos"))]
-        let selected = partial.or(first_alive);
-        selected.cloned()
-    }
-
     /// Register the FIRST physical link of a session that is about to aggregate —
     /// idempotent: pushes `link` into the (previously empty) shared set so
-    /// `Self::select_link` can route across it once a second link joins. Called
+    /// `TxRoute::select_link` can route across it once a second link joins. Called
     /// at the multilink JOIN when link 2 arrives (link 1 was driving single-link
     /// with an empty set until then). A no-op if the set already holds links.
     #[cfg(feature = "transport-multilink")]
@@ -9260,7 +9023,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(feature = "transport-multilink", feature = "codec-close"))]
     pub fn send_link_close(&self, reason: u8) {
         let bytes = crate::handshake_encode::encode_close(reason, /*session=*/ false);
-        self.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
+        self.route()
+            .send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
     }
 
     /// R311y839 — the SCOPE a teardown on THIS link should announce: `true` for a
@@ -10107,7 +9871,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///
     /// Without this, wz negotiated a band faithfully and then ignored it: a link
     /// whose band the containment NARROWED kept attracting the priorities it had
-    /// just given up, and [`Self::select_link`] could hand a message to a link the
+    /// just given up, and `TxRoute::select_link` could hand a message to a link the
     /// peer does not serve on that conduit.
     ///
     /// The band is written through in BOTH arms, `None` included, as upstream's
@@ -10145,7 +9909,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Non-multilink twin of [`Self::apply_negotiated_qos_to_link`]. A session
-    /// with no aggregation set never runs [`Self::select_link`] — `send_wire`
+    /// with no aggregation set never runs `TxRoute::select_link` — `send_wire`
     /// takes `self.link` directly — so there is no per-link selection input to
     /// reconfigure, and the negotiated metadata stays where
     /// [`Self::qos_link_metadata`] reports it. The arm exists so the call site
@@ -10458,7 +10222,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// transport-compression — the negotiated compression capability for this
-    /// session. Read by the lz4 tx wrap (`Self::send_wire`) and the rx un-wrap
+    /// session. Read by the lz4 tx wrap (`TransportTx::emit_on_link`) and the rx un-wrap
     /// ([`crate::drive::dispatch_link_event`]); true only when BOTH peers offered
     /// the ext. The getter lives under `transport-compression` (the wrap reads
     /// it) while the setters live under `session-extcompression` (the handshake
@@ -11087,7 +10851,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if !copied || copy.is_empty() {
                 return false;
             }
-            self.send_wire(&copy[..], Reliability::Reliable, HANDSHAKE_LANE);
+            self.route()
+                .send_wire(&copy[..], Reliability::Reliable, HANDSHAKE_LANE);
             true
         }
         // The lend-only send writes the bytes from the hold straight into the slot the link
@@ -11775,7 +11540,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 t.send_close_frame_with_reason = t.send_close_frame_with_reason.saturating_add(1)
             });
             let bytes = encode_close(reason as u8, self.close_scope_is_session());
-            self.send_wire_urgent_this_link(&bytes, Reliability::Reliable);
+            self.route()
+                .send_wire_urgent_this_link(&bytes, Reliability::Reliable);
         }
         #[cfg(not(all(
             feature = "codec-close",
@@ -11996,10 +11762,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         // The room of the queue this message's class leaves by: a best-effort message on a link
         // that carries it apart never waits for its streams' room.
-        let answer = self.with_conduit_link(reliability, priority, |link| {
-            link.link_driver()
-                .wait_for_room_for(reliability, priority, deadline.ask())
-        });
+        let answer = self
+            .route()
+            .with_conduit_link(reliability, priority, |link| {
+                link.link_driver()
+                    .wait_for_room_for(reliability, priority, deadline.ask())
+            });
         deadline.spend(answer.waited_us);
         answer.room == crate::link::LinkRoom::Congested
     }
@@ -12308,14 +12076,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             #[cfg(feature = "transport-stats")]
             self.tx.stats.inc_tx_network(&_stats_class);
             #[cfg(feature = "transport-stats")]
-            self.with_conduit_link(wire_reliability, priority, |link| {
-                self.count_network_message(
-                    crate::stats_registry::StatsDirection::Tx,
-                    link,
-                    message_priority,
-                    &_stats_class,
-                )
-            });
+            self.route()
+                .with_conduit_link(wire_reliability, priority, |link| {
+                    self.count_network_message(
+                        crate::stats_registry::StatsDirection::Tx,
+                        link,
+                        message_priority,
+                        &_stats_class,
+                    )
+                });
         };
         // transport-lowlatency — the lean send path (zenoh
         // `TransportBodyLowLatencyRef::Network(b) => write the bare
@@ -12371,7 +12140,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // transport writes to the link under its own lock and has no
                 // pipeline to be full.
                 count_pushed();
-                self.send_wire(&wire, wire_reliability, priority);
+                self.route().send_wire(&wire, wire_reliability, priority);
                 return Ok(Dispatched::Sent);
             }
         }
@@ -12539,9 +12308,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // peer before the puts that name what it undeclares. The link is told that what it holds
         // leaves before the Control frame does.
         if priority == Priority::Control {
-            self.with_conduit_link(wire_reliability, priority, |link| {
-                link.link_driver().tx_fence()
-            });
+            self.route()
+                .with_conduit_link(wire_reliability, priority, |link| {
+                    link.link_driver().tx_fence()
+                });
         }
         let stage_and_emit = |batch: &mut BatchTx| {
             // Whatever this sender does with the conduit, a wait for room included, is a send
@@ -12872,7 +12642,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             let prev = core::mem::take(&mut stage.buf);
             stage.count = 0;
-            self.send_wire(&prev, open_channel, priority);
+            self.route().send_wire(&prev, open_channel, priority);
         }
         if self.congested_within(reliability, priority, reserved, &mut emit.deadline) {
             return Ok(UnicastPush::Congested);
@@ -12919,81 +12689,85 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(feature = "transport-tx-lend")]
         let mut minted: Option<crate::sn::Sn> = None;
         #[cfg(feature = "transport-tx-lend")]
-        let lent = self.with_conduit_link(reliability, lend_priority, |link| {
-            use sce_forge_runtime::codec::CodecError;
-            // Lent from where `acquire` wrote it: bound out of its `Option` it would be copied
-            // first.
-            let mut lease = self.lease_on(link, want, lend_priority);
-            let Some(slot) = lease.as_mut() else {
-                return FrameLend::Heap;
-            };
-            // A window's frame grows across calls up to the whole budget, which a shorter slot
-            // would close earlier than the budget does: refused before an SN is minted for it.
-            if in_window && slot.capacity() < emit.mtu {
-                #[cfg(all(feature = "transport-batching", not(feature = "tx-lend-only")))]
-                {
-                    heap_why = HeapStage::ShortSlot;
-                }
-                return FrameLend::Heap;
-            }
-            // Over a slot that holds the whole budget a frame that crosses it is past the budget;
-            // over a shorter one the slot is what is short.
-            let whole_budget = slot.capacity() >= emit.mtu;
-            let sn = self.next_outbound_frame_sn(priority, emit.reliable, emit.sn_mask);
-            minted = Some(sn);
-            // Held to the budget, so a message past it is refused where it crosses it and its
-            // payload is not copied in; a window kept open keeps the hold for what is appended.
-            slot.hold_to(emit.mtu);
-            let written = crate::frame_encode::encode_frame_envelope_into(
-                slot,
-                crate::sn::to_wire(sn),
-                crate::frame_encode::frame_flags(emit.reliable),
-                emit.ext_qos,
-                crate::tx_buf::wire_body(encode_body),
-            );
-            match written {
-                Ok(()) => {}
-                Err(CodecError::BufferOverflow) if whole_budget => return FrameLend::PastMtu,
-                Err(CodecError::BufferOverflow) => return FrameLend::Heap,
-                // An encoder's refusal in a window's slot takes the oversize path, which measures
-                // the message again and answers the refusal (`emit_fragments_encoded`).
-                Err(_) if in_window => return FrameLend::PastMtu,
-                Err(refused) => return FrameLend::Refused(refused),
-            }
-            #[cfg(feature = "transport-batching")]
-            if in_window {
-                let idx = TxConduits::<R>::conduit_index(priority);
-                if let Some(stale) = link.batch_slots.get(idx).and_then(LentRecord::take) {
-                    // A record with no open frame naming it: the stage and the link disagree,
-                    // which the shared conduit lock rules out. Give the slot back rather than
-                    // lose it, and say so.
-                    link.link_driver().tx_slot_abort(stale);
-                    batch.lend.lost = batch.lend.lost.wrapping_add(1);
-                }
-                batch.lend.slot_frames = batch.lend.slot_frames.wrapping_add(1);
-                // A link whose slots come from a pool the session's other links share keeps none
-                // past this message while the pool has no other free: the frame leaves now with
-                // this message alone, as the window's flush would send it, and the next link that
-                // asks for a slot finds one.
-                #[cfg(feature = "session-unicast-accept")]
-                let keeps = link.link_driver().tx_slot_spare();
-                #[cfg(not(feature = "session-unicast-accept"))]
-                let keeps = true;
-                if keeps {
-                    let open = lease.take().map(crate::tx_lease::TxLease::keep_open);
-                    if let (Some(record), Some(open)) = (link.batch_slots.get(idx), open.as_ref()) {
-                        record.hold(open.slot());
+        let lent = self
+            .route()
+            .with_conduit_link(reliability, lend_priority, |link| {
+                use sce_forge_runtime::codec::CodecError;
+                // Lent from where `acquire` wrote it: bound out of its `Option` it would be copied
+                // first.
+                let mut lease = self.lease_on(link, want, lend_priority);
+                let Some(slot) = lease.as_mut() else {
+                    return FrameLend::Heap;
+                };
+                // A window's frame grows across calls up to the whole budget, which a shorter slot
+                // would close earlier than the budget does: refused before an SN is minted for it.
+                if in_window && slot.capacity() < emit.mtu {
+                    #[cfg(all(feature = "transport-batching", not(feature = "tx-lend-only")))]
+                    {
+                        heap_why = HeapStage::ShortSlot;
                     }
-                    batch.stage.lent = open;
-                    batch.stage.count = 1;
-                    return FrameLend::Sent;
+                    return FrameLend::Heap;
                 }
-                batch.stage.count = 0;
-            }
-            self.tx
-                .emit_on_link(link, &[], Some(slot), reliability, lend_priority, false);
-            FrameLend::Sent
-        });
+                // Over a slot that holds the whole budget a frame that crosses it is past the budget;
+                // over a shorter one the slot is what is short.
+                let whole_budget = slot.capacity() >= emit.mtu;
+                let sn = self.next_outbound_frame_sn(priority, emit.reliable, emit.sn_mask);
+                minted = Some(sn);
+                // Held to the budget, so a message past it is refused where it crosses it and its
+                // payload is not copied in; a window kept open keeps the hold for what is appended.
+                slot.hold_to(emit.mtu);
+                let written = crate::frame_encode::encode_frame_envelope_into(
+                    slot,
+                    crate::sn::to_wire(sn),
+                    crate::frame_encode::frame_flags(emit.reliable),
+                    emit.ext_qos,
+                    crate::tx_buf::wire_body(encode_body),
+                );
+                match written {
+                    Ok(()) => {}
+                    Err(CodecError::BufferOverflow) if whole_budget => return FrameLend::PastMtu,
+                    Err(CodecError::BufferOverflow) => return FrameLend::Heap,
+                    // An encoder's refusal in a window's slot takes the oversize path, which measures
+                    // the message again and answers the refusal (`emit_fragments_encoded`).
+                    Err(_) if in_window => return FrameLend::PastMtu,
+                    Err(refused) => return FrameLend::Refused(refused),
+                }
+                #[cfg(feature = "transport-batching")]
+                if in_window {
+                    let idx = TxConduits::<R>::conduit_index(priority);
+                    if let Some(stale) = link.batch_slots.get(idx).and_then(LentRecord::take) {
+                        // A record with no open frame naming it: the stage and the link disagree,
+                        // which the shared conduit lock rules out. Give the slot back rather than
+                        // lose it, and say so.
+                        link.link_driver().tx_slot_abort(stale);
+                        batch.lend.lost = batch.lend.lost.wrapping_add(1);
+                    }
+                    batch.lend.slot_frames = batch.lend.slot_frames.wrapping_add(1);
+                    // A link whose slots come from a pool the session's other links share keeps none
+                    // past this message while the pool has no other free: the frame leaves now with
+                    // this message alone, as the window's flush would send it, and the next link that
+                    // asks for a slot finds one.
+                    #[cfg(feature = "session-unicast-accept")]
+                    let keeps = link.link_driver().tx_slot_spare();
+                    #[cfg(not(feature = "session-unicast-accept"))]
+                    let keeps = true;
+                    if keeps {
+                        let open = lease.take().map(crate::tx_lease::TxLease::keep_open);
+                        if let (Some(record), Some(open)) =
+                            (link.batch_slots.get(idx), open.as_ref())
+                        {
+                            record.hold(open.slot());
+                        }
+                        batch.stage.lent = open;
+                        batch.stage.count = 1;
+                        return FrameLend::Sent;
+                    }
+                    batch.stage.count = 0;
+                }
+                self.tx
+                    .emit_on_link(link, &[], Some(slot), reliability, lend_priority, false);
+                FrameLend::Sent
+            });
         #[cfg(feature = "transport-tx-lend")]
         if let Some(sn) = minted {
             emit.sn = sn;
@@ -13219,7 +12993,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         );
         // The frame's conduit reconstructed from its own ext_qos (`Some(p)` iff
         // `p != DEFAULT`, else `None -> DEFAULT`) — the same key the SN mint used.
-        self.send_wire(frame, reliability, ext_qos.unwrap_or(Priority::DEFAULT));
+        self.route()
+            .send_wire(frame, reliability, ext_qos.unwrap_or(Priority::DEFAULT));
         Ok(UnicastPush::Pushed)
     }
 
@@ -13437,10 +13212,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // congestion drop. A chain whose every frame's room the sender reserved asks for
             // none: that room is the sender's, and asking would count its own promise.
             if emitted > 0 && !deadline.is_covered() {
-                let answer = self.with_conduit_link(reliability, priority, |link| {
-                    link.link_driver()
-                        .wait_for_room_for(reliability, priority, deadline.ask())
-                });
+                let answer = self
+                    .route()
+                    .with_conduit_link(reliability, priority, |link| {
+                        link.link_driver()
+                            .wait_for_room_for(reliability, priority, deadline.ask())
+                    });
                 deadline.spend(answer.waited_us);
                 if answer.room == crate::link::LinkRoom::Congested {
                     // (A stop marker the link lends no slot for is lost, and the
@@ -13606,7 +13383,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // The vector refuses no write, but the body can refuse itself (an encoder that composes
             // its message as it writes it), as it does in a slot: refused before a byte leaves.
             crate::frame_encode::write_fragment(&mut wire, span, body, reliable, ext_qos)?;
-            self.send_wire(&wire, reliability, priority);
+            self.route().send_wire(&wire, reliability, priority);
             Ok(())
         }
     }
@@ -13755,7 +13532,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let channel = crate::frame_encode::frame_wire_reliability(&frame);
             // Route each frame by its OWN conduit (y217 #3) — this drain path
             // carries no caller priority, so the band comes from the walk.
-            self.send_wire(&frame, channel, priority);
+            self.route().send_wire(&frame, channel, priority);
         }
     }
 
@@ -14453,10 +14230,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         let priority = self.conduit_priority(priority);
         let reliability = Reliability::from_reliable_bool(reliable);
-        Ok(self.with_conduit_link(reliability, priority, |link| {
-            link.link_driver()
-                .try_reserve_room_for(reliability, priority)
-        }))
+        Ok(self
+            .route()
+            .with_conduit_link(reliability, priority, |link| {
+                link.link_driver()
+                    .try_reserve_room_for(reliability, priority)
+            }))
     }
 
     /// Wait for room for a blocking message of `priority` on the link it leaves by, within
@@ -14486,10 +14265,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // A message that may not be dropped is a reliable one.
         let reliability = Reliability::from_reliable_bool(true);
         let deadline = PushDeadline::new(false, &self.params.tx_queue);
-        let answer = self.with_conduit_link(reliability, priority, |link| {
-            link.link_driver()
-                .wait_for_room_for(reliability, priority, deadline.ask())
-        });
+        let answer = self
+            .route()
+            .with_conduit_link(reliability, priority, |link| {
+                link.link_driver()
+                    .wait_for_room_for(reliability, priority, deadline.ask())
+            });
         if answer.room != crate::link::LinkRoom::Congested || !self.tx_slot_claimable() {
             return Ok(WireRoom::Send);
         }
@@ -14660,10 +14441,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         let priority = self.conduit_priority(priority);
         let reliability = Reliability::from_reliable_bool(reliable);
-        Ok(self.with_conduit_link(reliability, priority, |link| {
-            link.link_driver()
-                .try_reserve_rooms_for(reliability, priority, frames)
-        }))
+        Ok(self
+            .route()
+            .with_conduit_link(reliability, priority, |link| {
+                link.link_driver()
+                    .try_reserve_rooms_for(reliability, priority, frames)
+            }))
     }
 
     /// [`Self::send_network_message_reserved`] for a sender whose `room` covers every frame the
@@ -14802,7 +14585,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if descriptors.is_empty() || !self.is_shm() {
             return None;
         }
-        let handoff = self.with_conduit_link(
+        let handoff = self.route().with_conduit_link(
             Reliability::from_reliable_bool(reliable),
             self.conduit_priority(route),
             |link| R::with_mutex_mut(&link.shm_tx, |slot| slot.clone()),
@@ -18550,7 +18333,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // keepalive. And not queued behind the data in a lane either: the keepalive is the one
         // frame whose lateness costs the peer its lease, so it takes the link's urgent path
         // ([`BoxedLinkDriver::send_urgent`]).
-        self.send_wire_urgent_this_link(&bytes, class);
+        self.route().send_wire_urgent_this_link(&bytes, class);
     }
 
     /// A4 — record one declaration for replay and send it, as ONE step: `entry` goes at the end of
@@ -19846,7 +19629,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                         .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = encoded {
-                    a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                    a.route()
+                        .send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
                 }
             }
         }
@@ -19902,7 +19686,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                         .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = encoded {
-                    a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                    a.route()
+                        .send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
                     a.hold_handshake_answer(&bytes);
                 }
             }
@@ -20103,7 +19888,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                         .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = &encoded {
-                    a.send_wire(bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                    a.route()
+                        .send_wire(bytes, Reliability::Reliable, HANDSHAKE_LANE);
                     a.hold_handshake_answer(bytes);
                 }
                 encoded.is_ok() && cookie_bytes.is_some()
@@ -20176,7 +19962,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                             .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                     }
                     if let Ok(bytes) = &encoded {
-                        a.send_wire(bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                        a.route()
+                            .send_wire(bytes, Reliability::Reliable, HANDSHAKE_LANE);
                         a.hold_handshake_answer(bytes);
                     }
                 }
@@ -20241,7 +20028,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                         .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = encoded {
-                    a.send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                    a.route()
+                        .send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
                 }
             }
         }
