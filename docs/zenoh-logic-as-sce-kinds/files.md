@@ -405,6 +405,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-codecs/src/vle.rs` | S9 | |
 | `crates/wz-codecs/src/whatami.rs` | S9 | |
 | `crates/wz-command-seal/src/cbor.rs` | S6 | |
+| `crates/wz-command-seal/src/fresh.rs` | S6 | |
 | `crates/wz-command-seal/src/key.rs` | S6 | |
 | `crates/wz-command-seal/src/lib.rs` | S6 | |
 | `crates/wz-command-seal/src/replay.rs` | S6 | |
@@ -617,6 +618,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/keepalive_pacer.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/keyexpr_index.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/lib.rs` | S4, S5, S10, S12 | |
+| `crates/wz-runtime-tokio/src/lifecycle_seal.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/link_collision.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/link_interfaces.rs` | S10 | |
 | `crates/wz-runtime-tokio/src/link_pipeline.rs` | S5 | |
@@ -636,6 +638,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/multicast_glue.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/multicast_pipeline.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/multilink.rs` | S4 | |
+| `crates/wz-runtime-tokio/src/node_declaration.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/node_stats.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/observer.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/peer_board.rs` | S4 | |
@@ -1001,6 +1004,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/scouting_host/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/scouting_message.rs` | S1 | |
 | `crates/wz-session-core/src/scouting_message_parity.rs` | excluded: test | Parity tests of Scout and Hello against their documents, compiled only under `#[cfg(all(test, ...))]` (`lib.rs:1139`). |
+| `crates/wz-session-core/src/sealed_command.rs` | S1 | |
 | `crates/wz-session-core/src/selector_params.rs` | S2 | |
 | `crates/wz-session-core/src/send_declare_error.rs` | S3 | |
 | `crates/wz-session-core/src/send_deferral.rs` | S1 | |
@@ -1131,6 +1135,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-switchboard-codegen/src/lib.rs` | S10 | |
 | `crates/wz-switchboard-schema/src/lib.rs` | S10 | |
 | `crates/wz-tls-mbedtls/src/channel.rs` | S9 | |
+| `crates/wz-tls-mbedtls/src/es256.rs` | S9 | |
 | `crates/wz-tls-mbedtls/src/ffi.rs` | S9 | |
 | `crates/wz-tls-mbedtls/src/lib.rs` | S9 | |
 | `crates/wz-tls-mbedtls/src/lock.rs` | S9 | |
