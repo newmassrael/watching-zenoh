@@ -535,7 +535,7 @@ wz-session-core	wz-session-core/src/slot_observer.rs	1	error[E0425]: cannot find
 wz-session-core	wz-session-core/src/slot_observer.rs	1	error[E0425]: cannot find type `LocalTokenRegistry` in this scope: not found in this scope
 wz-session-core	wz-session-core/src/slot_observer.rs	1	error[E0425]: cannot find type `SwitchboardRegistry` in this scope: not found in this scope
 wz-session-core	wz-session-core/src/sn.rs	1	error: unresolved link to `crate::multicast_tx::multicast_tx_emit`: no item named `multicast_tx` in module `wz_session_core`
-wz-session-core	wz-session-core/src/sn.rs	3	error: unresolved link to `crate::session_actions::FrameTxConduits`: no item named `session_actions` in module `wz_session_core`
+wz-session-core	wz-session-core/src/sn.rs	3	error: unresolved link to `crate::transport_tx::FrameTxConduits`: no item named `transport_tx` in module `wz_session_core`
 wz-session-core	wz-session-core/src/source_info_ext.rs	1	error: unresolved link to `crate::attachment::encode_attachment_ext`: no item named `attachment` in module `wz_session_core`
 wz-session-core	wz-session-core/src/source_info_ext.rs	1	error: unresolved link to `crate::response_build`: no item named `response_build` in module `wz_session_core`
 wz-session-core	wz-session-core/src/stats.rs	1	error: unresolved link to `TransportStats::inc_rx_network`: no item named `TransportStats` in scope
