@@ -9281,6 +9281,24 @@
         "silent_skip: no lane builds wz-capi-pico with a narrowed policy domain.",
         "debt-prepush-round-fed-gates-red-on-main stays open on that leg."
       ]
+    },
+    "Round 4734": {
+      "decision_summary": "Repay the last member of gate 2z red on main, silent_skip, at its cause, and close the debt that recorded the gate's reds.",
+      "changes_bullets": [
+        "Five wz-capi-pico refusal tests returned early in every lane: the test build keeps every policy value and grows its tables.",
+        "Each asserts what such a build does instead, and Layer C1pc runs the five over defaults-only policies and fixed tables.",
+        "debt-prepush-round-fed-gates-red-on-main closed: why items landed past gate 2z is recorded."
+      ],
+      "verification_bullets": [
+        "The five pass in the default build and in the C1pc leg's build, 5 of 5 each.",
+        "silent_skip, armed_oracle, armed_skip, lanes and citation gates pass; clippy of wz-capi-pico lib and tests."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Gate 2z runs only in the extended sweep, so a later landing can red a member again."
+      ]
     }
   },
   "inventory_entries": {
