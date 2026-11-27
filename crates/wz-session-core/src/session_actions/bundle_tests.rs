@@ -1252,7 +1252,7 @@ mod lent_frame_refusal {
             crate::named_key::Prefix::of(id, "home/head"),
         )
         .expect("a key under its declaration");
-        let runs = crate::lent_push::plain_writer_runs;
+        let runs = || crate::lent_push::WRITER_RUNS.with(core::cell::Cell::get);
         for qos in [
             crate::sample::QosLevel::DEFAULT,
             crate::sample::QosLevel::from_raw(0x1a),

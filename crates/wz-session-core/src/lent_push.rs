@@ -598,21 +598,8 @@ where
 #[cfg(all(test, feature = "storage-profile", feature = "alloc"))]
 std::thread_local! {
     /// How many times [`write_plain_put`] ran on this thread: what a test of how often a Put is
-    /// written counts.
-    static WRITER_RUNS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
-}
-
-/// How many times [`write_plain_put`] ran on this thread, for a test of a send outside this
-/// module: `session_actions`'s lent frame refusal tests, so it is compiled where they are.
-#[cfg(all(
-    test,
-    feature = "storage-profile",
-    feature = "alloc",
-    feature = "tx-lend-only",
-    feature = "codec-push"
-))]
-pub(crate) fn plain_writer_runs() -> usize {
-    WRITER_RUNS.with(core::cell::Cell::get)
+    /// written counts, here and in `session_actions`'s lent frame tests.
+    pub(crate) static WRITER_RUNS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 /// The fixed fields of a Push [`write_push`] gathers before it hands them to its sink in one
