@@ -58,6 +58,10 @@ message-payload = ["wz-capi-pico/message-payload"]
 proto-text = ["wz-capi-pico/proto-text"]
 replay-cache = ["wz-capi-pico/replay-cache"]
 time-base = ["wz-capi-pico/time-base"]
+tx-probe = ["wz-capi-pico/tx-probe"]
+tx-expiry-run = ["wz-capi-pico/tx-expiry-run"]
+tx-fragment-credit = ["wz-capi-pico/tx-fragment-credit"]
+tx-held-wait = ["wz-capi-pico/tx-held-wait"]
 
 [dependencies]
 libfuzzer-sys = "0.4.10"

@@ -84,6 +84,12 @@ default = [
     "config-policy",
     "conformance-digest",
     "device-requires",
+    # The send's behaviours zenoh-pico's transport does not have (deploy/wz-config.toml,
+    # `tx-probe`, `tx-expiry-run`, `tx-fragment-credit`, `tx-held-wait`).
+    "tx-probe",
+    "tx-expiry-run",
+    "tx-fragment-credit",
+    "tx-held-wait",
     "config-verdict",
     "transport_compression",
     "auth_usrpwd",
@@ -308,6 +314,13 @@ conformance-digest = []
 # (`wz-capi-pico/device-requires`), part of the unstable surface: the derivation is
 # `wz-session-core`'s, so this feature only carries the capability's name.
 device-requires = ["unstable-api"]
+# The send's behaviours zenoh-pico's transport does not have (`wz-capi-pico/tx-probe` and its
+# three siblings): this engine's runtime takes the session core with its defaults, which hold all
+# four, so each feature only carries the capability's name.
+tx-probe = []
+tx-expiry-run = []
+tx-fragment-credit = []
+tx-held-wait = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

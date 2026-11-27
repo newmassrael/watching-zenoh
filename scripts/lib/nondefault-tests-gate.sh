@@ -591,6 +591,10 @@ object-pool|files::ext_handles_across_threads::"
     # the engine the default build does not name): an arena the memory cannot give is pico's out of
     # memory, a session limit over the build's value an invalid value.
     "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp|session::coop_open_refusal_tests::"
+    # The same build is a library without the send's behaviours zenoh-pico's transport does not
+    # have, as the zenoh-pico preset builds it: a count of `TX_EXPIRY_CLOSE_AFTER` its key states is
+    # refused, the run of expiries being one of them (`config_limits::`).
+    "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp|config_limits::tests::a_build_without_the_expiry_run_refuses_its_count"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
     "wz-app-frame|hook|replay|"
@@ -1399,6 +1403,118 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         tx-lend-only\
         |session_actions::bundle_tests::lent_handshake::"
+    # The send's behaviours beyond zenoh-pico's transport left out (`tx-probe`, `tx-expiry-run`,
+    # `tx-fragment-credit`, `tx-held-wait`, each a default of the crate), as the zenoh-pico preset
+    # builds the session core: the crate's defaults without the four, spelled out, over the first
+    # lend-only row's features above with fragmentation, the send of the C library's cooperative
+    # engine.
+    # Four filters, one build, each the test of what a behaviour's absence does: a chain its link
+    # cuts ends where it was cut, a kept expiry never closes the session, a stated count of
+    # expiries is refused by name, and every sender's deadline waits. NOT YET MEASURED.
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_actions::bundle_tests::chain_cut_without_a_stop_fragment::"
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_actions::bundle_tests::expiry_without_a_run::"
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
+        |policy_document::tests::a_build_without_the_expiry_run_refuses_its_count"
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
+        |tx_deadline::tests::without_the_probe_stage_every_deadline_waits"
     # The COMPACT initial-sequence-number derivation, a row of its own because
     # `initial-sn-compact` is a selector, not an addition: it swaps the SHAKE
     # derivation for the FNV-1a and SplitMix64 one and compiles the tests of the
