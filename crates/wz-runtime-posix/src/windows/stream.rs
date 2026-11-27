@@ -317,6 +317,9 @@ impl StreamSocket for WindowsTcpSocket {
     where
         Self: 'static;
 
+    // Every stream of this type is a socket it opened, which `input_wait` names.
+    const NAMES_INPUT_WAIT: bool = true;
+
     fn ends(&self) -> StreamEnds<'_> {
         StreamEnds::Ip {
             proto: LinkProto::Tcp,
