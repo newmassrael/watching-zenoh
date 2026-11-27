@@ -6898,22 +6898,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             Ok((wire, entropy, rooms))
         })?;
         // The read slots and send places of the faces past the dial role's, each with a Router of
-        // its own over the session's chain buffers.
+        // its own over the session's chain buffers, lent to its pump in a cell of its own.
         #[cfg(all(not(wz_round), feature = "listen"))]
-        let taken = {
-            // SAFETY: the handle is held by the faces' rows, which the engine drops first, before
-            // the place's owner, `Core::steps`, which hands out no `&mut` of it.
-            let lend = RouterLend::over(unsafe { lent.steps.router.share() });
-            direct::DirectFaces::<L, C>::taken_in(
-                lent.arena.arena_mut(),
-                lent.taken_faces,
-                &policy,
-                &lent.transport.reassembly,
-                lent.transport.face_chains,
-                &lend,
-            )
-            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?
-        };
+        let taken = direct::DirectFaces::<L, C>::taken_in(
+            lent.arena.arena_mut(),
+            lent.taken_faces,
+            &policy,
+            &lent.transport.reassembly,
+            lent.transport.face_chains,
+        )
+        .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
         links.lend_buffers(lent.transport.links);
         #[cfg(feature = "udp-listen")]
         links
@@ -7211,8 +7205,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         let handed_limits = HandedLimits::new(core.config.tx_queue.sizes);
         let arena_bytes = core.arena.bytes();
-        #[cfg(not(wz_round))]
-        let direct_lend = core.transport.lend.clone();
         let make = |this: NonNull<Self>| {
             // SAFETY: `this` is where the `Shared` the open places lays the engine, which is
             // taken out of its row at its close and first in its drop, before its place is given
@@ -7239,7 +7231,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 direct::DirectFaces::init_at(
                     NonNull::new_unchecked(addr_of_mut!((*at).direct)),
                     router,
-                    direct_lend,
                     #[cfg(feature = "listen")]
                     taken,
                 );

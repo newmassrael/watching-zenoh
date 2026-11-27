@@ -896,9 +896,10 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     pump: MaybeUninit<DirectPump<L, C>>,
     /// What each step of the pump is handed, held exactly while the pump is written.
     records: Option<LinkRecords<C>>,
-    /// The session's one Router, which the pump's receive is lent for each read.
+    /// The face's Router, which the pump's receive is lent for each read.
     router: SessionReassembly,
-    /// Where the Router is lent to the pump's receive.
+    /// Where the Router is lent to the pump's receive: the face's own cell
+    /// (`DirectFace::router_cell`), which no other face's pump looks in.
     lend: RouterLend<SessionReassembly, RouterPlace>,
     /// The link a dial made, and the endpoint it reached, until its handshake is begun.
     opened: Option<(OpenedLink<L::Pump, LinkCount>, DialEndpoint)>,
@@ -1265,6 +1266,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
     }
 }
 
+/// The cell a face's Router is lent in for each step of the face's pump, where the pump's receive
+/// looks for it (`DirectSlot::lend`).
+struct RouterCell(LendCell<SessionReassembly>);
+
+// SAFETY: the cell holds a pointer only while the holder of its face's read slot lends that face's
+// Router in it (`CoopEngine::step_pump`), and it is read and written only by that holder and by the
+// face's pump inside the holder's step, with the slot held: by one thread at a time, which is all
+// a `Cell` asks. The Router it points at lies in the slot, behind the same lock.
+unsafe impl Send for RouterCell {}
+// SAFETY: as `Send`: no thread that does not hold the face's read slot reaches the cell.
+unsafe impl Sync for RouterCell {}
+
 /// The face of a session whose read steps the one link itself: the link's session and what its
 /// life is carried out with ([`DirectSlot`]), behind the form's lock, which a read holds while it
 /// steps the pump; and what the link's end shares with the read.
@@ -1275,6 +1288,10 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// (`DirectWire`).
     site: DirectSite<L, C>,
     end: EndFlags,
+    /// Where the face's Router is lent to its pump for each step (`DirectSlot::lend`): the face's
+    /// own, so a read that steps this face's pump on one thread and a read that steps another
+    /// face's on another each lend and find their own face's Router.
+    router_cell: RouterCell,
     /// When the face is next due (`DirectSlot::due_us`), as its read last noted it: a read of
     /// several faces waits for the earliest of them, and the session's bookkeeping counts it,
     /// without holding the faces' slots. The one face's read holds its slot across its wait and
@@ -1310,21 +1327,23 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> {
     /// The face of the face table's row `row` of a session, whose Router is `router`, lent
-    /// through `lend`, with no link yet, made in `at` with its lock.
+    /// through the face's own cell, with no link yet, made in `at` with its lock.
     ///
     /// # Safety
     /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
     /// without being dropped. The face is not moved from `at` until it is dropped there.
-    unsafe fn init_at(
-        at: NonNull<Self>,
-        row: usize,
-        router: SessionReassembly,
-        lend: RouterLend<SessionReassembly, RouterPlace>,
-    ) {
+    unsafe fn init_at(at: NonNull<Self>, row: usize, router: SessionReassembly) {
         let at = at.as_ptr();
         // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
         // so each field is too, and each is written once.
         unsafe {
+            addr_of_mut!((*at).router_cell).write(RouterCell(core::cell::Cell::new(None)));
+            // The cell lies in the face, where the face does until it is dropped; the slot, which
+            // holds the handle and each pump's copy of it, is dropped with the face, and a handle
+            // does nothing with the cell in its drop.
+            let lend = RouterLend::over(PlacedRef::of_place(NonNull::new_unchecked(addr_of_mut!(
+                (*at).router_cell.0
+            ))));
             <CoopForm as LockForm>::init_at(
                 NonNull::new_unchecked(addr_of_mut!((*at).slot)),
                 |slot| {
@@ -1422,8 +1441,8 @@ pub(super) struct DirectFaces<L: CoopLinks + 'static, C: ClockSource + 'static> 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C> {
     /// The faces past the dial role's, `rows` of them lent from `arena`: the face of the face
     /// table's place `n` in the table's row `n - 1`, each with a Router of its own under
-    /// `policy`, staging at most `open` chains at once in `chains`, lent through `lend`.
-    /// Refused past what the arena has left.
+    /// `policy`, staging at most `open` chains at once in `chains`, lent through a cell of its
+    /// own. Refused past what the arena has left.
     #[cfg(feature = "listen")]
     pub(super) fn taken_in(
         arena: &mut Arena,
@@ -1431,16 +1450,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
         policy: &SessionPolicy,
         chains: &LentByteCells,
         open: usize,
-        lend: &RouterLend<SessionReassembly, RouterPlace>,
     ) -> Result<TakenFaces<L, C>, LendRefused> {
         let mut taken = arena.lend::<DirectFace<L, C>, { usize::MAX }>(rows)?;
         for at in 1..=rows {
             let router = session_reassembly(policy, SessionChains::over(chains, open));
-            let lend = lend.clone();
             let write = move |row: &mut MaybeUninit<DirectFace<L, C>>| {
                 // SAFETY: the row is aligned and valid for writes of a face, holds none, and is
                 // kept where it lies by the table for as long as the face is.
-                unsafe { DirectFace::<L, C>::init_at(NonNull::from(row).cast(), at, router, lend) }
+                unsafe { DirectFace::<L, C>::init_at(NonNull::from(row).cast(), at, router) }
             };
             // SAFETY: `write` leaves a whole face in its row, and does not unwind.
             if unsafe { taken.push_in_place(write) }.is_none() {
@@ -1450,8 +1467,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
         Ok(taken)
     }
 
-    /// The faces, the dial role's made in `at` with `router`, lent through `lend`, and those
-    /// past it `taken`.
+    /// The faces, the dial role's made in `at` with `router`, and those past it `taken`.
     ///
     /// # Safety
     /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
@@ -1459,19 +1475,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     pub(super) unsafe fn init_at(
         at: NonNull<Self>,
         router: SessionReassembly,
-        lend: RouterLend<SessionReassembly, RouterPlace>,
         #[cfg(feature = "listen")] taken: TakenFaces<L, C>,
     ) {
         let at = at.as_ptr();
         // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
         // so each field is too, and each is written once.
         unsafe {
-            DirectFace::init_at(
-                NonNull::new_unchecked(addr_of_mut!((*at).dial)),
-                0,
-                router,
-                lend,
-            );
+            DirectFace::init_at(NonNull::new_unchecked(addr_of_mut!((*at).dial)), 0, router);
             #[cfg(feature = "listen")]
             {
                 addr_of_mut!((*at).taken).write(taken);
@@ -2954,6 +2964,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 PumpPlace {
                     place: &mut slot.pump,
                     end,
+                    lend: slot.lend.clone(),
                 },
             )
             .map_err(OpenError::from)?;
@@ -3661,6 +3672,27 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         let mut held = <CoopForm as LockForm>::lock(&self.direct.dial.slot);
         f(&mut held.0.router, now_ms)
+    }
+
+    /// How many faces of the face table, but the one at row `row`, find a Router lent where
+    /// their pumps look for one while the face at `row` lends its own there for a step: each
+    /// face's read slot taken as a read takes it, uncounted. `None` past the table.
+    #[cfg(all(test, feature = "std", feature = "listen"))]
+    pub(crate) fn faces_lent_beside(&self, row: usize) -> Option<usize> {
+        let face = self.direct.iter().nth(row)?;
+        let mut held = <CoopForm as LockForm>::lock(&face.slot);
+        let DirectSlot { router, lend, .. } = &mut held.0;
+        Some(lend.lend_for(router, || {
+            self.direct
+                .iter()
+                .enumerate()
+                .filter(|&(at, other)| {
+                    at != row
+                        && <CoopForm as LockForm>::try_lock(&other.slot)
+                            .is_some_and(|other| other.0.lend.is_lent())
+                })
+                .count()
+        }))
     }
 }
 

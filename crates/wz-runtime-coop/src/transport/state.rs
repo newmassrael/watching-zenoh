@@ -236,7 +236,9 @@ pub struct TransportState<T: TransportFaces> {
     /// ([`TransportFaces::Router`]).
     pub router: T::Router,
     /// Where the session lends its Router to its links' receives, each link's task holding the
-    /// place: lent for the length of a pass of the tasks and at no other time.
+    /// place: lent for the length of a pass of the tasks and at no other time. A link whose owner
+    /// steps it itself looks for its Router in a place of its own face's instead
+    /// ([`PumpPlace::lend`]).
     pub lend: RouterLend<SessionReassembly, T::RouterPlace>,
 }
 
@@ -285,6 +287,10 @@ pub struct PumpPlace<'p, T: TransportFaces, E> {
     pub place: &'p mut MaybeUninit<LinkPump<T, LinkOf<T>>>,
     /// How the owner tells the link's session ended, and ends it.
     pub end: E,
+    /// Where the pump's receive looks for the Router its owner lends it for each step: a place of
+    /// the face the link serves, which no other face's pump looks in, so a pump reaches its own
+    /// face's Router alone while another thread steps another face's.
+    pub lend: RouterLend<SessionReassembly, T::RouterPlace>,
 }
 
 /// A link whose session its owner steps itself, made ([`TransportState::place_wire`]): the
@@ -489,9 +495,9 @@ impl<T: TransportFaces> TransportState<T> {
 
     /// [`Self::spawn_link`] with no task: the link's session built in `place`, which its owner
     /// holds, steps itself and drops once no step of it is under way
-    /// ([`place_session_with_router`]). The session's Router is lent to it through the place the
-    /// link holds, as to a task's pump, for the steps its owner lends the Router around. `None`
-    /// when the Router could not be built in its place.
+    /// ([`place_session_with_router`]). Its receive looks for its Router in `lend`, the place of
+    /// its owner's face, for the steps its owner lends the Router around. `None` when the Router
+    /// could not be built in its place.
     // Always inlined: its one caller holds these values in its own frame.
     #[inline(always)]
     pub fn place_link<'p, P>(
@@ -499,11 +505,12 @@ impl<T: TransportFaces> TransportState<T> {
         place: &'p mut MaybeUninit<LinkPump<T, P>>,
         runtime: CoopRuntime<T::Clock, dyn BoxedLinkDriver, T::Lock>,
         fields: PumpFields<T::Clock, P, dyn BoxedLinkDriver, T::Lock>,
+        lend: RouterLend<SessionReassembly, T::RouterPlace>,
     ) -> Option<&'p mut LinkPump<T, P>>
     where
         P: SessionDatagramLink + 'static,
     {
-        place_session_with_router(place, runtime, fields, self.lend.clone())
+        place_session_with_router(place, runtime, fields, lend)
     }
 
     /// Open the link of the group `endpoint` names (`group`), read here once for every stack
@@ -700,9 +707,9 @@ impl<T: TransportFaces> TransportState<T> {
             endpoint,
         } = opened_as;
         let built = self.build_wire(calls, face, opened, role, endpoint, making)?;
-        let PumpPlace { place, end } = place;
+        let PumpPlace { place, end, lend } = place;
         let pump = self
-            .place_link(place, runtime, built.fields)
+            .place_link(place, runtime, built.fields, lend)
             .ok_or(TransportRefusal::NoTask(SpawnRefusal::NoTaskCell))?;
         Ok(PlacedWire {
             wire: Wire::new(

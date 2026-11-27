@@ -4181,6 +4181,10 @@ mod entity_tables;
 // there not with the host's own locks (`host-sys`), which the module's tests read.
 #[cfg(all(feature = "std", debug_assertions))]
 mod face_order;
+// Each face's Router, where the read steps each face's pump itself and takes faces beside the dial
+// role's.
+#[cfg(all(not(wz_round), feature = "listen"))]
+mod face_routers;
 #[cfg(all(
     feature = "listen",
     feature = "query",
