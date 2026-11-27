@@ -324,6 +324,77 @@
       "decision": "docs/zenoh-logic-as-sce-kinds/S1.md, row 29",
       "runs": [],
       "abstract": true
+    },
+    {
+      "module": "PicoApiService",
+      "decision": "SCE ADR 0115, D1: the API of the zenoh-pico preset (docs/formal/README.md, 2026-11-28)",
+      "parts": {
+        "WaitsForCallbacks": "TRUE",
+        "OneRoute": "TRUE",
+        "StreamLink": "TRUE",
+        "TimelyLink": "TRUE"
+      },
+      "runs": [
+        {
+          "config": "PicoApiService.cfg",
+          "expect": "holds",
+          "states": 974934
+        },
+        {
+          "config": "PicoApiService_samples.cfg",
+          "expect": "holds",
+          "states": 492734
+        },
+        {
+          "config": "PicoApiService_liveliness.cfg",
+          "expect": "holds",
+          "states": 10284
+        },
+        {
+          "config": "PicoApiService_queries_live.cfg",
+          "expect": "holds",
+          "states": 21484
+        },
+        {
+          "config": "PicoApiService_queries_live_without_fairness.cfg",
+          "expect": "violates",
+          "property": "GetsEnd",
+          "against": "the fairness of LiveSpec"
+        },
+        {
+          "config": "PicoApiService_samples_without_waits.cfg",
+          "expect": "violates",
+          "invariant": "NothingAfterGone",
+          "without": "WaitsForCallbacks"
+        },
+        {
+          "config": "PicoApiService_samples_without_one_route_order.cfg",
+          "expect": "violates",
+          "invariant": "InOrder",
+          "without": "OneRoute"
+        },
+        {
+          "config": "PicoApiService_samples_without_one_route_once.cfg",
+          "expect": "violates",
+          "invariant": "AtMostOnce",
+          "without": "OneRoute"
+        },
+        {
+          "config": "PicoApiService_samples_without_stream_link.cfg",
+          "expect": "violates",
+          "invariant": "ReliableNoGap",
+          "without": "StreamLink"
+        },
+        {
+          "config": "PicoApiService_liveliness_without_timely_link.cfg",
+          "expect": "violates",
+          "invariant": "NoFalseDeath",
+          "without": "TimelyLink"
+        }
+      ],
+      "progress": [
+        "GetsEnd"
+      ]
     }
   ]
 }

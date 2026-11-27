@@ -30,6 +30,8 @@ promises those levels will be held to.
 | `FragmentPacingService.tla` | 1, promise | A paced writer's fragments: at most `Burst` in a row each less than `Gap` after the one before, none delayed past the gap after the last write, a datagram that is not a fragment never delayed, and `Burst` fragments let through between two waits |
 | `FragmentPacing.tla` | 2, protocol | The pacer (S1 29): the rule `sources/algorithms/fragment_pacing_wait.scxml`, its run taken and given back. `Refines` checks it against the promise |
 | `FragmentPacing*.cfg` | bounded exploration | A burst of two, a gap of three, six datagrams of either kind over five ticks; one configuration per part taken out |
+| `PicoApiService.tla` | 1, promise | What a program written to zenoh-pico's API may rely on: a session opened and closed, declarations and their undeclaration, the samples a put or a delete delivers by reliability and congestion control, a get's replies and its one end (`QueryFinalService` instantiated whole as the queryable's clause), what a liveliness subscriber is told; the network's faults as environment |
+| `PicoApiService*.cfg` | bounded exploration | One of each over one session; three samples of one publisher on two keys in every class; two tokens and two liveliness subscribers; two gets reaching two queryables; one configuration per assumption taken out |
 | `models.json` | manifest | Every module and configuration, in the format of SCE's `schemas/sce-formal-models.v1.schema.json` (`"v": 1`, no tool pin) |
 
 ## 2. Each part of the query's Final has a configuration that fails without it
@@ -130,6 +132,79 @@ Run by hand with TLC 1.7.4 on 2026-11-28, outside the judge: the holding configu
 violation in 57162 distinct states and refines the promise, and each configuration with a part
 taken out found the violation the table names. Not modelled: a timer that wakes late, a clock
 that goes back, and the time a write takes (the module's "Taken as given").
+
+### The API of the zenoh-pico preset (2026-11-28)
+
+`PicoApiService` is the top of the owner's goal of 2026-11-28, that the whole library refines a TLA+
+statement of its API: what a program written to zenoh-pico 1.10.2's API may rely on, with no
+mechanism in it, each clause read against the upstream source it cites in its head. The network
+is environment, with the faults of a channel of SCE ADR 0115 D7 (amended 2026-11-23), and the
+module says what a user sees of each: a duplicated frame nothing, a reordered frame a loss, a
+lost frame a loss, a link lost whole a `Break`.
+
+What it promises by a sample's class, while the link to the subscriber's session holds:
+
+| Class | May be lost | Order | Repetition |
+|---|---|---|---|
+| best effort | any sample | the order put, per publisher and channel | none |
+| reliable, congestion control DROP (a put's default) | any sample | the same | none |
+| reliable, congestion control BLOCK | none (`ReliableNoGap`), given a stream link | the same | none |
+
+A loss of the link may lose every sample in flight, of every class.
+
+Its manifest entry is not `abstract`: the judge refuses an abstract module that nothing refines,
+and the model that is to refine this one is the system model SCE's D7 generates and D12 composes,
+which is not built. Until then the module is run by itself, to show what each of its checks stands
+on. Its "parts" are its assumptions and the one clause of the API that a check stands on, each a
+constant a configuration takes out; none of them is a mechanism. When the system model exists, the
+entry becomes `abstract` and these runs move to the model that refines it.
+
+| Assumption or clause (constant) | What it keeps | Without it TLC is to find |
+|---|---|---|
+| `WaitsForCallbacks` | close and an undeclaration return after the last run of the callbacks they end (the clause of close and undeclare) | a sample given to a subscriber after its undeclaration returned (`NothingAfterGone`) |
+| `OneRoute` | the samples of a publisher reach a subscribing session over one chain of links; zenoh-pico judges order and repetition per peer | a later sample given before an earlier one (`InOrder`), and a sample given twice (`AtMostOnce`), one configuration each |
+| `StreamLink` | the link under a reliable channel loses only whole (TCP, TLS); zenoh-pico takes a reliable frame by its order alone and asks for none again | a reliable BLOCK sample lost while the link held (`ReliableNoGap`) |
+| `TimelyLink` | a link that holds delivers within the lease | a DELETE told of a token alive while its link held (`NoFalseDeath`) |
+| the fairness of `LiveSpec` | a get's timeout comes | a get left waiting for ever (`GetsEnd`): no Final need come, and a query refused at its queryable is sent none |
+
+Run by hand with TLC 1.7.4 on 2026-11-28, outside the judge (exit 0 holds, 12 an invariant
+violated, 13 a temporal property violated):
+
+| Configuration | Exit | Distinct states | Found |
+|---|---|---|---|
+| `PicoApiService.cfg` | 0 | 974934 | no violation |
+| `PicoApiService_samples.cfg` | 0 | 492734 | no violation |
+| `PicoApiService_liveliness.cfg` | 0 | 10284 | no violation |
+| `PicoApiService_queries_live.cfg` | 0 | 21484 | no violation, `GetsEnd` holds |
+| `PicoApiService_samples_without_waits.cfg` | 12 | 3234 | `NothingAfterGone` |
+| `PicoApiService_samples_without_one_route_order.cfg` | 12 | 12492 | `InOrder` |
+| `PicoApiService_samples_without_one_route_once.cfg` | 12 | 3030 | `AtMostOnce` |
+| `PicoApiService_samples_without_stream_link.cfg` | 12 | 2678 | `ReliableNoGap` |
+| `PicoApiService_liveliness_without_timely_link.cfg` | 12 | 199 | `NoFalseDeath` |
+| `PicoApiService_queries_live_without_fairness.cfg` | 13 | 21484 | `GetsEnd` |
+
+The states of a violating run are those TLC had found when it stopped, and depend on its workers.
+
+What the mechanism promises above refine of it. Each is a hand model today; the system model that
+would compose them under this promise is SCE ADR 0115 D7's, generated from the documents, and not
+built.
+
+| Mechanism promise | The part of the API promise it refines | Protocol model that refines it |
+|---|---|---|
+| `QueryFinalService` | QUERIES at the queryables' session, whole: `PicoApiService` instantiates it (`QF == INSTANCE QueryFinalService`) and takes each of its steps under the session's guards, so every behaviour of the API promise is one of it on that clause | `QueryFinals` (`Refines`) |
+| `ResetOnceService` | `Break`: a peer's reset ends its session at most once per generation, so a retransmitted or older reset is a duplicated frame, which a user sees as nothing, and not a second loss of the link | `ResetGenerations` |
+| `SecondLinkService` | `OneRoute` between two nodes that dial each other at once: one link carries, so samples and declarations between them travel one chain and none is seen twice | `SecondLinks` |
+| `FaceCollisionService` | `OneRoute` at a router: at most one face to a node, and the routing graph holds a link to it exactly while one is held | `FaceCollisions` |
+| `FragmentPacingService` | `TimelyLink`, in part: `BoundedDelay` bounds the delay a paced writer adds to a datagram by the gap, a part of what a link must keep within the lease | `FragmentPacing` |
+| `E2eCounterService` | none: end-to-end protection is past the pico preset; it makes the losses SAMPLES allows countable to the application that reads the payload | `E2eCounters` |
+
+Not modelled: a liveliness subscriber's history and the liveliness get; consolidation, except
+that with `LATEST` the replies are given at the Final and none at a timeout, which the promise
+allows; the key expression algebra past equality and one subscriber every key intersects; a
+query's target and the keys of queryables; payloads, encodings, attachments, timestamps; matching
+listeners and the advanced publisher and subscriber; the close of a publisher's or a token's own
+session, which is their undeclaration here; a publisher and a subscriber of the same session,
+whose delivery is within the session and is one the promise allows.
 
 ## 3. The judge is SCE's, and the SCE revision wz pins cannot run it on this manifest
 
