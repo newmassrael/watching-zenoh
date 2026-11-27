@@ -3667,13 +3667,17 @@ impl<P: Storage> SubscriberPeer<P> {
     /// ([`Self::alias_refusals`]), and the aliases already held are kept, as a lowered soft
     /// limit keeps what it holds. A table that holds no alias and whose rows are counted when it is
     /// made is counted to `quota` too ([`PeerIds::recount`]), so a quota above the build's
-    /// (a group's face, which holds every member's) has the rows to hold it.
+    /// (a group's face, which holds every member's) has the rows to hold it, and to the rows it
+    /// was made with for a quota of no most ([`PeerIds::recount_as_made`]), so a place a group's
+    /// face held is counted as a peer's again for its next face whatever the quota bounds.
     #[cfg(feature = "storage-profile")]
     pub fn limit_aliases_to(&mut self, quota: crate::limits::MaxPeerKeyexprAliasesHeld) {
         self.naming.alias_quota = quota;
-        if let Some(rows) = quota.get().most() {
-            PeerIds::<KeyText<P>, P::Keys>::recount(&mut self.naming.aliases, rows);
-        }
+        let aliases = &mut self.naming.aliases;
+        match quota.get().most() {
+            Some(rows) => PeerIds::<KeyText<P>, P::Keys>::recount(aliases, rows),
+            None => PeerIds::<KeyText<P>, P::Keys>::recount_as_made(aliases),
+        };
     }
 
     /// Hold the peer's alias table to admit at least the most `quota` states: its quota raised to

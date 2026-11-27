@@ -509,6 +509,13 @@ pub trait PeerIds<V, H>: Default {
         false
     }
 
+    /// Count the table back to the rows it was made with while it holds no id, as
+    /// [`Self::recount`] counts it: a table counted when it is made (`CountedIdMap`) takes its
+    /// build's `N` again and answers `true`. A table with no count to change: `false`.
+    fn recount_as_made(&mut self) -> bool {
+        false
+    }
+
     /// The rows the table is counted to, for a table whose rows are counted when it is made
     /// (`CountedIdMap`): the most ids it holds whatever its quota admits. `None` for a table of a
     /// fixed capacity, of rows lent from a pool, or that grows, which has no count.
@@ -894,6 +901,10 @@ impl<V, const N: usize> PeerIds<V, crate::on_use::BudgetKeys> for CountedIdMap<V
 
     fn recount(&mut self, rows: usize) -> bool {
         CountedIdMap::recount(self, rows)
+    }
+
+    fn recount_as_made(&mut self) -> bool {
+        CountedIdMap::recount(self, N)
     }
 
     fn counted_rows(&self) -> Option<usize> {
@@ -1822,8 +1833,9 @@ mod tests {
     }
 
     /// The on-use table of a peer's ids is counted anew while it holds no id, giving back the
-    /// rows it took, and keeps its count while it holds one. Turned red by a recount of a table
-    /// that holds ids (its rows would go with them), or by one that keeps the rows it took.
+    /// rows it took, and keeps its count while it holds one; counted back as made, it holds its
+    /// build's `N` again. Turned red by a recount of a table that holds ids (its rows would go with
+    /// them), by one that keeps the rows it took, or by a count as made of anything but `N`.
     #[cfg(feature = "alloc")]
     #[test]
     fn an_on_use_table_is_recounted_only_while_it_holds_no_id() {
@@ -1857,11 +1869,14 @@ mod tests {
         assert!(PeerIds::<u32, BudgetKeys>::recount(&mut table, 1));
         assert!(!table.holds_rows(), "a recount gives the rows back");
         assert_eq!(table.capacity(), 1);
+        assert!(PeerIds::<u32, BudgetKeys>::recount_as_made(&mut table));
+        assert_eq!(table.capacity(), 2, "counted back to the build's N");
         let mut fixed: FixedIdMap<u32, 2> = FixedIdMap::new();
         assert!(
             !PeerIds::<u32, BudgetKeys>::recount(&mut fixed, 5),
             "a table of a fixed capacity has no count to change"
         );
+        assert!(!PeerIds::<u32, BudgetKeys>::recount_as_made(&mut fixed));
     }
 
     /// The table answers as a pool: its capacity and holdings, the refusals it counted, and the
