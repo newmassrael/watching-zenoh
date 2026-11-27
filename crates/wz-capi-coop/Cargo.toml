@@ -286,7 +286,9 @@ link-admission = ["listen", "wz-runtime-coop/link-admission"]
 # preset leaves it off. A client that only dials answers no Interest and has none of it. The
 # `DeclareFinal` of the initial interest that ends what a peer face is told when its link comes up
 # (`CoopConfig::initial_interest`) is sent by a build that listens or answers, as zenoh-pico's peer
-# ends its push to a new peer with it; a client build links none of that either.
+# ends its push to a new peer with it; a client build links none of that either. The feature is the
+# request; the engine's code reads the core's own statement of what it built (`wz_interest_answer`,
+# build.rs), since another crate of the graph can turn the core's on while this one is off.
 interest-answer = ["wz-session-core/interest-answer"]
 # The send's behaviours that zenoh-pico's transport does not have, each the session core's feature
 # of the same name: on in this crate's own build, and named by the pico ABI's capabilities of the

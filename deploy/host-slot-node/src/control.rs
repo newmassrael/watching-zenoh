@@ -22,9 +22,10 @@
 use core::ops::ControlFlow;
 
 use wz_runtime_posix::control::{reply, Lines};
-use wz_session_core::lifecycle_node::{Commander, LifecycleNode, Verb};
+use wz_session_core::lifecycle_monitor::{Grant, Policy};
+use wz_session_core::lifecycle_node::{LifecycleNode, Verb};
 use wz_session_core::text_out::FixedText;
-use wz_session_mcu::connect_manager::{LifecyclePermits, PeerStore, StoreNode};
+use wz_session_mcu::connect_manager::{PeerStore, StoreNode};
 use wz_session_mcu::control_port::{self, Malformed};
 use wz_session_mcu::slot_node::{NodeApp, NodeHandle};
 
@@ -34,16 +35,18 @@ const LINES_PER_ROUND: usize = 4;
 /// status with its machine's row.
 const ANSWER_BYTES: usize = 256;
 
-/// The permit of the control channel: every verb its pipe asks is permitted, since the channel is
-/// the agent's own (decision D12: the authority on the pipe is possession of the pipe). A
-/// commander that is not the pipe is none of this permit's, so a node served in band as well
-/// gives that commander the permit it states for it and not this one.
+/// The policy of the control channel: the node's statement gives its pipe every verb, since the
+/// channel is the agent's own (decision D12: the authority on the pipe is possession of the pipe).
+/// It grants no zid, so a node served in band as well states the grants of that commander in a
+/// policy of its own and not this one. The node's monitor judges every line by it (decision D16).
 pub struct HostPermits;
 
-impl LifecyclePermits for HostPermits {
-    fn permits(&self, _verb: Verb, commander: Commander<'_>) -> bool {
-        matches!(commander, Commander::Pipe)
+impl Policy for HostPermits {
+    fn pipe_commands(&self, _verb: Verb) -> bool {
+        true
     }
+
+    fn each_grant(&self, _verb: Verb, _visit: &mut dyn FnMut(Grant<'_>) -> bool) {}
 }
 
 /// The verbs of the node's own store, under the channel's permit.

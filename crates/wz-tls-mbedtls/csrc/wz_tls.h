@@ -192,6 +192,18 @@ void wz_tls_session_close_notify(struct wz_tls_session *s);
 /** Free the session. */
 void wz_tls_session_free(struct wz_tls_session *s);
 
+/** Whether `signature` (r then s, 32 bytes each) is an ES256 signature of `message` by the P-256
+ * key `point` (65 bytes, uncompressed): 1 if it verifies, 0 if it does not or the point is not on
+ * the curve, a negative error when the library could not judge (not started, no key slot free). The
+ * key is imported for the call and destroyed before it returns. A sealed lifecycle command's
+ * verification (docs/command-seal.md). */
+int wz_tls_es256_verify(const uint8_t *point, const uint8_t *message, size_t len,
+			const uint8_t *signature);
+
+/** Fill `out` with `len` bytes of the library's random generator: 0, or a negative error (not
+ * started). */
+int wz_tls_random(uint8_t *out, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

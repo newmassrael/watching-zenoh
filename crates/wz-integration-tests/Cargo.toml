@@ -527,6 +527,9 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", features = [
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
     "tls-fixtures",
 ] }
+# A sealed lifecycle command's codec and its host signer (`ring`, the default): the commander of
+# `wz_sealed_commander_zenohd_interop` seals each command it sends with a key the test makes.
+wz-command-seal = { path = "../wz-command-seal" }
 # tempfile is used by R63 link_emitter_b6 to stage sce-codegen emit
 # output in a clean directory per test run (no pollution of $OUT_DIR
 # or vendor/sce/target).

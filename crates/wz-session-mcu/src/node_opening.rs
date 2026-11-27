@@ -12,7 +12,8 @@
 //! spelling of the zid, the outcomes, and their words are the same on every one.
 
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
-use wz_session_core::lifecycle_node::{self, Commander, Generation, LifecycleNode, Verb, Zid};
+use wz_session_core::lifecycle_monitor::{Asker, Monitor, NoGrants, NoRecord};
+use wz_session_core::lifecycle_node::{self, Generation, LifecycleNode, Verb, Zid};
 use wz_session_core::lifecycle_wire::{
     CloseOrder, MachineReport, OpenMode, OpenOutcome, OpenVerdict, SessionLinks,
 };
@@ -33,11 +34,10 @@ pub trait NodeOpening {
     /// Whether the node binds the in-band verbs at all. `false` only for [`NoOpening`].
     const BOUND: bool = true;
 
-    /// Whether this node lets `commander` open a session: the node's write permit, which is what
-    /// the config write is gated by too, judged alike for every commander until an image states
-    /// who may (decision D12). A node that does not permit it answers a refusal that says so,
-    /// and opens nothing.
-    fn permitted(&self, commander: Commander<'_>) -> bool;
+    /// The node's reference monitor (decision D16): the policy that says who may open a session,
+    /// and the record of every decision. A node the monitor refuses answers a refusal that says
+    /// so, and opens nothing.
+    fn monitor(&self) -> Monitor<'_>;
 
     /// Ask the node to hold the peer `zid`. Accepted, not completed: how the dial ends is read
     /// in the node's connection status. Asking again for a peer already held changes nothing
@@ -55,8 +55,9 @@ pub struct NoOpening;
 impl NodeOpening for NoOpening {
     const BOUND: bool = false;
 
-    fn permitted(&self, _commander: Commander<'_>) -> bool {
-        false
+    /// Binds no verb, so the monitor refuses every request as not bound before it reads a grant.
+    fn monitor(&self) -> Monitor<'_> {
+        Monitor::new(&NoGrants, &NoRecord)
     }
 
     fn open(&self, _zid: &[u8; CREDENTIAL_ZID_BYTES], _mode: OpenMode) -> OpenOutcome {
@@ -76,13 +77,14 @@ pub fn open_verdict<O: NodeOpening + ?Sized>(
     opener: &O,
     peer_text: &str,
     mode: OpenMode,
-    commander: Commander<'_>,
+    asker: Asker<'_>,
 ) -> OpenVerdict {
-    lifecycle_node::open_verdict(&OpeningOnly(opener), peer_text, mode, commander)
+    lifecycle_node::open_verdict(&OpeningOnly(opener), peer_text, mode, asker)
 }
 
 /// A node that binds the open verb alone, as the fixed in-band query and the first control port
-/// served it: the verbs of the other three are not permitted and ask the node nothing.
+/// served it: the other three verbs are not bound, so the monitor refuses them and they ask the
+/// node nothing.
 ///
 /// The effects of those verbs are not reached, since the function reads the permit first; they
 /// answer what a node with nothing to close, nothing to read and no room for a generation would.
@@ -90,8 +92,12 @@ pub fn open_verdict<O: NodeOpening + ?Sized>(
 pub struct OpeningOnly<'a, O: ?Sized>(pub &'a O);
 
 impl<O: NodeOpening + ?Sized> LifecycleNode for OpeningOnly<'_, O> {
-    fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
-        matches!(verb, Verb::Open) && self.0.permitted(commander)
+    fn binds(&self, verb: Verb) -> bool {
+        matches!(verb, Verb::Open) && O::BOUND
+    }
+
+    fn monitor(&self) -> Monitor<'_> {
+        self.0.monitor()
     }
 
     fn open(&self, zid: &Zid, mode: OpenMode) -> OpenOutcome {
@@ -144,9 +150,22 @@ mod tests {
         }
     }
 
-    impl NodeOpening for Counting {
-        fn permitted(&self, _commander: Commander<'_>) -> bool {
+    /// The node's write permit, a grant to anyone.
+    impl wz_session_core::lifecycle_monitor::Policy for Counting {
+        fn grants_anyone(&self, _verb: Verb) -> bool {
             self.permit
+        }
+        fn each_grant(
+            &self,
+            _verb: Verb,
+            _visit: &mut dyn FnMut(wz_session_core::lifecycle_monitor::Grant<'_>) -> bool,
+        ) {
+        }
+    }
+
+    impl NodeOpening for Counting {
+        fn monitor(&self) -> Monitor<'_> {
+            Monitor::new(self, &NoRecord)
         }
         fn open(&self, zid: &[u8; CREDENTIAL_ZID_BYTES], mode: OpenMode) -> OpenOutcome {
             self.asked.set(Some(*zid));
@@ -160,7 +179,7 @@ mod tests {
     fn a_node_that_does_not_permit_is_never_asked() {
         let node = Counting::new(false, OpenOutcome::Accepted);
         assert_eq!(
-            open_verdict(&node, "abc", OpenMode::Dial, Commander::Pipe),
+            open_verdict(&node, "abc", OpenMode::Dial, Asker::PIPE),
             OpenVerdict::Refused(RefusedReason::OpenNotPermitted)
         );
         assert_eq!(node.times.get(), 0);
@@ -171,7 +190,7 @@ mod tests {
         let node = Counting::new(true, OpenOutcome::Accepted);
         for text in ["", "0abc", "xyz", "00000000000000000000000000000000f"] {
             assert_eq!(
-                open_verdict(&node, text, OpenMode::Dial, Commander::Pipe),
+                open_verdict(&node, text, OpenMode::Dial, Asker::PIPE),
                 OpenVerdict::Refused(RefusedReason::PeerNotAZid),
                 "{text:?}"
             );
@@ -184,7 +203,7 @@ mod tests {
         let node = Counting::new(true, OpenOutcome::Accepted);
         for _ in 0..2 {
             assert_eq!(
-                open_verdict(&node, "abc", OpenMode::Dial, Commander::Pipe),
+                open_verdict(&node, "abc", OpenMode::Dial, Asker::PIPE),
                 OpenVerdict::Opening
             );
         }
@@ -205,7 +224,7 @@ mod tests {
         ] {
             let node = Counting::new(true, outcome);
             assert_eq!(
-                open_verdict(&node, "1", OpenMode::Dial, Commander::Pipe),
+                open_verdict(&node, "1", OpenMode::Dial, Asker::PIPE),
                 OpenVerdict::Refused(reason)
             );
         }
@@ -217,7 +236,7 @@ mod tests {
         let node = Counting::new(true, OpenOutcome::Accepted);
         for mode in [OpenMode::Dial, OpenMode::Passive] {
             assert_eq!(
-                open_verdict(&node, "1", mode, Commander::Pipe),
+                open_verdict(&node, "1", mode, Asker::PIPE),
                 OpenVerdict::Opening
             );
             assert_eq!(node.mode.get(), Some(mode));
@@ -228,7 +247,7 @@ mod tests {
     fn a_node_that_binds_no_verb_permits_nothing() {
         const { assert!(!NoOpening::BOUND) };
         assert_eq!(
-            open_verdict(&NoOpening, "1", OpenMode::Dial, Commander::Pipe),
+            open_verdict(&NoOpening, "1", OpenMode::Dial, Asker::PIPE),
             OpenVerdict::Refused(RefusedReason::OpenNotPermitted)
         );
     }

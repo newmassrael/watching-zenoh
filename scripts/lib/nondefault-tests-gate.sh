@@ -934,6 +934,11 @@ tests::group_congested::replies_past_the_reply_limit_are_the_transports_drops"
     "wz-capi-coop|hook|app-transport,group|engine::member_key_tests::"
     "wz-capi-coop|hook|app-transport,group|tests::arena::a_session_that_joins_groups_is_lent_a_receive_buffer_for_each"
     "wz-session-core|hook|alloc|round::tests::a_given_back_group_buffer_is_kept_while_a_record_reads_in_it"
+    # Decision D17: a sealed lifecycle command judged at both profiles' in-band entry points,
+    # through a link that proved only a router no grant names (the heap queries and the fixed
+    # node's verbs), and the verifier's echo after a start.
+    "wz-session-core|hook|sealed-commands,session-unicast,session-close-ingress,secure-channel|lifecycle_query::tests::sealed::"
+    "wz-session-mcu|hook|sealed-commands,alloc,adminspace-fixed,session-slot,lifecycle-close|admin_fixed::sealed_tests::"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::arena::a_groups_face_counts_every_members_aliases_in_the_pool"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|engine::registry::tests::a_groups_face_holds_its_members_aliases_until_its_set_is_given_back"
     # The tests of a group in the form whose read steps each face's link session itself

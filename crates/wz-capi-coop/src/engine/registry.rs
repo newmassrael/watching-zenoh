@@ -356,7 +356,7 @@ impl HeldFace {
     #[cfg(any(
         feature = "listen",
         feature = "group",
-        feature = "interest-answer",
+        wz_interest_answer,
         all(test, feature = "runtime-plan")
     ))]
     pub(super) const fn new(at: usize, id: FaceId) -> Self {
@@ -1594,7 +1594,7 @@ impl<H: Holders> RegistryOf<H> {
     /// side beside the table staged both as it was told; the table that serves one peer or many
     /// leaves each peer to read the table's epoch, and nothing else reads it. Only a build that
     /// answers its peers' Interests keeps any to reconcile.
-    #[cfg(feature = "interest-answer")]
+    #[cfg(wz_interest_answer)]
     fn reconcile_subscribers(&mut self, face: HeldFace) {
         // Handed out to be written, as `Self::split` hands a face's tables out.
         self.writing();
@@ -1612,7 +1612,7 @@ impl<H: Holders> RegistryOf<H> {
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
-        #[cfg(feature = "interest-answer")]
+        #[cfg(wz_interest_answer)]
         self.reconcile_subscribers(face);
         if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
             app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
@@ -1956,7 +1956,7 @@ impl<H: Holders> RegistryOf<H> {
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         if let Some(Split { app, face, .. }) = self.split_unwritten(self.place(face)) {
-            #[cfg(feature = "interest-answer")]
+            #[cfg(wz_interest_answer)]
             reconcile_face(app, face);
             app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
             // No `Final` is owed here: only a Request's dispatch owes one
@@ -1990,7 +1990,7 @@ impl<H: Holders> RegistryOf<H> {
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         self.dispatch_event_to(face, event, planes);
-        #[cfg(feature = "interest-answer")]
+        #[cfg(wz_interest_answer)]
         self.reconcile_subscribers(face);
         if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
@@ -2007,7 +2007,7 @@ impl<H: Holders> RegistryOf<H> {
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         if let Some(Split { app, face, .. }) = self.split_unwritten(self.place(face)) {
-            #[cfg(feature = "interest-answer")]
+            #[cfg(wz_interest_answer)]
             reconcile_face(app, face);
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
         }
@@ -2246,7 +2246,7 @@ impl<H: Holders> RegistryOf<H> {
 /// Stage for `face`'s peer what the application did to its subscriptions since the peer last looked
 /// ([`RegistryOf::reconcile_subscribers`]): one body for every caller, not one for each that inlines
 /// it. Only a build that answers its peers' Interests keeps any to reconcile.
-#[cfg(feature = "interest-answer")]
+#[cfg(wz_interest_answer)]
 #[inline(never)]
 fn reconcile_face(app: &App, face: &mut FaceTables) {
     face.peer.subscribers.reconcile(&app.tables);
@@ -2722,7 +2722,7 @@ mod tests {
     /// dial face and on a face that takes a lent set as it comes (a group's): the interest's row
     /// holds its key, so the answer staged for it names what it asked. A side whose rows were lent
     /// after it was handed the key arena keeps it.
-    #[cfg(feature = "interest-answer")]
+    #[cfg(wz_interest_answer)]
     #[test]
     fn a_faces_peer_interest_keeps_its_key_in_the_sessions_key_arena() {
         use wz_session_core::key_arena::block_bytes;

@@ -1374,7 +1374,7 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
         // `MAX_PENDING_DECLARES` sizes the answers staged for a peer's Interests
         // (`interest-answer`) and for its liveliness Interests (`liveliness`): a build of neither
         // stages none, and its row does not move with the limit.
-        #[cfg(any(feature = "interest-answer", feature = "liveliness"))]
+        #[cfg(any(wz_interest_answer, feature = "liveliness"))]
         assert!(
             tables(&at_one) < tables(&built),
             "the staging lent fewer rows"
@@ -1399,7 +1399,7 @@ fn the_peers_interest_pool_is_laid_out_only_where_the_build_keeps_their_rows() {
         max_faces: 3,
         ..client_config()
     });
-    #[cfg(feature = "interest-answer")]
+    #[cfg(wz_interest_answer)]
     {
         let plan =
             ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");

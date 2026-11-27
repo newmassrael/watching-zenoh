@@ -31,12 +31,12 @@ use wz_runtime_tokio::session_glue::{
     SessionLinkActions,
 };
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
-use wz_session_core::drive::{check_requested_close, LifecycleKey, SessionLifecycleAuthority};
+use wz_session_core::drive::check_requested_close;
 use wz_session_core::lifecycle_query::{
     count_links_over, order_close_over, Answered, CloseOrder, CloseVerdict, LifecycleQueries,
     RefusedReason, SessionDirectory, SessionLinks, SessionTarget, StatusVerdict,
 };
-use wz_session_core::query_sink::{BorrowedQuery, QueryView, ReplyError, ReplyOut};
+use wz_session_core::query_sink::{BorrowedQuery, ProvenQuery, QueryView, ReplyError, ReplyOut};
 use wz_session_core::sample::{EncodingHint, QosLevel};
 
 const NODE: &str = "a1b2";
@@ -95,15 +95,16 @@ impl SessionDirectory for Table {
     }
 }
 
-struct Authority(bool);
+/// The commander of every query here: the zid the key of the query's link proved.
+const COMMANDER: &str = "5c";
 
-impl SessionLifecycleAuthority for Authority {
-    fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
-        self.0
-    }
-
-    fn admits_status(&self, _key: &LifecycleKey<'_>) -> bool {
-        self.0
+/// The grants of the node (decision D16): the close and status verbs to [`COMMANDER`] when
+/// `permit`, and nothing otherwise, which refuses every commander.
+fn grants(permit: bool) -> wz_session_core::lifecycle_query::HeapGrants {
+    if permit {
+        wz_session_core::lifecycle_query::HeapGrants::parse(["5c=close,status"]).expect("grants")
+    } else {
+        wz_session_core::lifecycle_query::HeapGrants::default()
     }
 }
 
@@ -149,11 +150,14 @@ fn query(keyexpr: &str) -> impl QueryView + '_ {
     }
 }
 
-fn node(permit: bool, actions: &Arc<SessionLinkActions>) -> LifecycleQueries<Authority, Table> {
+fn node(
+    permit: bool,
+    actions: &Arc<SessionLinkActions>,
+) -> LifecycleQueries<wz_session_core::lifecycle_query::HeapGrants, Table> {
     LifecycleQueries::new(
         NODE,
         "peer",
-        Authority(permit),
+        grants(permit),
         Table(vec![Named {
             actions: Arc::clone(actions),
             zid: wz_session_core::zid_hex::zenoh_hex_to_zid(PEER).expect("a zid"),
@@ -166,9 +170,18 @@ fn close_key(peer: &str) -> String {
     format!("@/{NODE}/peer/session/close/{peer}")
 }
 
-fn ask(node: &LifecycleQueries<Authority, Table>, key: &str) -> (Answered, Vec<String>) {
+fn ask(
+    node: &LifecycleQueries<wz_session_core::lifecycle_query::HeapGrants, Table>,
+    key: &str,
+) -> (Answered, Vec<String>) {
     let mut out = Recorder::default();
-    let answered = node.answer(&query(key), &mut out);
+    let view = query(key);
+    let proven = ProvenQuery {
+        inner: &view,
+        peer: wz_session_core::credential_identity::zid_from_key_text(COMMANDER),
+        encoding: None,
+    };
+    let answered = node.answer(&proven, &mut out);
     let bodies = out
         .replies
         .into_inner()

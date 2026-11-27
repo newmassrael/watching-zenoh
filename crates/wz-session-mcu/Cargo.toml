@@ -94,6 +94,12 @@ lifecycle-status = ["lifecycle-verbs"]
 # declaration names its commanders (`scripts/lib/wz_node.py`); the verbs it binds are the
 # `lifecycle-*` features the image names beside this one.
 client-verbs = ["lifecycle-verbs", "adminspace-fixed", "client-slot"]
+# sealed-commands -- the in-band verbs take a command sealed by its commander's key in a query's
+# attachment (decision D17 of docs/session-lifecycle-intent.md, docs/command-seal.md):
+# `admin_fixed::FixedSeal` verifies it with the ES256 the image links (`wz-tls-mbedtls`'s `es256`),
+# and `VerbLegs::verify_sealed_with` hands it to the queryable. Without it a query that carries an
+# attachment is refused by name.
+sealed-commands = ["lifecycle-verbs", "wz-session-core/sealed-commands"]
 
 # Fixed-memory step S5 — the shell on the per-session slot profile
 # (`wz-runtime-coop`'s `session-slot`). The application layer is generic over the

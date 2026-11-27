@@ -854,6 +854,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-command-seal"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "wz-ext-pubsub"
 version = "0.1.0"
 dependencies = [
@@ -950,6 +957,7 @@ dependencies = [
  "sce-rust-runtime",
  "sha2",
  "wz-codecs",
+ "wz-command-seal",
  "wz-runtime-core",
  "zeroize",
 ]
@@ -987,6 +995,7 @@ dependencies = [
  "cc",
  "cmake",
  "dunce",
+ "wz-command-seal",
  "wz-runtime-coop",
  "wz-session-core",
 ]

@@ -711,6 +711,16 @@ pub use wz_session_core::query_sink;
 #[cfg(feature = "session-close-ingress")]
 pub use wz_session_core::lifecycle_query;
 
+/// The grants a node's declaration states, read when the node starts: the heap profile's policy
+/// of the lifecycle verbs, from the same rows the fixed profile compiles (decision D16).
+#[cfg(feature = "session-close-ingress")]
+pub mod node_declaration;
+
+/// The verifier of the sealed lifecycle commands a node is sent (decision D17): its zid, ES256 by
+/// `ring` and the echo of this start, for every commander its declaration grants a verb to.
+#[cfg(feature = "session-close-ingress")]
+pub mod lifecycle_seal;
+
 /// The seed of a lifecycle node's table of reset generations
 /// ([`lifecycle_query::LifecycleQueries::new`]), drawn from OS-backed entropy: sixteen bytes from
 /// `getrandom`, the source this runtime draws its handshake nonces and signing keys from, so a
@@ -956,6 +966,27 @@ pub fn admin_write_permit(permissions: &adminspace::AdminSpacePermissions) -> bo
     permissions.write
 }
 
+/// Whether a write of this node's configuration that arrived on `keyexpr` may be applied, as the
+/// node's reference monitor decides it (decision D16 of `docs/session-lifecycle-intent.md`): a
+/// `Configure` of that key, asked by nobody shown over the admin space (a write arrives as a
+/// sample, which proves no writer), judged against the write permission of `permissions`, which
+/// grants the verb to anyone ([`admin_write_permit`]). The decision is written to the process's
+/// log before it is answered.
+///
+/// Every host of the config-write surface asks this once per write and hands what it answers to
+/// [`adminspace::parse_admin_config_write`], so no host judges a write apart from the monitor.
+#[cfg(feature = "adminspace-write")]
+pub fn admin_write_permitted(
+    keyexpr: &str,
+    permissions: &adminspace::AdminSpacePermissions,
+) -> bool {
+    use wz_session_core::lifecycle_monitor::{Asker, LogRecord, Monitor, Request, WritePermission};
+    let policy = WritePermission(admin_write_permit(permissions));
+    Monitor::new(&policy, &LogRecord)
+        .decide(true, &Request::configure(Asker::admin_write(keyexpr)))
+        .permits()
+}
+
 /// R2658 (§5.23 `adminspace-write`) — resolve the config-key VOCABULARY the
 /// config-write decoder classifies against, the twin of [`admin_write_permit`]
 /// and for the same reason.
@@ -1024,6 +1055,30 @@ mod admin_write_permit_tests {
 /// list it will actually be handed. That is the exact "both ends true, the join
 /// unverified" shape this tree has paid for repeatedly, so the join gets its own
 /// fixture here, driving the REAL decoder with the REAL resolver.
+// A config write is a `Configure` the monitor decides against the write permission alone:
+// permitted with it on and refused with it off, whatever the read permission. Red if
+// `admin_write_permitted` answered anything but the monitor's decision on the write permission.
+#[cfg(all(test, feature = "adminspace-write"))]
+mod admin_write_monitor_tests {
+    use super::admin_write_permitted;
+    use wz_admin::adminspace::AdminSpacePermissions;
+
+    #[test]
+    fn a_config_write_is_permitted_by_the_write_permission_alone() {
+        let key = "@/a1b2/peer/config/connect/endpoints";
+        for read in [false, true] {
+            assert!(!admin_write_permitted(
+                key,
+                &AdminSpacePermissions { read, write: false }
+            ));
+            assert!(admin_write_permitted(
+                key,
+                &AdminSpacePermissions { read, write: true }
+            ));
+        }
+    }
+}
+
 #[cfg(all(test, feature = "adminspace-core", feature = "zenoh-config"))]
 mod admin_write_vocabulary_tests {
     use super::admin_write_knows_config_key;

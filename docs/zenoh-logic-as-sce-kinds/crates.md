@@ -38,6 +38,7 @@ The `Where` column holds the slices that read the crate (`S1, S2`), or
 | `wz-capture` | excluded: analyzer | The analyzer (pcap reading, dissection, flow verdicts); its place in the migration is the open point of section 8. |
 | `wz-cdylib-build` | excluded: build | Build-script helper that links the C ABI libraries. |
 | `wz-codecs` | S9 | |
+| `wz-command-seal` | S6 | |
 | `wz-codecs-test-support` | excluded: test | Helpers for the generated codecs' tests. |
 | `wz-codegen-build` | excluded: build | The build-script door that spawns `sce-codegen`; it produces the generated code and holds none of the protocol. |
 | `wz-conformance-build` | excluded: build | Builds the conformance proformas into the test suite. |

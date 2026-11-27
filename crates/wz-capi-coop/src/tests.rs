@@ -253,7 +253,7 @@ enum Command {
     PushSequenced(&'static str, &'static [u8], u32),
     /// Ask the session, as Interest `.0`, for its subscribers on the key, those it holds now and
     /// those it declares later.
-    #[cfg(any(feature = "interest-answer", feature = "listen"))]
+    #[cfg(any(wz_interest_answer, feature = "listen"))]
     AskSubscribers(u64, &'static str),
     /// Hold the cache of that advanced publisher: a queryable on its `@adv` key that answers as
     /// the publisher's own cache does, out of the samples with the sequence numbers `.0`, each
@@ -277,10 +277,10 @@ struct Seen {
     undeclared_subscribers: Vec<u64>,
     interests: usize,
     /// The Interest each subscriber declaration that answers one names, in the order they arrived.
-    #[cfg(any(feature = "interest-answer", feature = "listen"))]
+    #[cfg(any(wz_interest_answer, feature = "listen"))]
     subscriber_answers: Vec<u64>,
     /// The Interest each declaration Final names, in the order they arrived.
-    #[cfg(any(feature = "interest-answer", feature = "listen"))]
+    #[cfg(any(wz_interest_answer, feature = "listen"))]
     interest_finals: Vec<u64>,
     pushes: usize,
     /// What the router's catch-all subscriber received, when it holds one.
@@ -708,7 +708,7 @@ fn run_router(
                                 let at = seen.declares;
                                 seen.initial_finals.push(at);
                             }
-                            #[cfg(any(feature = "interest-answer", feature = "listen"))]
+                            #[cfg(any(wz_interest_answer, feature = "listen"))]
                             if let Some(interest) = declare.interest_id {
                                 use wz_codecs::declare::DeclareOwnedVariant as Body;
                                 match &declare.body {
@@ -797,7 +797,7 @@ fn run_router(
                         let at = seen.declares;
                         seen.initial_finals.push(at);
                     }
-                    #[cfg(any(feature = "interest-answer", feature = "listen"))]
+                    #[cfg(any(wz_interest_answer, feature = "listen"))]
                     if let Some(interest) = declare.interest_id {
                         match &declare.body {
                             wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(_) => {
@@ -916,7 +916,7 @@ fn run_router(
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
             }
-            #[cfg(any(feature = "interest-answer", feature = "listen"))]
+            #[cfg(any(wz_interest_answer, feature = "listen"))]
             Ok(Command::AskSubscribers(id, key)) => {
                 let _ = actions.send_interest_subscribers(id, true, true, 0, Some(key));
             }
@@ -1459,7 +1459,7 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
 /// answer. The CONTROL is the declaration itself, which reaches the peer unstepped too, so what
 /// the session sends outside a step is seen. Turned red by an answer staged only by the next event
 /// of the link's session.
-#[cfg(feature = "interest-answer")]
+#[cfg(wz_interest_answer)]
 #[test]
 fn a_subscriber_declared_after_a_peers_interest_is_answered_by_the_declaration() {
     const INTEREST: u64 = 41;
@@ -1502,12 +1502,33 @@ fn a_subscriber_declared_after_a_peers_interest_is_answered_by_the_declaration()
     });
 }
 
-/// A session that listens without the answering end of an Interest (`listen` without
-/// `interest-answer`, as the zenoh-pico preset builds a peer) answers no Interest a peer asks on a
-/// unicast face, as zenoh-pico's unicast session answers none: no `DeclareFinal` names it, and a
-/// subscriber declared after it reaches the peer as a declaration and not as an answer. The CONTROL
-/// is that declaration. Turned red by an answer staged, or a Final sent, in such a build.
-#[cfg(all(feature = "listen", not(feature = "interest-answer")))]
+/// The engine's half of the answer to a peer's Interest is compiled where the session core's is
+/// (`wz_interest_answer`, which `build.rs` reads from the core's own statement), whichever crate of
+/// the graph turned the core's `interest-answer` on: a build that listens with this crate's
+/// `interest-answer` off while another crate turns the core's on (Layer C1's workspace graph, where
+/// `wz-tls-mbedtls` lists this crate with `listen` and other members take the core with its
+/// defaults) answers, and its subscribers declared later are told as answers too. Turned red by
+/// `build.rs` relaying this crate's own feature instead of the core's metadata in such a graph.
+#[test]
+fn the_engines_answer_is_compiled_where_the_session_core_answers() {
+    // Every test build has the core's `declare-subscriber` and `peer-row-pools` (the crate's
+    // dependency and dev-dependency lines), so the constant is the core's `interest-answer` alone.
+    assert_eq!(
+        cfg!(wz_interest_answer),
+        wz_session_core::peer_tables::KEEPS_INTEREST_ROWS,
+        "the engine answers a peer's Interest exactly where its session core does"
+    );
+}
+
+/// A session that listens over a session core without the answering end of an Interest (`listen`
+/// and no `interest-answer` anywhere in the graph, as the zenoh-pico preset builds a peer) answers
+/// no Interest a peer asks on a unicast face, as zenoh-pico's unicast session answers none: no
+/// `DeclareFinal` names it, and a subscriber declared after it reaches the peer as a declaration
+/// and not as an answer. The CONTROL is that declaration. The build is read from the core's own
+/// statement (`wz_interest_answer`), not this crate's feature, which another crate of the graph
+/// can leave off while it turns the core's on. Turned red by an answer staged, or a Final sent, in
+/// such a build, or by gating the test on this crate's feature again in Layer C1's graph.
+#[cfg(all(feature = "listen", not(wz_interest_answer)))]
 #[test]
 fn a_listening_build_without_the_answer_answers_no_interest() {
     const INTEREST: u64 = 41;
