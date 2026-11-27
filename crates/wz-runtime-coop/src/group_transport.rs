@@ -9,7 +9,7 @@
 //! whether the carrier is up, multicast one datagram to the group, and take one
 //! inbound datagram with its source address. This trait is those four. The loop
 //! (`wz-session-mcu`'s `group_drive`) is generic over it, as the unicast loop is
-//! generic over [`SessionDatagramLink`](crate::session_drive::SessionDatagramLink);
+//! generic over `session_drive::SessionDatagramLink`;
 //! lwIP supplies one implementation (`wz-session-lwip`) and Zephyr's sockets
 //! another, so a board is not asked to carry the lwIP crate to run a group
 //! session over some other stack.
