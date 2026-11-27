@@ -215,10 +215,12 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/dial_in_flight.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/direct_receive.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/entity_tables.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/face_order.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/face_table.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/faces.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/get.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/group.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/group_congested.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/group_stack.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/held_keys.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/host_group.rs` | excluded: test | Test-only file by its name. |
@@ -632,10 +634,6 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/plugin_plane.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/plugin_search_dirs.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/plugins_config.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/posix_shm.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/posix_shm/unix.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/posix_shm/unix/lifetime.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/posix_shm/windows.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/pubsub.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/query.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/quic_config.rs` | S5 | |
@@ -708,12 +706,9 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/session_open.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/session_spans.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_auth_segment.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/shm_backend.rs` | S5 | |
+| `crates/wz-runtime-tokio/src/shm_buffer.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_reader.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/shm_posix_backend.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/shm_provider.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_relay.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/shm_watchdog.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/startup_phase.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/storage_aligner_service.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/storage_gc_service.rs` | S5 | |
