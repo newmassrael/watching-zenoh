@@ -4027,6 +4027,14 @@ fn face_ended(stands: bool, established: bool) -> bool {
 /// What one send's failure means for a publish: a link that is down skips it, anything else is
 /// a message no link could have carried.
 fn leg_outcome(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
+    // A link that lent no slot for the frame refused it before a byte left. Read as a link that is
+    // down, as its publish error reads it, a blocking put would be answered as sent and never
+    // reach the peer; it is a send that failed, as the refusal of a declaration is.
+    #[cfg(feature = "tx-lend-only")]
+    if let Err(SendWireError::LinkRefused(wz_session_core::link::LinkDropCause::NoTxSlot)) = result
+    {
+        return Err(FanoutError::ExceedsCapacity);
+    }
     match result.map_err(PublishError::from) {
         Ok(()) => Ok(0),
         Err(PublishError::TransportUnavailable | PublishError::RequiresUnicast) => Ok(0),
@@ -12682,6 +12690,39 @@ mod hand_back_tests {
         let back = made();
         back.handed_back();
         assert_eq!(*lock(&back.handed), 0);
+    }
+}
+
+#[cfg(test)]
+mod leg_outcome_tests {
+    //! What a publish's leg answers for each way its send ended.
+    use super::leg_outcome;
+    use wz_capi_port::FanoutError;
+    use wz_session_core::send_wire_error::SendWireError;
+
+    /// A send the link refused for want of a slot is a failed send, where a link that is down is
+    /// skipped and a sent frame is sent. Turned red by a `leg_outcome` that answers the refusal
+    /// as it answers a link that is down (`Ok(0)`), which a blocking put reads as sent.
+    #[cfg(feature = "tx-lend-only")]
+    #[test]
+    fn a_frame_the_link_lent_no_slot_for_is_a_failed_send() {
+        use wz_session_core::link::LinkDropCause;
+        assert_eq!(
+            leg_outcome(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot))),
+            Err(FanoutError::ExceedsCapacity)
+        );
+        assert_eq!(
+            leg_outcome(Err(SendWireError::LinkRefused(LinkDropCause::WriterGone))),
+            Ok(0),
+            "CONTROL: a link whose writer is gone is down, and skipped"
+        );
+    }
+
+    /// A sent frame and a link that is not there are no failure of the publish.
+    #[test]
+    fn a_sent_frame_and_a_link_that_is_down_are_no_failure() {
+        assert_eq!(leg_outcome(Ok(())), Ok(0));
+        assert_eq!(leg_outcome(Err(SendWireError::TransportUnavailable)), Ok(0));
     }
 }
 
