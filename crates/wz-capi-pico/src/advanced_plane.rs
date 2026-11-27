@@ -366,21 +366,42 @@ impl AdvancedPublisherPlane for PicoPlane {
     }
 }
 
-/// The number of a `_time` selector, read by the C library's own reader, as zenoh-pico reads it
-/// (`strtod`), from the literal wz's grammar admitted and wrote with no radix character: the
-/// library links no float reader of its own.
+/// The number of a `_time` selector, read by the C library's own reader as zenoh-pico reads it:
+/// `strtod` over a NUL-terminated copy of the literal wz's grammar admitted
+/// ([`decimal_text`](wz_session_core::time_range::decimal_text)), so the value is the literal
+/// correctly rounded and the library links no float reader of its own. A reader that stops before
+/// the copy's end reads a radix character other than `.` (the locale a program set), and the
+/// literal is read again as
+/// [`decimal_digits`](wz_session_core::time_range::decimal_digits) writes it, with none.
 #[cfg(unix)]
 fn time_number(text: &str) -> Result<f64, wz_session_core::time_range::FloatError> {
-    use wz_session_core::time_range::{decimal_text, Decimal, DECIMAL_TEXT};
-    let mut written = [0u8; DECIMAL_TEXT];
-    match decimal_text(text, &mut written)? {
-        Decimal::Read(value) => Ok(value),
-        // SAFETY: `decimal_text` wrote a number in `written` and a NUL after it, so the reader
-        // reads inside the array.
-        Decimal::Written(_) => {
-            Ok(unsafe { libc::strtod(written.as_ptr().cast(), core::ptr::null_mut()) })
-        }
+    use wz_session_core::time_range::{decimal_digits, decimal_text, Decimal, FloatError};
+    let mut written = [0u8; wz_session_core::time_range::DECIMAL_TEXT];
+    let len = match decimal_text(text, &mut written)? {
+        Decimal::Read(value) => return Ok(value),
+        Decimal::Written(len) => len,
+    };
+    if let Some(value) = read_whole(&written, len) {
+        return Ok(value);
     }
+    match decimal_digits(text, &mut written)? {
+        Decimal::Read(value) => Ok(value),
+        Decimal::Written(len) => read_whole(&written, len).ok_or(FloatError::Invalid),
+    }
+}
+
+/// `strtod` over the `len` bytes `written` holds before a NUL: `None` when it stops before their
+/// end.
+#[cfg(unix)]
+fn read_whole(
+    written: &[u8; wz_session_core::time_range::DECIMAL_TEXT],
+    len: usize,
+) -> Option<f64> {
+    let mut end: *mut libc::c_char = core::ptr::null_mut();
+    // SAFETY: `written` holds a NUL at `len`, so the reader reads inside the array, and `end` is
+    // the place the reader writes where it stopped.
+    let value = unsafe { libc::strtod(written.as_ptr().cast(), &mut end) };
+    (end.cast_const().cast::<u8>() == written.as_ptr().wrapping_add(len)).then_some(value)
 }
 
 /// A host whose C library's reader is not named here reads with core's.
@@ -388,14 +409,41 @@ fn time_number(text: &str) -> Result<f64, wz_session_core::time_range::FloatErro
 use wz_session_core::time_range::core_float as time_number;
 
 /// The C library's reader reads a `_time` number as core's does, and refuses what core refuses.
-/// Turned red by a literal handed to the reader in another form than the one it reads, or a
-/// grammar the platform reader admits more of.
+/// Turned red by a literal handed to the reader in another form than the one it reads (the
+/// halfway point `1 + 2^-53` and the literals a digit either side of it, which a reading short of
+/// their digits rounds the wrong way), or a grammar the platform reader admits more of.
 #[cfg(all(test, unix))]
 mod time_number_tests {
-    use wz_session_core::time_range::core_float;
+    use wz_session_core::time_range::{core_float, DECIMAL_TEXT};
 
     #[test]
     fn the_c_librarys_reader_reads_a_time_as_core_does() {
+        const HALF: &str = "1.00000000000000011102230246251565404236316680908203125";
+        let zeros = "0".repeat(DECIMAL_TEXT);
+        let long = [
+            std::format!("{HALF}{zeros}"),
+            std::format!("{HALF}{zeros}1"),
+        ];
+        let next = f64::from_bits(1.0_f64.to_bits() + 1);
+        for (text, value) in [
+            (HALF, 1.0),
+            (
+                "1.00000000000000011102230246251565404236316680908203124",
+                1.0,
+            ),
+            (
+                "1.00000000000000011102230246251565404236316680908203126",
+                next,
+            ),
+            (long[0].as_str(), 1.0),
+            (long[1].as_str(), next),
+        ] {
+            assert_eq!(
+                super::time_number(text).map(f64::to_bits),
+                Ok(value.to_bits()),
+                "{text:?} is rounded as its digits say"
+            );
+        }
         for text in [
             "30",
             "1.5",
@@ -411,7 +459,10 @@ mod time_number_tests {
             "1,5",
             "0x10",
             " 1",
-        ] {
+        ]
+        .into_iter()
+        .chain([HALF, long[0].as_str(), long[1].as_str()])
+        {
             match (super::time_number(text), core_float(text)) {
                 (Ok(a), Ok(b)) => assert!(
                     a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),

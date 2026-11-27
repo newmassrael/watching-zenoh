@@ -20,7 +20,7 @@
 //!   `parse_rfc3339_weak` reads it ([`parse_rfc3339_weak`]).
 //! - a duration is a float of seconds, or a float with one of `u ms s m h d w`. The float is
 //!   `f64::from_str`'s grammar, read by the reader the caller names ([`FloatRead`]): core's
-//!   ([`core_float`]), or a platform's C reader handed the literal as [`decimal_text`] writes it.
+//!   ([`core_float`]), or a platform's C reader handed the literal as [`decimal_text`] copies it.
 //!
 //! ## Where this differs from upstream
 //!
@@ -173,17 +173,22 @@ pub fn core_float(text: &str) -> Result<f64, FloatError> {
     })
 }
 
-/// The bytes [`decimal_text`] writes a literal in: a sign, [`DECIMAL_DIGITS`] digits and a sticky
-/// one, an `e`, the exponent's sign and five digits, and the terminating NUL.
-pub const DECIMAL_TEXT: usize = 64;
+/// The significant digits that decide how a decimal rounds to an `f64`: a halfway point between
+/// two `f64`s has at most 767, so a literal's first 768 and whether any digit past them is nonzero
+/// round as the whole literal does. Core's reader keeps the same digits (`DecimalSeq::MAX_DIGITS`
+/// of its `dec2flt`).
+pub const DECIMAL_DIGITS: usize = 768;
 
-/// The significant digits [`decimal_text`] keeps of a literal.
-pub const DECIMAL_DIGITS: usize = 48;
-
-/// The largest power of ten [`decimal_text`] writes: past it every `f64` is an infinity or a zero.
+/// The largest power of ten [`decimal_digits`] writes: past it every `f64` is an infinity or a
+/// zero.
 const DECIMAL_EXPONENT: i64 = 99_999;
 
-/// What [`decimal_text`] made of a literal.
+/// The bytes a literal is handed to a platform's C reader in: a sign, [`DECIMAL_DIGITS`] digits
+/// and a sticky one, an `e`, the exponent's sign and its five digits, and the terminating NUL. A
+/// literal shorter than this is copied whole ([`decimal_text`]).
+pub const DECIMAL_TEXT: usize = 1 + DECIMAL_DIGITS + 1 + 1 + 1 + 5 + 1;
+
+/// What [`decimal_text`] or [`decimal_digits`] made of a literal.
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Decimal {
     /// Read with no reader: an infinity, a NaN or a zero.
@@ -192,13 +197,35 @@ pub enum Decimal {
     Written(usize),
 }
 
-/// `text` checked against `f64::from_str`'s grammar, and a number in it written in `out` for a
-/// platform's C reader (`strtod`): an integer of its significant digits and a power of ten, with no
-/// radix character, so no locale reads it otherwise, NUL-terminated, so the reader reads nothing
-/// past it. Past [`DECIMAL_DIGITS`] significant digits a nonzero one, if any, is written as one more
-/// digit `1`, which rounds as the digits it stands for do unless the literal lies within a part in
-/// 10^48 of a halfway point between two `f64`s.
+/// `text` checked against `f64::from_str`'s grammar, and a number in it handed to a platform's C
+/// reader (`strtod`) as zenoh-pico hands it: a copy of the literal's own bytes in `out`,
+/// NUL-terminated, so the reader reads the literal and nothing past it, and rounds it as it
+/// rounds every literal (`vendor/zenoh-pico/src/utils/time_range.c` @
+/// `double value = strtod(bound->start, &err);`). A literal too long for `out` is written as
+/// [`decimal_digits`] writes it, which rounds as the literal does.
+///
+/// The copy keeps the literal's radix character, which a C library reads in the locale the
+/// program set: a reader that stops before the end of the copy is reading another radix, and the
+/// caller reads the literal again as [`decimal_digits`] writes it, with none.
 pub fn decimal_text(text: &str, out: &mut [u8; DECIMAL_TEXT]) -> Result<Decimal, FloatError> {
+    let decimal = decimal_digits(text, out)?;
+    let bytes = text.as_bytes();
+    match decimal {
+        Decimal::Written(_) if bytes.len() < DECIMAL_TEXT => {
+            out[..bytes.len()].copy_from_slice(bytes);
+            out[bytes.len()] = 0;
+            Ok(Decimal::Written(bytes.len()))
+        }
+        decimal => Ok(decimal),
+    }
+}
+
+/// `text` checked against `f64::from_str`'s grammar, and a number in it written in `out` for a
+/// platform's C reader: an integer of its significant digits and a power of ten, with no radix
+/// character, so no locale reads it otherwise, NUL-terminated. Past [`DECIMAL_DIGITS`] significant
+/// digits a nonzero one, if any, is written as one more digit `1`; no halfway point between two
+/// `f64`s lies between the literal and what is written, so the two round alike.
+pub fn decimal_digits(text: &str, out: &mut [u8; DECIMAL_TEXT]) -> Result<Decimal, FloatError> {
     let bytes = text.as_bytes();
     let (negative, rest) = match bytes.first() {
         None => return Err(FloatError::Empty),
@@ -839,12 +866,84 @@ mod tests {
         );
     }
 
-    /// What [`decimal_text`] writes reads, with a correctly rounding reader, to the value
+    /// Literals within an ulp's breadth of a halfway point between two `f64`s, and the halfway
+    /// point itself, with more significant digits than a short reading keeps: `1 + 2^-53` lies
+    /// halfway between 1 and the next `f64` up and rounds to 1 (to even), a digit less rounds to 1
+    /// and a digit more to the next. Past [`DECIMAL_TEXT`] bytes, so read as [`decimal_digits`]
+    /// writes them: the halfway point followed by zeros, and by zeros and a last 1.
+    fn halfway_literals() -> [std::string::String; 5] {
+        const HALF: &str = "1.00000000000000011102230246251565404236316680908203125";
+        let zeros = "0".repeat(DECIMAL_TEXT);
+        [
+            HALF.into(),
+            "1.00000000000000011102230246251565404236316680908203124".into(),
+            "1.00000000000000011102230246251565404236316680908203126".into(),
+            std::format!("{HALF}{zeros}"),
+            std::format!("{HALF}{zeros}1"),
+        ]
+    }
+
+    /// The halfway literals read as their own text says, by core's reader: the witness the
+    /// platform's reader is held to (the pico ABI's test reads the same literals with `strtod`).
+    #[test]
+    fn the_halfway_literals_round_to_even_and_away_from_the_halfway_point() {
+        let one = 1.0_f64;
+        let next = f64::from_bits(one.to_bits() + 1);
+        let read: std::vec::Vec<f64> = halfway_literals()
+            .iter()
+            .map(|text| core_float(text).expect("a literal"))
+            .collect();
+        assert_eq!(read, [one, one, next, one, next]);
+    }
+
+    /// [`decimal_text`] hands the reader the literal's own bytes and a NUL when they fit, and the
+    /// form [`decimal_digits`] writes when they do not; a refusal is the grammar's. Turned red by a
+    /// copy that changes a byte, leaves off the NUL, or reaches past the buffer.
+    #[test]
+    fn a_literal_that_fits_is_handed_over_as_its_own_bytes() {
+        for text in ["1.5", "-2.5e-3", "+.5E+1", "9007199254740993"] {
+            let mut out = [0xffu8; DECIMAL_TEXT];
+            assert_eq!(
+                decimal_text(text, &mut out),
+                Ok(Decimal::Written(text.len()))
+            );
+            assert_eq!(&out[..text.len()], text.as_bytes());
+            assert_eq!(out[text.len()], 0, "{text:?} ends in a NUL");
+        }
+        for text in halfway_literals() {
+            let mut out = [0u8; DECIMAL_TEXT];
+            let Ok(Decimal::Written(len)) = decimal_text(&text, &mut out) else {
+                panic!("{text:?} is written");
+            };
+            let written = core::str::from_utf8(&out[..len]).expect("ASCII");
+            if text.len() < DECIMAL_TEXT {
+                assert_eq!(written, text, "a literal that fits is its own bytes");
+            } else {
+                assert!(!written.contains('.'), "a long one is written as digits");
+            }
+            assert_eq!(
+                written.parse::<f64>().ok().map(f64::to_bits),
+                core_float(&text).ok().map(f64::to_bits),
+                "{text:?}"
+            );
+        }
+        let mut out = [0u8; DECIMAL_TEXT];
+        assert_eq!(decimal_text("1x", &mut out), Err(FloatError::Invalid));
+        assert_eq!(decimal_text("", &mut out), Err(FloatError::Empty));
+        assert_eq!(
+            decimal_text("-inf", &mut out),
+            Ok(Decimal::Read(f64::NEG_INFINITY))
+        );
+    }
+
+    /// What [`decimal_digits`] writes reads, with a correctly rounding reader, to the value
     /// `f64::from_str` reads the literal to, and it admits and refuses what that does, in its
     /// words. Turned red by a grammar that admits a text core refuses or the reverse, a digit or a
-    /// power of ten written wrong, or a radix character written.
+    /// power of ten written wrong, a radix character written, or fewer digits kept than decide
+    /// the rounding (the halfway literals).
     #[test]
     fn a_decimal_written_for_a_platform_reader_reads_as_core_reads_the_literal() {
+        let halfway = halfway_literals();
         let corpus = [
             "0",
             "1",
@@ -907,10 +1006,12 @@ mod tests {
             "nanx",
             "1.2.3",
             "1e5.5",
-        ];
+        ]
+        .into_iter()
+        .chain(halfway.iter().map(std::string::String::as_str));
         for text in corpus {
             let mut out = [0u8; DECIMAL_TEXT];
-            let ours = decimal_text(text, &mut out).map(|decimal| match decimal {
+            let ours = decimal_digits(text, &mut out).map(|decimal| match decimal {
                 Decimal::Read(value) => value,
                 Decimal::Written(len) => {
                     assert_eq!(out[len], 0, "{text:?} ends in a NUL");
