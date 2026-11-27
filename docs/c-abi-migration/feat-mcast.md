@@ -4,7 +4,8 @@ Status: the reading of the feature, the pairing of its work with zenoh-pico's, t
 out what is shape, and the owner's decision items for what is work; step F1 landed beside this note,
 and steps F2a and F8a and the decisions of section 4.1 land after it. Step F4 landed on 2026-11-28
 (section 7), which takes the gate layer of F3 with it; what F2b, F3, F5 to F8b stand on in the code
-of that day is section 7.2. Steps F4, F5 and F7 (the
+of that day is section 7.2. Steps F3, F5's Router, F6 and F9 landed after it on the same day, and
+the share section 2.1 left unplaced is placed in section 8. Steps F4, F5 and F7 (the
 group's shell and its transmit pipeline) and the decision item D2 they keep are the transmit lane's;
 F3 follows F4, as the one sink it leaves is read by the group face F4 makes (section 3.1 reads why
 from the code). D2 is not taken with them: the first step of F7 (`mcast-tx1.md` T3) does not hold
@@ -97,13 +98,14 @@ and each step says what it does to the receive of a group and of a link in a bui
 | **F1 (landed)** | the walk of a group datagram steps past an Init, an Open or an id no view reads by the session's in-place reader of a control message (`inbound::read_control`) where the build has it, instead of the owned decoder | -5,000 to -8,200 (codec, language): the owned decoder's 7,771 and its frame's drop glue 705, less the 290 the Init and Open views take back inlined once they have one caller again; the range is `read_control`, which had one caller and now has two, kept out of line (one call more on a link's control message, never on a data message) or inlined into both (its handshake arms twice, up to 3,000) | client: none (not compiled); a group's frame: none (the walk answers a Frame from its id, before this) | `multicast_rx::control_extent_tests`: three new tests, an Init and an Open stepped over as far as their decode reads and a refused or cut one ending the walk, and an id no reader takes ending it; `inbound::control_read_tests` holds the reader to the decoder |
 | **F2a (landed)** | the count half of F2: in a lend-only build (`tx-lend-only`, which the C library's `os-host` names) a group's item and reply are counted by their one writer run into a count (`ItemBody`, and `ReplyBody` for a reply, both written once in `wz-session-core`), as a link counts what it sends, not by the codec's `measure`, which compiles each encoder a second time over a counting sink; `MulticastTxReply::with_body` hands on `ReplyBody` where it built a closure per kind in the caller's crate | -3,500 to -7,000 (codec): the counting copies of the declaration's, the response's, the interest's, the request's and the final's encoders, with the put and extension bodies they reach (about half of the 11,815 of row E's heap encoders), and the reply encoders the stage's crate compiled for its own closures | none: a group's datagram is never counted on the read; a reply is counted by the writer that then writes it, no call more | `multicast_tx::push_tests::an_item_and_a_reply_count_for_what_the_codec_measures`: each kind's count is the codec's measure, through `multicast_tx_bytes`, `MulticastTxReply::bytes` and each writer run into a count |
 | F2b (in the engine since T1 and T2, section 7.2) | the write half of F2: the group's declaration, interest and reply written from their parts by the lent writers the links use (`lent_control`), not kept owned (`MulticastTxItem::Declare`, `DeclareReply`, `Interest`, `Response`) and written by the heap encoders; the stage that keeps an item until its conduit is free keeps its encoded bytes, which F7 decides | -2,500 to -5,000 (codec), after F7 | none on the read | the group's item bytes held to the link's writer's for the same message |
-| F3 | one sink from the group's walk to the engine: the member scope a field the engine's sink reads, the pump's gate a word it reads, so a record of the group reaches the engine as a link's does (`hand_lent_push`) | -3,000 to -6,000 (sessions, transport), read by line first | a group's record: two sink layers fewer; none added | the engine's group tests of delivery, of a member's departure and of the gate; the dispatcher's member scope tests |
+| **F3 (landed, section 8)** | one sink from the group's walk to the engine: the member scope a field the engine's sink reads, the pump's gate a word it reads, so a record of the group reaches the engine as a link's does (`hand_lent_push`) | -3,000 to -6,000 (sessions, transport), read by line first | a group's record: two sink layers fewer; none added | the engine's group tests of delivery, of a member's departure and of the gate; the dispatcher's member scope tests |
 | **F4 (landed)** | one shell for a group: the engine's group face steps the session core's dispatcher and the stage itself, as it steps a link's session, and the MCU loop (`MulticastPump`, `HeldSession`, `MulticastSessionPlace`, its executor task) stays the MCU image's | -15,000 to -25,000 (driver, sessions) | a group's datagram: the task hop out; none added | the engine's group tests (join, rejoin, leave, the first step's refusal), the MCU loop's own tests unchanged |
-| F5 | the open builds the group's state where it lies: `Core::join_group` (17,669) read by line first, then each part placed in its slot, not moved through the open's frame | -5,000 to -12,000 (sessions), read by line first | none: the open | the engine's open tests with a group, and the stack bound's reading of the open |
-| F6 | the group's leg of an operation under the held faces out of line: one non-generic call each operation makes, not the leg inlined into each of the 12 copies of `HeldOperation::run` | -3,000 to -4,500 (sessions) | none: an operation under the held faces is a declaration, an undeclaration, a query or a reply, never the read, and a publication's legs do not run through it | `direct::held_operation_tests`, the engine's declaration tests with a group |
+| F5 (its Router landed, section 8) | the open builds the group's state where it lies: `Core::join_group` (17,669) read by line first, then each part placed in its slot, not moved through the open's frame | -5,000 to -12,000 (sessions), read by line first | none: the open | the engine's open tests with a group, and the stack bound's reading of the open |
+| **F6 (landed, section 8)** | the group's leg of an operation under the held faces out of line: one non-generic call each operation makes, not the leg inlined into each of the 12 copies of `HeldOperation::run` | -3,000 to -4,500 (sessions) | none: an operation under the held faces is a declaration, an undeclaration, a query or a reply, never the read, and a publication's legs do not run through it | `direct::held_operation_tests`, the engine's declaration tests with a group |
 | F7 | the group's send through the links' writer: framing, batching and fragmenting by `session_actions`' writer, the stage keeping only what D2 decides (the held datagram and its order behind the beacon) | -8,000 to -15,000 (transport, codec), after F2, F4 and D2 | none on the read; a group's put the link's writer's one pass | the group's wire held to the link's for the same items; the stage's tests of a held datagram |
 | **F8a (landed)** | the member scope's containers: what a member holds declared is one sorted vector of its raw ids, each under its kind (`MemberDeclarations::held`), not three `BTreeSet<u64>`, and a member that leaves is kept whole until its retractions are handed (`MulticastDispatcher::departed`), not collected through a chain of three iterators into a vector of retractions; the retractions are the same and in the same order (subscribers, queryables, tokens, each by raw id, then the keyexprs) | -4,000 to -6,000 (language, sessions): the B-tree's bodies 3,144, the chained collect 2,471 and the drop glue of the three sets, less a vector's insert, remove and search of `u64` (300 to 600) | none: a member's record is scoped as before, its id now noted by a binary search of a vector | `multicast_member_scope::tests`: the order of a departed member's retractions, a redeclared id held once, an undeclared id not retracted; the dispatcher's tests of a member's departure |
 | F8b | the stage's queue and cells in the session's arena (`VecDeque<StagedMessage>`, `Rc<RefCell>`), after F4 and F7 | -1,500 to -2,500 (language) | none | the stage's tests |
+| **F9 (landed, section 8)** | the cells a join's face shares with the session that runs it (the mark of input, the members, the keyexpr asks, the stop, the end, the watchers' events) one `Rc<GroupShared>`, not one `Rc` each | -600 to -1,500 (language, sessions): five allocations a join and their drop glue fewer | none: a field reached through one handle where it was reached through its own | the engine's group tests |
 
 F1 is first because it changes one function of the walk, keeps every extent and every refusal the
 walk had (the reader answers the decoder's, by `inbound::control_read_tests`), and touches no
@@ -225,6 +227,20 @@ so does the walk: what changed is which reader says where they end.
   `MulticastSessionPlace`, `HeldSession`, `MulticastPump` or `GatedEvents` body, one
   `GroupRun::step`; `pico-client-coop-nostd` unchanged to the byte.
 
+- F3, F5, F6, F9: `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --lib --features
+  std,group,app-transport place_tests`: 4 tests (1 new,
+  `each_session_built_in_its_place_writes_its_router_there_with_the_groups_bound`); the same
+  features with `tests::group`, and with `query,queryable,liveliness,connectivity` added;
+  `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-coop --lib --features reassembly,alloc
+  a_router_built_in_its_place_is_the_one_built_as_a_value`: 1 test, new. Build and clippy of
+  `wz-capi-coop` with `group`; with `group,threads` (the hand that lets the session's lock go);
+  with `group,query,queryable,liveliness,connectivity`; and the round's form
+  (`WZ_COOP_VALUE_LOCKS=off`, `std,threads,group`), where `GroupShared` is shared with the
+  group's task; clippy of `wz-runtime-coop` with `reassembly`. In `pico-api-coop-nostd`'s
+  library one `announce_to_groups` and one `retract_from_groups` body, and
+  `Core::announce_subscriber_to_groups` and `Core::announce_queryable_to_groups` out of line;
+  `pico-client-coop-nostd` unchanged to the byte.
+
 ## 7. Step F4, as landed
 
 The read form of the engine (every form but the round's, `wz_round`) held the MCU image's group
@@ -293,16 +309,16 @@ put in a row.
   message pushed while another holds the conduits is kept encoded already (`Staged::keep`). What
   is left owned is the MCU image's queue (`MulticastReplyQueue`) and its pull seam, that image's
   form.
-- **F3: its gate half landed with F4**; its other half is the member scope as a field the engine's
+- **F3: its gate half landed with F4**, its hand landed after it (section 8); its other half is the member scope as a field the engine's
   sink reads instead of a sink that wraps it (`multicast_dispatch::MemberRecords`), and the
   engine's `DirectSink` handed the walk's records with no `dyn FnMut` between (`hand`, which
   `step_group` makes to let the session's lock go around each record where other threads reach
   the session). Both change the session core's walk and the threads form's lock order; they are
   the next step of this lane.
-- **F5, the open in place**, is next on the same seam: `GroupPlace::build` still makes the
+- **F5, the open in place**, its Router landed (section 8); before it, `GroupPlace::build` still makes the
   reassembly router on the stack and moves it into `run` (as the pump did), and
   `Core::join_group` is read by line first.
-- **F6, the group's leg under the held faces out of line**, is independent of F4 and not taken here.
+- **F6, the group's leg under the held faces out of line**, landed (section 8).
 - **F7 and D2** stay as section 4.1 decides them: F7's first step is `mcast-tx1.md` T3, whose
   premise the code does not hold (`mcast-tx1.md` section 7).
 - **F8b**, the stage's queue and cells in the session's arena, follows F7 (the stage's `Staged`
@@ -319,3 +335,110 @@ this lane's classification, for that lane to append under its next free ids.
 | D2, a group send that never blocks the session (the held datagram, the beacon behind it) | contract, kept in every build | the cooperative engine steps every face on one thread; a blocking send stalls every link (section 4.1) |
 | D3, a departed member's declarations retracted | contract, kept in every build | zenoh-pico's write filters forget a departed member by its dropped connection; wz's by the retraction (section 4.1) |
 | D4, the JOIN's two rules (`GroupJoinRule::Zenoh`, `::Pico`) | contract, not a capability | the Zenoh rule is two compares (section 4.1) |
+
+## 8. Steps F3, F5's Router, F6 and F9, as landed
+
+### 8.1 F3: the hand
+
+- `GroupPump::step` takes the engine's hand by type (`GroupHand`, which `direct::GroupHandOff`
+  implements), not a `dyn FnMut`: the walk's sink (`GroupEvents`) is of the hand's type, so a
+  record crosses one dynamic call from the session core's walk (the `&mut dyn EventSink` of
+  `dispatch_multicast_inbound_kept`) to the engine's dispatch, which is inlined into the sink's
+  `event`. The session's lock the hand lets go of around each record (`threads`) is the hand's
+  field, let go of at the end of the step's statement. `GroupPump::leave` steps the stopped
+  session with a sink that takes nothing: a stopped step sends its Close and reads nothing
+  (`GroupRun::step`), so no hand is made for it and no second copy of the step is compiled.
+- **The member scope as a field the engine's sink reads is not taken: its premise does not
+  hold.** What a member declared is the session core's dispatcher's fact (its row,
+  `MulticastDispatcher::member_scope`), and the scope rewrites the member's Declare by it before
+  any sink sees the record. The engine's sink reading it would put the session core's member table
+  in the engine's layer (`docs/c-abi-architecture.md` section 5, one fact in one layer), and the
+  walk would lend the sink a borrow of the dispatcher's row for each datagram through a method of
+  `EventSink`. The decorator `MemberRecords` is generic over the sink it wraps and is compiled into
+  the walk's own copy (`walk_lent_payload` over `MemberRecords<dyn EventSink>`), so it adds no
+  dynamic call; the 7,146 bytes row B2 read as `MemberRecords as EventSink` were the engine's
+  delivery inlined into it through the MCU loop's generic gate, which F4 took out. A group's
+  record now crosses the walk, the member scope (static), one dynamic call and the engine's
+  dispatch: a link's path, and the scope D3 keeps.
+- Tests: no branch is new; the engine's group tests (`tests::group`) in both lock forms, and
+  `place_tests`.
+- Bytes, expected: -300 to -800 (the closure's vtable and its shims, an indirect call a record);
+  receive Ir of a group's record: one indirect call fewer.
+
+### 8.2 F5: the Router where the place keeps it
+
+- `GroupPlace` holds the reassembly Router in a field of its own beside the dispatcher, both built
+  exactly while `run` holds a session: `GroupPlace::build` writes it there
+  (`wz_runtime_coop::reassembly_rx::mcu_reassembly_in`, over `ReassemblyDispatcher::init_in`),
+  where it made it on its stack (`mcu_reassembly`) and moved it into `GroupRun` and then into the
+  place. A Router is a slot machine for each of its slots, kilobytes: no frame of a join holds it,
+  and it is not copied.
+- Tests: `place_tests::each_session_built_in_its_place_writes_its_router_there_with_the_groups_bound`
+  (red for a build that keeps the last session's Router or its bound),
+  `reassembly_rx::tests::a_router_built_in_its_place_is_the_one_built_as_a_value`.
+- Bytes, expected: -300 to -1,000, and kilobytes of the join's stack; receive Ir: none.
+- **The rest of F5, `Core::join_group` (17,669 in the earlier tree), waits for the line
+  reading.** Read from the code, a join moves its parts by value through four frames:
+  `Core::group_joining` returns a `GroupJoining` (the group's `GroupJoin`, its `MulticastParams`,
+  the session's `SessionPolicy` and `SessionLimits`), `GroupFace::made` returns the face and
+  `GroupParts`, `GroupFace::join` returns the face and a `GroupSeat` (the seed's
+  `MulticastConfig`, parameters and policy again), `Core::join_group` returns both in a `Result`,
+  and `Core::seat_group` moves the seat into a `GroupPump` and the pump into its slot. Which of
+  these moves the compiler keeps is what `--explain pico-api-coop-nostd` reads by line; building
+  the face and the seat in the place they end in is the form, and it is the group's row of the
+  face table once R5 makes one.
+
+### 8.3 F6: a declaration's group leg
+
+- A subscriber's and a queryable's announcement to the groups is one call on the session's state
+  (`Core::announce_subscriber_to_groups`, `Core::announce_queryable_to_groups`), as a token's is
+  (`Core::announce_token_to_groups`), each out of line: the operation's body (a copy of
+  `HeldOperation::run` each where faces hold their own send places, the caller's body where they
+  share the session's lock) holds none of a group's announcement, nor its frame the
+  announcement's wire key. The walks of the groups that announce and retract
+  (`TellGroups::announce_to_groups`, `retract_from_groups`) are one body each, where they and
+  each group's message were inlined into each of the three operations that call them.
+- Kept in the operation's body: the legs one operation alone makes (a keyexpr's announcement, a
+  liveliness subscriber's end, a write filter's ask and end, a batch's step), each a walk of the
+  groups calling one method of a group; out of line, each would add a call and take out no copy.
+- Tests: no branch is new; `tests::group::a_members_subscriber_is_announced_on_the_group_and_retracted_from_it`,
+  `a_get_of_the_group_is_answered_by_a_members_queryable_and_ends_with_its_final`,
+  `a_liveliness_subscriber_asks_the_group_for_the_tokens_its_members_hold`.
+- Bytes, expected: -2,000 to -4,000 (sessions); receive Ir: none, an operation is never the read.
+
+### 8.4 F9: one cell of a join
+
+- A join's face and the session that runs it (the read slot's `GroupReads`, or the task's
+  closures where the faces are tasks of one set) shared six handles, each a heap cell of its own:
+  the mark of input, the members, the keyexpr asks, the stop, the end and the watchers' events.
+  They are the fields of one `GroupShared`, made with the join, of which each side holds one
+  `Rc`; the face notes that it read the end by a flag (`end_read`), where it let go of its
+  handle. A group's row of the face table (R5) holds these fields as its own.
+- The JOIN ask, the due and the counters stay handles of their own: they are the MCU loop's types
+  (`JoinAsk`, `GroupDue`), which both shells read, or shared with the stage (`TransportStats`),
+  whose cells F8b decides.
+- Tests: no branch is new; `tests::group` (the mark of input,
+  `a_burst_of_a_members_datagrams_moves_the_links_once`; the end and a join again,
+  `a_member_whose_group_link_is_lost_joins_the_group_again`; the members, with `connectivity`,
+  `each_member_is_a_transport_a_watcher_is_told_of_as_it_comes_and_goes`), `told_tests`.
+- Bytes, expected: -600 to -1,500 (language, sessions); receive Ir: none.
+
+### 8.5 The share section 2.1 left unplaced, placed
+
+Read from the code of 2026-11-28 against the bodies section 2 names: by symbol, not by line, so
+each part has a kind and an owner, not a figure.
+
+| part (row) | kind | why | whose |
+|---|---|---|---|
+| the group's two sockets in larger bodies, `bind_joined` and `bind_sender` against `_z_listen_udp_multicast` and `_z_open_udp_multicast` (A) | contract in a larger form | the same sockets, memberships and egress pin (section 4.1, D1); the larger part is the plan over a generic socket (`Plan::resolve`, `MulticastSocket`) and the link's `multicast-link-requires-iface` policy, where zenoh-pico requires `iface` | T-LINK (`docs/win-budget/size.md` section 9) |
+| `HostGroupReceive` against `_z_read_udp_multicast` (A) | contract | a datagram kept for the next walk (`keep`) and a read that waits in the group's receive (`await_input`) are the read slot's (`docs/c-abi-architecture.md` section 8.8): one read waits on every face and group, where zenoh-pico blocks a task in each transport; what the group's own sender sent is dropped by both | none |
+| `find_by_src`, `JoinIn::read_into`, `walk_lent_payload`, the reassembly (B2) | contract | the same work: zenoh-pico finds a peer by its address (`_z_find_peer_entry`), reads a JOIN and a frame's messages and rejoins a chain; its JOIN decoder lies in its unicast build's codec | none |
+| `session_duties`, `encode_join_into_slice`, `zp_send_join` (C) | contract | the release of the peer pool with its members' retractions (D3), and the JOIN zenoh-pico encodes in its base's codec | none |
+| `Core::join_group` (D) | form, read by line first | section 8.2 | F5's rest, then R5 |
+| `link_wait`, `open_links`, `end_links`, `read_groups`, `step_groups`, `step_group`, `seat_group` (D) | contract in a form R5 takes | the read waits on the groups beside the faces and steps each where it lies (the contract); the slot taken out of the session and put back around each step, and the groups a vector beside the face table, are the form a row of the face table replaces | R5 (`peer-rows.md`) |
+| the executor's task memory, `Taking` and `TaskStore` (D) | not linked by the read form | the round's form alone runs a group as a task (section 7) | none |
+| the kept cells and the group face's transport cells (D, G) | form | F9 (landed); the stage's cells are F8b's | F8b |
+| the rest of the drop glue and the `RawVec` growth (G) | form, falling with the bodies they serve | read again after F7 and R5 | the group-link-writer lane, R5 |
+
+What is left to this lane: F5's rest, once the line reading names it. F7, D2, F8b and T3 are the
+group-link-writer lane's.
