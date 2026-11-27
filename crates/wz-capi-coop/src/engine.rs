@@ -6303,6 +6303,70 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
+    /// Tell each group the session joined of the subscriber `handle` names, declared as `id`
+    /// with its traffic from `allowed_origin`, from its row as the links are told it. A session
+    /// that joined no group reads nothing.
+    // Out of line: a declaration's body, inlined into the operation the faces' holds run, holds
+    // none of a group's announcement, nor its frame the announcement's key.
+    #[cfg(feature = "group")]
+    #[inline(never)]
+    fn announce_subscriber_to_groups(
+        &self,
+        handle: SubscriberHandle,
+        id: EntityId,
+        allowed_origin: Locality,
+    ) {
+        if self.transport.groups.is_empty() {
+            return;
+        }
+        let tables = tables(&self.session.registry);
+        let Some(row) = tables.subscribers().get(handle) else {
+            return;
+        };
+        let wire = group::wire_key_of(tables.wire_of(row.key()));
+        let retraction = tables.retraction_of(row.key());
+        self.transport.announce_to_groups(GroupEntity {
+            what: GroupDeclaration::Subscriber,
+            entity: id,
+            keyexpr: row.key().as_str(),
+            wire: &wire,
+            retraction: retraction.as_ref(),
+            allowed_origin,
+        });
+    }
+
+    /// Tell each group the session joined of the queryable `handle` names, as
+    /// [`Self::announce_subscriber_to_groups`] tells a subscriber.
+    // Out of line, for the reason the subscriber's is.
+    #[cfg(all(feature = "group", feature = "queryable"))]
+    #[inline(never)]
+    fn announce_queryable_to_groups(
+        &self,
+        handle: QueryableHandle,
+        id: EntityId,
+        allowed_origin: Locality,
+    ) {
+        if self.transport.groups.is_empty() {
+            return;
+        }
+        let tables = tables(&self.session.registry);
+        let Some(row) = tables.queryables().get(handle) else {
+            return;
+        };
+        let wire = group::wire_key_of(tables.wire_of(row.key()));
+        let retraction = tables.retraction_of(row.key());
+        self.transport.announce_to_groups(GroupEntity {
+            what: GroupDeclaration::Queryable {
+                complete: row.complete(),
+            },
+            entity: id,
+            keyexpr: row.key().as_str(),
+            wire: &wire,
+            retraction: retraction.as_ref(),
+            allowed_origin,
+        });
+    }
+
     /// Move each group on. A group whose session ended on its own (its link was lost) takes with
     /// it what its members declared and the gets asked of them, as a lost link does, and is
     /// joined again `redial_ms` later, and again after each attempt that fails, as zenoh-pico's
@@ -11309,21 +11373,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             core.announce(DeclaredRow::of(declared.handle), tx);
             // So is each group, from the same row, when the session joined one.
             #[cfg(feature = "group")]
-            if !core.transport.groups.is_empty() {
-                let tables = tables(&core.session.registry);
-                if let Some(row) = tables.subscribers().get(declared.handle) {
-                    let wire = group::wire_key_of(tables.wire_of(row.key()));
-                    let retraction = tables.retraction_of(row.key());
-                    core.transport.announce_to_groups(GroupEntity {
-                        what: GroupDeclaration::Subscriber,
-                        entity: id,
-                        keyexpr: row.key().as_str(),
-                        wire: &wire,
-                        retraction: retraction.as_ref(),
-                        allowed_origin,
-                    });
-                }
-            }
+            core.announce_subscriber_to_groups(declared.handle, id, allowed_origin);
             // What it owes the Interests the peers asked goes now, after the declaration itself.
             #[cfg(feature = "interest-answer")]
             core.settle_faces(tx);
@@ -11883,23 +11933,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             core.announce(DeclaredRow::of(declared.handle), tx);
             // So is each group, from the same row, when the session joined one.
             #[cfg(feature = "group")]
-            if !core.transport.groups.is_empty() {
-                let tables = tables(&core.session.registry);
-                if let Some(row) = tables.queryables().get(declared.handle) {
-                    let wire = group::wire_key_of(tables.wire_of(row.key()));
-                    let retraction = tables.retraction_of(row.key());
-                    core.transport.announce_to_groups(GroupEntity {
-                        what: GroupDeclaration::Queryable {
-                            complete: row.complete(),
-                        },
-                        entity: id,
-                        keyexpr: row.key().as_str(),
-                        wire: &wire,
-                        retraction: retraction.as_ref(),
-                        allowed_origin,
-                    });
-                }
-            }
+            core.announce_queryable_to_groups(declared.handle, id, allowed_origin);
             // A matching listener that counts the session's own queryables may now match: it is
             // told, outside the lock.
             #[cfg(feature = "local-queryable")]
