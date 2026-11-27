@@ -113,8 +113,10 @@ pub trait FaceRecord<N: CountKind = OneTask> {
     /// the session's state.
     type Wire: FaceWire;
 
-    /// What the drive loop pumps for the face's link, which a dial under way makes.
-    type Pump;
+    /// What the drive loop pumps for the face's link, which a dial under way makes, and how
+    /// whatever reads the link shares it ([`SharedPump`]): a dial answers with the two handles
+    /// on the link, and the sink's type is the one the pump names.
+    type Pump: SharedPump<N>;
 
     /// A dial under way of the face's link ([`SessionLinks::Dial`]).
     type Dial: PendingDial<Self::Pump, N>;

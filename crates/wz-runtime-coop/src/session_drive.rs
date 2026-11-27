@@ -3834,6 +3834,7 @@ mod wake_budget_tests {
             CountedRouter,
             Sink,
             crate::sync::Shared,
+            dyn BoxedLinkDriver,
         >();
         for (cell, fits) in [(bytes, true), (bytes - 1, false)] {
             let runtime = CoopRuntime::try_reserved(
@@ -3983,6 +3984,7 @@ mod wake_budget_tests {
             CountedRouter,
             Sink,
             crate::sync::Shared,
+            dyn BoxedLinkDriver,
         >();
         let runtime = CoopRuntime::try_opening(
             Released,
