@@ -531,16 +531,13 @@ config WZ_CAP_TX_STREAM_OWED
 	default y
 	help
 	  A stream link's send that never waits for its stream: the part of a frame the stream did not take is owed in the frame's slot and written by a later step, and the link answers a question of room from its stream within the message's own wait, as zenoh's queue does. Off, each frame is written whole by a send that waits for its stream, as zenoh-pico's link write does, and the link has room whenever it has a slot.
-config WZ_CAP_CONFIG_LIMITS
-	bool "config-limits"
-	  ZEXT_CONFIG_LIMITS_KEY: the numbered config key by which a program states its session's limits and the values it holds apart from any session, judged at the insert and read by the open (wz-own). Off, the key is held unread as zenoh-pico's config holds a key it does not know, and every session opens each table at the preset's bound, what a statement could have raised it to.
 	  Exported by: pico.
 
-config WZ_CAP_MULTICAST_LOCATOR_KEYS
-	bool "multicast-locator-keys"
+config WZ_CAP_CONFIG_LIMITS
+	bool "config-limits"
 	default y
 	help
-	  A group endpoint's #ttl=, #bind= and #dscp=: the hop limit, the local address of the send socket and the traffic class of what a member sends (wz-own). Off, each is refused by name when the group's endpoint is read, as zenoh-pico's multicast link reads iface and join alone.
+	  ZEXT_CONFIG_LIMITS_KEY: the numbered config key by which a program states its session's limits and the values it holds apart from any session, judged at the insert and read by the open (wz-own). Off, the key is held unread as zenoh-pico's config holds a key it does not know, and every session opens each table at the preset's bound, what a statement could have raised it to.
 	  Exported by: pico.
 
 config WZ_CAP_TRANSPORT_COMPRESSION
@@ -563,5 +560,19 @@ config WZ_CAP_INTERCEPTORS
 	help
 	  The traffic policy a node's config states: access_control, low_pass_filter, downsampling and the qos/network overwrite, enforced on every face; a build without it refuses a config that states one, by its key.
 	  Exported by: c.
+
+config WZ_CAP_MULTICAST_LOCATOR_KEYS
+	bool "multicast-locator-keys"
+	default y
+	help
+	  A group endpoint's #ttl=, #bind= and #dscp=: the hop limit, the local address of the send socket and the traffic class of what a member sends (wz-own). Off, each is refused by name when the group's endpoint is read, as zenoh-pico's multicast link reads iface and join alone.
+	  Exported by: pico.
+
+config WZ_CAP_QUERY_REPLIES_WITH_FINAL
+	bool "query-replies-with-final"
+	default y
+	help
+	  The replies a queryable's callbacks make wait in the face's open frame and leave with the query's Final in one send (wz-own). Off, each reply leaves as its callback makes it and the Final after the callbacks, possibly in a later frame, as zenoh-pico's are sent.
+	  Exported by: pico.
 
 endmenu
