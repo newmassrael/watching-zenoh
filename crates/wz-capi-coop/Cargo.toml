@@ -26,6 +26,11 @@ license.workspace = true
 authors.workspace = true
 description = "The cooperative engine behind a wz C ABI: one session the program steps, implementing the C ABI's engine port."
 publish = false
+# The build script states whether this build keeps the process's table of engines (`engine-rows`),
+# as metadata a dependent's build script reads (`DEP_WZ_CAPI_COOP_ENGINE_ROWS`, see `build.rs`):
+# Cargo unifies this crate's features across the graph, so no feature of the dependent can say
+# whether the table, and the reach of an engine through it, is built.
+links = "wz_capi_coop"
 
 [lib]
 name = "wz_capi_coop"

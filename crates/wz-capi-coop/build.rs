@@ -26,6 +26,12 @@
 //! read task beside the program's calls sends from another thread (`threads`); else one place for
 //! every face, the session's lock on the one thread of the form, as the cfg `wz_one_send_place`
 //! reads it (`src/engine/direct.rs`). A build whose only face is the dial role's has neither.
+//!
+//! And of whether the build keeps the process's table of engines (`engine-rows`), through which
+//! an `EngineHandle` reaches an engine, as the metadata key `engine_rows` of
+//! `links = "wz_capi_coop"` (`1` kept, `0` not): a dependent reads it as
+//! `DEP_WZ_CAPI_COOP_ENGINE_ROWS`. A feature of the dependent cannot say it, since Cargo unifies
+//! this crate's features across the graph and any crate in it can turn the table on.
 
 /// The environment word that withholds the value locks a host lock would give ([`withheld`]).
 const VALUE_LOCKS: &str = "WZ_COOP_VALUE_LOCKS";
@@ -57,6 +63,10 @@ fn main() {
             println!("cargo:rustc-cfg=wz_one_send_place");
         }
     }
+    println!(
+        "cargo:engine_rows={}",
+        u8::from(set("CARGO_FEATURE_ENGINE_ROWS"))
+    );
 }
 
 /// Whether cargo set `feature` for this build.
