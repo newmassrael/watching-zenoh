@@ -14417,13 +14417,13 @@ layer_c1m_session_lwip() {
     # (`memory::tests::a_frame_written_into_a_lent_slot_reaches_the_peer_and_the_slots_are_bounded`)
     # runs in every leg without `session-slot`; it landed without moving this guard.
     # 23 -> 24 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu default" 24 \
+    _runci_guarded_test "C1m mcu default" 26 \
         cargo test -p wz-session-mcu --quiet || return 1
     # 23 -> 24, printed: the merge of main at `0e24b2486` (Round 4581) into the limits rounds
     # prints one more here, which neither tree printed before it.
     # 24 -> 25, printed: the in-memory link's lent-slot test (`7ec73acff`), as in the default leg.
     # 25 -> 26 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu unicast app layer" 26 \
+    _runci_guarded_test "C1m mcu unicast app layer" 28 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -14444,7 +14444,7 @@ layer_c1m_session_lwip() {
     # (`dial::parse_tests::the_ipv6_reader_reads_what_core_reads`, which `dial` compiles).
     # 62 -> 58, printed on 20ee0c0a1: the five dial reader tests moved to the runtime (322866c0f), one more lib test since.
     # 58 -> 60 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu adminspace-write" 60 \
+    _runci_guarded_test "C1m mcu adminspace-write" 62 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     # 27 -> 29, printed: hosted run 44895098050 on `c72460b30` printed 29 (the +2 above was counted
     # from the source and missed two).
@@ -14467,7 +14467,7 @@ layer_c1m_session_lwip() {
         connect_manager --quiet || return 1
     # 26 -> 27, counted on 20ee0c0a1: 24 passed beside the three admin_status tests the int-fix lane repays.
     # 27 -> 28 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu adminspace-core" 28 \
+    _runci_guarded_test "C1m mcu adminspace-core" 30 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
     # 57 -> 58: one more test in the lib (hosted C1m ran 59 and one is ignored); re-derived on
     # the build host.
@@ -14481,7 +14481,7 @@ layer_c1m_session_lwip() {
     # 73 -> 74, counted from the source: the same IPv6 reader test as the adminspace-write leg.
     # 74 -> 70, counted on 20ee0c0a1: 67 passed beside the same three admin_status tests.
     # 70 -> 73 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu adminspace read+write" 73 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 75 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
