@@ -91,6 +91,16 @@ impl RowCallbacks for Calls {
 
 type Tables = SessionTables<Calls>;
 
+/// How many write filters of `tables` hold an Interest open.
+fn held_interests<F: RowCallbacks, P: Storage>(tables: &SessionTables<F, P>) -> usize {
+    tables.kept_write_filters().map_or(0, |filters| {
+        filters
+            .iter()
+            .filter(|(_, row)| row.interest().is_some())
+            .count()
+    })
+}
+
 /// Every table at the build's bound, for a test to lower one of.
 fn rows() -> TableRows {
     TableRows {
@@ -1064,7 +1074,11 @@ fn each_filter_opens_an_interest_of_its_own_its_listeners_read() {
     assert!(querier
         .interest
         .is_some_and(|new| new.id != asked && new.id != again.id));
-    assert_eq!(tables.interests().len(), 3, "the listener opened none");
+    assert_eq!(held_interests(&tables), 3, "the listener opened none");
+    assert_eq!(
+        opened.handle, first.handle,
+        "the Interest is told from its filter's row"
+    );
     let interest = tables
         .write_filters()
         .get(first.handle)
@@ -1072,11 +1086,10 @@ fn each_filter_opens_an_interest_of_its_own_its_listeners_read() {
         .interest()
         .unwrap();
     assert_eq!(
-        interest, opened.handle,
+        (interest.id, interest.key, interest.kind),
+        (asked, "k", InterestKind::Subscribers),
         "the filter holds the Interest it opened"
     );
-    assert_eq!(tables.interests().get(interest).unwrap().id(), asked);
-    assert_eq!(tables.interest_key(interest), Some("k"));
     assert_eq!(
         tables.matching_listeners().get(listener).unwrap().filter(),
         first.handle,
@@ -1102,7 +1115,7 @@ fn each_filter_opens_an_interest_of_its_own_its_listeners_read() {
             .interest_final,
         Some(again.id)
     );
-    assert_eq!(tables.interests().len(), 1);
+    assert_eq!(held_interests(&tables), 1);
 }
 
 #[test]
@@ -1151,7 +1164,7 @@ fn a_full_listener_table_refuses_and_hands_the_callback_back() {
     let refused = tables.declare_matching_listener(filter, 4).unwrap_err();
     assert_eq!(refused.why, RegisterError::TableFull);
     assert_eq!(refused.callback, 4);
-    assert_eq!(tables.interests().len(), 1, "the filter's alone");
+    assert_eq!(held_interests(&tables), 1, "the filter's alone");
 }
 
 #[test]
@@ -1611,6 +1624,49 @@ fn rows_of_one_text_share_its_block() {
         space.counts().used > one,
         "CONTROL: another text takes a block of its own"
     );
+}
+
+/// A write filter's row and its Interest's hold one block of the key arena between them, and both
+/// rows are dropped where they lie when the filter is undeclared: the arena has every byte back,
+/// and the next filter on the key takes a block again. Turned red by an undeclaration that leaves
+/// a row's key held, or one that drops neither row.
+#[test]
+fn an_undeclared_write_filter_gives_its_key_back_where_its_rows_lay() {
+    let rows = small_rows();
+    let mut arena = arena(SessionTables::<Calls, Lent>::arena_bytes(&rows).unwrap());
+    let space = keys(256);
+    let mut tables = SessionTables::<Calls, Lent>::lent(&mut arena, space, &rows).unwrap();
+    let before = space.counts().used;
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "w/k", false)
+        .unwrap();
+    let held = space.counts().used;
+    assert!(held > before, "CONTROL: the filter's key takes a block");
+    assert!(
+        filter.interest.is_some(),
+        "the filter asks the peers by an Interest"
+    );
+    let gone = tables
+        .undeclare_write_filter(filter.handle, |_, _| unreachable!("no listener on it"))
+        .unwrap();
+    assert_eq!(gone.interest_final, filter.interest.map(|opened| opened.id));
+    assert_eq!(gone.held, None);
+    assert_eq!(
+        space.counts().used,
+        before,
+        "both rows' holds of the block went with them"
+    );
+    assert!(tables.write_filters().get(filter.handle).is_none());
+    assert_eq!(held_interests(&tables), 0);
+    let again = tables
+        .declare_write_filter(Plane::Subscribers, "w/k", false)
+        .unwrap();
+    assert_eq!(
+        space.counts().used,
+        held,
+        "the next filter takes the block again"
+    );
+    assert_ne!(again.handle, filter.handle);
 }
 
 #[test]
@@ -3128,7 +3184,7 @@ fn a_filter_that_asks_nothing_is_judged_on_its_own_key() {
         .declare_write_filter_as(Plane::Subscribers, "q", false, None, None)
         .unwrap();
     assert_eq!(quiet.interest, None);
-    assert_eq!(tables.interests().len(), 0, "no Interest held");
+    assert_eq!(held_interests(&tables), 0, "no Interest held");
     assert_eq!(tables.next_entity_id(), before, "no id spent");
     let row = tables.write_filters().get(quiet.handle).unwrap();
     assert_eq!((row.interest(), row.key()), (None, "q"));
@@ -3206,7 +3262,7 @@ fn a_write_filter_holds_its_keys_declaration_until_it_goes() {
 
     let full = tables.declare_keyexpr("demo/full").unwrap();
     while tables.retain_keyexpr(full.handle) {}
-    let interests = tables.interests().len();
+    let interests = held_interests(&tables);
     assert!(matches!(
         tables.declare_write_filter_as(
             Plane::Subscribers,
@@ -3217,11 +3273,7 @@ fn a_write_filter_holds_its_keys_declaration_until_it_goes() {
         ),
         Err(RegisterError::KeyexprHoldsFull)
     ));
-    assert_eq!(
-        tables.interests().len(),
-        interests,
-        "no Interest was opened"
-    );
+    assert_eq!(held_interests(&tables), interests, "no Interest was opened");
     assert_eq!(
         tables.keyexprs().get(full.handle).map(|row| row.holds()),
         Some(KeyexprHolds::MAX),
@@ -3244,14 +3296,14 @@ fn a_listener_on_a_key_opens_an_interest_of_its_own() {
     let listener = tables.matching_listeners().get(alone.handle).unwrap();
     assert!(listener.owns_filter());
     let own = listener.filter();
-    let interest = tables.write_filters().get(own).unwrap().interest().unwrap();
     assert_eq!(
-        interest, opened.handle,
+        opened.handle, own,
         "the listener's own filter holds the Interest it opened"
     );
-    let row = tables.interests().get(interest).unwrap();
+    let interest = tables.write_filters().get(own).unwrap().interest().unwrap();
+    assert_eq!(interest.id, asked);
     assert_eq!(
-        (row.mapping_id(), row.suffix(), row.aggregate()),
+        (interest.mapping_id, interest.suffix, interest.aggregate),
         (0, Some("m"), false)
     );
     let filter = tables
@@ -3261,7 +3313,7 @@ fn a_listener_on_a_key_opens_an_interest_of_its_own() {
         .interest
         .expect("the filter asks apart from the listener");
     assert_ne!(filters.id, asked);
-    assert_eq!(tables.interests().len(), 2);
+    assert_eq!(held_interests(&tables), 2);
     let sub = subscribe(&mut tables, "m", Locality::Any, 1);
     let mut cursor = 0;
     assert_eq!(
@@ -3278,7 +3330,7 @@ fn a_listener_on_a_key_opens_an_interest_of_its_own() {
     );
     assert!(first.row.is_some());
     assert!(tables.write_filters().get(own).is_none());
-    assert_eq!(tables.interests().len(), 1, "the entity's filter's stands");
+    assert_eq!(held_interests(&tables), 1, "the entity's filter's stands");
     assert_eq!(
         tables
             .undeclare_write_filter(filter.handle, |_, _| {})
@@ -3286,7 +3338,7 @@ fn a_listener_on_a_key_opens_an_interest_of_its_own() {
             .interest_final,
         Some(filters.id)
     );
-    assert_eq!(tables.interests().len(), 0);
+    assert_eq!(held_interests(&tables), 0);
 }
 
 /// A matching listener declared on a key judges through a filter of its own, held to the key
@@ -3315,7 +3367,7 @@ fn a_key_listeners_filter_is_held_to_the_key_listeners_rows() {
         (RegisterError::TableFull, 2)
     );
     assert_eq!(
-        tables.interests().len(),
+        held_interests(&tables),
         2,
         "the refused listener opened nothing"
     );
@@ -3357,11 +3409,10 @@ fn an_interest_names_its_rest_by_a_range_of_its_key() {
             .unwrap()
             .interest()
             .unwrap();
-        let row = tables.interests().get(interest).unwrap();
         (
-            row.mapping_id(),
-            row.suffix().map(std::string::String::from),
-            row.aggregate(),
+            interest.mapping_id,
+            interest.suffix.map(std::string::String::from),
+            interest.aggregate,
         )
     };
     assert_eq!(
@@ -3413,8 +3464,7 @@ fn an_interest_names_its_rest_by_a_range_of_its_key() {
         .unwrap()
         .interest()
         .unwrap();
-    let row = tables.interests().get(interest).unwrap();
-    assert_eq!((row.mapping_id(), row.suffix()), (9, None), "no rest");
+    assert_eq!((interest.mapping_id, interest.suffix), (9, None), "no rest");
 }
 
 /// A matching listener's callback is reached to change through its handle while the listener
@@ -3562,6 +3612,39 @@ fn each_table_of_declarations_is_read_through_its_own_slots() {
     );
 }
 
+/// A write filter that asks nothing holds a place among the Interests' slots, its row read there
+/// with no Interest, so a filter declared after it has the rank the filters' walk gives it. Turned
+/// red by Interests read through slots other than the filters', or a quiet filter's row that
+/// reads as an Interest.
+#[test]
+fn a_filter_that_asks_nothing_holds_its_place_among_the_interests() {
+    let mut tables = Tables::new();
+    let first = tables
+        .declare_write_filter(Plane::Subscribers, "f0", false)
+        .unwrap();
+    let quiet = tables
+        .declare_write_filter_as(Plane::Subscribers, "f1", false, None, None)
+        .unwrap();
+    let last = tables
+        .declare_write_filter(Plane::Subscribers, "f2", false)
+        .unwrap();
+    let slots = tables.slots_of(DeclaredTable::Interests);
+    assert_eq!(slots.len(), 3, "the quiet filter's place counts");
+    assert_eq!(slots.rank_of(DeclaredRow::of(last.handle).row), Some(2));
+    assert_eq!(
+        slots.nth_live(1),
+        Some(DeclaredRow::of(quiet.handle).row),
+        "the quiet filter lies between the two"
+    );
+    let row = tables.write_filters().get(quiet.handle).unwrap();
+    assert_eq!(row.interest(), None, "and holds no Interest to tell");
+    assert_eq!(
+        DeclaredRow::of(first.handle).table,
+        DeclaredTable::Interests,
+        "a filter is told as its Interest"
+    );
+}
+
 /// A plane's write filters are held to its own bound in the table the two planes share: a
 /// publisher's filter past the publishers' bound is refused while the table has room, asking
 /// nothing and spending no id, and a querier's is still taken up to the queriers' bound. The
@@ -3587,7 +3670,7 @@ fn a_planes_write_filters_are_held_to_its_own_bound() {
         Err(RegisterError::TableFull)
     ));
     assert_eq!(tables.next_entity_id(), before, "no id spent");
-    assert_eq!(tables.interests().len(), 1, "no Interest held for it");
+    assert_eq!(held_interests(&tables), 1, "no Interest held for it");
     assert!(tables.declare_write_filter(querier, "q0", false).is_ok());
     assert!(tables.declare_write_filter(querier, "q1", false).is_ok());
     assert!(matches!(

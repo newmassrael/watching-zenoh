@@ -73,7 +73,7 @@ use wz_runtime_coop::kept::Shared;
     all(not(wz_round), any(feature = "listen", feature = "group"))
 ))]
 use wz_session_core::bounded::Arena;
-use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, LendRefused, TableLender};
+use wz_session_core::bounded::{KeyMaker, KeyUnkept, LendRefused, TableLender};
 use wz_session_core::caps;
 #[cfg(all(feature = "liveliness", wz_round))]
 use wz_session_core::key_arena::KeyRef;
@@ -87,9 +87,9 @@ use wz_session_core::row_callback::{RowCallback, ThreadForm};
 use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
 use wz_session_core::session_tables::{
-    kind, DeclaredRow, DeclaredTable, InterestHandle, InterestKind, InterestName, InterestRow,
-    KeyexprHandle, KeyexprRef, MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks,
-    RowKey, SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
+    kind, DeclaredRow, DeclaredTable, FilterInterest, InterestKind, InterestName, KeyexprHandle,
+    KeyexprRef, MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks, RowKey,
+    SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
 #[cfg(feature = "runtime-plan")]
@@ -3722,37 +3722,10 @@ fn interest_on_link<C: ClockSource + 'static>(
     None
 }
 
-/// An Interest as a link is asked it, read off its row ([`Self::of`]): its id, what it asks
-/// about, and its key's text and declared form, borrowed from the session's tables. Its send reads
-/// nothing else of the session's state ([`send_interest`]).
-#[derive(Clone, Copy)]
-struct InterestTell<'a> {
-    id: EntityId,
-    kind: InterestKind,
-    key: &'a str,
-    mapping_id: ExprId,
-    aggregate: bool,
-    suffix: Option<&'a str>,
-}
-
-impl<'a> InterestTell<'a> {
-    /// The Interest `row` holds open.
-    fn of<K: KeyBacking>(row: &'a InterestRow<K>) -> Self {
-        Self {
-            id: row.id(),
-            kind: row.kind(),
-            key: row.key(),
-            mapping_id: row.mapping_id(),
-            aggregate: row.aggregate(),
-            suffix: row.suffix(),
-        }
-    }
-}
-
 /// Send `interest` open over `actions`, for what is declared now and what is declared later,
 /// naming its key as the link's key-wire form says: whether the link took it.
 fn send_interest<C: ClockSource + 'static>(
-    interest: InterestTell<'_>,
+    interest: FilterInterest<'_>,
     actions: &LinkActions<C>,
 ) -> bool {
     let linked = interest_on_link(actions, interest.key, interest.aggregate);
@@ -3775,14 +3748,16 @@ fn send_interest<C: ClockSource + 'static>(
         .is_ok()
 }
 
-/// Where the Interest `handle` names lies among the Interests the replay tells, in the table's slot
-/// order: read while it stands, for its Final's place once it is let go of. `None` when it names
-/// none. A build that reaches no pace reads no place (`replay`), so only whether it stands.
-fn interest_rank(tables: &CoopTables, handle: Option<InterestHandle>) -> Option<usize> {
+/// Where the write filter `handle` names lies among the Interests the replay tells, in the
+/// filters' slot order, whether it holds an Interest or not: read while it stands, for its place
+/// once it is let go of. `None` when it names none. A build that reaches no pace reads no place
+/// (`replay`), so only whether it stands.
+fn filter_rank(tables: &CoopTables, handle: WriteFilterHandle) -> Option<usize> {
+    let filters = tables.write_filters();
     if !ReplayPacing::REACHABLE {
-        return tables.interests().get(handle?).map(|_| 0);
+        return filters.get(handle).map(|_| 0);
     }
-    tables.interests().rank_of(handle?)
+    filters.rank_of(handle)
 }
 
 /// Take the write filter `handle` names out of `tables`, with the listeners declared on it, let go
@@ -10716,9 +10691,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     // A listener declared on a key ends the Interest of the filter it owns; one
                     // declared on an entity's filter ends none.
                     let owned = row.owns_filter().then_some(row.filter());
-                    let interest =
-                        owned.and_then(|filter| tables.write_filters().get(filter)?.interest());
-                    interest_rank(tables, interest)
+                    owned.and_then(|filter| filter_rank(tables, filter))
                 };
                 let unwatched =
                     tables_mut(&mut core.session.registry).undeclare_matching_listener(handle)?;
@@ -10772,10 +10745,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             // The id this filter spent of its own: its Interest's, or the one taken for a filter
             // that sends none.
             let spent = match watching.interest {
-                Some(opened) => {
-                    core.announce(DeclaredRow::of(opened.handle), tx);
-                    u64::from(opened.id)
-                }
+                Some(opened) => u64::from(opened.id),
                 None => {
                     // The entity id is taken whether the Interest is sent or not, as zenoh-pico's
                     // `_z_add_interest` takes it before it decides: a filter that finds none left
@@ -10793,6 +10763,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     u64::from(taken)
                 }
             };
+            // Its row is its Interest's place in the replay's order whether it asks or not, so a
+            // replay under way counts it; one that asks nothing is told nothing there.
+            core.announce(DeclaredRow::of(watching.handle), tx);
             // Each group a write filter asks (`asks_for_filters`) is asked for its members'
             // declarations by the id the filter spent, as the tokio engine's group is.
             #[cfg(feature = "group")]
@@ -10843,14 +10816,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             return;
         };
         let _ = self.live_on_link(|core, tx| {
-            // Its Interest's place is read while the row stands.
-            let place = {
-                let tables = tables(&core.session.registry);
-                let Some(row) = tables.write_filters().get(handle) else {
-                    return;
-                };
-                interest_rank(tables, row.interest())
-            };
+            // Its place is read while the row stands.
+            let place = filter_rank(tables(&core.session.registry), handle);
             let Some((last_held, held)) =
                 unwatch_filter(tables_mut(&mut core.session.registry), handle)
             else {

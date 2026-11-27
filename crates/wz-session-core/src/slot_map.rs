@@ -233,6 +233,16 @@ impl<T> Removal<T> {
     }
 }
 
+/// What discarding a row did ([`SlotMap::discard`], [`Entry::discard`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Discarded {
+    /// The row was dropped where it lay, and its slot is free.
+    Now,
+    /// The row is pinned: it is retired, gone from every lookup, and the last
+    /// [`SlotMap::unpin`] hands it back, as it hands back a row [`SlotMap::remove`] retired.
+    AfterCalls,
+}
+
 /// What a slot holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
@@ -1002,6 +1012,17 @@ impl<K, T, const N: usize, P: Storage> Entry<'_, K, T, N, P> {
             Retired::Deferred => Some(Removal::AfterCalls),
         }
     }
+
+    /// Remove the row and drop it where it lies, as [`SlotMap::discard`] does.
+    pub fn discard(self) -> Option<Discarded> {
+        match self.map.core.retire_at(&mut self.map.meta, self.at)? {
+            Retired::Now(at) => {
+                *self.map.rows.get_mut(at)? = None;
+                Some(Discarded::Now)
+            }
+            Retired::Deferred => Some(Discarded::AfterCalls),
+        }
+    }
 }
 
 /// A table of at most `N` rows of `T`, named by [`Handle<K>`], kept as the storage policy `P`
@@ -1199,6 +1220,24 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
                 unsafe { row.cast::<Option<T>>().as_ptr().replace(None) }.map(Removal::Taken)
             }
             RawRemoval::AfterCalls => Some(Removal::AfterCalls),
+        }
+    }
+
+    /// Remove the row `handle` names and drop it where it lies, the table borrowed: no copy of the
+    /// row leaves its slot. For a row whose drop may run where the table is held (a key of the
+    /// session's key arena, a count's hold), never for one whose drop is a program's, which
+    /// [`Self::remove`] hands back for its caller to drop with no lock held. `None` when it names
+    /// no live row; [`Discarded::AfterCalls`] when it is pinned, its last unpin handing it back.
+    pub fn discard(&mut self, handle: Handle<K>) -> Option<Discarded> {
+        match self.raw().remove(handle.erase())? {
+            // SAFETY: the place of the row whose slot was just freed, which no take reached since;
+            // the assignment drops the row once where it lies and leaves the `None` a free slot's
+            // row holds.
+            RawRemoval::Freed(row) => {
+                unsafe { *row.cast::<Option<T>>().as_ptr() = None };
+                Some(Discarded::Now)
+            }
+            RawRemoval::AfterCalls => Some(Discarded::AfterCalls),
         }
     }
 

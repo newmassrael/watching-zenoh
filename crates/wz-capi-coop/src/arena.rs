@@ -1174,11 +1174,6 @@ impl EntityRows {
             None => None,
         }
     }
-
-    /// The rows of the Interests the session holds open: a write filter opens at most one.
-    pub const fn interests(&self) -> Option<usize> {
-        self.filters()
-    }
 }
 
 /// One of each table of a cell for each link: the link's driver's, its gates', its session's

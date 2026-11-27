@@ -2379,7 +2379,6 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
     assert!(held >= 3, "the preset sizes the plan's rows: {plan:?}");
     let entities = plan.entities();
     assert_eq!(entities.filters(), Some(filters));
-    assert_eq!(entities.interests(), Some(filters), "one Interest a filter");
     assert_eq!(
         plan.gets().rows.queries,
         if cfg!(feature = "query") {

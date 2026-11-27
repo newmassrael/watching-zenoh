@@ -195,7 +195,6 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         0
     };
     assert_eq!(rows.filters(), Some(7 + key_listeners));
-    assert_eq!(rows.interests(), Some(7 + key_listeners));
     let count = |part: &str| {
         plan.rows()
             .find(|row| row.part() == part)
@@ -261,11 +260,6 @@ fn the_plan_lends_each_declaration_table_its_limit() {
          key listener's"
     );
     assert_eq!(plan.tables().matching_listeners, 5);
-    assert_eq!(
-        plan.tables().interests(),
-        7 + key_listeners,
-        "an Interest is a row of the session's one table set, one for each write filter"
-    );
     assert_eq!(
         count("write filters"),
         None,
@@ -976,6 +970,54 @@ fn each_filter_and_each_keys_listener_asks_an_interest_of_its_own() {
     engine.undeclare_write_filter(second);
     until(&engine, "the second filter's Final", || {
         router.seen(|s| s.interests) == asked + 5
+    });
+}
+
+/// A write filter that asks nothing holds its place among the Interests the replay tells and is
+/// told nothing there: a redeclaration sends the Interest of the filter declared after it and none
+/// of its own, and its undeclaration sends no Final while the other filter's still goes. Turned
+/// red by a replay that tells a filter's row as an Interest it does not hold, or one whose places
+/// lose count of the quiet filter, so the asking filter's Interest or its Final is not sent.
+#[test]
+fn a_filter_that_asks_nothing_holds_its_place_and_is_told_nothing() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let quiet = engine
+        .declare_write_filter(
+            FilterPlane::Subscribers,
+            "demo/quiet",
+            &WireKey::literal(),
+            None,
+            false,
+        )
+        .expect("a row is free")
+        .id;
+    let asking = filter(&engine, FilterPlane::Subscribers, "demo/asking").expect("a row is free");
+    until(&engine, "the asking filter's Interest", || {
+        router.seen(|s| s.interests) >= 1
+    });
+    settle(&engine);
+    let asked = router.seen(|s| s.interests);
+    assert_eq!(SessionEngine::redeclare(&*engine), Ok(1), "the dial link");
+    until(&engine, "the asking filter's Interest told again", || {
+        router.seen(|s| s.interests) == asked + 1
+    });
+    settle(&engine);
+    assert_eq!(
+        router.seen(|s| s.interests),
+        asked + 1,
+        "the quiet filter is told nothing"
+    );
+    engine.undeclare_write_filter(quiet);
+    settle(&engine);
+    assert_eq!(
+        router.seen(|s| s.interests),
+        asked + 1,
+        "no Final for a filter that asked nothing"
+    );
+    engine.undeclare_write_filter(asking);
+    until(&engine, "the asking filter's Final", || {
+        router.seen(|s| s.interests) == asked + 2
     });
 }
 
