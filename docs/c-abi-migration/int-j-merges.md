@@ -178,3 +178,11 @@ The lane states the tables' policy once, in the build script (`wz_lent`,
   the peer's staging (`TokenAnswers`, `b88db8bad5`). It now stages into a
   `TokenAnswers` of its own from the stand-in's registry, reads the refusals
   off it and drains it with `next_answer`, as the observer drains a peer's.
+- `docs/deterministic-tests/system-layer.tsv`: `tests/no_engine_rows.rs`
+  (from integration i) reaches the host's links, clock and entropy and had
+  no row. Its subject is not the host: it assembles engines and dials none,
+  so it is owed a move. The move needs a link stack, clock and entropy of no
+  host reachable from an integration test, which the crate does not export
+  (the sim is its unit tests' `tests::sim`), and the test must be a binary of
+  its own built without `engine-rows`. So it takes a `pending` row, as its
+  sibling `tests/engine_rows.rs` has for the same reason.

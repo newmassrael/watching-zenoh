@@ -48,5 +48,6 @@ crates/wz-capi-coop/src/tests/step_host.rs	system	clock,socket,thread,random	two
 crates/wz-capi-coop/src/tests/timestamps.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; opens its session on the host links; names the host clock; draws the host entropy; takes host_links, config, until of the test root and settle of tests::get
 crates/wz-capi-coop/src/tests/tx_pool.rs	system	clock,socket,thread,random	a slow reader over the host stream sockets: the kernel stream buffers are its subject
 crates/wz-capi-coop/tests/engine_rows.rs	pending	clock,socket,random	opens its session on the host links; names the host clock; draws the host entropy
+crates/wz-capi-coop/tests/no_engine_rows.rs	pending	clock,socket,random	assembles its engines over the host links, dialling none; names the host clock; draws the host entropy
 crates/wz-capi-coop/tests/tls_provider.rs	system	clock,socket,thread	the TLS provider of the engine on a host: a server and a client over the host sockets, one on a thread of its own
 crates/wz-capi-coop/tests/tls_sessions.rs	system	clock,socket,thread	how many TLS sessions a host program holds at once, over the host sockets
