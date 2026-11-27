@@ -1,0 +1,16 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"]
+decision = '''
+Pay the reds the switch landing left in builds without tx-probe: a binding
+and a test helper compiled where nothing reads them.
+'''
+changes = '''
+- session-core: probing without tx-probe only where a heap reads it.
+- capi-coop: links_owing only where tests::tx_pool is (listen, tx-probe).
+'''
+verification = '''
+- nondefault-features gate for wz-session-core and wz-capi-coop passes.
+- capi-coop lib tests 335 and 278 pass in the two switch-off builds.
+'''
+carry = '''
+- none for this lane.
+'''
