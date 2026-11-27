@@ -2250,7 +2250,7 @@ layer_bc_c11_freestanding() {
             ;;
         *)
             cat "$log" >&2
-            echo "Layer Bc FAIL (scripts/c11-lane.sh exited $rc; its report: target/c11-lane/report.md)" >&2
+            echo "Layer Bc FAIL (scripts/c11-lane.sh exited $rc; its report: $WZ_ARTIFACTS/target/c11-lane/report.md)" >&2
             return 1
             ;;
     esac
