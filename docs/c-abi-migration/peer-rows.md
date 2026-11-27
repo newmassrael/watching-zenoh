@@ -1015,6 +1015,57 @@ batches: red if the run is entered for one face alone or `run_waits` leaves a fa
 single-face tests of section 8.14.7 stand, among them
 `a_connection_arriving_during_a_quiet_read_is_taken_at_once` (the ports in the kept set).
 
+The groups joined the run after R5a: section 7.11.
+
+### 7.11 R8's group part, landed: the groups in the run
+
+**The premise, read after R5a.** R5a put a group's session in the row of its place (section
+7.7), so a run has a slot to step a group under: the row's, taken by a try, with the dial role's
+slot held across the steps as a whole read holds it (`CoopEngine::read_groups`), so a callback's
+read reads nothing. What R5a did not do is make the group's socket a face's link: its input lies
+in the group's face in the session's state (`GroupFace::input`), not in the transport's face
+table that `LinkSupervisor::run_waits` reads. The run therefore reads it there, under the lock
+it already takes once to gather its kept set; no second table is made.
+
+**What changed** (`crates/wz-capi-coop/src/engine/direct.rs`, `crates/wz-capi-coop/src/engine/group.rs`,
+`crates/wz-runtime-coop/src/faces.rs`).
+
+- A face's look no longer refuses a session that joined a group (`CoopEngine::quiet_until`,
+  now an associated function: it reads nothing of the engine).
+- At the run's entry each group says whether it stays in the run (`GroupFace::in_run`, its rule
+  the pure `run_entry`): refused where only a whole read serves it (its row owed its session,
+  its join owed its ask for keyexprs, its socket may hold what its last step left, its due by
+  now: its end to read, its first step, a write its stage holds, its beacon, its join again; or
+  a running session whose stack gives its input no wait); else its input, none for a group
+  waiting to be joined again, and its due, which bounds the run's deadline.
+- The kept set holds the groups' inputs after the faces' links (`run_waits`' `inputs`), and
+  refuses any two entries that give one wait, ports among them.
+- A wait that found a group's input ready steps the groups after the faces
+  (`CoopEngine::step_groups_in_run`: `step_groups` under the dial role's slot, then the
+  hand-out), and asks each group again, so a step that moved a beacon or left a write ends or
+  shortens the run before its next wait. Each pass's one question under the session's lock asks
+  the groups too (`groups_stay_in_run`), for what another thread's call left. A run of one face
+  steps it after a wait only where the wait found no group's input.
+
+**Tests.** `group`'s `a_group_stays_in_a_quiet_run_only_while_it_owes_a_whole_read_nothing`
+(`threads`): a running group with its input and due, one with nothing due, one waiting to be
+joined again and one joined no more stay; a seat owed, an ask owed, input left, a due now or at
+once, and a stack that gives no wait are refused (red if `run_entry` keeps any of them).
+`tests::host_group`'s `a_quiet_read_reads_a_face_and_a_group_in_one_run` (`group-host`,
+`listen`, `query`, `queryable`, `threads`; ignored where the host has no multicast route, as
+every test of the host's group sockets is): a session that listens and joins a group finds its
+client face quiet beside the group (the CONTROL: red while `quiet_until` refuses a joined group),
+and puts from its client and from another member in turn cost the face fewer than one turn in
+four batches (red if the run refuses the group or `run_waits` leaves its input out).
+
+**Expected.** Bytes: the builds that compile the run with `group` (`threads` with `group`:
+`pico-api-coop-nostd`) grow by the groups' part of the run (the entry's walk of the groups,
+`run_entry`, `groups_stay_in_run`, `step_groups_in_run`), a few hundred bytes, less the look's
+refusal; the zenoh-pico preset's peer and client cases (`threads` off) compile none of it.
+Receive Ir: the client case and a session of groups alone (D10's awaited read) do not move; a
+session of faces and groups reads each batch of either in the run where it took a whole turn
+for each, as section 7.10 measured for the faces.
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)
