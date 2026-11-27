@@ -12811,6 +12811,19 @@ layer_c1own_own_space_witnesses() {
 #                                                      not pass by deleting the
 #                                                      helper)
 #
+# The PER-SESSION SLOT subsets 19-22, the same lesson on the fixed-memory profile. Every
+# arm above builds the heap's forms or no session at all, and the feature sets the slot
+# profile is clippied in (`[package.metadata.wz-docs]`, Layers C1bf and gate 7) are its
+# LARGEST, every other feature beside it. A slot build of a few planes is what a small
+# image takes, and three faults lived only there: a declaration type whose one variant
+# left borrowed nothing (`liveliness-token` alone, an unused lifetime, a hard error), the
+# chain verdicts compiled with no reader where no session reads a frame, and test
+# fixtures no table of the build calls. CLIPPY arms, dead code being a warning.
+#   19. slot + liveliness-token, no session        (the verdicts' build)
+#   20. slot + session-unicast + liveliness-token  (the declaration type's build)
+#   21. 19 at every target                         (the test fixtures' build)
+#   22. a small slot node: tokens, a publish, a get and its replies
+#
 # R2275 (item 615): a LIST, for the same two reasons Layer C3 was rewritten into
 # one. Every subset here is `--quiet`, so the lane exited 0 having printed
 # nothing — SILENT at every observation the archived logs hold and in both jobs
@@ -12840,6 +12853,10 @@ layer_c1h_arbitrary_subset_matrix() {
         "clippy -p wz-session-core --no-default-features --features codec-init-body,session-unicast-open"
         "clippy -p wz-session-core --no-default-features --features alloc,codec-frame,codec-push,codec-declare,codec-request,codec-response,codec-response-final,codec-init-body,codec-open-body,codec-close,codec-keep-alive,codec-fragment,reassembly,codec-linkstate"
         "clippy -p wz-session-core --no-default-features --features alloc,codec-frame,codec-push,codec-declare,codec-request,codec-response,codec-response-final,codec-init-body,codec-open-body,codec-close,codec-keep-alive,codec-fragment,reassembly,codec-linkstate,session-unicast"
+        "clippy -p wz-session-core --no-default-features --features session-slot,liveliness-token --lib"
+        "clippy -p wz-session-core --no-default-features --features session-slot,session-unicast,liveliness-token --lib"
+        "clippy -p wz-session-core --no-default-features --features session-slot,liveliness-token --all-targets"
+        "clippy -p wz-session-core --no-default-features --features session-slot,session-unicast,liveliness-token,codec-push,rx-push,codec-response,codec-response-final,rx-response,codec-request --lib"
     )
     local subset ran=0 rc
     for subset in "${subsets[@]}"; do
