@@ -2194,6 +2194,27 @@ declared_keyexprs::"
     # the bundle's. The filter is the module path.
     "wz-session-core|hook|session-unicast,codec-response,reply-egress-gate|\
 session_actions::bundle_tests::reply_egress_gate::"
+    # The group session's core with the three declaration planes and no Put body op
+    # (`session-multicast` and the peer-declare registries, without `pubsub-put` or
+    # `pubsub-delete`). Every other row that compiles the observer's cross-talk tests has a Put
+    # body op on, so the Push those tests drive was always delivered there; in this build the
+    # Push is parsed and delivers no sample, which the tests assert, while the declaration planes
+    # still resolve the same frame through both id spaces. The filter is the module path. NOT YET
+    # MEASURED.
+    "wz-session-core|hook|\
+        codec-declare,\
+        codec-frame,\
+        codec-push,\
+        codec-response,\
+        codec-response-final,\
+        declare-final,\
+        declare-queryable,\
+        declare-subscriber,\
+        declare-undeclare,\
+        liveliness-token,\
+        session-multicast,\
+        transport-stats\
+        |observer::tests::cross_talk::"
     # The storage plane is the wz-storage crate's (server-layer split, steps 2-4), and its
     # gated tests went with it: the plugins document reader's (step 3) and the history,
     # strip-prefix, replication, aligner, wildcard and garbage-collection subsets (step 4),

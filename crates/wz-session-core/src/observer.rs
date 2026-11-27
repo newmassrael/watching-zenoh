@@ -1414,6 +1414,11 @@ mod tests {
     // three peer-declare features it touches (the original
     // `liveliness-token`-only gate implicitly relied on the workspace
     // default having declare-subscriber / declare-queryable on too).
+    // The Push a frame carries reaches a subscription only in a build with
+    // the Put body op (`pubsub-put`): without it the Push is parsed and no
+    // sample is projected from it (`SubscriberPeer::dispatch`). The
+    // declaration planes read no Put, so the module keeps their gate and holds
+    // the Push plane to what the build delivers (`put_delivered`).
     #[cfg(all(
         feature = "declare-subscriber",
         feature = "declare-queryable",
@@ -1431,6 +1436,13 @@ mod tests {
         use wz_codecs::lent::{
             Declare, DeclareVariant, Wireexpr, WireexprNonlocal, WireexprVariant,
         };
+
+        /// The samples one Put of a frame hands the one subscription its key
+        /// reaches: one in a build with the Put body op, none in a build without
+        /// it, which parses the Push and projects no sample from it.
+        fn put_delivered() -> usize {
+            usize::from(cfg!(feature = "pubsub-put"))
+        }
 
         #[test]
         fn dispatch_event_routes_event_into_all_consumer_registries_without_cross_talk() {
@@ -1522,7 +1534,7 @@ mod tests {
             ]);
             crate::driver_loop::deliver_frame(&outcome, |event| observer.dispatch_event(event));
 
-            assert_eq!(sub_fired.load(Ordering::SeqCst), 1);
+            assert_eq!(sub_fired.load(Ordering::SeqCst), put_delivered());
             assert_eq!(r_sub_fired.load(Ordering::SeqCst), 1);
             assert_eq!(r_q_fired.load(Ordering::SeqCst), 1);
             assert_eq!(l_fired.load(Ordering::SeqCst), 1);
@@ -1544,6 +1556,11 @@ mod tests {
         /// id 7 as `theirs/x` in the same registry, so a fan that handed over
         /// the peer table alone would resolve a confident WRONG keyexpr on all
         /// four rather than dropping them.
+        ///
+        /// The Push plane is one of the four only in a build with the Put body
+        /// op (`pubsub-put`). Without it the Push delivers no sample, so neither
+        /// subscription fires, and the three declaration planes carry the
+        /// witness alone.
         #[test]
         fn an_own_space_alias_resolves_through_the_fan_on_every_plane() {
             use alloc::string::ToString;
@@ -1618,8 +1635,8 @@ mod tests {
 
             assert_eq!(
                 ours_fired.load(Ordering::SeqCst),
-                1,
-                "the Push plane resolved id 7 in OUR space",
+                put_delivered(),
+                "the Push plane resolves id 7 in OUR space where the build delivers a Put",
             );
             assert_eq!(
                 theirs_fired.load(Ordering::SeqCst),
