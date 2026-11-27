@@ -98,6 +98,7 @@ fn rooms(answers: &Answers) -> Box<LinkRooms<Answers>> {
 }
 
 /// The places of the faces `room` names congested, or `None` for another answer.
+#[cfg(feature = "tx-held-wait")]
 fn congested(room: Room) -> Option<Vec<usize>> {
     match room {
         Room::Congested(set) => Some((0..64).filter(|at| set.contains(*at)).collect()),
@@ -106,6 +107,7 @@ fn congested(room: Room) -> Option<Vec<usize>> {
 }
 
 /// A session none of whose links gives a wait cannot be asked: the publish waits for the session.
+#[cfg(feature = "tx-held-wait")]
 #[test]
 fn a_session_whose_links_give_no_wait_is_not_asked() {
     assert_eq!(rooms(&Answers::default()).within(1_000), Room::Unasked);
@@ -113,6 +115,7 @@ fn a_session_whose_links_give_no_wait_is_not_asked() {
 
 /// Each link that is up is asked, for the wait it is handed, and one that takes no bytes within it
 /// is the congestion; with room on every link, whoever holds the session is not waiting on one.
+#[cfg(feature = "tx-held-wait")]
 #[test]
 fn each_link_is_asked_and_one_without_room_is_congestion() {
     let answers = Answers::default();
@@ -137,6 +140,7 @@ fn each_link_is_asked_and_one_without_room_is_congestion() {
 /// The congestion is the faces without room and no other: a face with room beside a full one is
 /// not dropped on. The first face without room spends the wait, and the faces asked after it are
 /// asked without one, so the publish spends one deadline however many faces the session has.
+#[cfg(feature = "tx-held-wait")]
 #[test]
 fn only_the_faces_without_room_are_the_congestion() {
     let answers = Answers::default();
@@ -160,6 +164,7 @@ fn only_the_faces_without_room_are_the_congestion() {
 /// the drop names the face the holder sends on and no other. A session held by a publish between
 /// its sends is tried again, and one held by what is not a publish (a read step, a timer) is waited
 /// for, blocked, with nothing asked either. Under zenoh's profile the same publish asks the link.
+#[cfg(feature = "tx-held-wait")]
 #[test]
 fn under_the_pico_profile_a_held_session_drops_without_asking() {
     use wz_session_core::session_init_params::HeldDrop;
@@ -193,6 +198,7 @@ fn under_the_pico_profile_a_held_session_drops_without_asking() {
 /// with no link asked for room: the read holds no send and lets go within its take, so zenoh's
 /// profile has no room to ask after and pico's nothing to wait for blocked. CONTROL: zenoh's
 /// profile behind a read step asks the link.
+#[cfg(feature = "tx-held-wait")]
 #[test]
 fn a_session_held_by_a_read_working_out_its_wait_is_tried_again_without_asking() {
     use wz_session_core::session_init_params::HeldDrop;
@@ -224,6 +230,7 @@ fn a_session_held_by_a_read_working_out_its_wait_is_tried_again_without_asking()
 /// tries the session again behind a send on another. CONTROL: a publish that holds no face asks
 /// every face. Turned red by a leg that asks every face's room, where a full face it is not sent
 /// on drops it, or by one dropped behind another face's send.
+#[cfg(feature = "tx-held-wait")]
 #[test]
 fn a_leg_held_alone_answers_for_its_own_face_behind_a_held_session() {
     use wz_session_core::session_init_params::HeldDrop;
@@ -263,9 +270,66 @@ fn a_leg_held_alone_answers_for_its_own_face_behind_a_held_session() {
     );
 }
 
+/// Without the held-conduit wait (`tx-held-wait`) every profile answers a held session as
+/// zenoh-pico's: a publish behind another publish's send on its face is dropped at once, one
+/// behind a publish between its sends or behind a read working out its wait tries again, one
+/// behind a step waits for the session, a leg held alone is dropped only behind a send on its own
+/// face, and no link is asked for room. Turned red by `for_held` asking a face's room in this
+/// build, or answering zenoh's profile otherwise than pico's.
+#[cfg(not(feature = "tx-held-wait"))]
+#[test]
+fn without_the_held_wait_every_profile_answers_as_pico() {
+    use wz_session_core::session_init_params::HeldDrop;
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(0, answers.face(10, false));
+    rooms.hold(1, answers.face(11, true));
+    for profile in [HeldDrop::DropAtOnce, HeldDrop::WaitForRoom] {
+        assert_eq!(
+            rooms.for_held(profile, Holder::Sending(7), 1_000, None),
+            Room::Held(7),
+            "{profile:?} behind a send"
+        );
+        assert_eq!(
+            rooms.for_held(profile, Holder::Publish, 1_000, None),
+            Room::Free,
+            "{profile:?} behind a publish between its sends"
+        );
+        assert_eq!(
+            rooms.for_held(profile, Holder::Step, 1_000, None),
+            Room::Stepping,
+            "{profile:?} behind a step"
+        );
+        assert_eq!(
+            rooms.for_held(profile, Holder::Waiting, 1_000, None),
+            Room::Free,
+            "{profile:?} behind a read working out its wait"
+        );
+        assert_eq!(
+            rooms.for_held(profile, Holder::Sending(0), 1_000, Some(1)),
+            Room::Free,
+            "{profile:?} behind a send on another face"
+        );
+        assert_eq!(
+            rooms.for_held(profile, Holder::Sending(1), 1_000, Some(1)),
+            Room::Held(1),
+            "{profile:?} behind a send on its own face"
+        );
+    }
+    assert!(
+        answers.asked(10).is_empty(),
+        "the full face was asked for room"
+    );
+    assert!(
+        answers.asked(11).is_empty(),
+        "the face with room was asked for room"
+    );
+}
+
 /// A face whose link was lost is not asked: its handle is let go of with the link, and what is
 /// left is a session with no wait to ask; a face's link made again names its handle anew, in place
 /// of the one before. Turned red by a handle kept past its link, or held twice for one face.
+#[cfg(feature = "tx-held-wait")]
 #[test]
 fn a_link_that_has_gone_is_not_asked() {
     let answers = Answers::default();
@@ -292,6 +356,7 @@ fn a_link_that_has_gone_is_not_asked() {
 /// A face's room lies at the face's own place, which its tables and its link keep, whatever
 /// places are free before it: a drop on it names that place. Turned red by a room put at the
 /// first free place of the table.
+#[cfg(feature = "tx-held-wait")]
 #[test]
 fn a_faces_room_lies_at_its_own_place() {
     let answers = Answers::default();
@@ -313,7 +378,11 @@ fn a_faces_room_lies_at_its_own_place() {
 /// publish is not sent it. A face that holds no place is named as every face, which drops the
 /// publish on all. Turned red by a place reused without its mark, or a face with no place the set
 /// leaves out.
-#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
+#[cfg(all(
+    wz_round,
+    feature = "tx-held-wait",
+    any(feature = "listen", feature = "group")
+))]
 #[test]
 fn a_face_that_takes_a_place_after_a_drop_is_not_sent_it() {
     let answers = Answers::default();
@@ -457,7 +526,8 @@ fn a_droppable_publish_behind_the_one_faces_held_send_place_is_dropped_at_once()
     );
 }
 
-#[cfg(all(feature = "listen", feature = "threads"))]
+// Its droppable publishes behind a held session are zenoh's queue profile's, which asks for room.
+#[cfg(all(feature = "listen", feature = "threads", feature = "tx-held-wait"))]
 mod stalled_link {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;

@@ -129,7 +129,15 @@ wz-tls-mbedtls = { path = "../wz-tls-mbedtls", optional = true }
 # The host: `std`'s mutex, threads and sleep behind the port's `os`, and the process's lock behind
 # the runtime's critical sections. Without it the engine is `no_std` with `alloc` and the image
 # supplies both (docs/upstream-parity.md section 5a).
-default = ["std", "key-matching-listener", "threads"]
+default = [
+    "std",
+    "key-matching-listener",
+    "threads",
+    "tx-probe",
+    "tx-expiry-run",
+    "tx-fragment-credit",
+    "tx-held-wait",
+]
 std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
 # A read task beside the program's calls (pico's multi-threaded arm): the session is stepped by a
 # thread of its own, so a callback's call may end on one thread while another undeclares its row,
@@ -233,6 +241,24 @@ listen = [
 # up (`CoopConfig::initial_interest`) is such an answer, to the Interest the peer hat acts as if the
 # face had sent, so a client build links none of that either.
 interest-answer = ["wz-session-core/interest-answer"]
+# The send's behaviours that zenoh-pico's transport does not have, each the session core's feature
+# of the same name: on in this crate's own build, and named by the pico ABI's capabilities of the
+# same names (deploy/wz-config.toml), which the zenoh-pico preset leaves off, so the engine of that
+# preset links none of them.
+#
+# `tx-probe`: a publish that may not be dropped, on a listening session whose links share fewer
+# outbound slots than they are, sends each face without waiting for a slot and waits for one with
+# nothing of the session held. Without it each face is sent by the caller's own send, which waits
+# with the session held, as zenoh-pico's peer writes each of its sockets under one transmit lock.
+tx-probe = ["wz-session-core/tx-probe"]
+# `tx-expiry-run`: the run of expiries that closes a session the expiry policy keeps.
+tx-expiry-run = ["wz-session-core/tx-expiry-run"]
+# `tx-fragment-credit`: the session's fragment budget and the stop fragment of a chain cut short.
+tx-fragment-credit = ["wz-session-core/tx-fragment-credit"]
+# `tx-held-wait`: a droppable publish that finds the session held by another send asks the faces
+# for room out of its own `wait_before_drop` under zenoh's queue profile. Without it every profile
+# answers as pico's: dropped at once behind a send, and no face asked.
+tx-held-wait = ["wz-session-core/tx-held-wait"]
 # A transport the program supplies: the session shell's links over the program's own network
 # stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
 app-transport = ["wz-runtime-coop/app-link"]
