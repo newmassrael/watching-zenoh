@@ -3178,6 +3178,32 @@ impl SubscriberPeer<crate::bounded::Region> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl SubscriberPeer<crate::bounded::OnUse> {
+    /// An empty side whose staging of the answers to the peer's interests holds at most `staged`
+    /// rows, under the build's bound, taken at its first answer. The peer's aliases and interests
+    /// are inline in the side at their bounds, as on the region policy, their keys kept where the
+    /// side is handed (`keep_keys_in`).
+    pub fn counted(staged: usize) -> Self {
+        let mut side = Self::default();
+        side.count_rows(staged);
+        side
+    }
+
+    /// Count an empty side's staging (`staged` rows) where it lies: what [`Self::counted`]
+    /// makes, without the side being a value of its own.
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+    pub fn count_rows(&mut self, staged: usize) {
+        self.interests.staged = BoundedVec::counted(staged);
+    }
+
+    /// Nothing to count: a build that answers no Interest stages nothing back to the peer.
+    #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
+    pub fn count_rows(&mut self, staged: usize) {
+        let _ = staged;
+    }
+}
+
 impl SubscriberPeer<Lent> {
     /// An empty side whose staging (`staged` rows) is lent from `arena`. Refused when it is over
     /// the build's capacity or the arena has not the room. The alias table and the interest table

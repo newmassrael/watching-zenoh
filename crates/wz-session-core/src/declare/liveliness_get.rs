@@ -205,6 +205,20 @@ impl<C: ReplySink> LivelinessGetRegistry<C, Profile> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<C: ReplySink> LivelinessGetRegistry<C, crate::bounded::OnUse> {
+    /// An empty registry of at most `rows` pending gets and as many markers they leave when they
+    /// end, under `MAX_PENDING_LIVELINESS_GETS`, each table taken at its first row: the snapshots a
+    /// session holds pending on one face, at its open.
+    pub fn counted(rows: usize) -> Self {
+        Self {
+            pending: BoundedVec::counted(rows),
+            finalized: BoundedVec::counted(rows),
+            ..Self::default()
+        }
+    }
+}
+
 impl<C: ReplySink> LivelinessGetRegistry<C, Lent> {
     /// An empty registry whose pending gets, and the markers they leave when they end, are `rows`
     /// rows each lent from `arena`, at most `MAX_PENDING_LIVELINESS_GETS`: the snapshots a session

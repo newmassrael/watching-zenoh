@@ -112,6 +112,18 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U, crate::bounded::Region
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U, crate::bounded::OnUse> {
+    /// A registry with no observer whose two observer lists hold at most `rows` rows each, taken
+    /// at each list's first observer ([`DeclObserverPair::counted`]).
+    pub fn counted(rows: usize) -> Self {
+        Self {
+            observers: DeclObserverPair::counted(rows),
+            oversize: 0,
+        }
+    }
+}
+
 impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U, Lent> {
     /// A registry with no observer whose two observer lists are lent from `arena`, `rows` rows
     /// each ([`DeclObserverPair::lent`]). Refused as that refuses.

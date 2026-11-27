@@ -284,6 +284,20 @@ impl LocalTokenRegistry<crate::bounded::Region> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl LocalTokenRegistry<crate::bounded::OnUse> {
+    /// An empty registry of at most `rows` tokens, under `MAX_LOCAL_TOKENS`, taken at its first
+    /// token, their keys counted against `keys`, the session's key budget: a session's, at its
+    /// open.
+    pub fn counted(keys: crate::on_use::BudgetKeys, rows: usize) -> Self {
+        Self {
+            tokens: BoundedVec::counted(rows),
+            keys,
+            ..Self::default()
+        }
+    }
+}
+
 impl LocalTokenRegistry<Lent> {
     /// An empty registry whose tokens are `rows` rows lent from `arena`, at most
     /// `MAX_LOCAL_TOKENS`, their keys kept in `keys`, the session's key arena: a session's, at

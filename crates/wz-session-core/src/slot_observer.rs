@@ -256,6 +256,30 @@ impl<R: ReplySink, G: ReplySink> Requesters<R, G, Lent> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<R: ReplySink, G: ReplySink> Requesters<R, G, crate::bounded::OnUse> {
+    /// No query pending, each registry of at most the rows `rows` states, under the build's bound,
+    /// taken at its first entry, the keyexpr each query was asked under counted against `keys`,
+    /// the session's key budget, and held to `limits` as [`Requesters::with_limits`] holds one.
+    /// Nothing is taken, so nothing is refused here: a get past a registry's count, or one the
+    /// allocator or the budget has no room for, is refused when it is held.
+    pub fn counted(
+        keys: crate::on_use::BudgetKeys,
+        rows: RequesterRows,
+        limits: &crate::limits::SessionLimits,
+    ) -> Self {
+        let mut requesters = Self {
+            replies: ReplyRegistry::counted(keys, rows.queries),
+            #[cfg(feature = "liveliness-get")]
+            liveliness_gets: LivelinessGetRegistry::counted(rows.liveliness_gets),
+            #[cfg(not(feature = "liveliness-get"))]
+            _gets: core::marker::PhantomData,
+        };
+        requesters.limit_to(limits);
+        requesters
+    }
+}
+
 impl<R: ReplySink, G: ReplySink, P: Storage> Requesters<R, G, P> {
     /// Hold each registry to the limits `limits` states: what the creator of the session resolved
     /// for it. What each registry holds is kept, and what it is asked for next is held to the new
@@ -438,6 +462,16 @@ impl NoRequesters {
     /// The bytes of an arena [`Self::lent`] takes: none.
     pub const fn arena_bytes(_rows: RequesterRows) -> Option<usize> {
         Some(0)
+    }
+
+    /// No requester side to count: nothing is held, whatever the rows say.
+    #[cfg(feature = "alloc")]
+    pub fn counted(
+        _keys: crate::on_use::BudgetKeys,
+        _rows: RequesterRows,
+        _limits: &crate::limits::SessionLimits,
+    ) -> Self {
+        Self
     }
 
     /// Nothing is pending, so nothing ends.
@@ -780,6 +814,19 @@ pub trait LentTables: ObserverTables {
     fn lend(arena: &mut Arena, keys: KeySpace, rows: Self::Rows) -> Result<Self, LendRefused>;
 }
 
+/// An [`ObserverTables`] of the on-use policy, made with the count of each table and no memory,
+/// which each table takes at its first row ([`SlotObserverOf::counted`]).
+#[cfg(feature = "alloc")]
+pub trait CountedTables: ObserverTables {
+    /// What the tables are counted by: how many rows of each kind.
+    type Rows;
+
+    /// Tables of no entity, each of at most the rows `rows` states, under the build's bound, their
+    /// keys counted against `keys`, the session's key budget. Nothing is taken, so nothing is
+    /// refused.
+    fn counted(keys: crate::on_use::BudgetKeys, rows: Self::Rows) -> Self;
+}
+
 /// The application's tables of the storage policies: the subscriber table, the queryable registry
 /// and the liveliness subscribers' table, each the record of its kind. `S` is a subscription's
 /// sink, `Q` a queryable's, `L` a liveliness subscriber's.
@@ -1080,6 +1127,15 @@ impl<F: RowCallbacks> LentTables for SessionTables<F, Lent> {
 
     fn lend(arena: &mut Arena, keys: KeySpace, rows: TableRows) -> Result<Self, LendRefused> {
         Self::lent(arena, keys, &rows)
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<F: RowCallbacks> CountedTables for SessionTables<F, crate::bounded::OnUse> {
+    type Rows = TableRows;
+
+    fn counted(keys: crate::on_use::BudgetKeys, rows: TableRows) -> Self {
+        SessionTables::<F, crate::bounded::OnUse>::counted(keys, &rows)
     }
 }
 
@@ -1513,6 +1569,50 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
         );
         let _ = rows;
         bytes
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, crate::bounded::OnUse, M> {
+    /// An observer with nothing registered whose application tables are each of at most the rows
+    /// `rows` states (the tables read their own of them, [`CountedTables::counted`]), under the
+    /// build's bound, taken at each table's first row, their keys counted against `keys`, the
+    /// session's key budget, and held to `limits` as [`SlotObserverOf::with_limits`] holds one.
+    /// The declaration watchers' lists hold as many rows each as `limits` admits watchers, taken
+    /// at each list's first watcher. Refused only when `limits` admits more watchers than the
+    /// build, as [`SlotObserverOf::lent`] refuses it: nothing is taken here.
+    pub fn counted(
+        keys: crate::on_use::BudgetKeys,
+        rows: ObserverRows<<K::Tables<crate::bounded::OnUse> as CountedTables>::Rows>,
+        limits: &crate::limits::SessionLimits,
+    ) -> Result<Self, LendRefused>
+    where
+        K::Tables<crate::bounded::OnUse>: CountedTables,
+    {
+        // The rows of a watcher list are the session's `MAX_DECL_OBSERVERS` whatever the policy.
+        #[cfg(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        ))]
+        let watchers = SlotObserverOf::<K, Lent, M>::decl_watcher_rows(limits)?;
+        let mut observer = Self {
+            tables: <K::Tables<crate::bounded::OnUse> as CountedTables>::counted(keys, rows.tables),
+            #[cfg(all(feature = "alloc", feature = "switchboard"))]
+            switchboard: SwitchboardRegistry::new(),
+            #[cfg(feature = "declare-subscriber")]
+            remote_subscribers: RemoteSubscriberTable::counted(watchers),
+            #[cfg(feature = "declare-queryable")]
+            remote_queryables: RemoteQueryableTable::counted(watchers),
+            #[cfg(not(any(feature = "declare-subscriber", feature = "declare-queryable")))]
+            matching: core::marker::PhantomData,
+            #[cfg(feature = "liveliness-token")]
+            liveliness: LivelinessRegistry::counted(watchers),
+            #[cfg(feature = "liveliness-token")]
+            local_tokens: LocalTokenRegistry::counted(keys, rows.local_tokens),
+        };
+        observer.limit_to(limits);
+        Ok(observer)
     }
 }
 
@@ -4159,5 +4259,248 @@ mod token_listener_tests {
         let observer = SlotObserverOf::<NoSinks>::default();
         assert_eq!(listeners(&observer).on_decl_len(), 0);
         assert_eq!(listeners(&observer).on_undecl_len(), 0);
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod on_use_tests {
+    //! An observer and a face's requesters of the on-use policy: each table made with its count and
+    //! no memory, taking its rows at its first entry and refusing past its count, its keys counted
+    //! against the session's key budget.
+    use super::lent_tests::TableSinks;
+    use super::*;
+    use crate::bounded::OnUse;
+    use crate::limits::SessionLimits;
+    use crate::locality::Locality;
+    use crate::on_use::KeyBudget;
+    use crate::registry_error::RegisterError;
+    use crate::reply::ReplyHandle;
+    use crate::reply_acceptance::ReplyAcceptance;
+    use crate::reply_sink::{BoxedReplySink, ReplyView};
+    use crate::session_tables::{KeyForm, TableRows};
+    use crate::sink::{BoxedSink, SampleView};
+    use crate::wire_id::RequestId;
+
+    /// A key budget of `bytes` the test leaks, so it outlives every table and key counted against
+    /// it.
+    fn budget(bytes: usize) -> &'static KeyBudget {
+        std::boxed::Box::leak(std::boxed::Box::new(KeyBudget::new(
+            bytes,
+            SessionLimits::defaults().max_keyexpr_bytes_held(),
+        )))
+    }
+
+    /// The handle the tables of a test make their keys through, counted against `budget`.
+    fn keys_of(budget: &'static KeyBudget) -> crate::on_use::BudgetKeys {
+        // SAFETY: the budget is leaked, so it neither moves nor goes while the tables and their keys
+        // live.
+        unsafe { budget.keys() }
+    }
+
+    fn sink() -> BoxedSink {
+        BoxedSink::new(|_sample: &dyn SampleView| {})
+    }
+
+    fn reply_sink() -> BoxedReplySink {
+        BoxedReplySink::new(|_reply: &dyn ReplyView| {}, |_rid: RequestId| {})
+    }
+
+    /// An observer of table-set subscriptions counted `subscribers` rows of that set under
+    /// `limits`, its keys counted against `budget`.
+    fn counted_observer(
+        subscribers: usize,
+        budget: &'static KeyBudget,
+        limits: &SessionLimits,
+    ) -> SlotObserverOf<TableSinks, OnUse> {
+        let rows = ObserverRows {
+            tables: TableRows {
+                subscribers,
+                ..TableRows::default()
+            },
+            ..ObserverRows::default()
+        };
+        SlotObserverOf::<TableSinks, OnUse>::counted(keys_of(budget), rows, limits)
+            .expect("the build's limits admit the build's watchers")
+    }
+
+    /// The table set of an on-use observer holds the rows its count gives it and takes nothing
+    /// before its first subscription: one row counted, the second subscription is refused as a full
+    /// table, and the pattern of the first is counted against the budget. Turned red by an observer
+    /// whose tables are made with the build's bound rather than the counts it is handed, or are not
+    /// handed the budget.
+    #[test]
+    fn an_on_use_observer_holds_the_subscriptions_its_count_gives_it() {
+        let budget = budget(256);
+        let mut observer = counted_observer(1, budget, &SessionLimits::defaults());
+        assert!(!observer.tables.subscribers().holds_rows());
+        observer
+            .tables
+            .declare_subscriber("demo/a", Locality::Any, KeyForm::default(), sink())
+            .expect("the one row is free");
+        assert!(observer.tables.subscribers().holds_rows());
+        let refused = observer
+            .tables
+            .declare_subscriber("demo/b", Locality::Any, KeyForm::default(), sink())
+            .expect_err("one row was counted");
+        assert!(matches!(refused.why, RegisterError::TableFull));
+        assert!(observer.tables.has_local_matching("demo/a"));
+        assert!(budget.counts().used > 0, "the pattern is counted");
+    }
+
+    /// The watchers' lists of an on-use observer hold the session's `MAX_DECL_OBSERVERS` rows each,
+    /// not the build's: lowered to one, a second watcher is refused on each plane. Turned red by
+    /// lists made with the build's bound rather than the session's count.
+    #[cfg(feature = "declare-subscriber")]
+    #[test]
+    fn on_use_watcher_lists_hold_the_sessions_count_and_refuse_one_more() {
+        use crate::decl_sink::BoxedDeclSink;
+        use crate::limit_binding::Quota;
+
+        /// An observer whose watchers are boxed closures, its subscriptions kept in the session's
+        /// one table set.
+        struct WatchedSinks;
+
+        impl ObserverSinks for WatchedSinks {
+            type Subscriber = BoxedSink;
+            type SubscriberId = crate::session_tables::SubscriberHandle;
+            type QueryableId = crate::session_tables::QueryableHandle;
+            type LivelinessSubscriberId = crate::session_tables::LivelinessSubscriberHandle;
+            type Delivery = ();
+            type Tables<P: Storage> = SessionTables<super::lent_tests::BoxedRows, P>;
+            type Queryable = NoSink;
+            type LivelinessSubscriber = NoSink;
+            type Declared = BoxedDeclSink;
+            type Undeclared = crate::decl_sink::BoxedUndeclSink;
+        }
+
+        let mut lowered = SessionLimits::defaults();
+        // A build whose value is one, or whose domain holds its value alone, has no lower one.
+        if crate::caps::MAX_DECL_OBSERVERS < 2
+            || lowered
+                .select_max_decl_observers(Quota::at_most(1))
+                .is_err()
+        {
+            return;
+        }
+        let mut observer = SlotObserverOf::<WatchedSinks, OnUse>::counted(
+            keys_of(budget(64)),
+            ObserverRows::default(),
+            &lowered,
+        )
+        .expect("one watcher is under the build's");
+        observer
+            .remote_subscribers
+            .on_subscriber_declared_sink(BoxedDeclSink::new(|_| {}))
+            .expect("within the row");
+        assert_eq!(
+            observer
+                .remote_subscribers
+                .on_subscriber_declared_sink(BoxedDeclSink::new(|_| {})),
+            Err(RegisterError::TableFull)
+        );
+        #[cfg(feature = "declare-queryable")]
+        {
+            observer
+                .remote_queryables
+                .on_queryable_declared_sink(BoxedDeclSink::new(|_| {}))
+                .expect("within the row");
+            assert_eq!(
+                observer
+                    .remote_queryables
+                    .on_queryable_declared_sink(BoxedDeclSink::new(|_| {})),
+                Err(RegisterError::TableFull)
+            );
+        }
+        #[cfg(feature = "liveliness-token")]
+        {
+            observer
+                .liveliness
+                .on_token_declared_sink(BoxedDeclSink::new(|_| {}))
+                .expect("within the row");
+            assert_eq!(
+                observer
+                    .liveliness
+                    .on_token_declared_sink(BoxedDeclSink::new(|_| {})),
+                Err(RegisterError::TableFull)
+            );
+        }
+    }
+
+    /// The requesters of one face of the on-use policy, with the heap profile's reply sinks.
+    type Counting = Requesters<BoxedReplySink, BoxedReplySink, OnUse>;
+
+    /// Hold query `rid` pending in `requesters`, accepting a reply on any key.
+    fn hold(requesters: &mut Counting, rid: RequestId) -> Result<ReplyHandle, RegisterError> {
+        requesters
+            .replies
+            .register_sink(rid, 1, None, ReplyAcceptance::Any, reply_sink())
+    }
+
+    /// Two pending queries counted: the third get is refused as a full table and the row its end
+    /// gives back holds the next; a get gated on its keyexpr counts the key against the budget and
+    /// gives it back when it ends. Turned red by requesters made with the build's bound rather than
+    /// their count, or not handed the budget (a gated get is then refused).
+    #[test]
+    fn on_use_requesters_refuse_a_get_past_their_count_and_count_its_key() {
+        use crate::key_arena::block_bytes;
+        let budget = budget(256);
+        let rows = RequesterRows {
+            queries: 2,
+            liveliness_gets: 1,
+        };
+        let mut requesters = Counting::counted(keys_of(budget), rows, &SessionLimits::defaults());
+        hold(&mut requesters, 1).expect("a row is free");
+        requesters
+            .replies
+            .register_sink(
+                2,
+                1,
+                None,
+                ReplyAcceptance::Matching("demo/q/2"),
+                reply_sink(),
+            )
+            .expect("the last row is free and the budget has room for the key");
+        assert_eq!(
+            budget.counts().used,
+            block_bytes("demo/q/2".len()).expect("short"),
+            "the gated get's key is counted"
+        );
+        assert!(!requesters.replies.has_room(), "both rows hold a query");
+        assert!(matches!(
+            hold(&mut requesters, 3),
+            Err(RegisterError::TableFull)
+        ));
+        assert_eq!(requesters.replies.len(), 2, "the refusal held nothing");
+        assert!(requesters.replies.unregister(2));
+        assert_eq!(budget.counts().used, 0, "the get's end gave its key back");
+        hold(&mut requesters, 3).expect("the row given back holds the next");
+    }
+
+    /// A face's liveliness snapshots of the on-use policy hold their count: one counted, the second
+    /// is refused, and a drain of the markers keeps the rows. Turned red by a registry made with the
+    /// build's bound rather than its count.
+    #[cfg(feature = "liveliness-get")]
+    #[test]
+    fn on_use_liveliness_gets_hold_their_count() {
+        if crate::caps::MAX_PENDING_LIVELINESS_GETS < 2 {
+            return;
+        }
+        let rows = RequesterRows {
+            queries: 1,
+            liveliness_gets: 1,
+        };
+        let mut requesters =
+            Counting::counted(keys_of(budget(64)), rows, &SessionLimits::defaults());
+        let gets = &mut requesters.liveliness_gets;
+        assert_eq!(gets.register(7, Some(10), reply_sink()), Ok(true));
+        assert!(gets.register(8, None, reply_sink()).is_err());
+        assert_eq!(gets.sweep_timed_out(11), 1);
+        let drained: std::vec::Vec<u64> = gets.take_finalized().into_iter().collect();
+        assert_eq!(drained, std::vec![7]);
+        assert_eq!(
+            gets.register(9, None, reply_sink()),
+            Ok(true),
+            "the drain kept the rows"
+        );
     }
 }
