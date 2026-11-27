@@ -1773,9 +1773,11 @@ pub enum RowCount {
     ReplyBytes,
     /// `MAX_PENDING_FINALS` owed to one face's peer's queries.
     Finals,
-    /// The sets of face tables an engine holds, one for each face its config admits, and the rows
-    /// of its index of which face holds each.
+    /// The sets of face tables an engine holds, one for each face its config admits.
     FaceSets,
+    /// The rows of an engine's index of which face holds each of its sets of face tables, one for
+    /// each set: a table of its own beside the sets', so a plan reads each from its own lines.
+    HeldSets,
     /// The tables of tokens the faces that went still owe the liveliness subscribers, one for each
     /// row of the session's pool of its peers' tokens.
     OwedTokens,

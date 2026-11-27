@@ -129,13 +129,15 @@ use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
 #[cfg(any(
-    feature = "runtime-plan",
-    all(feature = "liveliness", any(feature = "listen", feature = "group"))
+    all(feature = "query", feature = "runtime-plan"),
+    feature = "udp-listen"
 ))]
 use wz_session_core::bounded::Lent;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 use wz_session_core::bounded::ZeroEmpty;
 use wz_session_core::bounded::{Arena, LendRefused, TableLender, ARENA_ALIGN};
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::bounded::{RowCount, RowCounts};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 #[cfg(feature = "runtime-plan")]
@@ -143,31 +145,21 @@ use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locator_directory::LocatorText;
-#[cfg(feature = "runtime-plan")]
-use wz_session_core::peer_tables::PeerTables;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, KEEPS_INTEREST_ROWS, SHARES_ROWS};
 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 use wz_session_core::policy::HeldPublishDrop;
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
-use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::RequesterRows;
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
-use wz_session_core::slot_observer::Requesters;
 
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
-use crate::engine::LegHold;
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
-use crate::engine::LegSink;
-#[cfg(any(feature = "listen", feature = "group"))]
-use crate::engine::HELD_SET_BYTES;
+use crate::engine::set_get_bytes;
 #[cfg(all(feature = "runtime-plan", wz_round))]
 use crate::engine::REGISTRY_LEND_BYTES;
 #[cfg(feature = "runtime-plan")]
 use crate::engine::ROOM_PLACE_BYTES;
 #[cfg(feature = "runtime-plan")]
-use crate::engine::{CoopTables, FACE_SET_BYTES, ROUTER_LEND_BYTES};
+use crate::engine::{registry_bytes, registry_row_bytes, set_peer_bytes, ROUTER_LEND_BYTES};
 #[cfg(all(wz_round, feature = "runtime-plan"))]
 use crate::form::CoopForm;
 use crate::form::SessionLock;
@@ -1171,11 +1163,6 @@ impl GetTables {
     }
 }
 
-/// One face's table of pending gets, as the arena lends it. A build that asks no query keeps none
-/// (`engine::registry::Gets`) and lays out none.
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
-type FaceGets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
-
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at
 /// once; and how many rows each pool the faces' tables share holds.
@@ -2158,9 +2145,11 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // limit is still held, so a config over the build's is refused under its name either way.
         #[cfg(feature = "runtime-plan")]
         {
-            // Of the engine's own observer, whose sinks are the watches' rows, and whose own
-            // tokens are rows of the session's table set.
-            let watcher_bytes = self.sized(crate::engine::app_list_bytes(watchers));
+            // The registry's lines of the lists' count: the engine's own observer's, whose sinks
+            // are the watches' rows, and whose own tokens are rows of the session's table set.
+            let watcher_bytes = self.sized(registry_bytes(
+                &RowCounts::NONE.with(RowCount::DeclWatchers, watchers),
+            ));
             self.put(ArenaPart::DeclarationWatchers, 1, watcher_bytes);
         }
         #[cfg(not(feature = "runtime-plan"))]
@@ -2195,7 +2184,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // A build of the region's form holds its face's gets in its region (`RegistryRegion`).
         #[cfg(all(feature = "query", feature = "runtime-plan"))]
         {
-            let get_bytes = self.sized(FaceGets::arena_bytes(self.session.gets.rows));
+            let get_bytes = self.sized(set_get_bytes(self.session.gets.rows));
             self.put(ArenaPart::PendingGets, self.session.gets.tables, get_bytes);
         }
         // The ends of the legs, the rows of their callbacks and the session's note of each leg
@@ -2263,19 +2252,19 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it. A
         // build of the region's form holds its one set, its tables and their rows in its region.
         #[cfg(feature = "runtime-plan")]
-        self.put(
-            ArenaPart::FaceTables,
-            self.session.peers.sets(),
-            FACE_SET_BYTES,
-        );
-        // Which face holds which set, a row for each set, in a build that takes faces beside its
-        // dial role's.
-        #[cfg(any(feature = "listen", feature = "group"))]
-        self.put(
-            ArenaPart::HeldFaces,
-            self.session.peers.sets(),
-            HELD_SET_BYTES,
-        );
+        if let Some(set_bytes) = registry_row_bytes(RowCount::FaceSets) {
+            self.put(ArenaPart::FaceTables, self.session.peers.sets(), set_bytes);
+        }
+        // Which face holds which set, a row for each set, where the registry describes the index:
+        // a build that takes faces beside its dial role's.
+        #[cfg(feature = "runtime-plan")]
+        if let Some(holder_bytes) = registry_row_bytes(RowCount::HeldSets) {
+            self.put(
+                ArenaPart::HeldFaces,
+                self.session.peers.sets(),
+                holder_bytes,
+            );
+        }
         // What the face holding each set names for a wait for its room, a place for each set
         // (`crate::engine::LinkRooms`); a build of the region's form holds its one set's place in
         // its region (`crate::engine::StatePlaces`).
@@ -2287,7 +2276,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         );
         #[cfg(feature = "runtime-plan")]
         {
-            let peer_bytes = self.sized(PeerTables::<Lent>::arena_bytes(self.session.peers.rows));
+            let peer_bytes = self.sized(set_peer_bytes(self.session.peers.rows));
             self.put(ArenaPart::PeerTables, self.session.peers.tables, peer_bytes);
         }
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
@@ -2313,17 +2302,15 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             let directory = self.sized(pools.directory_bytes());
             self.put(ArenaPart::PeerRowDirectory, 1, directory);
         }
-        // The tokens the faces that went still owe, lent with the pools
-        // (`engine::registry::Registry::new`).
-        #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-        if self.session.peers.owed_tokens() > 0 {
-            self.put(
-                ArenaPart::OwedTokens,
-                self.session.peers.owed_tokens(),
-                core::mem::size_of::<
-                    wz_session_core::declare::liveliness_subscriber::PeerTokens<Lent>,
-                >(),
-            );
+        // The tokens the faces that went still owe, a table of the registry where it describes one
+        // (a build whose faces go and whose peers declare tokens), lent a row for each row of the
+        // session's pool of its peers' tokens.
+        #[cfg(feature = "runtime-plan")]
+        if let Some(owed_bytes) = registry_row_bytes(RowCount::OwedTokens) {
+            let owed = self.session.peers.owed_tokens();
+            if owed > 0 {
+                self.put(ArenaPart::OwedTokens, owed, owed_bytes);
+            }
         }
         self.session.held_queries = if cfg!(feature = "queryable") {
             self.lent_to::<{ caps::MAX_PENDING_FINALS }>(
@@ -2413,7 +2400,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     const fn put_entities(&mut self) {
         // The session's one table set, holding the kinds moved onto it so far: the write filters,
         // the matching listeners and the Interests they hold among them.
-        let tables = self.sized(CoopTables::arena_bytes(&self.tables()));
+        let tables = self.sized(registry_bytes(&self.tables().counts()));
         self.put(ArenaPart::SessionTables, 1, tables);
         // The keys of those rows and of every other keyed row of the session, in one area that a
         // key takes a block of as long as it is held (`TableLender::keys`), not a row of

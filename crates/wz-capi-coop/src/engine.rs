@@ -298,12 +298,12 @@ pub(crate) use registry::placed::{RegistryRegion, REGISTRY_REGION_LINES};
 // The values the state owns and its tasks reach by handles, as fields of the region.
 #[cfg(not(feature = "runtime-plan"))]
 mod state_places;
-#[cfg(any(feature = "listen", feature = "group"))]
-pub(crate) use registry::HELD_SET_BYTES;
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
+pub(crate) use registry::set_get_bytes;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
 #[cfg(feature = "runtime-plan")]
-pub(crate) use registry::{app_list_bytes, FACE_SET_BYTES};
+pub(crate) use registry::{registry_bytes, registry_row_bytes, set_peer_bytes};
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
 #[cfg(all(
     any(feature = "query", feature = "queryable"),

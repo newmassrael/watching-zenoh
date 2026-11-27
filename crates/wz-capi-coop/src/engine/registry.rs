@@ -269,25 +269,6 @@ impl FaceTables {
     }
 }
 
-/// The bytes of an arena the application's observer's lists take beside its tables:
-/// `watchers` rows of each of its lists of declaration watchers, of this engine's own sinks, and
-/// none of the session's own tokens, which are rows of the session's one table set. What the plan
-/// counts for them (`crate::arena::ArenaPlan`), read off the observer's own description.
-#[cfg(feature = "runtime-plan")]
-pub(crate) const fn app_list_bytes(watchers: usize) -> Option<usize> {
-    App::arena_bytes(watchers, 0)
-}
-
-/// The bytes of one set of face tables, a row of the arena's table of them
-/// (`crate::arena::ArenaPlan`), where the arena lends them (`runtime-plan`).
-#[cfg(feature = "runtime-plan")]
-pub(crate) const FACE_SET_BYTES: usize = core::mem::size_of::<FaceTables>();
-
-/// The bytes of one entry of the index of held sets, a row of the arena's table of them: kept by a
-/// build that adds faces beside its dial role's alone (`held::ManyHolders`).
-#[cfg(any(feature = "listen", feature = "group"))]
-pub(crate) const HELD_SET_BYTES: usize = core::mem::size_of::<FaceId>();
-
 /// What the index of held sets reads for a free set: the session numbers its faces up from 1
 /// one at a time (`LinkSupervisor::next_face_id`), so no face is known by it.
 const NO_FACE: FaceId = FaceId::MAX;
@@ -316,6 +297,12 @@ mod adding;
 // open: the region's and the plan's.
 #[cfg(any(feature = "runtime-plan", not(feature = "tables-on-use")))]
 mod described;
+// What the arena's plan counts of the registry and of a set, by the part of its report: the lines
+// of the same descriptions the open walks.
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
+pub(crate) use described::set_get_bytes;
+#[cfg(feature = "runtime-plan")]
+pub(crate) use described::{registry_bytes, registry_row_bytes, set_peer_bytes};
 mod held;
 use held::Holders;
 // The registry made by value, its tables counted at the open, where they take their memory at
@@ -834,6 +821,7 @@ impl<H: Holders> RegistryOf<H> {
             .and(&App::list_counts(limits, rows.local_tokens)?)
             .and(&gets.rows.counts())
             .with(RowCount::FaceSets, peers.sets())
+            .with(RowCount::HeldSets, peers.sets())
             .with(RowCount::OwedTokens, peers.owed_tokens());
         // The watches hold what the peers declare in the round the application's deliveries go to,
         // where the links are read by a task or a listener; a read that steps its one link itself
@@ -2582,6 +2570,7 @@ mod tests {
             )
             .and(&test_gets(faces).rows.counts())
             .with(RowCount::FaceSets, peers.sets())
+            .with(RowCount::HeldSets, peers.sets())
             .with(RowCount::OwedTokens, peers.owed_tokens())
     }
 
@@ -3273,6 +3262,129 @@ mod tests {
             );
         }
         holds_one_final(face(&mut held.registry, 5));
+    }
+
+    /// What the arena's plan reports of the build's registry is the registry's description read by
+    /// part: each part the lines of the counts it names, every other line lent none under them,
+    /// each what its table's own description counts, and together what the open's walk lends; a
+    /// set's gets and its peer's tables the set's lines of their counts, together the set. Turned
+    /// red by a part read off other lines than the ones the open walks, by the index's line lent by
+    /// the sets' count (the held faces' row then found nowhere, the parts short of the walk), or by
+    /// a peer's part without the row its side composes keys in.
+    #[test]
+    fn the_plans_parts_of_the_registry_are_the_lines_of_their_counts() {
+        // The build's own registry: of one face where the build takes none beside its dial role's.
+        let takes_faces = cfg!(any(feature = "listen", feature = "group"));
+        let faces = if takes_faces { 3 } else { 1 };
+        let pools = PeerPoolRows {
+            aliases: 16,
+            remote_decls: 16,
+            interests: 16,
+            shared: faces > 1,
+        };
+        let held = held_of::<BuildHolders>(faces, pools, true);
+        let counts = registry_counts(faces, pools);
+        let (_, walked) = laid_as_described(
+            (&held.registry as *const RegistryOf<BuildHolders>).cast::<u8>(),
+            core::mem::size_of::<RegistryOf<BuildHolders>>(),
+            RegistryOf::<BuildHolders>::LINES.seq_lines(),
+            &counts,
+        );
+
+        let watchers =
+            App::decl_watcher_rows(&SessionLimits::defaults()).expect("the build's watchers");
+        let lists = registry_bytes(&RowCounts::NONE.with(RowCount::DeclWatchers, watchers));
+        assert_eq!(
+            lists,
+            App::arena_bytes(watchers, 0),
+            "the lists are the engine's own observer's, none of its own tokens"
+        );
+        let tables_rows = observer_rows().tables;
+        let tables = registry_bytes(&tables_rows.counts());
+        assert_eq!(
+            tables,
+            CoopTables::arena_bytes(&tables_rows),
+            "the tables are the session's one table set"
+        );
+        assert_eq!(
+            registry_row_bytes(RowCount::FaceSets),
+            Some(core::mem::size_of::<FaceTables>()),
+            "a row of the sets' table is a set"
+        );
+        assert_eq!(
+            registry_row_bytes(RowCount::HeldSets),
+            takes_faces.then_some(core::mem::size_of::<FaceId>()),
+            "a row of the index names a face, in a build that keeps one"
+        );
+        #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+        assert_eq!(
+            registry_row_bytes(RowCount::OwedTokens),
+            Some(core::mem::size_of::<OwedTokens>())
+        );
+        #[cfg(not(all(feature = "liveliness", any(feature = "listen", feature = "group"))))]
+        assert_eq!(registry_row_bytes(RowCount::OwedTokens), None);
+        let gets = test_gets(faces).rows;
+        let own = registry_bytes(&gets.counts()).expect("small");
+        #[cfg(feature = "local-queryable")]
+        assert_eq!(
+            Some(own),
+            set_get_bytes(gets),
+            "the session's own gets are described as a set's"
+        );
+        #[cfg(not(feature = "local-queryable"))]
+        assert_eq!(
+            own, 0,
+            "no gets beside the sets' where the session answers none"
+        );
+
+        let peers = test_peers(faces, pools, true);
+        let table = |count, rows| {
+            registry_row_bytes(count).map_or(0, |stride| {
+                Arena::stride_bytes(rows, stride).expect("small")
+            })
+        };
+        let parts = [
+            lists.expect("small"),
+            tables.expect("small"),
+            table(RowCount::FaceSets, peers.sets()),
+            table(RowCount::HeldSets, peers.sets()),
+            table(RowCount::OwedTokens, peers.owed_tokens()),
+            own,
+        ];
+        assert_eq!(
+            parts.iter().sum::<usize>(),
+            walked,
+            "the parts add up to what the open's walk lent"
+        );
+
+        assert_eq!(
+            set_peer_bytes(peers.rows),
+            Peer::arena_bytes(PeerRows {
+                finals: if cfg!(feature = "queryable") {
+                    peers.rows.finals
+                } else {
+                    0
+                },
+                ..peers.rows
+            }),
+            "a face's peer tables are the set's lines of the peer's counts and its compose row"
+        );
+        #[cfg(feature = "query")]
+        let set_gets = {
+            assert_eq!(
+                set_get_bytes(gets),
+                Gets::arena_bytes(gets),
+                "a face's gets are the set's lines of the gets' counts"
+            );
+            set_get_bytes(gets).expect("small")
+        };
+        #[cfg(not(feature = "query"))]
+        let set_gets = 0;
+        assert_eq!(
+            set_peer_bytes(peers.rows).map(|peer| peer + set_gets),
+            FaceTables::arena_bytes(gets, peers.rows),
+            "a set's two parts are the set"
+        );
     }
 
     /// A session of its dial role's face alone keeps no index of the sets' holders: its registry's

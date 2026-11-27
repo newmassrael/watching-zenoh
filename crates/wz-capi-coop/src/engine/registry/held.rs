@@ -48,7 +48,7 @@ pub(in crate::engine) trait Holders: Sized {
         Self: 'a;
 
     /// The index's lines in the registry's description, from where the registry keeps the index: a
-    /// row for each set, lent `RowCount::FaceSets`, where the form keeps an index, and none where
+    /// row for each set, lent `RowCount::HeldSets`, where the form keeps an index, and none where
     /// the one set's holder is known when compiled.
     #[cfg(any(feature = "runtime-plan", not(feature = "tables-on-use")))]
     const LINES: RegionLines<HELD_LINES>;
@@ -101,7 +101,7 @@ impl Holders for ManyHolders {
     #[cfg(any(feature = "runtime-plan", not(feature = "tables-on-use")))]
     const LINES: RegionLines<HELD_LINES> = RegionLines::EMPTY.seq(
         SeqPlace::of::<FaceId>(core::mem::offset_of!(Self, 0), 0, MAX_FACE_SETS)
-            .counted(RowCount::FaceSets),
+            .counted(RowCount::HeldSets),
     );
 
     #[cfg(feature = "runtime-plan")]

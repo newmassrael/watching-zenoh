@@ -46,6 +46,8 @@ use wz_session_core::slot_observer::{RequesterRegionRows, REQUESTER_LINES};
 use super::held::Holders;
 #[cfg(feature = "query")]
 use super::Gets;
+#[cfg(feature = "runtime-plan")]
+use super::Registry;
 use super::{App, FaceTables, Peer, RegistryOf};
 use crate::engine::CoopTables;
 #[cfg(feature = "query")]
@@ -118,7 +120,9 @@ impl FaceTables {
 
     /// The bytes of an arena a set of `gets` and `peer` rows takes where it is lent
     /// (`Self::lend`): its description's lines summed, and the row its peer's side composes keys
-    /// in. `None` past the address space.
+    /// in. `None` past the address space. Read where sets are built after the open
+    /// (`adding::SpareSets`).
+    #[cfg(any(feature = "listen", feature = "group", test))]
     pub(super) const fn arena_bytes(gets: RequesterRows, peer: PeerRows) -> Option<usize> {
         match (
             seq_bytes(Self::LINES.seq_lines(), &Self::counts(gets, peer)),
@@ -165,6 +169,30 @@ impl FaceTables {
         #[cfg(not(feature = "query"))]
         let _ = limits;
         Ok(())
+    }
+}
+
+/// The bytes of an arena a set's gets take, `gets` rows of them: the set's description's lines of
+/// the gets' counts, each other line lent none under them. What a plan reports as a table of gets
+/// (`crate::arena::ArenaPart::PendingGets`), the session's own gets' table being of the same
+/// description (`Gets::places`). `None` past the address space.
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
+pub(crate) const fn set_get_bytes(gets: RequesterRows) -> Option<usize> {
+    seq_bytes(FaceTables::LINES.seq_lines(), &gets.counts())
+}
+
+/// The bytes of an arena a set's peer's tables take, `peer` rows of them: the set's description's
+/// lines of the peer's counts, each other line lent none under them, and the row the peer's side
+/// composes keys in, which no line names. What a plan reports as a face's peer tables
+/// (`crate::arena::ArenaPart::PeerTables`). `None` past the address space.
+#[cfg(feature = "runtime-plan")]
+pub(crate) const fn set_peer_bytes(peer: PeerRows) -> Option<usize> {
+    match (
+        seq_bytes(FaceTables::LINES.seq_lines(), &peer.counts()),
+        SubscriberPeer::<RowPolicy>::compose_bytes(),
+    ) {
+        (Some(lines), Some(compose)) => lines.checked_add(compose),
+        _ => None,
     }
 }
 
@@ -232,9 +260,10 @@ impl<H: Holders> RegistryOf<H> {
     /// application's lists' lines (the session's own tokens are rows of its one table set, so its
     /// observer's own registry of them has no room) and its tables', the sets' table's, a set for
     /// each face a plan counts (`RowCount::FaceSets`), the index of which face holds each where
-    /// the form keeps one, the tokens owed by the faces that went where faces go, and the session's
-    /// own gets' where it answers its own; and the handle each keeps to the key arena. A set's own
-    /// lines are the set's description (`FaceTables::places`), walked where the set lies.
+    /// the form keeps one (`RowCount::HeldSets`), the tokens owed by the faces that went where
+    /// faces go, and the session's own gets' where it answers its own; and the handle each keeps to
+    /// the key arena. A set's own lines are the set's description (`FaceTables::places`), walked
+    /// where the set lies.
     pub(super) const fn places(at: usize, rows: RegistryRowsAt) -> RegionLines<REGISTRY_LINES> {
         let app = at.wrapping_add(offset_of!(Self, app));
         let lines = RegionLines::EMPTY
@@ -274,4 +303,34 @@ impl<H: Holders> RegistryOf<H> {
 impl<H: Holders> RegistryOf<H> {
     /// The registry's own description from its start: the lines `RegistryOf::new` lends.
     pub(super) const LINES: RegionLines<REGISTRY_LINES> = Self::places(0, RegistryRowsAt::LENT);
+}
+
+/// The bytes of an arena the lines of the registry's own description take under `counts`, each
+/// line of a count `counts` leaves at none lent no row: a part of what a plan reports of the
+/// registry (`crate::arena::ArenaPart`), the lines of the counts the part names, so the parts add
+/// up to what the open's walk lends (`RegistryOf::new`). `None` past the address space.
+#[cfg(feature = "runtime-plan")]
+pub(crate) const fn registry_bytes(counts: &RowCounts) -> Option<usize> {
+    seq_bytes(Registry::LINES.seq_lines(), counts)
+}
+
+/// The bytes of one row of the table of the registry's own description that `count` lends (the
+/// sets', the index of their holders', the tokens owed): what a plan reports as that table's row.
+/// None where the build describes no table of that count.
+#[cfg(feature = "runtime-plan")]
+pub(crate) const fn registry_row_bytes(count: RowCount) -> Option<usize> {
+    stride_of(Registry::LINES.seq_lines(), count)
+}
+
+/// The bytes of one row of the first of `lines` lent by `count`, none where no line is.
+#[cfg(feature = "runtime-plan")]
+const fn stride_of(lines: &[SeqPlace], count: RowCount) -> Option<usize> {
+    let mut rest = lines;
+    while let [line, tail @ ..] = rest {
+        if line.count as u8 == count as u8 {
+            return Some(line.stride as usize);
+        }
+        rest = tail;
+    }
+    None
 }
