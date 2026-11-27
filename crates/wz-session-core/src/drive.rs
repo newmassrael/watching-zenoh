@@ -4531,6 +4531,12 @@ where
 /// End the chain of the channel whose `Frame` or `Fragment` the SN gate dropped: the copying
 /// loop's [`clear_rejected_chain`], and the receive in place's at the gate itself.
 #[cfg(feature = "reassembly")]
+// Out of line: it is the one part of a `Frame`'s dispatch whose body follows the Router's peers
+// (`P`), and that dispatch is compiled into the body every datagram runs. Inlined where it is
+// small (a Router of one peer's reads no zid), it gives the frame path around it, the same code
+// whatever `P`, other registers and another block order: instructions on every message for an
+// arm that runs only for a frame the gate dropped. A call keeps that body the same for every `P`.
+#[inline(never)]
 fn abort_rejected_channel<R, T, const SLOTS: usize, const CAP: usize, S, P>(
     reasm: &mut ReassemblyDispatcher<SLOTS, CAP, S, P>,
     actions: &SessionLinkActions<R, T>,
