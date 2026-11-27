@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 0c40ed4a691a3a1b1b2c345649d68312b8fcfff4c9a69ece0ea367708ffc95f2
+// source-hash: 3d313d05f007ed5ff5964031f557831bc96f5c79913353a59d0cda4f95762a65
 // source: clock_quality.scxml
 
 
@@ -945,8 +945,6 @@ compile_error!("feature `session-slot` requires `session-fixed-storage`, which t
 compile_error!("feature `session-slot` requires `storage-profile`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-slot", not(feature = "tx-lend-only")))]
 compile_error!("feature `session-slot` requires `tx-lend-only`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "session-unicast-accept", not(feature = "interest-answer")))]
-compile_error!("feature `session-unicast-accept` requires `interest-answer`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-unicast-accept", not(feature = "rx-control")))]
 compile_error!("feature `session-unicast-accept` requires `rx-control`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "session-unicast-accept", not(feature = "rx-push")))]
