@@ -1,0 +1,20 @@
+impact = ["watching-zenoh/local-ci-gates", "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"]
+decision = '''
+Judge every SCE source in Layer Bc, not only the codecs and algorithms: the statecharts, pools, links, event schemas and the feature model generate in the one C11 set, and what the generator or a hosted call refuses is declared by its words.
+'''
+changes = '''
+- c11-lane.sh generates sources/*/*.scxml as one orchestrate set; a document the generator refuses is declared by the words of its first error, generated alone and held to them.
+- A unit with a .c is compiled as SCE's own gate compiles a machine; the seams it may leave undefined are read from vendor/sce/backends/c/mcu/seams.c and the runtime headers, not listed by hand.
+- A unit that compiles and still calls a hosted function is declared with that call (the 13 pools: __assert_func through sce/sample.h's ownership trap).
+- 25 more units weighed: 11 statecharts, hello_received_schema, 13 pools. Four documents refused by the generator: two links (no machine in the deploy), clock_quality (a shadowed transition in the all-features variant), session_fsm_unicast (a variant must be named).
+'''
+verification = '''
+- bash scripts/c11-lane.sh: 93 compiled and weighed, 13 calling what is declared, 39 refused as declared, 4 refused by the generator as declared, 20 vectors of 7 documents; no earlier budget row moved.
+- Controls: a generator refusal declared with other words, and a pool row removed, each red the lane naming the unit; both restored.
+- lanes_gate, lane_digest, sce_codegen_spawn_lint, lane_decline_read, armed_skip_guard, script_exercise_census pass; shellcheck -x clean.
+'''
+carry = '''
+- SCE: orchestrate has no --features and generate --with-imports --features applies the choice to the feature model it imports; sce/sample.h's ownership trap defaults to assert, a hosted call. Reported to SCE with this round's findings.
+- wz decisions open: the variant of the feature model a C11 deployment builds, clock_quality's shadowed sync.lost transition, a machine for the two links in deploy, the pools' trap on an MCU.
+- No wz statechart has a replay scenario, so none runs under QEMU yet.
+'''
