@@ -27,7 +27,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MATRIX_TEST="files::wz_declared_commander_zenohd_target_matrix::zenohd_qemu_zephyr_image_passive_intent_holds_the_session_a_stock_client_opens_and_not_a_claim_of_its_zid"
+MATRIX_TEST="files::wz_declared_commander_zenohd_target_matrix::zenohd_zephyr_image_passive_intent_holds_the_session_a_stock_client_opens_and_not_a_claim_of_its_zid"
 
 usage() {
     sed -n '10,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2

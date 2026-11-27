@@ -29671,7 +29671,7 @@ layer_qza_zephyr_admin_node_vs_zenohd() {
     if [[ "$fail" -eq 0 ]] && _qz_west_build Qza deploy/zephyr-admin-node mps2/an385 "$pw/zbuild" \
         qza-passive-west-build.log \
         -- -DEXTRA_CONF_FILE="overlays/qemu_admin_fixed_tls.conf;$pw/keys/commanders.conf"; then
-        wz_test_args wz-integration-tests wz_declared_commander_zenohd_target_matrix zenohd_qemu_
+        wz_test_args wz-integration-tests wz_declared_commander_zenohd_target_matrix zenohd_zephyr_image_
         _runci_guarded_test Qza 1 env WZ_ZENOHD_BIN="${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}" \
             WZ_ZEPHYR_PASSIVE_QEMU_ELF="$pw/zbuild/zephyr/zephyr.elf" \
             WZ_ZEPHYR_PASSIVE_COMMANDER_CERT="$pw/keys/commander.pem" \

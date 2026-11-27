@@ -1262,7 +1262,7 @@ EOF
 # then the peer with its own. The leg reads the console this run captures from the byte the reset's boot
 # begins at. It needs cargo on this host, and the zenoh examples beside KIT_ZENOHD (or in the directory
 # KIT_ZENOH_EXAMPLES names).
-PASSIVE_TEST="files::wz_declared_commander_zenohd_target_matrix::zenohd_kit_zephyr_image_passive_intent_holds_the_session_a_stock_client_opens_and_not_a_claim_of_its_zid"
+PASSIVE_TEST="files::wz_declared_commander_zenohd_target_matrix::zenohd_zephyr_image_passive_intent_holds_the_session_a_stock_client_opens_and_not_a_claim_of_its_zid"
 passive() {
     local key="$1" before="$fails"
     image_spec "$key" || { bad "$key" "not an image of this lane (scripts/kit-lane.sh list)"; return 1; }

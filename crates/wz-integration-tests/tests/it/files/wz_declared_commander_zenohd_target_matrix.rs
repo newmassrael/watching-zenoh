@@ -569,20 +569,34 @@ impl Drop for ImageTarget {
     }
 }
 
-// wz-proves: none -- the hold of a session a peer opens under a passive intent is decision D10 on the fixed-memory profile's listener, witnessed on the Zephyr image that ships it (decision D18); no catalog atom names it
-#[test]
-#[ignore = "binary-dep e2e (the Zephyr image built with the commander's key by the lane, qemu-system-arm, + zenohd and its examples); runs via --ignored"]
-fn zenohd_qemu_zephyr_image_passive_intent_holds_the_session_a_stock_client_opens_and_not_a_claim_of_its_zid(
-) {
-    passive_hold(&mut ImageTarget::under_qemu());
+/// The image a run names: under QEMU when `WZ_ZEPHYR_PASSIVE_QEMU_ELF` names its ELF (Layer Qza), on
+/// the kit when `WZ_ZEPHYR_PASSIVE_KIT_CONSOLE` names the console the kit lane captures
+/// (`scripts/kit-lane.sh passive`). One test over the two targets, as decision D18 asks: the same
+/// steps, the target chosen by where the run is. A run that names neither has no image to judge
+/// and fails by name, never passes.
+fn the_named_image() -> ImageTarget {
+    match (
+        std::env::var_os("WZ_ZEPHYR_PASSIVE_QEMU_ELF").is_some(),
+        std::env::var_os("WZ_ZEPHYR_PASSIVE_KIT_CONSOLE").is_some(),
+    ) {
+        (true, false) => ImageTarget::under_qemu(),
+        (false, true) => ImageTarget::on_the_kit(),
+        (true, true) => panic!(
+            "WZ_ZEPHYR_PASSIVE_QEMU_ELF and WZ_ZEPHYR_PASSIVE_KIT_CONSOLE both name an image: name one"
+        ),
+        (false, false) => panic!(
+            "no image named: set WZ_ZEPHYR_PASSIVE_QEMU_ELF (Layer Qza) or \
+             WZ_ZEPHYR_PASSIVE_KIT_CONSOLE (scripts/kit-lane.sh passive)"
+        ),
+    }
 }
 
-// wz-proves: none -- the same scenario on the kit, for the same reason as the leg above
+// wz-proves: none -- the hold of a session a peer opens under a passive intent is decision D10 on the fixed-memory profile's listener, witnessed on the Zephyr image that ships it (decision D18); no catalog atom names it
 #[test]
-#[ignore = "lab e2e (the Zephyr image flashed to the kit by scripts/kit-lane.sh passive, + zenohd and its examples); runs via --ignored"]
-fn zenohd_kit_zephyr_image_passive_intent_holds_the_session_a_stock_client_opens_and_not_a_claim_of_its_zid(
+#[ignore = "binary-dep e2e (the Zephyr image under qemu-system-arm, or flashed to the kit by scripts/kit-lane.sh passive, + zenohd and its examples); runs via --ignored"]
+fn zenohd_zephyr_image_passive_intent_holds_the_session_a_stock_client_opens_and_not_a_claim_of_its_zid(
 ) {
-    passive_hold(&mut ImageTarget::on_the_kit());
+    passive_hold(&mut the_named_image());
 }
 
 #[test]
