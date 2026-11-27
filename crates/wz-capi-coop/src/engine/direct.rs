@@ -2742,14 +2742,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let Some(record) = core.transport.links.face_mut(slot.at()) else {
                 return Ok(());
             };
-            let was = record.life.phase();
             let effects = record.life.input(input, now_us);
             // A close is told to the life by the slot alone, which lets go of what it holds
             // itself (`DirectSlot::let_go`): no input told here asks for that.
             debug_assert!(!effects.let_go(), "a close told to the life past the slot");
             // A dial the life gave up on before the network answered it is its endpoint's refusal
             // for want of an answer in time, as a build whose links are tasks names it.
-            if effects.dial().is_some() || effects.backs_off() || effects.ends_session() {
+            if effects.gives_up_dial() {
                 if let Some(endpoint) = core.transport.links.end_dial(slot.at()) {
                     slot.keep_refusal(
                         core.transport.endpoint_text(Some(&endpoint)),
@@ -2757,13 +2756,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     );
                 }
             }
-            if effects.end_handshake() {
-                // Why the handshake ended is read off its link before the link goes, and names
-                // the endpoint the link was dialled to, which the life stood in.
-                let row = match was {
-                    LinkPhase::Handshaking { row, .. } => row,
-                    _ => 0,
-                };
+            // Why the handshake ended is read off its link before the link goes, and names the
+            // endpoint the link was dialled to, which the life names with the end.
+            if let Some(row) = effects.end_handshake() {
                 let why = core.transport.end_handshake(slot.at());
                 slot.keep_refusal(core.transport.endpoints.dial_text(row), why);
                 // The record lets go of the link while the place still holds its parts, so what
