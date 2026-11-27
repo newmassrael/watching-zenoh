@@ -1187,7 +1187,43 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
     `the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan` and
     `a_link_reads_into_the_buffer_its_sessions_arena_lent` are the D12 forms' alone.
 
+### 7.21 R3, 3c: an on-use listener's links held to its faces, and the reds of hn12
+
+- The bound (`de6a30cf2f`, a test alone): on use no table of buffers refuses a link any more
+  (7.20), so the links a listening session holds are bounded where a face is admitted, not where
+  a link's buffers are taken. Each accept path asks `Core::takes_a_face` first
+  (`crates/wz-capi-coop/src/engine/faces_added.rs:91`), which refuses a link past
+  `accept_pending` handshakes or past `Core::faces_full` (`:97` to `:102`, the face table
+  holding the dial role's and `max_faces` places); behind it `RegistryOf::add_face`
+  (`engine/registry/adding.rs:157` to `:161`) refuses a face when the index of held faces,
+  counted at the open to the plan's sets (`Holders::counted`), has no free row. The stack's
+  accept takes the link's heap buffers before the engine asks; a link refused is dropped in the
+  same accept, so at most one link past the faces holds buffers, and only for that call. No new
+  limit was needed.
+- Test: `tests::on_use::an_on_use_listener_closes_a_link_past_its_faces_unread` (`listen`; the
+  listener stepped on the test's thread by `step_once`, raw connections, two handshakes admitted
+  so only the faces' count refuses): with `max_faces` 1 the second connection is closed unread and
+  the first kept; CONTROL, with `max_faces` 2 both are kept. Red only when neither `faces_full`
+  nor `add_face`'s index refuses: the two hold the same count in two layers, either alone keeps
+  it green.
+- The reds of hn12, both left by `ff65049f24`'s gating of the links' tables to the D12 forms:
+  - `3689670ef3`: `arena.rs`'s `LinkCellFlag` and its `SessionLock` import are read on use only
+    by the udp ports' rows and slots, so they read `any(not(wz_on_use), feature = "udp-listen")`.
+  - `ce7e699b2c`: `engine.rs` imports `LentByteCells` for a build that listens and reads each
+    face itself; on use its one reader in the library, `Core::face_chains`, spelled the full path,
+    which left the import unused. The field names the import.
+
 ## 8. What the main session runs
+
+- The listener's bound and the reds of hn12 (`de6a30cf2f`, `3689670ef3`, `ce7e699b2c`), not
+  built or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
+  --features liveliness,listen,tables-on-use --lib on_use` and `--features
+  link-admission,tables-on-use --lib on_use`, one more each; `--features tables-on-use --lib
+  on_use` unchanged in count. `cargo clippy --manifest-path crates/Cargo.toml -p wz-capi-coop
+  --all-targets -- -D warnings` with `--features tables-on-use`, `--features
+  threads,tables-on-use`, `--features liveliness,listen,tables-on-use`, `--features
+  app-transport,group,multicast-declarations,liveliness,tables-on-use` and `--features
+  udp-listen,tables-on-use` (where the flag is still read). Size: none.
 
 - R3, 3c (b) and the seam before it (`99cc01afed`, `ff65049f24`), and the reds' fixes
   (`1e47d9d865`, `7e09c2c4ed`, `e335e9a48d`, `461f658b2a`, `dbac74a3ed`), not built or run by
@@ -1660,6 +1696,29 @@ The order that builds at each step:
      the kind's too (`CountKind::Buffers`), the heap's sized by the session to its batch and
      `LINK_TX_SLOTS`, after the ports' slots and the groups' buffers were lent apart (7.19); the
      ports, groups and kept publishes (c) are next.
+     Read for (c), not written yet. The ports: `udp-port-lent-only` is a feature of
+     `wz-runtime-coop` that `wz-capi-coop/udp-listen` names, so a build that unifies it with
+     `tables-on-use` compiles no port of the heap's memory, and the on-use plan still lays out and
+     lends the ports' rows and slots (`TransportRows::port_slots_from`, `PortRows::over`). The
+     form: `CountKind::Ports`, a `PortSource` (`udp_link.rs`) with the storage of the book's rows
+     and what a port reads into; `Option<LentPorts<F>>` (the rows and the slots a session lent,
+     `None` refusing the listener) for the kinds that lend, `HeapPorts::sized(peers, slots,
+     bytes)` for `OnHeap`, its rows `PortRows<OnUse, _>` counted to the session's links and
+     `UDP_PORT_SLOTS`, its reads the port's own buffer and spares (today's `PortRx::Own`).
+     `PortRx`, `Held` and `BookRows` become one type each source names (a `PortStore` trait),
+     `with_rows!` goes, `UdpPort`, `PortPeer` and `SharedBook` take the source as a parameter
+     beside the count kind (`N::Shared` counts the port, but `OnHeap<N>::Shared` is `N::Shared`,
+     so the source is read off the links' kind), `SessionLinks::lend_port_rows(rows, slots)`
+     becomes `lend_ports(N::Ports)` (a source of rows with no slots is no longer a value), and the
+     feature, its feature set (`heap-lent-ports`), its gate leg
+     (`scripts/lib/nondefault-tests-gate.sh`) and its tests go. A port no session sized is
+     refused, as a lent kind's port lent nothing is: every port's memory is bounded by a session's
+     statement. The groups: on use the plan lays out a receive buffer for each group it counts and
+     lends them; not lending leaves each joiner to make its own (`GroupRx::lent_or_own`), whose
+     length each joiner (`host_group`, `app_link`) must be read for before the plan drops the
+     rows, so the on-use source hands the joiner the plan's group batch. The kept publishes:
+     `HandedTable` (`HandedLegs` over `byte_cells` and a table, `wz_round` with `listen` or
+     `group`) needs a form of its own memory counted to `handed_legs`.
 4. N4 (3.7): the doors' objects from the allocator, counted against their kinds, so the places the
    ABI holds in the arena today (the handle's, the entities', the lodgings) are the ABI's own.
 5. 3d, the arena: with every tenant housed, the on-use form reserves no arena. `SessionArena`,
