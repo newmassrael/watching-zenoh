@@ -130,13 +130,39 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         query: &mut PinnedQuery<'_>,
     ) {
         let generation = records.generation;
-        let mut next = self.pin_queryable(&held, query, generation);
+        let first = self.pin_queryable(&held, query, generation);
         drop(held);
         // The callbacks' replies wait in the face's open frame for the Final, and the two leave
         // in one send once it is owed. No window is open meanwhile: what else is sent, on this
         // thread or another, goes at once.
         let replies =
             wz_session_core::response_sink::ResponseSink::hold_replies(records.actions.sink());
+        self.call_queryables(first, query, generation);
+        // A session closed by a callback sends nothing more.
+        if let Some(_held) = self.live() {
+            records.owe_final(query.rid(), query.qos());
+        }
+        wz_session_core::response_sink::ResponseSink::release_replies(
+            records.actions.sink(),
+            replies,
+        );
+        #[cfg(test)]
+        if replies {
+            self.takes.held_answers.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Call `next` with `query`, then each queryable the query reaches after it, one call at a
+    /// time with the session let go of, each next one pinned under the session's lock from the
+    /// place after the last. Nothing here reads the face the query came from, whose replies wait
+    /// where `hand_query` held them: one walk for the engine, which a link's face and a group's
+    /// share, rather than one compiled for each kind of face `hand_query` is instantiated for.
+    fn call_queryables(
+        &self,
+        mut next: Option<QueryableCall>,
+        query: &mut PinnedQuery<'_>,
+        generation: u64,
+    ) {
         // A read a callback makes reads nothing, so no record is handed out inside another's call.
         self.deliveries.within(|_| {
             while let Some(call) = next.take() {
@@ -155,18 +181,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     .and_then(|held| self.pin_queryable(&held, query, generation));
             }
         });
-        // A session closed by a callback sends nothing more.
-        if let Some(_held) = self.live() {
-            records.owe_final(query.rid(), query.qos());
-        }
-        wz_session_core::response_sink::ResponseSink::release_replies(
-            records.actions.sink(),
-            replies,
-        );
-        #[cfg(test)]
-        if replies {
-            self.takes.held_answers.fetch_add(1, Ordering::Relaxed);
-        }
     }
 
     /// The next queryable `query` reaches under `held`, with a hold taken on the query's Final
