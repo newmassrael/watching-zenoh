@@ -2453,12 +2453,16 @@ fn the_pico_presets_arena_lends_the_presets_rows() {
         // The key arena's row and the advanced cache's ring are one area of the limit's bytes, a
         // pool's one area of the rows its faces share, the watchers' one row of the spans of their
         // lists, and the session's table set one area of its tables, not a row of each. The udp ports' slots and their queue are a listening
-        // session's, which the preset's client is not: it holds none whatever the limit.
+        // session's, which the preset's client is not: it holds none whatever the limit. The marks
+        // of the places past the dial role's are one for each face the config opens past it, which
+        // its basis bounds and the client has none of: their count is the faces' test's
+        // (`the_faces_a_config_opens_with_fit_the_sets_the_arena_lends`).
         if row.basis() == "KEY_ARENA_BYTES"
             || row.basis() == "ADVANCED_CACHE_BYTES"
             || row.basis() == "UDP_PORT_SLOTS"
             || row.basis() == "MAX_DECL_OBSERVERS"
             || row.part() == "session tables"
+            || row.part() == "held faces"
             || POOL_PARTS.contains(&row.part())
         {
             continue;
