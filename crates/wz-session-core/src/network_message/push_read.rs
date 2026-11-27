@@ -385,6 +385,7 @@ mod tests {
     use crate::ext_admit::ZenohBody;
     use sce_forge_runtime::codec::{ListView, Without};
     use wz_codecs::ext_entry::ExtEntryWalk;
+    #[cfg(feature = "alloc")]
     use wz_codecs::wireexpr::WireexprViewVariant;
 
     /// What the reader reads from `bytes`: the view, how far it read and the verdict.
