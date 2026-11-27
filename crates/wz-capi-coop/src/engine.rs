@@ -2351,18 +2351,29 @@ impl Asked {
 
 /// How the leg of a put that holds the session sends it (`CoopEngine::decide_put`).
 enum PutGoes<'r> {
-    /// Written from its publisher's plan at the session's send epoch, nothing asked again.
-    Planned(wz_session_core::session_tables::PlannedPut<'r>),
-    /// A plain Put sent from these facts, and the head its filter's plain way wrote, if any; and
-    /// for the first leg of a bare put of that way not planned, the send epoch its plan was looked
-    /// for at, which the put plans the way at once it is sent (`CoopEngine::keep_plan`).
-    Plain(PlainPutParams, Option<lent_push::PutHead>, Option<u64>),
+    /// A plain Put sent from these facts, by its plan or with its key named, as `PlainBy` says:
+    /// the leg makes its metadata and its send of them once, for either.
+    Plain(PlainPutParams, PlainBy<'r>),
     /// A publish sent from its options, and the head its filter's plain way wrote, if any, which a
     /// link writes it from where the options leave it a plain Put (`PushParts::takes_head`).
     Options(Option<lent_push::PutHead>),
     /// Not sent, and answered so; a plain put whose destination admits no peer is answered as
     /// sent, to none.
     Unsent(Answer),
+}
+
+/// How a plain Put of the leg that holds the session is sent (`PutGoes::Plain`).
+enum PlainBy<'r> {
+    /// Written from its publisher's plan at the session's send epoch, nothing asked again.
+    Planned(wz_session_core::session_tables::PlannedPut<'r>),
+    /// With its key named in the session's tables, and written from the head its filter's plain
+    /// way wrote, if any; for the first leg of a bare put of that way not planned, `plan_at` is the
+    /// send epoch its plan was looked for at, which the put plans the way at once it is sent
+    /// (`CoopEngine::keep_plan`).
+    Named {
+        head: Option<lent_push::PutHead>,
+        plan_at: Option<u64>,
+    },
 }
 
 /// One put as each of the session's links is sent it ([`CoopEngine::send_on_links`]): the key as
@@ -8672,7 +8683,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let answer = self.live().map_or(Answer::Through, |core| {
             match Self::decide_put(&core.0, put, true) {
                 PutGoes::Unsent(answer) => answer,
-                PutGoes::Planned(_) | PutGoes::Plain(..) | PutGoes::Options(_) => Answer::Through,
+                PutGoes::Plain(..) | PutGoes::Options(_) => Answer::Through,
             }
         });
         asked.answer_first(answer);
@@ -8710,7 +8721,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 if groups_left {
                     let epoch = core.send_epoch();
                     if let Some(planned) = row.planned_put(epoch) {
-                        return PutGoes::Planned(planned);
+                        return PutGoes::Plain(planned.params(), PlainBy::Planned(planned));
                     }
                     first.then_some(epoch)
                 } else {
@@ -8758,7 +8769,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if first && !core.transport.groups.is_empty() {
             return PutGoes::Unsent(Answer::NotPlain);
         }
-        PutGoes::Plain(params, head, plan_at)
+        PutGoes::Plain(params, PlainBy::Named { head, plan_at })
     }
 
     /// The row of write filter `filter`: `None` for a put no publisher made, or a filter the
@@ -8857,14 +8868,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             return Ok(0);
         };
         let params = match Self::decide_put(&core.0, put, asked.first()) {
-            PutGoes::Plain(params, ..) => params,
+            PutGoes::Plain(params, PlainBy::Named { .. }) => params,
             PutGoes::Unsent(answer) => {
                 asked.answer_first(answer);
                 return Ok(0);
             }
             // A plan stands at an epoch no group was joined at, and a put by options goes by the
             // groups' leg of its own: neither is this leg's to send.
-            PutGoes::Planned(_) | PutGoes::Options(_) => {
+            PutGoes::Plain(_, PlainBy::Planned(_)) | PutGoes::Options(_) => {
                 asked.answer_first(Answer::Through);
                 return Ok(0);
             }
@@ -8968,43 +8979,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let first = asked.first();
         let plain_meta;
         let (kind, meta, send, head, plan_at) = match Self::decide_put(&core.0, put, first) {
-            PutGoes::Planned(planned) => {
-                asked.answer_first(Answer::Through);
-                #[cfg(test)]
-                self.takes.plans.fetch_add(1, Ordering::Relaxed);
-                let params = planned.params();
-                // A plain put carries its QoS and nothing else of a publication's.
-                let meta = PushMetadata {
-                    qos: params.qos,
-                    ..PushMetadata::default()
-                };
-                let leg = LinkLeg {
-                    named: planned.key(),
-                    payload: put.payload,
-                    kind: SampleKind::Put,
-                    meta: &meta,
-                    send: wz_session_core::session_actions::SendAs {
-                        reliable: params.reliable,
-                        express: params.express,
-                        priority: params.priority,
-                    },
-                    head: Some(planned.head()),
-                    planned: true,
-                };
-                // Marked as a publish for as long as it holds the session, as every put is.
-                let _publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
-                return self
-                    .send_on_links(&core.0, &leg, None, Pass::EVERY_FACE, tx)
-                    .0;
-            }
             PutGoes::Unsent(answer) => {
                 asked.answer_first(answer);
                 return Ok(0);
             }
-            PutGoes::Plain(params, head, plan_at) => {
-                #[cfg(test)]
-                self.takes.namings.fetch_add(1, Ordering::Relaxed);
-                // A plain put carries its QoS and nothing else of a publication's.
+            PutGoes::Plain(params, by) => {
+                // A plain put carries its QoS and nothing else of a publication's, and rides as its
+                // facts say, whether its plan writes it or its key is named.
                 plain_meta = PushMetadata {
                     qos: params.qos,
                     ..PushMetadata::default()
@@ -9014,7 +8995,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     express: params.express,
                     priority: params.priority,
                 };
-                (SampleKind::Put, &plain_meta, send, head, plan_at)
+                match by {
+                    PlainBy::Planned(planned) => {
+                        asked.answer_first(Answer::Through);
+                        #[cfg(test)]
+                        self.takes.plans.fetch_add(1, Ordering::Relaxed);
+                        let leg = LinkLeg {
+                            named: planned.key(),
+                            payload: put.payload,
+                            kind: SampleKind::Put,
+                            meta: &plain_meta,
+                            send,
+                            head: Some(planned.head()),
+                            planned: true,
+                        };
+                        // Marked as a publish for as long as it holds the session, as every put is.
+                        let _publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
+                        return self
+                            .send_on_links(&core.0, &leg, None, Pass::EVERY_FACE, tx)
+                            .0;
+                    }
+                    PlainBy::Named { head, plan_at } => {
+                        #[cfg(test)]
+                        self.takes.namings.fetch_add(1, Ordering::Relaxed);
+                        (SampleKind::Put, &plain_meta, send, head, plan_at)
+                    }
+                }
             }
             PutGoes::Options(head) => {
                 // A put by options read them before the take.

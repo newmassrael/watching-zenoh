@@ -12,6 +12,7 @@ use wz_capi_port::{
 };
 use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::publish_options::PublishOptions;
+use wz_session_core::reliability::Reliability;
 
 use super::{config, open, open_with, until, CatchAll, Command, Engine, Router};
 use crate::CoopConfig;
@@ -857,6 +858,52 @@ fn a_plan_asks_the_links_only_where_they_name_keys_their_own_way() {
     until(&engine, "the router to receive both puts", || {
         router.seen(|s| s.pushes) == 2
     });
+}
+
+/// A bare put of a publisher's best-effort way rides as the way says whether its key is named or
+/// its plan writes it: the first at a send epoch and the planned one after it both reach the
+/// router on the best-effort channel. CONTROL: the second was written from the plan. Turned red by
+/// a plain put sent by facts other than its way's in either arm.
+#[test]
+fn a_bare_put_rides_as_its_way_says_named_or_planned() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let hold = engine
+        .acquire_keyexpr("demo/x")
+        .expect("a session with ids left declares");
+    let wire = WireKey::aliased(hold.mapping_id(), None).at_row(hold.row());
+    let filter = filter_on(&engine, "demo/x");
+    until(&engine, "the router's catch-all to open the filter", || {
+        !engine.write_filter_active(filter)
+    });
+    let params = PublishOptions::put()
+        .with_reliability(Reliability::BestEffort)
+        .plain_put_params()
+        .expect("a plain put");
+    assert!(!params.reliable, "the premise: a best-effort way");
+    engine.keep_write_filter_plain(filter, Some((params, wire.declared())));
+
+    let before = plans(&engine);
+    for _ in 0..2 {
+        assert_eq!(
+            engine.publish_filtered(filter, "demo/x", &wire, b"v", None),
+            FilteredPut::Sent(Ok(0))
+        );
+    }
+    assert_eq!(
+        plans(&engine) - before,
+        1,
+        "CONTROL: the second put is written from the plan"
+    );
+    until(&engine, "the router to receive both puts", || {
+        router.seen(|s| s.samples.len()) == 2
+    });
+    assert_eq!(
+        router.seen(|s| s.reliabilities.clone()),
+        [Reliability::BestEffort; 2],
+        "the named put and the planned one ride as the way says"
+    );
+    drop(hold);
 }
 
 /// A plan stands at its send epoch alone: once the router retracts the subscriber that opened the

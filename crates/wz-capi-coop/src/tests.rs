@@ -34,6 +34,7 @@ use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::publish_options::PublishOptions;
 #[cfg(feature = "query")]
 use wz_session_core::query_sink::{BoxedQuerySink, QueryView, ReplyOut};
+use wz_session_core::reliability::Reliability;
 use wz_session_core::session_init_params::{
     KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf,
 };
@@ -284,6 +285,8 @@ struct Seen {
     pushes: usize,
     /// What the router's catch-all subscriber received, when it holds one.
     samples: Vec<(String, Vec<u8>)>,
+    /// The reliability of the frame each of `samples` came in, in their order.
+    reliabilities: Vec<Reliability>,
     /// The answers to the router's queries, in the order they arrived: `reply` for a Response,
     /// `final` for a ResponseFinal.
     #[cfg(feature = "queryable")]
@@ -564,11 +567,11 @@ fn run_router(
                 "**",
                 Locality::Any,
                 BoxedSink::new(move |sample: &dyn SampleView| {
-                    samples
-                        .lock()
-                        .unwrap()
+                    let mut record = samples.lock().unwrap();
+                    record
                         .samples
                         .push((sample.keyexpr().to_owned(), sample.payload().to_vec()));
+                    record.reliabilities.push(sample.reliability());
                 }),
             )
             .expect("the router's catch-all");
