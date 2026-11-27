@@ -8576,6 +8576,24 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4694": {
+      "decision_summary": "Hold the release form's redial of a lost link in a C program the package\ntests run on Linux and Windows: a client dials a listener, loses it, dials\nthe one that takes its port, and its puts and subscriber go on.",
+      "changes_bullets": [
+        "capi-pico example redial.c; capi-examples observes it on both hosts.",
+        "verify_plan lists it for the sanitizer lanes; soft_jobs declares the step.",
+        "release-proof: Z_FEATURE_AUTO_RECONNECT row observed; W09 narrowed."
+      ],
+      "verification_bullets": [
+        "redial.c PASS on Linux (16 checks), under ASan and under TSan.",
+        "release_proof_ledger_gate, soft_job_gate, pico_windows_package selftest pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
