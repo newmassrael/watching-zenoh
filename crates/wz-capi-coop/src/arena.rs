@@ -511,11 +511,11 @@ const HANDED_ROWS: usize =
 /// The application's tables apart from the session's one table set: the declaration watchers,
 /// where the arena lends them (`runtime-plan`).
 const OBSERVER_ROWS: usize = cfg!(feature = "runtime-plan") as usize;
-/// The pending gets, the ends of the legs, the legs' callbacks and the replies the gets that
-/// consolidate hold, of a build that asks (`query`), where the arena lends them (`runtime-plan`):
-/// one that asks nothing holds no table of gets, and a region holds them otherwise
-/// (`crate::engine::StatePlaces`).
-const GET_ROWS: usize = 4 * cfg!(all(feature = "query", feature = "runtime-plan")) as usize;
+/// The faces' tables of the legs of the pending gets, of a build that asks (`query`), where the
+/// arena lends them (`runtime-plan`): one that asks nothing holds no table of legs, and a region
+/// holds them otherwise. A get, its callback and the replies it holds back are rows of the
+/// session's tables (`ENTITY_ROWS`).
+const GET_ROWS: usize = cfg!(all(feature = "query", feature = "runtime-plan")) as usize;
 /// The faces' sets where the arena lends them (`runtime-plan`), and the index of the held ones
 /// where the build takes faces beside its dial role's (`TAKES_FACES`): a session of that face
 /// alone knows it holds the first set.
@@ -605,12 +605,10 @@ const FINAL_ROWS: usize = 2 * cfg!(all(feature = "queryable", feature = "runtime
 const RUNTIME_ROWS: usize = 2;
 /// The place the session's engine lies in ([`ArenaPlan::holding_engine`]).
 const ENGINE_STATE_ROWS: usize = 1;
-/// The planes the session's queryables, gets and watchers of its faces share, each where its
-/// feature is ([`ArenaPlan::lay_planes`]), where the arena holds them (`runtime-plan`).
+/// The planes the session's queryables and watchers of its faces share, each where its feature is
+/// ([`ArenaPlan::lay_planes`]), where the arena holds them (`runtime-plan`).
 const PLANE_ROWS: usize = cfg!(feature = "runtime-plan") as usize
-    * (cfg!(feature = "queryable") as usize
-        + cfg!(feature = "query") as usize
-        + cfg!(feature = "connectivity") as usize);
+    * (cfg!(feature = "queryable") as usize + cfg!(feature = "connectivity") as usize);
 /// The admission the links of a session that listens ask while their handshakes run
 /// (`ArenaPlan::lay_admission`, `link-admission`): a build without it lays none out.
 const ADMISSION_ROWS: usize = cfg!(feature = "link-admission") as usize;
