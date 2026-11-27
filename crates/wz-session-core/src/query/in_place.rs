@@ -1179,4 +1179,82 @@ mod tests {
             "(handler runs, replies staged, finals owed, requests refused)"
         );
     }
+
+    /// A Request whose key is id 7 in the receiver's space (`M=0`), as its frame lies, and the two
+    /// spaces that collide on that id: `demo/ours` in ours, `demo/theirs` in the peer's.
+    fn own_space_fixture() -> (
+        Vec<u8>,
+        HashMap<u64, String>,
+        HashMap<crate::wire_id::ExprId, String>,
+    ) {
+        use wz_codecs::lent::{
+            Query, Request, RequestVariant, Wireexpr, WireexprNonlocal, WireexprVariant,
+        };
+        let request = Request {
+            header: 0x1c,
+            rid: 7,
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id: 7,
+                    suffix_len: None,
+                    suffix: None,
+                }),
+            },
+            extensions: None,
+            body: RequestVariant::CodecZenohQuery(Query::default()),
+        }
+        .try_into_owned_in::<crate::wire::WireStorage>()
+        .expect("an owned Request");
+        let wire = request
+            .try_as_borrowed()
+            .expect("a borrowed view")
+            .encode_to_vec();
+        let mut peer = HashMap::new();
+        peer.insert(7, String::from("demo/theirs"));
+        let mut own = HashMap::new();
+        own.insert(7, String::from("demo/ours"));
+        (wire, peer, own)
+    }
+
+    /// R311y740 (N37) -- the own-space witness of the lent query plane: a query pinned where its
+    /// frame lies reads an `M=0` alias in OUR space, so it is shown under `demo/ours`. Turned red
+    /// by a pin that reads an `M=0` alias in the peer's space, which shows `demo/theirs`.
+    #[test]
+    fn an_own_space_alias_pins_the_lent_query_under_our_key() {
+        let (wire, peer, own) = own_space_fixture();
+        let decoded = RequestView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
+        let record =
+            InPlaceRecord::request_of_frame(&decoded, true, 0, crate::qos::Priority::DEFAULT);
+        let mut room = KeyexprBuf::new();
+        let mut finals = FinalStage::new();
+        let query = QueryPeer::default()
+            .pin_request_in_place(
+                &record,
+                MappingSpaces::with_own(&peer, &own),
+                &mut room,
+                &mut finals,
+            )
+            .expect("the lent form holds it")
+            .expect("an M=0 alias resolves in our space");
+        assert_eq!(query.hand(seen_of).keyexpr, "demo/ours");
+    }
+
+    /// ANTI-VACUITY twin: with the peer's space alone the same record pins no query, so the
+    /// witness above reads the space the M bit named and not whichever space holds the id.
+    #[test]
+    fn without_an_own_space_the_lent_query_pins_nothing() {
+        let (wire, peer, _) = own_space_fixture();
+        let decoded = RequestView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
+        let record =
+            InPlaceRecord::request_of_frame(&decoded, true, 0, crate::qos::Priority::DEFAULT);
+        let mut room = KeyexprBuf::new();
+        let mut finals = FinalStage::new();
+        let pinned = QueryPeer::default().pin_request_in_place(
+            &record,
+            MappingSpaces::peer_only(&peer),
+            &mut room,
+            &mut finals,
+        );
+        assert!(matches!(pinned, Ok(None)));
+    }
 }

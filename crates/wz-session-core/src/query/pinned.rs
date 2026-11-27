@@ -314,3 +314,75 @@ impl QueryPeer {
         })
     }
 }
+
+/// R311y740 (N37) -- the own-space witness pair of the pinned query plane: a query pinned off its
+/// owned Request reads an `M=0` alias in OUR space.
+#[cfg(all(test, feature = "alloc"))]
+mod tests {
+    use super::*;
+    use crate::wire_id::ExprId;
+    use alloc::string::String;
+    use hashbrown::HashMap;
+
+    /// A Request whose key is id 7 in the receiver's space (`M=0`), and the two spaces that
+    /// collide on that id: `demo/ours` in ours, `demo/theirs` in the peer's.
+    fn fixture() -> (RequestOwned, HashMap<u64, String>, HashMap<ExprId, String>) {
+        use wz_codecs::lent::{
+            Query, Request, RequestVariant, Wireexpr, WireexprNonlocal, WireexprVariant,
+        };
+        let request = Request {
+            header: 0x1c,
+            rid: 7,
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id: 7,
+                    suffix_len: None,
+                    suffix: None,
+                }),
+            },
+            extensions: None,
+            body: RequestVariant::CodecZenohQuery(Query::default()),
+        }
+        .try_into_owned_in::<crate::wire::WireStorage>()
+        .expect("an owned Request");
+        let mut peer = HashMap::new();
+        peer.insert(7, String::from("demo/theirs"));
+        let mut own = HashMap::new();
+        own.insert(7, String::from("demo/ours"));
+        (request, peer, own)
+    }
+
+    /// The pin reads the `M=0` alias in our space, so the query is shown under `demo/ours`.
+    /// Turned red by a pin that reads it in the peer's space, which shows `demo/theirs`.
+    #[test]
+    fn an_own_space_alias_pins_the_query_under_our_key() {
+        let (request, peer, own) = fixture();
+        let mut room = QueryRoom::default();
+        let mut finals = FinalStage::new();
+        let query = QueryPeer::default()
+            .pin_request(
+                &request,
+                MappingSpaces::with_own(&peer, &own),
+                &mut room,
+                &mut finals,
+            )
+            .expect("an M=0 alias resolves in our space");
+        assert_eq!(query.hand(|view| String::from(view.keyexpr())), "demo/ours");
+    }
+
+    /// ANTI-VACUITY twin: with the peer's space alone the same Request pins no query, so the
+    /// witness above reads the space the M bit named and not whichever space holds the id.
+    #[test]
+    fn without_an_own_space_the_same_alias_pins_no_query() {
+        let (request, peer, _) = fixture();
+        let mut room = QueryRoom::default();
+        let mut finals = FinalStage::new();
+        let pinned = QueryPeer::default().pin_request(
+            &request,
+            MappingSpaces::peer_only(&peer),
+            &mut room,
+            &mut finals,
+        );
+        assert!(pinned.is_none());
+    }
+}
