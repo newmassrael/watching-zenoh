@@ -303,17 +303,29 @@ def loop_vars(body):
 # What `--resolve-features` prints is `--no-default-features --features a,b`, never a test name,
 # so the array's expansion is cargo's options and not a filter. Only an array filled that way is
 # read so; any other array expansion is a filter this gate cannot name, and stays refused.
+#
+# The other producers of cargo's words are read the same way: `--resolve-build`, whose first line
+# is those words (the lane takes it with `mapfile`), `--build-cargo-args` and `--bench-cargo-args`,
+# and the run-ci.sh helpers that print them (`pico_tokio_args` and its kin). A scalar filled by
+# one and expanded unquoted (`cargo test -p p $tokio_args`) is the same words.
 RESOLVED_FEATURES = re.compile(
-    r'\b([A-Za-z_][A-Za-z0-9_]*)="\$\([^)]*--resolve-features\b')
+    r'\b([A-Za-z_][A-Za-z0-9_]*)="\$\((?:[^)]*--(?:resolve-features|resolve-build|build-cargo-args'
+    r'|bench-cargo-args)\b|\s*pico_[a-z_]*args\b)')
+MAPFILE = re.compile(
+    r'\bmapfile\s+-t\s+([A-Za-z_][A-Za-z0-9_]*)\s*<<<\s*"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"?')
 READ_ARRAY = re.compile(
     r'\bread\s+-r\s+-a\s+([A-Za-z_][A-Za-z0-9_]*)\s*<<<\s*"?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?"?')
 ARRAY_EXPANSION = re.compile(r'^\$\{([A-Za-z_][A-Za-z0-9_]*)\[@\]\}$')
+SCALAR_EXPANSION = re.compile(r'^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$')
 
 
 def cargo_arg_arrays(body):
-    """The arrays a lane fills with a profile's resolved cargo arguments (above)."""
+    """The arrays a lane fills with a profile's resolved cargo arguments, and the scalars that
+    hold them (above)."""
     resolved = set(RESOLVED_FEATURES.findall(body))
-    return frozenset(arr for arr, src in READ_ARRAY.findall(body) if src in resolved)
+    resolved |= {dest for dest, src in MAPFILE.findall(body) if src in resolved}
+    arrays = {arr for arr, src in READ_ARRAY.findall(body) if src in resolved}
+    return frozenset(arrays | resolved)
 
 
 def resolve_loop_var(loops, var, at):
@@ -389,6 +401,8 @@ def parse_invocation(cmd, loops=None, at=0, cargo_arrays=frozenset()):
         elif t == "--":
             i += 1
         elif ARRAY_EXPANSION.match(t) and ARRAY_EXPANSION.match(t).group(1) in cargo_arrays:
+            i += 1
+        elif SCALAR_EXPANSION.match(t) and SCALAR_EXPANSION.match(t).group(1) in cargo_arrays:
             i += 1
         elif t.startswith("-"):
             i += 2 if t in ("--features", "--manifest-path", "--target", "--profile") else 1
