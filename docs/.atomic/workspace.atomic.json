@@ -9447,6 +9447,26 @@
         "The table is Heap-held with the caller's slot_limit as its live bound; the census row's fixed [E2E_SENDER_SLOTS] (no heap) would drop slot_limit from the C ABI and is a decision.",
         "7.4's Fits-now count of the census document is not yet restated for S11 2."
       ]
+    },
+    "Round 4742": {
+      "decision_summary": "Land five lanes as one integration, verified once: the run-text layout\nof the bench functions; no Control barrier on one conduit; a link called\nover the closed set; the app reply fixes; cost cases built side by side.",
+      "changes_bullets": [
+        "run-text.ld 746 functions; the twin built in the release form.",
+        "Control barrier under transport-qos; driver 2b closed-set link calls.",
+        "get refused on no link; stream room; C1cs cases in parallel parts."
+      ],
+      "verification_bullets": [
+        "size 199,515 -> 198,987 B; receive W 3057 -> 3020 (W/P 0.755 -> 0.746).",
+        "RSS 1.15 -> ~1.09 with run-text; query client locked at WIN.",
+        "session-core, runtime-coop, capi-coop 306/497/372/356, pico 544.",
+        "preflight 7 gates, ledger and cost rc 0, nondefault clippy 4 crates."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
