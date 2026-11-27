@@ -2978,17 +2978,21 @@ binding_heap = "build"
 binding_fixed = "build"
 wire = "none"
 help = '''
-The sessions open at once in a process: the rows of the one table a reach
-of a session's engine names it by. A holder that must not keep the session
-open (a key expression the program keeps, a query kept past its callback,
-a cancellation token) holds a row and its generation. The close of a
-session vacates its row and moves the generation on, so a reach kept past
-the close reaches nothing. The open of one more session is refused.
+The sessions open at once in a process on the fixed storage policy: the
+rows of the one table a reach of a session's engine names it by, which lie
+in static memory. A holder that must not keep the session open (a key
+expression the program keeps, a query kept past its callback, a
+cancellation token) holds a row and its generation. The close of a session
+vacates its row and moves the generation on, so a reach kept past the close
+reaches nothing. The open of one more session is refused. On the heap
+storage policy it bounds nothing: an open takes a row of the heap when none
+is vacant, and the table keeps the row for the next open, as zenoh-pico
+allocates each session it opens.
 '''
 
 [limit.upstream]
 zenoh = "none"
-reason = "No key of upstream's configuration bounds the sessions a process opens, and zenoh-pico reaches a session from a weak handle of the heap. Two hundred fifty-six rows hold the sessions a host program opens at once, and the parallel run of a test suite, whose tests open their sessions side by side in one process, stays under them; the table lies in static memory, three words a row under one lock (6 KiB on a 64-bit host), and takes nothing of the heap."
+reason = "No key of upstream's configuration bounds the sessions a process opens: zenoh-pico allocates each session on its heap (`vendor/zenoh-pico/src/api/api.c` @ `(_z_session_t *)z_malloc(sizeof(_z_session_t));`) and reaches it from a weak handle there. The count binds a build on the fixed storage policy, whose table lies in static memory, two words a row under one lock (4 KiB on a 64-bit host); a build on the heap policy takes a row of the heap for an open that finds none vacant and keeps it for the next open, so nothing bounds its sessions but the heap, as zenoh-pico's. Two hundred fifty-six rows hold the sessions a host program opens at once, and the parallel run of a test suite, whose tests open their sessions side by side in one process, stays under them."
 
 [limit.pico_preset]
 value = 2

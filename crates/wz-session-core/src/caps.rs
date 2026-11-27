@@ -300,8 +300,10 @@ pub const HELD_SESSIONS: usize = generated::HELD_SESSIONS;
 /// thread-local storage to do it. A callback a thread past it would run is not run, and counted.
 pub const CALLBACK_THREADS: usize = generated::CALLBACK_THREADS;
 
-/// The sessions open at once in a process: the rows of the one table a reach of a session's engine
-/// names it by (the cooperative engine's `reach`). The open of one more is refused.
+/// The sessions open at once in a process on the fixed storage policy: the rows of the one table a
+/// reach of a session's engine names it by (the cooperative engine's `reach`), which lie in static
+/// memory; the open of one more is refused. On the heap policy it bounds nothing: an open takes a
+/// row of the heap when none is vacant, and the table keeps it for the next open.
 pub const ENGINE_ROWS: usize = generated::ENGINE_ROWS;
 
 /// The owned samples a program holds through the C ABI at once: the slots of the process's pool of

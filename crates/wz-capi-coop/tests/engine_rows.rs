@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The process's table of engines with every row held (the build's `ENGINE_ROWS`): one more open
-//! is refused before it reserves anything, and with a row let go of an open goes on past the rows.
-//! The table is the process's, so it is filled in a binary of its own, by this one test.
+//! The process's table of engines with the build's `ENGINE_ROWS` rows held, under the build's
+//! storage policy: on the fixed policy one more open is refused before it reserves anything, and
+//! with a row let go of an open goes on past the rows; on the heap policy the count bounds nothing,
+//! and opens go on past it, each on a row of the heap. The table is the process's, so it is filled
+//! in a binary of its own, by this one test.
 
 use std::alloc::Layout;
 use std::ptr::NonNull;
@@ -104,35 +106,50 @@ fn open() -> Result<EngineHold<Engine>, OpenError> {
     )
 }
 
-/// With every row of the table held, an open is refused with `NoEngineRow` and reserves no arena;
-/// with one row let go of, the same open goes on past the rows (to the refusal of the endpoint it
-/// dials, which nothing answers), gives its arena back and lets its row go again. Turned red by an
-/// open that takes no row, takes one past the table, reserves its arena before it is refused, or
-/// keeps the row of an open that failed.
+/// The opens past the build's `ENGINE_ROWS` rows, held all at once. On the fixed policy the
+/// table holds that many and no more: an open is refused with `NoEngineRow` and reserves no
+/// arena, and with one row let go of the same open goes on past the rows. On the heap policy a row
+/// past the count is one more of the heap, and eleven opens past it go on, as zenoh-pico opens a
+/// session wherever its heap has room. Either way an open that goes on reaches the refusal of the
+/// endpoint it dials, which nothing answers, gives its arena back and lets its row go again, for
+/// the next claim. Turned red by an open that takes no row, takes one past a fixed table, is
+/// refused past the count on the heap policy, reserves its arena before it is refused, or keeps
+/// the row of an open that failed.
 #[test]
-fn a_process_whose_engine_rows_are_all_held_opens_no_more_and_reserves_nothing() {
+fn an_open_past_the_builds_rows_is_refused_only_where_the_storage_policy_is_fixed() {
     let mut held: Vec<RowClaim> = std::iter::from_fn(RowClaim::take)
         .take(caps::ENGINE_ROWS + 1)
         .collect();
-    assert_eq!(held.len(), caps::ENGINE_ROWS, "every row is held once");
-    assert_eq!(open().err(), Some(OpenError::NoEngineRow));
-    assert_eq!(
-        OUT.load(Ordering::SeqCst),
-        0,
-        "the refused open reserved no arena"
-    );
-
-    drop(held.pop().expect("a row at least"));
-    let past = open().err();
-    assert!(
-        past.is_some() && past != Some(OpenError::NoEngineRow),
-        "with a row let go of the open goes past the rows: {past:?}"
-    );
-    assert_eq!(
-        OUT.load(Ordering::SeqCst),
-        0,
-        "the failed open gave its arena back"
-    );
+    let opens = if wz_session_core::bounded::ENFORCES_CAPACITY {
+        assert_eq!(held.len(), caps::ENGINE_ROWS, "every row is held once");
+        assert_eq!(open().err(), Some(OpenError::NoEngineRow));
+        assert_eq!(
+            OUT.load(Ordering::SeqCst),
+            0,
+            "the refused open reserved no arena"
+        );
+        drop(held.pop().expect("a row at least"));
+        1
+    } else {
+        assert_eq!(
+            held.len(),
+            caps::ENGINE_ROWS + 1,
+            "the heap gives a row past the build's count"
+        );
+        11
+    };
+    for _ in 0..opens {
+        let past = open().err();
+        assert!(
+            past.is_some() && past != Some(OpenError::NoEngineRow),
+            "the open goes past the rows: {past:?}"
+        );
+        assert_eq!(
+            OUT.load(Ordering::SeqCst),
+            0,
+            "the failed open gave its arena back"
+        );
+    }
     let again = RowClaim::take().expect("the failed open let its row go");
     drop(again);
     drop(held);

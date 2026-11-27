@@ -650,9 +650,10 @@ pub enum OpenError {
     /// build's `sn-resolution` domain leaves out: the build holds no word for its ring. Nothing
     /// was reserved, bound, joined or dialled.
     SnResolution(OutsideDomain<SnResolution>),
-    /// Every row of the process's table of engines (the build's `ENGINE_ROWS`, one for each
-    /// session open at once, [`RowClaim`]) holds the engine of a session open now.
-    /// Nothing was reserved, bound, joined or dialled.
+    /// No row of the process's table of engines was left for the session's engine ([`RowClaim`]):
+    /// on the fixed storage policy every row (the build's `ENGINE_ROWS`) holds the engine of a
+    /// session open now, and on the heap policy the heap had no room for one more row. Nothing was
+    /// reserved, bound, joined or dialled.
     NoEngineRow,
     /// The heap had no room for a link's shared handle. Nothing of the link stays.
     HeapRefused,
@@ -6698,8 +6699,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
-        // The row the engine is reached through, taken before anything is reserved: a process
-        // whose rows are all held opens no more, and reserves nothing for it.
+        // The row the engine is reached through, taken before anything is reserved: an open that
+        // finds no row, the fixed table full or the heap out of room, reserves nothing.
         let row = RowClaim::take().ok_or(OpenError::NoEngineRow)?;
         // The runtime's tables are placed in the arena, so its plan holds their span.
         #[cfg(wz_round)]

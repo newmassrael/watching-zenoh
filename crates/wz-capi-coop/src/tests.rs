@@ -1246,6 +1246,42 @@ fn until(engine: &Engine, what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
+/// Sessions open at once past the rows the build states, on the heap storage policy: with the
+/// build's `ENGINE_ROWS` rows held, eleven sessions open, each to a router of its own, and each is
+/// reached through its handle; once each closes, its handle is not open and reaches nothing, as
+/// zenoh-pico's upgrade of a closed session's weak handle answers none. A build on the fixed policy
+/// holds its sessions to that count, which `tests/engine_rows.rs` reads, so it opens none here.
+/// Turned red by a heap table that refuses an open past the count, or a close that leaves a handle
+/// reaching its engine.
+#[test]
+fn sessions_open_past_the_builds_rows_on_the_heap_policy_and_closed_ones_are_reached_no_more() {
+    if wz_session_core::bounded::ENFORCES_CAPACITY {
+        return;
+    }
+    let held: Vec<crate::RowClaim> = (0..wz_session_core::caps::ENGINE_ROWS)
+        .map(|_| crate::RowClaim::take().expect("the heap gives a row"))
+        .collect();
+    let routers: Vec<Router> = (0..11).map(|_| Router::start(CatchAll::None)).collect();
+    let engines: Vec<EngineHold<Engine>> = routers.iter().map(open).collect();
+    let handles: Vec<_> = engines.iter().map(EngineHold::downgrade).collect();
+    assert!(
+        handles
+            .iter()
+            .all(|handle| handle.is_open() && handle.upgrade().is_some()),
+        "every open session is reached"
+    );
+    for engine in &engines {
+        SessionDrive::close(&**engine);
+    }
+    assert!(
+        handles
+            .iter()
+            .all(|handle| !handle.is_open() && handle.upgrade().is_none()),
+        "a closed session's handle reaches nothing"
+    );
+    drop(held);
+}
+
 /// The router stand-in's link lends its session two slots of the stand-in's whole batch, which a
 /// lend-only session that batches needs. The CONTROL is the host's links as they come, which lend
 /// the slots their session needs (`SESSION_TX_SLOTS`), each as long as their receive buffer, and
