@@ -131,7 +131,7 @@ pub enum SendWireError {
     ///     instead of holding a chain that will never complete.
     ///
     /// Inert unless the host sets a budget
-    /// ([`SessionLinkActions::set_fragment_tx_budget`](crate::session_actions::SessionLinkActions::set_fragment_tx_budget));
+    /// (`SessionLinkActions::set_fragment_tx_budget`, in a build with `tx-fragment-credit`);
     /// the default is "unbounded", so a profile that never configures one
     /// behaves exactly as before.
     ///

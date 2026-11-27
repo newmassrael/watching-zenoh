@@ -12,6 +12,7 @@
 
 use sce_forge_runtime::codec::CodecError;
 
+#[cfg(feature = "tx-expiry-run")]
 use crate::limit_binding::Quota;
 use crate::link::RoomWait;
 use crate::session_init_params::TxQueueConf;
@@ -71,11 +72,20 @@ impl TxExpiry {
 ///
 /// A plain count, not an atomic: it lives in the session's out-of-band state, under the lock
 /// that state already has, where it takes the room of a field's padding and no new bytes.
+#[cfg(feature = "tx-expiry-run")]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ExpiryRun {
     run: u16,
 }
 
+// A count stated for a build that counts no run would be read by nothing.
+#[cfg(not(feature = "tx-expiry-run"))]
+const _: () = assert!(
+    crate::caps::TX_EXPIRY_CLOSE_AFTER == 0,
+    "TX_EXPIRY_CLOSE_AFTER is stated for a build without tx-expiry-run, which counts no run"
+);
+
+#[cfg(feature = "tx-expiry-run")]
 impl ExpiryRun {
     /// A message was pushed, so the link has room: the run ends.
     pub fn pushed(&mut self) {
@@ -127,6 +137,7 @@ pub struct PushDeadline {
     window_left_us: u64,
     /// Whether this is a sender that may not wait at all ([`Self::probe`]). A configured wait of
     /// zero is not the same: it still sends a chain, and abandons it if the lane fills.
+    #[cfg(feature = "tx-probe")]
     probing: bool,
     /// Whether the sender holds the room of every frame of the message ([`Self::covered`]), so a
     /// chain asks for no room after its first frame either.
@@ -145,6 +156,7 @@ impl PushDeadline {
                 extend_left_us: conf.max_wait_before_drop_fragments_us,
                 window_us: None,
                 window_left_us: 0,
+                #[cfg(feature = "tx-probe")]
                 probing: false,
                 covered: false,
             }
@@ -156,15 +168,24 @@ impl PushDeadline {
                 extend_left_us: 0,
                 window_us: conf.no_progress_us,
                 window_left_us: conf.no_progress_us.unwrap_or(0),
+                #[cfg(feature = "tx-probe")]
                 probing: false,
                 covered: false,
             }
         }
     }
 
-    /// Whether this deadline belongs to a sender that may not wait ([`Self::probe`]).
+    /// Whether this deadline belongs to a sender that may not wait (`Self::probe`, which a build
+    /// without `tx-probe` does not have: there every sender waits).
     pub fn is_probe(&self) -> bool {
-        self.probing
+        #[cfg(feature = "tx-probe")]
+        {
+            self.probing
+        }
+        #[cfg(not(feature = "tx-probe"))]
+        {
+            false
+        }
     }
 
     /// The deadline of a message whose sender reserved the room of every frame it leaves in
@@ -192,6 +213,7 @@ impl PushDeadline {
     /// a chain cannot be abandoned and begun again without end, which is what a sender that does
     /// not wait would do to it, so the sender is told to send it waiting. A chain the queue can
     /// hold whole is asked for like any frame.
+    #[cfg(feature = "tx-probe")]
     pub fn probe(droppable: bool) -> Self {
         Self {
             droppable,
@@ -272,6 +294,7 @@ mod tests {
             let ordinary = PushDeadline::new(droppable, &conf);
             assert!(covered.is_covered());
             assert!(!ordinary.is_covered());
+            #[cfg(feature = "tx-probe")]
             assert!(!PushDeadline::probe(droppable).is_covered());
             assert!(!covered.is_probe());
             assert_eq!(covered.ask(), ordinary.ask(), "droppable {droppable}");
@@ -280,6 +303,7 @@ mod tests {
 
     /// With no count stated, a blocked link is kept however long it stays blocked: the
     /// policy as it was before the limit.
+    #[cfg(feature = "tx-expiry-run")]
     #[test]
     fn a_run_of_expiries_never_closes_when_no_count_is_stated() {
         let mut run = ExpiryRun::default();
@@ -290,6 +314,7 @@ mod tests {
 
     /// The count-th expiry in a row is the one that closes the session, and the ones before
     /// it are kept.
+    #[cfg(feature = "tx-expiry-run")]
     #[test]
     fn the_expiry_that_completes_the_run_closes_the_session() {
         let three = Quota::at_most(3);
@@ -302,6 +327,7 @@ mod tests {
     }
 
     /// A count of one is upstream's own answer, the first expiry closes it.
+    #[cfg(feature = "tx-expiry-run")]
     #[test]
     fn a_count_of_one_closes_at_the_first_expiry() {
         assert!(ExpiryRun::default().expired(Quota::at_most(1)));
@@ -309,6 +335,7 @@ mod tests {
 
     /// A message that finds room ends the run: the expiries on either side of it are two runs
     /// of two, not one of four, so a link that blocks now and then is never closed.
+    #[cfg(feature = "tx-expiry-run")]
     #[test]
     fn a_push_between_expiries_starts_the_count_again() {
         let three = Quota::at_most(3);
@@ -322,6 +349,7 @@ mod tests {
     }
 
     /// A push with no run open changes nothing.
+    #[cfg(feature = "tx-expiry-run")]
     #[test]
     fn a_push_with_no_run_open_leaves_the_count_at_zero() {
         let mut run = ExpiryRun::default();
@@ -471,7 +499,32 @@ mod tests {
         assert_eq!(steps(None), steps(Some(10)));
     }
 
+    /// Without the probe stage no deadline is a probe's: a sender asks for room with the wait its
+    /// queue configuration gives, droppable or not, as each write of zenoh-pico's waits for its
+    /// socket. Turned red by a deadline of this build reading as a probe, or asking with no wait.
+    #[cfg(not(feature = "tx-probe"))]
+    #[test]
+    fn without_the_probe_stage_every_deadline_waits() {
+        let conf = TxQueueConf::of_snapshot(
+            &crate::policy::SessionPolicy::defaults(),
+            &crate::limits::SessionLimits::BUILD,
+        );
+        for droppable in [true, false] {
+            for deadline in [
+                PushDeadline::new(droppable, &conf),
+                PushDeadline::covered(droppable, &conf),
+            ] {
+                assert!(!deadline.is_probe(), "droppable {droppable}");
+                let wait_us = match deadline.ask() {
+                    RoomWait::Drop { wait_us } | RoomWait::Block { wait_us } => wait_us,
+                };
+                assert!(wait_us > 0, "droppable {droppable} asks with a wait");
+            }
+        }
+    }
+
     /// A sender that may not wait never waits, whatever the policy says.
+    #[cfg(feature = "tx-probe")]
     #[test]
     fn the_policy_does_not_touch_a_probe() {
         let mut probe = PushDeadline::probe(false);

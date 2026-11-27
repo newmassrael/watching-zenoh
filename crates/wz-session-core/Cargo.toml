@@ -94,6 +94,10 @@ default = [
     "south-subregions",
     "interest-answer",
     "policy-selection",
+    "tx-probe",
+    "tx-expiry-run",
+    "tx-fragment-credit",
+    "tx-held-wait",
 ]
 
 # `log`: the session core's diagnostics (`diag`), the warnings an operator reads when a peer sends
@@ -1299,6 +1303,34 @@ transport-tx-lend = []
 # `--all-features` clippy and doc lanes) must still compile; an image that turns
 # this selector on does not turn those two on.
 tx-lend-only = ["transport-tx-lend"]
+
+# The send's behaviours that zenoh-pico's transport does not have. Each is a parity contract of the
+# zenoh preset and on in a build that names nothing; the pico ABI turns each on through its
+# capability of the same name (deploy/wz-config.toml), which the zenoh-pico preset leaves off
+# (`configs/zenoh-pico_defconfig`), so that preset links none of them. A crate that takes this one
+# without its defaults and sends names the ones it keeps.
+#
+# `tx-probe`: a send that may not wait for room (`try_send_network_message_qos` and its twins),
+# which a router's fan-out and a listening engine's short slot pool use, so that one full link
+# costs an answer and not a stall. Without it every send waits for its room, as each write of
+# zenoh-pico's waits for its socket.
+tx-probe = ["alloc"]
+# `tx-expiry-run`: the run of blocking messages that found no room, which closes a session the
+# `tx-expiry-keeps-session` policy keeps once it is `TX_EXPIRY_CLOSE_AFTER` long. Without it a
+# kept expiry never closes the session, as zenoh-pico's failed send does not, and its lease alone
+# decides; a statement of the count is refused by name and a build that states one does not
+# compile.
+tx-expiry-run = []
+# `tx-fragment-credit`: the session's budget of fragments (`set_fragment_tx_budget`) and the stop
+# fragment that tells the peer a chain was abandoned once some of it left. Without it a chain is
+# never cut for want of credit, and one cut by its link (no room, no slot) ends where it was cut,
+# as zenoh-pico's does, with the sequence number of the fragment that did not leave given back.
+tx-fragment-credit = []
+# `tx-held-wait`: a droppable message that finds its conduit held by another sender waits for room
+# out of its own `wait_before_drop` (`HeldDrop::WaitForRoom`, zenoh's queue). Without it the
+# message is dropped at once and the sender told (`HeldDrop::DropAtOnce`), whatever the queue
+# profile, as zenoh-pico's dropping send fails on a transmit lock another send holds.
+tx-held-wait = []
 
 # session-slot — fixed-memory step S5: a session's per-session state lives in
 # storage of fixed size, and nothing it holds is behind a pointer to the heap.
