@@ -1127,8 +1127,7 @@ fn a_callback_inside_the_reads_step_finds_the_send_place_free() {
 /// row that holds none. A client that took no face turns its dial role's face alone, whatever rows
 /// its table keeps for faces to come. Turned red by a read that turns a face twice, a row no face
 /// holds, or no face at all, as a dial role's row whose mark is not held for the table's life
-/// would (`DirectFace::init_at`, `CoopEngine::read_faces` over `DirectFaces::turned`, or
-/// `CoopEngine::read_dial` where the dial role's face is the only face).
+/// would (`DirectFace::init_at`, `CoopEngine::read_faces` over `DirectFaces::turned`).
 #[cfg(not(wz_round))]
 #[test]
 fn a_read_turns_every_face_once() {
@@ -1203,6 +1202,34 @@ fn the_dial_roles_row_lies_where_the_faces_table_does() {
         !cfg!(feature = "listen"),
         "the dial role's row lies inline exactly where the session listens on no port"
     );
+}
+
+/// A read takes the read slot of the face it turns once, and holds it across its wait, exactly
+/// where its table is the dial role's one row and no group is joined; elsewhere it tries the slot
+/// before the wait, lets it go so a read on another thread may turn a row this one does not, and
+/// takes it again to turn it. Turned red by a client read that lets its slot go before its wait
+/// (two tries a read), or by a read of a build that takes faces holding its slot across the wait
+/// (one), the choice `CoopEngine::read_faces` makes by the build (`crate::arena::TAKES_FACES`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_read_holds_its_slot_across_its_wait_exactly_where_one_row_is_read() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.direct_faces().1,
+        1,
+        "CONTROL: the dial role's face is the one face a read turns"
+    );
+    let tries = if crate::arena::TAKES_FACES { 2 } else { 1 };
+    for read in 1..=3 {
+        let before = engine.takes.read_slot_takes.load(Ordering::SeqCst);
+        let _ = SessionDrive::read(&*engine, false);
+        assert_eq!(
+            engine.takes.read_slot_takes.load(Ordering::SeqCst) - before,
+            tries,
+            "read {read} tries the slot as the build's table asks"
+        );
+    }
 }
 
 /// What a read waits for is the earliest due of the faces as their slots hold it: each turn of a

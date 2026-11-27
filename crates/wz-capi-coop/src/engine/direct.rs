@@ -325,7 +325,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
     /// the frame, or before the first record of it that is not a Push (`within_frame`), which a
     /// test counts as a build whose links are tasks does (`FaceDispatch`). What the drains leave
     /// to hand out is the read's to hand out, once after every face and group it stepped
-    /// (`CoopEngine::read_faces`, `CoopEngine::read_dial`), or the next record's of the frame.
+    /// (`CoopEngine::read_faces`), or the next record's of the frame.
     fn drain_pushes(&mut self, within_frame: bool) {
         if !core::mem::take(&mut self.records.after_pushes) {
             return;
@@ -1577,7 +1577,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     /// The faces a read turns, in the order of the face table's rows: the dial role's, whose life
     /// dials the session's endpoints whether or not it holds a link and whose row holds its face
     /// for the table's life, then each past it whose row holds a face (`Self::hold_face`).
-    #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(always)]
     pub(super) fn turned(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
         #[cfg(feature = "listen")]
@@ -1594,7 +1593,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
 
     /// The faces a read walks, in the order of the face table's rows: the dial role's, then each
     /// row past it up to the last that holds a face (`Self::hold_face`), held or not.
-    #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(always)]
     pub(super) fn walked(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
         #[cfg(feature = "listen")]
@@ -1747,14 +1745,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if self.deliveries.delivers_here() {
             return self.read_nothing();
         }
-        #[cfg(any(feature = "listen", feature = "group"))]
-        {
-            self.read_faces::<false, _, _>(most_ms, || self.direct.turned())
-        }
-        #[cfg(not(any(feature = "listen", feature = "group")))]
-        {
-            self.read_dial::<false>(most_ms)
-        }
+        self.read_faces::<false>(most_ms)
     }
 
     /// The read the read task makes, over and over: [`Self::read_direct`], with no bound of its
@@ -1763,14 +1754,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// rather than coming straight back.
     #[cfg(feature = "threads")]
     pub(super) fn read_on_task(&self) -> Result<(), SessionClosed> {
-        #[cfg(any(feature = "listen", feature = "group"))]
-        {
-            self.read_faces::<true, _, _>(NO_STEP_BOUND_MS, || self.direct.turned())
-        }
-        #[cfg(not(any(feature = "listen", feature = "group")))]
-        {
-            self.read_dial::<true>(NO_STEP_BOUND_MS)
-        }
+        self.read_faces::<true>(NO_STEP_BOUND_MS)
     }
 
     /// What a read that finds a face's read slot held answers. A read other than the read task's
@@ -1795,44 +1779,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.read_nothing()
     }
 
-    /// The read where the dial role's face is the only face: its read slot held for the whole
-    /// read, the wait among it, as nothing else of this thread's takes it meanwhile, then the
-    /// face's turn and the session's periodic jobs. A slot found held is a read under way on this
-    /// thread, whose callback this read is called from: it reads nothing; the read task's
-    /// (`TASK`) finds it held by another thread's read (`Self::held_elsewhere`).
-    #[cfg(not(any(feature = "listen", feature = "group")))]
-    fn read_dial<const TASK: bool>(&self, most_ms: u32) -> Result<(), SessionClosed> {
-        let face = self.direct.dial();
-        let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
-            return self.held_elsewhere::<TASK>(u64::MAX);
-        };
-        let slot = &mut held.0;
-        let turn = self
-            .wait_on_faces(self.wait_due(slot), most_ms)
-            .and_then(|wait| self.face_turn(face, slot, Some(wait)));
-        let read = match turn {
-            Some(turn) => {
-                self.deliver();
-                if turn.ended.is_some() {
-                    Err(SessionClosed)
-                } else {
-                    if let Some(started_ms) = turn.jobs_due_ms {
-                        self.run_due_tickers(started_ms);
-                    }
-                    Ok(())
-                }
-            }
-            None => Err(SessionClosed),
-        };
-        // A close made while the read stepped the pump (a callback's) ended the link's life but
-        // left the pump, which the read held: it goes now, once no step of it is under way.
-        if self.closed.load(Ordering::Acquire) {
-            slot.let_go();
-            return Err(SessionClosed);
-        }
-        read
-    }
-
     /// What a read that reads nothing answers: whether the session is closed.
     fn read_nothing(&self) -> Result<(), SessionClosed> {
         if self.closed.load(Ordering::Acquire) {
@@ -1842,37 +1788,54 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
-    /// The read of the set of faces `faces` names, each read slot taken in turn: the wait, then a
-    /// look at each face's life and a step of its pump, the session's periodic jobs once every
-    /// face was turned. A slot found held is a read under way on this thread, whose callback this
-    /// read is called from: it reads nothing, so no record is handed out inside another's call;
-    /// the read task's (`TASK`) finds it held by another thread's read (`Self::held_elsewhere`).
-    #[cfg(any(feature = "listen", feature = "group"))]
-    fn read_faces<'f, const TASK: bool, I, F>(
-        &'f self,
-        most_ms: u32,
-        faces: F,
-    ) -> Result<(), SessionClosed>
-    where
-        F: Fn() -> I,
-        I: Iterator<Item = &'f DirectFace<L, C>>,
-    {
-        if !faces().all(|face| <CoopForm as LockForm>::try_lock(&face.slot).is_some()) {
-            return self.held_elsewhere::<TASK>(self.faces_due_us());
-        }
+    /// The read of the faces a read turns (`DirectFaces::turned`), one body for every build: one
+    /// wait for the input of any face or the earliest deadline, for at most `most_ms`
+    /// milliseconds, then a look at each face's life and a step of its pump in the order of the
+    /// face table's rows, the session's periodic jobs once every face was turned. Where the dial
+    /// role's face is the only face and no group is joined (`crate::arena::TAKES_FACES` false),
+    /// its read slot is taken once and held from before the wait to the read's end: no other row
+    /// exists for a read on another thread to turn, and that read waits behind this one
+    /// (`Self::held_elsewhere`). Elsewhere every slot is let go of before the wait, so a read on
+    /// another thread turns a row this one does not, and each is taken again by a try to turn it.
+    /// A slot found held is a read under way on this thread, whose callback this read is called
+    /// from: it reads nothing, so no record is handed out inside another's call; the read task's
+    /// (`TASK`) finds it held by another thread's read.
+    fn read_faces<const TASK: bool>(&self, most_ms: u32) -> Result<(), SessionClosed> {
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        let (mut kept, due_us) = match self.try_read_slot(self.direct.dial()) {
+            Some(held) => {
+                let due_us = self.wait_due(&held.0);
+                (Some(held), due_us)
+            }
+            None => return self.held_elsewhere::<TASK>(u64::MAX),
+        };
+        #[cfg(any(feature = "listen", feature = "group"))]
+        let (mut kept, due_us) = {
+            if !self
+                .direct
+                .turned()
+                .all(|face| self.try_read_slot(face).is_some())
+            {
+                return self.held_elsewhere::<TASK>(self.faces_due_us());
+            }
+            (
+                None::<StateGuard<'_, Confined<DirectSlot<L, C>>>>,
+                self.faces_due_us(),
+            )
+        };
         // The wait is handed back to the session by the first face's look at its life, or by the
         // read itself when no face was looked at. Each face's records are handed out with its
         // slot still held, so a callback's read finds it held.
         // Where the one input the read would wait on is a group's, the group's step waits in its
         // receive instead, for as long (`Self::wait_or_await_group`).
         #[cfg(feature = "group")]
-        let (wait, awaited_us) = self
-            .wait_or_await_group(self.faces_due_us(), most_ms)
-            .ok_or(SessionClosed)?;
+        let Some((wait, awaited_us)) = self.wait_or_await_group(due_us, most_ms) else {
+            return self.read_ends(kept.as_deref_mut(), Err(SessionClosed));
+        };
         #[cfg(not(feature = "group"))]
-        let wait = self
-            .wait_on_faces(self.faces_due_us(), most_ms)
-            .ok_or(SessionClosed)?;
+        let Some(wait) = self.wait_on_faces(due_us, most_ms) else {
+            return self.read_ends(kept.as_deref_mut(), Err(SessionClosed));
+        };
         let mut wait = Some(wait);
         let mut read = Ok(());
         let mut jobs_due_ms = None;
@@ -1905,32 +1868,45 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // A face at rest (`DirectFace::rests`) is passed over while another face is turned, whose
         // look serves the session's own bookkeeping (the ledger, the gets, the jobs, the ports);
         // with no face turned the first at rest is turned all the same, for that bookkeeping.
+        #[cfg(any(feature = "listen", feature = "group"))]
         let mut rested = None;
+        #[cfg(any(feature = "listen", feature = "group"))]
         let mut turned = false;
         // The last face turned: read alone after the read when its look found it quiet.
-        #[cfg(feature = "threads")]
+        #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
         let mut quiet = None;
-        for face in faces() {
+        for face in self.direct.turned() {
+            #[cfg(any(feature = "listen", feature = "group"))]
             if face.rests.load(Ordering::Acquire) {
                 if rested.is_none() {
                     rested = Some(face);
                 }
                 continue;
             }
-            let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
-                continue;
+            // The slot kept across the wait is the dial role's, the one face such a read turns.
+            let mut taken = None;
+            let slot = match kept.as_deref_mut() {
+                Some(held) => &mut held.0,
+                None => match self.try_read_slot(face) {
+                    Some(held) => &mut taken.insert(held).0,
+                    None => continue,
+                },
             };
-            turned = true;
-            if !turn_face(face, &mut held.0) {
+            #[cfg(any(feature = "listen", feature = "group"))]
+            {
+                turned = true;
+            }
+            if !turn_face(face, slot) {
                 break;
             }
-            #[cfg(feature = "threads")]
+            #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
             {
                 quiet = Some(face);
             }
         }
+        #[cfg(any(feature = "listen", feature = "group"))]
         if let (false, Some(face)) = (turned, rested) {
-            if let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) {
+            if let Some(mut held) = self.try_read_slot(face) {
                 turn_face(face, &mut held.0);
             }
         }
@@ -1941,8 +1917,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             self.read_groups(read_us, awaited_us);
         }
         // What the faces' and the groups' records left to hand out, handed out once for the read
-        // rather than once a face and once a run of Pushes: no slot is held, and a callback's read
-        // reads nothing inside the delivery (`Self::read_direct`).
+        // rather than once a face and once a run of Pushes, with no slot held but the one kept
+        // across the wait; a callback's read reads nothing inside the delivery
+        // (`Self::read_direct`).
         self.deliver();
         if let Some(wait) = wait {
             if let Some(mut held) = self.live() {
@@ -1962,21 +1939,48 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         // Only the read task's read goes on alone: a program's read returns once its turn is done,
         // as zenoh-pico's `zp_read` does.
-        #[cfg(feature = "threads")]
+        #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
         if let (true, Ok(()), Some(face)) = (TASK, &read, quiet) {
             self.read_quiet(face);
         }
-        // A close made while a read stepped a pump (a callback's) ended the link's life but left
-        // the pump, which the read held: each goes now, once no step of it is under way.
-        if self.closed.load(Ordering::Acquire) {
-            for face in faces() {
-                if let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) {
-                    held.0.let_go();
+        self.read_ends(kept.as_deref_mut(), read)
+    }
+
+    /// A try of `face`'s read slot by a read (`Self::read_faces`), counted by a test.
+    #[inline(always)]
+    fn try_read_slot<'f>(
+        &self,
+        face: &'f DirectFace<L, C>,
+    ) -> Option<StateGuard<'f, Confined<DirectSlot<L, C>>>> {
+        #[cfg(test)]
+        self.takes.read_slot_takes.fetch_add(1, Ordering::Relaxed);
+        <CoopForm as LockForm>::try_lock(&face.slot)
+    }
+
+    /// What a read comes to, `read` as its turns left it. A close made while the read stepped a
+    /// pump (a callback's) ended the link's life but left the pump, which the read held: each goes
+    /// now, once no step of it is under way, through `kept`, the slot the read holds across its
+    /// wait where it holds one, and elsewhere through each face's slot taken again by a try.
+    #[inline(always)]
+    fn read_ends(
+        &self,
+        kept: Option<&mut Confined<DirectSlot<L, C>>>,
+        read: Result<(), SessionClosed>,
+    ) -> Result<(), SessionClosed> {
+        if !self.closed.load(Ordering::Acquire) {
+            return read;
+        }
+        match kept {
+            Some(held) => held.0.let_go(),
+            None => {
+                for face in self.direct.turned() {
+                    if let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) {
+                        held.0.let_go();
+                    }
                 }
             }
-            return Err(SessionClosed);
         }
-        read
+        Err(SessionClosed)
     }
 
     /// Read `face`, which its look in the read that calls this found quiet (`Self::quiet_until`),
@@ -3596,12 +3600,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// role's and each past it whose row holds a face (`DirectFaces::turned`).
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn direct_faces(&self) -> (usize, usize) {
-        let rows = self.direct.iter().count();
-        #[cfg(any(feature = "listen", feature = "group"))]
-        let turned = self.direct.turned().count();
-        #[cfg(not(any(feature = "listen", feature = "group")))]
-        let turned = rows;
-        (rows, turned)
+        (self.direct.iter().count(), self.direct.turned().count())
     }
 
     /// Whether the dial role's face lies in the engine's own place, the faces' table inline there,

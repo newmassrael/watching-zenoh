@@ -1644,6 +1644,10 @@ pub(crate) struct Takes {
     /// its pump (`direct`).
     #[cfg(not(wz_round))]
     pub(crate) face_turns: core::sync::atomic::AtomicUsize,
+    /// The tries of a face's read slot a read made (`direct`): before its wait, and to turn the
+    /// face, or once for both where the read holds the slot across its wait.
+    #[cfg(not(wz_round))]
+    pub(crate) read_slot_takes: core::sync::atomic::AtomicUsize,
     /// The turns of a face whose look held every face's send place for a turn of its replay
     /// (`direct`).
     #[cfg(not(wz_round))]
