@@ -1,0 +1,19 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"]
+decision = '''
+Hold the shared key id doors on the cooperative engine the release ships,
+not only on the tokio one: one test body now runs on both engines and adds
+a get answered by id and a get by an id the answering session does not hold.
+'''
+changes = '''
+- capi-pico tests: key_ids_tokio.rs becomes key_ids.rs, run by the build's engine.
+- nondefault-tests gate: a coop leg for files::key_ids:: beside the tokio one.
+- release-proof ledger E05 and the public-surface census reason name the new file.
+'''
+verification = '''
+- coop: 4/4 key_ids tests and programs:: pass; clippy -D warnings clean.
+- tokio (gate feature row): 4/4 key_ids tests pass; clippy clean.
+- release_proof_ledger_gate --check and feature_public_surface_census --check pass.
+'''
+carry = '''
+- none for this lane.
+'''
