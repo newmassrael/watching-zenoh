@@ -3,8 +3,8 @@
 
 //! The order of the session's lock and a face's: a read waits for the session's lock inside its
 //! face's lend, and the session's lock is held over a face only by a try, never a wait
-//! (`wz_runtime_coop::sync::NoFaceWait`), which a debug build on a host fails at once. The one
-//! wait between the two runs from a face to the session's lock, so no cycle closes.
+//! (`wz_runtime_coop::sync::NoFaceWait`), which a debug build on `std`'s locks fails at once. The
+//! one wait between the two runs from a face to the session's lock, so no cycle closes.
 
 use wz_runtime_coop::sync::{FacePlace, Lend};
 
@@ -37,9 +37,11 @@ fn the_sessions_lock_is_taken_inside_a_faces_lend() {
 
 /// A face is tried under the session's lock, the way a step sends, and a wait on it there fails,
 /// which leaves the lock held to the step and free after it. A build whose values all lie under
-/// the session's one lock (no value locks) makes a face's lend no wait, so it runs there. Turned
-/// red by a check that refuses a try under the session's lock, or one that lets a wait through
-/// (`CoreGuard`'s mark), or fails a lend that cannot wait.
+/// the session's one lock (no value locks) makes a face's lend no wait, so it runs there; so does
+/// a wait in a build of the host's own locks (`host-sys`), whose runtime (`host-lock-sys`) is a
+/// library's without `std` and keeps the mark on no thread-local. Turned red by a check that
+/// refuses a try under the session's lock, or one that lets a wait through (`CoreGuard`'s mark),
+/// or fails a lend that cannot wait, or fails a wait where the build keeps no mark.
 #[cfg(feature = "threads")]
 #[test]
 fn a_face_is_tried_and_not_waited_on_under_the_sessions_lock() {
@@ -57,10 +59,11 @@ fn a_face_is_tried_and_not_waited_on_under_the_sessions_lock() {
         );
     });
     assert_eq!(tried, Lend::Lent(5));
+    let marked = !cfg!(feature = "host-sys");
     assert_eq!(
         waited,
-        Some(<SessionLock as LockKind>::WAITS),
-        "a wait on a face under the session's lock fails where a face's lend waits"
+        Some(<SessionLock as LockKind>::WAITS && marked),
+        "a wait on a face under the session's lock fails where a face's lend waits and is marked"
     );
     assert!(engine.session_is_free(), "the step let the lock go");
     assert_eq!(

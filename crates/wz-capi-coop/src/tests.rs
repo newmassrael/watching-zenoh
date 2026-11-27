@@ -4017,9 +4017,9 @@ mod direct_receive;
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 mod direct_runtime;
 mod entity_tables;
-// The mark the session's lock makes against a wait on a face is kept in a debug build on `std`'s
-// thread-locals.
-#[cfg(all(feature = "std", not(feature = "host-sys"), debug_assertions))]
+// The mark the session's lock makes against a wait on a face is kept only in a debug build, and
+// there not with the host's own locks (`host-sys`), which the module's tests read.
+#[cfg(all(feature = "std", debug_assertions))]
 mod face_order;
 #[cfg(all(
     feature = "listen",
