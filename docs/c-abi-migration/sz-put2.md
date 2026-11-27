@@ -2,7 +2,7 @@
 
 Status: the reading of the put's path against zenoh-pico's, line by line, the steps that walk its
 bytes without raising the put's or the receive's instructions, and the first step (S1) carried
-in beside it. Nothing here was built, run or measured by this lane: every byte figure is either
+in beside it; S2 to S5 and W-P1 carried after it (section 6), F1 left unwritten (section 7). Nothing here was built, run or measured by this lane: every byte figure is either
 **read** from the size ledger's explain document named below or an **estimate** from the code, to
 be read on that document after the merge.
 
@@ -88,11 +88,11 @@ reverted when they do not move by its expectation.
 | step | job | change | bytes (estimate) | put Ir | receive Ir |
 |------|-----|--------|-----------------:|--------|-----------|
 | **S1 (carried here)** | filter | the put's decision hands its leg the head the row's plain way keeps (`PutGoes::Plain`, `PutGoes::Options`, `Publication::head`); `leg_of` looks the row up no more, and `decide_put` and `keep_plan` look it up through one body (`filter_row`) | -40 to -100 | planned put 0; a put with options one row lookup fewer (the id's handle, the slot's generation, the way's head); the first plain put at an epoch the same | 0 |
-| S2 | key resolution | `put_leg` makes the put's leg (`leg_of`) and hands it to the fan-out and to `keep_plan`, which plans with the key the leg named in place of a `named_at` of its own; `fan_out_in` stays for `wait_for_slots` and the hand-off, whose session is let go between tries | -60 to -150 | planned put and put with options 0; the first plain put at an epoch one naming fewer | 0 |
-| S3 | the plan | the send epoch `decide_put` read for the plan is the one the put plans at (`plan_at`); where a `wz_round` build sends what was handed between the two, a plan kept at the earlier epoch is never taken, which costs one more put that is not planned | -30 to -60 | the first plain put at an epoch one epoch read fewer | 0 |
-| S4 | key resolution | `keep_plan` walks the links only where a link names a key its own way (`shared-key-ids`); without it every link names the key as the session does, and the row's own check (`WriteFilterRow::keep_plan`) is the plan's | -60 to -150 (the walk, its `SendTo` body) | the first plain put at an epoch the walk fewer | 0 |
-| S5 | QoS | a plain put's facts made into its metadata and its `SendAs` at one site, before the planned and the plain arms part | -30 to -60 | 0 | 0 |
-| W-P1 | statements | the publish statements (a set of links, a retry, the all-or-none form) a capability switch of `PublishOptions` the zenoh-pico preset turns off: `StatementNotHonoured::of_publish` and `plain_put_params`' checks of them leave the case | -60 to -150 | 0 | 0 |
+| S2 (carried, section 6) | key resolution | `put_leg` makes the put's leg (`leg_of`) and hands it to the fan-out and to `keep_plan`, which plans with the key the leg named in place of a `named_at` of its own; `fan_out_in` stays for `wait_for_slots` and the hand-off, whose session is let go between tries | -60 to -150 | planned put and put with options 0; the first plain put at an epoch one naming fewer | 0 |
+| S3 (carried) | the plan | the send epoch `decide_put` read for the plan is the one the put plans at (`plan_at`); where a `wz_round` build sends what was handed between the two, a plan kept at the earlier epoch is never taken, which costs one more put that is not planned | -30 to -60 | the first plain put at an epoch one epoch read fewer | 0 |
+| S4 (carried) | key resolution | `keep_plan` walks the links only where a link names a key its own way (`shared-key-ids`); without it every link names the key as the session does, and the row's own check (`WriteFilterRow::keep_plan`) is the plan's | -60 to -150 (the walk, its `SendTo` body) | the first plain put at an epoch the walk fewer | 0 |
+| S5 (carried) | QoS | a plain put's facts made into its metadata and its `SendAs` at one site, before the planned and the plain arms part | -30 to -60 | 0 | 0 |
+| W-P1 (carried as a feature, section 6) | statements | the publish statements (a set of links, a retry, the all-or-none form) a capability switch of `PublishOptions` the zenoh-pico preset turns off: `StatementNotHonoured::of_publish` and `plain_put_params`' checks of them leave the case | -60 to -150 | 0 | 0 |
 
 S1 to S5 together about -220 to -520 bytes; with W-P1 about -280 to -670.
 
@@ -140,3 +140,73 @@ What the main session reads to land it: the case's total and `put_on_links` (exp
 and the put side of the perf matrix (not up), the receive at arm W (unchanged); the put's `cfg`
 forms compile in the default build, `listen`, `group`, `local-subscriber`, `shared-key-ids` and
 the `wz_round` form (`WZ_COOP_VALUE_LOCKS=off`, with `listen` and with `group`).
+
+## 6. S2 to S5 and W-P1 as carried
+
+Each step is one commit on the branch `put-next`, in the order of section 4. Nothing was built,
+run or measured by this lane; the figures of section 4 stay estimates until the main session reads
+them.
+
+| step | Change-Id | what changed | where it departs from section 4 |
+|------|-----------|--------------|---------------------------------|
+| S2 | `I69acdc682f8d67e596390151ce59873197fd2a3c` | `put_leg` makes the put's leg once (`leg_of`) and sends it by `fan_out_leg` (inlined whole); `keep_plan` takes the key that leg named. `fan_out_in` is compiled only where `wait_for_slots` or the hand-off send through it (`listen`, or `wz_round` with `group`) | the plan was made of the filter's key (`row.key()`) under the put's declaration; it is now made of the key the put was sent on, which the row's own check (`WriteFilterRow::keep_plan`, the key's text against the row's) refuses when it is not the filter's: a bare put on a key other than its filter's was planned under the filter's key and its next put written there |
+| S3 | `I60327d7598a7edf02f3e5198e369f6868e595fd4` | `decide_put` reads the send epoch once for a bare put of the row's way and hands the first leg that reading (`PlainBy::Named::plan_at`); `put_leg` reads it no second time | the epoch is read where no group the session joined takes the put the general way, so a session that joined a group, whose puts are never written from a plan, keeps none; before, it planned at an epoch read apart |
+| S4 | `I6ac1b36f66e9f4ddbf44fcdc3671a232155d1841` | `keep_plan` asks the links up how they name the key only with `shared-key-ids`; without it the row's own check is the plan's | without `shared-key-ids` a plan is kept while a link up is not lent at that moment, which says nothing of how it names the key; a test seam counts the links a plan asked (`Core::plan_links`) |
+| S5 | `I35029f8c70744a97c2bfb937e96be25777eb2aaa` | `PutGoes::Plain` carries the facts and `PlainBy` (`Planned`, `Named`); `put_leg` makes the metadata and the `SendAs` once, before the two arms part | none |
+| W-P1 | `I53c10324b84f2ce513c88b2776afd87922d92f00` | `wz-session-core`'s feature `publish-statements` (on in its `default`) holds `PublishOptions::links`, `admission_retry`, `atomic_tx` and their setters; `PublishOptions::statement` names the first one made, a constant `None` without the feature; `StatementNotHonoured::of_publish` and `plain_put_params` read it alone | not a capability of `deploy/wz-config.toml`: the pico ABI has no door that states a set of links, a retry or the all-or-none form, so turning it on in a pico build would change nothing a program can reach, and there is no choice for a preset to make. It is a fact of the graph: `wz-capi-core` and `wz-capi-c`, whose doors and faces state and honour them, name it (the tokio runtime has it by the core's `default`); the pico graph (`wz-capi-pico`, `wz-capi-coop`, `wz-capi-port`, `wz-session-mcu`, `wz-runtime-coop`, every one without the core's defaults) leaves it off; the tests of `wz-capi-port` and `wz-capi-coop` name it on a dev-dependency. Off, the fields do not exist, so no caller can state what an engine would then ignore |
+
+The tests, and the line whose change turns each red:
+
+- S2: `tests::plain_put::a_put_plans_its_way_by_the_key_its_leg_named` (new): two bare puts of a
+  publisher whose filter is on `demo/x`, made on `demo/z` under the declaration of `demo/x`, plan
+  nothing and reach the router on `demo/z`; the CONTROL puts on `demo/x` are planned after the
+  first. Red when `keep_plan` names `row.key()` again in place of the leg's `named`.
+- S3: `tests::plain_put::a_bare_put_reads_the_send_epoch_once` (new): one read of the epoch for the
+  first bare put at an epoch and one for a planned put; none for a put with options or a given way.
+  Red when `put_leg` reads `send_epoch` again for `plan_at`.
+- S4: `tests::plain_put::a_plan_asks_the_links_only_where_they_name_keys_their_own_way` (new): the
+  one link is asked once with `shared-key-ids` and never without; the CONTROL second put is
+  planned either way. Red when the walk in `keep_plan` loses its `cfg(feature = "shared-key-ids")`.
+- S5: `tests::plain_put::a_bare_put_rides_as_its_way_says_named_or_planned` (new): a best-effort
+  way's named put and its planned put both reach the router best-effort (the router stand-in now
+  records each sample's reliability, `Seen::reliabilities`). Red when either arm makes its
+  `SendAs` from anything but the way's facts.
+- W-P1: `publish_options::plain_put_tests::each_statement_a_publish_makes_is_named_in_its_order`
+  (new, with the feature) and `a_build_without_the_statements_states_none` (new, without it); the
+  three tests of the statements and the plain lane are compiled with the feature; kept:
+  `wz-capi-port`'s `each_statement_is_refused_by_its_name_and_the_defaults_pass` and
+  `wz-capi-coop`'s `tests::link_sets`. Red when `statement` names a statement by another's
+  name, or answers one where the options hold none.
+- Kept for every step: the module's plan tests (`the_puts_of_a_publisher_at_one_send_epoch_are_written_from_its_plan`,
+  `a_put_looks_its_write_filters_row_up_once`, `a_plan_is_not_taken_once_a_peer_retracts_what_opened_its_filter`,
+  `a_plan_is_made_again_over_a_link_dialled_again`), `tests::shared_key_ids`, `tests::group`, `tests::local`.
+
+## 7. F1 not written
+
+F1 (section 4.1) is left unwritten, for the reason the section gives: it moves work onto the
+dispatch of a declaration a peer sends, a receive, and the owner's rule is that a step raises no
+receive's instructions; whether that work stays off the receive arm is a measurement this lane
+cannot make. The code adds a second reason to measure first: the put's ask is already a compare
+when nothing was declared since (`SessionTables::write_filter_row_open`: the verdict kept with the
+peers' write count, `PeerDeclarations::written`, read again only when that count moved), so the
+put's instructions F1 would save are a load and a compare on a put after a declaration, while its
+cost is a walk of the write filters, each key matched against the declared one, on every
+declaration that arrives. Its bytes (`write_filter_row_open` off the put, `decide_alone` left only
+the put whose destination admits no peer) are the reason to design it once the receive arm of a
+declaration is read.
+
+## 8. What the main session reads to land S2 to S5 and W-P1
+
+- The case's total and `put_on_links` in the explain document (expected together -180 to -420
+  for S2 to S5, the sum of their rows in section 4, and W-P1's -60 to -150 where `StatementNotHonoured::of_publish` and
+  `plain_put_params`' statement checks leave the case); `decide_alone` unchanged; the peer and api
+  cases of C1cs lower or equal.
+- The 8 B put on the opprofile line (the planned path) not up, the put side of the perf matrix not
+  up, the receive at arm W unchanged: no receive or delivery body changed, and no step adds a call
+  to the put (`fan_out_leg` is inlined whole).
+- The put's `cfg` forms compile: the default (`threads`), `listen`, `group`, `local-subscriber`,
+  `shared-key-ids`, `transport-stats`, the `wz_round` form (`WZ_COOP_VALUE_LOCKS=off`, with
+  `listen` and with `group`), the D12 form and `tables-on-use`; `wz-session-core` with and without
+  `publish-statements`; `wz-capi-core`, `wz-capi-c` and `wz-zenoh`, which state the statements.
+- The generated feature model (`sources/features/wz-session-core.scxml`, `sce_feature_model` in its
+  write mode), which names the new feature.
