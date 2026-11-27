@@ -726,17 +726,23 @@ fn token_matches(token_keyexpr: &str, pattern: Option<&str>) -> bool {
     }
 }
 
-/// The bytes [`build_token_reply`] encodes to for the same arguments: what a sender with no
-/// allocator asks a link to lend for it, since a `Declare` has no size constant (its keyexpr
-/// suffix's bound is upstream's u16 length). Its own frame, not inlined, so the `Declare` it
-/// counts is on the stack only while it counts. A reply [`build_token_reply`] refuses counts as
-/// zero: the encoder that follows refuses it with the same error.
-#[cfg(all(feature = "liveliness-token", not(feature = "alloc")))]
+/// The bytes the token reply is written as for the same arguments, a declaration of its one kind
+/// ([`crate::lent_control::token_reply_declaration`]): what a sender with no allocator asks a link
+/// to lend for it, since a `Declare` has no size constant (its keyexpr suffix's bound is upstream's
+/// u16 length). Its own frame, not inlined, so the declaration it counts is on the stack only while
+/// it counts. A reply that writer refuses counts as zero: the encoder that follows refuses it with
+/// the same error.
+#[cfg(all(
+    feature = "liveliness-token",
+    feature = "storage-profile",
+    not(feature = "alloc")
+))]
 #[inline(never)]
 pub fn token_reply_len(token_id: u64, keyexpr: &str, interest_id: u64) -> usize {
-    build_token_reply(token_id, keyexpr, interest_id).map_or(0, |declare| {
-        wz_codecs::declare::DeclareWire::measure(&declare).len()
-    })
+    crate::lent_control::token_reply_declaration(token_id, keyexpr, interest_id)
+        .map_or(0, |reply| {
+            wz_codecs::declare::DeclareWire::measure(&reply).len()
+        })
 }
 
 /// R311ho — build the borrowed `Declare(DeclToken)` interest-response for

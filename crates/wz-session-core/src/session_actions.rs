@@ -246,7 +246,7 @@ use crate::auth_dispatch::AuthDispatch;
 // R311y530 — `build_final_reply` dropped: the `DeclFinal` terminator now comes
 // from the UNGATED `declare_build` twin so the same seam serves the
 // session-local subscriber chain (which exists without `liveliness-token`).
-#[cfg(feature = "liveliness-token")]
+#[cfg(all(feature = "liveliness-token", feature = "alloc"))]
 use crate::declare::local_token::build_token_reply;
 
 // Builder + frame-encode modules are imported by glob. The wire-emit action
@@ -5034,10 +5034,10 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
 // encodes the same borrowed value through `SliceSink`. No reply-shape
 // duplication across profiles.
 impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R, T> {
-    // With no allocator the borrowed reply (`build_token_reply`, which is what the
-    // heap form converts to its owned mirror) is encoded as it is, into the lent slot:
-    // the same bytes, the same routing (control band, the default QoS a reply with no
-    // `ext_qos` reads as).
+    // With no allocator the reply is written into the lent slot as a declaration of its one
+    // kind (`lent_control::token_reply_declaration`, the group's writer of it too): the bytes of
+    // the borrowed reply the heap form converts to its owned mirror (`build_token_reply`), the
+    // same routing (control band, the default QoS a reply with no `ext_qos` reads as).
     #[cfg(all(feature = "liveliness-token", not(feature = "alloc")))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
         // A keyexpr past the session's `MAX_KEYEXPR_BYTES` is not answered, as the subscriber
@@ -5060,7 +5060,16 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                     crate::declare::local_token::token_reply_len(token_id, keyexpr, interest_id)
                 }),
                 crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-                as_encoder(&|sink| build_token_reply(token_id, keyexpr, interest_id)?.encode(sink)),
+                as_encoder(&|sink| {
+                    wz_codecs::declare::DeclareWire::encode_source(
+                        &crate::lent_control::token_reply_declaration(
+                            token_id,
+                            keyexpr,
+                            interest_id,
+                        )?,
+                        sink,
+                    )
+                }),
             )
             .map(|_| ());
     }
@@ -5090,7 +5099,14 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
             },
             || {
                 let reply = |sink: &mut crate::tx_buf::TxSink<'_>| {
-                    build_token_reply(token_id, keyexpr, interest_id)?.encode(sink)
+                    wz_codecs::declare::DeclareWire::encode_source(
+                        &crate::lent_control::token_reply_declaration(
+                            token_id,
+                            keyexpr,
+                            interest_id,
+                        )?,
+                        sink,
+                    )
                 };
                 let _ = self.dispatch_network_message_at(
                     DispatchStage::Fresh,
