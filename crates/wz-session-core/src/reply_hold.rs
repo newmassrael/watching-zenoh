@@ -405,6 +405,18 @@ impl<O> HeldReplies<O, Lent> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<O> HeldReplies<O, crate::bounded::OnUse> {
+    /// A hold of at most `rows` rows, under the build's bound, that takes their memory at the first
+    /// reply it holds.
+    pub fn counted(rows: usize) -> Self {
+        Self {
+            rows: BoundedVec::counted(rows),
+            refused: 0,
+        }
+    }
+}
+
 // SAFETY: its rows are a sequence of a policy whose sequences are empty at all zero bytes
 // (`ZeroSeqs`), and a hold that refused nothing is a zero count.
 unsafe impl<O, P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for HeldReplies<O, P> {}
