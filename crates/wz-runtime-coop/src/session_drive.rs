@@ -698,10 +698,10 @@ pub struct IpLocator {
 
 impl IpLocator {
     /// zenoh's text of the locator, written without `core::fmt` into text of
-    /// [`LONGEST_IP_LOCATOR_LEN`] bytes, so every IP locator is written whole. Whether a row of the
-    /// build holds it, at most [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes, is the admission's
-    /// question ([`crate::udp_link::ends_fit`]): every IPv4 locator does, the bound being held at
-    /// compile time to at least [`LONGEST_IPV4_LOCATOR_LEN`].
+    /// [`LONGEST_IP_LOCATOR_LEN`] bytes, so every IP locator is written whole. Whether the build's
+    /// pair of locators holds it, under a bound that pair states, is the admission's question
+    /// ([`crate::udp_link::ends_fit`]): every IPv4 locator does, the bound being held at compile
+    /// time to at least [`LONGEST_IPV4_LOCATOR_LEN`].
     pub fn text(&self) -> FixedText<LONGEST_IP_LOCATOR_LEN> {
         let mut text = FixedText::new();
         self.write(&mut text);
@@ -972,8 +972,8 @@ pub const LONGEST_IPV4_LOCATOR_LEN: usize = "tcp/255.255.255.255:65535".len();
 
 /// The longest IP locator text, 62 bytes: an IPv6 end with every group written out and the widest
 /// scope, `tcp/[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535`. A bound below it still
-/// builds; a link with an end longer than the bound is refused where it is admitted
-/// ([`crate::udp_link::ends_fit`]).
+/// builds; where the build's pair of locators is held to the bound (`session-slot`), a link with
+/// an end longer than it is refused where it is admitted ([`crate::udp_link::ends_fit`]).
 pub const LONGEST_IP_LOCATOR_LEN: usize =
     "tcp/[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535".len();
 
@@ -1036,8 +1036,8 @@ pub enum LinkOpenError {
     /// again later, which is why a dial that meets it is retried.
     Exhausted,
     /// The stack cannot open a link of the locator's protocol at all (an lwIP
-    /// image asked for `tcp/`), or the link's ends are longer than a row of the
-    /// build names them in (`crate::udp_link::ends_fit`). Permanent for the
+    /// image asked for `tcp/`), or the link's ends are longer than the build
+    /// names them in (`crate::udp_link::ends_fit`). Permanent for the
     /// locator: a retry would meet the same answer.
     Unsupported,
     /// The stack tried and the other end did not take the link (a TCP

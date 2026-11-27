@@ -342,8 +342,9 @@ impl<'a> StreamEnds<'a> {
         }
     }
 
-    /// Whether the rows of the build name both ends: an IP end as [`ends_fit`] asks, a FIFO by
-    /// the length of its locator, `unixpipe/` and its path.
+    /// Whether the build names both ends where it keeps them: an IP end as [`ends_fit`] asks of
+    /// the build's pair of locators, a FIFO by the length of its locator, `unixpipe/` and its
+    /// path, which a face's row holds as text.
     pub fn fit(self) -> bool {
         match self {
             Self::Ip { proto, local, peer } => ends_fit(proto, local, peer),

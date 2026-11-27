@@ -181,7 +181,8 @@ impl ConnText {
 
     /// The text `write` writes, in an allocation of its own of the text's length: a link's end
     /// written once, where it is handed out, from the facts its row holds. Written on the stack,
-    /// and again on the heap only past a row's bound, which only a heap engine's link reaches.
+    /// and again on the heap only past the build's locator bound: a unix socket path, or an IPv6
+    /// end with its scope under a bound shorter than the longest.
     fn written(write: impl Fn(&mut dyn TextOut)) -> Self {
         let mut inline: FixedText<{ wz_session_core::caps::MAX_LOCATOR_LEN }> = FixedText::new();
         write(&mut inline);
