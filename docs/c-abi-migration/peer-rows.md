@@ -566,6 +566,29 @@ another thread finds is what it finds today. Each decision is written before its
   then read through a field rather than through a counted handle: the same instructions or fewer a
   message.
 
+- **R4's handle form, and where the halves lie (main, 2026-11-28; read against the code).** No
+  third form of `SessionLinkActions`: `session-slot` keeps choosing between its two, the halves
+  as the bundle's fields and the halves behind `R::Shared`, and in the second the runtime's
+  `Shared` says whether a handle counts. What the code shows before it is written:
+  (1) a half has one holder, the link's actions (`SessionLinkActions::build_held`); the gates
+  and the dispatch hold the actions, not a half, and `resource-snapshot`'s `KernelCount` is
+  the one other holder, a clone of the kernel's handle; (2) the face's read slot cannot own the
+  halves: with `threads` a slot places its next link while the last one's wire is still in its
+  send place, held by a send on another thread (`DirectSlot::fill_site` finds the place held
+  and owes the change, `site_owed`), so one place a row would be written under a wire in use;
+  (3) the actions' cell lives exactly as long as anything reaches a half. **Decided:** the halves
+  lie in the actions' cell, beside the actions, written there in place (`ActionsCell`), and the
+  actions reach them through a `PlacedRef` that counts nothing; the last handle on the actions
+  drops the three, the actions first, so the pair's cell and its table leave the plan. The count
+  of `resource-snapshot` holds the actions (one count, as the kernel's handle was): the
+  record it lies in is let go of under the session's lock, on no rule of the slot's, so it keeps
+  the cell by counting it. The form
+  is the lock kind's (`LockKind::Halves`): the engine's kinds (`Confined`, `ManyThreads`)
+  place; the heap profile's kind (`sync::Shared`), whose sessions share their halves through
+  `ShareValues` with no cell to own them, counts. The round's lock kind is the one-thread
+  form's (`Confined`), and its halves have the same one holder, so it places too: a count there
+  separates nothing, and a form for the round alone would be a type that only names the build.
+
 ### 7.4 R2, landed
 
 - **One table of the faces' records** (`crates/wz-runtime-coop/src/faces.rs` @
