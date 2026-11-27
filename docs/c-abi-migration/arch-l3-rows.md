@@ -147,7 +147,7 @@ What it shows:
 | H1 | the id a declaration is numbered by | `SessionTables`'s `next_entity`, minted by `Declaring::mint` after the room and the key | none | no | gone (D1, D2) |
 | H2 | which row an entity is | the row's handle (`Declared::handle`, generation-checked, P10), named across the port by the row's word (`EntityRow`) | none: the door keeps the row, and the entity id is read off the row (`SessionEngine::entity_id_of`) | no | gone (D4) |
 | H3 | the key's text while a retraction is written | the row's `EntityKey` | none | no | gone (D3, D3q, D3t) |
-| H4 | what keeps a key's declaration alive | the tables' count of the declaration (`KeyexprCount`) | the ABI's anchor in every callback row (`KeyAnchor` in `SubscriberRow`, `QueryableRow`, `LivelinessRow`), which the pico ABI fills only on its advanced plane (`wz-capi-pico/src/advanced_forms.rs`) | the field and its drop, never filled | D5 |
+| H4 | what keeps a key's declaration alive | the tables' count of the declaration (`KeyexprCount`) | none where no ABI makes an anchor: `KeyAnchor` is of no size without the port's `key-anchors`, which only the ABIs that retract by an object of their own name (the advanced subscriber's host, the Rust API) | no | gone (D5) |
 | H5 | the callback protocol of a row | one record for every kind (`LatchedRow<S, A>` in `wz-capi-coop/src/engine.rs`) | none | no | gone (D6) |
 | H6 | the session's L3 tables as a value | `SessionTables` and `PeerTables` in `wz-session-core` | `RegistryOf<H>` in `wz-capi-coop/src/engine/registry.rs`: the application's observer (`SlotObserverOf`, whose `tables` is the `SessionTables`), the faces' `FaceTables` (`peer`, `gets`, the due row), the holders' index and the written count; every operation reaches the tables through it | 1,101 bytes; 7,938 in the peer case, 18,542 in the api case | D7 |
 | H7 | a pending get | each leg's entry in its face's table of pending gets (`FaceTables::gets`, `Requesters<ConsolidatingSink<LegSink, LegHold>>`); the tables' `PendingGetRow` is not built on this engine (6.3) | the get's own facts (mode, accepted key, deadline) once for each leg; the session's note of each leg went with H7a, the callback for each leg with H7b | no | D8: H7a, H7b, H7c1 landed, H7c2, H7d (6.3) |
@@ -178,7 +178,7 @@ reverted when its row does not move by its expectation.
 | D3q | H3, the queryable's | landed | `undeclare_retracted`, `RetractedEntity` (`wz-session-core/src/session_tables.rs`); the engine's `undeclare_queryable` | 0 (not built); the api case -20 to -150, as D3 read it for the subscriber | 0 | `session_tables::tests::a_queryables_undeclaration_names_its_retraction_off_the_row_it_removes`, `a_queryable_undeclared_while_its_callback_runs_names_its_retraction_past_the_row` |
 | D3t | H3, the token's | landed | `RetractedEntity for TokenRow`, `undeclare_token`; the engine's `undeclare_liveliness_token` | 0 (not built); the api case 0 to -60 (the names are read once, in the tables; the row is no longer handed back whole) | 0 | `session_tables::tests::a_tokens_undeclaration_names_its_retraction_off_the_row_it_removes`; `tests/liveliness.rs` unchanged |
 | D4 | H2, every kind at once | landed (6.4) | the port's `Declared` answers the row (`EntityRow`, the handle's bits on this engine, the id on an engine that has no rows); `undeclare_subscriber`, `undeclare_queryable` and the liveliness kinds take it; the doors keep it; L3's undeclarations by handle are there already | -150 to -300 (the walk of two tables by id), more where liveliness is built | 0 | an undeclaration by a row of an earlier generation finds nothing; one of a liveliness subscriber reaches its own table |
-| D5 | H4 | with S-SINK (`docs/win-budget/size.md` section 3.1) | the port's `KeyAnchor` as a type of no size where no ABI keeps an anchor | -100 to -200 text, 32 bytes a row of the region | 0 | the anchor test of `tests/liveliness.rs` kept on the build that keeps anchors; a size assertion of the row on one that does not |
+| D5 | H4 | landed (6.5) | the port's `KeyAnchor` as a type of no size where no ABI keeps an anchor | -100 to -200 text, 32 bytes a row of the region | 0 | the anchor test of `tests/liveliness.rs` kept on the build that keeps anchors; a size assertion of the row on one that does not |
 | D6 | H5 | landed | `wz-capi-coop/src/engine.rs` (`LatchedRow<S, A>`, `RowCall<S, A>`, one `RowCallback` impl), `engine/query.rs` and `engine/liveliness.rs` (`QueryableRow`, `LivelinessRow` its instances); the subscriber's timestamp choice is the row's `shown` field, so its row is laid out as before | 0: the measured case builds the subscriber's instance alone, whose layout, constructor (out of line) and calls are unchanged; the api case 0 (each kind is still its own instance) | 0 | `closure_drops`, `queryable`, `liveliness`, `round` unchanged |
 | D7 | H6 | with the driver lane, step 6d | the registry becomes the session core's (`wz-session-core`: the table set and the faces' sets, a face named by its set's handle) | -300 to -800; `pico-peer-coop` and the api case to be read (7,938 and 18,542 held now) | to be read: the receive's one look at its face's set is kept, and no call is added | the registry's tests move with it; `direct_receive`, `in_place` |
 | D8 | H7 (H8 read as not held twice, 6.2) | designed (6.3); H7a, H7b, H7c1 landed, H7c2, H7d to come | the note of each leg, then a callback for each leg, then the faces' copies of the get, then the snapshot's | 0; the api case by step (6.3) | 0; H7c read on the reply's receive | `get`, `local_query`, `queryable`, `snapshot`, `cancel` |
@@ -468,6 +468,29 @@ subscriber's row undeclares the subscriber holding the same handle's bits, or a 
 undeclaration takes a row of another table); `liveliness::a_history_subscriber_undeclared_from_its_history_is_let_go_of_before_its_declaration_returns`
 (the callback finds its own row by the id the session hands out next); the router node's and the
 tokio port's tests unchanged in what they hold, their ids read through `EntityRow::as_id`.
+
+### 6.5 D5, landed
+
+What a key keeps alive past its declaration is a capability of the port, `key-anchors`
+(`wz-capi-port/Cargo.toml`), as the shared sinks are `shared-sinks`: it gates `WireKey::keeping`,
+`WireKey::aliased_in`, the rest a key lends from what it keeps (`Suffix::Lent`) and the key's
+`Keeps`. Without it `KeyAnchor` has no field, so the anchor every subscriber's, queryable's and
+liveliness subscriber's row holds is of no size and has no drop, and a `WireKey` holds its name
+alone. It is named where an anchor is made: `wz-ext-pubsub`'s `engine-host` (the advanced
+subscriber's host, which the pico ABI's advanced plane and the zenoh-c ABI run), `wz-zenoh`'s port
+dependency (the Rust API's keeps), and the cooperative engine's tests (`liveliness`'s kept name).
+The pico preset without `advanced` builds none of it. The rest of `WireKey`'s forms another ABI
+alone makes (`Suffix::Owned`) are `arch-l4-facade.md` F9's, on the same seam.
+
+Expected: client and peer -100 to -200 text (`Keeps`' drop in every row's drop and in each
+`WireKey`'s, `into_anchor`'s move) and the anchor's bytes in each row of the three kinds; the api
+case 0 where `advanced` is built. Receive Ir 0: the anchor is touched by the declaration and the
+row's drop alone. Tests: `wz-capi-port` `tests::an_anchor_is_of_no_size_where_no_abi_keeps_one`
+(a build without `key-anchors`; red if the anchor or the key keeps an object's place);
+`tests::a_kept_rest_is_lent_to_the_key` and `tests::a_kept_anchor_lives_until_what_the_key_kept_is_dropped`
+with `key-anchors` (a row of `scripts/lib/nondefault-tests-gate.sh`); the cooperative engine's
+`liveliness::a_tokens_kept_name_is_let_go_of_by_its_declaration_with_no_lock_held` unchanged, its
+dev-dependency naming `key-anchors`.
 
 ## 7. The receive
 
