@@ -6055,7 +6055,7 @@ mod tests {
 // (C1c-g each pin a reply-consumer marker ON, cfg'ing the module out).
 #[cfg(test)]
 #[cfg(all(
-    feature = "storage-profile",
+    feature = "alloc",
     feature = "codec-response",
     not(feature = "pubsub-put"),
     not(feature = "pubsub-delete"),

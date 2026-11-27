@@ -1224,6 +1224,7 @@ pub fn response_final<'a>(
 /// would be caught by the first row that differs and not pass an empty loop.
 #[cfg(all(
     test,
+    feature = "alloc",
     feature = "codec-declare",
     feature = "declare-final",
     feature = "codec-response-final"

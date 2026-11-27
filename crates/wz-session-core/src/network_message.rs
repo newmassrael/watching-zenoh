@@ -6769,6 +6769,7 @@ mod attachment_identity_tests {
 // extension.
 #[cfg(all(
     test,
+    feature = "alloc",
     feature = "codec-push",
     feature = "codec-request",
     feature = "codec-response",
