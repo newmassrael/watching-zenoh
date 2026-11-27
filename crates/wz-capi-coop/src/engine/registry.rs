@@ -2787,16 +2787,13 @@ mod tests {
     #[cfg(feature = "liveliness")]
     #[test]
     fn the_dial_face_stages_a_liveliness_answer_in_its_lent_row() {
-        use wz_session_core::declare::local_token::DeclResponseItem;
+        use wz_session_core::declare::local_token::LocalTokenRegistry;
 
         let mut held = held(1);
-        let staging = &mut face(&mut held.registry, DIAL_FACE).peer.pending_declares;
-        assert!(staging
-            .push(DeclResponseItem::Final { interest_id: 1 })
-            .is_ok());
-        assert!(staging
-            .push(DeclResponseItem::Final { interest_id: 2 })
-            .is_err());
+        let none = LocalTokenRegistry::new();
+        let staging = &mut face(&mut held.registry, DIAL_FACE).peer.token_answers;
+        assert!(staging.stage(&none, None, 1).is_ok());
+        assert!(staging.stage(&none, None, 2).is_err());
     }
 
     /// An accepted face takes the set the open lent where it lies, empties it there when it goes,

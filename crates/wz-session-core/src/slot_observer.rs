@@ -593,9 +593,10 @@ pub struct SlotObserverOf<
     /// The application's listeners on the tokens a peer declares.
     #[cfg(feature = "liveliness-token")]
     pub liveliness: LivelinessRegistry<K::Declared, K::Undeclared, P>,
-    /// The tokens wz itself holds, answered to a peer's interest, and the staging of those
-    /// answers. Where the tables keep the session's tokens as rows ([`ObserverTables::held_tokens`])
-    /// the answers are read from them and this registry holds none.
+    /// The tokens wz itself holds, which a peer's interest is answered from into that peer's
+    /// staging (`PeerTables::token_answers`). Where the tables keep the session's tokens as rows
+    /// ([`ObserverTables::held_tokens`]) the answers are read from them and this registry holds
+    /// none.
     #[cfg(feature = "liveliness-token")]
     pub local_tokens: LocalTokenRegistry<P>,
 }
@@ -1654,9 +1655,6 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             .limit_observers_to(limits.max_decl_observers_held());
         #[cfg(feature = "liveliness-token")]
         self.local_tokens.limit_to(limits.max_local_tokens_held());
-        #[cfg(feature = "liveliness-token")]
-        self.local_tokens
-            .limit_interest_replies_to(limits.max_pending_declares_held());
     }
 
     /// Fan an [`IterationEvent`] of one session into every registry, against that
@@ -2042,15 +2040,9 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         {
             let held: &dyn crate::declare::local_token::HeldTokens =
                 self.tables.held_tokens().unwrap_or(&self.local_tokens);
-            let refused = self.local_tokens.answer_iteration_event(
-                held,
-                event,
-                peer_table,
-                &mut peers.pending_declares,
-            );
-            peers.token_interest_chains_refused = peers
-                .token_interest_chains_refused
-                .saturating_add(u32::try_from(refused).unwrap_or(u32::MAX));
+            peers
+                .token_answers
+                .answer_iteration_event(held, event, peer_table);
         }
         #[cfg(any(
             feature = "codec-response",
@@ -2422,8 +2414,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         #[cfg(feature = "liveliness-token")]
         // Drained in place: the rows are the ones the peer's tables were made with, which a table
         // moved out would take with it.
-        while !peers.pending_declares.is_empty() {
-            let item = peers.pending_declares.remove(0);
+        while let Some(item) = peers.token_answers.next_answer() {
             match item {
                 crate::declare::local_token::DeclResponseItem::Token {
                     token_id,
@@ -2476,7 +2467,7 @@ fn stages_replies<Q: RequesterTables, T: Storage>(peers: &PeerTables<T>, request
     }
     #[cfg(all(feature = "liveliness-token", feature = "interest-answer"))]
     {
-        staged |= !peers.pending_declares.is_empty();
+        staged |= !peers.token_answers.is_empty();
     }
     #[cfg(feature = "liveliness-get")]
     {

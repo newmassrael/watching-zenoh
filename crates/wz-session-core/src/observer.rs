@@ -320,6 +320,9 @@ pub struct ObserverFace<'a> {
     /// The tokens the peer declared.
     #[cfg(feature = "liveliness-subscriber")]
     pub tokens: &'a mut crate::declare::liveliness_subscriber::PeerTokens,
+    /// The answers staged to the peer's liveliness interests.
+    #[cfg(feature = "liveliness-token")]
+    pub token_answers: &'a mut crate::declare::local_token::TokenAnswers,
     /// The session's gets pending on the peer.
     pub replies: &'a mut ReplyRegistry<
         crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>,
@@ -344,6 +347,9 @@ pub struct ObserverFaceRef<'a> {
     /// The tokens the peer declared.
     #[cfg(feature = "liveliness-subscriber")]
     pub tokens: &'a crate::declare::liveliness_subscriber::PeerTokens,
+    /// The answers staged to the peer's liveliness interests.
+    #[cfg(feature = "liveliness-token")]
+    pub token_answers: &'a crate::declare::local_token::TokenAnswers,
     /// The session's gets pending on the peer.
     pub replies:
         &'a ReplyRegistry<crate::reply_sink::ConsolidatingSink<crate::reply_sink::BoxedReplySink>>,
@@ -527,6 +533,8 @@ impl ApplicationLayerObserver {
                 remote_queryables: &mut peers.remote_queryables,
                 #[cfg(feature = "liveliness-subscriber")]
                 tokens: &mut peers.tokens,
+                #[cfg(feature = "liveliness-token")]
+                token_answers: &mut peers.token_answers,
                 replies: &mut requesters.replies,
                 #[cfg(feature = "liveliness-get")]
                 liveliness_gets: &mut requesters.liveliness_gets,
@@ -568,6 +576,8 @@ impl ApplicationLayerObserver {
                 remote_queryables: &peers.remote_queryables,
                 #[cfg(feature = "liveliness-subscriber")]
                 tokens: &peers.tokens,
+                #[cfg(feature = "liveliness-token")]
+                token_answers: &peers.token_answers,
                 replies: &requesters.replies,
                 #[cfg(feature = "liveliness-get")]
                 liveliness_gets: &requesters.liveliness_gets,
@@ -696,7 +706,7 @@ impl ApplicationLayerObserver {
     /// Always zero on the growable backing, where staging never refuses.
     #[cfg(feature = "liveliness-token")]
     pub fn token_interest_chains_refused(&self) -> u32 {
-        self.peers.token_interest_chains_refused
+        self.peers.token_answers.refusals()
     }
 
     /// State the `query-unanswerable-final` value of the session about to be dispatched, from
@@ -912,7 +922,7 @@ impl ApplicationLayerObserver {
     }
 
     /// R311lr — drain the staged declarer-side liveliness interest-responses
-    /// (`peers.pending_declares`) through a [`DeclareReplySink`]. The
+    /// (`peers.token_answers`) through a [`DeclareReplySink`]. The
     /// `DeclareReplySink` sibling of [`Self::flush_query_replies`]: a consumer
     /// that replies to inbound liveliness Interests but drives neither the
     /// query-reply nor the liveliness-get-prune planes (the multicast reply
@@ -989,7 +999,7 @@ impl ApplicationLayerObserver {
     }
 
     /// R311lq — drain the declarer-side interest-response staging buffer
-    /// (`peers.pending_declares`) through a [`DeclareReplySink`].
+    /// (`peers.token_answers`) through a [`DeclareReplySink`].
     ///
     /// R283 / R311hn — every staged `DeclResponseItem` is emitted in stage
     /// order, so each interest-response batch's `Token`s precede its
