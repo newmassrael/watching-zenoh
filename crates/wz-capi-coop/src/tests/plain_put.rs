@@ -8,7 +8,7 @@
 use std::sync::atomic::Ordering;
 
 use wz_capi_port::{
-    FilterId, FilterPlane, FilteredPut, KeyHold, PeerLists, SessionEngine, WireKey,
+    FilterId, FilterPlane, FilteredPut, KeyHold, PeerLists, SessionDrive, SessionEngine, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::publish_options::PublishOptions;
@@ -154,12 +154,18 @@ fn a_put_with_options_asks_its_filter_under_its_own_take() {
 
 /// A put none of whose legs reaches the session, its one link lost, is answered under one take of
 /// its own and sends nothing: a bare put of its publisher's way and one with options alike are
-/// held back by a filter nothing opened. Turned red by a put that asks its filter by two takes
-/// once no leg holds the session, or by one answered as sent by a filter that holds it back.
+/// held back by a filter nothing opened. The session dials its router again, so it outlives the
+/// link: one that dials none ends with its one link, and a closed session holds nothing back.
+/// Turned red by a put that asks its filter by two takes once no leg holds the session, or by one
+/// answered as sent by a filter that holds it back.
 #[test]
 fn a_put_with_no_link_up_is_answered_under_one_take() {
     let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(50),
+        open_timeout_ms: 300,
+        ..config(&router)
+    });
     let hold = engine
         .acquire_keyexpr("demo/x")
         .expect("a session with ids left declares");
@@ -177,6 +183,10 @@ fn a_put_with_no_link_up_is_answered_under_one_take() {
     until(&engine, "the link to be lost", || {
         engine.peer_identities().is_empty()
     });
+    assert!(
+        !SessionDrive::is_closed(&*engine),
+        "the session outlives its link"
+    );
     assert!(
         engine.write_filter_active(filter),
         "nothing opened the filter"
