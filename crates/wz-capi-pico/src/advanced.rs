@@ -44,7 +44,6 @@
 //! callback at declare; wz's subscriber now has a registry of its own, and this
 //! ABI's fan-in is a set for the same reason.
 
-use alloc::sync::Arc;
 use core::ffi::c_void;
 use core::ptr::{addr_of_mut, NonNull};
 use core::time::Duration;
@@ -601,13 +600,24 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         ) else {
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let publisher = match AdvancedPublisherOn::declare_on(
-            Arc::new(PicoPlane::new(session.clone(), declared)),
-            ke,
-            advanced_publisher_options(options),
-            engine.session_zid(),
-        ) {
-            Ok(publisher) => publisher,
+        let plane = PicoPlane::new(session.clone(), declared);
+        let wz_options = advanced_publisher_options(options);
+        let zid = engine.session_zid();
+        // The publisher is declared in the state's place and the rest of the state written after
+        // it, so a refused declaration leaves the place unwritten and the slot gives it back.
+        let filled = slot.try_fill_in_place(|at| -> Result<(), AdvancedPublisherError> {
+            let place = core::ptr::addr_of_mut!((*at).publisher)
+                .cast::<core::mem::MaybeUninit<AdvancedPublisherOn<PicoPlane>>>();
+            AdvancedPublisherOn::declare_in(&mut *place, plane, ke, wz_options, zid)?;
+            core::ptr::addr_of_mut!((*at).engine).write(engine);
+            core::ptr::addr_of_mut!((*at).loaned_keyexpr).write(
+                crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+            );
+            core::ptr::addr_of_mut!((*at).record).write(crate::keyexpr::RecordKey::UNLENT);
+            Ok(())
+        });
+        let state = match filled {
+            Ok(state) => state,
             // A derived `@adv` key no peer could take is the caller's key and
             // not a failure of the session.
             Err(AdvancedPublisherError::InvalidAdvKeyexpr(_)) => return Z_ERR_INVALID,
@@ -616,12 +626,6 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             Err(AdvancedPublisherError::CacheRingUnavailable) => return Z_ERR_SYSTEM_OUT_OF_MEMORY,
             Err(_) => return Z_ERR_GENERIC,
         };
-        let state = slot.fill(AdvPubState {
-            engine,
-            publisher,
-            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            record: crate::keyexpr::RecordKey::UNLENT,
-        });
         // Bound where it lies: the place does not move until the undeclare gives it back.
         (*state).bind();
         (*pub_).handle = state.cast::<c_void>();
@@ -2359,6 +2363,8 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
 
 #[cfg(test)]
 mod tests {
+    use alloc::sync::Arc;
+
     use super::*;
 
     /// The publisher-detection keyexpr is derived where every advanced subscriber derives it, and

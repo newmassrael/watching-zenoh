@@ -193,13 +193,15 @@ impl AdvancedPublisherPlane for RecordingPlane {
         Ok(payload.len())
     }
 
-    fn publish_beacon(
-        &self,
-        _beacon: Option<&Named>,
-        _keyexpr: &str,
-        payload: &[u8],
-        sporadic: bool,
-    ) {
+    fn send_beacon(beacon: &Named, _keyexpr: &str, payload: &[u8], sporadic: bool) {
+        beacon
+            .events
+            .lock()
+            .unwrap()
+            .push(format!("beacon {payload:02x?} sporadic={sporadic}"));
+    }
+
+    fn publish_beacon(&self, _keyexpr: &str, payload: &[u8], sporadic: bool) {
         self.events
             .lock()
             .unwrap()
@@ -222,6 +224,90 @@ impl AdvancedPublisherPlane for RecordingPlane {
             events: Arc::clone(&self.events),
             name: "retained key",
         })))
+    }
+}
+
+/// The recording plane as a test holds it, so the test reads what the composite asked of the plane
+/// it was declared on.
+impl AdvancedPublisherPlane for Arc<RecordingPlane> {
+    type Publisher = Named;
+    type Queryable = Named;
+    type Token = Named;
+    type Beacon = Named;
+    type Timer = Named;
+
+    fn node_hlc(&self) -> &NodeHlc {
+        RecordingPlane::node_hlc(self)
+    }
+
+    fn stamps(&self) -> bool {
+        RecordingPlane::stamps(self)
+    }
+
+    fn order_stamp(&self, proposed: u64) -> Result<u64, PublishError> {
+        RecordingPlane::order_stamp(self, proposed)
+    }
+
+    fn declare_publisher(
+        &self,
+        keyexpr: &str,
+        options: PublishOptions<'static>,
+    ) -> Result<DeclaredPublisher<Named>, AdvancedPublisherError> {
+        RecordingPlane::declare_publisher(self, keyexpr, options)
+    }
+
+    fn declare_cache_queryable(
+        &self,
+        keyexpr: &str,
+        store: &CacheStore,
+    ) -> Result<Named, AdvancedPublisherError> {
+        RecordingPlane::declare_cache_queryable(self, keyexpr, store)
+    }
+
+    fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
+        RecordingPlane::cache_store(self, config)
+    }
+
+    fn declare_token(&self, keyexpr: &str) -> Result<Named, AdvancedPublisherError> {
+        RecordingPlane::declare_token(self, keyexpr)
+    }
+
+    fn declare_beacon(
+        &self,
+        keyexpr: &str,
+        sporadic: bool,
+    ) -> Result<Named, AdvancedPublisherError> {
+        RecordingPlane::declare_beacon(self, keyexpr, sporadic)
+    }
+
+    fn start_beacon_timer(
+        &self,
+        period: Duration,
+        tick: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Named {
+        RecordingPlane::start_beacon_timer(self, period, tick)
+    }
+
+    fn publish(
+        &self,
+        publisher: &Named,
+        keyexpr: &str,
+        payload: &[u8],
+        options: PublishOptions,
+    ) -> Result<usize, PublishError> {
+        RecordingPlane::publish(self, publisher, keyexpr, payload, options)
+    }
+
+    fn send_beacon(beacon: &Named, keyexpr: &str, payload: &[u8], sporadic: bool) {
+        RecordingPlane::send_beacon(beacon, keyexpr, payload, sporadic);
+    }
+
+    fn publish_beacon(&self, keyexpr: &str, payload: &[u8], sporadic: bool) {
+        RecordingPlane::publish_beacon(self, keyexpr, payload, sporadic);
+    }
+
+    fn retained_key(&self, publisher: &Named) -> Option<Retained> {
+        RecordingPlane::retained_key(self, publisher)
     }
 }
 
@@ -317,6 +403,106 @@ fn a_plane_sees_the_beacon_publisher_declared_after_the_token_and_retracted_befo
         "the beacon's publisher was not declared and retracted where the reference does, \
          or its timer was not stopped before the publisher it sends on"
     );
+}
+
+/// The beacon's timer sends through the beacon and holds no plane: the publisher is the plane's
+/// one holder, so a host keeps the plane in the publisher's own place. Turned red by a tick that
+/// keeps a hold of the plane.
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+#[test]
+fn the_beacons_timer_holds_no_plane() {
+    let plane = Arc::new(RecordingPlane::new(true));
+    let publisher = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/beacon",
+        AdvancedPublisherOptions {
+            cache: None,
+            publisher_detection: false,
+            sample_miss_detection: MissDetectionConfig::default().heartbeat(Duration::from_secs(1)),
+            ..AdvancedPublisherOptions::default()
+        },
+        SessionZid::from([0x01]),
+    )
+    .expect("the declaration is accepted");
+    assert_eq!(
+        Arc::strong_count(&plane),
+        2,
+        "the test and the publisher hold the plane, the timer's tick does not"
+    );
+    publisher.put(b"a").unwrap();
+    assert!(plane.tick());
+    assert_eq!(
+        plane
+            .events()
+            .iter()
+            .filter(|e| e.starts_with("beacon "))
+            .count(),
+        1,
+        "the tick sent its beacon through the beacon"
+    );
+    drop(publisher);
+    assert_eq!(
+        Arc::strong_count(&plane),
+        1,
+        "the publisher let its plane go"
+    );
+}
+
+/// A publisher declared in a place of the host's is the publisher `declare_on` hands back, in
+/// that place: refused, the place is left unwritten and the plane given to it is let go; accepted,
+/// the place holds the publisher, whose drop retracts what it declared. Turned red by a refusal
+/// that keeps the plane, or by a field `declare_in` leaves unwritten.
+#[test]
+fn a_publisher_is_declared_in_the_place_its_host_gives() {
+    let plane = Arc::new(RecordingPlane::new(false));
+    let mut place = MaybeUninit::uninit();
+    let refused = AdvancedPublisherOn::declare_in(
+        &mut place,
+        Arc::clone(&plane),
+        "demo/in",
+        AdvancedPublisherOptions {
+            sequencing: Sequencing::Timestamp,
+            cache: None,
+            publisher_detection: false,
+            ..AdvancedPublisherOptions::default()
+        },
+        SessionZid::from([0x01]),
+    );
+    assert!(matches!(
+        refused,
+        Err(AdvancedPublisherError::TimestampingDisabled)
+    ));
+    assert_eq!(Arc::strong_count(&plane), 1, "the refused plane was let go");
+    assert!(plane.events().is_empty(), "nothing was declared");
+
+    let plane = Arc::new(RecordingPlane::new(true));
+    let declared = AdvancedPublisherOn::declare_in(
+        &mut place,
+        Arc::clone(&plane),
+        "demo/in",
+        AdvancedPublisherOptions {
+            cache: None,
+            publisher_detection: true,
+            ..AdvancedPublisherOptions::default()
+        },
+        SessionZid::from([0x01]),
+    )
+    .expect("the declaration is accepted");
+    assert_eq!(declared.keyexpr(), "demo/in");
+    assert_eq!(declared.eid(), 7);
+    assert_eq!(declared.put(b"x"), Ok(1));
+    // SAFETY: `declare_in` answered `Ok`, so the place holds the publisher, dropped once here.
+    unsafe { place.assume_init_drop() };
+    let events = plane.events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.starts_with("drop "))
+            .collect::<Vec<_>>(),
+        ["drop publisher", "drop token"],
+        "the publisher in the place retracted what it declared, in the reference order: {events:?}"
+    );
+    assert_eq!(Arc::strong_count(&plane), 1, "and let its plane go");
 }
 
 /// The plane's timer calls the composite's tick, and the tick is the beacon's whole decision: a
@@ -478,7 +664,10 @@ fn a_plane_that_orders_nothing_carries_the_proposal() {
 }
 
 /// An advanced publisher on `plane` with no cache and no detection, sequenced by number.
-fn declare_plain(plane: &Arc<RecordingPlane>, key: &str) -> AdvancedPublisherOn<RecordingPlane> {
+fn declare_plain(
+    plane: &Arc<RecordingPlane>,
+    key: &str,
+) -> AdvancedPublisherOn<Arc<RecordingPlane>> {
     let options = AdvancedPublisherOptions {
         cache: None,
         publisher_detection: false,

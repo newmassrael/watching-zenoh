@@ -43,11 +43,9 @@ use crate::write_filter::PicoSession;
 
 /// The plane of one pico session.
 pub(crate) struct PicoPlane {
+    /// The session, whose own clock ([`crate::session_ext::PicoSessionExt::new`]) proposes the
+    /// plane's stamps and whose times then order them ([`AdvancedPublisherPlane::order_stamp`]).
     session: PicoSession,
-    /// The session's own clock ([`crate::session_ext::PicoSessionExt::new`]): it
-    /// proposes the plane's stamps, which the session's times then order
-    /// ([`AdvancedPublisherPlane::order_stamp`]).
-    hlc: NodeHlc,
     /// What the advanced publisher's own publisher is declared with: the
     /// `publisher_options` the program embedded in its advanced options, which
     /// pico hands to the `z_declare_publisher` that builds it. The heartbeat
@@ -61,11 +59,7 @@ impl PicoPlane {
     /// The plane of `session`, whose advanced publisher's publisher is declared
     /// with `declared`.
     pub(crate) fn new(session: PicoSession, declared: PublisherQos) -> Self {
-        Self {
-            hlc: session.hlc.clone(),
-            session,
-            declared,
-        }
+        Self { session, declared }
     }
 
     /// What the plane names a failed declaration: the entity, and the code the door that declares
@@ -105,6 +99,14 @@ fn pico_publish(options: &mut PublishOptions<'_>) {
     options.allowed_destination = crate::locality::default_locality!("local-subscriber");
 }
 
+/// What a heartbeat beacon is sent with, on its publisher or on the key: a plain put of this ABI.
+fn beacon_options() -> PublishOptions<'static> {
+    let mut options = PublishOptions::default();
+    pico_publish(&mut options);
+    options.kind = SampleKind::Put;
+    options
+}
+
 impl AdvancedPublisherPlane for PicoPlane {
     type Publisher = PlainPublisher;
     type Queryable = PlainQueryable;
@@ -118,7 +120,7 @@ impl AdvancedPublisherPlane for PicoPlane {
     type Timer = Option<Ticker<crate::session::EngineHold>>;
 
     fn node_hlc(&self) -> &NodeHlc {
-        &self.hlc
+        &self.session.hlc
     }
 
     fn start_beacon_timer(
@@ -246,33 +248,21 @@ impl AdvancedPublisherPlane for PicoPlane {
         }
     }
 
-    fn publish_beacon(
-        &self,
-        beacon: Option<&PlainPublisher>,
-        keyexpr: &str,
-        payload: &[u8],
-        _sporadic: bool,
-    ) {
-        let mut options = PublishOptions::default();
-        pico_publish(&mut options);
-        options.kind = SampleKind::Put;
-        match beacon {
-            // Through the beacon publisher, as pico's heartbeat task does, so
-            // the beacon is held back while nothing subscribes to it.
-            Some(publisher) => {
-                let _ = publisher.publish(payload, Some(&mut options));
-            }
-            // An on-demand beacon from a publisher that declared none: on the
-            // key itself.
-            None => {
-                let _ = self.session.engine.publish_on_wire_all(
-                    keyexpr,
-                    &WireKey::literal(),
-                    payload,
-                    &options,
-                );
-            }
-        }
+    /// Through the beacon publisher, as pico's heartbeat task does, so the beacon is held back
+    /// while nothing subscribes to it.
+    fn send_beacon(beacon: &PlainPublisher, _keyexpr: &str, payload: &[u8], _sporadic: bool) {
+        let mut options = beacon_options();
+        let _ = beacon.publish(payload, Some(&mut options));
+    }
+
+    /// An on-demand beacon from a publisher that declared none: on the key itself.
+    fn publish_beacon(&self, keyexpr: &str, payload: &[u8], _sporadic: bool) {
+        let _ = self.session.engine.publish_on_wire_all(
+            keyexpr,
+            &WireKey::literal(),
+            payload,
+            &beacon_options(),
+        );
     }
 
     fn retained_key(&self, publisher: &PlainPublisher) -> Option<Retained> {
@@ -450,7 +440,7 @@ mod tests {
             )
             .expect("test host entropy"),
         );
-        let plane = Arc::new(PicoPlane::new(
+        let plane = PicoPlane::new(
             PicoSession {
                 engine: shared.as_engine(),
                 mode: WhatAmI::Peer,
@@ -458,7 +448,7 @@ mod tests {
                 time: time.clone(),
             },
             PublisherQos::pico_default(),
-        ));
+        );
         // The options are non-exhaustive, so they are built from their default and set.
         let mut options = AdvancedPublisherOptions::default();
         options.cache = None;

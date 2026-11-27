@@ -25,6 +25,7 @@
 
 use alloc::borrow::Cow;
 use alloc::sync::Arc;
+use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 
@@ -602,17 +603,16 @@ pub trait AdvancedPublisherPlane: Send + Sync + 'static {
         self.publish(publisher, keyexpr, payload.bytes(), options)
     }
 
-    /// Send one heartbeat beacon, on `beacon` when the publisher declared one
-    /// and on the key itself when it did not (an on-demand beacon from a
-    /// publisher with no heartbeat configured). A failure is non-fatal: the next
-    /// tick re-sends.
-    fn publish_beacon(
-        &self,
-        beacon: Option<&Self::Beacon>,
-        keyexpr: &str,
-        payload: &[u8],
-        sporadic: bool,
-    );
+    /// Send one heartbeat beacon on `beacon`, the publisher it is declared on. An associated
+    /// function and not a method: what a beacon is sent through is the beacon's own, so the timer
+    /// that sends it holds the beacon alone and the composite is the plane's one holder. A plane
+    /// that sends its beacon on the key itself, with no publisher of its own, declares a handle on
+    /// its session as the beacon. A failure is non-fatal: the next tick re-sends.
+    fn send_beacon(beacon: &Self::Beacon, keyexpr: &str, payload: &[u8], sporadic: bool);
+
+    /// Send one heartbeat beacon on the key itself: an on-demand beacon from a publisher that
+    /// declared no beacon of its own (no heartbeat configured). A failure is non-fatal.
+    fn publish_beacon(&self, keyexpr: &str, payload: &[u8], sporadic: bool);
 
     /// What a cache keeps alive so the publisher's key stays declared while the
     /// cache holds a sample — [`Retained`], asked once when the publisher is
@@ -715,7 +715,10 @@ pub struct AdvancedPublisherOn<P: AdvancedPublisherPlane> {
     /// that ignored the arm would be a second opinion about the same publisher.
     #[cfg(feature = "ext-pubsub-sample-miss-detection")]
     heartbeat_sporadic: bool,
-    plane: Arc<P>,
+    /// The plane, held by the publisher alone: the beacon's timer sends through the beacon
+    /// ([`AdvancedPublisherPlane::send_beacon`]), so a host keeps the plane where it keeps the
+    /// publisher, and declares it in its place ([`Self::declare_in`]).
+    plane: P,
 }
 
 impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
@@ -732,11 +735,27 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     /// `local_zid` is the zid of the session the plane rides on: the publisher's
     /// source identity in every sample's `SourceInfo` and in the `@adv` key.
     pub fn declare_on(
-        plane: Arc<P>,
+        plane: P,
         keyexpr: impl Into<String>,
         options: AdvancedPublisherOptions,
         local_zid: SessionZid,
     ) -> Result<Self, AdvancedPublisherError> {
+        let mut place = MaybeUninit::uninit();
+        Self::declare_in(&mut place, plane, keyexpr, options, local_zid)?;
+        // SAFETY: `declare_in` answered `Ok`, which it does with every field written.
+        Ok(unsafe { place.assume_init() })
+    }
+
+    /// [`Self::declare_on`], the publisher made in `place`: a host that keeps the publisher in a
+    /// place of its own writes it there rather than moving it there. Refused, the place is left
+    /// unwritten and `plane` is let go.
+    pub fn declare_in(
+        place: &mut MaybeUninit<Self>,
+        plane: P,
+        keyexpr: impl Into<String>,
+        options: AdvancedPublisherOptions,
+        local_zid: SessionZid,
+    ) -> Result<&mut Self, AdvancedPublisherError> {
         // R2558 — ASKING FOR MISS DETECTION *IS* ASKING FOR SEQUENCE NUMBERS,
         // and until now wz let a caller state otherwise and then quietly did
         // nothing.
@@ -953,7 +972,6 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
                 // and runs when the handle drops, not when a stopped timer's
                 // next tick is polled.
                 let hb_publisher = Arc::downgrade(&publisher);
-                let hb_plane = Arc::clone(&plane);
                 let hb_keyexpr = adv_keyexpr.clone();
                 let hb_seqnum = Arc::clone(seqnum);
                 let last_emitted = AtomicU32::new(0);
@@ -969,7 +987,9 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
                     // Non-sporadic emits every tick (emit_heartbeat skips
                     // sn==0); sporadic only when the sn advanced.
                     if should_emit_heartbeat(sporadic, sn, last_emitted.load(Ordering::Relaxed))
-                        && emit_heartbeat(&*hb_plane, Some(&*publisher), &hb_keyexpr, sn, sporadic)
+                        && emit_heartbeat(sn, |payload| {
+                            P::send_beacon(&publisher, &hb_keyexpr, payload, sporadic)
+                        })
                     {
                         last_emitted.store(sn, Ordering::Relaxed);
                     }
@@ -994,26 +1014,56 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
             None => None,
         });
 
-        Ok(Self {
-            publisher,
-            unheld_key,
-            _token: token,
+        #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+        let heartbeat_sporadic = heartbeat_spawn_params(&options)
+            .map(|(_, sporadic)| sporadic)
+            .unwrap_or(false);
+
+        let at = place.as_mut_ptr();
+        // SAFETY: each field is written once through a pointer to it, inside the place, after the
+        // last step that can refuse, so a refused declaration leaves the place unwritten.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).publisher).write(publisher);
+            core::ptr::addr_of_mut!((*at).unheld_key).write(unheld_key);
+            core::ptr::addr_of_mut!((*at)._token).write(token);
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-            beacon,
-            cache,
-            keyexpr,
-            eid,
-            seqnum,
-            zid: local_zid,
-            qos,
+            core::ptr::addr_of_mut!((*at).beacon).write(beacon);
+            core::ptr::addr_of_mut!((*at).cache).write(cache);
+            core::ptr::addr_of_mut!((*at).keyexpr).write(keyexpr);
+            core::ptr::addr_of_mut!((*at).zid).write(local_zid);
+            core::ptr::addr_of_mut!((*at).eid).write(eid);
+            core::ptr::addr_of_mut!((*at).seqnum).write(seqnum);
+            core::ptr::addr_of_mut!((*at).qos).write(qos);
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-            adv_keyexpr,
+            core::ptr::addr_of_mut!((*at).adv_keyexpr).write(adv_keyexpr);
             #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-            heartbeat_sporadic: heartbeat_spawn_params(&options)
-                .map(|(_, sporadic)| sporadic)
-                .unwrap_or(false),
-            plane,
-        })
+            core::ptr::addr_of_mut!((*at).heartbeat_sporadic).write(heartbeat_sporadic);
+            core::ptr::addr_of_mut!((*at).plane).write(plane);
+        }
+        // Every field is named here, so a field added to the publisher and not written above fails
+        // to compile rather than leaving its place unwritten.
+        let _every_field_written = |publisher: &Self| {
+            let Self {
+                publisher: _,
+                unheld_key: _,
+                _token: _,
+                #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+                    beacon: _,
+                cache: _,
+                keyexpr: _,
+                zid: _,
+                eid: _,
+                seqnum: _,
+                qos: _,
+                #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+                    adv_keyexpr: _,
+                #[cfg(feature = "ext-pubsub-sample-miss-detection")]
+                    heartbeat_sporadic: _,
+                plane: _,
+            } = publisher;
+        };
+        // SAFETY: every field was written above.
+        Ok(unsafe { place.assume_init_mut() })
     }
 
     /// Publish `payload` with no value metadata — [`Self::put_with`] under
@@ -1332,13 +1382,23 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     /// same path the timer drives.
     pub fn emit_heartbeat_once(&self) -> bool {
         match self.seqnum.as_ref() {
-            Some(seqnum) => emit_heartbeat(
-                &*self.plane,
-                self.beacon.as_ref().map(|beacon| &*beacon._publisher),
-                &self.adv_keyexpr,
-                seqnum.load(Ordering::Relaxed),
-                self.heartbeat_sporadic,
-            ),
+            Some(seqnum) => emit_heartbeat(seqnum.load(Ordering::Relaxed), |payload| {
+                match &self.beacon {
+                    Some(beacon) => P::send_beacon(
+                        &beacon._publisher,
+                        &self.adv_keyexpr,
+                        payload,
+                        self.heartbeat_sporadic,
+                    ),
+                    None => {
+                        self.plane.publish_beacon(
+                            &self.adv_keyexpr,
+                            payload,
+                            self.heartbeat_sporadic,
+                        );
+                    }
+                }
+            }),
             None => false,
         }
     }
@@ -1375,23 +1435,17 @@ fn should_emit_heartbeat(sporadic: bool, sn: u32, last_emitted: u32) -> bool {
 }
 
 /// R311y85 — publish ONE heartbeat beacon: the last published sn
-/// (`z_serialize::<u32>(seqnum_now - 1)`; the counter is the NEXT sn) on the
-/// `@adv` KE. Returns `false` (no beacon) when nothing has been published yet
-/// (`seqnum_now == 0`). A publish error (e.g. a torn-down link) is non-fatal —
-/// the next tick re-emits (zenoh advanced_publisher.rs:392-394).
+/// (`z_serialize::<u32>(seqnum_now - 1)`; the counter is the NEXT sn), handed to
+/// `send`, which puts it on the `@adv` KE. Returns `false` (no beacon) when nothing
+/// has been published yet (`seqnum_now == 0`). A publish error (e.g. a torn-down
+/// link) is non-fatal — the next tick re-emits (zenoh advanced_publisher.rs:392-394).
 #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-fn emit_heartbeat<P: AdvancedPublisherPlane>(
-    plane: &P,
-    beacon: Option<&P::Beacon>,
-    adv_keyexpr: &str,
-    seqnum_now: u32,
-    sporadic: bool,
-) -> bool {
+fn emit_heartbeat(seqnum_now: u32, send: impl FnOnce(&[u8])) -> bool {
     if seqnum_now == 0 {
         return false;
     }
     let payload = z_serialize::<u32>(&(seqnum_now - 1));
-    plane.publish_beacon(beacon, adv_keyexpr, &payload, sporadic);
+    send(payload.as_slice());
     true
 }
 
