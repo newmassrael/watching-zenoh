@@ -498,6 +498,34 @@ config WZ_CAP_DEVICE_REQUIRES
 	  zext_config_device_requires: what an open of a pico config would ask of the operating system, in the facility words of the target manifest (wz-own).
 	  Exported by: pico.
 
+config WZ_CAP_TX_PROBE
+	bool "tx-probe"
+	default y
+	help
+	  The send that may not wait for room: a listening session whose links share fewer outbound slots than they are sends each face without waiting and waits for a slot with nothing of the session held (wz-own). Off, each face is sent by the caller's own send, which waits for its slot, as zenoh-pico's peer does.
+	  Exported by: pico.
+
+config WZ_CAP_TX_EXPIRY_RUN
+	bool "tx-expiry-run"
+	default y
+	help
+	  The run of blocking messages that found no room, which closes a session the tx-expiry-keeps-session policy keeps once it is TX_EXPIRY_CLOSE_AFTER long (wz-own). Off, a kept expiry never closes the session and its lease alone decides, as zenoh-pico's does; a statement of TX_EXPIRY_CLOSE_AFTER is refused.
+	  Exported by: pico.
+
+config WZ_CAP_TX_FRAGMENT_CREDIT
+	bool "tx-fragment-credit"
+	default y
+	help
+	  A session's budget of fragments, and the stop fragment that tells the peer a chain was cut once some of it left (wz-own). Off, a chain is never cut for want of credit, and one its link cuts ends where it was cut, as zenoh-pico's does.
+	  Exported by: pico.
+
+config WZ_CAP_TX_HELD_WAIT
+	bool "tx-held-wait"
+	default y
+	help
+	  A droppable message that finds its conduit or its session held by another send waits for room out of its own wait_before_drop, under zenoh's queue profile (wz-own). Off, it is dropped at once and its sender told under every profile, as zenoh-pico's dropping send is.
+	  Exported by: pico.
+
 config WZ_CAP_TRANSPORT_COMPRESSION
 	bool "transport_compression"
 	default y

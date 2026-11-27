@@ -3454,17 +3454,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// What a droppable publish does on the face at place `at`, whose send place another send
-    /// holds now, by the queue profile's `held_drop`, with nothing of the session held: pico's
-    /// drops it on the face at once and tells the caller, as pico's put fails when its try of the
-    /// transmit lock finds it held; zenoh's asks the face's link for room within
-    /// `wait_before_drop`, tries the place again once the link took room and drops the publish on
-    /// the face, untold, when it took none. A face that names no wait for its room is waited for.
+    /// holds now, by the queue profile's `held_drop`, with nothing of the session held
+    /// (`LinkRooms::for_held_place`): pico's drops it on the face at once and tells the caller, as
+    /// pico's put fails when its try of the transmit lock finds it held; zenoh's asks the face's
+    /// link for room within `wait_before_drop`, tries the place again once the link took room and
+    /// drops the publish on the face, untold, when it took none. A face that names no wait for its
+    /// room is waited for. A build without the held-conduit wait (`tx-held-wait`) answers either
+    /// profile as pico's.
     fn behind_held_place(&self, at: usize) -> Behind<DroppedOn> {
-        let room = match self.held_drop {
-            HeldDrop::DropAtOnce => Room::Held(mark_of_place(at)),
-            HeldDrop::WaitForRoom => self.rooms.within_face(at, self.wait_before_drop_us),
-        };
-        room.behind()
+        self.rooms
+            .for_held_place(self.held_drop, at, self.wait_before_drop_us)
+            .behind()
     }
 
     /// What a droppable publish's leg answers once it is dropped on a face whose send place

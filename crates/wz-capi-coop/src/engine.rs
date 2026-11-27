@@ -114,7 +114,7 @@ use wz_capi_port::Refusal as Declined;
 use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::face_send::{self, Behind, FaceSend, Pass, PublishRun, Then, FIRST_FACE};
-#[cfg(feature = "listen")]
+#[cfg(all(feature = "listen", feature = "tx-probe"))]
 use wz_runtime_coop::face_send::{after_probe, AfterProbe, ProbeAnswer};
 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 use wz_runtime_coop::face_send::{DropSet, HandedLimits};
@@ -181,7 +181,7 @@ use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOpti
 use wz_session_core::push_build;
 use wz_session_core::sample::{QosLevel, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
-#[cfg(feature = "listen")]
+#[cfg(all(feature = "listen", feature = "tx-probe"))]
 use wz_session_core::session_actions::Probed;
 use wz_session_core::session_actions::{LinkState, SessionCore, SessionLinkActions};
 use wz_session_core::session_init_params::{
@@ -1766,6 +1766,8 @@ pub(crate) const fn link_rooms_bytes<L: CoopLinks>() -> usize {
 /// What the face at a place of the table of rooms names.
 #[derive(Clone, Copy)]
 pub(crate) struct RoomPlace {
+    /// What a wait for the face's room waits on, which only the held-conduit wait asks.
+    #[cfg(feature = "tx-held-wait")]
     on: WaitOn,
     /// The table's mark when the face took the place.
     #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
@@ -1890,12 +1892,18 @@ impl<W: LinkWaits> LinkRooms<W> {
         let Some(place) = rooms.places.get_mut(at) else {
             return;
         };
-        if let Some(held) = place.as_mut() {
-            held.on = on;
+        #[cfg(not(feature = "tx-held-wait"))]
+        let _ = on;
+        if place.is_some() {
+            #[cfg(feature = "tx-held-wait")]
+            if let Some(held) = place.as_mut() {
+                held.on = on;
+            }
             return;
         }
         rooms.mark = mark;
         *place = Some(RoomPlace {
+            #[cfg(feature = "tx-held-wait")]
             on,
             #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             since: mark,
@@ -1946,7 +1954,7 @@ impl<W: LinkWaits> LinkRooms<W> {
     }
 
     /// What a droppable publish that found the session held is told, by the queue profile's
-    /// `held_drop`: zenoh's asks the faces for room within `wait_us` ([`Self::within`]). Pico's
+    /// `held_drop`: zenoh's asks the faces for room within `wait_us` (`Self::within`). Pico's
     /// asks nothing: on the face a send holds it is dropped at once ([`Room::Held`]), as pico's
     /// try-lock fails on a transmit lock another send holds; behind a publish between its sends it
     /// tries the session again ([`Room::Free`]); and behind a holder that is not a publish it waits
@@ -1955,9 +1963,12 @@ impl<W: LinkWaits> LinkRooms<W> {
     ///
     /// A leg that holds the send place of its one face, at place `leg`, answers for that face
     /// alone, as each of zenoh's transports drops on its own queue: zenoh's profile asks that
-    /// face for room ([`Self::within_face`]), and pico's is dropped only behind a send on that
+    /// face for room (`Self::within_face`), and pico's is dropped only behind a send on that
     /// face: a send on another face holds nothing of the leg's, and lets go of the session once
     /// that send is done, so the session is tried again, as behind a publish between its sends.
+    ///
+    /// A build without the held-conduit wait (`tx-held-wait`) answers every profile as pico's,
+    /// and asks no face for room.
     pub(crate) fn for_held(
         &self,
         held_drop: HeldDrop,
@@ -1965,30 +1976,53 @@ impl<W: LinkWaits> LinkRooms<W> {
         wait_us: u64,
         leg: Option<usize>,
     ) -> Room {
-        match (held_drop, holder) {
-            // Under either profile: a read working out its wait waits on no face and lets go in a
-            // moment, so no link is asked for room and nothing blocks on the session's lock.
-            (_, Holder::Waiting) => Room::Free,
-            (HeldDrop::WaitForRoom, _) => match leg {
+        // Under either profile a read working out its wait waits on no face and lets go in a
+        // moment, so no link is asked for room and nothing blocks on the session's lock.
+        #[cfg(feature = "tx-held-wait")]
+        if held_drop == HeldDrop::WaitForRoom && holder != Holder::Waiting {
+            return match leg {
                 Some(at) => self.within_face(at, wait_us),
                 None => self.within(wait_us),
-            },
-            (HeldDrop::DropAtOnce, Holder::Sending(face)) => match leg {
+            };
+        }
+        #[cfg(not(feature = "tx-held-wait"))]
+        let _ = (held_drop, wait_us);
+        match holder {
+            Holder::Waiting => Room::Free,
+            Holder::Sending(face) => match leg {
                 Some(at) if mark_of_place(at) != face => Room::Free,
                 _ => Room::Held(face),
             },
-            (HeldDrop::DropAtOnce, Holder::Publish) => Room::Free,
-            (HeldDrop::DropAtOnce, Holder::Step) => Room::Stepping,
+            Holder::Publish => Room::Free,
+            Holder::Step => Room::Stepping,
         }
+    }
+
+    /// What a droppable publish is told on the face at place `at`, whose send place another
+    /// holder has while the publish holds nothing of the session: the place is held as a send on
+    /// that face holds it, so the profile answers as behind such a send for a leg on that face
+    /// alone ([`Self::for_held`]). Pico's is dropped on the face at once ([`Room::Held`]), as
+    /// pico's try of that transport's transmit lock finds it taken; zenoh's asks that face alone
+    /// for room within `wait_us`; and a build without the held-conduit wait (`tx-held-wait`)
+    /// answers either profile as pico's, with no face asked.
+    pub(crate) fn for_held_place(&self, held_drop: HeldDrop, at: usize, wait_us: u64) -> Room {
+        self.for_held(
+            held_drop,
+            Holder::Sending(mark_of_place(at)),
+            wait_us,
+            Some(at),
+        )
     }
 
     /// The place `at` of the table, read under the lock, which goes before the caller waits on
     /// what it names: `None` past the table, and a free place as `Some(None)`.
+    #[cfg(feature = "tx-held-wait")]
     fn room_at(&self, at: usize) -> Option<Option<RoomPlace>> {
         lock(&self.rooms).places.get(at).copied()
     }
 
     /// The table's mark now.
+    #[cfg(feature = "tx-held-wait")]
     fn mark(&self) -> u64 {
         lock(&self.rooms).mark
     }
@@ -2000,6 +2034,7 @@ impl<W: LinkWaits> LinkRooms<W> {
     /// A face that comes up or goes meanwhile may be asked or passed over, a hint as every answer
     /// is; nothing is copied out of the lock but one handle at a time, and the faces that took no
     /// bytes are named by their places, with nothing of the heap.
+    #[cfg(feature = "tx-held-wait")]
     pub(crate) fn within(&self, wait_us: u64) -> Room {
         let mut left_us = wait_us;
         let mut congested = DroppedOn::none(self.mark());
@@ -2031,6 +2066,7 @@ impl<W: LinkWaits> LinkRooms<W> {
     /// taken on its own, behind another send of that place or behind the session's holder
     /// ([`Self::for_held`]). The face's place alone is named when it took none, and `Unasked`
     /// answered when the place names no wait.
+    #[cfg(feature = "tx-held-wait")]
     pub(crate) fn within_face(&self, at: usize, wait_us: u64) -> Room {
         let Some(Some(RoomPlace { on, .. })) = self.room_at(at) else {
             return Room::Unasked;
@@ -2041,6 +2077,52 @@ impl<W: LinkWaits> LinkRooms<W> {
         let mut congested = DroppedOn::none(self.mark());
         congested.insert(at);
         Room::Congested(congested)
+    }
+}
+
+/// Whether a publish's first fan-out sends without waiting for an outbound slot: one that may not
+/// be dropped, on a session whose links share fewer outbound slots than they are
+/// (`tx_pool_short`), in a build with the probe stage (`tx-probe`).
+#[cfg(all(feature = "listen", feature = "tx-probe"))]
+const fn probes(droppable: bool, tx_pool_short: bool) -> bool {
+    !droppable && tx_pool_short
+}
+
+/// `probes` in a build without the probe stage: no fan-out probes, and each face is sent by the
+/// caller's own send, which waits for its slot with the session held, as zenoh-pico's peer writes
+/// each of its sockets in turn under its one transmit lock.
+#[cfg(all(feature = "listen", not(feature = "tx-probe")))]
+const fn probes(_droppable: bool, _tx_pool_short: bool) -> bool {
+    false
+}
+
+#[cfg(all(test, feature = "listen"))]
+mod probe_tests {
+    use super::probes;
+
+    /// With the probe stage a publish that may not be dropped probes the faces of a short pool;
+    /// one that may be, or one on a pool of a slot for each link, does not. Turned red by a
+    /// droppable publish that probes, or a blocking one on a short pool that does not.
+    #[cfg(feature = "tx-probe")]
+    #[test]
+    fn a_blocking_publish_probes_a_short_pool() {
+        assert!(probes(false, true));
+        assert!(!probes(true, true));
+        assert!(!probes(false, false));
+        assert!(!probes(true, false));
+    }
+
+    /// Without the probe stage no fan-out probes, short pool or not: every face is sent by the
+    /// caller's own send, as zenoh-pico's peer sends each of its transports in turn. Turned red by
+    /// `probes` answering `true` in this build.
+    #[cfg(not(feature = "tx-probe"))]
+    #[test]
+    fn without_the_probe_stage_no_fan_out_probes() {
+        for droppable in [false, true] {
+            for short in [false, true] {
+                assert!(!probes(droppable, short), "{droppable} {short}");
+            }
+        }
     }
 }
 
@@ -2087,7 +2169,7 @@ struct LegSent {
 
 impl LegSent {
     /// A send that does not wait, ended before the head was asked for.
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", feature = "tx-probe"))]
     fn of(outcome: Result<usize, FanoutError>, stop: bool) -> Self {
         Self {
             outcome,
@@ -2116,7 +2198,7 @@ impl LinkLeg<'_> {
             head,
             planned,
         } = *self;
-        #[cfg(not(feature = "listen"))]
+        #[cfg(not(all(feature = "listen", feature = "tx-probe")))]
         let _ = how;
         let mut outcome = Ok(0);
         // Each link names the key as its own key-wire form says; a planned put's key was named on
@@ -2138,7 +2220,7 @@ impl LinkLeg<'_> {
         // A send that may not wait is told apart from one whose link has room: one with none
         // ends the fan-out at this face, and a chain of fragments, which such a send does not
         // begin, is sent as the caller's own send.
-        #[cfg(feature = "listen")]
+        #[cfg(all(feature = "listen", feature = "tx-probe"))]
         if how == FaceSend::Probe {
             let answer = match actions.try_send_push_qos(key, parts, send) {
                 Some(Ok(Probed::NoRoom)) => ProbeAnswer::NoRoom,
@@ -8249,7 +8331,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(not(wz_round))]
         if !droppable && <CoopForm as ThreadForm>::OTHER_THREADS {
             #[cfg(feature = "listen")]
-            let short = core.0.transport.tx_pool_short;
+            let short = probes(droppable, core.0.transport.tx_pool_short);
             #[cfg(not(feature = "listen"))]
             let short = false;
             if let Some(alone) = tx.alone_wire() {
@@ -8266,7 +8348,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // blocking put waits for its transmit lock, within its `wait_before_close`
         // (`Self::wait_for_slots`). The run's order is the face send value's (`PublishRun`).
         #[cfg(feature = "listen")]
-        let probe = !droppable && core.0.transport.tx_pool_short;
+        let probe = probes(droppable, core.0.transport.tx_pool_short);
         #[cfg(not(feature = "listen"))]
         let probe = false;
         let mut run = PublishRun::new(

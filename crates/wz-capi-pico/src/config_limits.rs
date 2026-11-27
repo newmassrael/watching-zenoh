@@ -287,6 +287,23 @@ mod tests {
         }
     }
 
+    /// A library on the cooperative engine without the run of expiries (`tx-expiry-run`, off in
+    /// the zenoh-pico preset) refuses a count of `TX_EXPIRY_CLOSE_AFTER`, alone or after a good
+    /// item: its sessions count no run, so a count would be taken and never read. The tokio engine
+    /// counts the run whatever this crate names, so the case is the cooperative engine's. Turned
+    /// red by the session core's entry of the limit reading as read in this build.
+    #[cfg(all(not(feature = "tx-expiry-run"), not(feature = "engine-tokio")))]
+    #[test]
+    fn a_build_without_the_expiry_run_refuses_its_count() {
+        for text in [
+            "TX_EXPIRY_CLOSE_AFTER=1",
+            "TX_EXPIRY_CLOSE_AFTER=3",
+            "MAX_PUBLISHERS=1,TX_EXPIRY_CLOSE_AFTER=2",
+        ] {
+            assert_eq!(state(Some(text)), Err(Z_ERR_CONFIG_INVALID_VALUE), "{text}");
+        }
+    }
+
     /// A name that is no limit of a session nor a held value, any other runtime limit included,
     /// a name one letter short or long of a limit's, an item with no count and a count that is
     /// no number are refused. Turned red by a door that skips what it does not know, or a name

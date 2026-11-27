@@ -749,6 +749,7 @@ pub struct OutOfBandState {
     /// The run of blocking messages that found no room, one after another: what the
     /// `TX_EXPIRY_CLOSE_AFTER` limit of `tx-expiry-keeps-session` counts. It is state of this
     /// lock and not a request, so it wakes no one and `Self::any` does not read it.
+    #[cfg(feature = "tx-expiry-run")]
     pub expiry_run: crate::tx_deadline::ExpiryRun,
     /// The peer closed this session at session scope (a Close with
     /// `FLAG_T_CLOSE_S` set, on an established link): every link of the
@@ -2664,7 +2665,7 @@ pub struct SessionFacts {
     /// keeps the pre-existing behavior byte for byte.
     ///
     /// A fact and not an atomic: ARMv6-M has no `target_has_atomic = "ptr"`.
-    #[cfg(feature = "transport-fragmentation")]
+    #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
     pub fragment_tx_budget: usize,
     /// Fixed-memory step S4 -- the sends this session refused because its link
     /// lent no slot (`tx-lend-only`): see [`TxRefusalCounts`]. A fact for
@@ -2901,7 +2902,7 @@ macro_rules! fact_doors {
 fact_doors! {
     #[cfg(feature = "transport-stats")]
     fact_metrics => metrics: crate::stats_registry::TransportMetrics,
-    #[cfg(feature = "transport-fragmentation")]
+    #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
     fact_fragment_tx_budget => fragment_tx_budget: usize,
     #[cfg(feature = "tx-lend-only")]
     fact_tx_refusals => tx_refusals: TxRefusalCounts,
@@ -3911,7 +3912,7 @@ enum DispatchStage {
     /// sender keeps its conduit's lock for as long as it waits (up to `wait_before_close`), so a
     /// probe that waited for that lock would wait for the room by another name; a conduit that is
     /// held is a lane with no room, and is answered `NoRoom` the same way.
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "tx-probe")]
     Probe,
     /// A send made under room its sender already holds ([`crate::link::RoomPermit`]): the
     /// reservation IS the room, so the ask for room is skipped and the frame is never counted as
@@ -4261,6 +4262,7 @@ impl DeclarationWith for WriteDeclaration<'_, '_> {
 }
 
 /// What [`SessionLinkActions::try_send_network_message_qos`] did not send, and whose it still is.
+#[cfg(feature = "tx-probe")]
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-request",
@@ -4287,7 +4289,7 @@ pub enum Unsent {
 
 /// What [`SessionLinkActions::try_send_encoded_push_qos`] did not send. The caller still holds
 /// the Push, so nothing is handed back.
-#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[cfg(all(feature = "codec-push", feature = "tx-probe"))]
 #[derive(Debug)]
 pub enum UnsentShared {
     /// The link had no room, and the call did not wait for any: nothing was sent, counted as a
@@ -4329,7 +4331,7 @@ enum UnicastPush {
     /// No room was found within the message's deadline.
     Congested,
     /// The message is a chain of fragments and the sender asked not to wait
-    /// ([`PushDeadline::probe`]): nothing was sent, and the sequence number the message took was
+    /// (`PushDeadline::probe`): nothing was sent, and the sequence number the message took was
     /// given back.
     ///
     /// A chain is wire-atomic, so it cannot be put down half way and picked up again: the peer is
@@ -4405,7 +4407,7 @@ pub struct SendAs {
 
 /// What a send that does not wait for a slot did
 /// ([`SessionLinkActions::try_send_push_qos`]).
-#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[cfg(all(feature = "codec-push", feature = "tx-probe"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Probed {
     /// The message was handed to the link, or dropped by a rule that is not congestion.
@@ -4417,7 +4419,7 @@ pub enum Probed {
     Chain,
 }
 
-#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[cfg(all(feature = "codec-push", feature = "tx-probe"))]
 impl Probed {
     fn of(sent: Dispatched) -> Self {
         match sent {
@@ -5712,7 +5714,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     metrics: stats_metrics,
                     // "Unbounded" until a host declares a budget — a profile that
                     // never configures one fragments exactly as it did before.
-                    #[cfg(feature = "transport-fragmentation")]
+                    #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
                     fragment_tx_budget: usize::MAX,
                     #[cfg(feature = "tx-lend-only")]
                     tx_refusals: TxRefusalCounts::default(),
@@ -8555,7 +8557,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// fragmenting from the next chain onward once a host calls this again.
     /// There is no partial-chain resume — an abandoned chain is abandoned,
     /// which is what its stop fragment told the peer.
-    #[cfg(feature = "transport-fragmentation")]
+    #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
     pub fn set_fragment_tx_budget(&self, fragments: usize) {
         self.fact_fragment_tx_budget(|slot| *slot = fragments);
     }
@@ -8568,7 +8570,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// happen — the value can change between this read and the next
     /// fragment. It is here for hosts and tests to OBSERVE the resource, not
     /// for the emit path to plan against.
-    #[cfg(feature = "transport-fragmentation")]
+    #[cfg(all(feature = "transport-fragmentation", feature = "tx-fragment-credit"))]
     pub fn fragment_tx_budget(&self) -> usize {
         self.fact_fragment_tx_budget(|slot| *slot)
     }
@@ -8593,6 +8595,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// so, which a shared `allow(dead_code)` would have silenced instead.
     #[cfg(all(
         feature = "transport-fragmentation",
+        feature = "tx-fragment-credit",
         any(
             feature = "codec-push",
             feature = "codec-request",
@@ -12142,14 +12145,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // completes the run is still dropped and still reported, because it was: the sender
             // is told the transport was not available, and the close is the drive loop's, as
             // upstream's is.
+            //
+            // A build without the run keeps the session through every expiry, as zenoh-pico's
+            // send that cannot write fails and leaves its session to the lease.
             TxExpiry::Kept => {
-                let close_after = self.params.limits.tx_expiry_close_after();
-                if self
-                    .core
-                    .out_of_band
-                    .take(|s| s.expiry_run.expired(close_after))
+                #[cfg(feature = "tx-expiry-run")]
                 {
-                    self.request_congestion_close();
+                    let close_after = self.params.limits.tx_expiry_close_after();
+                    if self
+                        .core
+                        .out_of_band
+                        .take(|s| s.expiry_run.expired(close_after))
+                    {
+                        self.request_congestion_close();
+                    }
                 }
             }
         }
@@ -12873,6 +12882,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let count_pushed = || {
             // A message with room ends a run of expiries (`TX_EXPIRY_CLOSE_AFTER`); with no
             // bound there is no run to end.
+            #[cfg(feature = "tx-expiry-run")]
             if !self.params.limits.tx_expiry_close_after().is_unbounded() {
                 self.core.out_of_band.take(|s| s.expiry_run.pushed());
             }
@@ -13038,20 +13048,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         //
         // R2926 — held as ONE deadline for the message ([`PushDeadline`]):
         // this first ask spends from it, and a fragment chain spends the rest.
-        #[cfg(feature = "alloc")]
+        #[cfg(feature = "tx-probe")]
         let probing = stage == DispatchStage::Probe;
-        #[cfg(not(feature = "alloc"))]
+        #[cfg(not(feature = "tx-probe"))]
         let probing = false;
-        let deadline = core::cell::Cell::new(if probing {
-            PushDeadline::probe(droppable)
-        } else if covered {
+        let deadline = core::cell::Cell::new(if covered {
             PushDeadline::covered(droppable, &self.params.tx_queue)
         } else {
             PushDeadline::new(droppable, &self.params.tx_queue)
         });
-        // Room is asked where a frame opens (`Self::write_n_msg`), and, with a heap, while a
-        // droppable message waits for its conduit's lock.
-        #[cfg(feature = "alloc")]
+        #[cfg(feature = "tx-probe")]
+        if probing {
+            deadline.set(PushDeadline::probe(droppable));
+        }
+        // Room is asked where a frame opens (`Self::write_n_msg`), and, with a heap and the
+        // held-conduit wait (`tx-held-wait`), while a droppable message waits for its conduit's
+        // lock.
+        #[cfg(all(feature = "alloc", feature = "tx-held-wait"))]
         let congested = || {
             let mut left = deadline.get();
             let full = self.congested_within(wire_reliability, priority, reserved, &mut left);
@@ -13182,7 +13195,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // already and waits for the lock as before. Whether a droppable message behind a held
         // conduit waits for room at all is the queue profile's (`HeldDrop`): the pico profile
         // drops it at once and asks the link nothing, as pico's try-lock does, and tells the
-        // sender so (`SendWireError::HeldConduit`), as pico's put does.
+        // sender so (`SendWireError::HeldConduit`), as pico's put does. A build without the wait
+        // (`tx-held-wait`) drops it so whatever the profile.
         #[cfg(feature = "alloc")]
         let mut held_dropped = false;
         #[cfg(feature = "alloc")]
@@ -13204,23 +13218,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     Some(None) => break Ok(UnicastPush::Congested),
                     None => {}
                 }
+                #[cfg(feature = "tx-held-wait")]
                 if self.params.tx_queue.held_drop
-                    == crate::session_init_params::HeldDrop::DropAtOnce
+                    == crate::session_init_params::HeldDrop::WaitForRoom
                 {
-                    // Dropped only behind another SENDER, as pico's try-lock fails only on a
-                    // lock another send holds; a holder that is not one (the writer's flush of
-                    // what is staged) lets go once it has written, and is waited for.
-                    if crate::runtime_cell::FlagCell::load(
-                        self.tx_conduits.sender_flag(priority),
-                        core::sync::atomic::Ordering::Relaxed,
-                    ) {
-                        held_dropped = true;
+                    if congested() {
                         break Ok(UnicastPush::Congested);
                     }
                     core::hint::spin_loop();
                     continue;
                 }
-                if congested() {
+                // Dropped only behind another SENDER, as pico's try-lock fails only on a lock
+                // another send holds; a holder that is not one (the writer's flush of what is
+                // staged) lets go once it has written, and is waited for.
+                if crate::runtime_cell::FlagCell::load(
+                    self.tx_conduits.sender_flag(priority),
+                    core::sync::atomic::Ordering::Relaxed,
+                ) {
+                    held_dropped = true;
                     break Ok(UnicastPush::Congested);
                 }
                 core::hint::spin_loop();
@@ -14011,6 +14026,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     break (this_sn, true, Ok(UnicastPush::Congested));
                 }
             }
+            #[cfg(feature = "tx-fragment-credit")]
             if !self.take_fragment_tx_credit() {
                 if emitted == 0 {
                     // Nothing left this session, and nothing has left
@@ -14057,16 +14073,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             emitted = emitted.saturating_add(1);
             deadline.next_fragment();
         };
-        if reserve_stop {
-            self.outbound_frame_sn.reserve_next(priority, reliable);
+        #[cfg(feature = "tx-fragment-credit")]
+        {
+            if reserve_stop {
+                self.outbound_frame_sn.reserve_next(priority, reliable);
+            }
+            let _ = self.send_fragment(
+                batch,
+                &crate::frame_encode::FragmentSpan::stop(stop_sn),
+                body,
+                reliable,
+                ext_qos,
+            );
         }
-        let _ = self.send_fragment(
-            batch,
-            &crate::frame_encode::FragmentSpan::stop(stop_sn),
-            body,
-            reliable,
-            ext_qos,
-        );
+        // Without the stop fragment the chain ends where it was cut, as zenoh-pico's does when a
+        // fragment's write fails: nothing more of it leaves, and the peer lets go of what it
+        // staged when the next chain begins. The sequence number of the fragment that did not
+        // leave is given back where it was reserved, so the conduit's ring has no gap.
+        #[cfg(not(feature = "tx-fragment-credit"))]
+        {
+            let _ = stop_sn;
+            if !reserve_stop {
+                self.outbound_frame_sn.unmint(priority, reliable);
+            }
+        }
         abandoned
     }
 
@@ -14230,7 +14260,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// a sender holding a conduit is a producer still adding, which is when the writer backs
     /// off. And a probe: a control message is a barrier for the data staged before it, so a
     /// probe that could not drain every conduit may not go ahead, and is told to come back (see
-    /// [`DispatchStage::Probe`]).
+    /// `DispatchStage::Probe`).
     #[cfg(feature = "transport-batching")]
     fn try_flush_open_batch(&self) -> bool {
         self.drain_conduits(&|_| true, false)
@@ -14766,7 +14796,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "codec-response",
         feature = "codec-response-final"
     ))]
-    #[cfg(feature = "alloc")]
+    #[cfg(feature = "tx-probe")]
     pub fn try_send_network_message_qos(
         &self,
         msg: crate::network_message::NetworkMessage,
@@ -14934,7 +14964,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the Push and makes the message only when it is to be held or sent with a wait. A Push that
     /// carries a buffer of shared memory is refused unsent ([`UnsentShared::Unshareable`]): its
     /// slices are mapped for this session's peer inside a transaction the message is built in.
-    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    #[cfg(all(feature = "codec-push", feature = "tx-probe"))]
     pub fn try_send_encoded_push_qos(
         &self,
         push: crate::encoded_push::SplicedPush<'_>,
@@ -15573,7 +15603,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::dispatch_declare`] at a stage, borrowing the message so that a probe that finds no
-    /// room leaves it whole with the caller (see [`Self::try_send_network_message_qos`]).
+    /// room leaves it whole with the caller (see `Self::try_send_network_message_qos`).
     #[cfg(any(
         feature = "declare-keyexpr",
         feature = "declare-subscriber",
@@ -15672,7 +15702,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::dispatch_oam`] at a stage, borrowing the message so that a probe that finds no room
-    /// leaves it whole with the caller (see [`Self::try_send_network_message_qos`]).
+    /// leaves it whole with the caller (see `Self::try_send_network_message_qos`).
     #[cfg(all(feature = "codec-linkstate", feature = "codec-push"))]
     #[cfg(feature = "alloc")]
     fn dispatch_oam_at(
@@ -15712,7 +15742,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::dispatch_request`] at a stage, borrowing the message so that a probe that finds no
-    /// room leaves it whole with the caller (see [`Self::try_send_network_message_qos`]).
+    /// room leaves it whole with the caller (see `Self::try_send_network_message_qos`).
     #[cfg(feature = "codec-request")]
     #[cfg(feature = "alloc")]
     fn dispatch_request_at(
@@ -15765,7 +15795,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::dispatch_response`] at a stage, borrowing the message so that a probe that finds
-    /// no room leaves it whole with the caller (see [`Self::try_send_network_message_qos`]). The
+    /// no room leaves it whole with the caller (see `Self::try_send_network_message_qos`). The
     /// express flush follows only a response that left.
     #[cfg(feature = "codec-response")]
     #[cfg(feature = "alloc")]
@@ -15824,7 +15854,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::dispatch_response_final`] at a stage, borrowing the message so that a probe that
-    /// finds no room leaves it whole with the caller (see [`Self::try_send_network_message_qos`]).
+    /// finds no room leaves it whole with the caller (see `Self::try_send_network_message_qos`).
     #[cfg(feature = "codec-response-final")]
     #[cfg(feature = "alloc")]
     fn dispatch_response_final_at(
@@ -15879,7 +15909,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// [`Self::dispatch_interest`] at a stage, borrowing the message so that a probe that finds no
-    /// room leaves it whole with the caller (see [`Self::try_send_network_message_qos`]).
+    /// room leaves it whole with the caller (see `Self::try_send_network_message_qos`).
     #[cfg(any(
         feature = "declare-interest",
         all(feature = "codec-linkstate", feature = "codec-push")
@@ -16272,7 +16302,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// now leaves it unsent and the caller's ([`Probed::NoRoom`]), to be sent again once one is
     /// free, with nothing counted as dropped and nothing closed. A want of room the link's own
     /// stack answers is waited for as the caller's own send waits.
-    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    #[cfg(all(feature = "codec-push", feature = "tx-probe"))]
     pub fn try_send_push_qos(
         &self,
         key: crate::named_key::NamedKey<'_>,

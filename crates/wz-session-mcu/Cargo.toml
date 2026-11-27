@@ -215,6 +215,9 @@ group = [
     "codec-push",
     "reassembly",
     "wz-session-core/transport-fragmentation",
+    # Its unicast chains keep the fragment credit and the stop fragment, which only the
+    # zenoh-pico preset leaves out.
+    "wz-session-core/tx-fragment-credit",
 ]
 adminspace-write = [
     "dial",

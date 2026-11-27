@@ -143,6 +143,10 @@
   <sce:feature name="transport-shm" requires="alloc"/>
   <sce:feature name="transport-stats" requires="alloc"/>
   <sce:feature name="transport-tx-lend"/>
+  <sce:feature name="tx-expiry-run"/>
+  <sce:feature name="tx-fragment-credit"/>
+  <sce:feature name="tx-held-wait"/>
   <sce:feature name="tx-lend-only" requires="transport-tx-lend"/>
+  <sce:feature name="tx-probe" requires="alloc"/>
   <sce:feature name="wire-bincode" requires="alloc"/>
 </scxml>

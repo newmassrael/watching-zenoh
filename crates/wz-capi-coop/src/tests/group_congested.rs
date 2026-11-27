@@ -230,6 +230,7 @@ fn replies_past_the_reply_limit_are_the_transports_drops() {
 /// A droppable put that finds the session held asks the group's socket for room as it asks a
 /// link's: the session's waits for room hold the group's, which answers congestion while the
 /// socket is full and room once it takes datagrams again.
+#[cfg(feature = "tx-held-wait")]
 #[test]
 fn a_held_session_asks_the_group_socket_for_room() {
     use crate::engine::Room;

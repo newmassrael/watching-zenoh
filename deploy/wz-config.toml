@@ -1689,6 +1689,57 @@ implies = ["unstable-api"]
 help = "zext_config_device_requires: what an open of a pico config would ask of the operating system, in the facility words of the target manifest (wz-own)."
 
 [[capability]]
+id = "tx-probe"
+kconfig = "WZ_CAP_TX_PROBE"
+# On in a build that names nothing, which has had it in every build, and off in the zenoh-pico
+# preset: zenoh-pico's transport has no send that declines to wait, and its peer writes each of
+# its sockets in turn under one transmit lock. A behaviour of the session, not a door: a build
+# without it sends every message waiting for its room. The zenoh preset keeps it, as do the
+# profiles over the pico base that run the cooperative engine.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "The send that may not wait for room: a listening session whose links share fewer outbound slots than they are sends each face without waiting and waits for a slot with nothing of the session held (wz-own). Off, each face is sent by the caller's own send, which waits for its slot, as zenoh-pico's peer does."
+
+[[capability]]
+id = "tx-expiry-run"
+kconfig = "WZ_CAP_TX_EXPIRY_RUN"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's send that cannot
+# write fails and leaves its session to the lease, and counts no run of such sends. The count it
+# serves, TX_EXPIRY_CLOSE_AFTER, is refused by name in a build without it.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "The run of blocking messages that found no room, which closes a session the tx-expiry-keeps-session policy keeps once it is TX_EXPIRY_CLOSE_AFTER long (wz-own). Off, a kept expiry never closes the session and its lease alone decides, as zenoh-pico's does; a statement of TX_EXPIRY_CLOSE_AFTER is refused."
+
+[[capability]]
+id = "tx-fragment-credit"
+kconfig = "WZ_CAP_TX_FRAGMENT_CREDIT"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's chain of
+# fragments draws on no budget and ends at the fragment whose write failed, with no fragment that
+# tells the peer the chain was cut.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "A session's budget of fragments, and the stop fragment that tells the peer a chain was cut once some of it left (wz-own). Off, a chain is never cut for want of credit, and one its link cuts ends where it was cut, as zenoh-pico's does."
+
+[[capability]]
+id = "tx-held-wait"
+kconfig = "WZ_CAP_TX_HELD_WAIT"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's dropping send
+# tries its transmit lock and drops the message when another send holds it, and the pico ABI's
+# sessions open under that queue profile in every build. What it keeps is zenoh's profile, which
+# asks the links for room out of the message's wait_before_drop.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "A droppable message that finds its conduit or its session held by another send waits for room out of its own wait_before_drop, under zenoh's queue profile (wz-own). Off, it is dropped at once and its sender told under every profile, as zenoh-pico's dropping send is."
+
+[[capability]]
 id = "transport_compression"
 kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
 os_needs = []

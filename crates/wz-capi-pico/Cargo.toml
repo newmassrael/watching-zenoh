@@ -110,6 +110,10 @@ default = [
     "config-policy",
     "conformance-digest",
     "device-requires",
+    "tx-probe",
+    "tx-expiry-run",
+    "tx-fragment-credit",
+    "tx-held-wait",
 ]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
@@ -642,6 +646,26 @@ conformance-digest = ["wz-capi-core?/conformance-digest"]
 # unstable API and carries no door of wz's. Either engine's open is read by it, so it selects
 # neither.
 device-requires = ["unstable-api", "wz-capi-core?/device-requires"]
+# The send's behaviours that zenoh-pico's transport does not have, each a parity contract of the
+# zenoh preset: on in a build that names nothing, which has had them in every build, and off in
+# the zenoh-pico preset, whose library then links none of them (deploy/wz-config.toml). Each is
+# the session core's feature of the same name, through the cooperative engine's where it runs the
+# sessions; the tokio engine's runtime holds all four whatever is named, so each selects neither.
+#
+# `tx-probe`: a listening session whose links share fewer outbound slots than they are sends a
+# publish that may not be dropped to each face without waiting, and waits for a slot with nothing
+# of the session held. Off, each face is sent by the caller's own send, which waits for its slot.
+tx-probe = ["wz-capi-core?/tx-probe", "wz-capi-coop?/tx-probe"]
+# `tx-expiry-run`: the run of expiries that closes a session the `tx-expiry-keeps-session` policy
+# keeps. Off, a kept expiry never closes it, and a statement of `TX_EXPIRY_CLOSE_AFTER` is refused.
+tx-expiry-run = ["wz-capi-core?/tx-expiry-run", "wz-capi-coop?/tx-expiry-run"]
+# `tx-fragment-credit`: the session's budget of fragments and the stop fragment of a chain cut
+# short. Off, a chain its link cuts ends where it was cut.
+tx-fragment-credit = ["wz-capi-core?/tx-fragment-credit", "wz-capi-coop?/tx-fragment-credit"]
+# `tx-held-wait`: a droppable message behind another send waits for room under zenoh's queue
+# profile. The sessions of this ABI open under pico's, which drops it at once, so off it links no
+# wait it never takes.
+tx-held-wait = ["wz-capi-core?/tx-held-wait", "wz-capi-coop?/tx-held-wait"]
 # `config-document`: `zext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a

@@ -4105,7 +4105,9 @@ mod step;
 #[cfg(feature = "ticker")]
 mod ticker;
 mod timestamps;
-#[cfg(feature = "listen")]
+// A short pool's blocking publish waits for its slot with nothing of the session held only where
+// it probes the faces first.
+#[cfg(all(feature = "listen", feature = "tx-probe"))]
 mod tx_pool;
 
 /// The round is kept by exactly the builds that queue a record into it (`wz_round`, the crate's

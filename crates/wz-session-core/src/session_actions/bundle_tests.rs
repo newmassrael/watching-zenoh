@@ -1501,6 +1501,261 @@ mod lent_frame_refusal {
     }
 }
 
+/// A chain of fragments its link cuts, in a build without the fragment credit and its stop
+/// fragment (`tx-fragment-credit`): nothing more of the chain leaves, as zenoh-pico's chain ends at
+/// the fragment whose write failed, and the next frame of the conduit carries the sequence number
+/// of the fragment that did not leave, so the reliable ring has no gap.
+#[cfg(all(
+    feature = "tx-lend-only",
+    feature = "codec-push",
+    feature = "alloc",
+    feature = "transport-fragmentation",
+    not(feature = "tx-fragment-credit")
+))]
+mod chain_cut_without_a_stop_fragment {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use super::{params, PlainRuntime, StillClock};
+    use crate::link::{
+        BoxedLinkDriver, LinkDropCause, LinkRoom, LinkSendOutcome, RoomAnswer, RoomWait, TxSlot,
+        TxSlotGrant,
+    };
+    use crate::qos::Priority;
+    use crate::reliability::Reliability;
+    use crate::send_wire_error::SendWireError;
+    use crate::session_actions::SessionLinkActions;
+
+    /// A link that has room while it holds fewer than `room_until` frames, lends its one slot
+    /// while it holds fewer than `lend_until`, and keeps each frame sent.
+    struct CuttingLink {
+        room_until: AtomicUsize,
+        lend_until: AtomicUsize,
+        slot: Mutex<Vec<u8>>,
+        sent: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl CuttingLink {
+        fn new(room_until: usize, lend_until: usize) -> Arc<Self> {
+            Arc::new(Self {
+                room_until: AtomicUsize::new(room_until),
+                lend_until: AtomicUsize::new(lend_until),
+                slot: Mutex::new(alloc::vec![0; 8192]),
+                sent: Mutex::new(Vec::new()),
+            })
+        }
+
+        /// How many frames the link holds.
+        fn held(&self) -> usize {
+            self.sent.lock().expect("the sends").len()
+        }
+
+        /// Room and a slot for every frame from now on.
+        fn free(&self) {
+            self.room_until.store(usize::MAX, Ordering::SeqCst);
+            self.lend_until.store(usize::MAX, Ordering::SeqCst);
+        }
+    }
+
+    impl BoxedLinkDriver for CuttingLink {
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+
+        fn wait_for_room_for(
+            &self,
+            _class: Reliability,
+            _priority: Priority,
+            _wait: RoomWait,
+        ) -> RoomAnswer {
+            RoomAnswer::at_once(if self.held() < self.room_until.load(Ordering::SeqCst) {
+                LinkRoom::Free
+            } else {
+                LinkRoom::Congested
+            })
+        }
+
+        fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+            (self.held() < self.lend_until.load(Ordering::SeqCst)).then_some(TxSlotGrant {
+                slot: TxSlot(0),
+                headroom: 0,
+            })
+        }
+
+        fn tx_slot_storage(&self, _slot: TxSlot) -> (*mut u8, usize) {
+            let mut slot = self.slot.lock().expect("the slot");
+            (slot.as_mut_ptr(), slot.len())
+        }
+
+        fn tx_slot_send(
+            &self,
+            _slot: TxSlot,
+            start: usize,
+            len: usize,
+            _reliability: Reliability,
+            _priority: Priority,
+        ) -> LinkSendOutcome {
+            let written = self.slot.lock().expect("the slot")[start..start + len].to_vec();
+            self.sent.lock().expect("the sends").push(written);
+            LinkSendOutcome::Sent
+        }
+
+        fn tx_slot_abort(&self, _slot: TxSlot) {}
+    }
+
+    /// An established session over `link`.
+    fn session(link: &Arc<CuttingLink>) -> Arc<SessionLinkActions<PlainRuntime, StillClock>> {
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
+        actions.enter_established();
+        actions
+    }
+
+    /// A reliable plain put of `len` bytes on `actions`.
+    fn put(
+        actions: &SessionLinkActions<PlainRuntime, StillClock>,
+        len: usize,
+    ) -> Option<Result<(), SendWireError>> {
+        let key = crate::named_key::NamedKey::literal("home/chain").expect("a key");
+        actions.send_plain_put_qos(
+            key,
+            &alloc::vec![0x5a; len],
+            None,
+            super::super::SendAs {
+                reliable: true,
+                express: false,
+                priority: Priority::DEFAULT,
+            },
+        )
+    }
+
+    /// A payload two batches long, which leaves as a chain of fragments.
+    fn chain_len(actions: &SessionLinkActions<PlainRuntime, StillClock>) -> usize {
+        let (budget, _) = actions
+            .negotiated_tx_limits_for(Reliability::Reliable)
+            .expect("the limits are settled at establishment");
+        budget.saturating_mul(2)
+    }
+
+    /// A chain whose link has no room after its first fragment ends there: the put is the
+    /// congestion drop a droppable message is, nothing follows the first fragment, and the next
+    /// frame carries the sequence number the second fragment would have had. Turned red by a stop
+    /// fragment written in this build (a frame between the two), or by the cut fragment's number
+    /// spent (the next frame on SN 2).
+    #[test]
+    fn a_chain_cut_for_room_ends_where_it_was_cut() {
+        let link = CuttingLink::new(1, usize::MAX);
+        let actions = session(&link);
+        let long = chain_len(&actions);
+        assert_eq!(
+            put(&actions, long),
+            Some(Ok(())),
+            "a droppable chain cut for room is dropped, not refused"
+        );
+        assert_eq!(link.held(), 1, "only the first fragment left");
+        link.free();
+        assert_eq!(put(&actions, 1), Some(Ok(())));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(
+            sent.len(),
+            2,
+            "the next put follows the first fragment with nothing between"
+        );
+        // The second byte of a frame or a fragment is its SN while it is below 128.
+        assert_eq!(sent[0][1], 0, "the first fragment carries SN 0");
+        assert_eq!(
+            sent[1][1], 1,
+            "the next frame carries the cut fragment's SN"
+        );
+    }
+
+    /// A chain whose link lends no slot for its second fragment ends there: the put is refused
+    /// for want of a slot, nothing follows the first fragment, and the number the second fragment
+    /// took is given back, so the next frame carries it. Turned red by the `unmint` of a chain
+    /// cut without its stop fragment taken out (the next frame on SN 2), or by a stop fragment
+    /// written in this build.
+    #[test]
+    fn a_chain_cut_for_want_of_a_slot_gives_the_cut_fragments_number_back() {
+        let link = CuttingLink::new(usize::MAX, 1);
+        let actions = session(&link);
+        let long = chain_len(&actions);
+        assert_eq!(
+            put(&actions, long),
+            Some(Err(SendWireError::LinkRefused(LinkDropCause::NoTxSlot)))
+        );
+        assert_eq!(link.held(), 1, "only the first fragment left");
+        link.free();
+        assert_eq!(put(&actions, 1), Some(Ok(())));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(
+            sent.len(),
+            2,
+            "the next put follows the first fragment with nothing between"
+        );
+        assert_eq!(sent[0][1], 0, "the first fragment carries SN 0");
+        assert_eq!(
+            sent[1][1], 1,
+            "the next frame carries the cut fragment's SN"
+        );
+    }
+}
+
+/// A session the `tx-expiry-keeps-session` policy keeps through an expiry, in a build without
+/// the run of expiries (`tx-expiry-run`).
+#[cfg(all(not(feature = "tx-expiry-run"), feature = "policy-selection"))]
+mod expiry_without_a_run {
+    use alloc::sync::Arc;
+
+    use super::{params, CountingLink, PlainRuntime, StillClock};
+    use crate::limit_binding::Quota;
+    use crate::link::BoxedLinkDriver;
+    use crate::policy::TxExpiryKeepsSession;
+    use crate::session_actions::SessionLinkActions;
+    use crate::session_init_params::TxQueueConf;
+    use crate::tx_deadline::TxExpiry;
+
+    /// A kept expiry never closes the session, however many come in a row and whatever count
+    /// the snapshot holds: a send that finds no room fails and the session stays, as zenoh-pico's
+    /// failed send leaves its session, until the lease decides. Turned red by
+    /// `settle_blocking_expiry` ordering a close on a kept expiry in this build.
+    #[test]
+    fn a_kept_expiry_never_closes_the_session() {
+        let mut params = params();
+        params
+            .policy
+            .select_tx_expiry_keeps_session(TxExpiryKeepsSession::On)
+            .expect("the policy's domain holds on");
+        params
+            .limits
+            .select_tx_expiry_close_after(Quota::at_most(2))
+            .expect("the limit's domain holds two");
+        params.tx_queue = TxQueueConf::of_snapshot(&params.policy, &params.limits);
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(CountingLink::default());
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params, StillClock)
+                .expect("the heap has room");
+        for expiry in 0..8 {
+            assert_eq!(
+                actions.settle_blocking_expiry(),
+                TxExpiry::Kept,
+                "expiry {expiry}"
+            );
+            assert!(
+                !actions.congestion_close_ordered(),
+                "expiry {expiry} ordered no close"
+            );
+        }
+    }
+}
+
 /// A control message the link has no slot for, because the batch a data conduit holds open has
 /// its one slot, sends that batch first and then takes the slot it gave back: the control message
 /// does not overtake data the session staged before it. The session machine's Close is that case,
