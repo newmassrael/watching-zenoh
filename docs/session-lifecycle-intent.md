@@ -1681,6 +1681,52 @@ stock zenohd, a commander behind a router whose own key no grant names, is witne
 points with the router's zid as the link's proof and not yet over the wire; and stock zenoh's
 `z_get` carries no attachment, so that witness needs a commander of wz's.
 
+**D16 follow-up.** The three entries the paragraph above left are built.
+
+The admin write is an entry point of the monitor. Writing the node's configuration is the
+fifth verb, `Verb::Configure` (`crates/wz-session-core/src/lifecycle_node.rs` @ `Configure,`),
+whose object is the node the written key names and the key itself
+(`crates/wz-session-core/src/lifecycle_monitor.rs` @ `pub fn configure(asker: Asker<'a>) -> Self {`);
+the value is no part of the object, since no grant is narrowed to a value and a record of
+fixed size could not keep one, and the parse reads it only after a permit. A write arrives as
+a sample, and a sample carries no proof of its writer, so it is asked by nobody shown over
+`Channel::AdminWrite` (`Asker::admin_write`). The write permission is no longer a fallback
+the function reads for every refusal: it is a grant of a verb to anyone, which a policy states
+per verb (`Policy::grants_anyone`, `Grounds::GrantedToAnyone`), and the configuration's write
+permission is the policy `WritePermission`, which grants `Configure` and nothing else. The
+fixed profile's `ConnectControl::apply` decides every write through the monitor before it
+reads the value and keeps the decision in a `DecisionLog` of its own
+(`crates/wz-session-mcu/src/admin_host.rs` @ `let permitted = Monitor::new(&policy, &self.record)`);
+the heap profile's three hosts of the config-write surface (the session's
+`apply_admin_config_write` and the demo's peer and router) ask
+`admin_write_permitted`, which decides the same request into the process's log
+(`crates/wz-runtime-tokio/src/lib.rs` @ `pub fn admin_write_permitted(`). The admin images
+keep working because their declaration states the grant: `ConnectControl::new(true)`, the
+configuration's `adminspace.permissions.write`, is the grant of `Configure` to anyone, and
+through `ControlledOpener` and `WritePermit` the grant of `open` to anyone, in
+`deploy/mcu-admin-node` (`main.rs`, `fixed.rs`, `fixed_tcp.rs`), `deploy/zephyr-admin-node`
+(`lib.rs`, `fixed_node.rs`, `fixed_tcp.rs`, `fixed_admin.rs`) and
+`deploy/zephyr-admin-loopback`; none of them changed. A grant of `Configure` to a zid is
+expressible (a grant narrowed to a key names the keys it may write) and permits nothing yet,
+because no sample says who wrote it; that waits on the sample path carrying the proof of the
+link it came over, as a query's does.
+
+The heap profile reads its grants from the node's declaration. `--node-declaration <file>`
+names the declaration a fixed node of the same policy is built from, and its `[[endpoint]]`
+rows whose `role` is `commander` are the grants (`crates/wz-runtime-tokio/src/node_declaration.rs`
+@ `pub fn commander_grants(text: &str) -> Result<HeapGrants, DeclarationError> {`), so one
+declaration states the policy of both profiles. `--session-commander` is gone: no test needs
+it, since the end-to-end tests write a declaration.
+
+The end-to-end witness has its positive leg again
+(`crates/wz-integration-tests/tests/it/files/wz_peer_session_lifecycle_query.rs`): the node
+listens on TCP and on mutual TLS (`--tls-mtls`, the demo's `enable_mtls`), its declaration
+grants `close` and `status` to the zid of a key the test makes, and a client that presents that
+key (`--tls-connect-cert`, `--tls-connect-key`) and claims the zid it names reads the peer's
+status and closes its session, whose face goes down. A key on no row of the declaration is
+refused the same close over the same listener, and the refusal over plain TCP and the refusal
+with no declaration stand beside it.
+
 ## 6. The contract for every verb (step 8; A, B and D built, C in part)
 
 Step 7e held the transports to one table for `open`. The other verbs of D6
