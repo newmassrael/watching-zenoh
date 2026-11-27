@@ -1136,11 +1136,13 @@ impl MissRooms {
 /// ([`AdvSubPlace`]).
 pub(crate) struct AdvSubState {
     engine: crate::session::EngineHold,
-    /// The subscriber the engine hosts, until its owner lets go of it. Dropping it retracts
-    /// everything it declared, in the order the runtime's own subscriber does; a background
-    /// subscriber is taken out to run on with its entities standing. Hosted on the engine as the
-    /// build names it, so a build of one engine makes no table of the session's operations for it.
-    subscriber: Option<EngineSubscriber<EngineHold>>,
+    /// The subscriber the engine hosts, declared in this place ([`EngineSubscriber::declare_in`])
+    /// and written for every state a handle names: a state whose declaration is refused is retired
+    /// before any handle names it. Its owner's release drops it, which retracts everything it
+    /// declared in the order the runtime's own subscriber does; a background subscriber is read
+    /// out to run on with its entities standing. Hosted on the engine as the build names it, so a
+    /// build of one engine makes no table of the session's operations for it.
+    subscriber: core::mem::MaybeUninit<EngineSubscriber<EngineHold>>,
     /// R311y559 — as `AdvPubState`, for `ze_advanced_subscriber_keyexpr`: a borrow of the key the
     /// subscriber keeps, which no copy of this state's doubles.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
@@ -1373,14 +1375,21 @@ unsafe fn let_go_miss_set(context: *mut c_void) {
 impl AdvSubState {
     /// Point the cached view at the key the subscriber keeps.
     fn bind(&mut self) {
-        let keyexpr = self.keyexpr().unwrap_or_default();
+        let keyexpr = self.keyexpr();
         self.loaned_keyexpr =
             crate::abi::z_loaned_keyexpr_t::borrowed(keyexpr.as_ptr(), keyexpr.len());
     }
 
-    /// The key the subscriber subscribes to, while its owner holds it.
-    fn keyexpr(&self) -> Option<&str> {
-        self.subscriber.as_ref().map(EngineSubscriber::keyexpr)
+    /// The subscriber, which every state a handle names holds.
+    fn subscriber(&self) -> &EngineSubscriber<EngineHold> {
+        // SAFETY: the field's: the subscriber is written before a handle names the state, and the
+        // release that lets go of it is the handle's last use.
+        unsafe { self.subscriber.assume_init_ref() }
+    }
+
+    /// The key the subscriber subscribes to.
+    fn keyexpr(&self) -> &str {
+        self.subscriber().keyexpr()
     }
 }
 
@@ -1508,7 +1517,7 @@ unsafe fn declare_subscriber_state(
         .fill_answering(
             AdvSubState {
                 engine: crate::session::EngineHold::clone(engine),
-                subscriber: None,
+                subscriber: core::mem::MaybeUninit::uninit(),
                 loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                 miss: None,
                 session: Some(session),
@@ -1562,12 +1571,12 @@ unsafe fn declare_subscriber_state(
     // SAFETY: the context is a count of the miss set, let go of once by `let_go_miss_set`; the
     // set is read through a shared borrow, which it admits from any thread.
     let misses = unsafe { MissHandlers::lent(fire_adv_miss, lent_miss, Some(let_go_miss_set)) };
-    let declared = EngineSubscriber::declare_in(engine, ke, opts, on_sample, misses, core);
+    // The subscriber is declared in the state's place, which was filled with none.
+    // SAFETY: as above; nothing else reaches the field until the state is handed out.
+    let place = unsafe { &mut *core::ptr::addr_of_mut!((*state).subscriber) };
+    let declared = EngineSubscriber::declare_in(place, engine, ke, opts, on_sample, misses, core);
     match declared {
-        Ok(subscriber) => {
-            // SAFETY: as above; the state was filled with no subscriber, so the write lets go of
-            // nothing in its place.
-            unsafe { core::ptr::addr_of_mut!((*state).subscriber).write(Some(subscriber)) };
+        Ok(_) => {
             (*state).bind();
             Ok(state)
         }
@@ -1594,7 +1603,7 @@ unsafe fn declare_subscriber_state(
 /// # Safety
 /// `state` is a live handle [`declare_subscriber_state`] made, let go of once.
 unsafe fn free_advanced_subscriber(state: *mut AdvSubState) {
-    drop((*state).subscriber.take());
+    (*state).subscriber.assume_init_drop();
     if let Some(set) = (*state).miss.as_deref() {
         set.leave_background();
     }
@@ -1949,10 +1958,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         else {
             return Z_ERR_NULL;
         };
-        let Some(keyexpr) = state.keyexpr() else {
-            return Z_ERR_NULL;
-        };
-        let ke = wz_ext_pubsub::advanced_ke::publisher_detection_ke(keyexpr);
+        let ke = wz_ext_pubsub::advanced_ke::publisher_detection_ke(state.keyexpr());
         let history = if options.is_null() {
             false
         } else {
@@ -2230,10 +2236,8 @@ pub(crate) unsafe fn advanced_publisher_keyexpr(
 pub(crate) unsafe fn advanced_subscriber_identity(
     sub: *const ze_loaned_advanced_subscriber_t,
 ) -> Option<([u8; 16], wz_session_core::wire_id::EntityId)> {
-    crate::abi::handle_ref::<ze_loaned_advanced_subscriber_t, AdvSubState>(sub).and_then(|state| {
-        let subscriber = state.subscriber.as_ref()?;
-        Some((state.engine.zid(), subscriber.id().eid()))
-    })
+    crate::abi::handle_ref::<ze_loaned_advanced_subscriber_t, AdvSubState>(sub)
+        .map(|state| (state.engine.zid(), state.subscriber().id().eid()))
 }
 
 /// The cached keyexpr borrow behind a loaned advanced subscriber.
@@ -2278,9 +2282,7 @@ pub unsafe extern "C" fn ze_declare_background_advanced_subscriber(
                 // runs in the background, its entities standing until the session ends. Its owner
                 // lets go of the place at once, with no wait, and the place stays with the sample
                 // closure, which holds the session's count open, so the close waits for it.
-                if let Some(subscriber) = (*state).subscriber.take() {
-                    subscriber.background();
-                }
+                (*state).subscriber.assume_init_read().background();
                 crate::object_slot::retire_entity::<AdvSubState, AdvSubKept>(state);
                 Z_OK
             }
@@ -2331,9 +2333,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
         if state.engine.is_closed() {
             return crate::result::Z_ERR_SESSION_CLOSED;
         }
-        let Some(keyexpr) = state.keyexpr() else {
-            return Z_ERR_NULL;
-        };
+        let keyexpr = state.keyexpr();
         let detection = wz_ext_pubsub::advanced_ke::publisher_detection_ke(keyexpr);
         let history = !options.is_null() && (*options).history;
         let engine = state.engine.clone();
@@ -2497,7 +2497,7 @@ mod tests {
         let state = slot.fill(crate::object_slot::Answering::keeping(
             AdvSubState {
                 engine,
-                subscriber: Some(subscriber),
+                subscriber: core::mem::MaybeUninit::new(subscriber),
                 loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
                 miss: Some(set.clone()),
                 session: None,
@@ -2537,11 +2537,7 @@ mod tests {
         // below consumes it.
         unsafe {
             (*state).bind();
-            let kept = (*state)
-                .subscriber
-                .as_ref()
-                .expect("the owner holds its subscriber")
-                .keyexpr();
+            let kept = (*state).subscriber().keyexpr();
             let view = advanced_subscriber_keyexpr(loaned);
             assert_eq!(crate::keyexpr::keyexpr_str(view), Some("demo/data"));
             assert_eq!(

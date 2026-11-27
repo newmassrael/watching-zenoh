@@ -1690,7 +1690,9 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
             given_back_into(&given),
         )
     };
+    let mut place = core::mem::MaybeUninit::uninit();
     let subscriber = EngineSubscriber::declare_in(
+        &mut place,
         &engine(&script),
         "demo/data",
         options(),
@@ -1700,7 +1702,8 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
     )
     .expect("the subscriber declares in the lent place");
     let listener = subscriber.sample_miss_listener(|_| {});
-    drop(subscriber);
+    // SAFETY: the declaration wrote the subscriber in `place`, which is read out of it once.
+    drop(unsafe { place.assume_init_read() });
     assert_eq!(
         given.load(Ordering::SeqCst),
         0,
@@ -1726,7 +1729,9 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
             given_back_into(&refused_back),
         )
     };
+    let mut refused_place = core::mem::MaybeUninit::uninit();
     let refused = EngineSubscriber::declare_in(
+        &mut refused_place,
         &engine(&script),
         "demo/data",
         AdvancedSubscriberOptions::new().with_history(HistoryConfig::new().max_samples(0)),
@@ -1737,6 +1742,103 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
     assert!(matches!(refused, Err(HostError::HistoryBoundZero { .. })));
     assert_eq!(refused_back.load(Ordering::SeqCst), 1, "given back at once");
     assert!(script.events().is_empty(), "nothing was declared");
+}
+
+/// A subscriber declared in a place its host gives is written there and handed back as that
+/// place, and one refused after its first declaration leaves the place as it found it. Turned red
+/// by a declaration that makes the subscriber elsewhere and moves it in, or a refusal that writes
+/// the place.
+#[test]
+fn a_subscriber_is_declared_in_the_place_its_host_gives() {
+    let given = AtomicU64::new(0);
+    let mut core = SubscriberCore::<Arc<dyn SessionEngine>>::vacant();
+    let script = Script::new(1);
+    // SAFETY: `core` is free and outlives the subscriber and every holder of its part; `given`
+    // outlives the give-back.
+    let lent = unsafe {
+        LentCore::new(
+            core::ptr::NonNull::from(&mut core),
+            count_given_back,
+            given_back_into(&given),
+        )
+    };
+    let mut place = core::mem::MaybeUninit::<EngineSubscriber>::uninit();
+    let at = place.as_ptr();
+    let declared = EngineSubscriber::declare_in(
+        &mut place,
+        &engine(&script),
+        "demo/data",
+        AdvancedSubscriberOptions::new(),
+        OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+        MissHandlers::default(),
+        lent,
+    )
+    .expect("the subscriber declares in the given place");
+    assert!(core::ptr::eq(&*declared, at), "handed back as the place");
+    assert_eq!(declared.keyexpr(), "demo/data");
+    let id = declared.id();
+    // SAFETY: the declaration wrote the subscriber in `place`, which is read out of it once.
+    let subscriber = unsafe { place.assume_init_read() };
+    assert_eq!(
+        subscriber.id(),
+        id,
+        "the place holds the subscriber declared"
+    );
+    drop(subscriber);
+    drop(script);
+    assert_eq!(given.load(Ordering::SeqCst), 1, "the core goes back once");
+
+    // An engine that runs no periodic job refuses the subscriber after its subscription stands.
+    let refused_back = AtomicU64::new(0);
+    let mut refused_core = SubscriberCore::<Arc<dyn SessionEngine>>::vacant();
+    let script = Script::new(1);
+    script.no_tickers.store(true, Ordering::SeqCst);
+    // SAFETY: as above.
+    let lent = unsafe {
+        LentCore::new(
+            core::ptr::NonNull::from(&mut refused_core),
+            count_given_back,
+            given_back_into(&refused_back),
+        )
+    };
+    let size = core::mem::size_of::<EngineSubscriber>();
+    let mut refused_place = core::mem::MaybeUninit::<EngineSubscriber>::uninit();
+    // SAFETY: the place is valid for `size` bytes, written here so they can be read back.
+    unsafe {
+        refused_place
+            .as_mut_ptr()
+            .cast::<u8>()
+            .write_bytes(0xA5, size)
+    };
+    let refused = EngineSubscriber::declare_in(
+        &mut refused_place,
+        &engine(&script),
+        "demo/data",
+        AdvancedSubscriberOptions::new()
+            .with_recovery(RecoveryConfig::new().with_periodic_queries(Duration::from_millis(500))),
+        OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+        MissHandlers::default(),
+        lent,
+    )
+    .map(|_| ());
+    assert!(matches!(refused, Err(HostError::Refused(_))));
+    assert_eq!(
+        script.events(),
+        ["declare subscriber demo/data", "retract demo/data"],
+        "what stood before the refusal is retracted"
+    );
+    // SAFETY: every byte of the place was written above and the refusal wrote none.
+    let bytes = unsafe { core::slice::from_raw_parts(refused_place.as_ptr().cast::<u8>(), size) };
+    assert!(
+        bytes.iter().all(|&byte| byte == 0xA5),
+        "a refusal leaves the place unwritten"
+    );
+    drop(script);
+    assert_eq!(
+        refused_back.load(Ordering::SeqCst),
+        1,
+        "the core goes back once"
+    );
 }
 
 /// The late-publisher subscription's callback is the engine's plain form over a count of the

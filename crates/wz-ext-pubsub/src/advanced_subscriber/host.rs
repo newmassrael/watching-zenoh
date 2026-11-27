@@ -727,23 +727,28 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         // SAFETY: `make` makes the whole shared part in the place it is handed. Refused, `make` is
         // dropped uncalled, and the callbacks with it.
         let shared = unsafe { Strong::try_boxed_in(make) }.map_err(|NoPlace| HostError::NoRoom)?;
-        Self::declare_over(engine, shared, &options)
+        let mut place = MaybeUninit::uninit();
+        Self::declare_over(&mut place, engine, shared, &options)?;
+        // SAFETY: `declare_over` answered `Ok`, which it does with every field written.
+        Ok(unsafe { place.assume_init() })
     }
 
-    /// [`Self::declare_with`] with what the subscriber's callbacks and jobs share lodged in `core`,
-    /// a place its host lends, and not in memory of its own: a host that keeps its objects in
-    /// places of its own declares with no memory taken for it.
+    /// [`Self::declare_with`] with the subscriber made in `place` and what its callbacks and jobs
+    /// share lodged in `core`, both places its host lends: a host that keeps its objects in places
+    /// of its own declares with no memory taken for it and moves no subscriber into its place.
+    /// Refused, `place` is left unwritten.
     ///
-    /// The place is given back once ([`LentCore::new`]): at once when the declaration is refused
+    /// The core is given back once ([`LentCore::new`]): at once when the declaration is refused
     /// before the part is made, and otherwise with the last of what holds the part.
-    pub fn declare_in(
+    pub fn declare_in<'p>(
+        place: &'p mut MaybeUninit<Self>,
         engine: &E,
         keyexpr: impl AsRef<str>,
         options: AdvancedSubscriberOptions,
         on_sample: OnSample,
         misses: MissHandlers,
         core: LentCore<E>,
-    ) -> Result<Self, HostError> {
+    ) -> Result<&'p mut Self, HostError> {
         let base_keyexpr = match admitted(engine, keyexpr.as_ref(), &options) {
             Ok(base_keyexpr) => base_keyexpr,
             Err(refused) => {
@@ -768,16 +773,18 @@ impl<E: EngineHolder> EngineSubscriber<E> {
                 core.context,
             )
         };
-        Self::declare_over(engine, shared, &options)
+        Self::declare_over(place, engine, shared, &options)
     }
 
-    /// Declare what `options` asks for over `shared`, the subscriber's shared part, made. The
-    /// options are read where the caller holds them, as nothing declared keeps them.
-    fn declare_over(
+    /// Declare what `options` asks for over `shared`, the subscriber's shared part, made, and
+    /// write the subscriber in `place` once nothing is left to refuse, so a refusal leaves it
+    /// unwritten. The options are read where the caller holds them, as nothing declared keeps them.
+    fn declare_over<'p>(
+        place: &'p mut MaybeUninit<Self>,
         engine: &E,
         shared: Strong<Shared<E>>,
         options: &AdvancedSubscriberOptions,
-    ) -> Result<Self, HostError> {
+    ) -> Result<&'p mut Self, HostError> {
         let zid = engine.session_zid();
         let recovery = options.recovery;
         let history = options.history;
@@ -863,22 +870,45 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         // The detection token, last: a subscriber advertises itself once it can receive.
         let detection_token = declare_detection_token(engine, base, options, id)?;
 
-        Ok(Self {
-            subscriber,
-            periodic,
+        let cancel = GetCancel {
+            shared: shared.clone(),
+            armed: true,
+        };
+        let at = place.as_mut_ptr();
+        // SAFETY: each field is written once through a pointer to it, inside the place, after the
+        // last step that can refuse.
+        unsafe {
+            addr_of_mut!((*at).subscriber).write(subscriber);
+            addr_of_mut!((*at).periodic).write(periodic);
             #[cfg(feature = "advanced-retention")]
-            retention,
-            cancel: GetCancel {
-                shared: shared.clone(),
-                armed: true,
-            },
-            late_publishers,
-            heartbeat,
-            detection_token,
-            shared,
-            id,
-            forms,
-        })
+            addr_of_mut!((*at).retention).write(retention);
+            addr_of_mut!((*at).cancel).write(cancel);
+            addr_of_mut!((*at).late_publishers).write(late_publishers);
+            addr_of_mut!((*at).heartbeat).write(heartbeat);
+            addr_of_mut!((*at).detection_token).write(detection_token);
+            addr_of_mut!((*at).shared).write(shared);
+            addr_of_mut!((*at).id).write(id);
+            addr_of_mut!((*at).forms).write(forms);
+        }
+        // Every field is named here, so a field added to the subscriber and not written above fails
+        // to compile rather than leaving its place unwritten.
+        let _every_field_written = |subscriber: &Self| {
+            let Self {
+                subscriber: _,
+                periodic: _,
+                #[cfg(feature = "advanced-retention")]
+                    retention: _,
+                cancel: _,
+                late_publishers: _,
+                heartbeat: _,
+                detection_token: _,
+                shared: _,
+                id: _,
+                forms: _,
+            } = subscriber;
+        };
+        // SAFETY: every field was written above.
+        Ok(unsafe { place.assume_init_mut() })
     }
 
     /// This subscriber's global identity: the session's zid and the id its subscription carries.
