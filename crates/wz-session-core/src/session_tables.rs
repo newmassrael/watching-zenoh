@@ -927,6 +927,12 @@ impl<Key, Cb> SubscriberRow<Key, Cb> {
     pub fn into_callback(self) -> Cb {
         self.callback
     }
+
+    /// Its callback and its key, the row let go of: the key for the retraction to name once the
+    /// row went from the tables.
+    fn into_parts(self) -> (Cb, Key) {
+        (self.callback, self.key.key)
+    }
 }
 
 /// A queryable of the session's.
@@ -1650,8 +1656,9 @@ impl<C> fmt::Debug for Refused<C> {
     }
 }
 
-/// An entity undeclared.
-pub struct Undeclared<T> {
+/// An entity undeclared. `R` is what its retraction names beside its id, for a kind whose
+/// undeclaration reads it off the row it removes ([`Retracting`]); nothing for the others.
+pub struct Undeclared<T, R = ()> {
     /// The id its retraction names.
     pub id: EntityId,
     /// What the caller drops where it holds no lock: the callback of a kind that has one, the row
@@ -1664,6 +1671,29 @@ pub struct Undeclared<T> {
     /// The declaration of its own key ([`KeyForm::own`]), when that was another and the entity
     /// held it last: retracted as [`Self::keyexpr`] is, after it.
     pub named: Option<ExprId>,
+    /// What its retraction names beside the id, read off its row while the declarations the row
+    /// held still stood.
+    pub retraction: R,
+}
+
+/// What an entity's retraction names beside its id, read off its row as the row went: the
+/// declaration and the rest of the key past it ([`RetractionKey`]), with the key that rest is read
+/// against, so the retraction is told once the row and the declarations it held went. The key is
+/// the row's own, moved out of the row the undeclaration took; a row a call of which runs stays in
+/// its slot until that call ends, and this holds its key once more. It is one of the session's
+/// keys, let go of where the tables are held.
+#[derive(Debug)]
+pub struct Retracting<Key> {
+    names: RetractionKey,
+    key: Key,
+}
+
+impl<Key: KeyBacking> Retracting<Key> {
+    /// The declaration's id and the rest of the key past it, or `0` and the whole key
+    /// ([`RetractionKey::names`]).
+    pub fn names(&self) -> (ExprId, &str) {
+        self.names.names(text(&self.key))
+    }
 }
 
 /// A write filter or a matching listener declared.
@@ -1969,14 +1999,18 @@ fn keyexpr_row_by_id<P: Storage>(keyexprs: &Keyexprs<P>, id: ExprId) -> FoundKey
 }
 
 /// Remove the entity `handle` names from `table`, and its holds of the declarations it names.
+/// `read` reads off the row what its retraction names, told whether the row leaves its slot now
+/// (`false` while a call of it runs, which keeps it there, retired, until the call ends).
 // What the caller drops is taken out of the row here (`hand`), once for every caller, so the
-// whole row is moved no further than this.
-fn undeclare_entity<K, R: Entity, T, P: Storage, const N: usize>(
+// whole row is moved no further than this. The retraction is read before the row's holds are let
+// go of: a declaration the row held last still names the key then.
+fn undeclare_entity<K, R: Entity, T, V, P: Storage, const N: usize>(
     table: &mut SlotMap<K, R, N, P>,
     keyexprs: &mut Keyexprs<P>,
     handle: Handle<K>,
+    read: impl FnOnce(&Keyexprs<P>, &R, bool) -> V,
     hand: impl FnOnce(R) -> T,
-) -> Option<Undeclared<T>> {
+) -> Option<Undeclared<T, V>> {
     let mut entry = table.entry(handle)?;
     let (id, (prefix, named), idle) = entry
         .get()
@@ -1986,6 +2020,7 @@ fn undeclare_entity<K, R: Entity, T, P: Storage, const N: usize>(
     if !(idle || entry.pin()) {
         return None;
     }
+    let retraction = read(&*keyexprs, entry.get()?, idle);
     let removal = entry.remove()?;
     let keyexpr = prefix.and_then(|prefix| release_keyexpr(keyexprs, prefix));
     let named = named.and_then(|named| release_keyexpr(keyexprs, named));
@@ -1994,7 +2029,51 @@ fn undeclare_entity<K, R: Entity, T, P: Storage, const N: usize>(
         taken: removal.taken().map(hand),
         keyexpr,
         named,
+        retraction,
     })
+}
+
+/// `key` as the wire carries it, by the declarations of `keyexprs` ([`SessionTables::wire_of`]).
+fn wire_form<'k, P: Storage>(keyexprs: &Keyexprs<P>, key: &'k EntityKey<P::Key>) -> WireForm<'k> {
+    let whole = text(&key.key);
+    let literal = WireForm {
+        mapping: 0,
+        suffix: whole,
+    };
+    let Some(row) = key.prefix.and_then(|prefix| keyexprs.get(prefix)) else {
+        return literal;
+    };
+    match whole.get(text(&row.key).len()..) {
+        Some(suffix) => WireForm {
+            mapping: row.id(),
+            suffix,
+        },
+        None => literal,
+    }
+}
+
+/// What the retraction of the entity whose key is `key` names beside its id, by the declarations
+/// of `keyexprs` ([`SessionTables::retraction_of`]).
+fn retraction_names<P: Storage>(
+    keyexprs: &Keyexprs<P>,
+    key: &EntityKey<P::Key>,
+) -> Option<RetractionKey> {
+    match key.retraction {
+        Retraction::ById => None,
+        Retraction::AsAnnounced => {
+            let form = wire_form(keyexprs, key);
+            Some(RetractionKey::declared(form.mapping, form.suffix))
+        }
+        // The declaration as the row holds it: its id while it stands, the whole key once it was
+        // retracted whatever held it.
+        Retraction::Named(named) => {
+            let (mapping, rest) = named.names(text(&key.key));
+            Some(match key.named.and_then(|held| keyexprs.get(held)) {
+                Some(row) if mapping == row.id() => RetractionKey::declared(row.id(), rest),
+                _ => RetractionKey::literal(),
+            })
+        }
+    }
 }
 
 /// Take out of `table` the next row at or after `cursor` that was removed while a call of it ran
@@ -2467,43 +2546,14 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// `key` as the wire carries it: by the declaration its form names where it still stands,
     /// whole otherwise.
     pub fn wire_of<'k>(&self, key: &'k EntityKey<P::Key>) -> WireForm<'k> {
-        let whole = text(&key.key);
-        let literal = WireForm {
-            mapping: 0,
-            suffix: whole,
-        };
-        let Some(row) = key.prefix.and_then(|prefix| self.keyexprs.get(prefix)) else {
-            return literal;
-        };
-        match whole.get(text(&row.key).len()..) {
-            Some(suffix) => WireForm {
-                mapping: row.id(),
-                suffix,
-            },
-            None => literal,
-        }
+        wire_form(&self.keyexprs, key)
     }
 
     /// What the retraction of the entity whose key is `key` names beside its id, read against
     /// that key ([`RetractionKey::names`]): `None` for the id alone, and for a key retracted as
     /// it is announced, the declaration its row holds while that stands, the whole key otherwise.
     pub fn retraction_of(&self, key: &EntityKey<P::Key>) -> Option<RetractionKey> {
-        match key.retraction {
-            Retraction::ById => None,
-            Retraction::AsAnnounced => {
-                let form = self.wire_of(key);
-                Some(RetractionKey::declared(form.mapping, form.suffix))
-            }
-            // The declaration as the row holds it: its id while it stands, the whole key once it
-            // was retracted whatever held it.
-            Retraction::Named(named) => {
-                let (mapping, rest) = named.names(text(&key.key));
-                Some(match key.named.and_then(|held| self.keyexprs.get(held)) {
-                    Some(row) if mapping == row.id() => RetractionKey::declared(row.id(), rest),
-                    _ => RetractionKey::literal(),
-                })
-            }
-        }
+        retraction_names(&self.keyexprs, key)
     }
 
     /// The key `key` names as the session sends it: its whole text, named on the wire by the
@@ -2575,19 +2625,41 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// ([`Self::begin_subscriber`]) nothing is handed back here: the call that ends last lets the
     /// row go ([`Self::release_subscriber`]), so the undeclaring caller returns only once
     /// `subscribers().holds_slot(handle)` is false, after the last call has returned and the row,
-    /// with its callback, was dropped (P11). The same holds for every kind with a callback.
+    /// with its callback, was dropped (P11). The same holds for every kind with a callback. What
+    /// its retraction names is read off the row it removes ([`Retracting`]), with the row's key,
+    /// which the retraction holds past the row whether the row left its slot or a call keeps it
+    /// there.
     pub fn undeclare_subscriber(
         &mut self,
         handle: SubscriberHandle,
-    ) -> Option<Undeclared<F::Subscriber>> {
+    ) -> Option<Undeclared<F::Subscriber, Option<Retracting<P::Key>>>> {
         let undeclared = undeclare_entity(
             &mut self.subscribers,
             &mut self.keyexprs,
             handle,
-            SubscriberRow::into_callback,
+            |keyexprs, row, leaves| {
+                let names = retraction_names(keyexprs, &row.key)?;
+                // A row a call keeps holds its key until the call ends, so the retraction holds it
+                // once more; a row that leaves hands its key over with it.
+                Some((names, (!leaves).then(|| row.key.key.clone())))
+            },
+            SubscriberRow::into_parts,
         )?;
         self.subscriber_epoch = self.subscriber_epoch.wrapping_add(1);
-        Some(undeclared)
+        let (taken, key) = undeclared.taken.unzip();
+        let retraction = undeclared.retraction.and_then(|(names, kept)| {
+            Some(Retracting {
+                names,
+                key: kept.or(key)?,
+            })
+        });
+        Some(Undeclared {
+            id: undeclared.id,
+            taken,
+            keyexpr: undeclared.keyexpr,
+            named: undeclared.named,
+            retraction,
+        })
     }
 
     /// Declare a queryable on `key`, answering what `origin` admits, `complete` or not.
@@ -2636,6 +2708,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             queryables,
             &mut self.keyexprs,
             handle,
+            |_, _, _| (),
             QueryableRow::into_callback,
         )
     }
@@ -2661,7 +2734,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// Undeclare the liveliness token `handle` names.
     pub fn undeclare_token(&mut self, handle: TokenHandle) -> Option<Undeclared<TokenRow<P::Key>>> {
         let tokens = <F::LivelinessPresence as Presence>::get_mut::<Tokens<P>>(&mut self.tokens)?;
-        undeclare_entity(tokens, &mut self.keyexprs, handle, core::convert::identity)
+        undeclare_entity(
+            tokens,
+            &mut self.keyexprs,
+            handle,
+            |_, _, _| (),
+            core::convert::identity,
+        )
     }
 
     /// Declare a liveliness subscriber on `key`, asking for the tokens alive now with `history`.
@@ -2710,6 +2789,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             subscribers,
             &mut self.keyexprs,
             handle,
+            |_, _, _| (),
             LivelinessSubscriberRow::into_callback,
         )
     }

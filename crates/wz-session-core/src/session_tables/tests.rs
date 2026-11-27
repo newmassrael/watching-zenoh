@@ -1977,6 +1977,85 @@ fn a_named_retraction_holds_its_declaration_until_the_entity_goes() {
     assert_eq!(tables.keyexpr_by_id(own.id), None);
 }
 
+/// A subscriber's undeclaration names its retraction off the row it removes, against the row's own
+/// key, which it hands over with it: the declaration the retraction names is named by its id,
+/// though the row was its last holder and it went with the row. One retracted by its id alone
+/// names nothing.
+///
+/// # Control
+///
+/// Reading the retraction in `undeclare_entity` after the row's holds are let go of names the key
+/// whole; handing the retraction no key of the row that left names nothing.
+#[test]
+fn a_subscribers_undeclaration_names_its_retraction_off_the_row_it_removes() {
+    let mut tables = Tables::new();
+    let own = tables.declare_keyexpr("demo/r").unwrap();
+    let key = "demo/r/**";
+    let named = KeyForm {
+        prefix: None,
+        own: None,
+        retraction: Retraction::Named(RetractionKey::declared(own.id, "/**")),
+    };
+    let sub = tables
+        .declare_subscriber(key, Locality::Any, named, 1)
+        .unwrap();
+    assert_eq!(
+        tables.undeclare_keyexpr(own.handle),
+        None,
+        "the subscriber holds it"
+    );
+    let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
+    assert_eq!(undeclared.named, Some(own.id), "it went with the row");
+    assert_eq!(tables.keyexpr_by_id(own.id), None);
+    assert_eq!(
+        undeclared.retraction.as_ref().map(Retracting::names),
+        Some((own.id, "/**")),
+        "the retraction names it as the row did"
+    );
+    assert_eq!(undeclared.taken, Some(1));
+    let quiet = tables
+        .declare_subscriber(key, Locality::Any, KeyForm::default(), 2)
+        .unwrap();
+    let undeclared = tables.undeclare_subscriber(quiet.handle).unwrap();
+    assert!(undeclared.retraction.is_none(), "retracted by its id alone");
+    assert_eq!(undeclared.taken, Some(2));
+}
+
+/// A subscriber undeclared while a call of its callback runs names its retraction as one whose row
+/// its undeclaration takes out does: the row keeps its key in its slot until the call ends, and
+/// the retraction holds the key once more, so the key reads after the row left every lookup and
+/// after the call that ended last let the row go.
+///
+/// # Control
+///
+/// Taking no hold of the key of a row a call keeps (`kept` always `None` in
+/// `undeclare_subscriber`) leaves the retraction nothing to name.
+#[test]
+fn a_subscriber_undeclared_while_its_callback_runs_names_its_retraction_past_the_row() {
+    let mut tables = latched_tables();
+    let own = tables.declare_keyexpr("demo/c").unwrap();
+    let key = "demo/c/x";
+    let named = KeyForm {
+        prefix: None,
+        own: None,
+        retraction: Retraction::Named(RetractionKey::declared(own.id, "/x")),
+    };
+    let sub = tables
+        .declare_subscriber(key, Locality::Any, named, latched(7))
+        .unwrap();
+    let call = tables.begin_subscriber(sub.handle).unwrap();
+    let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
+    assert!(undeclared.taken.is_none(), "a call of it runs");
+    assert!(ended::<CClosure<u32>>(call), "the last call lets it go");
+    assert!(tables.release_subscriber(sub.handle).is_some());
+    assert!(!tables.subscribers().holds_slot(sub.handle));
+    assert_eq!(
+        undeclared.retraction.as_ref().map(Retracting::names),
+        Some((own.id, "/x")),
+        "the retraction's own hold reads the key past the row"
+    );
+}
+
 /// A declaration an entity's key is named by and its retraction names alike is held once, and
 /// retracted once with it.
 ///

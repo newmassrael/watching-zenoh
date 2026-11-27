@@ -11230,27 +11230,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 }
                 // The declaration its key is named by goes with it when it is the last that holds
                 // it; what the links are told is read while the row stands.
-                let found = {
-                    let tables = tables(&core.session.registry);
-                    let found = tables
-                        .subscribers()
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (_, row))| row.id() == id)
-                        .map(|(rank, (handle, row))| {
-                            (
-                                rank,
-                                handle,
-                                row.key().holds(),
-                                // Read against the key, held past the row.
-                                tables
-                                    .retraction_of(row.key())
-                                    .map(|names| (names, row.key().backing().clone())),
-                            )
-                        });
-                    found
-                };
-                let (rank, handle, (prefix, named), retraction) = found?;
+                let found = tables(&core.session.registry)
+                    .subscribers()
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (_, row))| row.id() == id)
+                    .map(|(rank, (handle, row))| (rank, handle, row.key().holds()));
+                let (rank, handle, (prefix, named)) = found?;
                 // The links are asked while the rows stand, which are their places in the
                 // replay's order: the subscriber's, ranked by the walk that found it, then the
                 // declaration's, which comes before every subscriber.
@@ -11263,7 +11249,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     tables_mut(&mut core.session.registry).undeclare_subscriber(handle)?;
                 let row = undeclared.taken;
                 // The rows went before the links are told: a send never finds the tables borrowed.
-                let names = retraction.as_ref().map(|(names, key)| names.names(key));
+                // The retraction names the key as the row named it, holding the key past the row.
+                let names = undeclared
+                    .retraction
+                    .as_ref()
+                    .map(|retraction| retraction.names());
                 core.retract_at(place, Some(Retract::Subscriber { id, names }), tx);
                 core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
                 core.retract_keyexpr(named_place, undeclared.named, tx);
