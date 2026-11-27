@@ -196,7 +196,7 @@ fn count_rx_network_message<R: SessionRuntime, T: TimeSource>(
     let priority = crate::network_message::network_message_priority(msg);
     let rx = crate::stats_registry::StatsDirection::Rx;
     actions.observe_payload(rx, priority, &class);
-    actions.count_network_message(rx, &actions.link, priority, &class);
+    actions.count_network_message(rx, &actions.link.tx, priority, &class);
 }
 
 /// [`count_rx_network_message`] for a record the in-place walk lent, by its class read off the
@@ -215,7 +215,7 @@ fn count_rx_record<R: SessionRuntime, T: TimeSource>(
     actions.tx.stats.inc_rx_network(&class);
     let rx = crate::stats_registry::StatsDirection::Rx;
     actions.observe_payload(rx, record.priority, &class);
-    actions.count_network_message(rx, &actions.link, record.priority, &class);
+    actions.count_network_message(rx, &actions.link.tx, record.priority, &class);
 }
 
 /// [`count_rx_network_messages`] for a frame read on the plain-Put lane, whose records are not
@@ -246,7 +246,7 @@ fn count_rx_plain_puts<R: SessionRuntime, T: TimeSource>(
         actions.tx.stats.inc_rx_network(&class);
         let priority = crate::declare_ext_qos::qos_of_raw(put.qos.map(u64::from)).priority();
         actions.observe_payload(rx, priority, &class);
-        actions.count_network_message(rx, &actions.link, priority, &class);
+        actions.count_network_message(rx, &actions.link.tx, priority, &class);
     }
 }
 
@@ -264,9 +264,11 @@ fn note_rx_transport_message<R: SessionRuntime, T: TimeSource>(actions: &Session
     #[cfg(feature = "transport-stats")]
     {
         actions.tx.stats.inc_rx_transport_message();
-        actions.tx.record_on_link(&actions.link, |metrics, slot| {
-            metrics.inc_transport_message(crate::stats_registry::StatsDirection::Rx, slot, 1)
-        });
+        actions
+            .tx
+            .record_on_link(&actions.link.tx, |metrics, slot| {
+                metrics.inc_transport_message(crate::stats_registry::StatsDirection::Rx, slot, 1)
+            });
     }
     // The low 32 bits of the microsecond clock: the meter reads spans modulo 2^32.
     #[cfg(feature = "resource-snapshot")]
@@ -334,9 +336,11 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                 // transport-message count is NOT here: a unit carries as many
                 // as the peer batched, and `dispatch_unit` counts each.
                 let bytes = rx.bytes.len() as u64;
-                actions.tx.record_on_link(&actions.link, |metrics, slot| {
-                    metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
-                });
+                actions
+                    .tx
+                    .record_on_link(&actions.link.tx, |metrics, slot| {
+                        metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
+                    });
             }
             // transport-compression — un-wrap the OUTERMOST wire layer FIRST
             // (zenoh decompresses the batch before any transport-message
@@ -2694,9 +2698,11 @@ fn account_bytes_in_place<R: SessionRuntime, T: TimeSource>(
     {
         actions.tx.stats.inc_rx(unit.len());
         let bytes = unit.len() as u64;
-        actions.tx.record_on_link(&actions.link, |metrics, slot| {
-            metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
-        });
+        actions
+            .tx
+            .record_on_link(&actions.link.tx, |metrics, slot| {
+                metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
+            });
     }
     #[cfg(not(feature = "transport-stats"))]
     let _ = (unit, actions);
@@ -4215,7 +4221,7 @@ pub(crate) fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
         // finished a write, and that is when the line spoke (its data frames never mark the
         // tick, `emit_on_link`). Folded in as a stamp on the session's clock: the driver answers
         // an elapsed time, so the two clocks need no common epoch.
-        let driver = actions.link.link_driver();
+        let driver = actions.link.tx.link_driver();
         let written = if BoxedLinkDriver::reports_wire_writes(driver) {
             BoxedLinkDriver::ms_since_wire_write(driver).map(|ago| now.saturating_sub(ago))
         } else {
@@ -4282,7 +4288,7 @@ pub(crate) fn judge_keepalive<R: SessionRuntime, T: TimeSource>(
     deadlines: KeepaliveDeadlines,
 ) -> crate::lease::KeepAliveCheckOutcome {
     use crate::lease::KeepAliveCheckOutcome as K;
-    if !actions.link.transport_available.is_open() || deadlines.earliest().is_none() {
+    if !actions.link.tx.transport_available.is_open() || deadlines.earliest().is_none() {
         return K::Inactive;
     }
     let due = |deadline: Option<u64>| deadline.is_some_and(|at| now_ms >= at);
@@ -4291,7 +4297,7 @@ pub(crate) fn judge_keepalive<R: SessionRuntime, T: TimeSource>(
     // compare-and-swap of its stamp, so the tokio pacer beside the loop cannot answer it twice.
     let tick_ended = due(deadlines.link) && actions.link.end_keepalive_tick(deadlines.tick, now_ms);
     if tick_ended {
-        let spoke = &actions.link.spoke;
+        let spoke = &actions.link.tx.spoke;
         // zenoh-pico's order (`src/transport/unicast/lease.c`): a keepalive only for a tick
         // the line was silent in, and the flag cleared after it, so the keepalive's own mark
         // does not count as speech in the next tick.

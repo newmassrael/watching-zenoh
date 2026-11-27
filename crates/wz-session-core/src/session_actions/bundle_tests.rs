@@ -312,6 +312,44 @@ fn a_bundle_the_heap_has_no_room_for_is_refused() {
     assert!(made.is_ok(), "room for all three pointers is the bundle");
 }
 
+/// The transmit half of a link is made over its driver alone, with no session: closed to data
+/// sends, its line silent and its batches bare, and a write through it reaches the driver it was
+/// made over, which it lets go of when it goes. Turned red by `LinkTx::new` opening the send
+/// gate, marking the line or compressing before an establishment settles them, by `link_driver`
+/// answering another driver, or by a half that keeps its driver past its drop.
+#[test]
+fn a_link_transmit_half_is_made_without_a_session() {
+    let link = Arc::new(CountingLink::default());
+    let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+    #[cfg(feature = "transport-stats")]
+    let tx = crate::transport_tx::LinkTx::<PlainRuntime>::new(sink, None);
+    #[cfg(not(feature = "transport-stats"))]
+    let tx = crate::transport_tx::LinkTx::<PlainRuntime>::new(sink);
+    assert!(
+        !tx.transport_available.is_open(),
+        "no data leaves before an establishment"
+    );
+    #[cfg(feature = "transport-keepalive")]
+    assert!(!tx.spoke.load(Ordering::Relaxed), "the line has not spoken");
+    #[cfg(feature = "transport-compression")]
+    assert!(
+        !tx.compresses_batches(),
+        "a batch is bare before an establishment"
+    );
+    assert_eq!(
+        tx.link_driver()
+            .send_blocking(&[0x04], Reliability::Reliable),
+        LinkSendOutcome::Sent
+    );
+    assert_eq!(
+        link.written.load(Ordering::SeqCst),
+        1,
+        "the write reached the driver the half was made over"
+    );
+    drop(tx);
+    assert_eq!(Arc::strong_count(&link), 1, "the half lets its driver go");
+}
+
 /// A face's read raises the hold of its replies only in a build with `query-replies-with-final`:
 /// without it, as the zenoh-pico preset builds the session core, the hold answers that it raised
 /// nothing, so each reply leaves as it is made and the Final after them. With it the first hold
@@ -2737,7 +2775,7 @@ mod facts_lock {
             batch_size: 1024,
         }));
         actions.enter_established();
-        assert!(actions.link.transport_available.is_open(), "established");
+        assert!(actions.link.tx.transport_available.is_open(), "established");
         #[cfg(feature = "codec-push")]
         assert!(
             actions.negotiated_tx_limits().is_some(),
@@ -2757,7 +2795,7 @@ mod facts_lock {
         assert_eq!(whatami, None, "the role is the closed transport's");
         assert_eq!(caps, None, "the capabilities are the closed transport's");
         assert!(
-            !actions.link.transport_available.is_open(),
+            !actions.link.tx.transport_available.is_open(),
             "the reopened link waits for its establishment"
         );
         #[cfg(feature = "codec-push")]
@@ -3870,6 +3908,7 @@ mod link_stamps {
         assert!(
             actions
                 .link
+                .tx
                 .spoke
                 .load(core::sync::atomic::Ordering::Relaxed),
             "CONTROL: a frame on a link that writes inline marks the line"
@@ -3902,12 +3941,12 @@ mod link_stamps {
             (Reliability::BestEffort, Priority::Control),
         ];
         for (n, (class, priority)) in frames.into_iter().enumerate() {
-            actions.link.spoke.store(false, Ordering::Relaxed);
+            actions.link.tx.spoke.store(false, Ordering::Relaxed);
             actions
                 .tx
-                .emit_on_link(&actions.link, &[0x04], None, class, priority, false);
+                .emit_on_link(&actions.link.tx, &[0x04], None, class, priority, false);
             assert!(
-                actions.link.spoke.load(Ordering::Relaxed),
+                actions.link.tx.spoke.load(Ordering::Relaxed),
                 "frame {n} marks the line"
             );
         }
@@ -3986,11 +4025,11 @@ mod link_stamps {
         actions.link.arm_keepalive();
         let interval = actions.keepalive_interval_ms();
         let marks = |class, priority| {
-            actions.link.spoke.store(false, Ordering::Relaxed);
+            actions.link.tx.spoke.store(false, Ordering::Relaxed);
             actions
                 .tx
-                .emit_on_link(&actions.link, &[0x04], None, class, priority, false);
-            actions.link.spoke.load(Ordering::Relaxed)
+                .emit_on_link(&actions.link.tx, &[0x04], None, class, priority, false);
+            actions.link.tx.spoke.load(Ordering::Relaxed)
         };
         assert!(
             !marks(Reliability::Reliable, Priority::DEFAULT),
@@ -4004,7 +4043,7 @@ mod link_stamps {
             !marks(Reliability::BestEffort, Priority::Control),
             "a frame carried apart is not the link's line"
         );
-        actions.link.spoke.store(false, Ordering::Relaxed);
+        actions.link.tx.spoke.store(false, Ordering::Relaxed);
         let read = crate::drive::keepalive_deadlines(&*actions).expect("the worker runs");
         assert_eq!(
             read.earliest(),

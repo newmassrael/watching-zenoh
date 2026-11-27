@@ -1695,22 +1695,22 @@ pub struct LinkStamps {
 
 /// R311y205 (transport-multilink IMPL-2a) — the PER-LINK state: exactly the 5
 /// fields that belong to ONE physical link, not the logical session. Split out
-/// of the former flat `SessionLinkActions`: `driver` is the per-link write seam
-/// (reliability-segregated + per-link keepalive TX), the three stamps are the
+/// of the former flat `SessionLinkActions`: `tx` is the link's transmit half
+/// (its write seam and its F2 send gate among it), and the three stamps are the
 /// per-link lease + keepalive baselines (a shared stamp would let a live link
-/// keep a dead standby link's lease fresh so it is never reaped), and
-/// `transport_available` is the per-link F2 send gate. A later multilink slice
+/// keep a dead standby link's lease fresh so it is never reaped). A later multilink slice
 /// gives each physical link its own `LinkState` while N of them share ONE
 /// [`SessionCore`]; at N=1 (every build today) one `LinkState` pairs with one
 /// `SessionCore` inside [`SessionLinkActions`] (both behind the `R::Shared`
 /// pointer), behavior / wire / data-plane identical to the pre-split struct.
-/// Parameterised by `R` only — none of the 5 fields name the clock `T`.
+/// Parameterised by `R` only — none of its fields name the clock `T`.
 pub struct LinkState<R: SessionRuntime> {
-    /// R::LinkSink — the per-profile owning handle to the link write
-    /// seam (tokio `Arc<dyn BoxedLinkDriver + Send + Sync>`, lwIP MCU
-    /// `Rc<dyn BoxedLinkDriver>`). The generic action methods reach the
-    /// pure `&dyn BoxedLinkDriver` through `SessionLinkActions::link_driver`.
-    pub driver: R::LinkSink,
+    /// The link's transmit half ([`crate::transport_tx::LinkTx`]): its driver, its send gate,
+    /// whether its line spoke in the keepalive tick, whether its batches are compressed, its
+    /// registry cells, its shared-memory handoff as a sender and the slots it lent for open batch
+    /// frames. A send reads nothing else of the link, so the walk borrows this half alone
+    /// ([`crate::transport_tx::TxRoute::own`]).
+    pub tx: crate::transport_tx::LinkTx<R>,
     /// R311y632 (§17) — bytes of the CURRENT framing unit that have not been
     /// dispatched yet.
     ///
@@ -1748,27 +1748,6 @@ pub struct LinkState<R: SessionRuntime> {
     /// falls due or this count moves (`TransportTimers::fire_due`), so what moves a deadline only
     /// later (a receipt, a frame sent, a tick ended) costs a step no reading of them.
     deadlines_moved: R::Word,
-    /// F2 — is the transport currently accepting data sends? `false` at
-    /// construction: data leaves only over an established link, as upstream's
-    /// transport exists only once the Open exchange is over
-    /// (`io/zenoh-transport/src/unicast/establishment/open.rs`
-    /// @ `let oack_out = step!(fsm.recv_open_ack((&mut link_unicast, &mut state)).await);`
-    /// precedes `.init_transport_unicast(`), `false` again when
-    /// the FSM releases the link (`release_link`, Closing/Closed entry)
-    /// or the reconnect supervisor tears the transport down for re-dial
-    /// ([`SessionLinkActions::reset_for_reopen`]), `true` again when Established
-    /// (re-)enters ([`SessionLinkActions::enter_established`]). The
-    /// `SessionLinkActions::dispatch_network_message_at` chokepoint gates on it
-    /// so a data send inside the RECONNECTING window rejects typed
-    /// ([`SendWireError::TransportUnavailable`]) instead of silently
-    /// vanishing into a dead writer channel — zenoh-pico's tx path fails
-    /// on the dead transport's mutex/NULL
-    /// (`_Z_ERR_TRANSPORT_NOT_AVAILABLE`); the handshake / CLOSE
-    /// transport messages bypass the chokepoint and stay ungated.
-    ///
-    /// A [`crate::send_gate::SendGate`] and not a lock: every data send reads it, and nothing
-    /// reads and writes it in one step.
-    pub transport_available: crate::send_gate::SendGate,
     /// The send limits this link was established with.
     #[cfg(any(
         feature = "codec-push",
@@ -1793,21 +1772,6 @@ pub struct LinkState<R: SessionRuntime> {
     /// session in `Closing` sends nothing after its Close frame.
     #[cfg(feature = "transport-keepalive")]
     pub keepalive_armed: core::sync::atomic::AtomicBool,
-    /// Whether the line spoke in the keepalive tick that runs: set by every frame this link
-    /// hands its driver as the line's speech (`TransportTx::emit_on_link`) and read and
-    /// cleared where the tick ends, which sends a KeepAlive only when it is clear. A bit and not a
-    /// stamp: zenoh-pico's `_transmitted` flag (`src/transport/common/tx.c`), so the send path
-    /// writes one word and reads no clock.
-    #[cfg(feature = "transport-keepalive")]
-    pub spoke: core::sync::atomic::AtomicBool,
-    /// Whether this link's batches leave compressed and are read so: settled where the link is
-    /// established, from the capability its session negotiated, and withdrawn by a reopen
-    /// ([`SessionLinkActions::compresses_batches`]). The link's and not the session's, as
-    /// upstream's batch configuration is a link's: a link that joins an aggregate writes its
-    /// handshake bare while another link of the session compresses, and a frame is written as
-    /// the link it leaves by compresses.
-    #[cfg(feature = "transport-compression")]
-    compresses: R::Flag,
     /// Whether this link's lease monitor runs: set by the FSM's
     /// `start_lease_monitor` on `Established` entry and cleared by
     /// `stop_lease_monitor` on its exit (and by
@@ -1857,49 +1821,14 @@ pub struct LinkState<R: SessionRuntime> {
     /// per-link field; changes no accessor signature.
     #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
     pub priority_range: R::Mutex<Option<LinkPriorityRange>>,
-    /// R2825 (`transport-stats`) — this link's slot in the stats partition of
-    /// the core that records on it, or `None` when the driver names no
-    /// endpoints (the test doubles, the MCU drivers) and so has no link labels.
-    ///
-    /// Interior-mutable because the core that records can CHANGE: a link that
-    /// joins a multilink aggregate is re-opened in the PRIMARY's partition and
-    /// its slot rewritten there, since the slot is an index into one
-    /// partition and means nothing in another.
-    #[cfg(feature = "transport-stats")]
-    pub stats_slot: R::Mutex<Option<crate::stats_registry::LinkSlot>>,
-    /// R3122 (session-extshm) -- this link's handoff as a SENDER: the counters its Open message
-    /// declared to its peer and the chunks kept confirmed against them, or `None` when the
-    /// message declared the block `Disabled` (a link that is not reliable, an authenticator that
-    /// operates none) or has not been sent. It belongs to the LINK, as upstream's does
-    /// (`io/zenoh-transport/src/common/shm/interop.rs` @ `pub struct LinkShmHandoffConfig {`): a
-    /// second link of a session declares counters of its own, and what one link is owed is
-    /// neither forgotten nor confused by the other's establishment. Replaced by every Open
-    /// message the link sends, which drops the previous lease and returns its counters.
-    #[cfg(feature = "session-extshm")]
-    pub shm_tx: R::Mutex<Option<alloc::sync::Arc<dyn crate::extshm::ShmTxHandoff>>>,
     /// R3123 (session-extshm) -- this link's handoff as a RECEIVER: the means of acknowledging the
     /// shared-memory slices its peer sends, opened from the counters the peer named in the Open
-    /// message of THIS link. The other half of what [`Self::shm_tx`] is, and for the same reason:
-    /// the peer of a joined link names counters of its own, and a slice that arrives on the
-    /// joined link is owed to that peer, not to the peer of the session's first link.
+    /// message of THIS link. The other half of what
+    /// [`crate::transport_tx::LinkTx::shm_tx`] is, and for the same reason: the peer of a joined
+    /// link names counters of its own, and a slice that arrives on the joined link is owed to that
+    /// peer, not to the peer of the session's first link.
     #[cfg(feature = "session-extshm")]
     pub shm_rx: R::Mutex<crate::extshm::ShmRxSlot>,
-    /// ARCHITECTURE section 9.1 -- the slots THIS link lent for batch frames
-    /// still open, one record per TX conduit (the conduit's index). A batching
-    /// window opens a conduit's frame in a slot of the link that conduit routes
-    /// to; the frame itself, with where the slot's memory is, is the conduit's
-    /// (`BatchStage::lent`), so the calls that fill it take no lock of the link's
-    /// and ask its driver nothing, and the record here says which link lent it.
-    /// Written when the frame opens and cleared before its slot is sent or given
-    /// back, so a record that names the slot is what says it is still lent.
-    ///
-    /// On the LINK and not in the stage, for three reasons that are one: only the
-    /// lending driver can send or abort the slot; a record kept where the slot
-    /// came from cannot be mistaken for another link's, whatever the link set of
-    /// an aggregated session does meanwhile; and when the link itself goes, its
-    /// drop gives back whatever it still holds, so no path leaks a slot.
-    #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-    pub(crate) batch_slots: [LentRecord<R::Word>; crate::transport_tx::TX_CONDUITS],
     /// This link's place in its node's [`crate::link_admission::LinkAdmission`], which the node
     /// installs before the handshake ([`SessionLinkActions::install_link_admission`]) and asks while
     /// the link is still being established. `None` for a node that decides the question after the
@@ -1907,101 +1836,6 @@ pub struct LinkState<R: SessionRuntime> {
     /// is. Only a build that admits its links (`link-admission`) has one.
     #[cfg(all(feature = "link-admission", target_has_atomic = "ptr"))]
     pub(crate) link_lease: R::Mutex<Option<crate::link_admission::LinkLease>>,
-}
-
-/// ARCHITECTURE section 9.1 -- a link that goes away gives back the batch slots
-/// it still holds. A session that is dropped with a batching window open, or a
-/// link dropped by its last holder, would otherwise keep those slots out of the
-/// driver's pool for good: a held slot has no driver of its own to return to.
-#[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-impl<R: SessionRuntime> Drop for LinkState<R> {
-    fn drop(&mut self) {
-        for record in &self.batch_slots {
-            if let Some(slot) = record.take() {
-                self.link_driver().tx_slot_abort(slot);
-            }
-        }
-    }
-}
-
-/// ARCHITECTURE section 9.1 -- the slot a link lent for one conduit's open
-/// batch frame, as the link records it (`LinkState::batch_slots`): the slot's
-/// name, and whether the link holds one for that conduit.
-///
-/// One word of the runtime's (`W`, `SessionRuntime::Word`): the slot's name plus one, and
-/// zero while the link holds none. The runtime's word only so that a shared `&LinkState` can be
-/// written: every write of a conduit's record is made under that conduit's lock (the open, the
-/// appends, the flush, the abort of a reopen and the move off a leaving link all hold it), or by
-/// the link's drop, which has the link alone. The lock orders them, so they are `Relaxed`: no
-/// record is read by a thread that did not take that lock after the last write to it.
-#[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-pub(crate) struct LentRecord<W: crate::runtime_cell::WordCell> {
-    slot: W,
-}
-
-#[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-impl<W: crate::runtime_cell::WordCell> LentRecord<W> {
-    fn new() -> Self {
-        Self { slot: W::new(0) }
-    }
-
-    /// The word that names `slot` as held.
-    fn word_of(slot: crate::link::TxSlot) -> u64 {
-        u64::from(slot.0) + 1
-    }
-
-    /// Record `slot` as held for the conduit: the open of a batch frame in a lent slot, which
-    /// exists where a data send does.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    fn hold(&self, slot: crate::link::TxSlot) {
-        self.slot
-            .store(Self::word_of(slot), core::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Whether the link holds a slot for the conduit. Read by the send of a link's open batches
-    /// alone, which exists where a data send does.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    ))]
-    pub(crate) fn is_held(&self) -> bool {
-        self.slot.load(core::sync::atomic::Ordering::Relaxed) != 0
-    }
-
-    /// Whether the link holds exactly `slot` for the conduit.
-    pub(crate) fn holds(&self, slot: crate::link::TxSlot) -> bool {
-        self.slot.load(core::sync::atomic::Ordering::Relaxed) == Self::word_of(slot)
-    }
-
-    /// Clear the record, with the slot it held.
-    pub(crate) fn take(&self) -> Option<crate::link::TxSlot> {
-        // The word is a `u32` name plus one (`Self::word_of`), so the name fits.
-        let held = self
-            .slot
-            .load(core::sync::atomic::Ordering::Relaxed)
-            .checked_sub(1)?;
-        self.slot.store(0, core::sync::atomic::Ordering::Relaxed);
-        Some(crate::link::TxSlot(held as u32))
-    }
 }
 
 /// R311y217 (transport-multilink + transport-qos) — the inclusive QoS-priority
@@ -2310,45 +2144,15 @@ impl<R: SessionRuntime> LinkState<R> {
         );
     }
 
-    /// Whether this link's batches are compressed (its `compresses`).
-    #[cfg(feature = "transport-compression")]
-    #[inline]
-    pub(crate) fn compresses_batches(&self) -> bool {
-        crate::runtime_cell::FlagCell::load(&self.compresses, core::sync::atomic::Ordering::Acquire)
-    }
-
-    /// Settle whether this link's batches are compressed: at its establishment, and bare again
-    /// at a reopen.
-    #[cfg(feature = "transport-compression")]
-    #[inline]
-    fn settle_compression(&self, compresses: bool) {
-        crate::runtime_cell::FlagCell::store(
-            &self.compresses,
-            compresses,
-            core::sync::atomic::Ordering::Release,
-        );
-    }
-
     /// Start this link's keepalive worker. Its first tick counts from the establishment, and
     /// nothing the link sent before (the handshake) is speech in it.
     #[cfg(feature = "transport-keepalive")]
     pub(crate) fn arm_keepalive(&self) {
-        self.spoke
+        self.tx
+            .spoke
             .store(false, core::sync::atomic::Ordering::Relaxed);
         self.keepalive_armed
             .store(true, core::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Resolve the runtime-owned link sink (`R::LinkSink`) to the pure
-    /// `&dyn BoxedLinkDriver` write seam. `R::LinkSink` is opaque in
-    /// generic-`R` code — the tokio profile binds it to `Arc<dyn
-    /// BoxedLinkDriver + Send + Sync>`, the lwIP MCU profile to `Rc<dyn
-    /// BoxedLinkDriver>` — so the action methods cannot call
-    /// `send_blocking` on `self.driver` directly; this accessor erases
-    /// the per-profile refcount wrapper through [`R::link_driver`]. Reached
-    /// from [`SessionLinkActions::link_driver`], which forwards to this.
-    pub(crate) fn link_driver(&self) -> &R::Driver {
-        R::link_driver(&self.driver)
     }
 
     /// R2943 — the reliability class egress selection matches this link on:
@@ -2390,7 +2194,8 @@ impl<R: SessionRuntime> LinkState<R> {
     ))]
     pub(crate) fn reliability(&self) -> Option<Reliability> {
         R::with_mutex_mut(&self.declared_reliability, |d| *d).or_else(|| {
-            self.link_driver()
+            self.tx
+                .link_driver()
                 .link_subject()
                 .and_then(|s| s.kind)
                 .map(|kind| {
@@ -2415,7 +2220,8 @@ impl<R: SessionRuntime> LinkState<R> {
     /// none costs only the case of a late reader, so the unknown is the one that cannot leak.
     #[cfg(feature = "session-extshm")]
     fn is_reliable_by_protocol(&self) -> bool {
-        self.link_driver()
+        self.tx
+            .link_driver()
             .link_subject()
             .and_then(|s| s.kind)
             .is_some_and(|kind| kind.is_reliable())
@@ -3896,12 +3702,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         write_fields!(
             at,
             LinkState {
-                driver: driver,
+                #[cfg(feature = "transport-stats")]
+                tx: crate::transport_tx::LinkTx::new(driver, seed.slot),
+                #[cfg(not(feature = "transport-stats"))]
+                tx: crate::transport_tx::LinkTx::new(driver),
                 #[cfg(feature = "alloc")]
                 pending_batch: R::new_mutex(None::<crate::link::RxBytes>),
                 stamps: StampWords::new(),
                 deadlines_moved: <R::Word as crate::runtime_cell::WordCell>::new(0),
-                transport_available: crate::send_gate::SendGate::new(false),
                 #[cfg(any(
                     feature = "codec-push",
                     feature = "codec-request",
@@ -3917,10 +3725,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 tx_limits: TxLimits::new(),
                 #[cfg(feature = "transport-keepalive")]
                 keepalive_armed: core::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "transport-keepalive")]
-                spoke: core::sync::atomic::AtomicBool::new(false),
-                #[cfg(feature = "transport-compression")]
-                compresses: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
                 lease_armed: core::sync::atomic::AtomicBool::new(false),
                 close_reason: R::new_mutex(None),
                 #[cfg(feature = "transport-multilink")]
@@ -3929,14 +3733,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 declared_reliability: R::new_mutex(None),
                 #[cfg(all(feature = "transport-multilink", feature = "transport-qos"))]
                 priority_range: R::new_mutex(None),
-                #[cfg(feature = "transport-stats")]
-                stats_slot: R::new_mutex(seed.slot),
-                #[cfg(feature = "session-extshm")]
-                shm_tx: R::new_mutex(None),
                 #[cfg(feature = "session-extshm")]
                 shm_rx: R::new_mutex(crate::extshm::ShmRxSlot::default()),
-                #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-                batch_slots: core::array::from_fn(|_| LentRecord::new()),
                 #[cfg(all(feature = "link-admission", target_has_atomic = "ptr"))]
                 link_lease: R::new_mutex(None),
             } in_place {}
@@ -4261,30 +4059,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the per-profile refcount wrapper through [`R::link_driver`]. The
     /// returned reference borrows `self`, so the seam call composes
     /// inline (`self.link_driver().send_blocking(&wire, reliability)`).
-    /// R311y205 (IMPL-2a) — forwards to [`LinkState::link_driver`] now that the
-    /// `driver` field lives on the per-link `self.link`.
+    /// The driver is the link's transmit half's (`LinkTx::link_driver`).
     fn link_driver(&self) -> &R::Driver {
-        self.link.link_driver()
+        self.link.tx.link_driver()
     }
 
-    /// This binding's link state as a plain reference, whichever way the bundle
-    /// holds it (behind `R::Shared`, or as its own field under `session-slot`):
-    /// for the places that compare it by address or hand it on, where `&*self.link`
-    /// would name one of the two forms.
     /// Whether this session's link would lend a slot now as far as its pool goes
     /// ([`BoxedLinkDriver::tx_slot_claimable`](crate::link::BoxedLinkDriver::tx_slot_claimable)).
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
     fn tx_slot_claimable(&self) -> bool {
-        self.own_link().link_driver().tx_slot_claimable()
-    }
-
-    // Read by the batching window and by the heap Push's claim check.
-    #[cfg(any(
-        feature = "transport-batching",
-        all(feature = "codec-push", feature = "alloc")
-    ))]
-    fn own_link(&self) -> &LinkState<R> {
-        &self.link
+        self.link_driver().tx_slot_claimable()
     }
 
     /// R311y453 — the §5.16 link-derived SUBJECT of this binding's link: the
@@ -4358,7 +4142,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !links.is_empty() {
-                return links.iter().map(|l| render(l.link_driver())).collect();
+                return links.iter().map(|l| render(l.tx.link_driver())).collect();
             }
         }
         alloc::vec![render(self.link_driver())]
@@ -4381,7 +4165,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !links.is_empty() {
                 for link in links.iter() {
-                    if !visit(link.link_driver().link_ends()) {
+                    if !visit(link.tx.link_driver().link_ends()) {
                         break;
                     }
                 }
@@ -4566,7 +4350,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub(crate) fn count_network_message(
         &self,
         direction: crate::stats_registry::StatsDirection,
-        link: &LinkState<R>,
+        link: &crate::transport_tx::LinkTx<R>,
         priority: Priority,
         class: &crate::stats::NetworkStatsClass,
     ) {
@@ -4638,7 +4422,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn drop_for_congestion(
         &self,
-        link: &LinkState<R>,
+        link: &crate::transport_tx::LinkTx<R>,
         priority: Priority,
         class: &crate::stats::NetworkStatsClass,
     ) {
@@ -4678,7 +4462,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 self.route().with_batch_holder(idx, open.slot(), |found| {
                     // A slot no link records went back with the link that lent it.
                     if let Some(link) = found {
-                        let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
+                        let _ = link
+                            .batch_slots
+                            .get(idx)
+                            .and_then(crate::transport_tx::LentRecord::take);
                         open.abort(link.link_driver());
                     }
                 });
@@ -4695,7 +4482,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "transport-batching",
         feature = "transport-tx-lend"
     ))]
-    fn move_lent_batches_off(&self, link: &LinkState<R>) {
+    fn move_lent_batches_off(&self, link: &crate::transport_tx::LinkTx<R>) {
         #[cfg(not(feature = "tx-lend-only"))]
         use crate::tx_buf::TxBuf;
         for idx in 0..TX_CONDUITS {
@@ -4716,7 +4503,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         return;
                     }
                 };
-                let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
+                let _ = link
+                    .batch_slots
+                    .get(idx)
+                    .and_then(crate::transport_tx::LentRecord::take);
                 // SAFETY: `link` recorded the slot for this conduit until the line above, and
                 // every send or abort of a conduit's lent slot clears the record first, under the
                 // conduit's lock, which is held here.
@@ -5211,7 +5001,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn route(&self) -> crate::transport_tx::TxRoute<'_, R> {
         crate::transport_tx::TxRoute {
             tx: &self.tx,
-            own: &self.link,
+            own: &self.link.tx,
             #[cfg(feature = "transport-multilink")]
             links: &self.links,
         }
@@ -5256,10 +5046,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         body: ControlBody,
     ) -> Result<(), crate::link::LinkDropCause> {
         let write = crate::transport_tx::lent_write(|buf| self.write_control(buf, body));
-        match self
-            .route()
-            .send_lent_on(&self.link, Reliability::Reliable, priority, want, &write)
-        {
+        match self.route().send_lent_on(
+            &self.link.tx,
+            Reliability::Reliable,
+            priority,
+            want,
+            &write,
+        ) {
             crate::transport_tx::Lend::Sent => Ok(()),
             crate::transport_tx::Lend::NoSlot | crate::transport_tx::Lend::Refused(_) => {
                 Err(self.tx.refuse(crate::link::LinkDropCause::NoTxSlot))
@@ -5798,6 +5591,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // Before the limits: the envelope of a compressing link holds the batch header.
         #[cfg(feature = "transport-compression")]
         self.link
+            .tx
             .settle_compression(self.negotiated_batch_compression());
         // After the stamp: the envelope of an established lowlatency link is its own.
         #[cfg(any(
@@ -5820,7 +5614,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.release_handshake_answer();
         // Data sends are let through only now, with the limits above in place: upstream's
         // transport exists only once the Open exchange is over.
-        self.link.transport_available.open();
+        self.link.tx.transport_available.open();
         // R2924 — the link's outbound queue takes the established session's shape: its
         // configured sizes, one queue per priority if it negotiated QoS and one queue
         // otherwise, as zenoh builds a link's pipeline when the link joins an established
@@ -5855,7 +5649,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "liveliness-token",
         ))]
         self.settle_tx_limits();
-        self.link.transport_available.open();
+        self.link.tx.transport_available.open();
     }
 
     /// The bytes of a batch that are not its frame: the length a streamed link writes in
@@ -7093,13 +6887,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // names no endpoints keeps no slot, as at open.
         #[cfg(feature = "transport-stats")]
         {
-            let ends = crate::link::LinkEndsText::link_endpoints(link.link_driver());
+            let ends = crate::link::LinkEndsText::link_endpoints(link.tx.link_driver());
             let slot = ends.map(|ends| {
                 self.tx.metrics(|metrics| {
                     metrics.open_link(crate::stats_registry::LinkLabels::new(&ends.src, &ends.dst))
                 })
             });
-            R::with_mutex_mut(&link.stats_slot, |own| *own = slot);
+            R::with_mutex_mut(&link.tx.stats_slot, |own| *own = slot);
         }
         let mut links = self
             .links
@@ -7134,13 +6928,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // partition it recorded into: its counts fold into the transport, as
         // upstream's `remove_link` folds them.
         #[cfg(feature = "transport-stats")]
-        if let Some(slot) = R::with_mutex_mut(&link.stats_slot, |own| own.take()) {
+        if let Some(slot) = R::with_mutex_mut(&link.tx.stats_slot, |own| own.take()) {
             self.tx.metrics(|metrics| metrics.close_link(slot));
         }
         // ARCHITECTURE section 9.1 -- the batch frames open in this link's
         // slots move to the heap stage before the link leaves the set.
         #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
-        self.move_lent_batches_off(link);
+        self.move_lent_batches_off(&link.tx);
         // The departing link's loop may still be parked on this session; the
         // loops that stay park again when they are woken.
         self.out_of_band.wake_parked();
@@ -7177,7 +6971,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter(|l| l.transport_available.is_open())
+            .filter(|l| l.tx.transport_available.is_open())
             .count()
     }
 
@@ -7208,7 +7002,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if self.link_count() > 0 {
             return self.live_link_count() > 0;
         }
-        self.link.transport_available.is_open()
+        self.link.tx.transport_available.is_open()
     }
 
     /// Non-multilink builds have no aggregation set — the send gate is always this
@@ -7230,7 +7024,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     #[inline]
     fn session_send_available(&self) -> bool {
-        self.link.transport_available.is_open()
+        self.link.tx.transport_available.is_open()
     }
 
     /// The number of 0x4 Z_EXT_MULTILINK entries staged across this session's four
@@ -8468,7 +8262,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// Distinct from [`Self::is_compression`], which reports the NEGOTIATED capability.
     #[cfg(feature = "transport-compression")]
     pub fn compresses_batches(&self) -> bool {
-        self.link.compresses_batches()
+        self.link.tx.compresses_batches()
     }
 
     /// Whether a link established now compresses its batches. Two conjuncts, each mirroring
@@ -8819,7 +8613,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         declaration: crate::extshm::ShmOpenDeclaration,
     ) -> ExtEntryOwned {
         let crate::extshm::ShmOpenDeclaration { ext, tx } = declaration;
-        let previous = R::with_mutex_mut(&self.link.shm_tx, |slot| core::mem::replace(slot, tx));
+        let previous = R::with_mutex_mut(&self.link.tx.shm_tx, |slot| core::mem::replace(slot, tx));
         // Dropped after the lock is released: a handoff that drops gives its counters back and
         // lets go of every chunk it kept.
         drop(previous);
@@ -10633,7 +10427,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // sender that read the window open let go of its conduit before the stop's
             // drain, which waits for each conduit's lock.
             if !self.tx.conduits.caller_window_open() {
-                self.own_link().link_driver().tx_staged();
+                self.link_driver().tx_staged();
             }
         }
         match push {
@@ -10828,7 +10622,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 .conduits
                 .close_and_drain(crate::transport_tx::WINDOW_CALLER, || {
                     if self.tx.conduits.is_auto() {
-                        self.own_link().link_driver().tx_staged();
+                        self.link_driver().tx_staged();
                     }
                     self.flush_open_batch();
                 });
@@ -15892,7 +15686,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // re-handshake window (release_link already closed it when the
             // FSM saw the loss; this also covers a reset without a prior
             // terminal). record_established_at re-opens it.
-            self.link.transport_available.close();
+            self.link.tx.transport_available.close();
             // The send limits were settled from the capabilities cleared below: withdrawn with
             // them, behind the closed gate, until the next establishment settles them anew.
             #[cfg(any(
@@ -15980,7 +15774,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // The replacement's handshake is written bare, and its establishment settles the
             // compression anew from what that handshake negotiates.
             #[cfg(feature = "transport-compression")]
-            self.link.settle_compression(false);
+            self.link.tx.settle_compression(false);
             // The close reason is the closed transport's; the replacement
             // has staged none.
             R::with_mutex_mut(&self.link.close_reason, |reason| *reason = None);
@@ -17295,7 +17089,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // F2 — the link is going away: close the data-send gate so a
         // straggling send rejects typed instead of racing the teardown.
         // R311y205 (IMPL-2a) — the gate is per-link (`self.link()`).
-        self.link().transport_available.close();
+        self.link().tx.transport_available.close();
         // R311y205 (slice-1 MF-C) — remove THIS link's `LinkState` from the
         // shared aggregation set so `link_count()` reflects the LIVE topology
         // and a `max_links` slot recovers after a link dies (the join room check
