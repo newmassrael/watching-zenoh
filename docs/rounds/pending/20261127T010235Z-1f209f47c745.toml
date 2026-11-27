@@ -1,0 +1,18 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Pay the Windows package lane's red: the release DLL is linked by lld-link
+and the zenoh-pico reference by link.exe, so the size judge refused every
+row; the reference now links with the DLL's own linker.
+'''
+changes = '''
+- size_ceiling.ps1 takes -Linker (lld-link) and records it in reading /2.
+- pico_windows_package.py refuses a reading not linked by LLD.
+- platform.yml finds the toolchain's lld-link; upstream-parity D9.8 says so.
+'''
+verification = '''
+- pico_windows_package.py --selftest OK (four new arms on the linker).
+- the Windows rows are read from the hosted package-windows jobs of this run.
+'''
+carry = '''
+- none for this lane.
+'''
