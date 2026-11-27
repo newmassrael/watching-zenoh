@@ -113,7 +113,7 @@ for its own tests only, so the pico library's build is the one that decides it.
 | a frame the stream takes whole | written, slot back, the next frame not asked for room | written, slot back |
 | a frame the stream takes in part | the rest owed in the slot, written by the next step that finds room; the send returns at once | the send waits for room (`wait_writable` of the service tick) and writes the rest, then returns |
 | a frame behind owed frames | owed whole behind them, in order | none can be behind: nothing is owed between calls |
-| a question of room | written owed frames first; the stream asked within the message's wait; congested when it has none | room at once while a slot is free; congested at once when every slot is with the session; the stream is not asked |
+| a question of room | written owed frames first; the stream asked within the message's wait; congested when it has none | room at once, also while every slot is with the session (its open batch takes the message, or is sent first and the slot lent again); while another send holds the link, a droppable message is congested at once and a blocking one waits for it; congested at once while a pool the session's links share has no slot; the stream is not asked |
 | a slot asked while frames are owed | the owed frames written first, the freed slot lent | the slot or none: no write of the link's own frees one |
 | a write the stream fails | the link ends, every owed frame's slot back | the link ends, the frame's slot back |
 | an ended link | a send writes nothing, its slot back | the same |

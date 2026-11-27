@@ -1003,8 +1003,8 @@ mod tx_half {
             self.lender.spare()
         }
 
-        /// Whether the store has the memory for a slot now, as far as a pool goes: which slots
-        /// are out is the book's, read under a hold ([`TxLender::has_free_slot`]).
+        /// Whether the store has the memory for a slot now, as far as a pool goes
+        /// ([`TxLender::claimable`]).
         #[cfg(any(feature = "tx-stream-owed", feature = "session-unicast-accept"))]
         pub(super) fn claimable(&self) -> bool {
             self.lender.claimable()
@@ -1686,18 +1686,18 @@ where
     }
 
     // A link whose send writes each frame whole waits for its stream inside the send, as
-    // zenoh-pico's does, so the stream is not asked here: the link has room while a slot is free
-    // for the frame, and is congested at once while every slot is out, with the session or with a
-    // send under way, as zenoh-pico's one write buffer is not there for a message while another
-    // send holds its transmit lock. Which slots are out is the book of the send half, read under
-    // its hold; the store's `claimable` speaks for a pool alone. A send under way holds the half
-    // while it writes, so a droppable message only tries it, and is congested at once while it
-    // is held, as zenoh-pico's try of the lock drops one
+    // zenoh-pico's does, so the stream is not asked here. What keeps a message from the link is
+    // the send half another send holds while it writes, as zenoh-pico's transmit lock is: a
+    // droppable message only tries it and is congested at once while it is held
     // (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
-    // `return _z_mutex_try_lock(&ztc->_mutex_tx);`); one that may not be dropped waits for it,
-    // as zenoh-pico's lock does (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
-    // `_z_mutex_lock(&ztc->_mutex_tx);`).
-    // A link that has ended answers room, so the send that follows reports the end.
+    // `return _z_mutex_try_lock(&ztc->_mutex_tx);`), and one that may not be dropped waits for it
+    // (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
+    // `_z_mutex_lock(&ztc->_mutex_tx);`). A slot the session holds does not: its open batch takes
+    // the message, or is sent first and the slot lent again, as zenoh-pico's one write buffer
+    // held by a batch takes the next message or is flushed for it. So the link has room while its
+    // store has the memory for a slot (`claimable`), and is congested at once only while a pool
+    // its session's links share has none. A link that has ended answers room, so the send that
+    // follows reports the end.
     #[cfg(not(feature = "tx-stream-owed"))]
     #[cfg_attr(all(feature = "alloc", not(feature = "session-slot")), inline(never))]
     fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
@@ -1709,7 +1709,7 @@ where
         } else {
             Some(self.tx.hold())
         };
-        if tx.is_some_and(|held| held.lender().has_free_slot()) {
+        if tx.is_some_and(|held| held.lender().claimable()) {
             RoomAnswer::at_once(LinkRoom::Free)
         } else {
             RoomAnswer::at_once(LinkRoom::Congested)
@@ -3640,14 +3640,15 @@ mod tests {
         link.tx_slot_abort(two.slot);
     }
 
-    /// Without `tx-stream-owed` the stream is not asked for room: a link has room at once while a
-    /// slot is free, however full its stream is, is congested at once while every slot is with
-    /// the session, and has room once it has ended, so the send that follows reports the end.
-    /// Turned red by a question of room that waits for the stream (the owed form's
-    /// `wait_for_room`), or one that ignores the slots.
+    /// Without `tx-stream-owed` the stream is not asked for room: a link has room at once however
+    /// full its stream is, also while every slot is with the session, whose open batches take the
+    /// message or are sent first and the slot lent again, and has room once it has ended, so the
+    /// send that follows reports the end. Turned red by a question of room that waits for the
+    /// stream (the owed form's `wait_for_room`), or one that counts the slots the session holds
+    /// (the book read in place of `claimable`), which answers congested below.
     #[cfg(not(feature = "tx-stream-owed"))]
     #[test]
-    fn a_link_without_owed_frames_has_room_while_it_has_a_slot() {
+    fn a_link_without_owed_frames_has_room_whatever_slots_its_session_holds() {
         let link = trying();
         link.socket.full.set(true);
         assert_eq!(
@@ -3662,8 +3663,8 @@ mod tests {
             .expect("the other");
         assert_eq!(
             link.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 5_000_000 }),
-            RoomAnswer::at_once(LinkRoom::Congested),
-            "every slot is with the session"
+            RoomAnswer::at_once(LinkRoom::Free),
+            "every slot is with the session, which settles its own"
         );
         link.end(LostCause::PeerClosed);
         assert_eq!(
@@ -3698,10 +3699,99 @@ mod tests {
         assert_eq!(
             link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
             RoomAnswer::at_once(LinkRoom::Free),
-            "the send let go and no slot is out"
+            "the send let go"
         );
         assert!(
             link.socket.room_waits.borrow().is_empty(),
+            "the stream was never asked"
+        );
+    }
+
+    /// Without `tx-stream-owed` a link lent one slot, as the pico ABI lends its links one
+    /// (`LINK_TX_SLOTS`), has room while its session's open batch holds that slot: the message
+    /// joins the batch, or sends it and takes the slot again, as zenoh-pico appends to the batch
+    /// its one write buffer holds or flushes it first. Turned red by a question that counts the
+    /// slot the session holds (the book read in place of `claimable`), which answers congested
+    /// and has the session drop a blocking message and settle its expiry.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    #[test]
+    fn a_link_whose_one_slot_holds_its_sessions_open_batch_has_room_without_owed_frames() {
+        struct OneSlot(UnsafeCell<[u8; 32]>);
+
+        impl TxStore for OneSlot {
+            fn slots(&self) -> usize {
+                1
+            }
+
+            fn slot_len(&self) -> usize {
+                32
+            }
+
+            fn slot_base(&self, _slot: usize) -> *mut u8 {
+                self.0.get().cast::<u8>()
+            }
+        }
+
+        let link: StreamDriver<Pipe<true>, [u8; 34], OneSlot> = StreamDriver::over(
+            Pipe::default(),
+            [0u8; 34],
+            OneSlot(UnsafeCell::new([0; 32])),
+        );
+        let open = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("the one slot, for the session's open batch");
+        assert!(
+            link.tx_slot_acquire(16, Priority::DEFAULT).is_none(),
+            "CONTROL: the open batch holds the link's one slot"
+        );
+        for wait in [
+            RoomWait::Block { wait_us: 5_000_000 },
+            RoomWait::Drop { wait_us: 1_000 },
+        ] {
+            assert_eq!(
+                link.wait_for_room(Priority::DEFAULT, wait),
+                RoomAnswer::at_once(LinkRoom::Free),
+                "{wait:?}"
+            );
+        }
+        assert!(
+            link.socket.room_waits.borrow().is_empty(),
+            "the stream was never asked"
+        );
+        link.tx_slot_abort(open.slot);
+    }
+
+    /// Without `tx-stream-owed` a link of a pool whose one slot another link holds is congested at
+    /// once, whatever the message may wait, and has room once the slot is back: the pool is the
+    /// session's other links', which no step of this one frees. Turned red by a question that does
+    /// not ask its store (`claimable`) under the hold, which answers room below.
+    #[cfg(feature = "session-unicast-accept")]
+    #[cfg(not(feature = "tx-stream-owed"))]
+    #[test]
+    fn a_link_of_a_pool_with_no_slot_left_is_congested_at_once_without_owed_frames() {
+        let (tables, links) = pooled_tx_links(2, 1);
+        let held = links[0]
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("the pool's one slot");
+        assert_eq!(tables.tx_in_use(), 1);
+        for wait in [
+            RoomWait::Drop { wait_us: 1_000 },
+            RoomWait::Block { wait_us: 1_000_000 },
+        ] {
+            assert_eq!(
+                links[1].wait_for_room(Priority::DEFAULT, wait),
+                RoomAnswer::at_once(LinkRoom::Congested),
+                "{wait:?}"
+            );
+        }
+        links[0].tx_slot_abort(held.slot);
+        assert_eq!(
+            links[1].wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 1_000 }),
+            RoomAnswer::at_once(LinkRoom::Free),
+            "the slot is back in the pool"
+        );
+        assert!(
+            links[1].socket.room_waits.borrow().is_empty(),
             "the stream was never asked"
         );
     }
