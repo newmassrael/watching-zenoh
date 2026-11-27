@@ -1,0 +1,18 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Align no innermost loop of an x86 or x64 C library: the padding nops LLVM
+puts before them were text the ledger counts on both systems, and the
+receive runs no faster for them, as the reading shows.
+'''
+changes = '''
+- capi-nostd.toml: -x86-experimental-pref-innermost-loop-alignment=0.
+- capability_cost_gate selftest holds the flag per target arch.
+- docs/c-abi-migration/arch-win-ext.md: the Windows rows' growth read.
+'''
+verification = '''
+- size ledger: total 209,804 B vs main 211,840 (-2,036).
+- receive Ir W 3,069.9 vs main 3,076.4; capability_cost_gate --selftest passes.
+'''
+carry = '''
+- none for this lane.
+'''
