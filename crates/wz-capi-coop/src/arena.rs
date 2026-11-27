@@ -152,13 +152,9 @@ use wz_session_core::policy::HeldPublishDrop;
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
-#[cfg(feature = "runtime-plan")]
-use wz_session_core::slot_observer::HeapSinks;
 use wz_session_core::slot_observer::RequesterRows;
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::slot_observer::Requesters;
-#[cfg(feature = "runtime-plan")]
-use wz_session_core::slot_observer::SlotObserverOf;
 
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
 use crate::engine::LegHold;
@@ -2162,10 +2158,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // limit is still held, so a config over the build's is refused under its name either way.
         #[cfg(feature = "runtime-plan")]
         {
-            // The session's own tokens are rows of its one table set: the registry beside them is
-            // lent none (`RegistryOf::new`).
-            let watcher_bytes =
-                self.sized(SlotObserverOf::<HeapSinks, Lent>::arena_bytes(watchers, 0));
+            // Of the engine's own observer, whose sinks are the watches' rows, and whose own
+            // tokens are rows of the session's table set.
+            let watcher_bytes = self.sized(crate::engine::app_list_bytes(watchers));
             self.put(ArenaPart::DeclarationWatchers, 1, watcher_bytes);
         }
         #[cfg(not(feature = "runtime-plan"))]

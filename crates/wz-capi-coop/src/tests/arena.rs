@@ -359,7 +359,10 @@ fn the_plan_lays_out_the_watcher_lists_the_limits_state() {
     let rows = App::decl_watcher_rows(&SessionLimits::defaults()).expect("the build's value");
     assert_eq!(rows, caps::MAX_DECL_OBSERVERS);
     assert_eq!(watchers.count, 1, "one row of the lists' spans");
-    assert_eq!(Some(watchers.entry_bytes), App::arena_bytes(rows, 0));
+    assert_eq!(
+        Some(watchers.entry_bytes),
+        crate::engine::app_list_bytes(rows)
+    );
     assert!(
         watchers.entry_bytes > 0,
         "a build that reads what a peer declares has watchers"
@@ -369,7 +372,7 @@ fn the_plan_lays_out_the_watcher_lists_the_limits_state() {
         let plan = ArenaPlan::of(&client_config(), &one).expect("lays an arena out");
         assert_eq!(
             Some(row(&plan, "declaration watchers").entry_bytes),
-            App::arena_bytes(1, 0)
+            crate::engine::app_list_bytes(1)
         );
         assert!(plan.reserved_bytes() < built.reserved_bytes());
     }

@@ -283,6 +283,15 @@ impl FaceTables {
     }
 }
 
+/// The bytes of an arena the application's observer lends beside its tables (`App::lent`):
+/// `watchers` rows of each of its lists of declaration watchers, of this engine's own sinks, and
+/// none of the session's own tokens, which are rows of the session's one table set. What the plan
+/// counts for them (`crate::arena::ArenaPlan`), read off the observer's own description.
+#[cfg(feature = "runtime-plan")]
+pub(crate) const fn app_list_bytes(watchers: usize) -> Option<usize> {
+    App::arena_bytes(watchers, 0)
+}
+
 /// The bytes of one set of face tables, a row of the arena's table of them
 /// (`crate::arena::ArenaPlan`), where the arena lends them (`runtime-plan`).
 #[cfg(feature = "runtime-plan")]
