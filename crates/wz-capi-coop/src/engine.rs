@@ -8457,11 +8457,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// from (`Self::decide_put`), and what its first plain put at a send epoch plans
     /// (`Self::keep_plan`): the one place a put looks the row up.
     #[inline(always)]
-    fn filter_row<'r>(
-        core: &'r Core<L, C>,
+    fn filter_row(
+        core: &Core<L, C>,
         filter: Option<FilterId>,
     ) -> Option<
-        &'r wz_session_core::session_tables::WriteFilterRow<
+        &wz_session_core::session_tables::WriteFilterRow<
             <RowPolicy as wz_session_core::bounded::Storage>::Key,
         >,
     > {
