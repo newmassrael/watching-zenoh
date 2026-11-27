@@ -485,6 +485,22 @@ fn publisher_hex() -> String {
     zid_to_zenoh_hex(&[0x02])
 }
 
+/// Whether this build sweeps the sources that went away (`advanced-retention`), and so starts the
+/// retention job beside what a test asks for.
+fn sweeps() -> bool {
+    cfg!(feature = "advanced-retention")
+}
+
+/// The events of `events` this build records: each one marked as the retention job's (`true`) is
+/// left out of a build that starts no such job.
+fn events_of(events: &[(bool, &str)]) -> Vec<String> {
+    events
+        .iter()
+        .filter(|(retention, _)| !retention || sweeps())
+        .map(|(_, event)| (*event).to_owned())
+        .collect()
+}
+
 /// A plain subscriber is one subscription: samples deliver in order, a forward gap is reported
 /// and delivered past, and the session's zid is the identity trimmed of its padding.
 #[test]
@@ -615,18 +631,19 @@ fn a_teardown_cancels_the_get_and_the_ending_legs_deliver_nothing() {
         .is_none());
     callback(&sample(3, 13));
     assert_eq!(*delivered.lock().unwrap(), [10]);
+    let get = format!(
+        "get {}",
+        crate::advanced_ke::recovery_get_ke("demo/data", &publisher_hex(), 7)
+    );
     assert_eq!(
         script.events(),
-        [
-            "declare subscriber demo/data".to_owned(),
-            "start ticker 3600000".to_owned(),
-            format!(
-                "get {}",
-                crate::advanced_ke::recovery_get_ke("demo/data", &publisher_hex(), 7)
-            ),
-            "retract demo/data".to_owned(),
-            "stop ticker".to_owned(),
-        ]
+        events_of(&[
+            (false, "declare subscriber demo/data"),
+            (true, "start ticker 3600000"),
+            (false, get.as_str()),
+            (false, "retract demo/data"),
+            (true, "stop ticker"),
+        ])
     );
 }
 
@@ -640,11 +657,11 @@ fn a_heartbeat_beacon_ahead_of_the_stream_asks_for_the_bounded_range() {
     assert!(subscriber.heartbeat_channel_is_live());
     assert_eq!(
         script.events(),
-        [
-            "declare subscriber demo/data",
-            "start ticker 3600000",
-            "declare subscriber demo/data/@adv/pub/**"
-        ]
+        events_of(&[
+            (false, "declare subscriber demo/data"),
+            (true, "start ticker 3600000"),
+            (false, "declare subscriber demo/data/@adv/pub/**"),
+        ])
     );
 
     let mut live = script.callback(0);
@@ -672,7 +689,10 @@ fn a_heartbeat_beacon_ahead_of_the_stream_asks_for_the_bounded_range() {
 }
 
 /// The retention sweep and the periodic re-ask are jobs of the engine, and what the tick does is
-/// the machine's: the re-ask for each quiet source, the sweep of the ones nobody heard from.
+/// the machine's: the re-ask for each quiet source, the sweep of the ones nobody heard from. A
+/// build without the sweep (`advanced-retention`) starts the re-ask alone and keeps the quiet
+/// source, so its next sample past a gap asks for what it missed. Turned red, in the build without
+/// the sweep, by a retention job started there.
 #[test]
 fn the_periodic_jobs_run_on_the_engine_and_stop_with_the_subscriber() {
     let script = Script::new(1);
@@ -684,16 +704,22 @@ fn the_periodic_jobs_run_on_the_engine_and_stop_with_the_subscriber() {
     let (subscriber, delivered, _misses) = recording(&script, options);
     assert_eq!(
         script.events(),
-        [
-            "declare subscriber demo/data",
-            "start ticker 60000",
-            "start ticker 500"
-        ]
+        events_of(&[
+            (false, "declare subscriber demo/data"),
+            (true, "start ticker 60000"),
+            (false, "start ticker 500"),
+        ])
     );
 
     let mut live = script.callback(0);
     live(&sample(0, 10));
-    let (_, period, periodic) = script.tickers.lock().unwrap()[1].clone();
+    let (_, period, periodic) = script
+        .tickers
+        .lock()
+        .unwrap()
+        .last()
+        .expect("the re-ask is started")
+        .clone();
     assert_eq!(period, 500);
     assert!(periodic(), "the job goes on");
     assert_eq!(script.get_count(), 1);
@@ -703,19 +729,32 @@ fn the_periodic_jobs_run_on_the_engine_and_stop_with_the_subscriber() {
     assert_eq!(*delivered.lock().unwrap(), [10, 11]);
 
     // The sweep reads the engine's clock: far enough on, the quiet source is dropped, and the
-    // next sample from it is a first one again.
-    let (_, _, retention) = script.tickers.lock().unwrap()[0].clone();
+    // next sample from it is a first one again. Without the sweep the source is kept, and the
+    // sample past its gap is held while its cache is asked.
+    let retention = sweeps().then(|| script.tickers.lock().unwrap()[0].2.clone());
     script.now.store(10 * 60 * 1000, Ordering::SeqCst);
-    assert!(retention());
+    if let Some(retention) = &retention {
+        assert!(retention());
+    }
     live(&sample(7, 17));
-    assert_eq!(*delivered.lock().unwrap(), [10, 11, 17]);
+    if sweeps() {
+        assert_eq!(*delivered.lock().unwrap(), [10, 11, 17]);
+    } else {
+        assert_eq!(*delivered.lock().unwrap(), [10, 11]);
+        assert_eq!(script.get_count(), 2, "the kept source asks for its gap");
+    }
 
     drop(subscriber);
     let events = script.events();
-    assert_eq!(events.iter().filter(|e| *e == "stop ticker").count(), 2);
+    assert_eq!(
+        events.iter().filter(|e| *e == "stop ticker").count(),
+        if sweeps() { 2 } else { 1 }
+    );
     // The jobs end by themselves once what they work on is gone.
     assert!(!periodic());
-    assert!(!retention());
+    if let Some(retention) = &retention {
+        assert!(!retention());
+    }
 }
 
 /// An engine named by its own type hosts the same subscriber as the port's object does: the same
@@ -744,7 +783,7 @@ fn an_engine_of_its_own_type_hosts_the_subscriber_as_the_port_object_does() {
             .iter()
             .filter(|e| *e == "stop ticker")
             .count(),
-        2
+        if sweeps() { 2 } else { 1 }
     );
 }
 
@@ -754,10 +793,31 @@ fn an_engine_of_its_own_type_hosts_the_subscriber_as_the_port_object_does() {
 fn an_engine_without_periodic_jobs_refuses_a_periodic_subscriber() {
     let script = Script::new(1);
     script.no_tickers.store(true, Ordering::SeqCst);
-    let options = AdvancedSubscriberOptions::new().with_recovery(RecoveryConfig::new());
+    let options = AdvancedSubscriberOptions::new()
+        .with_recovery(RecoveryConfig::new().with_periodic_queries(Duration::from_millis(500)));
     let refused = EngineSubscriber::declare(&engine(&script), "demo/data", options, |_| {});
     assert!(matches!(refused, Err(HostError::Refused(_))));
     // What was declared before the refusal is retracted.
+    assert_eq!(
+        script.events(),
+        ["declare subscriber demo/data", "retract demo/data"]
+    );
+}
+
+/// A build without the sweep of the sources that went away (`advanced-retention`, off in the
+/// zenoh-pico preset) starts no retention job: a recovering subscriber that asks for no periodic
+/// re-ask is declared on an engine that runs no periodic jobs. Turned red by the retention job's
+/// start compiled into that build (`EngineSubscriber::declare_over`).
+#[cfg(not(feature = "advanced-retention"))]
+#[test]
+fn a_build_without_the_sweep_starts_no_retention_job() {
+    let script = Script::new(1);
+    script.no_tickers.store(true, Ordering::SeqCst);
+    let options = AdvancedSubscriberOptions::new()
+        .with_recovery(RecoveryConfig::new().with_retention_period(Duration::from_secs(60)));
+    let (subscriber, _delivered, _misses) = recording(&script, options);
+    assert_eq!(script.events(), ["declare subscriber demo/data"]);
+    drop(subscriber);
     assert_eq!(
         script.events(),
         ["declare subscriber demo/data", "retract demo/data"]
@@ -773,14 +833,12 @@ fn the_startup_get_holds_live_samples_until_the_history_is_in() {
         .with_recovery(RecoveryConfig::new())
         .with_history(HistoryConfig::new().max_samples(8));
     let (_subscriber, delivered, _misses) = recording(&script, options);
-    assert_eq!(
-        script.events()[..3],
-        [
-            "declare subscriber demo/data",
-            "start ticker 3600000",
-            "get demo/data/@adv/**"
-        ]
-    );
+    let declared = events_of(&[
+        (false, "declare subscriber demo/data"),
+        (true, "start ticker 3600000"),
+        (false, "get demo/data/@adv/**"),
+    ]);
+    assert_eq!(script.events()[..declared.len()], declared[..]);
     assert_eq!(script.gets.lock().unwrap()[0].parameters, "_max=8;_anyke");
 
     let mut live = script.callback(0);
@@ -877,13 +935,13 @@ fn the_detection_token_is_last_and_the_entities_retract_in_order() {
     drop(subscriber);
     assert_eq!(
         script.events(),
-        [
-            "retract demo/data",
-            "stop ticker",
-            "retract demo/data/@adv/pub/**",
-            "retract demo/data/@adv/pub/**",
-            "retract token"
-        ],
+        events_of(&[
+            (false, "retract demo/data"),
+            (true, "stop ticker"),
+            (false, "retract demo/data/@adv/pub/**"),
+            (false, "retract demo/data/@adv/pub/**"),
+            (false, "retract token"),
+        ]),
         "the subscription, the retention job, the two liveliness-order subscriptions, the token"
     );
 }
@@ -1057,12 +1115,9 @@ fn shared_on_key(
     base: &str,
 ) -> Strong<super::Shared<Arc<dyn SessionEngine>>> {
     let d = Arc::clone(delivered);
-    let state = State::new(
-        Box::new(move |s: Delivery<'_>| d.lock().unwrap().push(s.view().payload()[0])),
-        MissHandlers::default(),
-    )
-    .with_retransmission(true)
-    .with_history(1, usize::MAX);
+    let on_sample = OnSample::boxed(Box::new(move |s: Delivery<'_>| {
+        d.lock().unwrap().push(s.view().payload()[0])
+    }));
     let handle = Arc::downgrade(&engine(script));
     let base_keyexpr = super::fixed_key(base).expect("a key a session stores");
     let make = |place: core::ptr::NonNull<super::Shared<Arc<dyn SessionEngine>>>| {
@@ -1071,7 +1126,18 @@ fn shared_on_key(
             super::Shared::write_in(
                 place,
                 handle,
-                state,
+                // Written in its lock as the host writes it: retransmitting, the startup get in
+                // flight, no bound on the samples held back for it.
+                |cell| {
+                    State::write_in(
+                        cell,
+                        on_sample,
+                        MissHandlers::default(),
+                        true,
+                        1,
+                        usize::MAX,
+                    )
+                },
                 base_keyexpr,
                 Locality::SessionLocal,
                 1_000,

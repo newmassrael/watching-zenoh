@@ -67,6 +67,14 @@ advanced-publisher = [
 advanced-subscriber = ["dep:wz-capi-port"]
 advanced-recovery = ["advanced-subscriber", "dep:hashbrown", "dep:foldhash"]
 advanced-history = ["advanced-recovery"]
+# The sweep of the sources a recovering subscriber met (upstream's `gc_task`): every retention
+# period a source not heard from for that long, and whose liveliness token is gone, lets go of its
+# row and of what it holds back. Off, a source keeps its row until the subscriber goes or a new
+# source takes the row met longest ago among those that hold nothing back, as zenoh-pico's
+# subscriber keeps its sources; no retention job is started and no source carries the bookkeeping.
+# The tokio runtime's `ext-pubsub-advanced-recovery` turns it on, and the pico ABI's
+# `advanced-source-retention` capability (off in the zenoh-pico preset).
+advanced-retention = ["advanced-recovery"]
 # The subscriber hosted on an engine's port (`advanced_subscriber::host`): its declarations, its
 # gets, its two periodic jobs and its teardown, over `SessionEngine` alone, so the cooperative
 # engine and the tokio engine run the same host. The widest form (history, which implies recovery),

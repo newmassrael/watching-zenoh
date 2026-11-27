@@ -907,6 +907,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/ntp64.rs` | S1 | |
 | `crates/wz-session-core/src/observer.rs` | S3 | |
 | `crates/wz-session-core/src/oldest_instant.rs` | S10 | |
+| `crates/wz-session-core/src/on_use.rs` | S3 | |
 | `crates/wz-session-core/src/once_built.rs` | S3 | |
 | `crates/wz-session-core/src/owed_replies.rs` | S3 | |
 | `crates/wz-session-core/src/parse_error.rs` | S3 | |

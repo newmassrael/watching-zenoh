@@ -4944,3 +4944,102 @@ fn a_reference_finds_its_declaration_by_one_lookup_for_every_reader() {
         assert_eq!(tables.keyexpr_by_id(kept.id), Some(kept.handle));
     }
 }
+
+/// Tables of the on-use policy, every table held to `rows`, their keys counted against a budget of
+/// `bytes` the test leaks so that it outlives them.
+#[cfg(feature = "alloc")]
+fn on_use_tables<F: RowCallbacks>(
+    bytes: usize,
+    rows: &TableRows,
+) -> (
+    SessionTables<F, crate::bounded::OnUse>,
+    &'static crate::on_use::KeyBudget,
+) {
+    let budget: &'static crate::on_use::KeyBudget = std::boxed::Box::leak(std::boxed::Box::new(
+        crate::on_use::KeyBudget::new(bytes, SessionLimits::defaults().max_keyexpr_bytes_held()),
+    ));
+    // SAFETY: the budget is leaked, so it neither moves nor goes while the tables and their keys
+    // live.
+    let keys = unsafe { budget.keys() };
+    (SessionTables::counted(keys, rows), budget)
+}
+
+/// Tables of the on-use policy hold the rows their counts give them and refuse past them, as lent
+/// tables do, count each key against the session's budget and hand a row's callback back when it
+/// is undeclared; a table took nothing before its first declaration. Turned red by an on-use table
+/// made with the build's bound rather than its count, or by a key the budget does not count.
+#[cfg(feature = "alloc")]
+#[test]
+fn on_use_tables_hold_the_rows_their_counts_give_them() {
+    let rows = small_rows();
+    let (mut tables, budget) = on_use_tables::<Calls>(256, &rows);
+    assert!(!tables.subscribers().holds_rows());
+    let sub = tables
+        .declare_subscriber("a/b", Locality::Any, KeyForm::default(), 1)
+        .unwrap();
+    assert!(tables.subscribers().holds_rows());
+    tables
+        .declare_subscriber("a/c", Locality::Any, KeyForm::default(), 2)
+        .unwrap();
+    let refused = tables
+        .declare_subscriber("a/d", Locality::Any, KeyForm::default(), 3)
+        .unwrap_err();
+    assert_eq!(refused.why, RegisterError::TableFull);
+    assert_eq!(refused.callback, 3);
+    assert_eq!(
+        tables.subscribers().get(sub.handle).unwrap().key().as_str(),
+        "a/b"
+    );
+    assert!(budget.counts().used > 0, "each key is counted");
+    let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
+    assert_eq!(undeclared.taken.unwrap(), 1);
+}
+
+/// A key the session's budget has no room for is refused as a full table is, taking nothing, on
+/// the on-use policy as on the lent one. Turned red by a budget that counts a refused key, or by a
+/// refusal answered as something other than a full table.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_key_the_budget_has_no_room_for_is_refused_as_a_full_table() {
+    let rows = small_rows();
+    let (mut tables, budget) = on_use_tables::<Calls>(16, &rows);
+    let long = "k".repeat(64);
+    let refused = tables
+        .declare_subscriber(&long, Locality::Any, KeyForm::default(), 1)
+        .unwrap_err();
+    assert_eq!(refused.why, RegisterError::TableFull);
+    assert_eq!(refused.callback, 1);
+    assert_eq!(budget.counts().used, 0, "a refused key takes nothing");
+    assert!(budget.counts().refused > 0);
+    // Nothing was taken: a key that fits is declared under the first id.
+    assert_eq!(
+        tables
+            .declare_subscriber("k", Locality::Any, KeyForm::default(), 2)
+            .unwrap()
+            .id,
+        1
+    );
+}
+
+/// A subscriber of the on-use policy whose callback reads its row where it lies is undeclared
+/// while a call of it runs and let go of by that call's end, as on the lent policy: its row lies
+/// apart from the tables and never moves (`Storage::ROWS_STAY_APART`), which the begin of a call
+/// asks of the policy when the build is compiled. Turned red, at the build, by the on-use policy
+/// stating its rows inline, and at the run by a row that leaves its slot while a call holds it.
+#[cfg(feature = "alloc")]
+#[test]
+fn an_on_use_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last_call() {
+    let (mut tables, _budget) = on_use_tables::<Latched>(4096, &rows());
+    let sub = tables
+        .declare_subscriber("a", Locality::Any, KeyForm::default(), latched(7))
+        .unwrap();
+    let call = tables.begin_subscriber(sub.handle).unwrap();
+    assert_eq!(call.call, 7);
+    let undeclared = tables.undeclare_subscriber(sub.handle).unwrap();
+    assert!(undeclared.taken.is_none(), "a call of it runs");
+    assert!(tables.subscribers_for("a", false).next().is_none());
+    assert!(tables.subscribers().holds_slot(sub.handle));
+    assert!(ended::<CClosure<u32>>(call), "the last call lets it go");
+    assert!(tables.release_subscriber(sub.handle).is_some());
+    assert!(!tables.subscribers().holds_slot(sub.handle));
+}

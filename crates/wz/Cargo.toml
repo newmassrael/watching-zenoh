@@ -822,6 +822,9 @@ session-stateless-accept = []
 session-unicast-accept = [
     "wz-runtime-tokio?/session-unicast-accept",
     "wz-runtime-coop?/session-unicast-accept",
+    # The accepting node answers its peers' Interests, which the session core's accepting role no
+    # longer brings by itself; the tokio runtime names it on its own.
+    "wz-runtime-coop?/interest-answer",
 ]
 session-unicast-open = [
     "wz-runtime-tokio?/session-unicast-open",

@@ -13,7 +13,7 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Weak;
 use core::ffi::c_void;
-#[cfg(feature = "advanced-recovery")]
+#[cfg(feature = "advanced-retention")]
 use core::time::Duration;
 
 #[cfg(feature = "advanced-recovery")]
@@ -99,11 +99,46 @@ impl Miss {
 /// engine's own callbacks take ([`Self::lent`]), keeps it beside the map rather than in it, so
 /// the declaration takes no memory for it. It is the first registered, so it fires first, which
 /// is the order the map would give it.
+///
+/// # The map is reached through its own operations
+///
+/// The listeners registered after the declaration lie in a map made by the first
+/// [`Self::register`] and reached through a table of its own operations: a host whose listeners
+/// are its own, as the pico C ABI's are (one lent listener that fires its own set), never
+/// registers one, so its build links no code of the map, and a miss is one call to that host's
+/// set.
 #[derive(Default)]
 pub struct MissHandlers {
     next_id: usize,
     first: Option<FirstListener>,
-    handlers: BTreeMap<usize, Box<dyn FnMut(Miss) + Send>>,
+    listeners: Option<Box<dyn Listeners>>,
+}
+
+/// What a registry does with the listeners registered after the declaration, in the order of
+/// their ids.
+trait Listeners: Send {
+    /// Hold `handler` under `id`.
+    fn hold(&mut self, id: usize, handler: Box<dyn FnMut(Miss) + Send>);
+    /// Let go of the handler held under `id`, if one is.
+    fn let_go(&mut self, id: usize);
+    /// Report `miss` to every handler held.
+    fn report(&mut self, miss: Miss);
+}
+
+impl Listeners for BTreeMap<usize, Box<dyn FnMut(Miss) + Send>> {
+    fn hold(&mut self, id: usize, handler: Box<dyn FnMut(Miss) + Send>) {
+        BTreeMap::insert(self, id, handler);
+    }
+
+    fn let_go(&mut self, id: usize) {
+        BTreeMap::remove(self, &id);
+    }
+
+    fn report(&mut self, miss: Miss) {
+        for handler in self.values_mut() {
+            handler(miss);
+        }
+    }
 }
 
 impl MissHandlers {
@@ -129,7 +164,7 @@ impl MissHandlers {
                     drop,
                 },
             }),
-            handlers: BTreeMap::new(),
+            listeners: None,
         }
     }
 
@@ -137,7 +172,9 @@ impl MissHandlers {
     pub fn register(&mut self, handler: Box<dyn FnMut(Miss) + Send>) -> usize {
         let id = self.next_id;
         self.next_id += 1;
-        self.handlers.insert(id, handler);
+        self.listeners
+            .get_or_insert_with(|| Box::new(BTreeMap::<usize, Box<dyn FnMut(Miss) + Send>>::new()))
+            .hold(id, handler);
         id
     }
 
@@ -147,7 +184,9 @@ impl MissHandlers {
             self.first = None;
             return;
         }
-        self.handlers.remove(&id);
+        if let Some(listeners) = self.listeners.as_mut() {
+            listeners.let_go(id);
+        }
     }
 
     /// Report one miss to every registered listener. A miss with no listener
@@ -159,9 +198,15 @@ impl MissHandlers {
             // which runs only when this registry lets it go.
             unsafe { (lent.call)(lent.context, miss) };
         }
-        for handler in self.handlers.values_mut() {
-            handler(miss);
+        if let Some(listeners) = self.listeners.as_mut() {
+            listeners.report(miss);
         }
+    }
+
+    /// Whether the registry made its map of listeners, which only a registration does.
+    #[cfg(test)]
+    fn holds_a_map(&self) -> bool {
+        self.listeners.is_some()
     }
 }
 
@@ -427,14 +472,16 @@ impl core::fmt::Debug for SampleMissListener {
 /// source is first seen, so creation IS the first access: it starts at the
 /// reading the host gave the call that created it, and not alive.
 ///
-/// ⚠ SCOPED TO THE RECOVERY FEATURE, and the limit is stated rather than hidden:
-/// the retention PERIOD is configured through `RecoveryConfig`, because that
-/// is where upstream puts it, so a subscriber built without recovery has no
-/// knob, no sweep, and keeps the unbounded growth this closes. Upstream has the
-/// same scope — its `gc_task` is spawned from the recovery path — and compiling
-/// the bookkeeping into a build that can never sweep would be the dead surface
-/// this module refuses elsewhere.
-#[cfg(feature = "advanced-recovery")]
+/// ⚠ SCOPED TO THE RETENTION FEATURE (`advanced-retention`, which implies
+/// recovery), and the limit is stated rather than hidden: the retention PERIOD is
+/// configured through `RecoveryConfig`, because that is where upstream puts it,
+/// and upstream spawns its `gc_task` from the recovery path. A build without the
+/// feature (the zenoh-pico preset's, whose subscriber keeps each source until it
+/// goes) has no flag and no sweep: a source keeps its row until a new source takes
+/// the one met longest ago among those that hold nothing back. Compiling the
+/// bookkeeping into a build that can never sweep would be the dead surface this
+/// module refuses elsewhere.
+#[cfg(feature = "advanced-retention")]
 struct Retention {
     /// When this source was last touched, in the host's milliseconds. Upstream's
     /// `latest_access`, which its sweep compares against `now` and its heartbeat
@@ -455,7 +502,7 @@ struct Retention {
     alive: bool,
 }
 
-#[cfg(feature = "advanced-recovery")]
+#[cfg(feature = "advanced-retention")]
 impl Retention {
     /// A source seen for the first time at `now_ms`.
     fn new(now_ms: u64) -> Self {
@@ -476,7 +523,7 @@ impl Retention {
 struct SourceState {
     /// R2621 — see [`Retention`]. Carried by both shapes, because the gap this
     /// closes is the SUBSCRIBER surface's and not either shape's.
-    #[cfg(feature = "advanced-recovery")]
+    #[cfg(feature = "advanced-retention")]
     retention: Retention,
     /// Last in-order delivered sequence number (`None` before the first
     /// sample from this source).
@@ -491,12 +538,12 @@ struct SourceState {
 
 impl SourceState {
     /// A source first seen at `now_ms`. The reading is the retention clock's, so a build
-    /// without recovery, which has none, ignores it.
+    /// without the sweep, which has none, ignores it.
     fn new(now_ms: u64) -> Self {
-        #[cfg(not(feature = "advanced-recovery"))]
+        #[cfg(not(feature = "advanced-retention"))]
         let _ = now_ms;
         Self {
-            #[cfg(feature = "advanced-recovery")]
+            #[cfg(feature = "advanced-retention")]
             retention: Retention::new(now_ms),
             last_delivered: None,
             #[cfg(feature = "advanced-recovery")]
@@ -550,7 +597,7 @@ impl SourceState {
 struct TimestampedState {
     /// R2621 — see [`Retention`]. The `alive` flag this doc used to say was
     /// waiting for a sweep now HAS that sweep, so it lands here.
-    #[cfg(feature = "advanced-recovery")]
+    #[cfg(feature = "advanced-retention")]
     retention: Retention,
     /// Newest instant delivered for this timestamp-id (`None` before the
     /// first). Upstream's `last_delivered: Option<T>` at `T = Timestamp`.
@@ -567,10 +614,10 @@ struct TimestampedState {
 impl TimestampedState {
     /// A timestamp-id first seen at `now_ms`.
     fn new(now_ms: u64) -> Self {
-        #[cfg(not(feature = "advanced-recovery"))]
+        #[cfg(not(feature = "advanced-retention"))]
         let _ = now_ms;
         Self {
-            #[cfg(feature = "advanced-recovery")]
+            #[cfg(feature = "advanced-retention")]
             retention: Retention::new(now_ms),
             last_delivered: None,
             pending_queries: 0,
@@ -589,7 +636,7 @@ struct TimestampedState {
     /// unreclaimed map grows the same either way, so the retention surface is
     /// not a history feature — though it IS a recovery one, because that is
     /// where its period is configured.
-    #[cfg(feature = "advanced-recovery")]
+    #[cfg(feature = "advanced-retention")]
     retention: Retention,
     /// Newest instant delivered for this timestamp-id (`None` before the first).
     last_delivered: Option<wz_session_core::sample::TimestampHint>,
@@ -599,10 +646,10 @@ struct TimestampedState {
 impl TimestampedState {
     /// A timestamp-id first seen at `now_ms`.
     fn new(now_ms: u64) -> Self {
-        #[cfg(not(feature = "advanced-recovery"))]
+        #[cfg(not(feature = "advanced-retention"))]
         let _ = now_ms;
         Self {
-            #[cfg(feature = "advanced-recovery")]
+            #[cfg(feature = "advanced-retention")]
             retention: Retention::new(now_ms),
             last_delivered: None,
         }
@@ -944,6 +991,51 @@ impl State {
         self
     }
 
+    /// The state [`Self::delivering_to`] makes, its retransmission and history set as
+    /// [`Self::with_retransmission`] and [`Self::with_history`] set them, made in `place`: a state
+    /// holds the bytes its sources hold samples back in (`ADVANCED_SUBSCRIBER_PENDING_BYTES`), so a
+    /// host that keeps it in a place of its own writes it there rather than moving it there.
+    #[cfg(feature = "engine-host")]
+    pub(crate) fn write_in(
+        place: &mut core::mem::MaybeUninit<Self>,
+        on_sample: OnSample,
+        miss_handlers: MissHandlers,
+        retransmission: bool,
+        global_pending_queries: usize,
+        max_history_depth: usize,
+    ) -> &mut Self {
+        let at = place.as_mut_ptr();
+        // SAFETY: each field is written once through a pointer to it, inside the place; the span
+        // the sources hold samples back in is written as zeroes, the empty ring
+        // `PendingSpan::empty` is.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).sequenced).write(Sources::new());
+            core::ptr::addr_of_mut!((*at).timestamped).write(Sources::new());
+            core::ptr::addr_of_mut!((*at).pending).write_bytes(0, 1);
+            core::ptr::addr_of_mut!((*at).on_sample).write(on_sample);
+            core::ptr::addr_of_mut!((*at).miss_handlers).write(miss_handlers);
+            core::ptr::addr_of_mut!((*at).retransmission).write(retransmission);
+            core::ptr::addr_of_mut!((*at).global_pending_queries).write(global_pending_queries);
+            core::ptr::addr_of_mut!((*at).max_history_depth).write(max_history_depth);
+        }
+        // Every field is named here, so a field added to the state and not written above fails
+        // to compile rather than leaving its place unwritten.
+        let _every_field_written = |state: &Self| {
+            let Self {
+                sequenced: _,
+                timestamped: _,
+                pending: _,
+                on_sample: _,
+                miss_handlers: _,
+                retransmission: _,
+                global_pending_queries: _,
+                max_history_depth: _,
+            } = state;
+        };
+        // SAFETY: every field was written above.
+        unsafe { place.assume_init_mut() }
+    }
+
     /// The listener registry, for declaring and retracting a listener.
     pub fn miss_handlers(&mut self) -> &mut MissHandlers {
         &mut self.miss_handlers
@@ -1028,7 +1120,7 @@ impl State {
         #[cfg(not(feature = "advanced-history"))]
         let _ = slot;
         // R2621 — a sample IS being heard from, so the retention clock restarts.
-        #[cfg(feature = "advanced-recovery")]
+        #[cfg(feature = "advanced-retention")]
         state.retention.touch(now_ms);
 
         // STRICTLY newer, so a retransmission at an equal instant and a late
@@ -1327,6 +1419,7 @@ impl State {
         };
         let owner = sequenced_owner(slot);
         // R2621 — delivery is activity, as on the two paths above.
+        #[cfg(feature = "advanced-retention")]
         state.retention.touch(now_ms);
 
         match state.last_delivered {
@@ -1517,6 +1610,7 @@ impl State {
     /// be a second index to keep coherent with two maps that are otherwise
     /// keyed lookups — and it is bounded by the same retention period, which is
     /// hours by default rather than milliseconds.
+    #[cfg(feature = "advanced-retention")]
     pub fn reclaim_expired_sources(&mut self, now_ms: u64, retention_period: Duration) -> usize {
         /// Whether the source whose retention is `retention` stays.
         fn stays(retention: &mut Retention, now_ms: u64, retention_period_ms: u64) -> bool {
@@ -1560,10 +1654,11 @@ impl State {
     /// `(zid, eid)` and the timestamped one by `zid` alone, which is why a token
     /// naming only a zid reaches every sequenced entry sharing it.
     ///
-    /// Gated with its callers: the liveliness subscriber that drives it exists
-    /// only under the history feature, and a writer compiled where nothing can
-    /// call it is the dead code this module already refuses.
-    #[cfg(feature = "advanced-history")]
+    /// Gated with its callers and its reader: the liveliness subscriber that drives
+    /// it exists only under the history feature and the sweep that reads the flag
+    /// only under the retention one, and a writer compiled where nothing can call it
+    /// is the dead code this module already refuses.
+    #[cfg(all(feature = "advanced-history", feature = "advanced-retention"))]
     pub fn set_source_alive(&mut self, zid: &[u8], eid: Option<u32>, alive: bool) {
         for (_, source, state) in self.sequenced.iter_mut() {
             if source.zid() == zid && eid.is_none_or(|e| e == source.eid()) {
@@ -1663,6 +1758,7 @@ impl State {
         )?;
         // R2621 — a beacon is the publisher saying it is still there, which is
         // exactly what upstream's heartbeat arm refreshes `latest_access` for.
+        #[cfg(feature = "advanced-retention")]
         state.retention.touch(now_ms);
         if newly_seen && global_pull_in_flight {
             return None;

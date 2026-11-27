@@ -199,7 +199,8 @@ session-slot = ["session-unicast", "rx-in-place", "wz-session-core/session-slot"
 # A `udp/` listener over the heap profile's links (`ip_stack::IpLinks::open_listener`): one socket
 # whose peers are told apart by the address each datagram came from (`udp_link::UdpPort`), each
 # peer's share of it a datagram link of its own. A node that only dials leaves it out, so its links
-# carry no second kind of datagram link. The links it listens with are the session shell's
+# carry no second kind of datagram link, and so does one that listens on `tcp/` alone (`listen`
+# does not bring it). The links it listens with are the session shell's
 # (`ip_stack`, `udp_link`), compiled with `session-unicast`, so it asks for that too.
 udp-listen = ["alloc", "session-unicast"]
 # A SELECTOR for an engine that lends its udp ports what they keep at each open: the rows of their
@@ -301,6 +302,11 @@ codec-open-body = ["dep:wz-session-core", "wz-session-core/codec-open-body"]
 codec-keep-alive = ["dep:wz-session-core", "wz-session-core/codec-keep-alive"]
 codec-close = ["dep:wz-session-core", "wz-session-core/codec-close"]
 session-unicast-accept = ["dep:wz-session-core", "wz-session-core/session-unicast-accept"]
+# The answering end of a peer's Interest (`wz-session-core`'s `interest-answer`), which the session
+# core's accepting role no longer brings: named beside `session-unicast-accept` by a node that
+# answers its peers' Interests (the facade's accepting role), and left out by the zenoh-pico
+# preset's peer, which answers none on a unicast face.
+interest-answer = ["dep:wz-session-core", "wz-session-core/interest-answer"]
 # No `session-close-ingress` here: the lifecycle verbs compile only beside a
 # secure channel (decision D2 of docs/session-lifecycle-intent.md), and this
 # runtime cannot promise one, so a feature naming the verbs here would name a
@@ -355,7 +361,7 @@ app-link = ["session-unicast", "alloc", "wz-session-core/app-link"]
 # where an answer to a query goes (`queryable`), the faces a get asks (`query`) and the rows of
 # its links it reports (`connectivity`). Each is the engine's feature of the same name, which the
 # engine forwards here; a build without one holds none of it.
-listen = ["session-unicast-accept", "udp-listen"]
+listen = ["session-unicast-accept"]
 group = []
 shared-key-ids = ["dep:wz-session-core", "wz-session-core/shared-key-ids"]
 queryable = []

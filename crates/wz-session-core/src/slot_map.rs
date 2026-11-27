@@ -763,7 +763,7 @@ impl<T, const N: usize, P: Storage> RowColumn<T> for BoundedVec<T, N, P> {
     }
 
     fn room_for_one(&mut self) -> bool {
-        self.free_slots() != 0
+        self.make_room()
     }
 
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
@@ -1214,10 +1214,12 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     #[inline(never)]
     fn add_free_typed_slot(&mut self) {
         let at = self.meta.len();
-        // A slot's index is a `u16` counted from one: the place past the last has none.
+        // A slot's index is a `u16` counted from one: the place past the last has none. Both columns'
+        // room is made before either grows, so a column that takes its memory at its first row and
+        // is refused it leaves the other as it was.
         if self.core.held >= self.core.limit()
             || at >= MAX_SLOTS
-            || self.meta.free_slots() == 0
+            || !self.meta.make_room()
             || !self.rows.room_for_one()
         {
             return;
@@ -1555,6 +1557,26 @@ impl<K, T, const N: usize> SlotMap<K, T, N, Lent> {
             (Some(meta), Some(values)) => meta.checked_add(values),
             _ => None,
         }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<K, T, const N: usize> SlotMap<K, T, N, crate::bounded::OnUse> {
+    /// A table of at most `rows` rows, held to the build's `N`, that takes no memory until its first
+    /// insert and then both of its columns' rows at once: what a session's open makes each of its
+    /// tables with, from the limits it resolved. [`Self::new`] makes one of `N`.
+    pub fn counted(rows: usize) -> Self {
+        Self {
+            meta: BoundedVec::counted(rows),
+            rows: BoundedVec::counted(rows),
+            core: Core::new(rows.min(N)),
+            kind: PhantomData,
+        }
+    }
+
+    /// Whether the table took the memory of its rows.
+    pub fn holds_rows(&self) -> bool {
+        self.meta.holds_rows() || self.rows.holds_rows()
     }
 }
 

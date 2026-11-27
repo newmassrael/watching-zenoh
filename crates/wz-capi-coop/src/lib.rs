@@ -37,10 +37,10 @@
 //! With `remote-declaration-watch` or `declarations-synced-event` it tells a program's watch what
 //! the peers of its links declare and retract (`decl_watch`), as the tokio engine does.
 //!
-//! With `listen` it also listens: the ports `CoopConfig::listen` names take inbound `tcp/` and
-//! `udp/` links, each a face of its own beside the dial role's (`docs/capi-pico-on-coop-engine.md`,
-//! step L3); a `udp/` port is one socket whose peers the stack tells apart by the address each
-//! datagram came from.
+//! With `listen` it also listens: the ports `CoopConfig::listen` names take inbound `tcp/` links,
+//! and with `udp-listen` `udp/` ones, each a face of its own beside the dial role's
+//! (`docs/capi-pico-on-coop-engine.md`, step L3); a `udp/` port is one socket whose peers the
+//! stack tells apart by the address each datagram came from.
 //!
 //! ## Where it builds
 //!
@@ -135,6 +135,16 @@ pub(crate) type RowPolicy = wz_session_core::bounded::Lent;
 /// See the form of a build with `runtime-plan`.
 #[cfg(not(feature = "runtime-plan"))]
 pub(crate) type RowPolicy = wz_session_core::bounded::Region;
+// The session takes the memory of its tables when it opens and none after (docs/upstream-parity.md,
+// D12): the moment this engine lays its tables out at, which every form above answers. A policy
+// that takes its memory at another moment is a form of its own, chosen with the moment.
+const _: () = assert!(
+    matches!(
+        <RowPolicy as wz_session_core::bounded::Storage>::TAKEN,
+        wz_session_core::bounded::Taken::AtOpen
+    ),
+    "the session's tables take their memory at its open"
+);
 // How the engine's calls stand to its threads, and the locks that choice decides.
 mod form;
 

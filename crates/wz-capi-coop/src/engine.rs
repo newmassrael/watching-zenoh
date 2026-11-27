@@ -481,8 +481,10 @@ pub struct CoopConfig<E = Vec<String>> {
     /// (`wz_session_core::extbound::sends_initial_interest_final`): what a zenoh peer's open
     /// waits for before it returns. The tokio engine's `OpenStance::initial_interest`, chosen by
     /// the calling ABI for both engines alike; any other pair is sent none either way. The Final
-    /// is the answer to the Interest the peer hat acts as if the face had sent, so a build without
-    /// `interest-answer`, which answers no Interest, sends it to no face whatever this says.
+    /// is the answer to the Interest the peer hat acts as if the face had sent, which a build that
+    /// listens sends whether or not it answers its peers' Interests (`interest-answer`), as
+    /// zenoh-pico's peer ends its push to a new peer with it; a build that does neither, a client
+    /// that only dials, sends it to no face whatever this says.
     pub initial_interest: bool,
 }
 
@@ -3005,8 +3007,8 @@ struct UpFacts {
     /// Whether the link's peer and this session meet as the peer hat's two north-bound peers
     /// (`SessionLinkActions::meets_remote_as_peer_hat`), `None` for a peer whose role never
     /// arrived: what decides whether the link's replay is ended with the `DeclareFinal` of the
-    /// initial interest, which only a build that answers Interests sends.
-    #[cfg(feature = "interest-answer")]
+    /// initial interest, which a build that listens or answers Interests sends.
+    #[cfg(any(feature = "interest-answer", feature = "listen"))]
     peer_hat: Option<bool>,
     /// The link's generation, which the queries it carries are answered under: how an answer
     /// finds its link without a lend of it.
@@ -3053,7 +3055,7 @@ impl UpFacts {
         Self {
             peer: actions.peer_session_zid(),
             whatami: actions.peer_whatami_wire(),
-            #[cfg(feature = "interest-answer")]
+            #[cfg(any(feature = "interest-answer", feature = "listen"))]
             peer_hat: actions.meets_remote_as_peer_hat(),
             #[cfg(feature = "queryable")]
             generation: 0,
@@ -3414,11 +3416,11 @@ impl SubscriberRow {
     }
 }
 
-// A call reads its row where it lies, so the rows lie in the session's arena, lent at its open,
-// where no table moves them and the dispatch reads them only through a shared borrow.
+// A call reads its row where it lies, so the rows lie apart from the tables, where no table moves
+// them and the dispatch reads them only through a shared borrow.
 const _: () = assert!(
-    <RowPolicy as wz_session_core::bounded::Storage>::LENT_AT_OPEN,
-    "the session's tables lend their rows from its arena and never move one"
+    <RowPolicy as wz_session_core::bounded::Storage>::ROWS_STAY_APART,
+    "the session's tables keep their rows apart from themselves and never move one"
 );
 
 // A delivery ends a call with no lock of the session held; a target whose latch is ended only with
@@ -5661,7 +5663,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         #[cfg(feature = "connectivity")]
         let told = facts.row.clone().filter(|_| self.session.faces_watched());
-        #[cfg(feature = "interest-answer")]
+        #[cfg(any(feature = "interest-answer", feature = "listen"))]
         let peer_hat = facts.peer_hat;
         if let Some(face) = self.transport.links.face_mut(at) {
             face.facts = Some(facts);
@@ -5669,7 +5671,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The link is now one the session's sends go through: what was planned over the links
         // before it no longer holds (`LinkSupervisor::generation`).
         self.transport.links.establish(at);
-        #[cfg(feature = "interest-answer")]
+        #[cfg(any(feature = "interest-answer", feature = "listen"))]
         self.owe_link_initial_final(at, peer_hat);
         #[cfg(wz_round)]
         if self.begin_replay(at, now_us / 1000, core::marker::PhantomData) == TurnEnd::EndsLink {
@@ -6768,7 +6770,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?
         };
         links.lend_buffers(lent.transport.links);
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "udp-listen")]
         links
             .lend_port_rows(lent.transport.port_rows)
             .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;
@@ -7732,6 +7734,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         test,
         feature = "std",
         feature = "queryable",
+        feature = "query-replies-with-final",
         any(feature = "threads", feature = "listen", feature = "group")
     ))]
     pub(crate) fn answers_held(&self) -> usize {
@@ -13114,7 +13117,7 @@ mod up_facts_tests {
         UpFacts {
             peer: None,
             whatami: None,
-            #[cfg(feature = "interest-answer")]
+            #[cfg(any(feature = "interest-answer", feature = "listen"))]
             peer_hat: None,
             #[cfg(feature = "queryable")]
             generation: 0,

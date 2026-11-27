@@ -1187,7 +1187,9 @@ inline in the registry, its peer's declarations at the build's capacities (about
 pools` and `peer interest pool`, one area each, and `peer row directory`, the one span that names
 where each kind's rows lie, which the session's key arena points every face's tables at. The plan
 counts every span `PeerPools::lent` takes (`PeerPoolRows::arena_bytes`): a span it left out would
-leave the open's arena short at the last place it lends.
+leave the open's arena short at the last place it lends. A build that keeps no interest of a peer
+(`KEEPS_INTEREST_ROWS`; one that answers no peer's Interest, without `interest-answer`) is lent no
+span of them, and its plan lays out no `peer interest pool`.
 
 - A session of many faces lends one pool of each kind, holding the fewer of its `SESSION_MAX_` limit
   and what the faces could hold at one peer's bound. A row is its item and a link of two `u16`s,

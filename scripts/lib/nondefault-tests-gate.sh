@@ -601,6 +601,12 @@ object-pool|files::ext_handles_across_threads::"
     # build opens each table at the preset's bound (`session::opening_limits_tests::`), each test
     # gated `not(feature = "config-limits")`. Two tests. NOT YET MEASURED.
     "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp|without_the_limits_key"
+    # refused, the run of expiries being one of them (`config_limits::`).
+    "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp|config_limits::tests::a_build_without_the_expiry_run_refuses_its_count"
+    # The advanced plane without the node clock its publisher stamps from (`advanced-node-clock`,
+    # off in the zenoh-pico preset), on the cooperative engine: the session holds no clock, so a
+    # sample takes the system clock's time. NOT YET MEASURED.
+    "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp,advanced|advanced_plane::no_node_clock_tests::"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
     "wz-app-frame|hook|replay|"
@@ -803,19 +809,23 @@ files::decl_watch_doors::"
     # the session on two faces, a second router dialled beside the first (`tests::face_table::`,
     # 4, compiled with `query`, `queryable` and `local-queryable`), and the session that listens,
     # taking two clients of its own engine over loopback (`tests::listen::`, 5, compiled with
-    # `listen`, `query` and `queryable`); the crate's own tests were 65 passed with all of them.
+    # `listen`, `query` and `queryable`, its `udp/` port's with `udp-listen`, and its answers to
+    # a peer's Interest with `interest-answer`); the crate's own tests were 65 passed with all of
+    # them.
     # The `tls/` provider of a host (`tests/tls_provider.rs`, 8, compiled with `tls-mbedtls`) builds
     # the pinned Mbed TLS from its submodules, which is why the feature is a leg of its own cost.
     # The sessions a host holds at once (`tests/tls_sessions.rs`, 1, compiled with the same
     # feature) starts the provider's own arena and so runs in a binary of its own.
-    "wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats|"
+    "wz-capi-coop|hook|connectivity,interest-answer,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats,udp-listen|"
     # The same suite in the form the C library ships for pico's single-threaded arm: no `threads`,
     # so the rows count their calls on the latch of one thread, a delivery is one flag and no read
     # task starts (`row_callback::OneThread`). The tests a read task or a second thread on one
     # session steps are `threads`' and leave this build; the rest must pass in it as they do above.
     # `tls-mbedtls` is the row above's cost and is not repeated. Matching listeners on a key stay
     # in (`key-matching-listener`, a default the row above has), so the suite's tests of them run
-    # in this form too.
+    # in this form too. It listens without `udp-listen` and `interest-answer`, as the zenoh-pico
+    # preset's peer does, so a `udp/` endpoint to listen on is refused here and a peer's Interest
+    # is not answered.
     "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
     # The declaration watch in the same form: a round of one thread tells a catch-up a declaration a
     # round with the links held, which the watch's tests prove only where they run in it.
@@ -1022,8 +1032,14 @@ files::decl_watch_doors::"
     # only with `advanced-subscriber`, `advanced-recovery` and `advanced-history`; the leg is the
     # crate's, with no filter. The subscriber hosted on an engine's port and its tests (a scripted
     # engine) are compiled only with `engine-host`. MEASURED: 64 passed with all of them.
+    # `advanced-retention` joins: the sweep of the sources that went away and its tests.
+    "wz-ext-pubsub|hook|transport-shm,advanced-publisher,advanced-history,advanced-retention,\
+engine-host,pubsub-qos,pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
+    # The same crate without the sweep, as the zenoh-pico preset builds it (its
+    # `advanced-source-retention` off): the hosted subscriber starts no retention job and keeps a
+    # quiet source, and the host's tests read the events of that build. NOT YET MEASURED.
     "wz-ext-pubsub|hook|transport-shm,advanced-publisher,advanced-history,engine-host,pubsub-qos,\
-pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
+pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subscriber::host::tests::"
     # The node's time (the wall clock, the node HLC with its per-role switch, the stamper). The HLC,
     # the Push stamp and its tests are compiled only with the three features, which the tokio
     # runtime forwards; the leg is the crate's, with no filter. MEASURED: 6 passed with default
@@ -2178,6 +2194,27 @@ declared_keyexprs::"
     # the bundle's. The filter is the module path.
     "wz-session-core|hook|session-unicast,codec-response,reply-egress-gate|\
 session_actions::bundle_tests::reply_egress_gate::"
+    # The group session's core with the three declaration planes and no Put body op
+    # (`session-multicast` and the peer-declare registries, without `pubsub-put` or
+    # `pubsub-delete`). Every other row that compiles the observer's cross-talk tests has a Put
+    # body op on, so the Push those tests drive was always delivered there; in this build the
+    # Push is parsed and delivers no sample, which the tests assert, while the declaration planes
+    # still resolve the same frame through both id spaces. The filter is the module path. NOT YET
+    # MEASURED.
+    "wz-session-core|hook|\
+        codec-declare,\
+        codec-frame,\
+        codec-push,\
+        codec-response,\
+        codec-response-final,\
+        declare-final,\
+        declare-queryable,\
+        declare-subscriber,\
+        declare-undeclare,\
+        liveliness-token,\
+        session-multicast,\
+        transport-stats\
+        |observer::tests::cross_talk::"
     # The storage plane is the wz-storage crate's (server-layer split, steps 2-4), and its
     # gated tests went with it: the plugins document reader's (step 3) and the history,
     # strip-prefix, replication, aligner, wildcard and garbage-collection subsets (step 4),

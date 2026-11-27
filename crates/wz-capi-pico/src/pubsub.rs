@@ -1131,8 +1131,9 @@ mod session_timestamp_tests {
 }
 
 /// A program's stamps (`z_timestamp_new`) and the session's advanced publisher's are one order:
-/// both pass through the session's last time given, which the node clock learns.
-#[cfg(all(test, feature = "advanced"))]
+/// both pass through the session's last time given, which the node clock learns. The node clock is
+/// the advanced plane's in a build with `advanced-node-clock`.
+#[cfg(all(test, feature = "advanced", feature = "advanced-node-clock"))]
 mod one_session_time_tests {
     use alloc::vec::Vec;
 

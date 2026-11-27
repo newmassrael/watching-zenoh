@@ -752,8 +752,10 @@ session-unicast = ["dep:sce-rust-runtime"]
 # side forwards here so the role-gated action arms compile consistently.
 session-unicast-open = []
 # A node that takes the sessions a peer opens is asked and written to by that peer: it receives
-# whatever the peer sends.
-session-unicast-accept = ["rx-push", "rx-response", "rx-control", "interest-answer"]
+# whatever the peer sends. Whether it answers the peer's Interests is `interest-answer`'s, which a
+# crate names beside this one where its node answers them, and the zenoh-pico preset's peer leaves
+# out, as zenoh-pico's unicast session answers none.
+session-unicast-accept = ["rx-push", "rx-response", "rx-control"]
 
 # clock-quality (the observation plane's clock with a quality) — the clock-quality statechart
 # (`sources/session/clock_quality.scxml`): how far a node may trust the time it stamps with
@@ -1040,8 +1042,9 @@ declare-subscriber = ["codec-declare", "declare-final", "rx-push", "rx-control"]
 # The answering end of a peer's Interest: the declarations of this session that the Interest
 # reaches (subscribers, queryables, tokens) and its `DeclareFinal`, and for a FUTURE Interest the
 # ones declared later. A node a peer asks is one that takes the sessions others open
-# (`session-unicast-accept`) or joins a group (`session-multicast`), so both turn it on, and so
-# does `default`. A node that only dials leaves it out, as zenoh-pico's unicast session does
+# (`session-unicast-accept`, beside which each crate whose node answers names it) or joins a group
+# (`session-multicast`, which turns it on), and so does `default`. A node that only dials leaves
+# it out, and so does the zenoh-pico preset's peer, as zenoh-pico's unicast session does
 # (`vendor/zenoh-pico/src/session/interest.c` @ `// Nothing to do on unicast`): it keeps no row
 # of a peer's Interest, stages no answer and owes no `DeclareFinal`. Gate-only.
 interest-answer = []

@@ -1311,6 +1311,20 @@ impl<C: ReplySink> ReplyRegistry<C, Profile> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<C: ReplySink> ReplyRegistry<C, crate::bounded::OnUse> {
+    /// An empty registry of at most `rows` pending queries, under `MAX_PENDING_QUERIES`, taken at
+    /// its first query, the keyexpr each was asked under counted against `keys`, the session's key
+    /// budget: the gets a session holds pending on one face, at its open.
+    pub fn counted(keys: crate::on_use::BudgetKeys, rows: usize) -> Self {
+        Self {
+            pending: BoundedVec::counted(rows),
+            keys,
+            ..Self::default()
+        }
+    }
+}
+
 impl<C: ReplySink> ReplyRegistry<C, Lent> {
     /// An empty registry whose pending queries are `rows` rows lent from `arena`, at most
     /// `MAX_PENDING_QUERIES`, the keyexpr each was asked under kept in `keys`, the session's key

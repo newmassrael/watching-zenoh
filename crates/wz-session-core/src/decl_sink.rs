@@ -239,6 +239,19 @@ impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, Lent> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, crate::bounded::OnUse> {
+    /// An empty pair whose two lists hold at most `rows` rows each, under the build's bound, taken
+    /// at each list's first observer: the `MAX_DECL_OBSERVERS` a session's open resolved.
+    pub fn counted(rows: usize) -> Self {
+        Self {
+            on_decl: BoundedVec::counted(rows),
+            on_undecl: BoundedVec::counted(rows),
+            ..Self::default()
+        }
+    }
+}
+
 /// The rows of a [`DeclObserverPair`] of the region policy, which a region lays out beside it:
 /// each list's, at the build's bound.
 pub struct DeclObserverRows<D, U> {

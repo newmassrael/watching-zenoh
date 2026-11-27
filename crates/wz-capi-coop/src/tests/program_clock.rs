@@ -3,90 +3,100 @@
 
 //! A session on a clock the program sets, as the pico ABI's time base is: every timer of the
 //! engine reads the clock it was opened with, so a lease runs on the program's time alone. The
-//! router stand-in hangs (it reads and sends nothing and keeps its socket), so nothing but the
+//! router stand-in hangs (it reads and sends nothing and keeps its end), so nothing but the
 //! session's lease can end the session.
+//!
+//! The session runs in the simulated world (`tests::sim`), whose one clock is the program's: it
+//! moves only when the test moves it, and a read's wait takes none of it. What a test here holds
+//! is that the lease is read against that clock, and that no read and no wait counts as time;
+//! that the engine names no clock of the host is held by its build without `std`, which has none
+//! to name.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-
-use crate::tests::{host_links, PosixLinks};
 use wz_capi_port::{PeerLists, SessionDrive};
-use wz_runtime_coop::ClockSource;
-use wz_runtime_posix::stream::PosixTcpDial;
-use wz_runtime_posix::{PosixClock, PosixEntropy};
 
-use super::sim::SetClock;
-use super::{config, CatchAll, Command, Router, LOOPBACK, ROUTER_ZID};
-use crate::EngineHold;
-use crate::{CoopConfig, CoopEngine};
+use super::sim::{Sim, SimEngine};
+use super::{CatchAll, ROUTER_ZID};
+use crate::{CoopConfig, EngineHold};
 
-/// The session's lease, in milliseconds: short, so the wall clock passes it several times over
-/// in a test.
+/// The seed every test here runs on: the session's and the stand-in's entropy.
+const SEED: u64 = 0x5eed_c10c;
+
+/// The session's lease, in milliseconds.
 const LEASE_MS: u64 = 500;
 
-/// A session of [`LEASE_MS`] dialled to `router` on `clock`; it redials none, so it ends with
-/// its link.
-fn open_on<C: ClockSource + Clone>(
-    router: &Router,
-    clock: C,
-) -> EngineHold<CoopEngine<PosixLinks, C>> {
-    CoopEngine::open(
-        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
-        clock,
-        PosixEntropy,
-        CoopConfig {
-            lease_ms: LEASE_MS,
-            ..config(router)
-        },
-    )
-    .expect("the session opens")
+/// The reads made with the program's clock standing still: at the config's wait of 100 ms each,
+/// a dozen leases of a clock that ran.
+const STILL_READS: usize = 64;
+
+/// How far the program's clock moves after each read once it has passed the lease: past the
+/// bound of the close that follows the expiry within a few reads.
+const STEP_MS: u64 = 50;
+
+/// The most reads a test makes waiting for the session to end: a bound against a lease that
+/// never runs out, which no expiry a test waits for comes near.
+const MOST_READS: usize = 1_000;
+
+/// A session of [`LEASE_MS`] dialled to a stand-in that hangs from the open on; it redials none,
+/// so it ends with its link.
+fn hung(sim: &Sim) -> (super::sim::StandIn, EngineHold<SimEngine>) {
+    let router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(CoopConfig {
+        lease_ms: LEASE_MS,
+        ..sim.config()
+    });
+    router.freeze();
+    (router, engine)
 }
 
-/// Three of its leases of the wall clock with the program's clock standing still, and the silent
-/// router is still the session's peer; then the program's clock passes the lease and runs on, and
-/// the router is expired and the session ends.
+/// Read `engine` until it ends, the program's clock moved on by [`STEP_MS`] after each read:
+/// how many reads that took.
+fn reads_until_closed(sim: &Sim, engine: &SimEngine, what: &str) -> usize {
+    let mut reads = 0;
+    while !SessionDrive::is_closed(engine) {
+        assert!(reads < MOST_READS, "{what}");
+        let _ = SessionDrive::read(engine, false);
+        sim.advance_ms(STEP_MS);
+        reads += 1;
+    }
+    reads
+}
+
+/// Reads with the program's clock standing still, as many as a dozen leases of a clock that ran
+/// would take, and the silent stand-in is still the session's peer; then the program's clock
+/// passes the lease and runs on, and the stand-in is expired and the session ends.
 #[test]
 fn a_lease_on_the_programs_clock_runs_on_that_clock_alone() {
-    let router = Router::start(CatchAll::None);
-    let now_us = Arc::new(AtomicU64::new(0));
-    let engine = open_on(&router, SetClock(now_us.clone()));
-    router.send(Command::Freeze);
+    let sim = Sim::new(SEED);
+    let (_router, engine) = hung(&sim);
 
-    let quiet = Instant::now() + Duration::from_millis(3 * LEASE_MS + 100);
-    while Instant::now() < quiet {
+    for _ in 0..STILL_READS {
         SessionDrive::read(&*engine, false)
             .expect("the session stays open while the program's clock stands still");
     }
     assert_eq!(engine.peer_identities(), vec![(vec![ROUTER_ZID; 4], 0)]);
 
-    now_us.store((LEASE_MS + 100) * 1000, Ordering::SeqCst);
-    let until = Instant::now() + Duration::from_secs(5);
-    while !SessionDrive::is_closed(&*engine) {
-        assert!(
-            Instant::now() < until,
-            "the session outlived its lease once the program's clock passed it"
-        );
-        let _ = SessionDrive::read(&*engine, false);
-        // The program's time runs on, past the bound of the close that follows the expiry.
-        now_us.fetch_add(50_000, Ordering::SeqCst);
-    }
+    sim.advance_ms(LEASE_MS + 100);
+    reads_until_closed(
+        &sim,
+        &engine,
+        "the session outlived its lease once the program's clock passed it",
+    );
 }
 
-/// The CONTROL: the same hanging router and lease on the system's clock, which runs. The session
-/// ends within a few leases, so the harness sees an expiry when there is one, and the first test's
-/// session standing is the program's clock's doing.
+/// The CONTROL: the same hanging stand-in and lease, on the program's clock running from the
+/// open on. The session ends once the clock has passed its lease and not before, so the reads see
+/// an expiry when there is one, and the first test's session standing is the still clock's doing.
 #[test]
-fn a_lease_on_the_systems_clock_runs_out_with_the_wall_clock() {
-    let router = Router::start(CatchAll::None);
-    let engine = open_on(&router, PosixClock);
-    router.send(Command::Freeze);
-    let until = Instant::now() + Duration::from_secs(5);
-    while !SessionDrive::is_closed(&*engine) {
-        assert!(
-            Instant::now() < until,
-            "a hanging router was not expired by the wall clock"
-        );
-        let _ = SessionDrive::read(&*engine, false);
-    }
+fn a_lease_on_a_running_clock_runs_out_with_that_clock() {
+    let sim = Sim::new(SEED);
+    let (_router, engine) = hung(&sim);
+    let reads = reads_until_closed(
+        &sim,
+        &engine,
+        "a hanging stand-in was not expired by the running clock",
+    );
+    assert!(
+        reads as u64 * STEP_MS >= LEASE_MS,
+        "the session ended after {reads} reads of {STEP_MS} ms, inside its {LEASE_MS} ms lease"
+    );
 }

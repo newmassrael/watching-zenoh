@@ -213,7 +213,7 @@ impl QueryPeer {
         // As the owned path: a Query that would owe a Final the table cannot
         // hold is refused before any queryable runs, and counted.
         if matches!(request.body, RequestViewVariant::CodecZenohQuery(_))
-            && !pending_final_rids.has_room()
+            && !pending_final_rids.make_room()
         {
             pending_final_rids.refuse_request();
             return;
@@ -285,7 +285,7 @@ impl QueryPeer {
         let RequestViewVariant::CodecZenohQuery(query) = &request.body else {
             return Ok(None);
         };
-        if !pending_final_rids.has_room() {
+        if !pending_final_rids.make_room() {
             pending_final_rids.refuse_request();
             return Ok(None);
         }

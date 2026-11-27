@@ -978,6 +978,23 @@ impl<D: DeclSink, U: UndeclSink, M: MatchingReport>
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<D: DeclSink, U: UndeclSink, M: MatchingReport>
+    RemoteSubscriberTable<D, U, crate::bounded::OnUse, M>
+{
+    /// A table with no observer whose two observer lists hold at most `rows` rows each, taken at
+    /// each list's first observer ([`DeclObserverPair::counted`]).
+    pub fn counted(rows: usize) -> Self {
+        Self {
+            observers: DeclObserverPair::counted(rows),
+            #[cfg(all(feature = "session-matching", feature = "alloc"))]
+            matching_watches: MatchingWatchList::new(),
+            #[cfg(not(all(feature = "session-matching", feature = "alloc")))]
+            matching_watches: core::marker::PhantomData,
+        }
+    }
+}
+
 impl<D: DeclSink, U: UndeclSink, M: MatchingReport> RemoteSubscriberTable<D, U, Lent, M> {
     /// A table with no observer whose two observer lists are lent from `arena`, `rows` rows each
     /// ([`DeclObserverPair::lent`]). Refused as that refuses.

@@ -3742,7 +3742,7 @@ impl QueryPeer {
                 // timeout, and the handler's work would answer nobody. Only a
                 // Query body can owe one, so only it is refused.
                 if matches!(req.body, RequestOwnedVariant::CodecZenohQuery(_))
-                    && !pending_final_rids.has_room()
+                    && !pending_final_rids.make_room()
                 {
                     pending_final_rids.refuse_request();
                     continue;

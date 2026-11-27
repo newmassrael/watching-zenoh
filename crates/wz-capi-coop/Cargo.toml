@@ -226,27 +226,43 @@ key-matching-listener = []
 # unsupported. Off, which is pico's client build, the engine is the dial role alone and its text
 # has no acceptor, no table of ports and no wait on one (the capability-cost gate measures it).
 # The session machine compiles its accepting role only under `session-unicast-accept`, so the
-# feature asks the runtime for it: without that an acceptor would start on no event. It asks the
-# runtime's `udp-listen` too, which gives the host's links a `udp/` listener, one socket whose
-# peers each take a face of their own. A face dialled beside the dial role's (`attach_face`) is
-# this build's too: every build of more faces than one shares the faces' rows in the session's
-# pools (`peer-row-pools`), so a face that goes gives its set back at once. The open lends every
-# udp port the rows of its peers and the slots of its datagrams (`CoopEngine::assemble`), so the
-# runtime's ports are compiled in that form alone (`udp-port-lent-only`).
+# feature asks the runtime for it: without that an acceptor would start on no event. A face
+# dialled beside the dial role's (`attach_face`) is this build's too: every build of more faces
+# than one shares the faces' rows in the session's pools (`peer-row-pools`), so a face that goes
+# gives its set back at once. The links listen on `tcp/`; a `udp/` endpoint is `udp-listen`'s
+# below, and without it the links refuse one as a scheme they do not carry. A peer's Interest on a
+# unicast face is answered only with `interest-answer` beside it; the replay a new face is told ends
+# with the `DeclareFinal` of the initial interest either way, as zenoh-pico's push to a new peer
+# does.
 listen = [
-    "interest-answer",
     "runtime-plan",
     "wz-runtime-coop/listen",
-    "wz-runtime-coop/udp-port-lent-only",
     "wz-session-core/peer-row-pools",
+]
+# `udp-listen`: the listening role on `udp/` too, the runtime's `udp-listen`, which gives the
+# host's links a `udp/` listener, one socket whose peers are told apart by the address each
+# datagram came from, each a face of its own. The open lends every udp port the rows of its peers
+# and the slots of its datagrams (`CoopEngine::assemble`), so the runtime's ports are compiled in
+# that form alone (`udp-port-lent-only`), and the session's plan lays those rows out for each
+# `udp/` endpoint it listens on. A behaviour zenoh-pico's peer does not have: its POSIX link
+# listens on no unicast `udp/` endpoint (`vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @
+# `static z_result_t _z_udp_posix_listen(`). The pico ABI's capability of the same name
+# (deploy/wz-config.toml) turns it on, which the zenoh-pico preset leaves off.
+udp-listen = [
+    "listen",
+    "wz-runtime-coop/udp-listen",
+    "wz-runtime-coop/udp-port-lent-only",
 ]
 # The answering end of a peer's Interest (`wz-session-core`'s `interest-answer`): what the
 # application registers after a peer asked is staged for that peer's face before each drain. A peer
-# asks a node that listens or joins a group, so `listen` and `group` turn it on; a client that
-# only dials answers no Interest, as zenoh-pico's unicast session does, and has none of it.
-# The `DeclareFinal` of the initial interest that ends what a peer face is told when its link comes
-# up (`CoopConfig::initial_interest`) is such an answer, to the Interest the peer hat acts as if the
-# face had sent, so a client build links none of that either.
+# asks a node that listens or joins a group: `group` turns it on, as zenoh-pico answers an
+# Interest on a multicast transport, and `listen` does not, as zenoh-pico's unicast session answers
+# none (`vendor/zenoh-pico/src/session/interest.c` @ `// Nothing to do on unicast`); the pico ABI's
+# capability of the same name (deploy/wz-config.toml) names it beside `listen`, and the zenoh-pico
+# preset leaves it off. A client that only dials answers no Interest and has none of it. The
+# `DeclareFinal` of the initial interest that ends what a peer face is told when its link comes up
+# (`CoopConfig::initial_interest`) is sent by a build that listens or answers, as zenoh-pico's peer
+# ends its push to a new peer with it; a client build links none of that either.
 interest-answer = ["wz-session-core/interest-answer"]
 # The send's behaviours that zenoh-pico's transport does not have, each the session core's feature
 # of the same name: on in this crate's own build, and named by the pico ABI's capabilities of the

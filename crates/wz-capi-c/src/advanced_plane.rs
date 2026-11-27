@@ -53,9 +53,13 @@ impl CPlane {
         }
     }
 
-    /// What the plane names a declaration the engine refused.
-    fn refusal(what: &str) -> AdvancedPublisherError {
-        AdvancedPublisherError::Plane(format!("{what}: the session refused the declaration"))
+    /// What the plane names a declaration the engine refused: the entity, under this ABI's
+    /// generic refusal, as the engine gives no code of its own.
+    fn refusal(entity: &'static str) -> AdvancedPublisherError {
+        AdvancedPublisherError::Plane {
+            entity,
+            code: crate::result::Z_EGENERIC,
+        }
     }
 }
 

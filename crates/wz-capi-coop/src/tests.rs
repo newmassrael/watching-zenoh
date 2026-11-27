@@ -193,10 +193,6 @@ enum Command {
     FinishInitial,
     /// Close the session and stop, as a router that goes away does.
     Close,
-    /// Read nothing and send nothing from now on, the socket held open until the router is let
-    /// go of, as a node that hangs: no Close reaches the session and no error from the socket,
-    /// so only the session's lease can end it.
-    Freeze,
     /// Ask a query of request id `.0` on the key.
     #[cfg(feature = "queryable")]
     Query(wz_session_core::wire_id::RequestId, &'static str),
@@ -256,7 +252,7 @@ enum Command {
     PushSequenced(&'static str, &'static [u8], u32),
     /// Ask the session, as Interest `.0`, for its subscribers on the key, those it holds now and
     /// those it declares later.
-    #[cfg(feature = "interest-answer")]
+    #[cfg(any(feature = "interest-answer", feature = "listen"))]
     AskSubscribers(u64, &'static str),
     /// Hold the cache of that advanced publisher: a queryable on its `@adv` key that answers as
     /// the publisher's own cache does, out of the samples with the sequence numbers `.0`, each
@@ -280,10 +276,10 @@ struct Seen {
     undeclared_subscribers: Vec<u64>,
     interests: usize,
     /// The Interest each subscriber declaration that answers one names, in the order they arrived.
-    #[cfg(feature = "interest-answer")]
+    #[cfg(any(feature = "interest-answer", feature = "listen"))]
     subscriber_answers: Vec<u64>,
     /// The Interest each declaration Final names, in the order they arrived.
-    #[cfg(feature = "interest-answer")]
+    #[cfg(any(feature = "interest-answer", feature = "listen"))]
     interest_finals: Vec<u64>,
     pushes: usize,
     /// What the router's catch-all subscriber received, when it holds one.
@@ -658,7 +654,7 @@ fn run_router(
                                 let at = seen.declares;
                                 seen.initial_finals.push(at);
                             }
-                            #[cfg(feature = "interest-answer")]
+                            #[cfg(any(feature = "interest-answer", feature = "listen"))]
                             if let Some(interest) = declare.interest_id {
                                 use wz_codecs::declare::DeclareOwnedVariant as Body;
                                 match &declare.body {
@@ -747,7 +743,7 @@ fn run_router(
                         let at = seen.declares;
                         seen.initial_finals.push(at);
                     }
-                    #[cfg(feature = "interest-answer")]
+                    #[cfg(any(feature = "interest-answer", feature = "listen"))]
                     if let Some(interest) = declare.interest_id {
                         match &declare.body {
                             wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(_) => {
@@ -864,7 +860,7 @@ fn run_router(
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
             }
-            #[cfg(feature = "interest-answer")]
+            #[cfg(any(feature = "interest-answer", feature = "listen"))]
             Ok(Command::AskSubscribers(id, key)) => {
                 let _ = actions.send_interest_subscribers(id, true, true, 0, Some(key));
             }
@@ -1008,12 +1004,6 @@ fn run_router(
             Ok(Command::Close) => {
                 actions.send_close_with_reason(CloseReason::Generic);
                 local.run_until_idle();
-                return;
-            }
-            Ok(Command::Freeze) => {
-                // Unstepped, so nothing is read or sent; the session's task, and with it the
-                // socket, lives until the test lets go of the router.
-                while inbox.recv().is_ok() {}
                 return;
             }
             #[cfg(feature = "queryable")]
@@ -1454,6 +1444,46 @@ fn a_subscriber_declared_after_a_peers_interest_is_answered_by_the_declaration()
     unstepped("the answer to the Interest", &|s| {
         s.subscriber_answers.contains(&INTEREST)
     });
+}
+
+/// A session that listens without the answering end of an Interest (`listen` without
+/// `interest-answer`, as the zenoh-pico preset builds a peer) answers no Interest a peer asks on a
+/// unicast face, as zenoh-pico's unicast session answers none: no `DeclareFinal` names it, and a
+/// subscriber declared after it reaches the peer as a declaration and not as an answer. The CONTROL
+/// is that declaration. Turned red by an answer staged, or a Final sent, in such a build.
+#[cfg(all(feature = "listen", not(feature = "interest-answer")))]
+#[test]
+fn a_listening_build_without_the_answer_answers_no_interest() {
+    const INTEREST: u64 = 41;
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    router.send(Command::AskSubscribers(INTEREST, "demo/**"));
+    let declared_before = router.seen(|s| s.subscribers.len());
+    engine
+        .declare_subscriber_on_wire(
+            "demo/a",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
+        )
+        .expect("the session declares the subscriber");
+    until(&engine, "CONTROL: the declaration", || {
+        router.seen(|s| s.subscribers.len() > declared_before)
+    });
+    // Stepped long enough for the Interest, sent before the declaration, to have been read.
+    let settled = Instant::now() + Duration::from_millis(200);
+    until(&engine, "the Interest to be read", || {
+        Instant::now() >= settled
+    });
+    assert!(
+        !router.seen(|s| s.interest_finals.contains(&INTEREST)),
+        "no DeclareFinal answers the Interest"
+    );
+    assert!(
+        !router.seen(|s| s.subscriber_answers.contains(&INTEREST)),
+        "no subscriber answers it"
+    );
 }
 
 /// A publish that finds nothing handed to the session takes the session's lock once and the queue
@@ -3883,6 +3913,37 @@ fn a_dial_refused_at_once_names_its_endpoint_and_its_cause() {
             "{endpoint}"
         );
     }
+}
+
+/// A build that listens without the udp listener (`listen` without `udp-listen`, as the zenoh-pico
+/// preset builds a peer) refuses a `udp/` endpoint to listen on by name, as a scheme its links do
+/// not carry: zenoh-pico's POSIX link has no such listener either. The CONTROL is a `tcp/` endpoint
+/// in the same build, which opens. Turned red by a udp port bound in such a build, or by a refusal
+/// that loses the endpoint or its cause.
+#[cfg(all(feature = "listen", not(feature = "udp-listen")))]
+#[test]
+fn a_build_without_the_udp_listener_refuses_a_udp_endpoint_to_listen_on() {
+    use crate::{EndpointRefusal, OpenError, Refusal};
+    use wz_runtime_coop::session_drive::LinkOpenError;
+
+    let listening_on = |endpoint: &str| CoopConfig {
+        whatami: WhatAmI::Peer,
+        listen: vec![endpoint.to_owned()],
+        ..client_config()
+    };
+    let udp = "udp/127.0.0.1:0";
+    assert_eq!(
+        open_with_result(listening_on(udp)),
+        Some(OpenError::Listen(EndpointRefusal::new(
+            udp,
+            Refusal::Link(LinkOpenError::Unsupported)
+        )))
+    );
+    assert_eq!(
+        open_with_result(listening_on("tcp/127.0.0.1:0")),
+        None,
+        "CONTROL: a tcp/ endpoint opens"
+    );
 }
 
 /// The open writes each endpoint's text into a row of the session's arena: one longer than a row

@@ -393,10 +393,62 @@ impl PeerTables<Lent> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl PeerTables<crate::bounded::OnUse> {
+    /// Empty tables, for a peer that has said nothing yet, each of at most the rows `rows` states,
+    /// under the build's bound, none taking memory until its first row; the keys of every row
+    /// counted against `keys`, the session's key budget; held to `limits` as
+    /// [`PeerTables::limit_to`] holds them. What the peer writes by its own choice (its aliases,
+    /// its declarations, its interests) is inline in the tables at its bounds, as on the region
+    /// policy, so there is no pool to hand them. Nothing is taken, so nothing is refused here: a
+    /// row past a table's count, or one the allocator or the budget has no room for, is refused
+    /// when the peer asks for it.
+    pub fn counted(
+        keys: crate::on_use::BudgetKeys,
+        rows: PeerRows,
+        limits: &crate::limits::SessionLimits,
+    ) -> Self {
+        let mut tables = Self::default();
+        tables.count_rows(keys, rows, limits);
+        tables
+    }
+
+    /// Count tables of no rows ([`PeerTables::init_in`]) the rows `rows` states where they lie,
+    /// hand them `keys` to count their rows' keys against and hold them to `limits`: what
+    /// [`Self::counted`] makes, without the tables being a value of their own. A staging that held
+    /// answers is emptied.
+    pub fn count_rows(
+        &mut self,
+        keys: crate::on_use::BudgetKeys,
+        rows: PeerRows,
+        limits: &crate::limits::SessionLimits,
+    ) {
+        self.keep_keys_in(keys);
+        self.subscribers.count_rows(rows.pending_declares);
+        self.replies = ReplyStage::counted(rows.replies, rows.reply_bytes);
+        self.finals = FinalStage::counted(rows.finals);
+        #[cfg(feature = "liveliness-token")]
+        {
+            self.pending_declares = BoundedVec::counted(rows.pending_declares);
+        }
+        self.limit_to(limits);
+    }
+}
+
 /// Whether this build's lent tables keep what a peer writes in pools a session's faces share
 /// (`peer-row-pools`): an engine that lends no pool where it is off reads this as a constant, so
 /// the code that sizes and lends them is not in its text.
 pub const SHARES_ROWS: bool = cfg!(feature = "peer-row-pools");
+
+/// Whether this build's pools keep the rows of a peer's subscriber interests (`interest-answer`,
+/// beside `declare-subscriber` and `peer-row-pools`): a build that answers no peer's Interest keeps
+/// none and [`PeerPools::lent`] lends them no span, so an engine that lays its arena out by this
+/// constant lays out no area of them.
+pub const KEEPS_INTEREST_ROWS: bool = cfg!(all(
+    feature = "declare-subscriber",
+    feature = "interest-answer",
+    feature = "peer-row-pools"
+));
 
 /// How many rows each kind of what the peers of one session write by their own choice is lent
 /// ([`PeerPools::lent`]), and whether the session's faces share them.
@@ -927,6 +979,28 @@ mod tests {
         assert!(PeerTables::bytes() > 0);
     }
 
+    /// The pools give a peer's subscriber interests bytes exactly where the build says it keeps
+    /// their rows (`KEEPS_INTEREST_ROWS`), shared by many faces or one face's own: an engine that
+    /// lays its arena out by the constant lays out the span the pools take, and none where they
+    /// take none. Turned red by a constant whose features differ from
+    /// `PeerPoolRows::interest_bytes`'s.
+    #[test]
+    fn the_interest_rows_take_bytes_exactly_where_the_build_keeps_them() {
+        for shared in [true, false] {
+            let rows = PeerPoolRows {
+                aliases: 0,
+                remote_decls: 0,
+                interests: 1,
+                shared,
+            };
+            assert_eq!(
+                rows.interest_bytes().is_some_and(|bytes| bytes > 0),
+                KEEPS_INTEREST_ROWS,
+                "shared: {shared}"
+            );
+        }
+    }
+
     /// The tables take the bounds their creator states: held to two, a peer's third alias and
     /// third subscriber are refused and counted, and the quotas outlive a forgotten peer, as the
     /// session's limits outlive one link.
@@ -1107,7 +1181,7 @@ mod lent_tests {
     }
 
     /// `each` rows of every table, and room for `each` replies of 8 bytes on keys of 8.
-    fn rows(each: usize) -> PeerRows {
+    pub(super) fn rows(each: usize) -> PeerRows {
         PeerRows {
             pending_declares: each,
             replies: each,
@@ -1166,7 +1240,7 @@ mod lent_tests {
     }
 
     /// A one-byte Put on `"k"` for request `rid`, stamped by `responder` and `timestamp`.
-    fn reply<'a>(
+    pub(super) fn reply<'a>(
         rid: crate::wire_id::RequestId,
         responder: Option<(&'a [u8], u32)>,
         timestamp: Option<TimestampParts<'a>>,
@@ -2144,6 +2218,134 @@ mod lent_tests {
                 tables.remote_subscribers.refusals()
             ),
             (0, 1)
+        );
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod on_use_tests {
+    //! The tables of a peer of the on-use policy: made with their counts and no memory, each takes
+    //! its rows at its first value and refuses past its count, and the keys of what the peer
+    //! declares are counted against the session's key budget.
+    use super::lent_tests::{reply, rows};
+    use super::*;
+    use crate::bounded::OnUse;
+    use crate::limits::SessionLimits;
+    use crate::on_use::KeyBudget;
+    use crate::query_sink::ReplyError;
+    use crate::reply_stage::{FinalStaging, ReplyStaging};
+    use crate::sample::QosLevel;
+
+    /// A key budget of `bytes` the test leaks, so it outlives every table and key counted against
+    /// it.
+    fn budget(bytes: usize) -> &'static KeyBudget {
+        std::boxed::Box::leak(std::boxed::Box::new(KeyBudget::new(
+            bytes,
+            SessionLimits::defaults().max_keyexpr_bytes_held(),
+        )))
+    }
+
+    /// A peer's tables of `rows`, their keys counted against `budget`.
+    fn counted(rows: PeerRows, budget: &'static KeyBudget) -> PeerTables<OnUse> {
+        // SAFETY: the budget is leaked, so it neither moves nor goes while the tables and their keys
+        // live.
+        let keys = unsafe { budget.keys() };
+        PeerTables::<OnUse>::counted(keys, rows, &SessionLimits::defaults())
+    }
+
+    /// One reply and one `Final` counted: the second of each is refused, a drain keeps the rows the
+    /// first took, and the liveliness staging takes nothing before its first answer and refuses
+    /// past its count. Turned red by tables made with the build's bounds rather than the counts
+    /// `PeerTables::counted` is handed.
+    #[test]
+    fn on_use_peer_tables_refuse_past_their_counts_and_keep_their_rows_across_a_drain() {
+        let mut tables = counted(rows(1), budget(256));
+        assert_eq!(tables.replies.stage_parts(reply(1, None, None)), Ok(()));
+        assert_eq!(
+            tables.replies.stage_parts(reply(2, None, None)),
+            Err(ReplyError::StagingFull)
+        );
+        let mut drained = 0;
+        tables.replies.drain_parts(|_| drained += 1);
+        assert_eq!(drained, 1);
+        assert_eq!(
+            tables.replies.stage_parts(reply(3, None, None)),
+            Ok(()),
+            "the drain kept the row the first reply took"
+        );
+
+        assert!(tables.finals.has_room());
+        tables.finals.owe(1, QosLevel::DEFAULT);
+        assert!(!tables.finals.has_room(), "one row of Finals");
+        assert_eq!(tables.finals.take_owed().len(), 1);
+        assert!(tables.finals.has_room());
+
+        #[cfg(feature = "liveliness-token")]
+        {
+            assert!(
+                !tables.pending_declares.holds_rows(),
+                "nothing is taken before the first answer"
+            );
+            assert!(tables
+                .pending_declares
+                .push(DeclResponseItem::Final { interest_id: 1 })
+                .is_ok());
+            assert!(tables.pending_declares.holds_rows());
+            assert!(tables
+                .pending_declares
+                .push(DeclResponseItem::Final { interest_id: 2 })
+                .is_err());
+        }
+    }
+
+    /// What a peer declares keeps its key counted against the session's budget, as the key arena
+    /// would count its block, and reads back as it was declared; forgetting the peer gives every
+    /// key's bytes back. Turned red by tables that are not handed the budget (a peer's key is then
+    /// refused), or by a key whose bytes the budget does not get back.
+    #[cfg(all(feature = "codec-declare", feature = "declare-subscriber"))]
+    #[test]
+    fn an_on_use_peers_keys_are_counted_against_the_budget_and_given_back() {
+        use crate::key_arena::block_bytes;
+        use crate::transport_profile::owned::DeclareOwnedVariant;
+        use wz_session_core_test_support as fx;
+
+        let budget = budget(256);
+        let mut tables = counted(rows(1), budget);
+        tables.subscribers.absorb_declare(
+            &DeclareOwnedVariant::CodecZenohDeclKexpr(fx::decl_kexpr(3, "demo/alias")),
+            None::<crate::wireexpr_resolve::OwnSpace<'_, crate::bounded::Static>>,
+        );
+        let mut table = crate::declare::subscriber::RemoteSubscriberTable::<
+            crate::decl_sink::BoxedDeclSink,
+            crate::decl_sink::BoxedUndeclSink,
+        >::default();
+        let none: hashbrown::HashMap<u64, std::string::String> = hashbrown::HashMap::new();
+        table.dispatch_declare(
+            &mut tables.remote_subscribers,
+            &DeclareOwnedVariant::CodecZenohDeclSubscriber(fx::decl_subscriber(
+                1,
+                0,
+                Some("demo/sub/x"),
+            )),
+            &none,
+        );
+        assert_eq!(
+            tables.subscribers.resolve_inbound_mapping(3).as_deref(),
+            Some("demo/alias")
+        );
+        assert!(tables.remote_subscribers.has_matching("demo/sub/x"));
+        let blocks = block_bytes("demo/alias".len()).expect("short")
+            + block_bytes("demo/sub/x".len()).expect("short");
+        assert_eq!(
+            budget.counts().used,
+            blocks,
+            "each key counted as its block"
+        );
+        tables.forget_peer();
+        assert_eq!(
+            budget.counts().used,
+            0,
+            "a forgotten peer gives every key's bytes back"
         );
     }
 }

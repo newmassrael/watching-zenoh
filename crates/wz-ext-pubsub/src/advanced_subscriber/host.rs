@@ -168,7 +168,9 @@ const fn rows_in<T, const N: usize>(_table: *mut [T; N]) -> usize {
 
 impl<E: EngineHolder> Shared<E> {
     /// A subscriber of `engine` on `base_keyexpr` with no get in flight, made in `place`, where
-    /// it stays: its token holds a lock made in its place ([`CancellationToken::init_in`]).
+    /// it stays: its token holds a lock made in its place ([`CancellationToken::init_in`]), and
+    /// its machine is written by `state` in the place its lock holds it in
+    /// ([`State::write_in`]), since the machine holds the bytes its samples are held back in.
     ///
     /// # Safety
     /// `place` is valid for writes of a `Self`, aligned for it and holds none; what is made there
@@ -176,7 +178,7 @@ impl<E: EngineHolder> Shared<E> {
     unsafe fn write_in(
         place: NonNull<Self>,
         engine: E::Handle,
-        state: State,
+        state: impl FnOnce(&mut MaybeUninit<State>) -> &mut State,
         base_keyexpr: FixedKey,
         dest: Locality,
         timeout_ms: u32,
@@ -194,7 +196,7 @@ impl<E: EngineHolder> Shared<E> {
             for row in 0..rows_in(table) {
                 GetSlot::write_empty(gets.add(row));
             }
-            addr_of_mut!((*at).state).write(Mutex::new(state));
+            Mutex::init_at(NonNull::new_unchecked(addr_of_mut!((*at).state)), state);
             CancellationToken::init_in(NonNull::new_unchecked(addr_of_mut!((*at).token)));
             addr_of_mut!((*at).closing).write(AtomicBool::new(false));
             addr_of_mut!((*at).base_keyexpr).write(base_keyexpr);
@@ -622,6 +624,7 @@ pub struct EngineSubscriber<E: EngineHolder = Arc<dyn SessionEngine>> {
     // the detection token.
     subscriber: Held<Subscription<E>>,
     periodic: Option<Ticker<E>>,
+    #[cfg(feature = "advanced-retention")]
     retention: Option<Ticker<E>>,
     cancel: GetCancel<E>,
     late_publishers: Option<Held<Subscription<E>>>,
@@ -724,7 +727,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         // SAFETY: `make` makes the whole shared part in the place it is handed. Refused, `make` is
         // dropped uncalled, and the callbacks with it.
         let shared = unsafe { Strong::try_boxed_in(make) }.map_err(|NoPlace| HostError::NoRoom)?;
-        Self::declare_over(engine, shared, options)
+        Self::declare_over(engine, shared, &options)
     }
 
     /// [`Self::declare_with`] with what the subscriber's callbacks and jobs share lodged in `core`,
@@ -765,14 +768,15 @@ impl<E: EngineHolder> EngineSubscriber<E> {
                 core.context,
             )
         };
-        Self::declare_over(engine, shared, options)
+        Self::declare_over(engine, shared, &options)
     }
 
-    /// Declare what `options` asks for over `shared`, the subscriber's shared part, made.
+    /// Declare what `options` asks for over `shared`, the subscriber's shared part, made. The
+    /// options are read where the caller holds them, as nothing declared keeps them.
     fn declare_over(
         engine: &E,
         shared: Strong<Shared<E>>,
-        options: AdvancedSubscriberOptions,
+        options: &AdvancedSubscriberOptions,
     ) -> Result<Self, HostError> {
         let zid = engine.session_zid();
         let recovery = options.recovery;
@@ -791,56 +795,17 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         )?;
         let id = identity_of(zid, subscriber.entity.id, forms.as_ref());
 
-        // The retention sweep and the periodic re-ask: jobs the engine runs.
-        let retention = match recovery.map(|c| c.retention_period()) {
-            Some(period) => {
-                let weak = Strong::downgrade(&shared);
-                let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-                Some(
-                    Ticker::start_on(
-                        E::clone(engine),
-                        period_ms,
-                        Arc::new(move || {
-                            let Some(shared) = weak.upgrade() else {
-                                return false;
-                            };
-                            if shared.is_closing() {
-                                return false;
-                            }
-                            let now = shared.now_ms();
-                            shared.lock().reclaim_expired_sources(now, period);
-                            true
-                        }),
-                    )
-                    .map_err(HostError::of("the engine runs no periodic jobs"))?,
-                )
-            }
-            None => None,
-        };
-        let periodic = match recovery.and_then(|c| c.periodic_queries()) {
-            Some(period) => {
-                let weak = Strong::downgrade(&shared);
-                let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-                Some(
-                    Ticker::start_on(
-                        E::clone(engine),
-                        period_ms,
-                        Arc::new(move || {
-                            let Some(shared) = weak.upgrade() else {
-                                return false;
-                            };
-                            if shared.is_closing() {
-                                return false;
-                            }
-                            run_periodic_tick(&shared);
-                            true
-                        }),
-                    )
-                    .map_err(HostError::of("the engine runs no periodic jobs"))?,
-                )
-            }
-            None => None,
-        };
+        // The retention sweep and the periodic re-ask: jobs the engine runs, over one body
+        // (`start_job`). The sweep is a build's that lets go of the sources that went away
+        // (`advanced-retention`).
+        #[cfg(feature = "advanced-retention")]
+        let retention = recovery
+            .map(|c| start_job(engine, &shared, c.retention_period(), sweep_tick::<E>))
+            .transpose()?;
+        let periodic = recovery
+            .and_then(|c| c.periodic_queries())
+            .map(|period| start_job(engine, &shared, period, periodic_tick::<E>))
+            .transpose()?;
 
         // The startup get, after the live subscription, so a live sample that arrives during it
         // is held until the history is in.
@@ -896,11 +861,12 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         };
 
         // The detection token, last: a subscriber advertises itself once it can receive.
-        let detection_token = declare_detection_token(engine, base, &options, id)?;
+        let detection_token = declare_detection_token(engine, base, options, id)?;
 
         Ok(Self {
             subscriber,
             periodic,
+            #[cfg(feature = "advanced-retention")]
             retention,
             cancel: GetCancel {
                 shared: shared.clone(),
@@ -961,6 +927,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         let Self {
             subscriber,
             periodic,
+            #[cfg(feature = "advanced-retention")]
             retention,
             mut cancel,
             late_publishers,
@@ -979,7 +946,11 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         let Held { mut entity, keeps } = subscriber;
         entity.retract = false;
         retain(keeps);
-        for ticker in [periodic, retention].into_iter().flatten() {
+        if let Some(ticker) = periodic {
+            ticker.detach();
+        }
+        #[cfg(feature = "advanced-retention")]
+        if let Some(ticker) = retention {
             ticker.detach();
         }
         for held in [late_publishers, heartbeat].into_iter().flatten() {
@@ -1034,21 +1005,24 @@ unsafe fn write_shared_part<E: EngineHolder>(
     misses: MissHandlers,
 ) {
     let history = options.history;
-    let state = State::delivering_to(on_sample, misses)
-        .with_retransmission(options.recovery.is_some())
-        .with_history(
-            usize::from(history.is_some()),
-            history
-                .as_ref()
-                .and_then(|h| h.sample_depth)
-                .unwrap_or(usize::MAX),
-        );
     // SAFETY: the caller's, which is `write_in`'s; the part is whole before its bounds are set.
     unsafe {
         Shared::write_in(
             place,
             E::downgrade(engine),
-            state,
+            |cell| {
+                State::write_in(
+                    cell,
+                    on_sample,
+                    misses,
+                    options.recovery.is_some(),
+                    usize::from(history.is_some()),
+                    history
+                        .as_ref()
+                        .and_then(|h| h.sample_depth)
+                        .unwrap_or(usize::MAX),
+                )
+            },
             base_keyexpr,
             options.get_locality,
             recovery_query_timeout_ms(options.query_timeout),
@@ -1348,6 +1322,7 @@ fn on_late_publisher_detected<E: EngineHolder>(
     if kind != LivelinessSampleKind::Put {
         // A departed publisher has nothing to recover, but its retention flag is how the sweep
         // learns it is not alive any more.
+        #[cfg(feature = "advanced-retention")]
         if let Some(source) = parse_heartbeat_source(token_keyexpr) {
             if let Some((zid, eid)) = match source {
                 AdvPublisherSource::Sequenced { zid, eid } => Some((zid, Some(eid))),
@@ -1365,7 +1340,7 @@ fn on_late_publisher_detected<E: EngineHolder>(
             let issue = {
                 let mut state = shared.lock();
                 let issue = state.handle_late_publisher(zid.clone(), eid, now);
-                state.set_source_alive(&zid, Some(eid), true);
+                mark_alive(&mut state, &zid, Some(eid));
                 issue
             };
             if issue {
@@ -1376,7 +1351,7 @@ fn on_late_publisher_detected<E: EngineHolder>(
             let issue = {
                 let mut state = shared.lock();
                 let issue = state.handle_late_timestamped_publisher(zid.clone(), now);
-                state.set_source_alive(&zid, None, true);
+                mark_alive(&mut state, &zid, None);
                 issue
             };
             if issue {
@@ -1389,6 +1364,55 @@ fn on_late_publisher_detected<E: EngineHolder>(
         }
         None => {}
     }
+}
+
+/// Mark the publisher `(zid, eid)` alive, as its liveliness token says, for the sweep that spares
+/// a live source. A build without the sweep (`advanced-retention`) reads no such word.
+fn mark_alive(state: &mut State, zid: &[u8], eid: Option<u32>) {
+    #[cfg(feature = "advanced-retention")]
+    state.set_source_alive(zid, eid, true);
+    #[cfg(not(feature = "advanced-retention"))]
+    let _ = (state, zid, eid);
+}
+
+/// Start a job of the subscriber on its engine: every `period`, `run` with the subscriber and the
+/// period, until the subscriber is gone or closing. The one body of both of its jobs, so a build
+/// with the two carries one job closure and one ticker start.
+fn start_job<E: EngineHolder>(
+    engine: &E,
+    shared: &Strong<Shared<E>>,
+    period: core::time::Duration,
+    run: fn(&Strong<Shared<E>>, core::time::Duration),
+) -> Result<Ticker<E>, HostError> {
+    let weak = Strong::downgrade(shared);
+    let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
+    Ticker::start_on(
+        E::clone(engine),
+        period_ms,
+        Arc::new(move || {
+            let Some(shared) = weak.upgrade() else {
+                return false;
+            };
+            if shared.is_closing() {
+                return false;
+            }
+            run(&shared, period);
+            true
+        }),
+    )
+    .map_err(HostError::of("the engine runs no periodic jobs"))
+}
+
+/// The retention sweep's tick: the sources nobody heard from for `period` are let go of.
+#[cfg(feature = "advanced-retention")]
+fn sweep_tick<E: EngineHolder>(shared: &Strong<Shared<E>>, period: core::time::Duration) {
+    let now = shared.now_ms();
+    shared.lock().reclaim_expired_sources(now, period);
+}
+
+/// The periodic re-ask's tick, which reads no period: [`run_periodic_tick`].
+fn periodic_tick<E: EngineHolder>(shared: &Strong<Shared<E>>, _period: core::time::Duration) {
+    run_periodic_tick(shared);
 }
 
 /// One periodic recovery tick: collect each source's `_sn=last+1..` request under the state lock,

@@ -1007,6 +1007,34 @@ abis = ["core", "pico", "c"]
 implies = ["liveliness", "queryable", "timestamping", "unstable-api"]
 help = "The advanced publisher and subscriber (cache, history, miss detection)."
 
+# The advanced subscriber's sweep of the sources that went away (upstream zenoh's `gc_task`). On in
+# a build that names nothing, which has had it with `advanced`, and off in the zenoh-pico preset:
+# zenoh-pico's subscriber keeps each source until the subscriber goes and runs no such job. A
+# behaviour of the advanced subscriber, not a door, so it implies nothing: without `advanced` there
+# is no subscriber to sweep. The tokio engine's runtime runs it whatever is named.
+[[capability]]
+id = "advanced-source-retention"
+kconfig = "WZ_CAP_ADVANCED_SOURCE_RETENTION"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "The advanced subscriber's sweep of its sources: every retention period a source not heard from and whose token is gone lets go of its row. Off, a source keeps its row until the subscriber goes or a new source takes the row met longest ago, as zenoh-pico's subscriber keeps its sources."
+
+# The node clock an advanced publisher stamps its samples from (upstream zenoh's HLC, under the
+# `clock-quality-stamping` policy). On in a build that names nothing, which has had it with
+# `advanced`, and off in the zenoh-pico preset: zenoh-pico's publisher stamps each sample with
+# `z_timestamp_new`, the system clock, and has no clock to hold back. A behaviour, not a door, so
+# it implies nothing. The tokio engine's runtime holds the clock whatever is named.
+[[capability]]
+id = "advanced-node-clock"
+kconfig = "WZ_CAP_ADVANCED_NODE_CLOCK"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "The node clock an advanced publisher stamps from: a hybrid logical clock under the clock-quality-stamping policy, whose trusted-only refuses a sample while the clock is not trusted. Off, a sample takes the system clock's time, ordered by the session's last time given, as zenoh-pico's publisher stamps with z_timestamp_new, and trusted-only refuses none."
+
 # A clock the application registers (the observation plane's time, a clock with a quality): a
 # hardware clock or a time
 # master the device has, which the node reads in place of the system clock. wz's own door, with no
@@ -1779,6 +1807,23 @@ implies = []
 help = "ZEXT_CONFIG_LIMITS_KEY: the numbered config key by which a program states its session's limits and the values it holds apart from any session, judged at the insert and read by the open (wz-own). Off, the key is held unread as zenoh-pico's config holds a key it does not know, and every session opens each table at the preset's bound, what a statement could have raised it to."
 
 [[capability]]
+id = "interest-answer"
+kconfig = "WZ_CAP_INTEREST_ANSWER"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's unicast session
+# answers no Interest a peer sends (`vendor/zenoh-pico/src/session/interest.c` @
+# `// Nothing to do on unicast`) and tells a new peer its declarations once, ended by the
+# DeclareFinal of interest 0, which a peer without this capability still sends. It changes what a
+# peer sees on the wire and is off in that preset all the same, the preset's contract being
+# zenoh-pico's. A behaviour of the session core (its feature of the same name, through
+# wz-capi-coop's), not a door: a build that joins a group answers on every face, as zenoh-pico
+# answers on its multicast transport, and the tokio engine's runtime answers whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["peer"]
+help = "The answering end of a peer's Interest on a unicast face: the session's declarations the Interest reaches and its DeclareFinal, and for a future Interest the ones declared later, kept current (wz-own). Off, a peer's Interest on a unicast face is not answered, as zenoh-pico's unicast session does, and a new peer is told the session's declarations once, ended by the DeclareFinal of interest 0."
+
+[[capability]]
 id = "transport_compression"
 kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
 os_needs = []
@@ -1831,6 +1876,20 @@ upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = []
 help = "The replies a queryable's callbacks make wait in the face's open frame and leave with the query's Final in one send (wz-own). Off, each reply leaves as its callback makes it and the Final after the callbacks, possibly in a later frame, as zenoh-pico's are sent."
+
+[[capability]]
+id = "udp-listen"
+kconfig = "WZ_CAP_UDP_LISTEN"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico's POSIX link
+# listens on no unicast `udp/` endpoint (`vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @
+# `static z_result_t _z_udp_posix_listen(`), so its peer accepts over `tcp/` alone. A behaviour of
+# the cooperative engine's links (wz-runtime-coop's feature of the same name, through
+# wz-capi-coop's), not a door; the tokio engine's runtime listens on `udp/` whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = ["peer"]
+help = "A unicast udp/ endpoint a peer listens on: one socket whose peers are told apart by the address each datagram came from, each a face of its own (wz-own). Off, a udp/ endpoint to listen on is refused by name as a scheme the links do not carry, as zenoh-pico's POSIX link has no such listener, and a peer accepts over tcp/ alone."
 
 # ## The upstream switches (a complete map: every upstream switch is classified)
 #

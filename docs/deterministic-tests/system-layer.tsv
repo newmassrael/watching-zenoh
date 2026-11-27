@@ -1,0 +1,51 @@
+# The system layer of the test modules the deterministic test layer gate covers
+# (scripts/lib/deterministic_test_layer_gate.py; docs/deterministic-tests.md sections 4 to 6).
+# One row per module that reaches a source a unit test may not: kind pending is owed a move to the
+# simulated world (tests::sim) and its row goes when it moves; kind system has the host as its
+# subject. The gate holds each row to the sources its module reaches, both ways. A row is added
+# only for a module whose subject is the host.
+path	kind	sources	reason
+crates/wz-capi-coop/src/scout/tests.rs	system	clock,socket,thread	the scouting window over sockets the test owns on loopback: the host datagram sockets are its subject
+crates/wz-capi-coop/src/tests.rs	system	clock,socket,thread,random	the test root: the router stand-in on the host and the helpers that open a session on the host links; it stays while a module of this table needs them
+crates/wz-capi-coop/src/tests/admission_heap.rs	pending	clock,socket,thread,random	takes open_with of the test root
+crates/wz-capi-coop/src/tests/advanced.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; takes open, until, Engine of the test root and ask of tests::get
+crates/wz-capi-coop/src/tests/app_listen.rs	pending	clock,random	names the host clock; draws the host entropy
+crates/wz-capi-coop/src/tests/arena.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; opens its session on the host links; binds or dials host sockets itself; waits on or reads the wall clock; draws the host entropy; takes host_links, config, open of the test root and open_under of tests::entity_tables
+crates/wz-capi-coop/src/tests/closure_drops.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; takes open_under of tests::entity_tables and open, Router, Engine of the test root
+crates/wz-capi-coop/src/tests/congestion.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; runs threads of its own; takes open_with, until, Router of the test root
+crates/wz-capi-coop/src/tests/decl_watch.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; takes open, Router, until of the test root
+crates/wz-capi-coop/src/tests/dial_in_flight.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; opens its session on the host links; waits on or reads the wall clock; draws the host entropy; takes host_links, PosixLinks, config of the test root
+crates/wz-capi-coop/src/tests/direct_receive.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; takes config, open, open_with of the test root and settle, ask of tests::get
+crates/wz-capi-coop/src/tests/direct_runtime.rs	pending	clock	names the host clock
+crates/wz-capi-coop/src/tests/entity_tables.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; takes config, open_with, until of the test root
+crates/wz-capi-coop/src/tests/face_order.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; takes open, Router of the test root
+crates/wz-capi-coop/src/tests/face_table.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; takes open, until, Engine of the test root
+crates/wz-capi-coop/src/tests/faces.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; takes config, open, open_with of the test root
+crates/wz-capi-coop/src/tests/get.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; takes open, until, Engine of the test root and open_under of tests::entity_tables
+crates/wz-capi-coop/src/tests/group.rs	pending	clock,thread,random	waits on or reads the wall clock; runs threads of its own; draws the host entropy
+crates/wz-capi-coop/src/tests/group_congested.rs	pending	clock,thread,random	waits on or reads the wall clock; runs threads of its own; draws the host entropy
+crates/wz-capi-coop/src/tests/group_stack.rs	pending	clock,random	names the host clock; draws the host entropy
+crates/wz-capi-coop/src/tests/held_keys.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; takes open_under of tests::entity_tables and open, Engine, Router of the test root
+crates/wz-capi-coop/src/tests/host_group.rs	system	clock,socket,thread,random	sessions that join a multicast group over the host sockets: the host group membership is its subject
+crates/wz-capi-coop/src/tests/in_place.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; takes open_under of tests::entity_tables and open, until, Engine of the test root and ask, settle of tests::get
+crates/wz-capi-coop/src/tests/link_sets.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; takes open, until, Router of the test root
+crates/wz-capi-coop/src/tests/listen.rs	pending	clock,socket,thread,random	binds or dials host sockets itself; waits on or reads the wall clock; runs threads of its own; takes open_with, Engine of the test root
+crates/wz-capi-coop/src/tests/liveliness.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; takes config, open, open_with of the test root
+crates/wz-capi-coop/src/tests/local.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; runs threads of its own; takes open, until, Engine of the test root
+crates/wz-capi-coop/src/tests/local_query.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; runs threads of its own; takes ask, settle, Leg of tests::get and open, until, Engine of the test root and open_under of tests::entity_tables
+crates/wz-capi-coop/src/tests/one_face.rs	pending	clock,socket,thread,random	binds or dials host sockets itself; waits on or reads the wall clock; takes client, eventually, listening of tests::listen
+crates/wz-capi-coop/src/tests/one_thread.rs	pending	clock,socket,thread,random	opens its session on the host links; binds or dials host sockets itself; waits on or reads the wall clock; runs threads of its own; draws the host entropy
+crates/wz-capi-coop/src/tests/plain_put.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; takes config, open, open_with of the test root
+crates/wz-capi-coop/src/tests/queryable.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; takes open, until, Engine of the test root and open_under of tests::entity_tables
+crates/wz-capi-coop/src/tests/redial_heap.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; opens its session on the host links; waits on or reads the wall clock; draws the host entropy; takes host_links, PosixLinks, config of the test root
+crates/wz-capi-coop/src/tests/redial_wait.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; opens its session on the host links; waits on or reads the wall clock; draws the host entropy; takes host_links, PosixLinks, config of the test root
+crates/wz-capi-coop/src/tests/region.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; opens its session on the host links; names the host clock; draws the host entropy; takes host_links, Engine, Router of the test root
+crates/wz-capi-coop/src/tests/replay.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; opens its session on the host links; waits on or reads the wall clock; draws the host entropy; takes config, open_with, router_port of the test root
+crates/wz-capi-coop/src/tests/shared_key_ids.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; opens its session on the host links; names the host clock; draws the host entropy; takes host_links, Engine, Router of the test root and eventually, Stepped of tests::listen
+crates/wz-capi-coop/src/tests/snapshot.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; takes open, until, Engine of the test root
+crates/wz-capi-coop/src/tests/step_host.rs	system	clock,socket,thread,random	two threads of the host step one session at once: every interleaving the host scheduler may choose is its subject
+crates/wz-capi-coop/src/tests/timestamps.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; opens its session on the host links; names the host clock; draws the host entropy; takes host_links, config, until of the test root and settle of tests::get
+crates/wz-capi-coop/src/tests/tx_pool.rs	system	clock,socket,thread,random	a slow reader over the host stream sockets: the kernel stream buffers are its subject
+crates/wz-capi-coop/tests/engine_rows.rs	pending	clock,socket,random	opens its session on the host links; names the host clock; draws the host entropy
+crates/wz-capi-coop/tests/tls_provider.rs	system	clock,socket,thread	the TLS provider of the engine on a host: a server and a client over the host sockets, one on a thread of its own
+crates/wz-capi-coop/tests/tls_sessions.rs	system	clock,socket,thread	how many TLS sessions a host program holds at once, over the host sockets

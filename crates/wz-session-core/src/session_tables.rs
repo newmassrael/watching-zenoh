@@ -306,6 +306,11 @@ pub trait Presence: sealed::Presence {
     /// it is not.
     fn lent_from<T: LentTable>(lend: &mut TableLender<'_>, rows: usize) -> Self::Table<T>;
 
+    /// The table of `rows` rows that takes its memory at its first row ([`CountedTable`]), where
+    /// the kind is kept; nothing is made where it is not.
+    #[cfg(feature = "alloc")]
+    fn counted<T: CountedTable>(rows: usize) -> Self::Table<T>;
+
     /// Whether the kind is kept.
     const KEPT: bool;
 
@@ -356,6 +361,21 @@ impl<K, T, const N: usize> LentTable for SlotMap<K, T, N, Lent> {
     }
 }
 
+/// A table of the on-use policy, made with its count and no memory, which its first row takes
+/// ([`Presence::counted`]).
+#[cfg(feature = "alloc")]
+pub trait CountedTable {
+    /// The table of at most `rows` rows, none taken yet.
+    fn counted(rows: usize) -> Self;
+}
+
+#[cfg(feature = "alloc")]
+impl<K, T, const N: usize> CountedTable for SlotMap<K, T, N, crate::bounded::OnUse> {
+    fn counted(rows: usize) -> Self {
+        SlotMap::<K, T, N, crate::bounded::OnUse>::counted(rows)
+    }
+}
+
 mod sealed {
     /// The two answers to whether a kind is kept, and no other: what lets tables of the region
     /// policy, and their rows, state that they are empty at all zero bytes whichever a build
@@ -391,6 +411,11 @@ impl Presence for Present {
 
     fn lent_from<T: LentTable>(lend: &mut TableLender<'_>, rows: usize) -> T {
         T::lent_from(lend, rows)
+    }
+
+    #[cfg(feature = "alloc")]
+    fn counted<T: CountedTable>(rows: usize) -> T {
+        T::counted(rows)
     }
 
     const KEPT: bool = true;
@@ -464,6 +489,11 @@ impl Presence for Absent {
     }
 
     fn lent_from<T: LentTable>(_lend: &mut TableLender<'_>, _rows: usize) -> AbsentTable<T> {
+        AbsentTable::new()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn counted<T: CountedTable>(_rows: usize) -> AbsentTable<T> {
         AbsentTable::new()
     }
 
@@ -3960,6 +3990,50 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl<F: RowCallbacks> SessionTables<F, crate::bounded::OnUse> {
+    /// The tables of a session, each of at most the rows `rows` gives it, under the build's bound,
+    /// none of them holding memory until its first row, their keys counted against the session's
+    /// key budget (`keys`): what an open that takes its memory on use makes, from the limits it
+    /// resolved. Nothing is taken, so nothing is refused here: a declaration past a table's count,
+    /// or one the allocator or the budget has no room for, is refused when it is made.
+    pub fn counted(keys: crate::on_use::BudgetKeys, rows: &TableRows) -> Self {
+        Self {
+            keys,
+            next_entity: EntityIds::default(),
+            next_expr: 1,
+            next_request: 0,
+            subscriber_epoch: 0,
+            // The memory a table of fixed size keeps (`memo_slots`): the build's
+            // `MATCH_MEMO_FIXED_SLOTS`, none unless the image asks for them.
+            memo: MatchMemo::new(0),
+            key_gate: KeyGate::of_build(),
+            keyexprs: SlotMap::counted(rows.keyexprs),
+            subscribers: SlotMap::counted(rows.subscribers),
+            queryables: <F::QueryablePresence as Presence>::counted::<
+                Queryables<F, crate::bounded::OnUse>,
+            >(rows.queryables),
+            tokens: <F::LivelinessPresence as Presence>::counted::<Tokens<crate::bounded::OnUse>>(
+                rows.tokens,
+            ),
+            liveliness_subscribers: <F::LivelinessPresence as Presence>::counted::<
+                LivelinessSubscribers<F, crate::bounded::OnUse>,
+            >(rows.liveliness_subscribers),
+            write_filters: <F::FilterPresence as Presence>::counted::<
+                WriteFilters<crate::bounded::OnUse>,
+            >(rows.write_filters()),
+            plane_bounds: PlaneBounds::of(rows),
+            matching: <F::FilterPresence as Presence>::counted::<
+                MatchingListeners<F, crate::bounded::OnUse>,
+            >(rows.matching_listeners),
+            pending_gets: <F::GetPresence as Presence>::counted::<
+                PendingGets<F, crate::bounded::OnUse>,
+            >(rows.pending_gets),
+            held: crate::reply_hold::HeldReplies::counted(rows.held_replies),
+        }
+    }
+}
+
 // SAFETY: the key arena handle is `LentKeys`, whose zero is no arena; the ids are counts of ids
 // handed out, a zero expression id is minted as 1, the request id and the epoch are counts; the
 // match memory and the held replies are `ZeroEmpty` of this policy; every table is a `SlotMap` of
@@ -4081,9 +4155,10 @@ const fn kept_bytes<K: Presence>(bytes: Option<usize>) -> Option<usize> {
 /// Whether a row whose callback is `Cb` may lie in a table of policy `P`: a callback whose calls
 /// read its row where it lies ([`RowCallback::READS_ROW_IN_PLACE`]) is read on another thread while
 /// the tables are held, so its row lies only where no `&mut` of the tables, nor of what holds them,
-/// reaches it: in the arena, behind the pointer a table of the lent policy keeps (P3, P11).
+/// reaches it: behind the pointer a table keeps where its policy keeps every row apart from the
+/// table and never moves one ([`Storage::ROWS_STAY_APART`]), whenever it took the memory (P3, P11).
 const fn row_may_lie_in<Cb: RowCallback, P: Storage>() -> bool {
-    !Cb::READS_ROW_IN_PLACE || P::LENT_AT_OPEN
+    !Cb::READS_ROW_IN_PLACE || P::ROWS_STAY_APART
 }
 
 /// A row whose calls read it where it lies ([`RowCallback::READS_ROW_IN_PLACE`]) is read by them

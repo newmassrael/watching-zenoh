@@ -35,6 +35,8 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("liveliness", &["core", "pico", "c"]),
     ("liveliness-get", &["core", "pico", "c"]),
     ("advanced", &["core", "pico", "c"]),
+    ("advanced-source-retention", &["core", "pico"]),
+    ("advanced-node-clock", &["core", "pico"]),
     ("clock-source", &["core", "pico", "c"]),
     ("event-ring", &["core", "pico", "c"]),
     ("supervision", &["core", "pico", "c"]),
@@ -89,11 +91,13 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("tx-held-wait", &["core", "pico"]),
     ("tx-stream-owed", &["core", "pico"]),
     ("config-limits", &["core", "pico"]),
+    ("interest-answer", &["core", "pico"]),
     ("transport_compression", &["core", "c"]),
     ("auth_usrpwd", &["core", "c"]),
     ("interceptors", &["core", "c"]),
     ("multicast-locator-keys", &["core", "pico"]),
     ("query-replies-with-final", &["core", "pico"]),
+    ("udp-listen", &["core", "pico"]),
 ];
 
 /// Each layout switch that is not a capability (`wz_config.arm_switches`) and the ABIs whose

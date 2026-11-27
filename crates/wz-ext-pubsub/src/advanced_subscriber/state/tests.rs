@@ -11,7 +11,7 @@ use super::*;
 use std::sync::Arc;
 #[cfg(feature = "advanced-recovery")]
 use std::sync::Mutex;
-#[cfg(feature = "advanced-recovery")]
+#[cfg(feature = "advanced-retention")]
 use std::time::Duration;
 #[cfg(feature = "advanced-recovery")]
 use wz_session_core::sample::SourceInfo;
@@ -161,6 +161,93 @@ fn recovery_buffers_forward_gap_and_drains_when_filled() {
         misses.lock().unwrap().is_empty(),
         "the recovery filled the hole -> no Miss"
     );
+}
+
+/// A registry lent one listener at declaration makes no map of listeners: a miss is the one call
+/// to the lent listener, and the map is made by the first registration, whose listener hears a
+/// miss after the lent one. Turned red by a map made with the registry (`MissHandlers::lent`),
+/// which a host whose listeners are its own would then link, or by the lent listener fired after
+/// the registered ones.
+#[test]
+fn a_lent_listener_alone_makes_no_map_and_is_heard_first() {
+    type Log = std::sync::Mutex<Vec<(u8, u32)>>;
+    unsafe fn heard(context: *mut c_void, miss: Miss) {
+        // SAFETY: the context is the test's log, which outlives the registry.
+        let log = unsafe { &*context.cast::<Log>() };
+        log.lock().unwrap().push((0, miss.nb()));
+    }
+    let log = std::sync::Arc::new(Log::new(Vec::new()));
+    let context = std::sync::Arc::as_ptr(&log).cast_mut().cast::<c_void>();
+    // SAFETY: `heard` reads the log, which outlives the registry, from any thread, and nothing is
+    // let go of.
+    let mut handlers = unsafe { MissHandlers::lent(heard, context, None) };
+    assert!(!handlers.holds_a_map());
+    let source = EntityGlobalId::new(&[0x02], 7).expect("a one-byte zid");
+    handlers.fire(Miss::for_test(source, 2));
+    assert_eq!(*log.lock().unwrap(), [(0, 2)]);
+
+    let registered = std::sync::Arc::clone(&log);
+    let id = handlers.register(Box::new(move |miss: Miss| {
+        registered.lock().unwrap().push((1, miss.nb()));
+    }));
+    assert!(handlers.holds_a_map());
+    handlers.fire(Miss::for_test(source, 3));
+    assert_eq!(*log.lock().unwrap(), [(0, 2), (0, 3), (1, 3)]);
+
+    handlers.unregister(id);
+    handlers.unregister(0);
+    handlers.fire(Miss::for_test(source, 4));
+    assert_eq!(
+        log.lock().unwrap().len(),
+        3,
+        "both listeners were retracted"
+    );
+}
+
+/// A state written in its place is the one the builder makes, whatever the place held before: a
+/// live sample is held back while the history get it was told of is out, a forward gap asks for
+/// its range, and both go on in order once their gets end. The place is filled with ones first,
+/// so a field `State::write_in` left unwritten (the span samples are held back in, above all) is
+/// read as it was left. Turned red by a field written at another value than the builder's.
+#[cfg(feature = "engine-host")]
+#[test]
+fn a_state_written_in_its_place_is_the_one_the_builder_makes() {
+    let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let d = Arc::clone(&delivered);
+    let mut place = Box::<State>::new_uninit();
+    // SAFETY: the place is the box's, valid for writes of a `State`, and holds no state yet.
+    unsafe {
+        place
+            .as_mut_ptr()
+            .cast::<u8>()
+            .write_bytes(0xFF, core::mem::size_of::<State>());
+    }
+    let state = State::write_in(
+        &mut place,
+        OnSample::boxed(owned_samples(Box::new(move |s: Sample| {
+            d.lock().unwrap().push(s.payload[0])
+        }))),
+        MissHandlers::default(),
+        true,
+        1,
+        usize::MAX,
+    );
+    assert!(state.ingest(sequenced(0, 0xA0), true, NOW).is_none());
+    assert!(
+        delivered.lock().unwrap().is_empty(),
+        "held while the history get is out"
+    );
+    state.finish_history();
+    assert_eq!(*delivered.lock().unwrap(), [0xA0]);
+    let request = state
+        .ingest(sequenced(2, 0xA2), true, NOW)
+        .expect("a forward gap asks for its range");
+    assert_eq!(request.from_sn, 1);
+    let _ = state.ingest(sequenced(1, 0xA1), false, NOW);
+    state.finish_recovery(&(vec![0x02u8], 7u32));
+    assert_eq!(*delivered.lock().unwrap(), [0xA0, 0xA1, 0xA2]);
+    // SAFETY: the state was written in the place above, and is dropped once, here.
+    unsafe { place.assume_init_drop() };
 }
 
 /// R311y82 state-machine unit test: a hole the recovery GET does NOT fill
@@ -316,7 +403,7 @@ fn handle_heartbeat_requests_bounded_get_when_ahead() {
 /// `last_delivered`, and the next sample from it reads as a gap. The third
 /// arm is the anti-vacuity control — without it "reclaims a quiet source" is
 /// equally consistent with a sweep that empties the map unconditionally.
-#[cfg(feature = "advanced-recovery")]
+#[cfg(feature = "advanced-retention")]
 #[test]
 fn the_retention_sweep_reclaims_only_quiet_sources_that_no_token_calls_live() {
     let mut state = silent(true);

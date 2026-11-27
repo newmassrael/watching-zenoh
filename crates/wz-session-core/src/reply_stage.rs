@@ -275,6 +275,11 @@ pub trait FinalStaging {
     /// refuse the request ([`Self::refuse_request`]) before running anything.
     fn has_room(&self) -> bool;
 
+    /// [`Self::has_room`], the room made now where the table takes its memory at its first row,
+    /// so a `true` is a promise that the next [`Self::owe`] is taken: what a dispatch asks before
+    /// it runs anything for a request that will owe a `Final`.
+    fn make_room(&mut self) -> bool;
+
     /// Owe a `Final` for `rid`, carrying the query's `qos`.
     fn owe(&mut self, rid: crate::wire_id::RequestId, qos: QosLevel);
 
@@ -521,6 +526,26 @@ impl ReplyStage<Lent> {
         match payload.checked_add(key) {
             Some(each) => replies.checked_mul(each),
             None => None,
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl ReplyStage<crate::bounded::OnUse> {
+    /// An empty stage of at most `replies` rows and `bytes` bytes of reply text and payload, each
+    /// under the build's bound, that takes their memory at the first reply it stages; held to the
+    /// build's bounds until its creator states the session's ([`Self::limit_to`]). Nothing is
+    /// taken, so nothing is refused here: a reply past either count, or one the allocator has no
+    /// room for, is refused when it is staged.
+    pub const fn counted(replies: usize, bytes: usize) -> Self {
+        Self {
+            rows: BoundedVec::counted(replies),
+            arena: BoundedVec::counted(bytes),
+            refusals: ReplyRefusals {
+                staging_full: 0,
+                payload_too_large: 0,
+            },
+            bounds: ReplyBounds::BUILD,
         }
     }
 }
@@ -901,6 +926,16 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
             self.refusals.staging_full = self.refusals.staging_full.saturating_add(1);
             return Err(ReplyError::StagingFull);
         }
+        // A policy that takes a column's memory at its first value takes both columns' now, before
+        // either is written: an allocator that refuses one refuses the reply whole, rather than
+        // leave its bytes staged with no row. Room was counted above, so on every other policy
+        // this is never reached.
+        if matches!(P::TAKEN, crate::bounded::Taken::AtFirstUse)
+            && (!self.rows.make_room() || (need != 0 && !self.arena.make_room()))
+        {
+            self.refusals.staging_full = self.refusals.staging_full.saturating_add(1);
+            return Err(ReplyError::StagingFull);
+        }
 
         // Everything fits: write it. The order is fixed (key first) because `pop`
         // gives the arena back from where the last row's key starts.
@@ -1040,6 +1075,20 @@ impl FinalStage<Lent> {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl FinalStage<crate::bounded::OnUse> {
+    /// An empty table of at most `rows` rows, under the build's bound, that takes their memory at
+    /// the first `Final` it owes; held to the build's quota until its creator states the
+    /// session's ([`Self::limit_to`]).
+    pub const fn counted(rows: usize) -> Self {
+        Self {
+            rows: BoundedVec::counted(rows),
+            refused_requests: 0,
+            quota: crate::limits::MaxPendingFinalsHeld::build_default(),
+        }
+    }
+}
+
 impl FinalStage<Profile> {
     /// An empty table of this build's profile. `const`, so a session slot that holds
     /// one can be a `static`.
@@ -1155,6 +1204,16 @@ impl<P: Storage> core::ops::Deref for FinalStage<P> {
 impl<P: Storage> FinalStaging for FinalStage<P> {
     fn has_room(&self) -> bool {
         self.rows.free_slots() > 0 && self.quota.admits(self.rows.len().saturating_add(1))
+    }
+
+    fn make_room(&mut self) -> bool {
+        // Only a policy that takes a table's memory at its first value has a room to make; on every
+        // other the rows counted by `has_room` are there already.
+        if matches!(P::TAKEN, crate::bounded::Taken::AtFirstUse) {
+            self.has_room() && self.rows.make_room()
+        } else {
+            self.has_room()
+        }
     }
 
     fn owe(&mut self, rid: crate::wire_id::RequestId, qos: QosLevel) {
@@ -1765,6 +1824,11 @@ mod tests {
                 use crate::bounded::Heap;
                 $(#[test] fn $case() { super::$case::<Heap>(); })*
             }
+            #[cfg(feature = "alloc")]
+            mod on_first_use {
+                use crate::bounded::OnUse;
+                $(#[test] fn $case() { super::$case::<OnUse>(); })*
+            }
         };
     }
 
@@ -1831,6 +1895,104 @@ mod tests {
             [1, 2],
             "the second reply's bytes are not the first's"
         );
+    }
+
+    /// A stage of the on-use policy made with its counts takes no memory until its first reply,
+    /// then its rows and its bytes together, and refuses a reply past its count of rows though the
+    /// build's bound is larger; a drain keeps the rows for the next reply. Turned red by a stage
+    /// made with the build's bounds rather than its counts, or by one whose columns take their
+    /// memory when it is made.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_on_use_stage_takes_its_memory_at_its_first_reply_and_holds_its_counts() {
+        use crate::bounded::OnUse;
+        if caps::MAX_PENDING_REPLIES < 2 {
+            // A build of one reply cannot tell a count of one from its bound.
+            return;
+        }
+        let bytes = ReplyStage::<Lent>::area_bytes(1, 8, 8).expect("a small area");
+        let mut stage = ReplyStage::<OnUse>::counted(1, bytes);
+        assert!(
+            !stage.rows.holds_rows() && !stage.arena.holds_rows(),
+            "a stage takes nothing before its first reply"
+        );
+        assert_eq!(stage.stage_parts(put_reply(1, "a/b", b"x")), Ok(()));
+        assert!(stage.rows.holds_rows() && stage.arena.holds_rows());
+        assert_eq!(
+            stage.stage_parts(put_reply(2, "a/b", b"x")),
+            Err(ReplyError::StagingFull)
+        );
+        assert_eq!(stage.refusals().staging_full, 1);
+        let mut drained = 0;
+        stage.drain_parts(|_| drained += 1);
+        assert_eq!(drained, 1);
+        assert_eq!(
+            stage.stage_parts(put_reply(3, "a/b", b"x")),
+            Ok(()),
+            "the drain kept the rows"
+        );
+    }
+
+    /// A reply whose bytes are past a stage's count of bytes is refused as a full stage, taking
+    /// nothing, though a row is free. Turned red by a stage whose bytes are counted by the build's
+    /// bound rather than by its count.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_on_use_stage_refuses_a_reply_past_its_count_of_bytes() {
+        use crate::bounded::OnUse;
+        let mut stage = ReplyStage::<OnUse>::counted(2, 4);
+        assert_eq!(
+            stage.stage_parts(put_reply(1, "a/b/c", b"x")),
+            Err(ReplyError::StagingFull)
+        );
+        assert_eq!(stage.staged(), 0);
+        assert!(
+            !stage.rows.holds_rows() && !stage.arena.holds_rows(),
+            "a refused reply takes nothing"
+        );
+        assert_eq!(stage.stage_parts(put_reply(2, "a", b"x")), Ok(()));
+    }
+
+    /// A table of `Final`s of the on-use policy made with its count takes no memory until the first
+    /// `Final` it owes, and has no room past its count though the build's bound is larger. Turned
+    /// red by a table made with the build's bound rather than its count.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_on_use_final_stage_takes_its_rows_at_its_first_final_and_holds_its_count() {
+        use crate::bounded::OnUse;
+        if N < 2 {
+            // A build of one `Final` cannot tell a count of one from its bound.
+            return;
+        }
+        let mut finals = FinalStage::<OnUse>::counted(1);
+        assert!(!finals.rows.holds_rows());
+        assert!(finals.has_room());
+        finals.owe(1, QosLevel::DEFAULT);
+        assert!(finals.rows.holds_rows());
+        assert!(!finals.has_room(), "one row of Finals");
+        finals.owe(2, QosLevel::DEFAULT);
+        assert_eq!((finals.owed(), finals.refusals()), (1, 1));
+    }
+
+    /// Making room for a `Final` on the on-use policy takes the table's rows before anything is
+    /// owed, so the dispatch that asks it before a query runs learns then whether the `Final` can
+    /// be owed; past the count there is no room to make, and a table whose rows are lent answers as
+    /// `has_room` does. Turned red by a `make_room` that answers `has_room` without taking the
+    /// rows.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn making_room_for_a_final_takes_the_on_use_rows_before_anything_is_owed() {
+        use crate::bounded::OnUse;
+        let mut finals = FinalStage::<OnUse>::counted(1);
+        assert!(!finals.rows.holds_rows());
+        assert!(finals.make_room());
+        assert!(finals.rows.holds_rows(), "the room is made, not counted");
+        assert_eq!(finals.owed(), 0, "nothing is owed by making room");
+        finals.owe(1, QosLevel::DEFAULT);
+        assert!(!finals.make_room(), "no room past the count");
+        assert_eq!(finals.refusals(), 0, "making room refuses nothing");
+        let mut fixed: FinalStage<Static> = FinalStage::default();
+        assert_eq!(fixed.make_room(), fixed.has_room());
     }
 
     /// The default `FinalStage` is the build's profile and can sit in a `static`.

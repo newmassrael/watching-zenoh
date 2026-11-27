@@ -68,9 +68,10 @@ impl PicoPlane {
         }
     }
 
-    /// What the plane names a failed declaration.
-    fn refusal(what: &str, code: ZResult) -> AdvancedPublisherError {
-        AdvancedPublisherError::Plane(format!("{what}: pico result {code}"))
+    /// What the plane names a failed declaration: the entity, and the code the door that declares
+    /// it gave.
+    fn refusal(entity: &'static str, code: ZResult) -> AdvancedPublisherError {
+        AdvancedPublisherError::Plane { entity, code }
     }
 }
 
@@ -289,6 +290,19 @@ mod timer_tests {
 
     use super::*;
 
+    /// A refused declaration names its entity and the code its door gave, with no text made for
+    /// it. Turned red by a refusal that loses the door's code.
+    #[test]
+    fn a_refusal_names_the_entity_and_the_doors_code() {
+        assert!(matches!(
+            PicoPlane::refusal("cache queryable", crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY),
+            AdvancedPublisherError::Plane {
+                entity: "cache queryable",
+                code: crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
+            }
+        ));
+    }
+
     /// The heartbeat's job holds the session's engine as the session does, not as the port's
     /// object of periodic jobs, so no table of the engine's jobs is made for it.
     #[test]
@@ -301,6 +315,40 @@ mod timer_tests {
             TypeId::of::<<PicoPlane as AdvancedPublisherPlane>::Timer>(),
             TypeId::of::<Option<Ticker>>()
         );
+    }
+}
+
+/// A library without the node clock (`advanced-node-clock`, off in the zenoh-pico preset) holds
+/// none for its sessions: an advanced publisher proposes the system clock's time, which the
+/// session's times then order, as zenoh-pico's publisher stamps with `z_timestamp_new`, and a
+/// `trusted-only` policy has no clock to hold back. The tokio engine holds the clock whatever is
+/// named, and a registrable clock brings its own, so the case is the cooperative engine's alone.
+#[cfg(all(
+    test,
+    not(feature = "advanced-node-clock"),
+    not(feature = "clock-source"),
+    not(feature = "engine-tokio")
+))]
+mod no_node_clock_tests {
+    use wz_node_time::node_clock::{DataStamp, NodeHlc, TimestampingEnabled};
+    use wz_session_core::policy::SessionPolicy;
+    use wz_session_core::WhatAmI;
+
+    /// The session's clock, as its open builds it, is no clock: it takes no memory, stamps
+    /// nothing, and tells the publisher to fall back to the system clock. Turned red by the node
+    /// clock left in `advanced` (the manifest's `wz-node-time/time-hlc`).
+    #[test]
+    fn a_session_without_the_node_clock_stamps_from_the_system_clock() {
+        let hlc = NodeHlc::for_node_by(
+            &[0x11; 16],
+            WhatAmI::Peer,
+            TimestampingEnabled::all(true),
+            &SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
+        );
+        assert_eq!(core::mem::size_of::<NodeHlc>(), 0);
+        assert!(!hlc.is_stamping());
+        assert_eq!(hlc.data_stamp(), DataStamp::NoClock);
     }
 }
 

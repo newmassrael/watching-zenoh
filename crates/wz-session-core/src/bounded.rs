@@ -17,9 +17,10 @@
 //!
 //! The backing is a type parameter, a [`Storage`](crate::bounded::Storage) policy, not a feature
 //! that selects code, so heap or no heap is the instantiation and the algorithm exists once.
-//! There are four policies, because "an allocator is linked", "the declared capacities are
-//! hard", "the capacities are known when the session opens" and "the build lays the session out"
-//! are different facts about a build:
+//! There are five policies, because "an allocator is linked", "the declared capacities are
+//! hard", "the capacities are known when the session opens", "the build lays the session out" and
+//! "a table takes its memory at its first value" are different facts about a build; when a table
+//! takes its memory is stated by each policy ([`Taken`](crate::bounded::Taken)):
 //!
 //! - [`Heap`](crate::bounded::Heap) (needs `alloc`) -- backed by `alloc::vec::Vec<T>` and
 //!   `alloc::string::String`. [`push`](crate::bounded::BoundedVec::push) never fails; the
@@ -40,6 +41,11 @@
 //! - [`Region`](crate::bounded::Region) -- [`Lent`](crate::bounded::Lent)'s rows, placed where a
 //!   struct the build lays out holds them ([`place_seqs`](crate::bounded::place_seqs)), every
 //!   table and row of it empty as the allocator's zeroed bytes ([`ZeroEmpty`](crate::bounded::ZeroEmpty)).
+//! - [`OnUse`](crate::bounded::OnUse) (needs `alloc`) -- [`Region`](crate::bounded::Region)'s shape,
+//!   each table's rows taken from the allocator at its first value, all of its count at once, and
+//!   never moved after ([`FirstUse`](crate::on_use::FirstUse)); a key is an allocation of its own
+//!   counted against the session's key budget ([`HeapKey`](crate::on_use::HeapKey)). A table never
+//!   used takes nothing.
 //!
 //! A container names its policy as its last parameter and defaults it to
 //! [`Profile`](crate::bounded::Profile), the policy this build's features choose (`alloc` on and
@@ -151,8 +157,19 @@ pub trait Storage: 'static {
     const ENFORCES_CAPACITY: bool;
 
     /// Whether a table of this policy has rows only where its maker lent it some from an
-    /// arena (`true`), so a sequence a table makes for itself by `Default` has none.
+    /// arena (`true`), so a sequence a table makes for itself by `Default` has none. Where a row
+    /// lies is [`Self::ROWS_STAY_APART`]'s question, and when its memory is taken [`Self::TAKEN`]'s.
     const LENT_AT_OPEN: bool;
+
+    /// Whether every table of this policy keeps its rows apart from itself, behind a pointer, where
+    /// none moves while it stands: what a reader of a row where it lies, with the tables let go (a
+    /// callback's call on another thread), needs of the policy, since no `&mut` of a table reaches
+    /// such a row. The lent, the region and the on-use policies keep them so; the static policy
+    /// keeps its rows inline in the table, and the growable one's sequences move theirs as they grow.
+    const ROWS_STAY_APART: bool;
+
+    /// When a table of this policy takes the memory its rows lie in ([`Taken`]).
+    const TAKEN: Taken;
 
     /// The policy of a working buffer an algorithm over a table of this policy keeps while it
     /// runs (a key's chunks while it is canonized): this policy where it can make one for itself,
@@ -239,6 +256,23 @@ pub trait Storage: 'static {
     /// memory after it.
     #[cfg(feature = "storage-profile")]
     type Compose: crate::wireexpr_resolve::ComposeRoom;
+}
+
+/// When a table of a [`Storage`] policy takes the memory its rows lie in ([`Storage::TAKEN`]): a
+/// fact of its own, apart from whether the build links an allocator ([`Profile`]) and from where
+/// the rows lie ([`Storage::ROWS_STAY_APART`]). An engine states the moment its session takes
+/// its memory at, and the policy it lays its tables out by answers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Taken {
+    /// When the image is built: the rows lie in the table, at its build count.
+    AtBuild,
+    /// When the session opens, from the limits it resolved, and nothing after
+    /// (`docs/upstream-parity.md`, D12).
+    AtOpen,
+    /// At a table's first value, all of its count's rows at once, and nothing after for that table.
+    AtFirstUse,
+    /// As a table grows.
+    AsItGrows,
 }
 
 /// A policy's [`Storage::HeapForm`]: the unit on the growable policy, and a type of no value on a
@@ -522,6 +556,14 @@ pub trait SeqBacking<T>: Sized + IntoIterator<Item = T> {
     /// How many more pushes are guaranteed to succeed.
     fn free_slots(&self) -> usize;
 
+    /// Whether the next push is taken, its room made now where the sequence takes its memory at
+    /// its first value ([`FirstUse`](crate::on_use::FirstUse)): what a caller that grows two
+    /// sequences as one asks of each before it pushes to either, so a refusal of the second leaves
+    /// the first as it was. A sequence whose rows are there already answers [`Self::free_slots`].
+    fn make_room(&mut self) -> bool {
+        self.free_slots() != 0
+    }
+
     /// Append `value`, or hand it back when the policy's capacity is full.
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>>;
 
@@ -668,6 +710,8 @@ pub struct Heap;
 impl Storage for Heap {
     const ENFORCES_CAPACITY: bool = false;
     const LENT_AT_OPEN: bool = false;
+    const ROWS_STAY_APART: bool = false;
+    const TAKEN: Taken = Taken::AsItGrows;
     type Scratch = Heap;
     type Seq<T, const N: usize> = Vec<T>;
     type Rows<T, const N: usize> = crate::slot_map::Chunked<T>;
@@ -694,6 +738,8 @@ pub struct Static;
 impl Storage for Static {
     const ENFORCES_CAPACITY: bool = true;
     const LENT_AT_OPEN: bool = false;
+    const ROWS_STAY_APART: bool = false;
+    const TAKEN: Taken = Taken::AtBuild;
     type Scratch = Static;
     type Seq<T, const N: usize> = heapless::Vec<T, N>;
     type Rows<T, const N: usize> = BoundedVec<T, N, Static>;
@@ -733,6 +779,8 @@ pub struct Lent;
 impl Storage for Lent {
     const ENFORCES_CAPACITY: bool = true;
     const LENT_AT_OPEN: bool = true;
+    const ROWS_STAY_APART: bool = true;
+    const TAKEN: Taken = Taken::AtOpen;
     type Scratch = Static;
     type Seq<T, const N: usize> = LentSeq<T>;
     type Rows<T, const N: usize> = BoundedVec<T, N, Lent>;
@@ -774,6 +822,8 @@ pub struct Region;
 impl Storage for Region {
     const ENFORCES_CAPACITY: bool = true;
     const LENT_AT_OPEN: bool = true;
+    const ROWS_STAY_APART: bool = true;
+    const TAKEN: Taken = Taken::AtOpen;
     type Scratch = Static;
     type Seq<T, const N: usize> = LentSeq<T>;
     type Rows<T, const N: usize> = BoundedVec<T, N, Region>;
@@ -781,6 +831,43 @@ impl Storage for Region {
     type Key = crate::key_arena::KeyRef;
     type KeyLen = crate::caps::KeyLen;
     type Keys = crate::key_arena::LentKeys;
+    type Offset = u32;
+    type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
+    type Pooled<T, const N: usize> = BoundedVec<T, N, Static>;
+    type Epoch = ();
+    type HeapForm = core::convert::Infallible;
+    #[cfg(feature = "storage-profile")]
+    type Compose = crate::wireexpr_resolve::ComposeInline;
+}
+
+/// The policy of storage taken on use: [`Region`]'s shape, its memory taken from the allocator by
+/// each table at its first value rather than reserved when the session opens. A table is made with
+/// its count and no memory ([`BoundedVec::counted`]); its first value takes all its count's rows in
+/// one allocation ([`FirstUse`](crate::on_use::FirstUse)), which never grows nor moves, so a row
+/// stays where it was put as on the lent policy, and a value past the count, or one the allocator
+/// refuses, is handed back as one past [`Static`]'s `N` is. A row keeps its key as an allocation of
+/// its own ([`HeapKey`](crate::on_use::HeapKey)), counted against the session's key budget
+/// ([`KeyBudget`](crate::on_use::KeyBudget)), so a key past the budget is refused as one past the
+/// key arena is. A table never used takes nothing.
+///
+/// A table a peer writes keeps its rows inline at its build capacity, and a key composed while a
+/// peer's message is delivered is composed in a row inline in the table, as on [`Region`].
+#[cfg(feature = "alloc")]
+pub struct OnUse;
+
+#[cfg(feature = "alloc")]
+impl Storage for OnUse {
+    const ENFORCES_CAPACITY: bool = true;
+    const LENT_AT_OPEN: bool = false;
+    const ROWS_STAY_APART: bool = true;
+    const TAKEN: Taken = Taken::AtFirstUse;
+    type Scratch = Static;
+    type Seq<T, const N: usize> = crate::on_use::FirstUse<T, N>;
+    type Rows<T, const N: usize> = BoundedVec<T, N, OnUse>;
+    type Text<const N: usize> = heapless::String<N>;
+    type Key = crate::on_use::HeapKey;
+    type KeyLen = crate::caps::KeyLen;
+    type Keys = crate::on_use::BudgetKeys;
     type Offset = u32;
     type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
     type Pooled<T, const N: usize> = BoundedVec<T, N, Static>;
@@ -1177,6 +1264,23 @@ impl<T, const N: usize> BoundedVec<T, N, Static> {
 }
 
 #[cfg(feature = "alloc")]
+impl<T, const N: usize> BoundedVec<T, N, OnUse> {
+    /// A table of at most `rows` values, held to the build's `N`, that takes no memory until its
+    /// first value and then all of its rows at once: what a session's open makes each of its tables
+    /// with, from the limits it resolved. `Default` makes one of `N`.
+    pub const fn counted(rows: usize) -> Self {
+        Self {
+            inner: crate::on_use::FirstUse::counted(rows),
+        }
+    }
+
+    /// Whether the table took its rows.
+    pub fn holds_rows(&self) -> bool {
+        self.inner.holds_rows()
+    }
+}
+
+#[cfg(feature = "alloc")]
 impl<T, const N: usize> BoundedVec<T, N, Heap> {
     /// An empty table of the heap policy. `const`, as [`Self::new_static`] is.
     pub const fn new_heap() -> Self {
@@ -1217,6 +1321,12 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
     /// staging half of it.
     pub fn free_slots(&self) -> usize {
         self.inner.free_slots()
+    }
+
+    /// Whether the next push is taken, its room made now where the policy takes a table's memory at
+    /// its first value ([`SeqBacking::make_room`]).
+    pub fn make_room(&mut self) -> bool {
+        self.inner.make_room()
     }
 
     /// The policy's sequence as a lent table, where it is one ([`SeqBacking::as_lent`]).
@@ -1538,7 +1648,12 @@ impl<T> LentSeq<T> {
 /// # Safety
 /// The `len` rows from `first` each hold a value `drop_one` drops, which nothing reads after.
 #[inline(never)]
-unsafe fn drop_rows(first: *mut u8, len: usize, stride: usize, drop_one: unsafe fn(*mut u8)) {
+pub(crate) unsafe fn drop_rows(
+    first: *mut u8,
+    len: usize,
+    stride: usize,
+    drop_one: unsafe fn(*mut u8),
+) {
     let mut row = first;
     for _ in 0..len {
         // SAFETY: the caller's contract: `row` is one of the `len` rows, each a value to drop.
@@ -1551,7 +1666,7 @@ unsafe fn drop_rows(first: *mut u8, len: usize, stride: usize, drop_one: unsafe 
 ///
 /// # Safety
 /// `row` holds a value of `T`, aligned for it, which nothing reads after.
-unsafe fn drop_row<T>(row: *mut u8) {
+pub(crate) unsafe fn drop_row<T>(row: *mut u8) {
     // SAFETY: the caller's contract.
     unsafe { core::ptr::drop_in_place(row.cast::<T>()) }
 }
@@ -2800,6 +2915,8 @@ mod tests {
             TypeId::of::<<Static as Storage>::HeapForm>(),
             TypeId::of::<<Lent as Storage>::HeapForm>(),
             TypeId::of::<<Region as Storage>::HeapForm>(),
+            #[cfg(feature = "alloc")]
+            TypeId::of::<<OnUse as Storage>::HeapForm>(),
         ] {
             assert_eq!(bounded, TypeId::of::<Infallible>());
         }
@@ -2808,6 +2925,69 @@ mod tests {
             TypeId::of::<<Heap as Storage>::HeapForm>(),
             TypeId::of::<()>()
         );
+    }
+
+    /// Each policy states when its tables take their memory and whether their rows lie apart from
+    /// them: the lent and the region policies at the session's open, their rows apart; the static
+    /// one when the image is built, its rows inline; the growable one as it grows, its sequences
+    /// moving their rows. Turned red by a policy that answers another's moment, which an engine's
+    /// assertion of its own moment reads, or that claims rows apart it keeps inline or moves, which
+    /// `row_may_lie_in` of the session's tables reads.
+    #[test]
+    fn each_policy_states_when_its_tables_take_their_memory() {
+        assert_eq!(<Static as Storage>::TAKEN, Taken::AtBuild);
+        assert_eq!(<Lent as Storage>::TAKEN, Taken::AtOpen);
+        assert_eq!(<Region as Storage>::TAKEN, Taken::AtOpen);
+        assert_eq!(
+            [
+                <Static as Storage>::ROWS_STAY_APART,
+                <Lent as Storage>::ROWS_STAY_APART,
+                <Region as Storage>::ROWS_STAY_APART,
+            ],
+            [false, true, true]
+        );
+        #[cfg(feature = "alloc")]
+        {
+            assert_eq!(<Heap as Storage>::TAKEN, Taken::AsItGrows);
+            assert_eq!(
+                [
+                    <Heap as Storage>::ROWS_STAY_APART,
+                    <Heap as Storage>::LENT_AT_OPEN,
+                ],
+                [false, false]
+            );
+            assert_eq!(<OnUse as Storage>::TAKEN, Taken::AtFirstUse);
+            assert_eq!(
+                [
+                    <OnUse as Storage>::ROWS_STAY_APART,
+                    <OnUse as Storage>::LENT_AT_OPEN,
+                    <OnUse as Storage>::ENFORCES_CAPACITY,
+                ],
+                [true, false, true]
+            );
+        }
+    }
+
+    /// A table of the on-use policy takes no memory until its first value, then holds its count and
+    /// not the build's `N`, its rows never moving; one made by `Default` holds `N`. Turned red by a
+    /// table that takes its rows when it is made, or that a count does not bound.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_on_use_table_takes_its_rows_at_its_first_value_and_holds_its_count() {
+        let mut table: BoundedVec<u32, 8, OnUse> = BoundedVec::counted(2);
+        assert!(!table.holds_rows());
+        assert_eq!(table.free_slots(), 2);
+        assert!(table.is_empty());
+        assert!(table.push(1).is_ok());
+        assert!(table.holds_rows());
+        let first: *const u32 = &table[0];
+        assert!(table.push(2).is_ok());
+        assert!(table.push(3).is_err(), "past the count, under N");
+        assert!(core::ptr::eq(&table[0], first));
+        assert_eq!(table.capacity(), 8, "the declared ceiling does not move");
+        let whole: BoundedVec<u32, 8, OnUse> = BoundedVec::default();
+        assert_eq!(whole.free_slots(), 8);
+        assert!(!whole.holds_rows());
     }
 
     #[test]
@@ -3144,6 +3324,13 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "alloc")]
+    impl Fresh for OnUse {
+        fn table<T, const N: usize>() -> BoundedVec<T, N, Self> {
+            BoundedVec::default()
+        }
+    }
+
     impl Fresh for Lent {
         fn table<T, const N: usize>() -> BoundedVec<T, N, Self> {
             let bytes = Arena::table_bytes::<T>(N).expect("a test table fits the address space");
@@ -3464,6 +3651,11 @@ mod tests {
             mod on_heap {
                 use super::*;
                 $(#[test] fn $case() { super::$case::<Heap>(); })*
+            }
+            #[cfg(feature = "alloc")]
+            mod on_first_use {
+                use super::*;
+                $(#[test] fn $case() { super::$case::<OnUse>(); })*
             }
         };
     }

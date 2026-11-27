@@ -89,6 +89,11 @@ EXEMPT: dict[tuple[str, str], Exemption] = {
         "the high-water marks of the runtime's and the session core's tables, each turned on by a "
         "leg of its own crate; the shell lists the pools with or without it",
     ),
+    ("wz-runtime-coop", "interest-answer"): Exemption(
+        "forward",
+        "the answering end of a peer's Interest, the session core's feature of the same name, which "
+        "the session core's default turns on; the facade names it beside its accepting role",
+    ),
     ("wz-session-mcu", "listen"): Exemption(
         "lane",
         "a node that takes the sessions its clients open is a process: Layer Z packages the "

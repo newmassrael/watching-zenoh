@@ -51,16 +51,25 @@ impl<K: PartialEq + Clone, V> Sources<K, V> {
             .position(|row| row.as_ref().is_some_and(|row| row.key == *key))
     }
 
+    /// The slot of `key`'s row, out of line: the callers off a sample's path (a heartbeat, a late
+    /// publisher, a token's word, a get's end) share this one body of the lookup, which a sample's
+    /// own path ([`Self::entry`]) keeps in line.
+    #[cfg(feature = "advanced-recovery")]
+    #[inline(never)]
+    fn find(&self, key: &K) -> Option<usize> {
+        self.slot_of(key)
+    }
+
     /// Whether `key` has a row.
     #[cfg(feature = "advanced-recovery")]
     pub(super) fn contains_key(&self, key: &K) -> bool {
-        self.slot_of(key).is_some()
+        self.find(key).is_some()
     }
 
     /// The row of `key` and its slot, if it has one, not counted as met.
     #[cfg(feature = "advanced-recovery")]
     pub(super) fn get_mut(&mut self, key: &K) -> Option<(usize, &mut V)> {
-        let slot = self.slot_of(key)?;
+        let slot = self.find(key)?;
         let row = self.rows.get_mut(slot)?.as_mut()?;
         Some((slot, &mut row.value))
     }
@@ -79,18 +88,7 @@ impl<K: PartialEq + Clone, V> Sources<K, V> {
         let slot = match self.slot_of(key) {
             Some(slot) => slot,
             None => {
-                let slot = match self.used_rows().iter().position(Option::is_none) {
-                    Some(free) => free,
-                    None if self.used < self.rows.len() => self.used,
-                    None => self
-                        .used_rows()
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(slot, row)| row.as_ref().map(|row| (slot, row)))
-                        .filter(|(slot, row)| may_go(*slot, &row.value))
-                        .min_by_key(|(_, row)| row.met)
-                        .map(|(slot, _)| slot)?,
-                };
+                let slot = self.vacant_slot(&mut may_go)?;
                 *self.rows.get_mut(slot)? = Some(Row {
                     key: key.clone(),
                     value: make(),
@@ -103,6 +101,26 @@ impl<K: PartialEq + Clone, V> Sources<K, V> {
         let row = self.rows.get_mut(slot)?.as_mut()?;
         row.met = met;
         Some((slot, &mut row.value))
+    }
+
+    /// The slot a source met for the first time takes: a row let go, a row never held, or else the
+    /// row met longest ago of those `may_go(slot, state)` lets go; `None` when none may go. Out of
+    /// line and over the caller's test as an object, so the callers of [`Self::entry`] share one
+    /// body of the search, which only a new source runs.
+    #[inline(never)]
+    fn vacant_slot(&self, may_go: &mut dyn FnMut(usize, &V) -> bool) -> Option<usize> {
+        match self.used_rows().iter().position(Option::is_none) {
+            Some(free) => Some(free),
+            None if self.used < self.rows.len() => Some(self.used),
+            None => self
+                .used_rows()
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, row)| row.as_ref().map(|row| (slot, row)))
+                .filter(|(slot, row)| may_go(*slot, &row.value))
+                .min_by_key(|(_, row)| row.met)
+                .map(|(slot, _)| slot),
+        }
     }
 
     /// Every row, with its slot and key, in the order of the slots.
@@ -118,7 +136,7 @@ impl<K: PartialEq + Clone, V> Sources<K, V> {
 
     /// Keep the rows `keep(slot, state)` says to and let the others go; the answer is how many
     /// went.
-    #[cfg(feature = "advanced-recovery")]
+    #[cfg(feature = "advanced-retention")]
     pub(super) fn retain(&mut self, mut keep: impl FnMut(usize, &mut V) -> bool) -> usize {
         let mut gone = 0;
         let used = self.used;
@@ -208,7 +226,43 @@ mod tests {
         assert!(table.entry(&(rows + 2), || 0, |_, _| false).is_none());
     }
 
+    /// A new source takes the first row never held while there is one, and in a full table the
+    /// row met longest ago of those that may go, or none. Turned red by a search that skips the
+    /// test it is handed (`vacant_slot`) or orders the rows by anything but when each was met.
+    #[test]
+    fn a_new_source_takes_a_row_never_held_then_the_oldest_that_may_go() {
+        let rows = caps::MAX_ADVANCED_SOURCES;
+        assert!(rows >= 3, "the case needs three rows");
+        let mut table: Sources<usize, usize> = Sources::new();
+        assert_eq!(table.vacant_slot(&mut |_, _| false), Some(0));
+        for key in 0..rows {
+            meet(&mut table, key);
+        }
+        assert_eq!(table.vacant_slot(&mut |_, _| false), None);
+        meet(&mut table, 0);
+        assert_eq!(table.vacant_slot(&mut |_, _| true), Some(1));
+        assert_eq!(table.vacant_slot(&mut |slot, _| slot != 1), Some(2));
+    }
+
+    /// The lookup off a sample's path finds the row a meeting made, and no row for a key never
+    /// met. Turned red by a lookup that reads another table than `slot_of` does.
     #[cfg(feature = "advanced-recovery")]
+    #[test]
+    fn a_lookup_off_the_sample_path_finds_the_row_a_meeting_made() {
+        let mut table = Sources::new();
+        for key in 0..3 {
+            meet(&mut table, key);
+        }
+        assert_eq!(table.find(&2), Some(2));
+        assert_eq!(table.find(&9), None);
+        assert!(table.contains_key(&1));
+        assert_eq!(
+            table.get_mut(&1).map(|(slot, value)| (slot, *value)),
+            Some((1, 1))
+        );
+    }
+
+    #[cfg(feature = "advanced-retention")]
     #[test]
     fn a_row_let_go_is_taken_before_one_never_held() {
         let mut table = Sources::new();

@@ -803,7 +803,9 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "sent with, forwarded the same way) and the subscriber's three, `advanced-subscriber` "
         "(its options and its ordering machine), `advanced-recovery` (the gap-recovery half) "
         "and `advanced-history` (the startup and late-publisher history), which the tokio "
-        "runtime's `ext-pubsub-advanced-subscriber`, `-recovery` and `-history` turn on, and "
+        "runtime's `ext-pubsub-advanced-subscriber`, `-recovery` and `-history` turn on, "
+        "`advanced-retention` (the sweep of the sources that went away, which the tokio "
+        "runtime's `-recovery` turns on and the pico ABI's `advanced-source-retention`), and "
         "`engine-host` (the subscriber hosted on an engine's port, which the cooperative "
         "engine's C ABI turns on). `host-sync` is the one this crate's tests do not turn on: its "
         "one public item is `advanced_cache`, the module `std` gates, behind a cfg of either, and "
@@ -819,6 +821,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "advanced-subscriber",
                 "advanced-recovery",
                 "advanced-history",
+                "advanced-retention",
                 "engine-host",
                 "ext-pubsub-sample-miss-detection",
             }

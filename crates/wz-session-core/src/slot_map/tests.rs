@@ -433,6 +433,32 @@ fn dropping_a_fixed_table_drops_its_live_and_retired_rows_once() {
     drops_each_row_once(SlotMap::<Test, Counted<'_>, 4, Static>::new(), &drops);
 }
 
+/// The growable policy drops each of its rows once too, from the chunks it made them in. Turned red
+/// by a drop of `Chunked` that skips a written row, drops a retired row twice, or drops a place no
+/// row was written to.
+#[cfg(feature = "alloc")]
+#[test]
+fn dropping_a_growable_table_drops_its_live_and_retired_rows_once() {
+    let drops = Cell::new(0);
+    drops_each_row_once(
+        SlotMap::<Test, Counted<'_>, 4, crate::bounded::Heap>::new(),
+        &drops,
+    );
+}
+
+/// The on-use policy drops each of its rows once too, from the rows its first insert took. Turned
+/// red by a drop of `FirstUse` that skips a written row, drops a retired row twice, or drops a
+/// place no row was written to.
+#[cfg(feature = "alloc")]
+#[test]
+fn dropping_an_on_use_table_drops_its_live_and_retired_rows_once() {
+    let drops = Cell::new(0);
+    drops_each_row_once(
+        SlotMap::<Test, Counted<'_>, 4, crate::bounded::OnUse>::new(),
+        &drops,
+    );
+}
+
 /// A row taken into a freed slot and one taken into a slot the table adds are each written once,
 /// over an empty place: no insert drops a row, the freed slot is taken before the table grows, and
 /// each row is dropped once, with the table. Turned red by an insert that takes a new slot while
@@ -957,4 +983,193 @@ fn a_fixed_id_map_of_zero_bytes_is_empty() {
     assert!(matches!(ids.bind(7, 70), Ok(None)));
     assert_eq!(ids.find(7), Some(&70));
     assert_eq!(ids.unbind(7), Some(70));
+}
+
+/// The rows a table the contract is read on is made to hold: past one chunk of the growable
+/// policy's column, so the clause that a row stays where it was put spans the insert that makes a
+/// second chunk there.
+const CONTRACT_ROWS: usize = 40;
+
+#[cfg(feature = "alloc")]
+const _: () = assert!(CONTRACT_ROWS > CHUNK_ROWS);
+
+/// A table made to hold `CONTRACT_ROWS` rows.
+type ContractMap<P> = SlotMap<Test, u32, CONTRACT_ROWS, P>;
+
+/// Hold `map`, made empty to hold `CONTRACT_ROWS` rows, to what a table answers whatever its
+/// storage policy, the shape a policy gives its rows being the only thing a policy changes
+/// (`docs/c-abi-migration/heap-native.md`, section 2.3): its count bounds it and a refusal hands
+/// the value back and takes nothing; a row stays where it was put while it stands; a handle names
+/// nothing once its row left, before and after its slot is taken again; a row removed while pinned
+/// leaves every lookup at once and holds its slot until its last unpin hands it back; a limit
+/// lowered under the rows held refuses every insert until enough leave, though slots are free.
+///
+/// Turned red by a policy's column that moves a row when it grows, by `Core::free` leaving a
+/// slot's generation, by `Core::take_free` taking a slot past the limit, or by a retired row that a
+/// lookup or a walk still finds or whose slot an insert takes before its last unpin.
+fn keeps_the_table_contract<P: Storage>(map: &mut ContractMap<P>) {
+    assert!(map.is_empty());
+    assert_eq!(map.capacity(), CONTRACT_ROWS);
+
+    let first = map.insert(0).expect("a row under the count");
+    let first_at: *const u32 = map.get(first).expect("the row just put");
+    let mut held = std::vec![first];
+    for value in 1..CONTRACT_ROWS {
+        let value = u32::try_from(value).expect("a count a u32 holds");
+        held.push(map.insert(value).expect("a row under the count"));
+    }
+    assert!(map.is_full());
+    match map.insert(u32::MAX) {
+        Err(CapacityFull(back)) => assert_eq!(back, u32::MAX),
+        Ok(_) => panic!("a row went in past the count"),
+    }
+    assert_eq!(map.len(), CONTRACT_ROWS);
+
+    assert!(
+        core::ptr::eq(map.get(first).expect("the first row stands"), first_at),
+        "a row stays where it was put"
+    );
+    for (at, handle) in held.iter().enumerate() {
+        assert_eq!(map.get(*handle).copied(), u32::try_from(at).ok());
+    }
+
+    let gone = held[1];
+    assert_eq!(map.remove(gone), Some(Removal::Taken(1)));
+    assert_eq!(map.get(gone), None);
+    assert!(!map.contains(gone));
+    assert!(map.pin(gone).is_none());
+    assert_eq!(map.remove(gone), None);
+    let again = map.insert(100).expect("the slot the removal freed");
+    assert_eq!(again.place(), gone.place());
+    assert_ne!(again, gone, "the slot's generation moved");
+    assert_eq!(map.get(gone), None);
+    assert_eq!(map.get(again), Some(&100));
+    assert_eq!(Handle::<Test>::from_bits(again.to_bits()), Some(again));
+
+    let busy = held[2];
+    let pin = map.pin(busy).expect("a live row is pinned");
+    assert_eq!(map.remove(busy), Some(Removal::AfterCalls));
+    assert_eq!(map.get(busy), None);
+    assert!(map.iter().all(|(handle, _)| handle != busy));
+    assert_eq!(map.pinned(&pin), Some(&2));
+    assert!(map.holds_slot(busy));
+    assert_eq!(map.len(), CONTRACT_ROWS);
+    assert!(
+        map.insert(u32::MAX).is_err(),
+        "a retired row holds its slot"
+    );
+    assert_eq!(map.unpin(pin), Some(2));
+    assert!(!map.holds_slot(busy));
+    let next = map.insert(200).expect("the slot the last unpin freed");
+    assert_eq!(next.place(), busy.place());
+    assert_eq!(map.get(busy), None);
+
+    map.limit_to(CONTRACT_ROWS - 2);
+    assert_eq!(map.capacity(), CONTRACT_ROWS - 2);
+    assert!(map.remove(held[3]).is_some());
+    assert!(map.remove(held[4]).is_some());
+    assert_eq!(map.len(), CONTRACT_ROWS - 2);
+    assert!(
+        map.insert(300).is_err(),
+        "two slots are free and the lowered limit holds"
+    );
+    assert!(map.remove(held[5]).is_some());
+    assert!(map.insert(300).is_ok(), "one row under the limit");
+}
+
+/// The fixed policy keeps the table contract, its rows inline in the table at its build count.
+#[test]
+fn a_fixed_table_keeps_the_table_contract() {
+    keeps_the_table_contract(&mut ContractMap::<Static>::new());
+}
+
+/// The lent policy keeps the table contract, its rows lent from an arena at the count asked.
+#[test]
+fn a_lent_table_keeps_the_table_contract() {
+    let bytes = ContractMap::<Lent>::arena_bytes(CONTRACT_ROWS).expect("a table's bytes");
+    let mut arena = arena(bytes);
+    let mut map = ContractMap::<Lent>::lent(&mut arena, CONTRACT_ROWS).expect("the rows lent");
+    keeps_the_table_contract(&mut map);
+}
+
+/// The region policy keeps the table contract, its rows laid out beside the table in a block of
+/// zero bytes and placed by the table's lines.
+#[test]
+fn a_region_table_keeps_the_table_contract() {
+    #[repr(C)]
+    struct OneTable {
+        table: ContractMap<Region>,
+        rows: SlotRows<u32, CONTRACT_ROWS>,
+    }
+    // SAFETY: both fields are `ZeroEmpty`.
+    unsafe impl ZeroEmpty for OneTable {}
+    const LINES: [SeqPlace; 2] = ContractMap::<Region>::places(
+        core::mem::offset_of!(OneTable, table),
+        core::mem::offset_of!(OneTable, rows),
+    );
+    let layout = std::alloc::Layout::new::<OneTable>();
+    // SAFETY: the layout is of a type of some bytes.
+    let block = unsafe { std::alloc::alloc_zeroed(layout) };
+    let region = NonNull::new(block).expect("the test allocator answers");
+    // SAFETY: the lines name the table's two columns and the rows beside it, aligned, which
+    // nothing but the table reaches.
+    unsafe { crate::bounded::place_seqs(region, &LINES) };
+    // SAFETY: the zeroed block is a `OneTable`, its table placed over its rows just above, and
+    // nothing else reaches it until it goes back below.
+    let one = unsafe { &mut *block.cast::<OneTable>() };
+    keeps_the_table_contract(&mut one.table);
+    // SAFETY: the rows hold nothing that drops; the block goes back with its layout.
+    unsafe { std::alloc::dealloc(block, layout) };
+}
+
+/// The on-use policy keeps the table contract, its two columns' rows taken from the allocator at
+/// its first insert, all of the count at once, and never moved. Turned red by a column of that
+/// policy that moves its rows, or that a count does not bound.
+#[cfg(feature = "alloc")]
+#[test]
+fn an_on_use_table_keeps_the_table_contract() {
+    keeps_the_table_contract(&mut ContractMap::<crate::bounded::OnUse>::new());
+}
+
+/// An on-use table takes no memory until its first insert, a lookup, a walk and a question of room
+/// among what comes before it, and then holds the count it was made with and not the build's `N`.
+/// Turned red by a table that takes its rows when it is made or asked, or by one that a count does
+/// not bound.
+#[cfg(feature = "alloc")]
+#[test]
+fn an_on_use_table_takes_its_rows_at_its_first_insert_and_holds_its_count() {
+    let mut map = SlotMap::<Test, u32, 8, crate::bounded::OnUse>::counted(3);
+    assert_eq!(map.capacity(), 3);
+    assert!(map.is_empty() && !map.is_full());
+    assert_eq!(map.iter().count(), 0);
+    assert_eq!(map.nth_live(0), None);
+    assert!(!map.holds_rows(), "asking takes nothing");
+    let first = map.insert(1).expect("a row under the count");
+    assert!(map.holds_rows());
+    let first_at: *const u32 = map.get(first).expect("the row just put");
+    assert!(map.insert(2).is_ok());
+    assert!(map.insert(3).is_ok());
+    assert!(map.is_full());
+    match map.insert(4) {
+        Err(CapacityFull(back)) => assert_eq!(back, 4),
+        Ok(_) => panic!("a row went in past the count"),
+    }
+    assert!(core::ptr::eq(
+        map.get(first).expect("the first row stands"),
+        first_at
+    ));
+    let whole = SlotMap::<Test, u32, 8, crate::bounded::OnUse>::new();
+    assert_eq!(whole.capacity(), 8);
+    assert!(!whole.holds_rows());
+}
+
+/// The growable policy keeps the table contract once a limit holds it to the count, its rows in
+/// chunks made as they are needed. Turned red by a column of that policy that moves its rows when
+/// it grows, or that a limit does not bound.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_growable_table_held_to_a_count_keeps_the_table_contract() {
+    let mut map = ContractMap::<crate::bounded::Heap>::new();
+    map.limit_to(CONTRACT_ROWS);
+    keeps_the_table_contract(&mut map);
 }

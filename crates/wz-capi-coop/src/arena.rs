@@ -27,15 +27,16 @@
 //!   lent no row: the engine's queryable answers into a stage of its own (`peer_rows`);
 //! - one pool of each kind of row a peer writes by its own choice, which every face's tables share
 //!   ([`PeerPoolRows`]): its aliases (`SESSION_MAX_PEER_KEYEXPR_ALIASES`), its subscribers,
-//!   queryables and tokens and the repeats of them (`SESSION_MAX_REMOTE_DECLS`) and its subscriber
-//!   interests (`SESSION_MAX_INBOUND_SUB_INTERESTS`), each the fewer of the session's value of its
-//!   limit and what the faces could hold at the bound of each peer (`MAX_PEER_KEYEXPR_ALIASES`,
-//!   `MAX_REMOTE_DECLS`, `MAX_INBOUND_SUB_INTERESTS`), each row the place of its key in the key
-//!   arena below. A face holds the rows its peer wrote and not the most it could, as zenoh-pico
-//!   takes each from its heap as it comes. A session of one face shares with no one: its tables
-//!   take spans of their own of that face's bounds instead, laid out as inline tables are, with no
-//!   link and no pool state. Either way one span more names where each kind's rows lie, which every
-//!   face's tables reach them through by the session's key arena;
+//!   queryables and tokens and the repeats of them (`SESSION_MAX_REMOTE_DECLS`) and, with
+//!   `interest-answer`, its subscriber interests (`SESSION_MAX_INBOUND_SUB_INTERESTS`), each the
+//!   fewer of the session's value of its limit and what the faces could hold at the bound of each
+//!   peer (`MAX_PEER_KEYEXPR_ALIASES`, `MAX_REMOTE_DECLS`, `MAX_INBOUND_SUB_INTERESTS`), each row
+//!   the place of its key in the key arena below. A face holds the rows its peer wrote and not the
+//!   most it could, as zenoh-pico takes each from its heap as it comes. A session of one face
+//!   shares with no one: its tables take spans of their own of that face's bounds instead, laid
+//!   out as inline tables are, with no link and no pool state. Either way one span more names
+//!   where each kind's rows lie, which every face's tables reach them through by the session's key
+//!   arena;
 //! - the buffers of the links the session may hold: a pool of receive buffers of the batch the
 //!   session advertises, a streamed batch's length counted inside it, as many as
 //!   `RX_POOL_BUFFERS` and no more than the links, which a link holds only while it holds part of
@@ -48,8 +49,8 @@
 //! - with `group`, a receive buffer for each group the session may join, of the largest batch a
 //!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
 //!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
-//! - with `listen`, for a session that listens on a `udp/` endpoint, the slots its udp ports read
-//!   their datagrams into and hold them in until the links of their peers take them
+//! - with `udp-listen`, for a session that listens on a `udp/` endpoint, the slots its udp ports
+//!   read their datagrams into and hold them in until the links of their peers take them
 //!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
 //!   with the links' tables; one that listens on `tcp/` alone binds no port and holds none;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
@@ -124,7 +125,7 @@ use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::kept::Kept;
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
-#[cfg(feature = "listen")]
+#[cfg(feature = "udp-listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
 #[cfg(any(
@@ -144,7 +145,7 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::locator_directory::LocatorText;
 #[cfg(feature = "runtime-plan")]
 use wz_session_core::peer_tables::PeerTables;
-use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, SHARES_ROWS};
+use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, KEEPS_INTEREST_ROWS, SHARES_ROWS};
 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 use wz_session_core::policy::HeldPublishDrop;
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
@@ -520,8 +521,8 @@ const DIRECT_FACE_ROWS: usize = (!cfg!(wz_round) && cfg!(feature = "listen")) as
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the
-/// rows of the peers the ports took and of the datagrams sorted for them (`listen`).
-const PORT_RX_ROWS: usize = 4 * cfg!(feature = "listen") as usize;
+/// rows of the peers the ports took and of the datagrams sorted for them (`udp-listen`).
+const PORT_RX_ROWS: usize = 4 * cfg!(feature = "udp-listen") as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
 /// beside them (`listen` or `group`, in the work form, `wz_round`): a build of the dial face
 /// alone owes no other face, nor does one that sends each face its own leg (`direct`).
@@ -544,8 +545,10 @@ const FACE_ROWS: usize = cfg!(feature = "runtime-plan") as usize + TAKES_FACES a
 /// one set's place otherwise.
 const ROOM_ROWS: usize = 1 + cfg!(feature = "runtime-plan") as usize;
 /// The peers' tables, and the pools their rows lie in where the faces share them with the one span
-/// naming where those rows lie, where the arena lends them (`runtime-plan`).
-const PEER_ROWS: usize = cfg!(feature = "runtime-plan") as usize * (1 + 4 * SHARES_ROWS as usize);
+/// naming where those rows lie, where the arena lends them (`runtime-plan`): the aliases' and the
+/// declarations' pools, and the interests' where the build keeps a peer's (`KEEPS_INTEREST_ROWS`).
+const PEER_ROWS: usize = cfg!(feature = "runtime-plan") as usize
+    * (1 + (3 + KEEPS_INTEREST_ROWS as usize) * SHARES_ROWS as usize);
 /// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
 /// session whose faces share their pools, so counted where a build shares them at all.
 const OWED_ROWS: usize = (cfg!(all(
@@ -1352,10 +1355,10 @@ pub struct TransportRows {
     #[cfg(feature = "group")]
     group_rx: (usize, usize),
     /// The slots of the datagrams the session's udp ports hold: how many, and the bytes of each.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "udp-listen")]
     port_rx: (usize, usize),
     /// The rows of the peers the session's udp ports take, one for each link it may hold.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "udp-listen")]
     port_peers: usize,
 }
 
@@ -1381,7 +1384,7 @@ pub(crate) struct TransportTables {
     #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub(crate) handed: HandedTable,
     /// The rows the session's udp ports keep their peers and the datagrams sorted for them in.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "udp-listen")]
     pub(crate) port_rows: PortRows<Lent, LinkCellFlag>,
 }
 
@@ -1402,9 +1405,9 @@ impl TransportRows {
         handed_legs: 0,
         #[cfg(feature = "group")]
         group_rx: (0, 0),
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "udp-listen")]
         port_rx: (0, 0),
-        #[cfg(feature = "listen")]
+        #[cfg(feature = "udp-listen")]
         port_peers: 0,
     };
 
@@ -1425,7 +1428,7 @@ impl TransportRows {
                 lend.byte_cells(self.link_bytes, self.handed_legs),
                 lend.table(self.handed_legs),
             ),
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "udp-listen")]
             port_rows: PortRows::over(lend.table(self.port_peers), lend.table(self.port_rx.0)),
         }
     }
@@ -1465,7 +1468,7 @@ impl TransportRows {
     /// `tables` with the slots the session's udp ports read their datagrams into and hold them in
     /// until the links of their peers take them, lent by `lend` after the groups' buffers: the
     /// ports share them, a slot of the links' batch each.
-    #[cfg(feature = "listen")]
+    #[cfg(feature = "udp-listen")]
     fn port_rx_from(
         &self,
         tables: LinkTables<LinkCellFlag>,
@@ -1479,8 +1482,8 @@ impl TransportRows {
         tables.with_port_rx(lend.byte_cells_of(bytes, slots))
     }
 
-    /// A build that listens on no port lends no port a slot.
-    #[cfg(not(feature = "listen"))]
+    /// A build that binds no udp port lends no port a slot.
+    #[cfg(not(feature = "udp-listen"))]
     fn port_rx_from(
         &self,
         tables: LinkTables<LinkCellFlag>,
@@ -1933,9 +1936,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             handed_legs: 0,
             #[cfg(feature = "group")]
             group_rx: (0, 0),
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "udp-listen")]
             port_rx: (0, 0),
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "udp-listen")]
             port_peers: 0,
         };
         // The largest message a link rejoins is decided before the lane that hands it on, so a
@@ -2041,8 +2044,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // The slots the udp ports of a session that listens read their datagrams into and hold
         // them in until the links of their peers take them, lent with the links' tables
         // (`TransportRows::links_from`): the ports share them, each a link's batch long. A
-        // session that listens on no `udp/` endpoint binds no port and holds none.
-        #[cfg(feature = "listen")]
+        // session that listens on no `udp/` endpoint binds no port and holds none, nor does a
+        // build without the udp listener (`udp-listen`), whose links refuse such an endpoint.
+        #[cfg(feature = "udp-listen")]
         {
             let slots = self.lent_to::<{ caps::UDP_PORT_SLOTS }>(
                 ArenaLimit::UdpPortSlots,
@@ -2300,8 +2304,13 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             self.put(ArenaPart::PeerAliasPool, 1, aliases);
             let declarations = self.sized(pools.decl_bytes());
             self.put(ArenaPart::PeerDeclarationPools, 1, declarations);
-            let interests = self.sized(pools.interest_bytes());
-            self.put(ArenaPart::PeerInterestPool, 1, interests);
+            // A build that answers no peer's Interest keeps none of their rows and is lent no span
+            // of them (`KEEPS_INTEREST_ROWS`): its plan lays out no row of them, as one that binds
+            // no udp port lays out none of a port's.
+            if KEEPS_INTEREST_ROWS {
+                let interests = self.sized(pools.interest_bytes());
+                self.put(ArenaPart::PeerInterestPool, 1, interests);
+            }
             // `PeerPools::lent` lends one span past the three, the directory the session's key
             // arena names them by: a plan without it leaves the arena a span short of the open's
             // last place.
@@ -3456,8 +3465,9 @@ pub struct PlanShape {
     pub listens: usize,
     /// How many of those are `udp/` ones, each a udp port the stack binds, which read into the
     /// datagram slots the arena lends (`UDP_PORT_SLOTS`): a session that listens on `tcp/` alone
-    /// binds no port and is lent none.
-    #[cfg(feature = "listen")]
+    /// binds no port and is lent none. Only a build with the udp listener (`udp-listen`) binds
+    /// one.
+    #[cfg(feature = "udp-listen")]
     pub udp_listens: usize,
     /// The multicast groups it joins.
     pub groups: usize,
@@ -3482,7 +3492,7 @@ impl PlanShape {
         Self {
             dials: config.endpoints.count(),
             listens: config.listen.count(),
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "udp-listen")]
             udp_listens: config.listen.udp(),
             groups: config.groups.len(),
             max_faces: config.max_faces,
@@ -3514,7 +3524,7 @@ impl PlanShape {
         Self {
             dials,
             listens: 0,
-            #[cfg(feature = "listen")]
+            #[cfg(feature = "udp-listen")]
             udp_listens: 0,
             groups: 0,
             max_faces: 0,
