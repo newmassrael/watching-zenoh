@@ -1,0 +1,19 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Keep sce-codegen in the machine's oracle store, keyed by the source state
+it was built from, the build recipe and the toolchain, so every checkout
+and action copy of a machine takes one build instead of building its own.
+'''
+changes = '''
+- build-sce.sh and sce-codegen-oracle.sh: store lookup, flock, atomic publish.
+- wz-codegen-build: consumers read the store first; provenance unchanged.
+- regen prints cargo progress; bx.toml shares the store path.
+'''
+verification = '''
+- wz-codegen-build provenance 16/16; shellcheck -x clean on four scripts.
+- build-sce twice: the second run builds nothing.
+- spawn, artifact-root, build-evidence lints and census coverage pass.
+'''
+carry = '''
+- none for this lane.
+'''
