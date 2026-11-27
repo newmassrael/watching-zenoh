@@ -3661,7 +3661,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// How many of a publish's legs reach the session's groups (`FaceTx::reaches_groups`), the
     /// faces' legs and the groups' own of the walk a publish makes (`Self::on_publish_legs`), or
     /// the one leg where the faces share one send place (`Self::on_faces`).
-    #[cfg(all(test, feature = "std", feature = "group"))]
+    // Its readers: `tests::direct_receive` where each face holds its own send place, and the group
+    // tests of `tests::one_thread` over the program's transport.
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "group",
+        any(wz_face_places, feature = "app-transport")
+    ))]
     pub(crate) fn group_legs_of_a_publish(&self) -> usize {
         let legs = core::cell::Cell::new(0);
         let leg = |tx: LinkTx<'_, C>| -> Result<usize, FanoutError> {
