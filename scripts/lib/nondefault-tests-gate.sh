@@ -503,6 +503,9 @@ object-pool|files::ext_handles_across_threads::"
     # behind `shared-key-ids`). The filter is each module path.
     "wz-capi-pico|hook|app-transport|app_transport::tests::"
     "wz-capi-pico|hook|config-document|config_policy::tests::"
+    # The refusal of an open whose document asks for the program's transport while the config is
+    # handed none: it needs the document reader and the program's transport together.
+    "wz-capi-pico|hook|config-document,app-transport|config_policy::tests::an_open_without_the_program_transport_its_document_asks_for_is_refused"
     # The cooperative engine's dispatch in a build with the program's transport: the host's links
     # and the program's are one type of links, so the engine is built once
     # (`session::static_dispatch_tests::`, its transport test behind `app-transport`).
@@ -582,6 +585,9 @@ object-pool|files::ext_handles_across_threads::"
     # ...`): every name says `time_base`, which is the filter. The tokio engine first (8), then the
     # cooperative one (8), where the session's clock itself and its read's word run too.
     "wz-capi-pico|hook|time-base|time_base"
+    # The cooperative opens on a time base waiting on the one sleep each open set aside, over the
+    # program's transport: the time base and the program's transport together.
+    "wz-capi-pico|hook|time-base,app-transport|time_base::tests::the_opens_of_a_session_on_a_time_base_wait_on_one_sleep_with_no_memory_taken"
     "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp,connectivity,time-base|time_base"
     # The files of the merged target `it` are built only with the pools' door, which the two rows
     # above leave out: the scouting window of the program's time runs with it, over the build of
