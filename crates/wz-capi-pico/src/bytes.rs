@@ -685,21 +685,14 @@ impl ByteBuf {
         }
     }
 
-    /// Where the payload's segment `idx` ends; `None` past its last.
-    fn segment_end(&self, idx: usize) -> Option<usize> {
+    /// The top word of the payload's table of segment ends, where their count lies and end `k`
+    /// `k + 1` words below it ([`SEGMENTED`]); `None` for a payload that keeps none. Read once
+    /// by each reader of ends, which then reads them as words below it.
+    fn end_table(&self) -> Option<*mut usize> {
         match &self.block {
-            // SAFETY: a payload that keeps ends keeps their count in the top word of a block of its
-            // own, and end `idx`, below their count, `idx + 1` words below it ([`SEGMENTED`]).
-            Some(block) if self.is_segmented() => unsafe {
-                let top = block.top();
-                if idx < top.read() {
-                    Some(top.sub(idx.saturating_add(1)).read())
-                } else {
-                    None
-                }
-            },
-            // One segment of all the bytes, or none when there are none.
-            _ => (idx == 0 && self.size() != 0).then_some(self.size()),
+            // SAFETY: a payload that keeps ends keeps them at the top of a block of its own.
+            Some(block) if self.is_segmented() => Some(unsafe { block.top() }),
+            _ => None,
         }
     }
 
@@ -802,22 +795,6 @@ impl ByteBuf {
         self.extent = self.extent.saturating_add(bytes.len());
     }
 
-    /// End a segment at `end`, in the word [`Self::reserve`] made for one more end.
-    fn push_end(&mut self, end: usize) {
-        let ends = self.ends().saturating_add(1);
-        let Some(block) = &self.block else {
-            return;
-        };
-        // SAFETY: `reserve` left a block of the payload's own, of one holder, with the word of the
-        // ends' count and of one more end free at its top, above the payload's bytes.
-        unsafe {
-            let top = block.top();
-            top.sub(ends).write(end);
-            top.write(ends);
-        }
-        self.extent |= SEGMENTED;
-    }
-
     /// Whether the payload is ONE slice, which is what
     /// `z_bytes_get_contiguous_view` requires.
     ///
@@ -837,11 +814,21 @@ impl ByteBuf {
     /// The `idx`-th segment, or `None` past the end — what
     /// `z_bytes_slice_iterator_next` yields.
     pub(crate) fn segment(&self, idx: usize) -> Option<&[u8]> {
-        let start = match idx.checked_sub(1) {
-            None => 0,
-            Some(before) => self.segment_end(before)?,
+        let (start, end) = match self.end_table() {
+            // SAFETY: the table's count lies in its top word and end `k` `k + 1` words below it;
+            // `idx` is below the count, so the two ends read lie in the table.
+            Some(top) => unsafe {
+                if idx >= top.read() {
+                    return None;
+                }
+                let end = top.sub(idx.saturating_add(1)).read();
+                let start = if idx == 0 { 0 } else { top.sub(idx).read() };
+                (start, end)
+            },
+            // One segment of all the bytes, or none when there are none.
+            None if idx == 0 && self.size() != 0 => (0, self.size()),
+            None => return None,
         };
-        let end = self.segment_end(idx)?;
         self.as_slice().get(start..end)
     }
 
@@ -859,24 +846,44 @@ impl ByteBuf {
         if brought == 0 {
             return Ok(());
         }
+        let had = self.ends();
         let close = !self.is_segmented() && self.size() != 0;
         // The room of every byte and end this append writes, taken before anything is written:
         // one end for each of the other's segments and one to close this payload's own.
         self.reserve(other.size(), brought.saturating_add(usize::from(close)))?;
-        if close {
-            self.push_end(self.size());
-        }
         // The other's segments follow one another and its last ends at its last byte (a write
         // grows the last), so its bytes are written in one copy and each of its ends is moved up
         // by the bytes before them.
         let before = self.size();
         self.put_after(other.as_slice());
-        for idx in 0..brought {
-            let Some(end) = other.segment_end(idx) else {
-                break;
-            };
-            self.push_end(before.saturating_add(end));
+        let theirs = other.end_table();
+        let Some(block) = &self.block else {
+            return Ok(());
+        };
+        // SAFETY: `reserve` left a block of the payload's own, of one holder, with the words of
+        // `had` ends, of their count and of every end written here free at its top, above the
+        // payload's bytes. The other's table, when it keeps one, holds `brought` ends in the
+        // words below its top; it lies in a block apart from this one, which `reserve` made the
+        // payload's alone.
+        unsafe {
+            let top = block.top();
+            let mut count = had;
+            if close {
+                count = count.saturating_add(1);
+                top.sub(count).write(before);
+            }
+            for k in 1..=brought {
+                let end = match theirs {
+                    Some(their_top) => their_top.sub(k).read(),
+                    // A payload that keeps no end is one segment of all its bytes.
+                    None => other.size(),
+                };
+                count = count.saturating_add(1);
+                top.sub(count).write(before.saturating_add(end));
+            }
+            top.write(count);
         }
+        self.extent |= SEGMENTED;
         Ok(())
     }
 
@@ -2796,6 +2803,53 @@ mod block_tests {
             );
         }
         assert_eq!(writer.segment(40), None);
+    }
+
+    /// Through the exports, the slice iterator walks each segment a writer's appends left, in
+    /// order, and stays at its end; a payload that keeps no ends is walked as its one segment and
+    /// an empty one as none. Turned red by a segment read that starts anywhere but at the end
+    /// before it, or that reads an end past the count of them.
+    #[test]
+    fn the_slice_iterator_walks_each_segment_and_stays_at_its_end() {
+        fn walk(buf: ByteBuf) -> Vec<Vec<u8>> {
+            let mut owned = z_owned_bytes_t::null_value();
+            let mut seen = Vec::new();
+            // SAFETY: a value this test owns, dropped once; each view is copied while it lives.
+            unsafe {
+                assert_eq!(store_bytes(&mut owned, Ok(buf)), Z_OK);
+                let mut iter = z_bytes_get_slice_iterator(z_bytes_loan(&owned));
+                let mut view = z_view_slice_t {
+                    _start: core::ptr::null(),
+                    _len: 0,
+                    _pad: [0; 2],
+                };
+                while z_bytes_slice_iterator_next(&mut iter, &mut view) {
+                    seen.push(core::slice::from_raw_parts(view._start, view._len).to_vec());
+                }
+                assert!(
+                    !z_bytes_slice_iterator_next(&mut iter, &mut view),
+                    "the iterator stays at its end"
+                );
+                z_bytes_drop(z_bytes_move(&mut owned));
+            }
+            seen
+        }
+        let mut writer = ByteBuf::copy_of(b"abc").expect("room");
+        let parts: [&[u8]; 2] = [b"de", b"f"];
+        for part in parts {
+            writer
+                .append_segments(&ByteBuf::copy_of(part).expect("room"))
+                .expect("room");
+        }
+        assert_eq!(
+            walk(writer),
+            [b"abc".to_vec(), b"de".to_vec(), b"f".to_vec()]
+        );
+        assert_eq!(
+            walk(ByteBuf::copy_of(b"whole").expect("room")),
+            [b"whole".to_vec()]
+        );
+        assert!(walk(ByteBuf::new()).is_empty());
     }
 
     /// A slice over a writer's block, and a payload made over that slice, read the bytes as one
