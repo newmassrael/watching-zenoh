@@ -2866,8 +2866,9 @@ const TX_PARTS: [&str; 2] = ["link transmit flags", "link transmit slots"];
 /// client's arena lends one set of a face's tables and the buffers of one link; a peer's lends the
 /// same rows, with a set and a link for each of the ten faces it admits and a link for its one
 /// handshake: every other row is the client's, item for item, which is the sum
-/// `docs/c-abi-no-heap-pools.md` (section 9.6) states. The peer listens, so a build without
-/// `listen` refuses its faces.
+/// `docs/c-abi-no-heap-pools.md` (section 9.6) states. Where the tables take their memory on use
+/// the arena lays out neither the links' rows nor the faces', and the counts are the sum. The peer
+/// listens, so a build without `listen` refuses its faces.
 #[cfg(feature = "listen")]
 #[test]
 fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
@@ -2934,20 +2935,25 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     let own = usize::from(cfg!(feature = "local-queryable"));
     assert_eq!(client.peers().tables, 1);
     assert_eq!(client.gets().tables, 1 + own);
-    assert_eq!(row(&client, "link receive buffers").count, 1);
+    assert_eq!(link_receive_buffers(&client), 1);
     assert_eq!(peer.peers().tables, faces);
     assert_eq!(peer.gets().tables, faces + own);
     assert_eq!(link_places(&peer), faces + handshakes);
-    assert_eq!(
-        row(&peer, "link transmit slots").count,
-        pooled(preset("TX_POOL_SLOTS"), faces + handshakes),
-        "the peer's links share the preset's outbound pool"
-    );
-    assert_eq!(
-        row(&peer, "link receive buffers").count,
-        pooled(preset("RX_POOL_BUFFERS"), faces + handshakes),
-        "the peer's links share the preset's pool"
-    );
+    // The pools the links share are the arena's; where the tables take their memory on use each
+    // link holds its own buffers, which no row counts.
+    #[cfg(not(wz_on_use))]
+    {
+        assert_eq!(
+            row(&peer, "link transmit slots").count,
+            pooled(preset("TX_POOL_SLOTS"), faces + handshakes),
+            "the peer's links share the preset's outbound pool"
+        );
+        assert_eq!(
+            row(&peer, "link receive buffers").count,
+            pooled(preset("RX_POOL_BUFFERS"), faces + handshakes),
+            "the peer's links share the preset's pool"
+        );
+    }
 
     // The pools hold the fewer of the session's limit and what the faces could hold, each at a
     // peer's own bound: a client's one face what its tables held, and the peer's ten the
@@ -3062,28 +3068,34 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             theirs.part()
         );
     }
-    let at_the_build = ArenaPlan::of(
-        &CoopConfig {
-            listen: vec!["tcp/127.0.0.1:0".to_owned()],
-            ..client_config()
-        },
-        &SessionLimits::defaults(),
-    )
-    .expect("lays an arena out")
-    .reserved_bytes();
-    // A build that admits no more faces and handshakes than the preset, one made at it, lays out
-    // the peer's links and faces at its defaults too, and so has nothing of them to lower.
-    let build = SessionLimits::defaults();
-    if admitted_faces(&build) == Ok(faces) && admitted_handshakes(&build) == Ok(handshakes) {
-        assert!(
-            peer.reserved_bytes() <= at_the_build,
-            "a peer at the preset reserves no more than a listener at a build of the preset"
-        );
-    } else {
-        assert!(
-            peer.reserved_bytes() < at_the_build,
-            "a peer at the preset reserves less than a listener at the build's defaults"
-        );
+    // The preset lowers what the arena reserves by the rows of the links and the faces it lends;
+    // where the tables take their memory on use the arena holds none of them, and the preset's
+    // counts above are what bounds the memory each takes.
+    #[cfg(not(wz_on_use))]
+    {
+        let at_the_build = ArenaPlan::of(
+            &CoopConfig {
+                listen: vec!["tcp/127.0.0.1:0".to_owned()],
+                ..client_config()
+            },
+            &SessionLimits::defaults(),
+        )
+        .expect("lays an arena out")
+        .reserved_bytes();
+        // A build that admits no more faces and handshakes than the preset, one made at it, lays
+        // out the peer's links and faces at its defaults too, and so has nothing of them to lower.
+        let build = SessionLimits::defaults();
+        if admitted_faces(&build) == Ok(faces) && admitted_handshakes(&build) == Ok(handshakes) {
+            assert!(
+                peer.reserved_bytes() <= at_the_build,
+                "a peer at the preset reserves no more than a listener at a build of the preset"
+            );
+        } else {
+            assert!(
+                peer.reserved_bytes() < at_the_build,
+                "a peer at the preset reserves less than a listener at the build's defaults"
+            );
+        }
     }
 }
 
