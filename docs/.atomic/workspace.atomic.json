@@ -8735,6 +8735,24 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4703": {
+      "decision_summary": "Align no innermost loop of an x86 or x64 C library: the padding nops LLVM\nputs before them were text the ledger counts on both systems, and the\nreceive runs no faster for them, as the reading shows.",
+      "changes_bullets": [
+        "capi-nostd.toml: -x86-experimental-pref-innermost-loop-alignment=0.",
+        "capability_cost_gate selftest holds the flag per target arch.",
+        "docs/c-abi-migration/arch-win-ext.md: the Windows rows' growth read."
+      ],
+      "verification_bullets": [
+        "size ledger: total 209,804 B vs main 211,840 (-2,036).",
+        "receive Ir W 3,069.9 vs main 3,076.4; capability_cost_gate --selftest passes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
