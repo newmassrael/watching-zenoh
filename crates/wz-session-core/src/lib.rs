@@ -182,6 +182,12 @@ pub mod bounded;
 /// Unconditional, like [`bounded`].
 pub mod key_arena;
 
+/// The column and the keys of the on-use storage policy ([`bounded::OnUse`]): a table's rows taken
+/// from the allocator at its first value, all at once, and a key an allocation of its own counted
+/// against the session's key budget. Gated on `alloc`, whose allocator it takes them from.
+#[cfg(feature = "alloc")]
+pub mod on_use;
+
 /// The pools of rows the faces of a session share: a slab of rows of one kind lent from the
 /// session's arena once, each table that keeps its rows there a list of the rows it holds
 /// ([`row_pool::PooledRows`]). Unconditional, like [`bounded`], whose lent policy keeps a peer's

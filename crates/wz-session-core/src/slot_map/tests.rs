@@ -446,6 +446,19 @@ fn dropping_a_growable_table_drops_its_live_and_retired_rows_once() {
     );
 }
 
+/// The on-use policy drops each of its rows once too, from the rows its first insert took. Turned
+/// red by a drop of `FirstUse` that skips a written row, drops a retired row twice, or drops a
+/// place no row was written to.
+#[cfg(feature = "alloc")]
+#[test]
+fn dropping_an_on_use_table_drops_its_live_and_retired_rows_once() {
+    let drops = Cell::new(0);
+    drops_each_row_once(
+        SlotMap::<Test, Counted<'_>, 4, crate::bounded::OnUse>::new(),
+        &drops,
+    );
+}
+
 /// A row taken into a freed slot and one taken into a slot the table adds are each written once,
 /// over an empty place: no insert drops a row, the freed slot is taken before the table grows, and
 /// each row is dropped once, with the table. Turned red by an insert that takes a new slot while
@@ -1107,6 +1120,47 @@ fn a_region_table_keeps_the_table_contract() {
     keeps_the_table_contract(&mut one.table);
     // SAFETY: the rows hold nothing that drops; the block goes back with its layout.
     unsafe { std::alloc::dealloc(block, layout) };
+}
+
+/// The on-use policy keeps the table contract, its two columns' rows taken from the allocator at
+/// its first insert, all of the count at once, and never moved. Turned red by a column of that
+/// policy that moves its rows, or that a count does not bound.
+#[cfg(feature = "alloc")]
+#[test]
+fn an_on_use_table_keeps_the_table_contract() {
+    keeps_the_table_contract(&mut ContractMap::<crate::bounded::OnUse>::new());
+}
+
+/// An on-use table takes no memory until its first insert, a lookup, a walk and a question of room
+/// among what comes before it, and then holds the count it was made with and not the build's `N`.
+/// Turned red by a table that takes its rows when it is made or asked, or by one that a count does
+/// not bound.
+#[cfg(feature = "alloc")]
+#[test]
+fn an_on_use_table_takes_its_rows_at_its_first_insert_and_holds_its_count() {
+    let mut map = SlotMap::<Test, u32, 8, crate::bounded::OnUse>::counted(3);
+    assert_eq!(map.capacity(), 3);
+    assert!(map.is_empty() && !map.is_full());
+    assert_eq!(map.iter().count(), 0);
+    assert_eq!(map.nth_live(0), None);
+    assert!(!map.holds_rows(), "asking takes nothing");
+    let first = map.insert(1).expect("a row under the count");
+    assert!(map.holds_rows());
+    let first_at: *const u32 = map.get(first).expect("the row just put");
+    assert!(map.insert(2).is_ok());
+    assert!(map.insert(3).is_ok());
+    assert!(map.is_full());
+    match map.insert(4) {
+        Err(CapacityFull(back)) => assert_eq!(back, 4),
+        Ok(_) => panic!("a row went in past the count"),
+    }
+    assert!(core::ptr::eq(
+        map.get(first).expect("the first row stands"),
+        first_at
+    ));
+    let whole = SlotMap::<Test, u32, 8, crate::bounded::OnUse>::new();
+    assert_eq!(whole.capacity(), 8);
+    assert!(!whole.holds_rows());
 }
 
 /// The growable policy keeps the table contract once a limit holds it to the count, its rows in
