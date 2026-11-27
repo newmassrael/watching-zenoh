@@ -128,6 +128,13 @@ impl PolicyStatements {
     ) -> Result<wz_session_core::shared_key_ids::KeyIdsAtOpen, ZResult> {
         Ok(Default::default())
     }
+
+    /// No address of the node's own: a config handed no document states none, and only
+    /// `config-document`, which brings the doors, hands one.
+    #[inline(always)]
+    pub(crate) fn document_owned_address(&self) -> Option<[u8; 4]> {
+        None
+    }
 }
 
 /// What a config's doors stated about its policies, as they stated it: the open judges and
@@ -227,6 +234,20 @@ impl PolicyStatements {
         Ok(stated)
     }
 
+    /// The node's own address the `wz/owned-address` of the document `zext_config_document` was
+    /// handed states, which its door read, or none when the config was handed no document.
+    #[cfg(feature = "config-document")]
+    pub(crate) fn document_owned_address(&self) -> Option<[u8; 4]> {
+        self.document.owned_address
+    }
+
+    /// See the twin with the document door: a build without it hands no document, so it states
+    /// no address.
+    #[cfg(not(feature = "config-document"))]
+    pub(crate) fn document_owned_address(&self) -> Option<[u8; 4]> {
+        None
+    }
+
     /// `policy` is to take `value` in the API layer; an earlier statement of the policy is
     /// replaced. A policy the build does not have, or a value the policy does not have, is
     /// `Z_ERR_CONFIG_INVALID_VALUE`, the code the open's resolution gives it.
@@ -272,7 +293,9 @@ impl PolicyStatements {
 
 /// What the `wz` member of the document `zext_config_document` was handed states, read by the
 /// door into the build's own ids with no tree kept: the profile, the statements of `wz/policies`
-/// and those of `wz/limits`, each held by the build's table, and the key ids of `wz/key-ids`. `Default` is a document with no `wz` member, which states nothing.
+/// and those of `wz/limits`, each held by the build's table, the key ids of `wz/key-ids`, and
+/// the node's own address `wz/owned-address` states. `Default` is a document with no `wz`
+/// member, which states nothing.
 #[cfg(feature = "config-document")]
 #[derive(Clone, Default)]
 struct DocumentRows {
@@ -281,6 +304,7 @@ struct DocumentRows {
     limits: LimitSet,
     #[cfg(feature = "shared-key-ids")]
     key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
+    owned_address: Option<[u8; 4]>,
 }
 
 /// A document the reader refuses: `Z_ERR_CONFIG_INVALID_VALUE` at the door.
@@ -360,6 +384,30 @@ struct Seen {
     policies: bool,
     limits: bool,
     key_ids: bool,
+    owned_address: bool,
+}
+
+/// The longest text an IPv4 address is written in, `255.255.255.255`.
+#[cfg(feature = "config-document")]
+const IPV4_TEXT_MAX: usize = 15;
+
+/// The text of a string member decoded into the room an IPv4 address takes, or `Refused` for one
+/// longer than any address is written in, which names none.
+#[cfg(feature = "config-document")]
+struct AddressText {
+    bytes: [u8; IPV4_TEXT_MAX],
+    len: usize,
+}
+
+#[cfg(feature = "config-document")]
+impl core::fmt::Write for AddressText {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let end = self.len.checked_add(text.len()).ok_or(core::fmt::Error)?;
+        let room = self.bytes.get_mut(self.len..end).ok_or(core::fmt::Error)?;
+        room.copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
 }
 
 /// The first reading of a member: a second one is refused, as the document's resolution refuses
@@ -428,8 +476,10 @@ impl DocumentRows {
 
     /// Whether the document states nothing, so a config resolves as one handed none.
     fn states_nothing(&self) -> bool {
-        let stated =
-            self.profile.is_some() || !self.statements.is_empty() || !self.limits.is_empty();
+        let stated = self.profile.is_some()
+            || !self.statements.is_empty()
+            || !self.limits.is_empty()
+            || self.owned_address.is_some();
         #[cfg(feature = "shared-key-ids")]
         let stated =
             stated || self.key_ids != wz_session_core::shared_key_ids::KeyIdsAtOpen::default();
@@ -470,6 +520,7 @@ impl DocumentRows {
         {
             self.key_ids = Default::default();
         }
+        self.owned_address = None;
         self.read_document(&mut Lexer::new(text), runtime)
             .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
     }
@@ -543,11 +594,37 @@ impl DocumentRows {
                 // A build without the capability refuses the member by name.
                 #[cfg(not(feature = "shared-key-ids"))]
                 return Err(Refused);
+            } else if name.eq_str("owned-address") {
+                first(&mut seen.owned_address)?;
+                self.read_owned_address(lex)?;
             } else {
                 return Err(Refused);
             }
             after_member(lex)?;
         }
+        Ok(())
+    }
+
+    /// `wz/owned-address`: the node's own IPv4 address, as the reader of the other ABIs reads it
+    /// (`wz_session_core::zid_derivation::parse_owned_address`), so text that is no address of a
+    /// node is refused alike.
+    fn read_owned_address(&mut self, lex: &mut Lexer<'_>) -> Result<(), Refused> {
+        if !lex.at_string() {
+            return Err(Refused);
+        }
+        let mut text = AddressText {
+            bytes: [0; IPV4_TEXT_MAX],
+            len: 0,
+        };
+        lex.string()?.decode_into(&mut text)?;
+        let text = text
+            .bytes
+            .get(..text.len)
+            .and_then(|bytes| core::str::from_utf8(bytes).ok())
+            .ok_or(Refused)?;
+        let address =
+            wz_session_core::zid_derivation::parse_owned_address(text).map_err(|_| Refused)?;
+        self.owned_address = Some(address);
         Ok(())
     }
 
@@ -973,6 +1050,7 @@ mod tests {
         #[cfg(feature = "shared-key-ids")]
         let of_a_session = of_a_session
             || read.key_ids != wz_session_core::shared_key_ids::KeyIdsAtOpen::default();
+        let of_a_session = of_a_session || read.owned_address.is_some();
         if of_a_session {
             return Err(Z_ERR_CONFIG_INVALID_VALUE);
         }
@@ -1275,6 +1353,73 @@ mod tests {
             read(&config),
             tree,
             "a refused document keeps the key ids the config held"
+        );
+    }
+
+    /// The door reads `wz/owned-address` as the tree reader does: the address of a node is kept
+    /// for the open and states no policy, and text that is no IPv4 address of a node, a value that
+    /// is not a string and the member stated twice are refused with the config left as it was. A
+    /// runtime's document states no address, which is a session's.
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn the_document_door_reads_the_owned_address_as_the_tree_reader_does() {
+        let text = r#"{ mode: "client", wz: { "owned-address": "127.0.0.1" } }"#;
+        let tree = policy_document::statements_from_json5(&wz_members(text).expect("an object"))
+            .expect("well formed")
+            .owned_address;
+        assert_eq!(
+            tree,
+            Some([127, 0, 0, 1]),
+            "CONTROL: the tree reader reads it"
+        );
+        let mut config = Config::new();
+        assert_eq!(config.state().policies.document_owned_address(), None);
+        assert_eq!(config.document(text), Z_OK);
+        assert_eq!(config.state().policies.document_owned_address(), tree);
+        assert_eq!(
+            config.resolved(),
+            stating_nothing(),
+            "the address states no policy"
+        );
+        for refused in [
+            r#"{ wz: { "owned-address": "127.0.0" } }"#,
+            r#"{ wz: { "owned-address": "127.0.0.1.1" } }"#,
+            r#"{ wz: { "owned-address": "255.255.255.255.255" } }"#,
+            r#"{ wz: { "owned-address": "0.0.0.0" } }"#,
+            r#"{ wz: { "owned-address": "239.1.2.3" } }"#,
+            r#"{ wz: { "owned-address": 2130706433 } }"#,
+            r#"{ wz: { "owned-address": "10.0.0.1", "owned-address": "10.0.0.2" } }"#,
+        ] {
+            assert!(
+                policy_document::statements_from_json5(&wz_members(refused).expect("an object"))
+                    .is_err(),
+                "CONTROL: the tree reader refuses {refused}"
+            );
+            assert_eq!(
+                config.document(refused),
+                Z_ERR_CONFIG_INVALID_VALUE,
+                "{refused}"
+            );
+            assert_eq!(
+                config.state().policies.document_owned_address(),
+                tree,
+                "a refused document keeps the address the config held: {refused}"
+            );
+        }
+        assert_eq!(
+            config.document(r#"{ mode: "client" }"#),
+            Z_OK,
+            "a document that states no address"
+        );
+        assert_eq!(
+            config.state().policies.document_owned_address(),
+            None,
+            "replaces the one that stated it"
+        );
+        assert_eq!(
+            runtime_limits_of(r#"{ wz: { "owned-address": "127.0.0.1" } }"#).err(),
+            Some(Z_ERR_CONFIG_INVALID_VALUE),
+            "a runtime's document states no address of a session"
         );
     }
 

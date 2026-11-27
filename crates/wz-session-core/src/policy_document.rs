@@ -55,6 +55,12 @@
 //! the statements' `key_ids` (`crate::shared_key_ids::KeyIdsAtOpen`), and its refusals
 //! ([`KeyIdsReason`]) are found by the same reader, so they refuse the document as a refused
 //! policy does. A build without the capability refuses the member by name.
+//!
+//! `wz/owned-address` states the node's own IPv4 address, which heads the zid
+//! `zid-derivation = address-ports` derives in place of a listener's, so a node that only dials
+//! has one (`crate::zid_derivation`). It is read into the statements' `owned_address`; text
+//! that is no IPv4 address of a node is refused ([`Reason::OwnedAddress`]) whichever value the
+//! policy takes, and it states no policy.
 
 use core::fmt;
 use core::ops::ControlFlow;
@@ -69,6 +75,7 @@ use crate::policy::{KeyWireForm, SessionPolicy, POLICIES, POLICY_COUNT, PROFILES
 use crate::policy_binding::{
     Binding, LimitKind, PolicyEntry, PolicyValue, Scope, SelectError, ValueSet,
 };
+use crate::zid_derivation::OwnedAddressRefused;
 
 /// Where a policy's value in a snapshot came from: the layer that stated it last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -603,8 +610,8 @@ pub enum Reason<'a> {
     /// A member of the document's `wz` tree is stated more than once; JSON5 allows it, and a
     /// later one may not silently win.
     MemberStatedTwice {
-        /// The member: `wz`, `wz/profile`, `wz/policies`, `wz/limits`, `wz/key-ids` or one of
-        /// the two members of `wz/key-ids`.
+        /// The member: `wz`, `wz/profile`, `wz/policies`, `wz/limits`, `wz/key-ids`, one of
+        /// the two members of `wz/key-ids`, or `wz/owned-address`.
         member: &'static str,
     },
     /// The statement names no limit of the build.
@@ -655,6 +662,13 @@ pub enum Reason<'a> {
     },
     /// `wz/key-ids`, or a part of it, is refused.
     KeyIds(KeyIdsReason<'a>),
+    /// `wz/owned-address` states text that is no IPv4 address of a node.
+    OwnedAddress {
+        /// The text stated.
+        text: &'a str,
+        /// Why it names no address a zid can be derived from.
+        why: OwnedAddressRefused,
+    },
 }
 
 /// Why `wz/key-ids`, or a part of it, was refused. An entry is named by its place in its list,
@@ -936,7 +950,7 @@ impl fmt::Display for Refusal<'_> {
             Reason::UnknownMember { member } => write!(
                 f,
                 "{layer} states `wz/{member}`, which wz does not read (it reads `wz/profile`, \
-                 `wz/policies`, `wz/limits` and `wz/key-ids`)"
+                 `wz/policies`, `wz/limits`, `wz/key-ids` and `wz/owned-address`)"
             ),
             Reason::MemberStatedTwice { member } => {
                 write!(f, "{layer} states `{member}` more than once")
@@ -976,6 +990,10 @@ impl fmt::Display for Refusal<'_> {
                 "{layer} states the limit `{limit}` again; a layer states a limit once"
             ),
             Reason::KeyIds(reason) => write!(f, "{layer} {reason}"),
+            Reason::OwnedAddress { text, why } => write!(
+                f,
+                "{layer} states `wz/owned-address` = `{text}`, which is refused: {why}"
+            ),
         }
     }
 }
@@ -1634,8 +1652,8 @@ mod from_json5 {
     use crate::policy_binding::PolicyEntry;
 
     /// What the `wz` member of a document states: the profile it names, the statements of its
-    /// `wz/policies` and of its `wz/limits`, each in the document's order, and the key ids of its
-    /// `wz/key-ids`.
+    /// `wz/policies` and of its `wz/limits`, each in the document's order, the key ids of its
+    /// `wz/key-ids`, and the node's own address its `wz/owned-address` states.
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct DocumentStatements<'a> {
         /// The id `wz/profile` names, if it names one.
@@ -1648,14 +1666,18 @@ mod from_json5 {
         /// the document states no such member.
         #[cfg(feature = "shared-key-ids")]
         pub key_ids: crate::shared_key_ids::KeyIdsAtOpen,
+        /// The node's own IPv4 address `wz/owned-address` states, which heads a zid
+        /// `zid-derivation = address-ports` derives; `None` when the document states none.
+        pub owned_address: Option<[u8; 4]>,
     }
 
     /// The profile and the statements the `wz` member of `tree` states, or every refusal of its
     /// shape: a `wz`, `wz/policies` or `wz/limits` that is not an object, a policy's value that
     /// is not a string, a limit's value that is neither a whole number nor `unbounded`, a member
-    /// of `wz` other than `profile`, `policies`, `limits` and `key-ids`, a member stated twice,
-    /// and every refusal of `wz/key-ids` ([`super::KeyIdsReason`]). A document with no `wz`
-    /// member states nothing. Whether the policies, the limits, the values and the profile exist
+    /// of `wz` other than `profile`, `policies`, `limits`, `key-ids` and `owned-address`, a
+    /// member stated twice, every refusal of `wz/key-ids` ([`super::KeyIdsReason`]), and a
+    /// `wz/owned-address` that is not a string or names no IPv4 address of a node. A document
+    /// with no `wz` member states nothing. Whether the policies, the limits, the values and the profile exist
     /// is for [`resolve_document`].
     // The refusals are held inline because the core has no heap to box them in.
     #[allow(clippy::result_large_err)]
@@ -1742,6 +1764,7 @@ mod from_json5 {
         policies: bool,
         limits: bool,
         key_ids: bool,
+        owned_address: bool,
     }
 
     fn refuse<'a>(refusals: &mut Refusals<'a>, reason: Reason<'a>) {
@@ -1895,6 +1918,41 @@ mod from_json5 {
                                 },
                             ),
                         }
+                    }
+                }
+                "owned-address" => {
+                    if seen.owned_address {
+                        refuse(
+                            refusals,
+                            Reason::MemberStatedTwice {
+                                member: "wz/owned-address",
+                            },
+                        );
+                    }
+                    seen.owned_address = true;
+                    let Json5Value::String(text) = value else {
+                        refuse(
+                            refusals,
+                            Reason::NotAString {
+                                within: "wz",
+                                member: "owned-address",
+                            },
+                        );
+                        continue;
+                    };
+                    match crate::zid_derivation::parse_owned_address(text) {
+                        Ok(address) => {
+                            if read.owned_address.is_none() {
+                                read.owned_address = Some(address);
+                            }
+                        }
+                        Err(why) => refuse(
+                            refusals,
+                            Reason::OwnedAddress {
+                                text: text.as_str(),
+                                why,
+                            },
+                        ),
                     }
                 }
                 other => refuse(refusals, Reason::UnknownMember { member: other }),
@@ -3142,7 +3200,79 @@ mod tests {
             assert_eq!(
                 format!("{refusal}"),
                 "the document states `wz/colour`, which wz does not read (it reads `wz/profile`, \
-                 `wz/policies`, `wz/limits` and `wz/key-ids`)"
+                 `wz/policies`, `wz/limits`, `wz/key-ids` and `wz/owned-address`)"
+            );
+        }
+
+        /// `wz/owned-address` is read into the statements as the node's four address bytes and
+        /// states no policy; text that is no IPv4 address of a node, a value that is not a string
+        /// and the member stated twice are refused, and with them the whole document.
+        #[test]
+        fn the_owned_address_is_read_and_a_malformed_one_refused() {
+            use crate::zid_derivation::ZidDerivationError;
+
+            let tree = parse(r#"{ wz: { "owned-address": "127.0.0.1" } }"#).unwrap();
+            let read = statements_from_json5(&tree).expect("an address of a node");
+            assert_eq!(read.owned_address, Some([127, 0, 0, 1]));
+            assert!(read.statements.is_empty() && read.profile.is_none());
+            assert_eq!(
+                resolve_document(SessionPolicy::defaults(), &tree).expect("states no policy"),
+                Resolved::unchanged(SessionPolicy::defaults())
+            );
+            let silent = parse(r#"{ wz: { profile: "upstream" } }"#).unwrap();
+            assert_eq!(
+                statements_from_json5(&silent).expect("reads").owned_address,
+                None,
+                "a document that states none holds none"
+            );
+
+            for (text, why) in [
+                ("10.77.0", OwnedAddressRefused::NotIpv4),
+                ("10.77.0.256", OwnedAddressRefused::NotIpv4),
+                ("tcp/10.77.0.5:7447", OwnedAddressRefused::NotIpv4),
+                (
+                    "0.0.0.0",
+                    OwnedAddressRefused::NamesNoNode(ZidDerivationError::Unspecified),
+                ),
+                (
+                    "224.0.0.224",
+                    OwnedAddressRefused::NamesNoNode(ZidDerivationError::Multicast),
+                ),
+            ] {
+                let text_doc = format!(r#"{{ wz: {{ "owned-address": "{text}" }} }}"#);
+                let tree = parse(&text_doc).unwrap();
+                let refusals = resolve_document(SessionPolicy::defaults(), &tree).unwrap_err();
+                let refusal = only(&refusals);
+                assert_eq!(refusal.reason, Reason::OwnedAddress { text, why }, "{text}");
+                assert!(
+                    format!("{refusal}").contains(&format!("states `wz/owned-address` = `{text}`")),
+                    "{refusal}"
+                );
+                assert_eq!(
+                    statements_from_json5(&tree).unwrap_err(),
+                    refusals,
+                    "the shape reader refuses it the same"
+                );
+            }
+
+            let tree = parse(r#"{ wz: { "owned-address": 2130706433 } }"#).unwrap();
+            let refusal = only(&statements_from_json5(&tree).unwrap_err());
+            assert_eq!(
+                refusal.reason,
+                Reason::NotAString {
+                    within: "wz",
+                    member: "owned-address"
+                }
+            );
+            let tree =
+                parse(r#"{ wz: { "owned-address": "10.0.0.1", "owned-address": "10.0.0.2" } }"#)
+                    .unwrap();
+            let refusal = only(&statements_from_json5(&tree).unwrap_err());
+            assert_eq!(
+                refusal.reason,
+                Reason::MemberStatedTwice {
+                    member: "wz/owned-address"
+                }
             );
         }
 

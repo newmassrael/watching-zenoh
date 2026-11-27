@@ -75,7 +75,12 @@ z_result_t zext_config_device_requires(const z_loaned_config_t *config,
  * limits of the session by their ids, each a whole number or "unbounded";
  * a limit the build does not have, a limit only the build decides, a limit
  * of a runtime and a value the build's domain leaves out refuse the
- * document, and the session opens under the limits it states. */
+ * document, and the session opens under the limits it states. The member's
+ * wz/owned-address states the node's own IPv4 address ("192.0.2.7"),
+ * which heads the zid the session derives under zid-derivation =
+ * address-ports in place of the address of a listener, so a session that
+ * only dials derives one; text that is no IPv4 address of a node refuses
+ * the document. */
 z_result_t zext_config_policy(z_loaned_config_t *config, const char *policy,
                                 const char *value);
 z_result_t zext_config_profile(z_loaned_config_t *config,

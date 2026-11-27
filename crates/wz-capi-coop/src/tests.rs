@@ -1189,6 +1189,7 @@ fn client_config() -> CoopConfig {
         endpoints: Vec::new(),
         whatami: WhatAmI::Client,
         zid: config_zid(0xb1),
+        owned_address: None,
         batch_size: 1024,
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::PICO,
@@ -3360,18 +3361,101 @@ fn a_derived_zid_is_the_listeners_address_and_ports_then_the_sources_bytes() {
         "udp/10.77.0.5:28001".to_string(),
         "tcp/10.77.0.5:28000".to_string(),
     ];
-    let zid = derived_zid(&listen, &mut Seeded(0x31)).expect("a listener names the node");
+    let zid = derived_zid(&listen, None, &mut Seeded(0x31)).expect("a listener names the node");
     let expected: [u8; 16] = [
         10, 77, 0, 5, 0x60, 0x6D, 0x61, 0x6D, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
     ];
     assert_eq!(zid.to_vec(), expected.to_vec());
     assert_eq!(
-        derived_zid(&["tcp/0.0.0.0:28000".to_string()], &mut Seeded(1)),
+        derived_zid(&["tcp/0.0.0.0:28000".to_string()], None, &mut Seeded(1)),
         Err(OpenError::ZidDerivation(ZidDerivationError::NoAddress))
     );
     assert_eq!(
-        derived_zid(&listen, &mut Failing),
+        derived_zid(&listen, None, &mut Failing),
         Err(OpenError::EntropyUnavailable)
+    );
+
+    // A node that only dials has no listener: the address its config states heads the zid, both
+    // port fields are 0, as the address-ports rule writes them for a node with no listener of
+    // either protocol, and the source's bytes follow.
+    let zid = derived_zid(
+        std::iter::empty::<&str>(),
+        Some([127, 0, 0, 1]),
+        &mut Seeded(0x31),
+    )
+    .expect("the stated address names the node");
+    let expected: [u8; 16] = [
+        127, 0, 0, 1, 0, 0, 0, 0, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+    ];
+    assert_eq!(zid.to_vec(), expected.to_vec());
+    // The stated address heads the zid over a listener's, whose ports follow it.
+    let zid = derived_zid(&listen, Some([192, 0, 2, 7]), &mut Seeded(0x31))
+        .expect("the stated address names the node");
+    let expected: [u8; 16] = [
+        192, 0, 2, 7, 0x60, 0x6D, 0x61, 0x6D, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
+    ];
+    assert_eq!(zid.to_vec(), expected.to_vec());
+    assert_eq!(
+        derived_zid(std::iter::empty::<&str>(), None, &mut Seeded(1)),
+        Err(OpenError::ZidDerivation(ZidDerivationError::NoAddress)),
+        "a node that only dials and states no address"
+    );
+}
+
+/// A session that only dials, under `zid-derivation = address-ports`, opens on the zid its
+/// config's own address heads, its port fields 0; the same config without the address is refused
+/// with the reason before anything is dialled.
+#[test]
+fn a_session_that_only_dials_opens_on_the_zid_its_stated_address_heads() {
+    use crate::arena::AllocatorMemory;
+    use crate::{OpenError, OpenKeyIds};
+    use wz_session_core::policy::{SessionPolicy, ZidDerivation};
+    use wz_session_core::zid_derivation::ZidDerivationError;
+
+    let mut policy = SessionPolicy::defaults();
+    if policy
+        .select_zid_derivation(ZidDerivation::AddressPorts)
+        .is_err()
+    {
+        // A build whose domain of the policy leaves the value out derives no zid at all.
+        return;
+    }
+    let open = |config: CoopConfig| {
+        Engine::open_made_in(
+            host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            PosixClock,
+            PosixEntropy,
+            move || config,
+            policy,
+            OpenKeyIds::none(),
+            crate::arena::OpenStorage {
+                memory: &AllocatorMemory,
+                held: crate::arena::HeldPlaces::NONE,
+                plan: crate::arena::PlanFrom::Config,
+            },
+        )
+    };
+    let router = Router::start(CatchAll::None);
+    let engine = open(CoopConfig {
+        zid: None,
+        owned_address: Some([127, 0, 0, 1]),
+        ..config(&router)
+    })
+    .expect("the session opens");
+    assert_eq!(
+        &SessionEngine::zid(&*engine)[..8],
+        &[127, 0, 0, 1, 0, 0, 0, 0],
+        "the stated address, then no listener's ports"
+    );
+    SessionDrive::close(&*engine);
+    let refused = open(CoopConfig {
+        zid: None,
+        ..config(&router)
+    })
+    .err();
+    assert_eq!(
+        refused,
+        Some(OpenError::ZidDerivation(ZidDerivationError::NoAddress))
     );
 }
 

@@ -18,7 +18,9 @@
  *
  * When the check directory holds key-ids, the session is opened with that dictionary of key
  * ids every node of the deployment shares, and with the key-wire form params states for this
- * party's endpoint. When params says segmented, an e2e sender cuts every frame it puts into
+ * party's endpoint. When params names owned_address, the session is opened with that address
+ * as the node's own (wz/owned-address), which heads the zid it derives under
+ * zid-derivation = address-ports, a dialling party having no listener to take one from. When params says segmented, an e2e sender cuts every frame it puts into
  * the pieces of the segment profile, and the receiver joins them before it judges.
  *
  * Exit status: 0 when the role ran to its end, 1 when it timed out waiting, 2 when it was
@@ -41,6 +43,8 @@
  * every build and refuses a dictionary by name where the library has none. */
 #pragma weak zext_config_key_ids
 #pragma weak zext_config_key_wire_form_for
+/* The document door is in a build with config-document only, weak for the same reason. */
+#pragma weak zext_config_document
 
 #define MAX_FRAMES 256
 #define MAX_PARAMS 32
@@ -301,6 +305,22 @@ static int configure_keys(z_owned_config_t *config, const char *how, const char 
     return 0;
 }
 
+/* Hand the config the node's own address params states, as the document member a zenoh
+ * configuration states it in. */
+static int configure_owned_address(z_owned_config_t *config) {
+    const char *owned = param("owned_address");
+    if (owned == NULL) return 0;
+    if (zext_config_document == NULL) {
+        printf("refused owned address: the library was built without config-document\n");
+        return 2;
+    }
+    char document[96];
+    int written = snprintf(document, sizeof document, "{ wz: { \"owned-address\": \"%s\" } }", owned);
+    if (written < 0 || (size_t)written >= sizeof document) return refused("owned address", _Z_ERR_GENERIC, NULL);
+    z_result_t rc = zext_config_document(z_config_loan_mut(config), document);
+    return rc == Z_OK ? 0 : refused("owned address", rc, NULL);
+}
+
 /* 0 with the session open, or the refused status. A dialling end retries while the listener
  * binds. */
 static int open_session(z_owned_session_t *session, const char *how, const char *locator, const char *mode) {
@@ -318,6 +338,7 @@ static int open_session(z_owned_session_t *session, const char *how, const char 
             zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, locator);
         }
         int status = configure_keys(&config, how, locator);
+        if (status == 0) status = configure_owned_address(&config);
         if (status != 0) {
             z_config_drop(z_config_move(&config));
             return status;

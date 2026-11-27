@@ -154,6 +154,7 @@ fn config() -> CoopConfig {
         endpoints: vec!["udp/127.0.0.1:7447".to_owned()],
         whatami: WhatAmI::Client,
         zid: Some(SessionZid::from([0xb1; 4])),
+        owned_address: None,
         batch_size: BATCH,
         lease_ms: 10_000,
         keep_alive: KeepAliveConf::PICO,

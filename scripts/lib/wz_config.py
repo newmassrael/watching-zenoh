@@ -3439,7 +3439,9 @@ def emit_config_schema(decl: dict) -> str:
     declared default. Each carries its help's first sentence and where it is bound (`x-wz-*`). The build may narrow a policy's values further (its domain), which a
     document is checked against when it is applied, not here. `profile` is the enum of the
     declared profiles' ids, present only where the declaration states one. `key-ids` is the shape
-    of the key ids every node shares, present where the declaration has `key-wire-form`."""
+    of the key ids every node shares, present where the declaration has `key-wire-form`.
+    `owned-address` is the node's own IPv4 address, which a zid the `address-ports` value of
+    `zid-derivation` derives is headed by."""
     policies = {}
     for pol in decl["policies"]:
         if pol["binding"] == "build":
@@ -3520,6 +3522,15 @@ def emit_config_schema(decl: dict) -> str:
             },
             "additionalProperties": False,
         }
+    # `wz/owned-address`, read by every build: the reader refuses text that is no IPv4 address of
+    # a node (the unspecified, a multicast and the broadcast address), which `format` does not say.
+    members["owned-address"] = {
+        "description": ("The node's own IPv4 address, dotted, which heads the zid "
+                        "zid-derivation = address-ports derives in place of the address of a "
+                        "listener, so that a node that only dials derives one."),
+        "type": "string",
+        "format": "ipv4",
+    }
     doc = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$comment": ("GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit "
@@ -6856,8 +6867,12 @@ def cmd_selftest() -> int:
            and "Statement" not in empty_profile)
     pschema = json.loads(emit_config_schema(dict(profile_decl, limits=sdecl["limits"])))
     expect("the schema names the profiles a document may start from, before its policies",
-           list(pschema["properties"]["wz"]["properties"]) == ["profile", "policies", "limits"]
+           list(pschema["properties"]["wz"]["properties"])
+           == ["profile", "policies", "limits", "owned-address"]
            and pschema["properties"]["wz"]["properties"]["profile"]["enum"] == ["upstream", "quiet"])
+    expect("the schema names the node's own address as a dotted IPv4 string",
+           pschema["properties"]["wz"]["properties"]["owned-address"]["format"] == "ipv4"
+           and pschema["properties"]["wz"]["properties"]["owned-address"]["type"] == "string")
     expect("a declaration without a profile has no `profile` in the schema",
            "profile" not in schema["properties"]["wz"]["properties"])
     # The domain a build allows each policy.

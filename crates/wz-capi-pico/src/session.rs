@@ -1460,6 +1460,9 @@ unsafe fn open_request(
         #[cfg(feature = "shared-key-ids")]
         key_ids,
     );
+    // The node's own address the config's document states, which heads a zid the session derives
+    // (`zid-derivation = address-ports`).
+    let owned_address = cfg.policies.document_owned_address();
     #[cfg(any(feature = "scout", feature = "scout-mcu"))]
     let scouted: ScoutedLocators = match (connect, listen) {
         (None, None) => crate::scout::locators_by_scout(cfg, &policy, &stated.limits)?,
@@ -1538,6 +1541,7 @@ unsafe fn open_request(
         scouted,
         dial_whatami,
         zid,
+        owned_address,
         start_read_task,
         #[cfg(feature = "admin-space")]
         start_admin_space,
@@ -1843,6 +1847,10 @@ struct OpenRequest {
     /// The id the config names for the session, as an INIT carries it, `None` for one the
     /// engine mints.
     zid: Option<SessionZid>,
+    /// The node's own address the config states (`wz/owned-address`), which heads a zid the
+    /// engine derives under `zid-derivation = address-ports`; `None` for a config that states
+    /// none.
+    owned_address: Option<[u8; 4]>,
     // The cooperative engine's single-threaded arm starts no read task: the program steps it.
     #[cfg_attr(
         all(not(feature = "engine-tokio"), not(feature = "multi-thread")),
@@ -1899,6 +1907,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         listen,
         dial_whatami,
         zid,
+        owned_address,
         start_read_task,
         #[cfg(feature = "admin-space")]
         start_admin_space,
@@ -2059,20 +2068,16 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // And the key ids every node shares, when the config states them (`crate::key_ids`),
             // and the time base the program supplies, when the config names one
             // (`crate::time_base`), which the session's clock is made over.
-            #[cfg(feature = "shared-key-ids")]
+            // And the node's own address the config states, which heads a zid the session
+            // derives.
             session_defaults: wz_capi_core::session_defaults::SessionDefaults {
+                #[cfg(feature = "shared-key-ids")]
                 key_ids,
                 #[cfg(feature = "time-base")]
                 time_base,
+                owned_address,
                 ..Default::default()
             },
-            #[cfg(all(not(feature = "shared-key-ids"), feature = "time-base"))]
-            session_defaults: wz_capi_core::session_defaults::SessionDefaults {
-                time_base,
-                ..Default::default()
-            },
-            #[cfg(not(any(feature = "shared-key-ids", feature = "time-base")))]
-            session_defaults: wz_capi_core::session_defaults::SessionDefaults::default(),
             session_policy: policy,
             session_limits: limits,
             // pico's configuration states no limit of a node, so a node its open runs holds the
@@ -2547,6 +2552,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         endpoints: dial_list,
         whatami: dial_whatami,
         zid,
+        // The node's own address the config states, which heads a zid the engine derives.
+        owned_address: request.owned_address,
         // The numbers of pico's value build switches, as the open's snapshot holds them: the
         // batch size and lease its InitSyn carries (`BATCH_UNICAST_SIZE`,
         // `Z_TRANSPORT_LEASE`), the largest message it rejoins (`FRAG_MAX_SIZE`), how often

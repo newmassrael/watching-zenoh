@@ -672,7 +672,14 @@ pub(crate) fn open_router_blocking(
         policy: session_policy,
         limits: session_limits,
     };
-    let (_, wire_zid) = session_zids(zid).ok_or(OpenError::DriveFailed)?;
+    // The node's id is chosen as a session's is: stated, drawn, or derived under
+    // `zid-derivation = address-ports` from its stated address and its listeners.
+    let (_, wire_zid) = open_zids(
+        zid,
+        &session_policy,
+        &listen,
+        session_defaults.owned_address,
+    )?;
     // Built here and shared, so that the program holding the node can reach the forwarder's
     // entry points (they take `&self`) while the node's thread runs the face loop over it.
     let own_zid = Zid::from_slice(&wire_zid);

@@ -9,16 +9,18 @@
 //!
 //! | bytes  | content                                                        |
 //! |--------|----------------------------------------------------------------|
-//! | 0..4   | the node's IPv4 address, in its written order                  |
+//! | 0..4   | the node's own IPv4 address, in its written order              |
 //! | 4..6   | the lowest port a TCP listener of the node binds, little-endian |
 //! | 6..8   | the lowest port a UDP listener of the node binds, little-endian |
 //! | 8..16  | random bytes, from the source an upstream zid is drawn from    |
 //!
-//! A node with no listener of a protocol writes `0` for that port. The address must be one a
-//! peer can name the node by: the unspecified address, a multicast group and the limited
-//! broadcast address are refused
-//! ([`ZidDerivationError`](crate::zid_derivation::ZidDerivationError)), since a zid built on one
-//! of them would say nothing of the node. The random half keeps two nodes on one address and
+//! The node's own address is the one its configuration states (`wz/owned-address`, read by
+//! [`parse_owned_address`]), which a node that only dials has no listener to tell; a node that
+//! states none takes the address of the first of its listeners that binds one. A node with no
+//! listener of a protocol writes `0` for that port. The address must be one a peer can name the
+//! node by: the unspecified address, a multicast group and the limited broadcast address are
+//! refused ([`ZidDerivationError`](crate::zid_derivation::ZidDerivationError)), since a zid built
+//! on one of them would say nothing of the node. The random half keeps two nodes on one address and
 //! ports (a restart, or two processes behind one listener) apart.
 //!
 //! Pure: the inputs are values, the random half included, so a test names every byte and a host
@@ -32,7 +34,8 @@ pub const RANDOM_BYTES: usize = 8;
 /// Why an address cannot head a derived zid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZidDerivationError {
-    /// No listener or stated address gave the node an IPv4 address of its own.
+    /// Neither the configuration (`wz/owned-address`) nor a listener gave the node an IPv4
+    /// address of its own.
     NoAddress,
     /// `0.0.0.0`: every address of the host, which names none of them.
     Unspecified,
@@ -45,7 +48,9 @@ pub enum ZidDerivationError {
 impl core::fmt::Display for ZidDerivationError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let why = match self {
-            Self::NoAddress => "no IPv4 address of the node was stated",
+            Self::NoAddress => {
+                "neither `wz/owned-address` nor a listener names an IPv4 address of the node"
+            }
             Self::Unspecified => "the unspecified address names no node",
             Self::Multicast => "a multicast group address names no node",
             Self::Broadcast => "the broadcast address names no node",
@@ -62,6 +67,38 @@ pub const fn admit_address(address: [u8; 4]) -> Result<(), ZidDerivationError> {
         [0xFF, 0xFF, 0xFF, 0xFF] => Err(ZidDerivationError::Broadcast),
         _ => Ok(()),
     }
+}
+
+/// The configuration's member that states the node's own IPv4 address.
+pub const OWNED_ADDRESS_MEMBER: &str = "wz/owned-address";
+
+/// Why the text a configuration states as the node's own address is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnedAddressRefused {
+    /// The text is not an IPv4 address written as four decimal numbers joined by dots.
+    NotIpv4,
+    /// The address is one no zid can be derived from ([`admit_address`]).
+    NamesNoNode(ZidDerivationError),
+}
+
+impl core::fmt::Display for OwnedAddressRefused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotIpv4 => f.write_str("it is not an IPv4 address such as `192.0.2.7`"),
+            Self::NamesNoNode(refused) => core::fmt::Display::fmt(refused, f),
+        }
+    }
+}
+
+/// The address `text` states as the node's own, as the first four bytes of a derived zid, or
+/// why it is refused: text that is not a dotted IPv4 address, and an address [`admit_address`]
+/// refuses. Refused when the configuration is read, so a document that names an address no zid
+/// can be built on is refused whole, whichever value `zid-derivation` takes.
+pub fn parse_owned_address(text: &str) -> Result<[u8; 4], OwnedAddressRefused> {
+    let address: core::net::Ipv4Addr = text.parse().map_err(|_| OwnedAddressRefused::NotIpv4)?;
+    let octets = address.octets();
+    admit_address(octets).map_err(OwnedAddressRefused::NamesNoNode)?;
+    Ok(octets)
 }
 
 /// The sixteen bytes of the zid derived from `address`, the lowest TCP and UDP listener ports
@@ -129,16 +166,16 @@ impl ListenerFacts {
         *slot = Some(slot.map_or(port, |lowest| lowest.min(port)));
     }
 
-    /// The zid these listeners derive with `random`, the address `stated` standing in when the
-    /// listeners named none (a node whose listeners all bind every address of the host).
+    /// The zid these listeners derive with `random`, headed by `stated`, the address the
+    /// configuration states as the node's own, or, when it states none, by the first address a
+    /// listener named. The ports are the listeners' either way.
     pub fn derive(
         &self,
         stated: Option<[u8; 4]>,
         random: [u8; RANDOM_BYTES],
     ) -> Result<[u8; ZID_MAX], ZidDerivationError> {
-        let address = self
-            .address
-            .or(stated)
+        let address = stated
+            .or(self.address)
             .ok_or(ZidDerivationError::NoAddress)?;
         derive(
             address,
@@ -287,10 +324,11 @@ mod tests {
         assert_eq!(&zid[6..8], &[0, 0], "no UDP listener writes 0");
     }
 
-    /// A wildcard listener states no address, so the first listener that names one is the node's;
-    /// with none, the stated address stands in, and with neither the derivation is refused.
+    /// The stated address heads the zid over every listener's, a wildcard listener states none,
+    /// the first listener that names one stands in when nothing is stated, and with neither the
+    /// derivation is refused.
     #[test]
-    fn the_address_is_the_first_listener_that_names_one_or_the_stated_one() {
+    fn the_stated_address_heads_the_zid_and_a_listener_stands_in_without_one() {
         let mut facts = ListenerFacts::new();
         facts.listener(ListenerTransport::Tcp, [0, 0, 0, 0], 22_000);
         assert_eq!(
@@ -299,23 +337,99 @@ mod tests {
         );
         let zid = facts
             .derive(Some([172, 16, 5, 6]), RANDOM)
-            .expect("the stated address stands in");
+            .expect("the stated address heads the zid");
         assert_eq!(&zid[..4], &[172, 16, 5, 6]);
 
         facts.listener(ListenerTransport::Udp, [192, 168, 77, 3], 21_000);
         facts.listener(ListenerTransport::Udp, [192, 168, 77, 4], 21_001);
         let zid = facts
             .derive(Some([172, 16, 5, 6]), RANDOM)
+            .expect("the stated address heads the zid");
+        assert_eq!(
+            &zid[..4],
+            &[172, 16, 5, 6],
+            "the stated address wins over every listener's"
+        );
+        assert_eq!(
+            &zid[4..6],
+            &22_000u16.to_le_bytes(),
+            "the ports stay the listeners'"
+        );
+        assert_eq!(&zid[6..8], &21_000u16.to_le_bytes());
+        let zid = facts
+            .derive(None, RANDOM)
             .expect("a listener names the address");
         assert_eq!(
             &zid[..4],
             &[192, 168, 77, 3],
-            "the first listener that names an address wins over the stated one"
+            "with nothing stated the first listener that names an address stands in"
         );
         assert_eq!(
             ListenerFacts::new().derive(Some([224, 1, 1, 1]), RANDOM),
             Err(ZidDerivationError::Multicast),
             "a stated address is held to the same rule"
         );
+    }
+
+    /// A node that only dials has no listener: the stated address heads its zid, both ports are
+    /// `0`, and the random half follows untouched.
+    #[test]
+    fn a_node_with_no_listener_derives_its_zid_from_the_stated_address() {
+        let zid = ListenerFacts::new()
+            .derive(Some([127, 0, 0, 1]), RANDOM)
+            .expect("the stated address heads the zid");
+        assert_eq!(
+            zid,
+            [127, 0, 0, 1, 0, 0, 0, 0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8]
+        );
+        assert_eq!(
+            ListenerFacts::new().derive(None, RANDOM),
+            Err(ZidDerivationError::NoAddress)
+        );
+    }
+
+    /// The stated text is a dotted IPv4 address of a node: anything else, and an address no zid
+    /// can be built on, is refused with the reason, and the refusal of no address names the
+    /// member that states one.
+    #[test]
+    fn a_stated_address_is_read_as_a_dotted_ipv4_address_of_a_node() {
+        assert_eq!(parse_owned_address("127.0.0.1"), Ok([127, 0, 0, 1]));
+        assert_eq!(parse_owned_address("10.77.0.5"), Ok([10, 77, 0, 5]));
+        for text in [
+            "",
+            "10.77.0",
+            "10.77.0.5.1",
+            "10.77.0.256",
+            "10.77.0.5:7447",
+            " 10.77.0.5",
+            "::1",
+            "node.example",
+        ] {
+            assert_eq!(
+                parse_owned_address(text),
+                Err(OwnedAddressRefused::NotIpv4),
+                "{text:?}"
+            );
+        }
+        assert_eq!(
+            parse_owned_address("0.0.0.0"),
+            Err(OwnedAddressRefused::NamesNoNode(
+                ZidDerivationError::Unspecified
+            ))
+        );
+        assert_eq!(
+            parse_owned_address("239.1.2.3"),
+            Err(OwnedAddressRefused::NamesNoNode(
+                ZidDerivationError::Multicast
+            ))
+        );
+        assert_eq!(
+            parse_owned_address("255.255.255.255"),
+            Err(OwnedAddressRefused::NamesNoNode(
+                ZidDerivationError::Broadcast
+            ))
+        );
+        let text = std::format!("{}", ZidDerivationError::NoAddress);
+        assert!(text.contains(OWNED_ADDRESS_MEMBER), "{text}");
     }
 }

@@ -56,6 +56,10 @@ pub struct SessionDefaults {
     /// the session by the system's clock.
     #[cfg(feature = "time-base")]
     pub time_base: Option<wz_runtime_tokio::time_base::TimeBaseHold>,
+    /// The node's own IPv4 address the configuration states (`wz/owned-address`), which heads
+    /// the zid `zid-derivation = address-ports` derives in place of the address of a listener.
+    /// `None` for a configuration that states none.
+    pub owned_address: Option<[u8; 4]>,
 }
 
 /// What a `qos/publication` rule sets on a publication: each field stated replaces what the
