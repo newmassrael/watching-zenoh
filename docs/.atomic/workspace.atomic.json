@@ -8343,6 +8343,23 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4681": {
+      "decision_summary": "Pay main's limit-read red: the pinned subscribers' capacity is a const\ngeneric argument, storage the gate admits, but the gate did not read a\nqualified path whose type is itself one as a generic list.",
+      "changes_bullets": [
+        "limit_read_gate: a run of < that a name ends opens a qualified path.",
+        "selftest: the nested form is storage; a shift before a block stays a read."
+      ],
+      "verification_bullets": [
+        "limit_read_gate --selftest OK; --check green on main (was the one red).",
+        "python floor lint clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
