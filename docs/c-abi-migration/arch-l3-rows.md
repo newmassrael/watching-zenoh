@@ -150,7 +150,7 @@ What it shows:
 | H4 | what keeps a key's declaration alive | the tables' count of the declaration (`KeyexprCount`) | the ABI's anchor in every callback row (`KeyAnchor` in `SubscriberRow`, `QueryableRow`, `LivelinessRow`), which the pico ABI fills only on its advanced plane (`wz-capi-pico/src/advanced_forms.rs`) | the field and its drop, never filled | D5 |
 | H5 | the callback protocol of a row | one record for every kind (`LatchedRow<S, A>` in `wz-capi-coop/src/engine.rs`) | none | no | gone (D6) |
 | H6 | the session's L3 tables as a value | `SessionTables` and `PeerTables` in `wz-session-core` | `RegistryOf<H>` in `wz-capi-coop/src/engine/registry.rs`: the application's observer (`SlotObserverOf`, whose `tables` is the `SessionTables`), the faces' `FaceTables` (`peer`, `gets`, the due row), the holders' index and the written count; every operation reaches the tables through it | 1,101 bytes; 7,938 in the peer case, 18,542 in the api case | D7 |
-| H7 | a pending get | `SessionTables::pending_gets` | each face's `FaceTables::gets` (`Requesters<ConsolidatingSink<LegSink, LegHold>>`) and the due index (`Dues`) | no | D8 |
+| H7 | a pending get | each leg's entry in its face's table of pending gets (`FaceTables::gets`, `Requesters<ConsolidatingSink<LegSink, LegHold>>`); the tables' `PendingGetRow` is not built on this engine (6.3) | the session's note of each leg (`SessionState::pending_gets`), and the get's own facts (mode, accepted key, deadline, callback) once for each leg | no | D8: H7a to H7d (6.3) |
 | H8 | a query kept past its callback | the queries' plane (`wz-session-core/src/query_plane.rs`, `FinalHold::kept`) | none: the engine keeps no copy, only the query's name across the port (`HeldQueryId`), read in 6.2 | no | not held twice |
 | H9 | the session's own tokens | the application's tables (`ObserverTables::held_tokens`) | none; the tokens a lost face owes are kept apart (`OwedTokens`), read with D7 | no | gone (D9a, D9b) |
 | H10 | a sample between a read and a callback | the read's frame | the round, under `wz_round` | no | D10 |
@@ -181,7 +181,7 @@ reverted when its row does not move by its expectation.
 | D5 | H4 | with S-SINK (`docs/win-budget/size.md` section 3.1) | the port's `KeyAnchor` as a type of no size where no ABI keeps an anchor | -100 to -200 text, 32 bytes a row of the region | 0 | the anchor test of `tests/liveliness.rs` kept on the build that keeps anchors; a size assertion of the row on one that does not |
 | D6 | H5 | landed | `wz-capi-coop/src/engine.rs` (`LatchedRow<S, A>`, `RowCall<S, A>`, one `RowCallback` impl), `engine/query.rs` and `engine/liveliness.rs` (`QueryableRow`, `LivelinessRow` its instances); the subscriber's timestamp choice is the row's `shown` field, so its row is laid out as before | 0: the measured case builds the subscriber's instance alone, whose layout, constructor (out of line) and calls are unchanged; the api case 0 (each kind is still its own instance) | 0 | `closure_drops`, `queryable`, `liveliness`, `round` unchanged |
 | D7 | H6 | with the driver lane, step 6d | the registry becomes the session core's (`wz-session-core`: the table set and the faces' sets, a face named by its set's handle) | -300 to -800; `pico-peer-coop` and the api case to be read (7,938 and 18,542 held now) | to be read: the receive's one look at its face's set is kept, and no call is added | the registry's tests move with it; `direct_receive`, `in_place` |
-| D8 | H7 (H8 read as not held twice, 6.2) | read, not designed (6.2) | the gets' legs as rows of the pending get | 0; the api case to be read | 0 | `get`, `local_query`, `queryable` |
+| D8 | H7 (H8 read as not held twice, 6.2) | designed (6.3): H7a, H7b, H7c, H7d | the note of each leg, then a callback for each leg, then the faces' copies of the get, then the snapshot's | 0; the api case by step (6.3) | 0; H7c read on the reply's receive | `get`, `local_query`, `queryable`, `snapshot`, `cancel` |
 | D9a | H9: the answering apart from the holder | landed | `local_token.rs` (`TokenAnswers`), `peer_tables.rs` (`PeerTables::token_answers`), the observer's answer and drain | 0 (no liveliness); the api case 0 to -100 (the observer's sum of refusals and its `try_from`, read on `dispatch_event_among` and `answer_iteration_event`) | 0 (an Interest's path only) | `local_token::tests` (the staging's tests now stage through `TokenAnswers`, and `a_chain_that_does_not_fit_whole_is_refused_and_stages_nothing` reads the refusal it counts), `peer_tables::lent_tests::a_lent_peer_holds_a_liveliness_answer` (the refusal counted by the lent row's staging), `limits::tests::max_pending_declares_stated_refuses_the_next_chain_whole` (the quota reaches the staging through `PeerTables::limit_to`, and the observer reads the refusal off it) |
 | D9b | H9: one holder | landed | `slot_observer.rs` (`RegistryTables::local_tokens`, `RegistryRows::local_tokens`, `ObserverTables::held_tokens` and `init_empty_at`; `ObserverRows` and the observer's field, region rows and line gone), `observer.rs` (the heap view reads the tables' registry), `local_token.rs` (the registry's region and counted forms gone), the coop engine's three callers of the observer's lent and counted forms and its region rows | 0 (no liveliness); the api case -100 to -400 (the observer's `LocalTokenRegistry<Region>` state, its region line, its lend of no row, its two `limit_*` calls, and the `HeldTokens` of `LocalTokenRegistry<Lent>`, whose vtable the `unwrap_or` named) | 0 | `slot_observer::lent_tests::a_lent_observers_tokens_are_a_registry_of_its_tables_lent_their_own_rows`; `limits::tests::max_local_tokens_*` (the token quota reaches the registry through `RegistryTables::hold_to`); `liveliness` |
 | D10 | H10 | the MCU matrix | a lock per value on a target without 64-bit atomics (the kernel's), so no `threads` form keeps the round | 0 on a host; the MCU images' to be read | to be read on the MCU matrix | `one_thread`, `round` until they go |
@@ -267,15 +267,14 @@ port's name of the kept query (`wz_capi_port::QueryHolder`), not a second record
 that name should be the row's handle rather than a lookup by generation and id is H2's question,
 one contract for every entity across the port, and goes with D4.
 
-H7 holds: a get the session waits on is recorded three times. The tables' row
-(`SessionTables::pending_gets`, `PendingGetRow`: the request id, the gate, the legs still owing
-their Final, the deadline, the callback); the engine's note of each leg pending
+H7 holds, though not as first read: the tables' row (`SessionTables::pending_gets`,
+`PendingGetRow`: the request id, the gate, the legs still owing their Final, the deadline, the
+callback) is not built on this engine (6.3). A get is recorded in the engine's note of each leg pending
 (`CoopEngine::pending_gets`, `Rows<PendingGet>`, lent with the legs' rows); and each face's
 requesters (`FaceTables::gets`, `Requesters<ConsolidatingSink<LegSink, LegHold>>`), with the
 index of the earliest deadline over the faces' sets (`Dues`, a `DueRow` per set). Folding the
-legs into the pending get's row reaches the get's send, its replies' consolidation per leg, the
-deadline index, the round's reply calls and the faces' sets, and is designed against those before
-it is written; it is the next step of this lane.
+legs into one row of the get reaches the get's send, its replies' consolidation per leg, the
+deadline index, the round's reply calls and the faces' sets; 6.3 designs it against them.
 
 D4 is the façade lane's because the port's identity of an entity is one contract for every kind
 and every engine: the cooperative engine, the tokio engine's port (`wz-capi-core/src/engine_port.rs`),
@@ -285,6 +284,62 @@ subscriber alone it would be changed again for the queryable, the token and the 
 subscriber, each time in every engine; changed once with step 5, which takes the port out of the
 release build (`arch-l4-facade` F7: the façade names L3's handles), the door keeps the L3 handle
 itself.
+
+### 6.3 H7, designed
+
+H7's premise as 6.2 states it holds for the cooperative engine in part. Its tables keep no get:
+`GetPresence` is `Absent` for its callbacks (`wz-capi-coop/src/engine.rs`, `RowCallbacks for
+CoopRows`), so `SessionTables::pending_gets`, `PendingGetRow` and the tables' held replies are
+built by the session core's tests alone. What a get is recorded in on this engine, for each leg (a
+link's face, a group's, or the session's own queryables'):
+
+| record | where | what it holds |
+|---|---|---|
+| the leg's entry | the face's table of pending gets (`FaceTables::gets`, `Requesters`): `ReplyRegistry`'s `Pending` for a query, `LivelinessGetRegistry`'s for a snapshot | the request id, which carries the entry's row; the Finals owed; the deadline; the accepted key; the sink: the consolidation of the get's mode (`ConsolidatingSink`), the leg's id (`LegSink`), its hold (`LegHold`) and the guard that says the leg's end (`LegEnd`) |
+| the session's note of the leg | `SessionState::pending_gets` (`PendingGet { face, leg, kind, fan }`), a row for each entry the faces' tables hold | the face and the entry's key, again; the leg's id, again; the fan that cancels it, held nowhere else |
+| the leg's callback | the get plane's rows (`LegRows`, `LegRow`), held by count | the callback the port minted for the leg, whether it shows timestamps |
+| what the leg holds of its replies | the plane's held table (`HeldReplies<u64>`, tagged with the leg) and its ends (`EndedLegs`) | the consolidation's held replies; the leg's end, with the timeout that ended it |
+| the deadline index | a `DueRow` for each face's set and the session's own gets (`Dues`) | a leaf for each table, keyed by the table's own earliest deadline: an index over tables, not a record of a get |
+
+Read against the four things the fold reaches:
+
+- The send. A leg's entry is held before its request goes out, so no answer arrives before it, under
+  a request id of the face's serial and the entry's row (`LegRid::at`, `wire_id::request_id_at`), so a
+  reply finds its entry at the row its id carries (`ReplyRegistry::row_of`) with no walk. The
+  note is written after the send, under the same hold.
+- The consolidation. Each leg consolidates on its own: its sink holds the get's mode and its own
+  held replies, flushed at that leg's end. A get of two legs in `Latest` hands its callback a
+  reply of a key from each leg. zenoh consolidates over every Final of the query and flushes once,
+  at the last (`api/session.rs:3025-3029`, as `reply_sink.rs` reads it), and zenoh-pico holds one
+  pending query with its remaining Finals (`_z_pending_query_t._remaining_finals`). Per-leg
+  consolidation is right only for a get of one leg: a client's get of its one link, its own
+  queryables not asked.
+- The deadline index. A leaf per table, each table keeping its earliest deadline as entries come
+  and go (`ReplyRegistry::due_ms`); an end is not told, a read raises a stale key (`DueIndex`).
+  Every leg of a get repeats the get's one deadline in its own table.
+- The round. A reply no thread captured is a record holding a count of the leg's callback row
+  (`Round::offer_reply`); the leg's end is handed out after every reply held before it, and the
+  callback is dropped by the last count, with no lock held.
+
+The facts held twice are the face and the entry's key, and the leg's id, in the entry and in the
+note; the facts of the get itself (its mode, its accepted key, its deadline, its timestamp choice,
+its callback) are held once for each of its legs. The target is zenoh's: a get is one row, the
+tables' `PendingGetRow` (its request id, its accepted key, the Finals its legs owe, its deadline,
+its callback), with its consolidation mode, its fan and its held replies (`SessionTables::held`,
+by the get's handle); a face holds of a leg only what a face must, the get its Final counts against
+and how many it owes, so a lost face ends its legs and the round of deliveries never meets a leg.
+Four steps, each landing on its own:
+
+| step | removes | reaches | expected | receive Ir |
+|---|---|---|---|---|
+| H7a | the session's note of each leg: the fan is a field of the leg's callback row (the get as its asker holds it: its callback, its timestamp choice, the fan that cancels it); a cancellation ends the first entry, over the faces' tables, whose sink's row is in the fan; a lost face's table is emptied as a set given back is; the close and the last handle empty every table | `pending_get.rs` (`PendingGet`, `PendingLegs`, `GetKind`, `SessionFaces::end_leg`, `LegTables::end_leg` go), `session_state.rs` (`SessionParts::PendingGets`, `note_pending` go), `get_plane.rs` (`GetCalls::Fan`, `LegRow::fan`, `GetPlane::in_fan`), `reply.rs` and `liveliness_get.rs` (`unregister_first`), the engine's four notes and their refusals, its close, its drop, its cancellation and the end's walk of the notes in every delivery that hands an end out, the arena's `pending legs` part and the region's rows of it | 0 (no get); the api case -200 to -600 text (the note's writes and refusals in `get_on_wire` and `liveliness_get_on_wire`, the walk in `deliver`, the close's and the drop's loops, `PendingLegs`' bodies) and 32 bytes a leg row of the arena (a note's 56 less the fan's 24 in the callback row) | 0: a reply is handed to its entry as before; the walk of the notes ran only where an end was handed out |
+| H7b | a callback for each leg: the engine mints the get's callback once and every leg's sink holds a count of its row, so the leg rows are a row for each get, and the get is over when its one callback is dropped (the port's contract: "a get is over when the last callback it minted is dropped") | `get_on_wire`, `liveliness_get_on_wire`, `hold_leg` (`LegAsk` holds the opened row), `GetPlane::open_leg` and a hold of an opened row; the doors' count of legs read first | the api case: one mint for each get; the leg rows' table sized by gets, not by legs | 0 |
+| H7c | the faces' copies of the get: the get is the tables' row (`GetPresence = Present` on this engine), its request id minted by the tables and carried by every leg, as zenoh and zenoh-pico carry one; its replies consolidated in the tables' held replies and flushed at its last Final, over every leg; its deadline in the row and the tables' watermark the one leaf of the index for queries (`Dues` keeps the snapshots' alone, or goes with H7d); a face's entry the get's handle and the Finals that face owes; the plane's held table and its leg rows go, the round's reply records holding the row's latch (P11) as a subscriber's do | `reply.rs` (the face's table of queries, its dispatch of a Response and a Final), `registry.rs` (`dispatch_reply`, `lend_reply`, `project_reply`, `take_reply`, `fire_reply`, `sweep_due_gets`, `Dues`), `get_plane.rs`, `round.rs`' reply records, the arena's gets parts | the api case: the faces' copies of the gate's key and of the deadline, the plane's held table and leg rows; kilobytes, to be read | must not grow: the request id carries the get's row as it carries the entry's now, and the Response's find is one look as now; read on the reply's receive before it lands |
+| H7d | the snapshot's copies: a liveliness get's row in the same table, its Interest's id per face (an Interest id is the link's) and its DeclFinal counted as a query's Final | `liveliness_get.rs`, the registry's `claim_token`, `fire_token` | the api case, to be read | 0 |
+
+H7c changes what a program of a peer with two links sees of a `Latest` or `Monotonic` get: one
+reply of a key over both legs, where it is handed one from each now. That is the reference's
+behaviour, and the change is stated in its commit and held by a test of a get of two legs.
 
 ## 7. The receive
 
