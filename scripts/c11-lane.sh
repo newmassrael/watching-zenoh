@@ -129,6 +129,11 @@ TARGET_FLAGS=(-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16)
 D3_FLAGS=("${TARGET_FLAGS[@]}" -std=c11 -ffreestanding -nostdlib -Os -ffunction-sections -fdata-sections
           -Wall -Wextra -Wpedantic -Werror)
 KEEP_FLAGS=(-fkeep-inline-functions -fkeep-static-functions)
+# The checkout's and the artifact root's absolute paths, mapped away. A unit that reaches
+# assert() carries __FILE__ in .rodata, so without this a figure measured the length of the
+# directory the tree was checked out in: the pools' .rodata moved by one byte between two
+# worktrees whose names differ by one character, and a hosted runner's path is another.
+PATH_FLAGS=("-ffile-prefix-map=$ROOT/=" "-ffile-prefix-map=$WZ_ARTIFACTS/=")
 INCLUDES=(-I "$SCE/backends/c/runtime/include" -I "$SCE/backends/c/forge-runtime/include" -I "$GEN")
 
 rm -rf "$OUT"
@@ -326,11 +331,11 @@ for unit in "${UNITS[@]}"; do
     log="$OBJ/$unit.log"
     if [[ -f "$GEN/$unit.c" ]]; then
         src="$GEN/$unit.c"
-        flags=("${D3_FLAGS[@]}")
+        flags=("${D3_FLAGS[@]}" "${PATH_FLAGS[@]}")
     else
         src="$OBJ/$unit.c"
         printf '#include "%s.h"\n' "$unit" > "$src"
-        flags=("${D3_FLAGS[@]}" "${KEEP_FLAGS[@]}")
+        flags=("${D3_FLAGS[@]}" "${PATH_FLAGS[@]}" "${KEEP_FLAGS[@]}")
     fi
     declared_where="${REFUSED_WHERE[$unit]:-}"
     rc=0
