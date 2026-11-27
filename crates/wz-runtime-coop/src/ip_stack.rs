@@ -83,7 +83,7 @@ use crate::udp_link::UdpStack;
 use crate::udp_link::{bind_refused, datagram_ends_fit, dial_bind, UDP_RX_CAPACITY};
 use crate::udp_link::{DatagramSocket, UdpDriver};
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-use crate::udp_link::{PortPeer, UdpPort};
+use crate::udp_link::{LinkSocket, UdpPort};
 
 /// The link of one session over a platform's datagram sockets `U`, its plain streams `T` and its
 /// secure-channel streams `L`: a datagram, a stream or a secure stream link, as its dial named.
@@ -513,7 +513,8 @@ impl<N: CountKind> LinkPlace<N> {
     /// its ends, made in a cell when the stack was lent some, of the type that says who waits for
     /// its input (`W`, the stack's), and waited on by its owner when the stack says so. Left to the
     /// compiler to inline: a build that only dials has one caller, and a body of its own there would
-    /// add a call and save nothing.
+    /// add a call and save nothing. A build that listens on `udp/` calls it with one socket type
+    /// alone (`own_datagram`, `LinkSocket`), so its links are one driver.
     fn datagram<U: DatagramSocket + 'static, W: InputWaiter>(
         &self,
         socket: U,
@@ -528,6 +529,21 @@ impl<N: CountKind> LinkPlace<N> {
             }
             link
         })
+    }
+
+    /// [`Self::datagram`] over `socket`, one of the stack's own (a dial's, an acceptor's bound to
+    /// its port): in a build that listens on `udp/`, held as the link socket a port's peer's link
+    /// holds too (`LinkSocket`), so the stack makes every datagram link of one driver type.
+    fn own_datagram<U: DatagramSocket + 'static, W: InputWaiter>(
+        &self,
+        socket: U,
+        peer: Option<SocketAddr>,
+        rx: RxBuffer<N::Flag>,
+        tx: TxBuffer<N::Flag>,
+    ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
+        #[cfg(feature = "udp-listen")]
+        let socket = LinkSocket::<U, N::Shared>::Own(socket);
+        self.datagram::<_, W>(socket, peer, rx, tx)
     }
 }
 
@@ -696,7 +712,7 @@ where
                 let socket = U::bind(dial_bind(self.local, ip.at)).map_err(bind_refused::<U>)?;
                 self.shape
                     .place
-                    .datagram::<_, W>(socket, Some(ip.at), rx, tx)
+                    .own_datagram::<_, W>(socket, Some(ip.at), rx, tx)
             }
             LinkProto::Tcp if !D::CARRIED => Err(LinkOpenError::Unsupported),
             LinkProto::Tcp => {
@@ -768,7 +784,7 @@ where
         let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = U::bind(SocketAddr::new(self.local, port)).map_err(bind_refused::<U>)?;
-        self.shape.place.datagram::<_, W>(socket, None, rx, tx)
+        self.shape.place.own_datagram::<_, W>(socket, None, rx, tx)
     }
 
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump, N>, LinkOpenError> {
@@ -781,16 +797,16 @@ where
         self.shape.lent = Some(tables);
     }
 
-    /// The largest cell any link of these takes: a datagram link, a link of a `udp/` port's
-    /// peer, a plain stream's and a secure channel's.
+    /// The largest cell any link of these takes: a datagram link (one type for a dialled socket
+    /// and a `udp/` port's peer, `LinkSocket`), a plain stream's and a secure channel's.
     const LINK_CELL_BYTES: usize = {
+        #[cfg(not(feature = "udp-listen"))]
         let datagram =
             CellRc::<UdpDriver<U, RxBuffer<N::Flag>, TxBuffer<N::Flag>, W>>::cell_bytes();
         #[cfg(feature = "udp-listen")]
-        let datagram = crate::link_cells::larger_cell(
-            datagram,
-            CellRc::<UdpDriver<PortPeer<U, N::Shared>, RxBuffer<N::Flag>, TxBuffer<N::Flag>, W>>::cell_bytes(),
-        );
+        let datagram = CellRc::<
+            UdpDriver<LinkSocket<U, N::Shared>, RxBuffer<N::Flag>, TxBuffer<N::Flag>, W>,
+        >::cell_bytes();
         let stream = crate::link_cells::larger_cell(
             CellRc::<<D::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
             CellRc::<<L::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
@@ -843,7 +859,7 @@ where
                 let socket = U::bind(dial_bind(self.local, ip.at)).map_err(bind_refused::<U>)?;
                 self.shape
                     .place
-                    .datagram::<_, W>(socket, Some(ip.at), rx, tx)
+                    .own_datagram::<_, W>(socket, Some(ip.at), rx, tx)
                     .map(IpDial::from)
             }
             LinkProto::Tcp => Ok(IpDial(IpDialing::Tcp(PendingStream {
@@ -1102,7 +1118,7 @@ impl<U: DatagramSocket + 'static, N: CountKind, W: InputWaiter> LinkListener<Hea
         let (rx, tx) = self.shape.buffers(self.shape.datagram_rx)?;
         self.shape
             .place
-            .datagram::<_, W>(share, Some(peer), rx, tx)
+            .datagram::<_, W>(LinkSocket::Port(share), Some(peer), rx, tx)
             .map(Some)
     }
 
