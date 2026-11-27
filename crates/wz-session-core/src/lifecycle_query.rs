@@ -76,6 +76,18 @@
 //! the caller did not mean as a target. The status query reads one peer the same
 //! way: its reply is about the peer its key names, and a pattern names none. The
 //! capability query has no target, so it answers any key that intersects it.
+//!
+//! # A sealed command in the attachment
+//!
+//! A close, reset, status or open query may carry, as its attachment, the command sealed by its
+//! commander's key (decision D17, `docs/command-seal.md`). It is then judged for the commander
+//! that key proves and not for the link it came over, which behind a router proves only the
+//! router: [`crate::sealed_command`] verifies it, holds it to the request the key names and to
+//! its freshness, and takes its counter only once the monitor permits it. A query whose sealed
+//! command is refused is answered `{"verdict":"refused","reason":"..."}`, with `"echo"` beside
+//! the challenge a node that has just started puts to a commander it holds no counter for, and is
+//! never judged as the link's commander. A node given no verifier ([`LifecycleQueries::with_seal`])
+//! refuses every query that carries an attachment.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -105,6 +117,8 @@ use crate::lifecycle_wire::{CLOSE_VERB, OPEN_VERB, RESET_VERB, STATUS_VERB};
 use crate::query_sink::{QueryView, ReplyError, ReplyOut};
 pub use crate::reset_generations::MapSeed;
 use crate::reset_generations::{ResetGenerations, HEAP_RESET_PEERS};
+use crate::sealed_command::{claim, Claimed, SealedNode};
+pub use crate::sealed_command::{SealRefused, SealVerifier};
 use crate::text_out::FixedText;
 use crate::zid_hex::same_zid;
 
@@ -279,6 +293,9 @@ pub struct LifecycleQueries<A, D, I = NoIntent, M = NoMachines, O = NoOpener, R 
     /// ([`HEAP_RESET_PEERS`]) and keeps the table on the heap, which grows as it fills, so it
     /// never refuses a peer for room. Volatile, as every runtime edit of D6 is.
     resets: RefCell<ResetGenerations<HEAP_RESET_PEERS, Heap>>,
+    /// The verifier of the sealed commands a query may carry (decision D17), or `None` for a node
+    /// that verifies none and refuses every query that carries an attachment.
+    seal: Option<alloc::boxed::Box<dyn SealVerifier + Send>>,
 }
 
 /// What [`LifecycleQueries::answer`] did with a query.
@@ -294,6 +311,9 @@ pub enum Answered {
     Open(OpenVerdict),
     /// A reply was staged: the capability document.
     Verbs,
+    /// A reply was staged: the query carried a sealed command, refused before the monitor judged
+    /// it (decision D17), and nothing of the node was asked.
+    Sealed(SealRefused),
     /// The query is no lifecycle query this node serves, or is a close, reset,
     /// status or open query that is not an exact key; nothing was replied.
     Unserved,
@@ -318,6 +338,7 @@ impl<A: Policy, D: SessionDirectory> LifecycleQueries<A, D> {
             machines: NoMachines,
             opener: NoOpener,
             resets: RefCell::new(ResetGenerations::with_seed(reset_seed)),
+            seal: None,
         }
     }
 }
@@ -343,6 +364,7 @@ where
             machines: self.machines,
             opener: self.opener,
             resets: self.resets,
+            seal: self.seal,
         }
     }
 
@@ -359,6 +381,7 @@ where
             machines: self.machines,
             opener: self.opener,
             resets: self.resets,
+            seal: self.seal,
         }
     }
 
@@ -375,6 +398,7 @@ where
             machines,
             opener: self.opener,
             resets: self.resets,
+            seal: self.seal,
         }
     }
 
@@ -391,6 +415,18 @@ where
             machines: self.machines,
             opener,
             resets: self.resets,
+            seal: self.seal,
+        }
+    }
+
+    /// These queries for a node that verifies the sealed commands a query may carry in its
+    /// attachment (decision D17) with `verifier`: such a query is judged for the commander whose key
+    /// signed the command, whatever link it came over, and is refused by name when the command
+    /// does not verify, is not the request its key names or is not fresh.
+    pub fn with_seal<V: SealVerifier + Send + 'static>(self, verifier: V) -> Self {
+        Self {
+            seal: Some(alloc::boxed::Box::new(verifier)),
+            ..self
         }
     }
 
@@ -461,14 +497,37 @@ where
         // sized to: a string, which this profile has.
         let mut body = String::new();
         // The commander is whom the key of the link the query arrived on proved, and nobody shown
-        // otherwise (decision D12): the dispatch of the host hands the view that says it.
+        // otherwise (decision D12): the dispatch of the host hands the view that says it. A query
+        // that carries a sealed command is the commander's whose key signed it (decision D17).
         let requester = view.requester();
-        let verdict = lifecycle_verdict(
-            &Asked { queries: self },
-            command,
-            Asker::query(requester.as_ref(), key),
-            &mut body,
-        );
+        let verifier = self
+            .seal
+            .as_deref()
+            .map(|verifier| verifier as &dyn SealVerifier);
+        let node = Asked { queries: self };
+        let verdict = match claim(view.attachment(), &command, verifier) {
+            Claimed::Channel => lifecycle_verdict(
+                &node,
+                command,
+                Asker::query(requester.as_ref(), key),
+                &mut body,
+            ),
+            Claimed::Sealed(sealed) => lifecycle_verdict(
+                &SealedNode::new(&node, sealed.admission()),
+                command,
+                Asker::sealed(sealed.commander(), key),
+                &mut body,
+            ),
+            Claimed::Refused(refused) => {
+                crate::diag_warn!(
+                    "lifecycle query on {key}: sealed command refused: {}",
+                    refused.words()
+                );
+                refused.write_json(&mut body);
+                let _ = reply_json(out, key, &body);
+                return Answered::Sealed(refused);
+            }
+        };
         // A reply the stage refused still happened as an order or a read: the verdict is
         // what the node did, and the host's reply-stage counters say the rest.
         let _ = reply_json(out, key, &body);
@@ -1791,6 +1850,257 @@ mod tests {
             let answers: Vec<Option<&str>> = answers.iter().map(Option::as_deref).collect();
             judge_session(case, Profile::Heap, &answers, world.orders.get())
                 .unwrap_or_else(|violation| panic!("{violation:?}"));
+        }
+    }
+    /// Decision D17 at the heap profile's entry point: a query that carries a sealed command, as
+    /// it reaches a node through a router whose own key no grant names.
+    #[cfg(feature = "sealed-commands")]
+    mod sealed {
+        use super::*;
+        use crate::credential_identity::zid_from_key_text;
+        use crate::sealed_command::seal::{self, Echo, Freshness};
+        use crate::sealed_command::witness::{DigestEs256, DigestSigner};
+        use crate::sealed_command::SealedCommands;
+        use alloc::vec;
+
+        /// The echo this node drew when it started.
+        const BOOT: Echo = [0x5e; 16];
+        /// The commander the grant lists, and one it does not.
+        const LISTED: DigestSigner = DigestSigner(0x41);
+        const STRANGER: DigestSigner = DigestSigner(0x42);
+        /// The zid the link proved: the router's, which no grant names (the test's [`COMMANDER`]).
+        const ROUTER: Zid = COMMANDER;
+
+        fn zid_text(zid: &Zid) -> String {
+            alloc::format!("{:x}", u128::from_le_bytes(*zid))
+        }
+
+        fn me() -> Zid {
+            zid_from_key_text(ME).expect("a zid")
+        }
+
+        fn peer_a() -> Zid {
+            zid_from_key_text(PEER_A).expect("a zid")
+        }
+
+        /// A node that grants `close` and `reset` to [`LISTED`] and nothing to the router, holds a
+        /// session with [`PEER_A`], and verifies sealed commands after a start with [`BOOT`].
+        fn node() -> LifecycleQueries<HeapGrants, Table> {
+            let grant = alloc::format!("{}=close,reset", zid_text(&LISTED.commander()));
+            LifecycleQueries::new(
+                ME,
+                "peer",
+                HeapGrants::parse([grant.as_str()]).expect("a grant"),
+                Table(RefCell::new(vec![fake(PEER_A)])),
+                TEST_SEED,
+            )
+            .with_seal(SealedCommands::<_, 4>::new(
+                me(),
+                DigestEs256,
+                Freshness::echo(BOOT),
+            ))
+        }
+
+        fn command(verb: seal::Verb, counter: u64, echo: Option<Echo>) -> seal::Command {
+            seal::Command {
+                verb,
+                node: me(),
+                object: seal::Object {
+                    peer: peer_a(),
+                    generation: (verb == seal::Verb::Reset).then_some(3),
+                },
+                counter,
+                echo,
+            }
+        }
+
+        fn sealed_by(signer: DigestSigner, command: &seal::Command) -> Vec<u8> {
+            let (bytes, len) = signer.sealed(command).expect("seals");
+            bytes[..len].to_vec()
+        }
+
+        /// Ask `key` over a link that proved the router, carrying `attachment`.
+        fn ask_with<O: PeerOpener>(
+            node: &LifecycleQueries<HeapGrants, Table, NoIntent, NoMachines, O>,
+            key: &str,
+            attachment: Option<&[u8]>,
+        ) -> (Answered, String) {
+            let view = BorrowedQuery {
+                keyexpr: key,
+                parameters: None,
+                attachment,
+                source_info: None,
+                payload: None,
+                encoding: None,
+                rid: 1,
+                is_local: false,
+                qos: QosLevel::DEFAULT,
+            };
+            let mut out = Recorder::default();
+            let answered = node.answer(&proven(&view, Some(ROUTER)), &mut out);
+            let body = out
+                .replies
+                .into_iter()
+                .map(|(_, body, _)| body)
+                .next()
+                .unwrap_or_default();
+            (answered, body)
+        }
+
+        fn close_key() -> String {
+            alloc::format!("@/{ME}/peer/session/close/{PEER_A}")
+        }
+
+        fn closed(node: &LifecycleQueries<HeapGrants, Table>) -> bool {
+            node.directory.0.borrow()[0].ordered.get()
+        }
+
+        /// The case D17 exists for: the router is not listed, so its own query is refused; the
+        /// listed commander's sealed close, after the echo a started node asks for, is permitted
+        /// and closes the session; the same object sent again is a replay. Red if the entry point
+        /// judged a sealed query as the link's commander or took a counter without the echo.
+        #[test]
+        fn a_listed_commanders_sealed_close_is_permitted_through_an_unlisted_router() {
+            let node = node();
+            let (answered, _) = ask_with(&node, &close_key(), None);
+            assert_eq!(
+                answered,
+                Answered::Close(CloseVerdict::Refused(RefusedReason::NotPermitted)),
+                "the router's own query is the router's"
+            );
+            assert!(!closed(&node));
+
+            let first = sealed_by(LISTED, &command(seal::Verb::Close, 1, None));
+            let (answered, body) = ask_with(&node, &close_key(), Some(&first));
+            assert_eq!(
+                answered,
+                Answered::Sealed(SealRefused::EchoRequired { echo: BOOT })
+            );
+            assert_eq!(
+                body,
+                alloc::format!(
+                    "{{\"verdict\":\"refused\",\"reason\":\"the sealed command must carry this \
+                     node's echo\",\"echo\":\"{}\"}}",
+                    "5e".repeat(16)
+                )
+            );
+            assert!(!closed(&node), "a challenge closes nothing");
+
+            let repeat = sealed_by(LISTED, &command(seal::Verb::Close, 2, Some(BOOT)));
+            let (answered, _) = ask_with(&node, &close_key(), Some(&repeat));
+            assert_eq!(
+                answered,
+                Answered::Close(CloseVerdict::Closing { links: 1 })
+            );
+            assert!(closed(&node));
+
+            let (answered, body) = ask_with(&node, &close_key(), Some(&repeat));
+            assert_eq!(answered, Answered::Sealed(SealRefused::Replay { last: 2 }));
+            assert!(body.ends_with(",\"last\":2}"), "{body}");
+        }
+
+        /// A sealed command that fails is refused by name and never judged as the router: a flipped
+        /// byte, a command for another peer or verb than the key names, one for another node, and
+        /// bytes that are no sealed command.
+        #[test]
+        fn a_tampered_or_misdirected_sealed_command_is_refused_by_name() {
+            let node = node();
+            let mut tampered = sealed_by(LISTED, &command(seal::Verb::Close, 5, Some(BOOT)));
+            let last = tampered.len() - 1;
+            tampered[last] ^= 0x01;
+            let other_peer = sealed_by(
+                LISTED,
+                &seal::Command {
+                    object: seal::Object {
+                        peer: zid_from_key_text(PEER_B).expect("a zid"),
+                        generation: None,
+                    },
+                    ..command(seal::Verb::Close, 6, Some(BOOT))
+                },
+            );
+            let other_verb = sealed_by(LISTED, &command(seal::Verb::Reset, 7, Some(BOOT)));
+            let other_node = sealed_by(
+                LISTED,
+                &seal::Command {
+                    node: zid_from_key_text(PEER_B).expect("a zid"),
+                    ..command(seal::Verb::Close, 8, Some(BOOT))
+                },
+            );
+            for (attachment, refused) in [
+                (tampered, SealRefused::BadSignature),
+                (other_peer, SealRefused::NotTheRequest),
+                (other_verb, SealRefused::NotTheRequest),
+                (other_node, SealRefused::WrongNode),
+                (b"not a sealed command".to_vec(), SealRefused::Malformed),
+            ] {
+                let (answered, body) = ask_with(&node, &close_key(), Some(&attachment));
+                assert_eq!(answered, Answered::Sealed(refused), "{body}");
+                assert!(body.contains(refused.words()), "{body}");
+            }
+            assert!(!closed(&node));
+        }
+
+        /// A sealed reset names its generation as its key does: the generation of the key and of
+        /// the object must agree.
+        #[test]
+        fn a_sealed_reset_is_held_to_the_generation_its_key_names() {
+            let node = node();
+            let reset = sealed_by(LISTED, &command(seal::Verb::Reset, 1, Some(BOOT)));
+            let other = alloc::format!("@/{ME}/peer/session/reset/4/{PEER_A}");
+            assert_eq!(
+                ask_with(&node, &other, Some(&reset)).0,
+                Answered::Sealed(SealRefused::NotTheRequest)
+            );
+            let named = alloc::format!("@/{ME}/peer/session/reset/3/{PEER_A}");
+            assert_eq!(
+                ask_with(&node, &named, Some(&reset)).0,
+                Answered::Reset(ResetVerdict::Resetting { links: 1 })
+            );
+        }
+
+        /// A verified command no grant permits takes no counter: its commander is still asked for
+        /// the echo afterwards, so a key nobody granted takes no slot of the window. Red if the
+        /// counter were taken before the monitor decided.
+        #[test]
+        fn a_sealed_command_no_grant_permits_takes_no_counter() {
+            let node = node();
+            let stranger = sealed_by(STRANGER, &command(seal::Verb::Close, 1, Some(BOOT)));
+            assert_eq!(
+                ask_with(&node, &close_key(), Some(&stranger)).0,
+                Answered::Close(CloseVerdict::Refused(RefusedReason::NotPermitted))
+            );
+            assert!(!closed(&node));
+            let again = sealed_by(STRANGER, &command(seal::Verb::Close, 2, None));
+            assert_eq!(
+                ask_with(&node, &close_key(), Some(&again)).0,
+                Answered::Sealed(SealRefused::EchoRequired { echo: BOOT }),
+                "the stranger has no counter here"
+            );
+        }
+
+        /// A node given no verifier refuses a query that carries an attachment, even from a link
+        /// its grants name: the attachment is a claim, and an unverified claim is no command.
+        #[test]
+        fn a_node_with_no_verifier_refuses_an_attachment_even_from_a_listed_link() {
+            let grant = alloc::format!("{}=close", zid_text(&ROUTER));
+            let node: LifecycleQueries<HeapGrants, Table> = LifecycleQueries::new(
+                ME,
+                "peer",
+                HeapGrants::parse([grant.as_str()]).expect("a grant"),
+                Table(RefCell::new(vec![fake(PEER_A)])),
+                TEST_SEED,
+            );
+            let sealed = sealed_by(LISTED, &command(seal::Verb::Close, 1, Some(BOOT)));
+            assert_eq!(
+                ask_with(&node, &close_key(), Some(&sealed)).0,
+                Answered::Sealed(SealRefused::NotVerified)
+            );
+            assert!(!closed(&node));
+            assert_eq!(
+                ask_with(&node, &close_key(), None).0,
+                Answered::Close(CloseVerdict::Closing { links: 1 }),
+                "CONTROL: the same link without the attachment is its grant"
+            );
         }
     }
 }

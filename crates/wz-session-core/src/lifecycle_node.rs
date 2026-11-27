@@ -516,6 +516,8 @@ mod tests {
     /// Decisions D12 and D16: the monitor is asked about the commander of every verb, once, first,
     /// whoever the commander is, and records what it decided. A commander nobody shown is refused
     /// even by a node whose policy grants every verb, and a refused request asks the node nothing.
+    /// A sealed command's commander is refused too when the node's monitor holds no admission to
+    /// take its counter (decision D17): the entry point that verified it gives one.
     /// Red if `lifecycle_verdict` read the node before the monitor or skipped the record.
     #[test]
     fn the_monitor_decides_every_verb_about_the_commander() {
@@ -526,7 +528,7 @@ mod tests {
             (
                 Commander::Sealed(&PROVEN),
                 "sealed:2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
-                true,
+                false,
             ),
             (Commander::Unproven, "unproven", false),
         ] {

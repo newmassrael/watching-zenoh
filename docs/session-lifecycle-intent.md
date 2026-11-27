@@ -1652,6 +1652,35 @@ command line in the declaration's shape, not from a node declaration file. The
 Zephyr loopback image names a `Commander` where `lifecycle_verdict` now takes an
 `Asker` (lane D18's file).
 
+**D17 built.** A sealed command reaches the monitor as its commander on both profiles' in-band
+entry points. The object travels as the lifecycle query's attachment, which a router hands on as
+it received it (upstream's router clones the request body that holds it,
+`zenoh/src/net/routing/dispatcher/queries.rs` @ `payload: msg.payload.clone(),`; wz's clones the
+whole request, `crates/wz-runtime-tokio/src/router_forward.rs` @ `let mut carrier = request.clone();`).
+One function reads it for both profiles (`crates/wz-session-core/src/sealed_command.rs` @
+`pub fn claim<'v>(`): the object is verified against the node's zid, held to the verb, the peer
+and the generation the key names, and checked fresh; then the monitor judges the request with
+`Commander::Sealed`, and the counter is taken by an `Admission` the monitor asks only after a
+grant permits the commander (`crates/wz-session-core/src/lifecycle_monitor.rs` @
+`pub fn with_admission(self, admission: &'a dyn Admission) -> Self {`), before any effect, so an
+object no grant permits takes no counter; a monitor given no admission refuses a sealed commander
+(`Refusal::NotFresh`). A query whose object fails is refused by name, never judged as the link's
+commander, and a node with no verifier refuses every query that carries an attachment. The heap
+profile verifies in `LifecycleQueries::with_seal`; the fixed profile in `admin_fixed::FixedSeal`,
+handed to the client's verbs by `VerbLegs::verify_sealed_with`, over ES256 by the TLS library's
+PSA Crypto (`crates/wz-tls-mbedtls/src/es256.rs`, `wz_tls_es256_verify`), so it links no
+`ring`. Across a restart the node uses OSCORE's echo (RFC 8613, appendix B.1.2): it draws one
+when it starts, refuses a commander it holds no counter for with
+`{"verdict":"refused","reason":"...","echo":"<hex>"}` until the repeated command carries it, and
+a port may give back a persisted window instead (appendix B.1.1;
+`crates/wz-command-seal/src/fresh.rs`). The format, the reply and the ports are
+`docs/command-seal.md`. What remains: no host wires a verifier yet (the heap binding in
+`wz-runtime-tokio` and the declared node of `deploy/host-slot-node` each construct their
+`LifecycleQueries` or `VerbLegs` without one, and draw no echo), so the end-to-end case over a
+stock zenohd, a commander behind a router whose own key no grant names, is witnessed at both entry
+points with the router's zid as the link's proof and not yet over the wire; and stock zenoh's
+`z_get` carries no attachment, so that witness needs a commander of wz's.
+
 ## 6. The contract for every verb (step 8; A, B and D built, C in part)
 
 Step 7e held the transports to one table for `open`. The other verbs of D6

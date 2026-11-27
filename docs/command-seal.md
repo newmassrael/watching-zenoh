@@ -29,7 +29,7 @@ between them, and a grant names the zid.
 
 ## The object
 
-All of it is CBOR in the deterministic encoding of RFC 8949, section 4.2.1 (`cbor.rs`): every
+All of it is CBOR in the deterministic encoding of RFC 8949, section 4.2.1 (`crates/wz-command-seal/src/cbor.rs`): every
 argument in the fewest bytes that hold it, every length definite, map keys in the bytewise order
 of their encodings. There is exactly one encoding of a command, so the bytes the commander signed
 are the bytes the node rebuilds the Sig_structure from, and two copies of one command cannot
@@ -63,6 +63,7 @@ Payload = [
         generation: uint / null,    ; a reset's generation; null for every other verb
     ],
     counter: uint,                  ; above every counter this commander sealed before
+    ? echo:  bstr .size 16,         ; the node's echo, when the command repeats one refused for it
 ]
 ```
 
@@ -103,16 +104,17 @@ or the SPKI bytes themselves), and each was weighed:
 
 ### Sizes
 
-Every item of the protected header has a fixed size, so it is 83 bytes. The payload is at most 60
-bytes (a reset whose generation and counter each take eight), the Sig_structure at most 160 and
-the whole object at most 216 (`MAX_SEALED_LEN`). A node opens one on its stack with no allocator.
+Every item of the protected header has a fixed size, so it is 83 bytes. The payload is at most 77
+bytes (a reset whose generation and counter each take eight, carrying an echo), the Sig_structure
+at most 177 and the whole object at most 233 (`MAX_SEALED_LEN`); without an echo each is 17 bytes
+less. A node opens one on its stack with no allocator.
 
 ### A worked object
 
-The tests pin one object made outside the crate (`src/tests.rs`, `PINNED_SEALED_HEX`): a reset of
+The tests pin one object made outside the crate (`crates/wz-command-seal/src/tests.rs`, `PINNED_SEALED_HEX`): a reset of
 generation 7 for the peer `202122...2f` at the node `101112...1f`, counter 42, assembled by hand
 from this document and signed by `openssl dgst -sha256 -sign` over its Sig_structure. Its key is
-pinned as a PEM (`src/key.rs`), and the zid the crate derives from the COSE_Key equals what
+pinned as a PEM (`crates/wz-command-seal/src/key.rs`), and the zid the crate derives from the COSE_Key equals what
 `wz_node.py` `zid_of` gives for that PEM (`ff05494985b357564f04d8a732497692`).
 
 ## Opening a sealed command
@@ -156,10 +158,25 @@ window never fills in a correct deployment, so `WindowFull` names a declaration 
 commanders than the window holds.
 
 **A restart.** The window is memory, so a node that restarts has forgotten its counters and would
-take a replayed command once more. OSCORE meets the same loss with persisted state or a challenge
-(RFC 8613, appendix B.1). The crate leaves the choice to the node: `ReplayWindow::iter` lists
-every commander and its last counter, and giving them back to `accept` at start restores the
-window. Which of the two a node uses is open (see the decisions at the end).
+take a replayed command once more. OSCORE meets the same loss two ways (RFC 8613, appendix B.1),
+and `Freshness<N>` (`crates/wz-command-seal/src/fresh.rs`) has both:
+
+- **Echo** (appendix B.1.2; RFC 9175, section 2), what every node does: when it starts it draws an
+  echo of sixteen bytes from its entropy (`Freshness::echo`). A verified command of a commander the
+  window holds no counter for is refused with `EchoRequired { echo }` unless its payload carries
+  that echo; the commander seals the command again, under a new counter, with the echo as the
+  payload's fifth item, and that command is taken and starts the commander's counter. A command
+  sealed before the start cannot carry an echo drawn after it, so none is taken twice, and the
+  node keeps nothing across the start. The echo of a commander the window holds is not read: its
+  counter already refuses what it sealed before. It costs one round trip per commander per start.
+- **A persisted window** (appendix B.1.1), what a port may provide: a node that writes the window
+  down after each command it takes and before it answers (`ReplayWindow::iter`), and gives it back
+  when it starts (`Freshness::persisted`), has lost nothing and asks for no echo. No image of the
+  workspace has the storage for it today; the fixed profile's `FixedSeal::start_persisted` and
+  `FixedSeal::window` are its door.
+
+`Freshness::check` answers whether a command would be taken, taking nothing, and
+`Freshness::take` takes it after the same check.
 
 ## Ports
 
@@ -177,29 +194,31 @@ Verification and signing are ports, so a node uses the primitives it already lin
 reads a PKCS#8 document or makes a key. A fixed-memory build turns the feature off
 (`default-features = false`) and links no `ring`.
 
-**A fixed-memory node** implements `Es256` over the PSA Crypto API of the TF-PSA library
-`wz-tls-mbedtls` links. What it needs, which the port does not provide:
+**A fixed-memory node** verifies over the PSA Crypto API of the TF-PSA library `wz-tls-mbedtls`
+links: `wz_tls_mbedtls::es256::PsaEs256` (feature `es256`, `crates/wz-tls-mbedtls/src/es256.rs`)
+over the C entry point `wz_tls_es256_verify` (`crates/wz-tls-mbedtls/csrc/wz_tls.c`). It imports
+the point as a volatile key of type `PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1)`, 256
+bits, usage `PSA_KEY_USAGE_VERIFY_MESSAGE`, algorithm `PSA_ALG_ECDSA(PSA_ALG_SHA_256)` (PSA's
+import format for such a key is exactly the uncompressed point), calls `psa_verify_message`
+(PSA's signature format for ECDSA is exactly r then s, so neither side converts) and destroys the
+key; a point the import refuses verifies nothing, and a call before the library started verifies
+nothing. It needs `PSA_WANT_ALG_ECDSA`, `PSA_WANT_ECC_SECP_R1_256`, `PSA_WANT_ALG_SHA_256` and
+`PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY`, which the channel's TLS 1.3 with a P-256 peer already needs:
+the build `vendored` makes states them in `crates/wz-tls-mbedtls/config/wz_tls_crypto_config.h`,
+and a Zephyr image states them in its own configuration (`CONFIG_PSA_WANT_ALG_ECDSA`,
+`CONFIG_PSA_WANT_ECC_SECP_R1_256`, `CONFIG_PSA_WANT_ALG_SHA_256`,
+`CONFIG_PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY`). The echo is drawn from the same library's generator
+(`es256::random_echo`, `psa_generate_random`). The codec crate stays free of any TLS library.
 
-- one C entry point beside the channel's, e.g. `wz_tls_es256_verify(point, message, len,
-  signature)`, that imports the point as a volatile key of type
-  `PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1)`, 256 bits, usage
-  `PSA_KEY_USAGE_VERIFY_MESSAGE`, algorithm `PSA_ALG_ECDSA(PSA_ALG_SHA_256)` (PSA's import
-  format for such a key is exactly the uncompressed point), calls `psa_verify_message` (PSA's
-  signature format for ECDSA is exactly r then s, so neither side converts), and destroys the key;
-- the build options `PSA_WANT_ALG_ECDSA`, `PSA_WANT_ECC_SECP_R1_256`,
-  `PSA_WANT_ALG_SHA_256` and `PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY`, which a TLS 1.3 build that
-  verifies a P-256 peer already enables;
-- a Rust `impl Es256` over that entry point in `wz-tls-mbedtls`, so the codec crate stays free
-  of any TLS library.
+Not measured: what one verification costs in time and stack on a given MCU is that image's
+measurement to make.
 
-Not built, and not measured: what one verification costs in time and stack on a given MCU is
-that image's measurement to make.
-
-## How D16 consumes it
+## How the monitor consumes it
 
 D16's monitor judges (subject, verb, object, context). A sealed command adds one subject,
 `Commander::Sealed(&Zid)`, beside the commander a channel proves. The order on the node, for a
-lifecycle query that carries a sealed command:
+lifecycle query that carries a sealed command, is written once for both profiles
+(`crates/wz-session-core/src/sealed_command.rs`, `claim`):
 
 1. `verify_sealed(bytes, own_zid, &es256)`. A refusal refuses the request; the node does not
    fall back to the channel's commander, because a sealed command that fails is a claim that
@@ -207,37 +226,62 @@ lifecycle query that carries a sealed command:
 2. The sealed command must be the request: its verb is the key's verb (`open_passive` for a key
    `open/passive/<peer>`), its peer is the key's peer (`zid_from_key_text` of the peer chunk),
    its generation is the key's for a reset and absent otherwise, and its node is the key's node
-   (`verify_sealed` checked it against the node's own). A mismatch refuses: a router must not
-   move a sealed command onto another key.
-3. The monitor judges `permits(verb, Commander::Sealed(&sealed.commander))`. A refusal takes no
-   counter.
-4. `Verified::take(&mut window)`. `Replay` or `WindowFull` refuses.
+   (`verify_sealed` checked it against the node's own). A mismatch refuses
+   (`NotTheRequest`): a router must not move a sealed command onto another key.
+3. `Freshness::check`: a replay, a window with no room, or a commander with no counter and no
+   echo refuses, taking nothing.
+4. The monitor judges the request with `Commander::Sealed(&sealed.commander)`. The entry point
+   judges the node through `SealedNode`, whose monitor holds the `Admission` that takes the
+   counter: `Monitor::decide` asks it only after a grant permits the commander, and a refused
+   take turns the permit into `Refusal::NotFresh`. A monitor given no admission refuses every
+   sealed commander so (fail-safe). An object no grant permits therefore takes no counter and no
+   slot of the window.
 5. The effect, as for any commander.
 
-A query that carries no sealed command keeps today's subject, the channel's commander. The window
-lives with the node: on the fixed profile a static table of the size the declaration's sealed
-grants need, on the heap profile the same type in the node's state.
+A query that carries no attachment keeps today's subject, the channel's commander. A query that
+carries an attachment on a node given no verifier, or built without `sealed-commands`, is
+refused as `NotVerified`. The window lives with the node: on the heap profile a
+`SealedCommands<E, N>` in the node's `LifecycleQueries` (`with_seal`), on the fixed profile a
+`FixedSeal<E, N>` in a static behind the runtime's critical section, handed to the verbs'
+queryable with `VerbLegs::verify_sealed_with` and started with the node's zid and an echo once
+the node knows its zid (`FixedSeal::start`). An admin node's `Verbs` and a node that binds only
+the open verb verify none.
 
-## How the object travels (a proposal)
+## How the object travels
 
-Proposed for the main session, not implemented here: the sealed command travels as the
-**attachment** of the lifecycle query. The key keeps naming the node, the verb and the peer as
-today, so routing and the key grammar are unchanged; the attachment is a query field the protocol
-already carries end to end, and a router forwards it without reading it. A node reads it through
-the query view it already has (`QueryView::attachment` in `wz_session_core::query_sink`). The
-encoding has no framing of its own to add: the attachment is the 216 bytes or fewer of the object
-itself, and its COSE tag (18) tells it apart from any other attachment. What the main session must
-confirm before relying on it: that every router wz ships, and upstream's, forwards a query's
-attachment unchanged to the queryable.
+The sealed command travels as the **attachment** of the lifecycle query. The key keeps naming the
+node, the verb and the peer as today, so routing and the key grammar are unchanged; the
+attachment is the object itself, 233 bytes or fewer, with no framing of its own. A node reads it
+through the query view it already has (`QueryView::attachment`).
 
-A commander seals with `seal` (or `examples/seal_command.rs`, which reads a PKCS#8 PEM and
-prints the object in hex and the commander's zid) and sends a get on the lifecycle key with the
-object as the attachment.
+A router forwards it unchanged. Upstream's attachment of a query is a field of the query body
+(`commons/zenoh-protocol/src/zenoh/query.rs` @ `pub ext_attachment: Option<ext::AttachmentType>,`),
+and its router hands a routed request on with that body cloned
+(`zenoh/src/net/routing/dispatcher/queries.rs` @ `payload: msg.payload.clone(),`). wz's router
+clones the whole request and rewrites its source, its key and its id alone
+(`crates/wz-runtime-tokio/src/router_forward.rs` @ `let mut carrier = request.clone();`).
+
+**The reply.** A query whose sealed command is refused before the monitor is answered as every
+lifecycle refusal is, one JSON document with the packed id of `application/json`, under the key
+that was asked: `{"verdict":"refused","reason":"<words>"}`, the words naming the refusal
+(`SealRefused::words`). Two carry what the commander needs: a replay adds the commander's last
+counter, `"last":N`, and the challenge of a node that has just started adds its echo,
+`{"verdict":"refused","reason":"the sealed command must carry this node's echo","echo":"<32
+lowercase hex digits>"}`, the echo's sixteen bytes in order, which the commander puts back as the
+payload's fifth item. A request the monitor refuses is answered in the verb's own refusal
+(`"this node does not permit closing the session with that peer"`), whoever its subject was.
+
+A commander seals with `seal` (or `crates/wz-command-seal/examples/seal_command.rs`, which reads
+a PKCS#8 PEM, takes the echo a refusal handed out as `echo=<hex>`, and prints the object in hex
+and the commander's zid) and sends a get on the lifecycle key with the object as the attachment.
 
 ## Decisions for the owner
 
-- **The window across a restart**: persist the window (`iter` and `accept`), or bind a command
-  to the node's boot with a challenge the node hands out (OSCORE's Echo, RFC 8613 appendix
-  B.1.2), which costs a round trip per command and keeps no state.
-- **A sealed command that fails**: refused (proposed above), rather than judged as the channel's
-  commander.
+- **The window across a restart**: closed by the textbook answer, the echo (appendix B.1.2), on
+  every node, with a persisted window (appendix B.1.1) as a port's option. Open: whether an
+  image with storage should persist the window and skip the round trip.
+- **A sealed command that fails**: refused by name, never judged as the channel's commander.
+- **The echo reply is not signed.** OSCORE protects its 4.01 with the echo; a refusal here is a
+  plain document, so a router can hand the commander a wrong echo. That costs the commander one
+  more round trip and grants nothing (the node refuses a wrong echo with the right one); a router
+  that drops replies can deny service either way. Open: whether the node should sign its refusals.

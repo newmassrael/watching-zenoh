@@ -88,6 +88,17 @@ impl<'a> Asker<'a> {
             key: Some(key),
         }
     }
+
+    /// A query in band on `key` that carried a sealed command, verified as signed by the key
+    /// whose zid is `commander` (decision D17): the commander is that zid, whatever link the
+    /// query arrived on.
+    pub const fn sealed(commander: &'a Zid, key: &'a str) -> Self {
+        Self {
+            commander: Commander::Sealed(commander),
+            channel: Channel::Query,
+            key: Some(key),
+        }
+    }
 }
 
 /// Why a request was permitted.
@@ -121,6 +132,9 @@ pub enum Refusal {
     /// The subject's grants of this verb are each narrowed to a key expression, and the request
     /// arrived on no key any of them includes.
     OutsideGrant,
+    /// A grant permits the commander of a sealed command, and the command's counter was not taken:
+    /// a replay, a window with no room, or a monitor that holds no window to take it in.
+    NotFresh,
 }
 
 /// What the monitor decided, with its reason.
@@ -267,6 +281,14 @@ fn within(narrowed: &str, asked: &str) -> bool {
     !asked.contains(['*', '$']) && crate::keyexpr_match::keyexpr_intersects(narrowed, asked)
 }
 
+/// What the proof of a sealed command still asks once a grant permits its commander: that its
+/// counter is taken (decision D17). Asked after the policy and before any effect, so a command no
+/// grant permits takes no counter and a command whose counter is refused has no effect.
+pub trait Admission {
+    /// Take what the request's proof asks to be taken, or say why it cannot be.
+    fn admit(&self, request: &Request<'_>) -> Result<(), Refusal>;
+}
+
 /// Where the monitor writes every decision, permit and refusal alike, with its request.
 pub trait DecisionRecord {
     /// Keep `decision` on `request`.
@@ -296,18 +318,45 @@ impl DecisionRecord for NoRecord {
 pub struct Monitor<'a> {
     policy: &'a dyn Policy,
     record: &'a dyn DecisionRecord,
+    admission: Option<&'a dyn Admission>,
 }
 
 impl<'a> Monitor<'a> {
     /// The monitor of a node whose policy is `policy` and whose decisions are kept in `record`.
     pub fn new(policy: &'a dyn Policy, record: &'a dyn DecisionRecord) -> Self {
-        Self { policy, record }
+        Self {
+            policy,
+            record,
+            admission: None,
+        }
+    }
+
+    /// This monitor for a request that carried a sealed command: a permit of its commander stands
+    /// only once `admission` has taken the command's counter.
+    pub fn with_admission(self, admission: &'a dyn Admission) -> Self {
+        Self {
+            admission: Some(admission),
+            ..self
+        }
     }
 
     /// Decide `request` for a node that binds its verb when `bound` ([`decide`]), and record the
     /// decision before it is answered.
+    ///
+    /// A permit of a sealed command's commander is then admitted: its counter taken, or the request
+    /// refused as [`Refusal::NotFresh`]. A monitor given no admission refuses every sealed
+    /// commander so, since nothing took its counter (fail-safe).
     pub fn decide(&self, bound: bool, request: &Request<'_>) -> Decision {
-        let decision = decide(self.policy, bound, request);
+        let mut decision = decide(self.policy, bound, request);
+        if let (Decision::Permit(_), Commander::Sealed(_)) = (decision, request.subject) {
+            let admitted = match self.admission {
+                Some(admission) => admission.admit(request),
+                None => Err(Refusal::NotFresh),
+            };
+            if let Err(refusal) = admitted {
+                decision = Decision::Deny(refusal);
+            }
+        }
         self.record.record(request, decision);
         decision
     }
@@ -988,5 +1037,83 @@ mod tests {
             );
             assert!(!decide(&grants, true, &request(Commander::Pipe, verb, None)).permits());
         }
+    }
+    /// An admission that takes a sealed command's counter, or refuses as it is told, and counts
+    /// how often it is asked.
+    struct Counter {
+        refuse: bool,
+        asked: core::cell::Cell<u32>,
+    }
+
+    impl Admission for Counter {
+        fn admit(&self, _request: &Request<'_>) -> Result<(), Refusal> {
+            self.asked.set(self.asked.get() + 1);
+            if self.refuse {
+                Err(Refusal::NotFresh)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// A sealed command's counter is taken only after a grant permits its commander: an unlisted
+    /// commander and an ungranted verb are refused without asking, a channel's commander is never
+    /// asked, a refused take refuses the request, and a monitor with no admission permits no sealed
+    /// commander. Red if `Monitor::decide` admitted before deciding or permitted a sealed
+    /// commander with nothing to take its counter.
+    #[test]
+    fn a_sealed_commander_is_admitted_only_after_a_grant_permits_it() {
+        let table = Table {
+            grants: Vec::from([(Verb::Close, ADMIN, None)]),
+            ..Table::default()
+        };
+        let kept = Kept::default();
+        let taking = Counter {
+            refuse: false,
+            asked: core::cell::Cell::new(0),
+        };
+        let monitor = Monitor::new(&table, &kept).with_admission(&taking);
+        let sealed_close = |zid| request(Commander::Sealed(zid), Verb::Close, None);
+        assert_eq!(
+            monitor.decide(true, &sealed_close(&ADMIN)),
+            Decision::Permit(Grounds::Granted)
+        );
+        assert_eq!(taking.asked.get(), 1);
+        assert_eq!(
+            monitor.decide(true, &sealed_close(&STRANGER)),
+            Decision::Deny(Refusal::NotListed)
+        );
+        assert_eq!(
+            monitor.decide(true, &request(Commander::Sealed(&ADMIN), Verb::Open, None)),
+            Decision::Deny(Refusal::NotListed)
+        );
+        assert_eq!(
+            monitor.decide(
+                true,
+                &request(Commander::Verified(&ADMIN), Verb::Close, None)
+            ),
+            Decision::Permit(Grounds::Granted)
+        );
+        assert_eq!(taking.asked.get(), 1, "only the permitted sealed command");
+
+        let refusing = Counter {
+            refuse: true,
+            asked: core::cell::Cell::new(0),
+        };
+        let monitor = Monitor::new(&table, &kept).with_admission(&refusing);
+        assert_eq!(
+            monitor.decide(true, &sealed_close(&ADMIN)),
+            Decision::Deny(Refusal::NotFresh)
+        );
+        assert_eq!(refusing.asked.get(), 1);
+
+        let bare = Monitor::new(&table, &kept);
+        assert_eq!(
+            bare.decide(true, &sealed_close(&ADMIN)),
+            Decision::Deny(Refusal::NotFresh)
+        );
+        let last = *kept.0.borrow().last().expect("recorded");
+        assert_eq!(last.subject, Subject::Sealed(ADMIN));
+        assert_eq!(last.decision, Decision::Deny(Refusal::NotFresh));
     }
 }

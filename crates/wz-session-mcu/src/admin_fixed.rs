@@ -59,6 +59,9 @@ use wz_session_core::text_out::{FixedText, TextOut};
 
 use crate::node_opening::open_verdict;
 use wz_session_core::lifecycle_monitor::Asker;
+use wz_session_core::sealed_command::SealRefused;
+#[cfg(feature = "lifecycle-verbs")]
+use wz_session_core::sealed_command::{claim, Claimed, SealVerifier, SealedNode};
 
 use crate::admin_status::{
     write_connect_status, ConfigView, ConnectStatusSource, DialStatus, CONNECT_STATUS_TAIL,
@@ -140,7 +143,8 @@ impl<N: wz_session_core::lifecycle_node::LifecycleNode + Sync + 'static> InBand 
         zid_hex: &str,
         whatami: &str,
     ) {
-        serve_verbs(arena, query, out, zid_hex, whatami, &self.0);
+        // An admin node verifies no sealed command (decision D17): one it is sent is refused.
+        serve_verbs(arena, query, out, zid_hex, whatami, &self.0, None);
     }
 }
 
@@ -605,6 +609,22 @@ fn serve_open<const BODY: usize, O: NodeOpening>(
     if parsed.node_zid != zid_hex || parsed.whatami != whatami {
         return;
     }
+    // A node that binds only the open verb verifies no sealed command: a query that carries one is
+    // refused by name and never judged as the link's commander (decision D17).
+    if query.attachment().is_some() {
+        if let Some(tail) = node_key_tail(key, zid_hex, whatami) {
+            let _ = arena.serve_leg(
+                query,
+                out,
+                zid_hex,
+                whatami,
+                tail,
+                AdminLegEncoding::Json,
+                |body| SealRefused::NotVerified.write_json(body),
+            );
+        }
+        return;
+    }
     // The commander is whom the link's key proved asks, or nobody shown (decision D12).
     let requester = query.requester();
     let verdict = open_verdict(
@@ -651,6 +671,7 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
     zid_hex: &str,
     whatami: &str,
     node: &N,
+    seal: Option<&dyn SealVerifier>,
 ) {
     use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Verb};
     use wz_session_core::lifecycle_wire::{CLOSE_VERB, RESET_VERB, STATUS_VERB};
@@ -724,6 +745,10 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
     let Some(tail) = node_key_tail(key, zid_hex, whatami) else {
         return;
     };
+    // A query that carries a sealed command is the commander's whose key signed it, verified,
+    // held to this key and fresh before the monitor judges it, and its counter taken only on a
+    // permit (decision D17); one that fails is refused by name and never judged as the link's.
+    let claimed = claim(query.attachment(), &command, seal);
     let _ = arena.serve_leg(
         query,
         out,
@@ -731,8 +756,19 @@ fn serve_verbs<const BODY: usize, N: wz_session_core::lifecycle_node::LifecycleN
         whatami,
         tail,
         AdminLegEncoding::Json,
-        |body| {
-            lifecycle_verdict(node, command, Asker::query(requester.as_ref(), key), body);
+        |body| match &claimed {
+            Claimed::Channel => {
+                lifecycle_verdict(node, command, Asker::query(requester.as_ref(), key), body);
+            }
+            Claimed::Sealed(sealed) => {
+                lifecycle_verdict(
+                    &SealedNode::new(node, sealed.admission()),
+                    command,
+                    Asker::sealed(sealed.commander(), key),
+                    body,
+                );
+            }
+            Claimed::Refused(refused) => refused.write_json(body),
         },
     );
 }
@@ -765,6 +801,7 @@ pub struct VerbLegs {
     host: AdminHost<VERB_REPLY_BYTES>,
     name: core::cell::UnsafeCell<VerbName>,
     named: Cell<bool>,
+    seal: Cell<Option<&'static (dyn SealVerifier + Sync)>>,
 }
 
 /// Who the node is, as the verbs' keys name it, and the key the queryable is registered under.
@@ -806,7 +843,20 @@ impl VerbLegs {
                 pattern: FixedText::new(),
             }),
             named: Cell::new(false),
+            seal: Cell::new(None),
         }
+    }
+
+    /// Verify the sealed commands a query may carry with `verifier` (decision D17): such a query
+    /// is judged for the commander whose key signed it, whatever link it came over. Once, before
+    /// the queryable is registered; `false` when a verifier was given before, which stays. Until
+    /// then every query that carries an attachment is refused by name.
+    pub fn verify_sealed_with(&self, verifier: &'static (dyn SealVerifier + Sync)) -> bool {
+        if self.seal.get().is_some() {
+            return false;
+        }
+        self.seal.set(Some(verifier));
+        true
     }
 
     /// Name the node the verbs are of, `@/<zid_hex>/<whatami>`, and hand back the key the
@@ -877,8 +927,133 @@ impl VerbLegs {
                 busy.set(busy.get().saturating_add(1));
                 return;
             };
-            serve_verbs(&mut arena, query, out, zid_hex, whatami, self.node);
+            let seal = self.seal.get().map(|seal| seal as &dyn SealVerifier);
+            serve_verbs(&mut arena, query, out, zid_hex, whatami, self.node, seal);
         });
+    }
+}
+
+/// The verifier of the sealed commands a fixed-memory node is sent (decision D17): its ES256 (the
+/// TLS library's, `wz_tls_mbedtls::es256::PsaEs256`), and once the node has started, its zid and
+/// the freshness of the commands of up to `N` commanders, in a static behind the runtime's
+/// critical section. `N` is the number of commanders the node's declaration grants a verb to,
+/// so a window filled only by commanders the node permits never refuses one for room.
+#[cfg(feature = "sealed-commands")]
+pub struct FixedSeal<E, const N: usize> {
+    es256: E,
+    state: Mutex<RefCell<Option<SealState<N>>>>,
+}
+
+/// What a started [`FixedSeal`] holds: the node's zid and the freshness of its commanders.
+#[cfg(feature = "sealed-commands")]
+struct SealState<const N: usize> {
+    node: wz_session_core::lifecycle_node::Zid,
+    fresh: wz_session_core::sealed_command::seal::Freshness<N>,
+}
+
+#[cfg(feature = "sealed-commands")]
+impl<E, const N: usize> FixedSeal<E, N> {
+    /// A verifier that verifies with `es256` and verifies nothing until it is started. `const`,
+    /// so the image declares it in a `static`.
+    pub const fn new(es256: E) -> Self {
+        Self {
+            es256,
+            state: Mutex::new(RefCell::new(None)),
+        }
+    }
+
+    /// Start verifying for the node `node` after a start of the node that remembers no counter:
+    /// a commander's first command carries `echo`, drawn from the node's entropy at this start
+    /// (RFC 8613, appendix B.1.2). Once: `false` if it was started before, which stays.
+    pub fn start(&self, node: wz_session_core::lifecycle_node::Zid, echo: [u8; 16]) -> bool {
+        use wz_session_core::sealed_command::seal::Freshness;
+        self.start_with(node, Freshness::echo(echo))
+    }
+
+    /// Start verifying for the node `node` with the window it wrote down before it stopped and
+    /// gave back now (RFC 8613, appendix B.1.1): no echo is asked. A port that keeps the window
+    /// writes it down after each command the node takes, before it answers. Once, as [`Self::start`].
+    pub fn start_persisted(
+        &self,
+        node: wz_session_core::lifecycle_node::Zid,
+        window: wz_session_core::sealed_command::seal::ReplayWindow<N>,
+    ) -> bool {
+        use wz_session_core::sealed_command::seal::Freshness;
+        self.start_with(node, Freshness::persisted(window))
+    }
+
+    fn start_with(
+        &self,
+        node: wz_session_core::lifecycle_node::Zid,
+        fresh: wz_session_core::sealed_command::seal::Freshness<N>,
+    ) -> bool {
+        wz_runtime_coop::cs::with(|cs| {
+            let Ok(mut state) = self.state.borrow(cs).try_borrow_mut() else {
+                return false;
+            };
+            if state.is_some() {
+                return false;
+            }
+            *state = Some(SealState { node, fresh });
+            true
+        })
+    }
+
+    /// The counters taken so far, for a port that writes the window down; `None` before the
+    /// start.
+    pub fn window(&self) -> Option<wz_session_core::sealed_command::seal::ReplayWindow<N>> {
+        wz_runtime_coop::cs::with(|cs| {
+            let state = self.state.borrow(cs).try_borrow().ok()?;
+            state.as_ref().map(|state| state.fresh.window().clone())
+        })
+    }
+}
+
+#[cfg(feature = "sealed-commands")]
+impl<E: wz_session_core::sealed_command::seal::Es256, const N: usize> SealVerifier
+    for FixedSeal<E, N>
+{
+    fn verify(
+        &self,
+        bytes: &[u8],
+    ) -> Result<wz_session_core::sealed_command::seal::Verified, SealRefused> {
+        let node = wz_runtime_coop::cs::with(|cs| {
+            let state = self.state.borrow(cs).try_borrow().ok()?;
+            state.as_ref().map(|state| state.node)
+        })
+        .ok_or(SealRefused::NotVerified)?;
+        wz_session_core::sealed_command::seal::verify_sealed(bytes, &node, &self.es256)
+            .map_err(SealRefused::from)
+    }
+
+    fn check(
+        &self,
+        sealed: &wz_session_core::sealed_command::seal::Sealed,
+    ) -> Result<(), SealRefused> {
+        wz_runtime_coop::cs::with(|cs| {
+            let state = self
+                .state
+                .borrow(cs)
+                .try_borrow()
+                .map_err(|_| SealRefused::NotVerified)?;
+            let state = state.as_ref().ok_or(SealRefused::NotVerified)?;
+            state.fresh.check(sealed).map_err(SealRefused::from)
+        })
+    }
+
+    fn take(
+        &self,
+        verified: wz_session_core::sealed_command::seal::Verified,
+    ) -> Result<wz_session_core::sealed_command::seal::Sealed, SealRefused> {
+        wz_runtime_coop::cs::with(|cs| {
+            let mut state = self
+                .state
+                .borrow(cs)
+                .try_borrow_mut()
+                .map_err(|_| SealRefused::NotVerified)?;
+            let state = state.as_mut().ok_or(SealRefused::NotVerified)?;
+            state.fresh.take(verified).map_err(SealRefused::from)
+        })
     }
 }
 
@@ -972,5 +1147,230 @@ mod node_key_tail_tests {
             None
         );
         assert_eq!(node_key_tail("@/aa/peer", "aa", "peer"), None);
+    }
+}
+
+/// Decision D17 at the fixed profile's in-band entry point: the verbs answered for the commander a
+/// sealed command proves, through a link that proved only a router no grant names.
+#[cfg(all(test, feature = "sealed-commands", feature = "alloc"))]
+mod sealed_tests {
+    extern crate std;
+    use super::*;
+    use std::string::String;
+    use std::vec::Vec;
+    use wz_session_core::lifecycle_monitor::{Grant, Monitor, NoRecord, Policy};
+    use wz_session_core::lifecycle_node::{Generation, LifecycleNode, Verb, Zid};
+    use wz_session_core::lifecycle_wire::{
+        CloseOrder, MachineReport, OpenMode, OpenOutcome, SessionLinks,
+    };
+    use wz_session_core::query_sink::{BorrowedQuery, ProvenQuery, ReplyError};
+    use wz_session_core::sample::{EncodingHint, QosLevel};
+    use wz_session_core::sealed_command::seal::{self, Echo};
+    use wz_session_core::sealed_command::witness::{DigestEs256, DigestSigner};
+
+    const ME: &str = "a1b2";
+    const PEER: &str = "c3d4";
+    const BOOT: Echo = [0x5e; 16];
+    const LISTED: DigestSigner = DigestSigner(0x41);
+    /// The zid the link proved: a router no grant names.
+    const ROUTER: Zid = [0x1f; 16];
+
+    fn zid(text: &str) -> Zid {
+        wz_session_core::credential_identity::zid_from_key_text(text).expect("a zid")
+    }
+
+    /// Grants `close` to [`LISTED`] alone, and counts the closes it orders.
+    struct Node {
+        listed: Zid,
+        closes: Cell<u32>,
+    }
+
+    impl Policy for Node {
+        fn each_grant(&self, verb: Verb, visit: &mut dyn FnMut(Grant<'_>) -> bool) {
+            if verb == Verb::Close {
+                visit(Grant {
+                    commander: &self.listed,
+                    key: None,
+                });
+            }
+        }
+    }
+
+    impl LifecycleNode for Node {
+        fn monitor(&self) -> Monitor<'_> {
+            Monitor::new(self, &NoRecord)
+        }
+        fn open(&self, _peer: &Zid, _mode: OpenMode) -> OpenOutcome {
+            OpenOutcome::OpenerGone
+        }
+        fn withdraw(&self, _peer: &Zid) {}
+        fn order_close(&self, _peer: &Zid) -> CloseOrder {
+            self.closes.set(self.closes.get() + 1);
+            CloseOrder {
+                newly_ordered: 1,
+                already_ordered: 0,
+            }
+        }
+        fn take_generation(&self, _peer: &Zid, _generation: u64) -> Generation {
+            Generation::Taken
+        }
+        fn links(&self, _peer: &Zid) -> SessionLinks {
+            SessionLinks::default()
+        }
+        fn read_machines(&self, _peer: &Zid, read: &mut dyn FnMut(&[MachineReport<'_>])) {
+            read(&[]);
+        }
+    }
+
+    /// The bodies of the replies staged.
+    #[derive(Default)]
+    struct Bodies(Vec<String>);
+
+    impl ReplyOut for Bodies {
+        fn reply(&mut self, _payload: &[u8]) {}
+        fn reply_del(&mut self) {}
+        fn reply_keyed_encoded(
+            &mut self,
+            _keyexpr: &str,
+            payload: &[u8],
+            _encoding: Option<&EncodingHint>,
+        ) -> Result<(), ReplyError> {
+            self.0
+                .push(String::from_utf8(payload.to_vec()).expect("a document is text"));
+            Ok(())
+        }
+        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&[u8]>, _payload: &[u8]) {}
+        fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
+        fn clear_responder(&mut self) {}
+        fn responder(&self) -> Option<(&[u8], u32)> {
+            None
+        }
+    }
+
+    fn close(counter: u64, echo: Option<Echo>) -> Vec<u8> {
+        let command = seal::Command {
+            verb: seal::Verb::Close,
+            node: zid(ME),
+            object: seal::Object {
+                peer: zid(PEER),
+                generation: None,
+            },
+            counter,
+            echo,
+        };
+        let (bytes, len) = LISTED.sealed(&command).expect("seals");
+        bytes[..len].to_vec()
+    }
+
+    /// Ask the close of [`PEER`] over a link that proved [`ROUTER`], carrying `attachment`: the
+    /// document answered.
+    fn ask(node: &Node, verifier: Option<&dyn SealVerifier>, attachment: Option<&[u8]>) -> String {
+        let key = std::format!("@/{ME}/peer/session/close/{PEER}");
+        let view = BorrowedQuery {
+            keyexpr: &key,
+            parameters: None,
+            attachment,
+            source_info: None,
+            payload: None,
+            encoding: None,
+            rid: 1,
+            is_local: false,
+            qos: QosLevel::DEFAULT,
+        };
+        let proven = ProvenQuery {
+            inner: &view,
+            peer: Some(ROUTER),
+            encoding: None,
+        };
+        let mut arena: AdminReplyArena<1024> = AdminReplyArena::new();
+        let mut out = Bodies::default();
+        serve_verbs(&mut arena, &proven, &mut out, ME, "peer", node, verifier);
+        out.0.into_iter().next().unwrap_or_default()
+    }
+
+    /// The router's own close is refused; the listed commander's sealed close is challenged for
+    /// the echo after the start, permitted when it carries it, and a replay when sent again; a
+    /// tampered one is refused by name. Red if the entry point judged a sealed query as the link's
+    /// commander or took a counter before the echo.
+    #[test]
+    fn a_listed_commanders_sealed_close_is_permitted_through_an_unlisted_router() {
+        let node = Node {
+            listed: LISTED.commander(),
+            closes: Cell::new(0),
+        };
+        let verifier: FixedSeal<DigestEs256, 2> = FixedSeal::new(DigestEs256);
+        assert_eq!(
+            ask(&node, Some(&verifier), Some(&close(1, Some(BOOT)))),
+            SealRefused::NotVerified.document(),
+            "a verifier that has not started verifies nothing"
+        );
+        assert!(verifier.start(zid(ME), BOOT));
+        assert!(!verifier.start(zid(ME), [0; 16]), "started once");
+
+        assert!(ask(&node, Some(&verifier), None).contains("does not permit"));
+        let challenged = ask(&node, Some(&verifier), Some(&close(1, None)));
+        assert_eq!(
+            challenged,
+            SealRefused::EchoRequired { echo: BOOT }.document()
+        );
+        assert_eq!(node.closes.get(), 0);
+
+        let repeat = close(2, Some(BOOT));
+        assert_eq!(
+            ask(&node, Some(&verifier), Some(&repeat)),
+            "{\"verdict\":\"closing\",\"links\":1}"
+        );
+        assert_eq!(node.closes.get(), 1);
+        assert_eq!(
+            ask(&node, Some(&verifier), Some(&repeat)),
+            SealRefused::Replay { last: 2 }.document()
+        );
+
+        let mut tampered = close(3, None);
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert_eq!(
+            ask(&node, Some(&verifier), Some(&tampered)),
+            SealRefused::BadSignature.document()
+        );
+        assert_eq!(node.closes.get(), 1);
+        assert_eq!(
+            verifier
+                .window()
+                .and_then(|window| window.last(&LISTED.commander())),
+            Some(2)
+        );
+    }
+
+    /// A node given no verifier refuses a query that carries an attachment, even from a link its
+    /// grant names, and answers the same link without it.
+    #[test]
+    fn a_node_with_no_verifier_refuses_an_attachment_even_from_a_listed_link() {
+        let node = Node {
+            listed: ROUTER,
+            closes: Cell::new(0),
+        };
+        assert_eq!(
+            ask(&node, None, Some(&close(1, Some(BOOT)))),
+            SealRefused::NotVerified.document()
+        );
+        assert_eq!(node.closes.get(), 0);
+        assert_eq!(
+            ask(&node, None, None),
+            "{\"verdict\":\"closing\",\"links\":1}",
+            "CONTROL: the same link without the attachment is its grant"
+        );
+    }
+
+    trait Document {
+        fn document(self) -> String;
+    }
+
+    impl Document for SealRefused {
+        fn document(self) -> String {
+            let mut text: FixedText<256> = FixedText::new();
+            self.write_json(&mut text);
+            String::from(text.prefix())
+        }
     }
 }
