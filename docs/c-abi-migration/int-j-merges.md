@@ -138,3 +138,9 @@ The lane states the tables' policy once, in the build script (`wz_lent`,
   test of `GetLegs::places` read peer-prop's `SeqPlace` offsets as `usize`.
   peer-prop keeps a description's offsets in 32 bits; the test widens them,
   as the observer's own description test does.
+- `crates/wz-runtime-coop/src/faces.rs`: win-p99's `SiteFacts::read_wrote`
+  took its link as the trait-object cell, and base-td gives a face's pump
+  the stack's own link type, so the direct read's call
+  (`engine/direct.rs`, `tell_facts`) passed a typed cell. It is generic
+  over the link type as `ReadFacts::of_link` beside it is; the holders'
+  reads go through `FaceWire::owes_write_if_free`, generic already.

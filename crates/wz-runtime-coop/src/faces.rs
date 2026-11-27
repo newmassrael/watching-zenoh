@@ -1019,10 +1019,10 @@ impl SiteFacts {
     /// would come after that mark, and the face would look owing after the send wrote every byte:
     /// its read would then wait for room it has and step a link that brought nothing.
     #[inline]
-    pub fn read_wrote<N: CountKind>(
+    pub fn read_wrote<L: ?Sized + SessionDatagramLink, N: CountKind>(
         &self,
         mark: WriteMark,
-        link: &CellRc<dyn SessionDatagramLink, N>,
+        link: &CellRc<L, N>,
     ) {
         if let Some(owes) = link.owes_write_if_free() {
             self.wrote(mark, owes);
