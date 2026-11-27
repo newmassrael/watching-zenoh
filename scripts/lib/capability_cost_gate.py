@@ -58,7 +58,8 @@ A case may read its features from a registered profile (`Case.features_from`) wh
 builds a library from that profile: `pico-api-coop-nostd` is the Linux twin of the Windows
 like-for-like library (`pico_windows_package.LIKE_PROFILE`), built with the features that lane
 builds it with, resolved from the same profile when the case is built, so the two lanes hold one
-list and not two.
+list and not two. It is built in the release client's form, which both cases take from one
+definition (`NOSTD_RELEASE_FORM`), so the twin and the client differ by their features alone.
 
 ## Where and when the build ran
 
@@ -172,6 +173,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import types
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -288,6 +290,18 @@ RUN_TEXT_LINK = f"-Wl,-T,{RUN_TEXT_SCRIPT}"
 # section placed none of them (`link_findings`).
 RUN_TEXT_SECTION = ".text.run"
 RUN_TEXT_LIST_LINE = re.compile(r"^    \*\(.+\)$", re.MULTILINE)
+# How the gate builds the library a release ships without `std` on Linux, as `Case` fields: the
+# profile and configuration of that name, the relocations packed, the unwind tables discarded and
+# the run's code laid out (the files above), and the names such a library leaves undefined and
+# needs (pico-client-coop-nostd's note says why). One definition, taken by the release client's
+# case and by the Linux twin of the Windows like-for-like library, so the two differ by their
+# features alone and a link choice the release gains reaches both.
+NOSTD_RELEASE_FORM: Mapping[str, object] = types.MappingProxyType({
+    "profile": "capi-nostd",
+    "cargo_configs": (NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG, RUN_TEXT_CONFIG),
+    "forbid_undefined": (r"^rust_eh_personality$", r"^_Unwind_Resume(@|$)"),
+    "require_needed": (r"^libc\.so",),
+})
 # The C compiler's like of `-C force-unwind-tables=no`: code with no unwind tables, the
 # asynchronous ones GCC writes by default on x86_64 included.
 NO_UNWIND_CFLAGS = ("-fno-asynchronous-unwind-tables", "-fno-unwind-tables")
@@ -876,11 +890,8 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
-         forbid_undefined=(r"^rust_eh_personality$", r"^_Unwind_Resume(@|$)"),
-         require_needed=(r"^libc\.so",),
          # 443 exports: `zext_callbacks_refused` (d80d315d1).
-         exports=443, profile="capi-nostd",
-         cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG, RUN_TEXT_CONFIG),
+         exports=443, **NOSTD_RELEASE_FORM,
          note="Linked with its relative relocations packed, as pico-client-coop is, and so is "
               "its zenoh-pico reference: 1,590 relative relocations (38,160 bytes of "
               "`.rela.dyn`) in the form read on 2026-11-22, a packed table of 440. Linked "
@@ -1126,13 +1137,10 @@ CASES: tuple[Case, ...] = (
          forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK,
                  STD_RUNTIME),
          require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
-         forbid_undefined=(r"^rust_eh_personality$", r"^_Unwind_Resume(@|$)"),
-         require_needed=(r"^libc\.so",),
-         profile="capi-nostd",
-         cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG),
-         features_from=pico_windows_package.LIKE_PROFILE,
-         note="pico-client-coop-nostd's form (profile, configuration files and the names it "
-              "defines) with the features of the library pico_windows_package.py --size-features "
+         **NOSTD_RELEASE_FORM, features_from=pico_windows_package.LIKE_PROFILE,
+         note="pico-client-coop-nostd's form (NOSTD_RELEASE_FORM: the profile, the configuration "
+              "files, the run-text layout among them, and the names it leaves undefined and "
+              "needs) with the features of the library pico_windows_package.py --size-features "
               "builds first, so the two lanes build one feature set, each on its own platform. No "
               "budget and no ceiling row until the first reading: --measure prints both"),
     # 2026-11-03 -- `pico-peer` 2,946,185 on hosted run 41481900203, 185 over its budget of
@@ -3254,7 +3262,9 @@ def cmd_selftest() -> int:
            "lane's profile and is built in the release client's form",
            twin.features is None and twin.features_from == pico_windows_package.LIKE_PROFILE
            and (twin.package, twin.lib, twin.profile, twin.cargo_configs)
-           == (release.package, release.lib, release.profile, release.cargo_configs))
+           == (release.package, release.lib, release.profile, release.cargo_configs)
+           and all(getattr(case, name) == value for case in (twin, release)
+                   for name, value in NOSTD_RELEASE_FORM.items()))
     expect("only a pico case reads its features from a profile, and it states none of its own",
            all(c.package == "wz-capi-pico" and c.features is None
                for c in CASES if c.features_from is not None))
@@ -3268,8 +3278,10 @@ def cmd_selftest() -> int:
                 wz_config.load_decl(), pico_windows_package.LIKE_PROFILE)["features"],
             wz_config.manifest_features(wz_config.MANIFESTS["pico"]))
         twin_build = case_build(twin, {}, "x86_64-unknown-linux-gnu", linux_gnu, limits={})
-        expect("the twin is built with the features the Windows lane builds its library with",
+        expect("the twin is built with the features the Windows lane builds its library with, "
+               "and linked as the release client is",
                feature_list(twin) == ",".join(like)
+               and twin_build.link_args == bare_build.link_args
                and twin_build.cmd[-3:] == ("--no-default-features", "--features",
                                            artifact_features(twin.package, ",".join(like)))
                and {"os-host", "peer"} <= case_features(twin))

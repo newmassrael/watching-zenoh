@@ -578,8 +578,9 @@ more.
   made again differs by what changed. SCRIPT `-` writes nothing, which reads arm P's executed bytes too.
 - `crates/wz-capi-pico/link/run-text.ld`, its statement empty until a trace fills it (an output section with
   nothing in it is not written, so the library links as before), and `crates/.cargo/capi-run-text.toml`, in the
-  size gate's `pico-client-coop-nostd` case and so in arm W of the matrix (`bench_case`). The zenoh-pico
-  reference is not linked with it: the order is wz's own.
+  size gate's release form (`capability_cost_gate.NOSTD_RELEASE_FORM`), which its `pico-client-coop-nostd` case
+  and the Linux twin of the Windows like-for-like library (`pico-api-coop-nostd`) both take, and so in arm W of
+  the matrix (`bench_case`). The zenoh-pico reference is not linked with it: the order is wz's own.
 - The library's build script reruns when a link script changes, so a new list relinks the library.
 
 **What can keep a function the run executes outside.** (a) A path the traced run did not take: callgrind runs a
@@ -647,7 +648,9 @@ target), so the file is made from the committed list's lines and the Windows bui
 3. Link again with `-C link-arg=/ORDER:@<dir>/run-order.txt`.
 
 The order file is not committed: it is the Windows build's own names, made from the committed list at each
-build, as the Linux link reads the committed script. Nothing of this is wired into the Windows package yet
+build, as the Linux link reads the committed script. The Linux twin of the like-for-like DLL
+(`pico-api-coop-nostd`) links by the list already, as a part of the release form, so the two links are what
+lays that DLL out as its twin is read. Nothing of this is wired into the Windows package yet
 (`pico_windows_package.py`, which would run the two links), and none of it was run on Windows: the map's form
 under `/demangle:no` is the one assumption of step 2, and whether the DLL's working set falls with the layout is
 read on Windows, not carried over from the Linux reading.
