@@ -866,6 +866,23 @@ stacks of an either; red (it stops compiling) if an either's sink names a type o
 the bound is not implied where it is used. The dialer, admin and client node tests over the
 in-memory network instantiate the bound with a real stack.
 
+### 9.9 What 9.8 left red, repaid (not built or run by this lane)
+
+One commit, the root of one compile red of the round build (`wz_round`: `threads` with the host's
+value locks withheld, `WZ_COOP_VALUE_LOCKS=off`), which no default or all-features build compiles.
+
+- **A round's read dial is bounded as its answer needs** (`wz-capi-coop`'s `engine.rs`):
+  `ReadDial<P>` holds a dial's answer, `DialAnswer<P, LinkCount>`, whose `OpenedLink<P, N>`
+  asks `P: SharedPump<N>` since 9.5 keyed a link's sink on its pump. The struct and its impl now
+  state the same bound; every use names `L::Pump` of a `CoopLinks` stack, which carries it.
+
+Expected on the case: none. A bound; no code is generated for it. Size and Ir unchanged. Not
+measured.
+
+Tests: no branch is new. The round leg's `tests::round::` and the whole suite in that form
+(`nondefault-tests-gate.sh`'s two `WZ_COOP_VALUE_LOCKS=off` rows) compile `ReadDial` through
+`RoundLinkIo`; red (it stops compiling) if the bound is dropped again.
+
 ## 10. Transport: the structure for what remains, and what SCE is asked for the machines
 
 Read from the same explain document as section 6 (2026-11-26, schema 5): transport 30,814 against
