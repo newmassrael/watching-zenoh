@@ -669,6 +669,61 @@ H7c2b and H7c2c write `registry.rs`' `Gets` and `FaceTables`, which `peer-rows.m
 part of the face's row: the merge of the two lanes is the main session's to order, and H7c2c's
 `GetLegs` is the part of the face's row R3b names (its pending gets).
 
+**Whether an ABI shows a reply's request id: none does.** Read before the timeout takes the row's
+id. zenoh's `Reply` (`zenoh/src/api/query.rs` at the pin) holds its result and, behind
+`unstable`, its replier's id; zenoh-c's accessors, as `crates/wz-capi-c/src/get.rs` implements
+them, are `z_reply_is_ok`, `z_reply_ok`, `z_reply_err`, `z_reply_replier_id` and the
+clone, loan, take and drop of a reply; zenoh-pico's `_z_reply_t` holds a `_z_reply_data_t` of
+`_result`, `replier_id` and `_tag` (`vendor/zenoh-pico/include/zenoh-pico/net/reply.h`), and
+`crates/wz-capi-pico/src/get.rs` keeps the same accessors. `ReplyView::rid` is read inside wz
+alone, by the tables that find a reply's get. So the timeout the deliveries hand out may name the
+row's id before any leg carries it, and H7c2b need not move the id: H7c2c makes it the one id every
+leg carries.
+
+**H7c2c's table, built ahead of H7c2b.** H7c2b's face entry is not a `ReplyRegistry` of a sink that
+is the handle, which H7c2c would take out again: it is H7c2c's table, built now and used by H7c2b.
+
+- The read of a peer's Response (`wz-session-core/src/reply.rs`, `ReplyReceive`): the key gate
+  and the receive side of shared memory, with `take_response` and `project_response`, out of
+  `ReplyRegistry`, which holds one and hands its setters on. The engine reads a Response through
+  the face registry's `receive_mut` until its face holds the legs' table. Size: 0 (the same
+  fields and bodies, one level down). Receive: 0. Test:
+  `reply::tests::a_receive_alone_gates_a_peers_reply_by_its_key` (red if `admits_key` takes a
+  key outside a closed set, refuses an Err, or does not count the refusal), and the registry's
+  key-gate and shared-memory tests unchanged.
+- The legs of a face (`wz-session-core/src/get_legs.rs`, `GetLegs<H, P>`): for each leg the id
+  the face's peer answers it under and the get's handle, and the face's `ReplyReceive`. A reply
+  finds its get through the key gate and one look at the row its id carries, the walk left for a
+  leg an earlier end moved (`reply_to`, `get_of`); a Final ends the leg and hands the get back
+  for the caller's `end_leg` on the row (`end_leg`); a get its row retired is let go of
+  (`forget`); a lost face ends every leg, each get handed back once (`end_every_leg`). A leg
+  keeps no count of Finals: on this engine a face's entry owes one, and the session's own
+  queryables are a leg of the row, not of a face. No key, deadline or sink a leg: those are the
+  row's. The table states no quota: a get has at most one leg a face, so the gets' table bounds it.
+  Size: 0 until the engine holds it (no caller yet). Tests (`get_legs::tests`):
+  `a_reply_finds_the_get_its_id_names_and_its_final_ends_the_leg_once` (red if a reply reaches
+  another leg's get or a Final ends a leg twice),
+  `a_leg_is_found_by_its_whole_id_wherever_an_earlier_end_moved_it` (red if the carried row is
+  taken without the whole id compared, or the walk is left out),
+  `a_retired_get_is_forgotten_and_a_lost_face_ends_every_leg` (red if `forget` takes another
+  get's leg, or the loss leaves a leg or hands one twice),
+  `a_table_lent_one_row_refuses_a_second_leg_until_the_first_ends` (red if the table holds past
+  its rows or keeps a row its leg left), and, with `key-set-closed`,
+  `a_closed_key_set_keeps_a_reply_outside_it_from_its_get` (red if a reply skips the face's gate).
+
+The snapshot's legs are answered under an Interest id, not a request id, and its registry keeps
+what is the snapshot's own (the Interests whose answer ended, pruned from the reconnect cache; the
+count of keys past the bound the slot profile reads into). Whether its legs are a second
+`GetLegs` over Interest ids is read when the snapshot's callback, deadline and end move into the
+row, with H7c2b.
+
+What is left of H7c2b is unchanged otherwise: the engine's `GetPresence = Present`, the row's
+callback record (`LatchedRow` of the callback, `shown`, the fan), the face's `Gets` as
+`GetLegs<PendingGetHandle>`, the receive and the local queryable's reply through
+`admit_reply`, the deliveries walking `next_ended_get`, the sweep through `next_expired_get`,
+the cancellation and the close through `retire_get` and `forget`, the issue through
+`begin_get` and `add_leg`, and the plane deleted.
+
 ## 7. The receive
 
 None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message
