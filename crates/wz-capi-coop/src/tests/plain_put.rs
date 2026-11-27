@@ -697,6 +697,64 @@ fn a_put_looks_its_write_filters_row_up_once() {
     });
 }
 
+/// A bare put plans its publisher's way by the key its leg named, the one it is sent on: a
+/// publisher whose filter is on `demo/x` that puts on `demo/z`, under the declaration of
+/// `demo/x`, plans nothing, and each of those puts reaches the router on `demo/z`. CONTROL: its
+/// puts on its own key are written from the plan after the first. Turned red by a plan made of
+/// the filter's key in place of the key the put's leg named, whose planned put is written on the
+/// filter's key.
+#[test]
+fn a_put_plans_its_way_by_the_key_its_leg_named() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let hold = engine
+        .acquire_keyexpr("demo/x")
+        .expect("a session with ids left declares");
+    let wire = WireKey::aliased(hold.mapping_id(), None).at_row(hold.row());
+    let filter = filter_on(&engine, "demo/x");
+    until(&engine, "the router's catch-all to open the filter", || {
+        !engine.write_filter_active(filter)
+    });
+    let params = PublishOptions::put()
+        .plain_put_params()
+        .expect("a plain put");
+    engine.keep_write_filter_plain(filter, Some((params, wire.declared())));
+
+    let before = plans(&engine);
+    for _ in 0..2 {
+        assert_eq!(
+            engine.publish_filtered(filter, "demo/z", &wire, b"z", None),
+            FilteredPut::Sent(Ok(0))
+        );
+    }
+    assert_eq!(
+        plans(&engine),
+        before,
+        "a put on a key other than its filter's plans nothing"
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            engine.publish_filtered(filter, "demo/x", &wire, b"x", None),
+            FilteredPut::Sent(Ok(0))
+        );
+    }
+    assert_eq!(
+        plans(&engine) - before,
+        1,
+        "CONTROL: a put on its filter's key is written from the plan after the first"
+    );
+    until(&engine, "the router to receive every put", || {
+        router.seen(|s| s.samples.len()) == 4
+    });
+    let on = |key: &str| router.seen(|s| s.samples.iter().filter(|(k, _)| k == key).count());
+    assert_eq!(
+        (on("demo/z"), on("demo/x")),
+        (2, 2),
+        "each put reaches the router on the key it was made on"
+    );
+    drop(hold);
+}
+
 /// A plan stands at its send epoch alone: once the router retracts the subscriber that opened the
 /// filter, the epoch has moved and the publisher's bare put is held back, not written from the
 /// plan. CONTROL: the put before the retraction is written from it. Turned red by an epoch that

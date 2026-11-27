@@ -9045,7 +9045,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         // The first plain put of the row's way after its plan stood plans it at this epoch.
         let plan_at = (first && matches!(put.by, PutBy::Plain(None))).then(|| core.0.send_epoch());
-        let (outcome, stuck) = self.fan_out_in(&mut core.0, &publication, None, begin.pass, tx);
+        // The put's leg is made once: the fan-out sends it, and the plan is made with the key it
+        // named. An empty key names nothing a link carries.
+        let leg = Self::leg_of(&core.0, &publication);
+        let (outcome, stuck) = match &leg {
+            Some(leg) => self.fan_out_leg(&mut core.0, &publication, leg, None, begin.pass, tx),
+            None => (Err(FanoutError::ExceedsCapacity), None),
+        };
         // The clock is read only for a fan-out that stopped at a face, whose wait it bounds. Only
         // a send that waits for no slot stops one, which a build that listens on nothing never
         // makes: there the fan-out is done, and neither the clock nor the wait is read.
@@ -9055,8 +9061,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         );
         let stuck = stuck.filter(|_| cfg!(feature = "listen"));
         let fanned = run.fanned(stuck, || core.0.now_us());
-        if let Some(epoch) = plan_at {
-            Self::keep_plan(&core.0, put, epoch, tx);
+        if let (Some(epoch), Some(leg)) = (plan_at, &leg) {
+            Self::keep_plan(&core.0, put, epoch, leg.named, tx);
         }
         #[cfg(feature = "listen")]
         let waits = match fanned.then {
@@ -9083,20 +9089,24 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// Plan the plain way of `put`'s write filter at the sender's `epoch`, its first put at that
-    /// epoch sent: kept when every link names the filter's key as the session does, by the head's
-    /// declaration alone (`WriteFilterRow::keep_plan`). The epoch counts the session's own
-    /// subscribers, the queryables none, so a filter that counts queryables plans nothing.
-    fn keep_plan(core: &Core<L, C>, put: &PutOn<'_>, epoch: u64, tx: LinkTx<'_, C>) {
-        let registry: &Registry = &core.session.registry;
+    /// epoch sent with its key named `named`, as its leg named it (`Self::leg_of`): kept when that
+    /// is the filter's key and every link names it as the session does, by the head's declaration
+    /// alone (`WriteFilterRow::keep_plan`), so a plan is never made of a key the put was not sent
+    /// on. The epoch counts the session's own subscribers, the queryables none, so a filter that
+    /// counts queryables plans nothing.
+    fn keep_plan(
+        core: &Core<L, C>,
+        put: &PutOn<'_>,
+        epoch: u64,
+        named: NamedKey<'_>,
+        tx: LinkTx<'_, C>,
+    ) {
         let Some(row) = Self::filter_row(core, put.filter) else {
             return;
         };
         if row.plane() != Plane::Subscribers {
             return;
         }
-        let Some(named) = tables(registry).named_at(row.key(), put.wire.declared()) else {
-            return;
-        };
         if core.up_wires_at().all(|(_, wire)| {
             send_through(wire, tx, &|actions: &LinkActions<C>| {
                 key_on_link(actions, named).wire() == named.wire()
@@ -9183,7 +9193,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// `pass.from` on ([`mark_of_place`]), with a send that does not wait for a slot when
     /// `pass.probe`. The faces are sent the put in order until one's link finds no outbound slot
     /// for it, which is answered beside the outcome and is sent nothing, nor are the faces after
-    /// it, nor the groups.
+    /// it, nor the groups. What a publish sent again after a wait for a slot, and a handed one, are
+    /// sent by, each try naming its key afresh, as the session was let go between tries.
+    #[cfg(any(feature = "listen", all(wz_round, feature = "group")))]
     fn fan_out_in(
         &self,
         core: &mut Core<L, C>,
@@ -9196,14 +9208,33 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let Some(link_leg) = Self::leg_of(core, put) else {
             return (Err(FanoutError::ExceedsCapacity), None);
         };
-        let (outcome, stuck) = self.send_on_links(core, &link_leg, skip, pass, tx);
+        self.fan_out_leg(core, put, &link_leg, skip, pass, tx)
+    }
+
+    /// `leg`, the leg `put` is sent each link by (`Self::leg_of`), sent as `Self::fan_out_in`
+    /// sends it: to the faces by `pass`, then to each group the session joined unless a face's link
+    /// found no outbound slot for it.
+    // Inlined whole: a put's leg sends through it in its own body, with no call added.
+    #[inline(always)]
+    fn fan_out_leg(
+        &self,
+        core: &mut Core<L, C>,
+        put: &Publication<'_>,
+        leg: &LinkLeg<'_>,
+        skip: Option<&DroppedOn>,
+        pass: Pass,
+        tx: LinkTx<'_, C>,
+    ) -> (Result<usize, FanoutError>, Option<u64>) {
+        let (outcome, stuck) = self.send_on_links(core, leg, skip, pass, tx);
         if stuck.is_some() {
             return (outcome, stuck);
         }
         #[cfg(feature = "group")]
-        if let sent @ Err(_) = self.publish_to_groups(core, put, link_leg.send, skip, tx) {
+        if let sent @ Err(_) = self.publish_to_groups(core, put, leg.send, skip, tx) {
             return (sent, None);
         }
+        #[cfg(not(feature = "group"))]
+        let _ = put;
         (outcome, None)
     }
 
