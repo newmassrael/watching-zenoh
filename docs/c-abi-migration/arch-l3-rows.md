@@ -13,7 +13,9 @@ branch of 2026-11-27 (`cbc0f6ecb3`). One entity kind at a time, subscribers firs
 |---|---|---|
 | a subscriber | one row of `SessionTables::subscribers` (`wz-session-core/src/session_tables.rs`, `SubscriberRow<Key, Cb>`: id, key in the key arena, key facts, origin, callback) whose `Cb` is the engine's callback record (`wz-capi-coop/src/engine.rs`, `SubscriberRow`: anchor, sink, timestamp choice, latch) | the registry's own entry and its copy of the key; the door keeps the id and a loan of the row's key (`wz-capi-pico/src/pubsub.rs`, `DeclaredSubscriber`) |
 | the id a subscriber is numbered by (H1, step D1) | minted by the tables after the room and the key (`Declaring::mint`); the declaration answers the row's id | the engine's read of `next_entity_id()` ahead of the declaration and its `debug_assert` |
+| the id a queryable and a liveliness subscriber are numbered by (H1, step D2) | as the subscriber's: `declare_queryable_on_wire` and `declare_liveliness_subscriber_on_wire` answer `declared.id` | the engine's read of `next_entity_id()` ahead of each declaration and its `debug_assert`; no entity of the engine reads an id ahead of its row now |
 | the key a subscriber's retraction names (H3, step D3) | read off the row the undeclaration removes, while the declarations the row held still stand, with the row's own key moved out with it (`Undeclared::retraction`, `Retracting`); a row a call keeps in its slot is held once more for the length of the retraction | the engine's `retraction_of` ahead of the undeclaration and its second count of the key (`row.key().backing().clone()`) on every undeclaration |
+| the key a queryable's and a token's retraction names (H3, steps D3q, D3t) | one undeclaration for every kind whose retraction is read off its row (`undeclare_retracted` over the private `RetractedEntity`, which the subscriber's, the queryable's and the token's rows implement); `undeclare_queryable` and `undeclare_token` answer `RetractedUndeclared`, the token's with no callback (`()`) | the engine's `retraction_of` and second count of the key ahead of the queryable's undeclaration; the engine's read of the token's names ahead of its undeclaration and the whole `TokenRow` it took back; `EntityKey::backing`, whose one use was that second count |
 | a callback's life (P11) | the row's latch (`RowCallback` for the engine's row; `SessionTables::release_drained_subscriber`) | the per-door wait |
 | the delivery of a sample | the read pins the rows its key reaches under the session's lock (`SessionTables::pin_subscribers`) and calls each row's callback after it (`engine/pinned.rs`, `hand_row_by_row`) | `wz-capi-coop/src/lane.rs`; `wz-session-core/src/delivery_lane.rs` is read only by the tokio engine (`wz-runtime-tokio/src/session/offload.rs`) |
 | a queryable, a liveliness subscriber, a token | rows of the same table set (`QueryableRow` in `engine/query.rs`, `LivelinessRow`, `HeldTokens for SessionTables`) | their registries' entries |
@@ -141,9 +143,9 @@ What it shows:
 
 | # | fact | first holder | second holder | in the measured case | status |
 |---|---|---|---|---|---|
-| H1 | the id a declaration is numbered by | `SessionTables`'s `next_entity`, minted by `Declaring::mint` after the room and the key | the engine's read of `next_entity_id()` ahead of the queryable's and the liveliness subscriber's declarations, checked by a `debug_assert` | no | the subscriber's is gone (D1) |
+| H1 | the id a declaration is numbered by | `SessionTables`'s `next_entity`, minted by `Declaring::mint` after the room and the key | none | no | gone (D1, D2) |
 | H2 | which row a subscriber is | the row's handle (`Declared::handle`, generation-checked, P10) | the entity id the port hands the door (`Declared<SubId>`), by which `undeclare_subscriber` walks the liveliness subscribers and then the subscribers, enumerated, comparing ids | yes | D4 |
-| H3 | the key's text while a retraction is written | the row's `EntityKey` | a second count of the same block (`row.key().backing().clone()`), the queryable's undeclaration | no | the subscriber's is gone (D3) |
+| H3 | the key's text while a retraction is written | the row's `EntityKey` | none | no | gone (D3, D3q, D3t) |
 | H4 | what keeps a key's declaration alive | the tables' count of the declaration (`KeyexprCount`) | the ABI's anchor in every callback row (`KeyAnchor` in `SubscriberRow`, `QueryableRow`, `LivelinessRow`), which the pico ABI fills only on its advanced plane (`wz-capi-pico/src/advanced_forms.rs`) | the field and its drop, never filled | D5 |
 | H5 | the callback protocol of a row | the subscriber's record | the queryable's and the liveliness subscriber's records, each `{anchor, sink, latch}` with the same `RowCallback` body | one instance | D6 |
 | H6 | the session's L3 tables as a value | `SessionTables` and `PeerTables` in `wz-session-core` | `RegistryOf<H>` in `wz-capi-coop/src/engine/registry.rs`: the application's observer (`SlotObserverOf`, whose `tables` is the `SessionTables`), the faces' `FaceTables` (`peer`, `gets`, the due row), the holders' index and the written count; every operation reaches the tables through it | 1,101 bytes; 7,938 in the peer case, 18,542 in the api case | D7 |
@@ -171,19 +173,57 @@ reverted when its row does not move by its expectation.
 |---|---|---|---|---:|---|---|
 | D1 | H1, the subscriber's | landed | `wz-capi-coop/src/engine.rs` (`declare_subscriber_on_wire`) | -15 to -40 (`declare_subscriber_on_wire` 1,522) | 0 | `entity_tables::a_subscriber_is_answered_the_id_its_row_was_numbered_by`, `entity_tables::a_full_subscribers_table_is_answered_before_an_id_is_asked_for` |
 | D3 | H3, the subscriber's | landed | `wz-session-core/src/session_tables.rs` (`undeclare_entity`, `Undeclared`, `Retracting`), the engine's `undeclare_subscriber` | -20 to -150 (the engine's clone of the key and the drop of its count; the clone a kept row takes is the rare branch), read on `undeclare_subscriber` 1,721 and `SessionTables::undeclare_subscriber` 824 together | 0 | `session_tables::tests::a_subscribers_undeclaration_names_its_retraction_off_the_row_it_removes`, `a_subscriber_undeclared_while_its_callback_runs_names_its_retraction_past_the_row`; the retraction tests of `tests/held_keys.rs` and `tests/replay.rs` unchanged |
-| D2 | H1, the queryable's and the liveliness subscriber's | the queryable stage | `declare_queryable_on_wire`, `declare_liveliness_subscriber_on_wire` | 0 (neither is built); `pico-client-coop` -30 to -80 | 0 | D1's two tests written for each kind |
-| D3q | H3, the queryable's | the queryable stage | the queryable's `undeclare_entity` reads its retraction as the subscriber's does; the engine's `undeclare_queryable` | 0 (not built) | 0 | D3's two tests for the queryable |
+| D2 | H1, the queryable's and the liveliness subscriber's | landed | `declare_queryable_on_wire`, `declare_liveliness_subscriber_on_wire` | 0 (neither is built); -15 to -40 a kind where it is (`pico-client-coop`, the api case: the read of `next_entity` and its refusal branch) | 0 | `entity_tables::a_queryable_is_answered_the_id_its_row_was_numbered_by`, `a_full_queryables_table_is_answered_before_an_id_is_asked_for` and the two of the liveliness subscriber, one shared body each with the subscriber's (`CalledKind`) |
+| D3q | H3, the queryable's | landed | `undeclare_retracted`, `RetractedEntity` (`wz-session-core/src/session_tables.rs`); the engine's `undeclare_queryable` | 0 (not built); the api case -20 to -150, as D3 read it for the subscriber | 0 | `session_tables::tests::a_queryables_undeclaration_names_its_retraction_off_the_row_it_removes`, `a_queryable_undeclared_while_its_callback_runs_names_its_retraction_past_the_row` |
+| D3t | H3, the token's | landed | `RetractedEntity for TokenRow`, `undeclare_token`; the engine's `undeclare_liveliness_token` | 0 (not built); the api case 0 to -60 (the names are read once, in the tables; the row is no longer handed back whole) | 0 | `session_tables::tests::a_tokens_undeclaration_names_its_retraction_off_the_row_it_removes`; `tests/liveliness.rs` unchanged |
 | D4 | H2, every kind at once | with step 5 (`arch-l4-facade` F7) | the port's `Declared` answers the row (`EntityRow`, the handle's bits on this engine, the id on an engine that has no rows); `undeclare_subscriber`, `undeclare_queryable` and the liveliness kinds take it; the doors keep it; L3's undeclarations by handle are there already | -150 to -300 (the walk of two tables by id), more where liveliness is built | 0 | an undeclaration by a row of an earlier generation finds nothing; one of a liveliness subscriber reaches its own table |
 | D5 | H4 | with S-SINK (`docs/win-budget/size.md` section 3.1) | the port's `KeyAnchor` as a type of no size where no ABI keeps an anchor | -100 to -200 text, 32 bytes a row of the region | 0 | the anchor test of `tests/liveliness.rs` kept on the build that keeps anchors; a size assertion of the row on one that does not |
 | D6 | H5 | the queryable stage | `wz-capi-coop/src/engine.rs`, `engine/query.rs`: one latched record over the sink type | 0 (one instance) | 0 | `closure_drops` |
 | D7 | H6 | with the driver lane, step 6d | the registry becomes the session core's (`wz-session-core`: the table set and the faces' sets, a face named by its set's handle) | -300 to -800; `pico-peer-coop` and the api case to be read (7,938 and 18,542 held now) | to be read: the receive's one look at its face's set is kept, and no call is added | the registry's tests move with it; `direct_receive`, `in_place` |
 | D8 | H7, H8 | the gets' and queries' stage | the gets' legs as rows of the pending get; the held query as a row of the queries' plane | 0; the api case to be read | 0 | `get`, `local_query`, `queryable` |
-| D9 | H9 | the tokens' stage | `slot_observer`: `local_tokens` by `Presence` where the tables keep tokens; the owed tokens as rows of the lost face's set | 0 | 0 | `liveliness` |
+| D9 | H9 | the tokens' stage; read in 6.1: the answering's bound moves out of the registry first | `local_token.rs`: the answering apart from the holder; `slot_observer`: `local_tokens` by `Presence` where the tables keep tokens; the owed tokens as rows of the lost face's set, with D7 | 0 | 0 | `liveliness` |
 | D10 | H10 | the MCU matrix | a lock per value on a target without 64-bit atomics (the kernel's), so no `threads` form keeps the round | 0 on a host; the MCU images' to be read | to be read on the MCU matrix | `one_thread`, `round` until they go |
 
 With D1 and D3 the subscriber holds in L3 what L3 can hold without another lane's file: its id,
 its row, its key, its retraction, its callback's life and its delivery. What is left of it is H2,
 the port's identity of an entity; H4, the ABI's anchor; and H6, the registry around the tables.
+With D2, D3q and D3t the queryable, the liveliness subscriber and the token hold their ids and
+their retractions the same way: no kind's id is read ahead of its row, and every kind whose
+retraction names its key reads it off the row it removes, by one undeclaration
+(`undeclare_retracted`), so a kind added later implements `RetractedEntity` and costs nothing
+more. The liveliness subscriber's retraction is its Interest's Final, which names no key.
+
+### 6.1 D9, read
+
+The premise of D9 as its row states it (`local_tokens` by `Presence`) holds for one of the two
+facts the field holds, not for the other. `LocalTokenRegistry`
+(`wz-session-core/src/declare/local_token.rs`) holds the session's own tokens, which is H9's
+second holder: the cooperative engine lends it no row (`ObserverRows { local_tokens: 0 }` in
+`wz-capi-coop/src/engine.rs` and `engine/registry/counted.rs`), as its tables keep the tokens.
+It also holds the bound of the staging of a peer's liveliness Interest's answers, of which it is
+the one writer (`reply_quota`, `MAX_PENDING_DECLARES`, `limit_interest_replies_to`,
+`has_room`), and the answering itself (`stage_answer`, `answer_interest`,
+`answer_interest_view`, `answer_messages`, `answer_iteration_event`), which every build that
+answers a peer reads whoever holds the tokens (`slot_observer.rs`: `answer_iteration_event(held,
+..)` with `held` the tables' tokens). A field made absent by `Presence` takes the staging's
+bound with it. So D9 is two moves:
+
+1. The answering and its bound become a value of their own beside the observer's planes, handed
+   `&dyn HeldTokens` as they are now; the registry keeps the tokens, their bound and their keys.
+2. The registry becomes `<_ as Presence>::Table<LocalTokenRegistry<P>>`, its presence chosen by
+   the sinks (`ObserverSinks`) and absent where `K::Tables` keep tokens; the drain's
+   `held_tokens().unwrap_or(&self.local_tokens)` reads the one holder there is.
+
+Move 2 reaches the observer's in-place init (the `ptr::write` of the field), its region rows
+and lines (`ObserverRegionRows::local_tokens`, `SLOT_OBSERVER_LINES`), its lent and counted
+forms, and the heap profile's view of the application half (`observer.rs`, `&mut
+LocalTokenRegistry`), which the tokio engine and the lwip drive register through. It is designed
+against those files before it is written. Expected: 0 in the measured case (no liveliness); in
+the api case the registry's state (a lent sequence's header and its key arena's handle), its
+lend of no row, and the `HeldTokens` of `LocalTokenRegistry<Lent>` (`each_token`,
+`keyexpr_for`, its vtable) that the `unwrap_or` names, read on those bodies before it is
+claimed. The tokens a lost face owes (`OwedTokens`) are read with D7, whose faces' sets they
+would be rows of.
 
 D4 is the façade lane's because the port's identity of an entity is one contract for every kind
 and every engine: the cooperative engine, the tokio engine's port (`wz-capi-core/src/engine_port.rs`),
@@ -196,8 +236,11 @@ itself.
 
 ## 7. The receive
 
-None of D1 to D6 is on the receive or the put; their receive instructions a message are expected
-unchanged (about 3,073 in the lane's reading; `docs/win-budget/size.md` section 8 reads 3,078).
+None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message
+are expected unchanged (about 3,073 in the lane's reading; `docs/win-budget/size.md` section 8
+reads 3,078). D2 changes two declarations, D3q and D3t two undeclarations, none of which a read
+calls; the queryable's receive bodies (`next_queryable_reached`, `QueryableCall`) take none of
+their code.
 D3 changes the undeclaration only: `undeclare_entity`, `Undeclared` and the engine's
 `undeclare_subscriber`. `wire_of` and `retraction_of` became calls of one free function each,
 which the receive reaches through neither: the receive's subscriber bodies (`hand_lent_push`,
