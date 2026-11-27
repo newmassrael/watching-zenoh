@@ -33,12 +33,9 @@
 //! mapped for their whole life, a process-long table for the global storage, which is a mapping
 //! (and the memory of an unlinked segment) for every provider a process ever read from.
 
-use std::{
-    collections::BTreeMap,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, RwLock, Weak,
-    },
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, RwLock, Weak,
 };
 
 use zenoh_core::{zread, zwrite};
@@ -48,34 +45,34 @@ use zenoh_result::ZResult;
 pub(crate) const RETAINED_SEGMENTS: usize = 16;
 
 /// One segment the table knows.
-struct Entry<V: ?Sized> {
+struct Entry<K, V: ?Sized> {
+    id: K,
     segment: Weak<V>,
+    /// The table's own reference, while the segment is among the last ones used.
+    kept: Option<Arc<V>>,
     /// When it was last found, on the table's clock: what the least recently used is chosen by.
     used: AtomicU64,
 }
 
-struct Table<K, V: ?Sized> {
-    entries: BTreeMap<K, Entry<V>>,
-    /// The segments kept with no buffer of theirs held: at most the cache's capacity.
-    kept: BTreeMap<K, Arc<V>>,
-}
-
 /// A table of mapped segments by id, holding each by a `Weak` and the most recently used ones,
 /// up to `capacity`, by an `Arc`.
+///
+/// A list searched in order: it holds what is mapped now, the segments a buffer points into and
+/// at most `capacity` more, which is a handful in a process (one data segment per provider read
+/// from, the metadata segments of the processes it reads from), and a list compiles to a fraction
+/// of a search tree's code (measured on 2026-11-27: the tree form of this table was 13,842 bytes of
+/// text in the C library, three instantiations of the standard tree).
 pub(crate) struct SegmentCache<K, V: ?Sized> {
-    table: RwLock<Table<K, V>>,
+    table: RwLock<Vec<Entry<K, V>>>,
     capacity: usize,
     clock: AtomicU64,
 }
 
-impl<K: Ord + Copy, V: ?Sized> SegmentCache<K, V> {
+impl<K: PartialEq + Copy, V: ?Sized> SegmentCache<K, V> {
     /// An empty table that keeps at most `capacity` segments no buffer holds.
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
-            table: RwLock::new(Table {
-                entries: BTreeMap::new(),
-                kept: BTreeMap::new(),
-            }),
+            table: RwLock::new(Vec::new()),
             capacity,
             clock: AtomicU64::new(0),
         }
@@ -92,67 +89,48 @@ impl<K: Ord + Copy, V: ?Sized> SegmentCache<K, V> {
         map: impl FnOnce() -> ZResult<Arc<V>>,
     ) -> ZResult<Arc<V>> {
         // The common case, under the shared lock: a segment some buffer or the kept set holds.
-        {
-            let table = zread!(self.table);
-            if let Some(found) = Self::live(&table, id, self.tick()) {
-                return Ok(found);
-            }
+        if let Some(found) = self.live(&zread!(self.table), id) {
+            return Ok(found);
         }
         let mut table = zwrite!(self.table);
         // Another reader may have mapped it between the two locks.
-        if let Some(found) = Self::live(&table, id, self.tick()) {
+        if let Some(found) = self.live(&table, id) {
             return Ok(found);
         }
         let segment = map()?;
         // What no buffer and no kept slot holds any more is forgotten with the miss that finds
         // it, so the table is as long as what is mapped and not as long as what ever was.
-        table
-            .entries
-            .retain(|_, entry| entry.segment.strong_count() > 0);
-        table.entries.insert(
+        table.retain(|entry| entry.segment.strong_count() > 0);
+        if self.capacity > 0 && table.iter().filter(|e| e.kept.is_some()).count() >= self.capacity {
+            if let Some(oldest) = table
+                .iter_mut()
+                .filter(|entry| entry.kept.is_some())
+                .min_by_key(|entry| entry.used.load(Ordering::Relaxed))
+            {
+                oldest.kept = None;
+            }
+        }
+        table.push(Entry {
             id,
-            Entry {
-                segment: Arc::downgrade(&segment),
-                used: AtomicU64::new(self.tick()),
-            },
-        );
-        self.keep(&mut table, id, &segment);
+            segment: Arc::downgrade(&segment),
+            kept: (self.capacity > 0).then(|| Arc::clone(&segment)),
+            used: AtomicU64::new(self.tick()),
+        });
         Ok(segment)
     }
 
-    /// The segment `id` if it is still mapped, marked used at `now`.
-    fn live(table: &Table<K, V>, id: K, now: u64) -> Option<Arc<V>> {
-        let entry = table.entries.get(&id)?;
+    /// The segment `id` in `table` if it is still mapped, marked used now.
+    fn live(&self, table: &[Entry<K, V>], id: K) -> Option<Arc<V>> {
+        let entry = table.iter().find(|entry| entry.id == id)?;
         let segment = entry.segment.upgrade()?;
-        entry.used.store(now, Ordering::Relaxed);
+        entry.used.store(self.tick(), Ordering::Relaxed);
         Some(segment)
-    }
-
-    /// Keep `segment` among the last ones used, letting go of the least recently used one kept
-    /// when the set is full.
-    fn keep(&self, table: &mut Table<K, V>, id: K, segment: &Arc<V>) {
-        if self.capacity == 0 {
-            return;
-        }
-        if table.kept.len() >= self.capacity {
-            let oldest = table.kept.keys().copied().min_by_key(|key| {
-                table
-                    .entries
-                    .get(key)
-                    .map_or(0, |entry| entry.used.load(Ordering::Relaxed))
-            });
-            if let Some(oldest) = oldest {
-                table.kept.remove(&oldest);
-            }
-        }
-        table.kept.insert(id, Arc::clone(segment));
     }
 
     /// How many segments the table holds mapped now, by a buffer or by its kept set.
     pub(crate) fn mapped(&self) -> usize {
         zread!(self.table)
-            .entries
-            .values()
+            .iter()
             .filter(|entry| entry.segment.strong_count() > 0)
             .count()
     }
@@ -163,9 +141,10 @@ impl<K, V: ?Sized> std::fmt::Debug for SegmentCache<K, V> {
         let mut debug = f.debug_struct("SegmentCache");
         debug.field("capacity", &self.capacity);
         match self.table.try_read() {
-            Ok(table) => debug
-                .field("known", &table.entries.len())
-                .field("kept", &table.kept.len()),
+            Ok(table) => debug.field("known", &table.len()).field(
+                "kept",
+                &table.iter().filter(|entry| entry.kept.is_some()).count(),
+            ),
             Err(_) => debug.field("table", &"<locked>"),
         };
         debug.finish()

@@ -604,21 +604,29 @@ fn provider_handle(provider: Provider) -> Handle {
 /// the process's one shared-memory system, so a chunk of either is issued, watched, held and
 /// collected as upstream's is, and a buffer's descriptor is one any reader of zenoh's maps
 /// (`docs/shm-transport.md`, section 6).
+///
+/// One provider type over either backend (`DynBackend`), as zenoh-c's enum is two: the provider's
+/// allocation paths, its policies and the transport's copy are compiled once rather than once per
+/// backend, for one indirect call per allocation into a backend that is the C program's or a
+/// pool's (measured on 2026-11-27: the provider of the callbacks was 5,550 bytes of text beside the
+/// pool's 3,537, the same code twice).
 #[derive(Clone)]
-enum Backing {
-    /// The built-in pool: a POSIX segment carved by upstream's default allocator.
-    Posix(Arc<ShmProvider<PosixShmProviderBackend>>),
-    /// A C program's allocator ([`ForeignBackend`]).
-    Foreign(Arc<ShmProvider<ForeignBackend>>),
-}
+struct Backing(Arc<ShmProvider<DynBackend>>);
+
+/// A backend of either kind: the built-in POSIX pool, or a C program's allocator
+/// ([`ForeignBackend`]).
+type DynBackend = Box<dyn ShmProviderBackend + Send + Sync>;
 
 impl Backing {
+    /// A provider over `backend`.
+    fn over(backend: impl ShmProviderBackend + Send + Sync + 'static) -> Self {
+        let backend: DynBackend = Box::new(backend);
+        Self(Arc::new(ShmProviderBuilder::backend(backend).wait()))
+    }
+
     /// `buffer`, which this provider issued, held with the provider.
     fn issued(&self, buffer: ShmBufInner) -> IssuedBuffer {
-        match self {
-            Backing::Posix(provider) => IssuedBuffer::new(buffer, provider.clone()),
-            Backing::Foreign(provider) => IssuedBuffer::new(buffer, provider.clone()),
-        }
+        IssuedBuffer::new(buffer, self.0.clone())
     }
 
     fn alloc(
@@ -626,10 +634,7 @@ impl Backing {
         layout: MemoryLayout,
         policy: Policy,
     ) -> Result<ShmBufInner, ZLayoutAllocError> {
-        match self {
-            Backing::Posix(provider) => alloc_from(provider, layout, policy),
-            Backing::Foreign(provider) => alloc_from(provider, layout, policy),
-        }
+        alloc_from(&self.0, layout, policy)
     }
 
     /// Whether this provider can serve `layout`: upstream computes the layout it will
@@ -637,10 +642,7 @@ impl Backing {
     /// (`commons/zenoh-shm/src/api/provider/shm_provider.rs` @
     /// `.map_err(|_| ZLayoutError::ProviderIncompatibleLayout)?;`).
     fn serves(&self, layout: MemoryLayout) -> bool {
-        match self {
-            Backing::Posix(provider) => provider.alloc_layout(layout).is_ok(),
-            Backing::Foreign(provider) => provider.alloc_layout(layout).is_ok(),
-        }
+        self.0.alloc_layout(layout).is_ok()
     }
 
     fn map(
@@ -648,25 +650,15 @@ impl Backing {
         chunk: zenoh_shm::api::provider::chunk::AllocatedChunk,
         len: usize,
     ) -> Result<ShmBufInner, ZAllocError> {
-        let mapped = match self {
-            Backing::Posix(provider) => provider.map(chunk, len),
-            Backing::Foreign(provider) => provider.map(chunk, len),
-        };
-        mapped.map(|buffer| buffer.into_inner())
+        self.0.map(chunk, len).map(|buffer| buffer.into_inner())
     }
 
     fn available(&self) -> usize {
-        match self {
-            Backing::Posix(provider) => provider.available(),
-            Backing::Foreign(provider) => provider.available(),
-        }
+        self.0.available()
     }
 
     fn defragment(&self) -> usize {
-        match self {
-            Backing::Posix(provider) => provider.defragment(),
-            Backing::Foreign(provider) => provider.defragment(),
-        }
+        self.0.defragment()
     }
 
     /// # Safety
@@ -674,12 +666,7 @@ impl Backing {
     /// invalidated.
     unsafe fn garbage_collect_unsafe(&self) -> usize {
         // SAFETY: the caller's contract.
-        unsafe {
-            match self {
-                Backing::Posix(provider) => provider.garbage_collect_unsafe(),
-                Backing::Foreign(provider) => provider.garbage_collect_unsafe(),
-            }
-        }
+        unsafe { self.0.garbage_collect_unsafe() }
     }
 }
 
@@ -782,9 +769,9 @@ impl Provider {
     /// A provider over the built-in POSIX pool of `layout`, or `None` when none can be made: a
     /// pool too small for its allocator to claim, or no shared memory to make it in.
     fn pool(layout: MemoryLayout) -> Option<Self> {
-        let provider = ShmProviderBuilder::default_backend(layout).wait().ok()?;
+        let backend = PosixShmProviderBackend::builder(layout).wait().ok()?;
         Some(Self {
-            shm: Backing::Posix(Arc::new(provider)),
+            shm: Backing::over(backend),
             threadsafe: true,
         })
     }
@@ -1903,14 +1890,7 @@ impl SessionShm {
         let (_, Some(provider)) = self.try_get() else {
             return None;
         };
-        match &provider.shm {
-            Backing::Posix(provider) => {
-                wz_runtime_tokio::shm_buffer::transport_copy(provider, bytes)
-            }
-            Backing::Foreign(provider) => {
-                wz_runtime_tokio::shm_buffer::transport_copy(provider, bytes)
-            }
-        }
+        wz_runtime_tokio::shm_buffer::transport_copy(&provider.shm.0, bytes)
     }
 
     /// Wait for a build that has started: upstream's blocking `recv` on the
@@ -4001,7 +3981,7 @@ unsafe fn foreign_provider_new(
             return;
         }
         let provider = Provider {
-            shm: Backing::Foreign(Arc::new(ShmProviderBuilder::backend(backend).wait())),
+            shm: Backing::over(backend),
             threadsafe,
         };
         // SAFETY: `this_` was checked non-null above.

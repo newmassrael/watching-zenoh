@@ -67,3 +67,35 @@ pub trait ShmProviderBackend: WithProtocolID {
         true
     }
 }
+
+/// A backend behind a box is the backend in it: what lets one provider type hold backends of
+/// several kinds (`ShmProvider<Box<dyn ShmProviderBackend + Send + Sync>>`), as a C ABI that hands
+/// out providers over the built-in pool and over a C program's callbacks does, compiling the
+/// provider's allocation paths once rather than once per backend. Hidden from the documentation:
+/// the original's trait has no such implementation.
+#[doc(hidden)]
+impl<T: ShmProviderBackend + ?Sized> ShmProviderBackend for Box<T> {
+    fn alloc(&self, layout: &MemoryLayout) -> ChunkAllocResult {
+        (**self).alloc(layout)
+    }
+
+    fn free(&self, chunk: &ChunkDescriptor) {
+        (**self).free(chunk)
+    }
+
+    fn defragment(&self) -> usize {
+        (**self).defragment()
+    }
+
+    fn available(&self) -> usize {
+        (**self).available()
+    }
+
+    fn layout_for(&self, layout: MemoryLayout) -> Result<MemoryLayout, ZLayoutError> {
+        (**self).layout_for(layout)
+    }
+
+    fn accepts(&self, chunk: &AllocatedChunk) -> bool {
+        (**self).accepts(chunk)
+    }
+}
