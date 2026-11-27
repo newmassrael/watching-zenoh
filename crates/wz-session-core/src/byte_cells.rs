@@ -339,25 +339,49 @@ impl<F: CellFlag> Drop for ByteBuf<F> {
     }
 }
 
-/// The first bytes of a buffer a table lent, kept past the call that wrote them: the cell is lent
-/// to no other claim until this drops, so what reads those bytes where they lie may do so for as
-/// long as it holds this. A completed reassembly chain is handed up as one when its staging can
-/// give its buffer away (`ChainStaging::keep`). Not `Send`, as the claim it holds is not.
+/// Bytes kept past the call that wrote them, where they were written: the first bytes of a buffer
+/// a table lent, whose cell is lent to no other claim until this drops, or a buffer of the
+/// allocator that is the keeper's alone and goes back to the allocator when this drops. What reads
+/// those bytes where they lie may do so for as long as it holds this. A completed reassembly chain
+/// is handed up as one when its staging can give its buffer away (`ChainStaging::keep`). Not
+/// `Send`, as the claim it may hold is not.
 pub struct KeptBytes {
-    buf: ByteBuf,
-    len: usize,
+    held: Held,
+}
+
+/// What keeps the bytes of a [`KeptBytes`] where they lie.
+enum Held {
+    /// The first `len` bytes of a table's cell.
+    Cell { buf: ByteBuf, len: usize },
+    /// A buffer of the allocator, as long as what it keeps.
+    #[cfg(feature = "alloc")]
+    Own(alloc::vec::Vec<u8>),
 }
 
 impl KeptBytes {
     /// The first `len` bytes of `buf`, at most the whole buffer.
     pub fn of(buf: ByteBuf, len: usize) -> Self {
         let len = len.min(buf.len);
-        Self { buf, len }
+        Self {
+            held: Held::Cell { buf, len },
+        }
+    }
+
+    /// The bytes of `bytes`, kept where they lie: the buffer moves in, not its bytes.
+    #[cfg(feature = "alloc")]
+    pub fn own(bytes: alloc::vec::Vec<u8>) -> Self {
+        Self {
+            held: Held::Own(bytes),
+        }
     }
 
     /// The bytes kept.
     pub fn as_slice(&self) -> &[u8] {
-        self.buf.as_slice().get(..self.len).unwrap_or_default()
+        match &self.held {
+            Held::Cell { buf, len } => buf.as_slice().get(..*len).unwrap_or_default(),
+            #[cfg(feature = "alloc")]
+            Held::Own(bytes) => bytes.as_slice(),
+        }
     }
 }
 
@@ -440,6 +464,19 @@ mod tests {
         drop(kept);
         let whole = KeptBytes::of(CELLS.claim().expect("the cell, given back"), 9);
         assert_eq!(whole.as_slice(), &[1, 2, 3, 4], "at most the whole buffer");
+    }
+
+    /// Kept bytes of a buffer of the allocator are the buffer's whole length, read where the
+    /// buffer lies: the buffer moved in, its bytes did not. Turned red by a keep that copies them.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn kept_bytes_of_an_own_buffer_are_read_where_it_lies() {
+        let mut bytes = alloc::vec::Vec::with_capacity(8);
+        bytes.extend_from_slice(&[5, 6, 7]);
+        let base = bytes.as_ptr();
+        let kept = KeptBytes::own(bytes);
+        assert_eq!(kept.as_slice(), &[5, 6, 7]);
+        assert_eq!(kept.as_slice().as_ptr(), base, "read where the buffer lies");
     }
 
     /// A claim kept past its own life is taken back by the address it starts at, once, and an

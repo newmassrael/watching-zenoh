@@ -221,8 +221,9 @@ pub trait ChainStaging<const SLOTS: usize, const CAP: usize> {
     /// or give the handle back (`Err`) when this arena cannot.
     ///
     /// The delivery holds the buffer for as long as it reads what was decoded out of it, and the
-    /// buffer is the arena's again only when the [`KeptBytes`] drop: a type, not a rule that no
-    /// fragment is staged meanwhile, keeps the next chain from writing over it. The Router frees
+    /// buffer is the arena's again, or the allocator's where it was the chain's own, only when the
+    /// [`KeptBytes`] drop: a type, not a rule that no fragment is staged meanwhile, keeps the next
+    /// chain from writing over it. The Router frees
     /// its own slot either way, so a chain that starts while the buffer is kept stages into
     /// another of the arena's buffers.
     ///
@@ -578,6 +579,162 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
             .cells
             .map_or(0, |cells| cells.capacity().saturating_sub(cells.in_use()));
         self.chains.saturating_sub(self.held()).min(free)
+    }
+}
+
+/// An arena whose chains each take a buffer of the allocator when their first fragment arrives,
+/// as long as the session's bound on a rejoined message, and give it back when they end,
+/// completed, aborted or timed out: the chains of a session whose tables take their memory on use
+/// ([`OnUse`](crate::bounded::OnUse)). It holds nothing while no chain is open, and a chain never
+/// grows its buffer, so a chain is refused at its start or not at all: a chain past the staging's
+/// count of open chains, or whose buffer the allocator refuses, is refused as pool exhaustion,
+/// which the Router answers by dropping the chain and the session counts ([`Self::refused`]), as
+/// zenoh-pico drops a chain whose buffer it cannot allocate
+/// (`vendor/zenoh-pico/src/transport/unicast/rx.c` @
+/// `*dbuf = _z_wbuf_make(Z_FRAG_MAX_SIZE, false);`).
+///
+/// A completed chain kept by its delivery ([`ChainStaging::keep`]) takes its buffer with it: the
+/// chain's place is free at once and the buffer is the delivery's, given back to the allocator
+/// when the [`KeptBytes`] drop, so the staging's count bounds the chains open and not the
+/// messages kept. [`ChainStaging::available`] is the chains it may still open.
+#[cfg(feature = "alloc")]
+pub struct OwnStaging<const SLOTS: usize, const CAP: usize> {
+    /// How many of its chains hold a buffer now.
+    held: usize,
+    /// The most chains open at once, at most `SLOTS`.
+    chains: usize,
+    /// The longest chain, at most `CAP`: the length of every buffer a chain takes.
+    capacity: usize,
+    /// The chains refused a buffer ([`Self::refused`]).
+    refused: u64,
+}
+
+/// One chain's staging in an [`OwnStaging`]: its buffer, whose room for the staging's capacity
+/// was taken when the chain started, and what of it the chain staged.
+#[cfg(feature = "alloc")]
+pub struct OwnChain {
+    /// What the chain staged, in a buffer of room for the staging's capacity.
+    buf: alloc::vec::Vec<u8>,
+    /// Bytes handed out by the most recent [`ChainStaging::buf`] and not yet resolved by
+    /// [`ChainStaging::commit`]; see [`HeapChain`]'s field.
+    reserved: usize,
+}
+
+#[cfg(feature = "alloc")]
+impl<const SLOTS: usize, const CAP: usize> OwnStaging<SLOTS, CAP> {
+    /// A staging of at most `chains` chains open at once, at most `SLOTS`, each taking a buffer
+    /// of `bytes`, at most `CAP`, when it starts. Nothing is taken now.
+    pub fn sized(bytes: usize, chains: usize) -> Self {
+        Self {
+            held: 0,
+            chains: chains.min(SLOTS),
+            capacity: bytes.min(CAP),
+            refused: 0,
+        }
+    }
+
+    /// The longest chain the staging takes.
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// How many chains this staging refused a buffer to since it was made: its chains at their
+    /// count, or a buffer the allocator refused. Read as [`LentStaging::refused`] is.
+    pub const fn refused(&self) -> u64 {
+        self.refused
+    }
+
+    /// A buffer of room for the capacity for a chain that starts; `None` where the staging's
+    /// chains are at their count or the allocator refuses the room.
+    fn take(&mut self) -> Option<OwnChain> {
+        if self.held >= self.chains {
+            return None;
+        }
+        let mut buf = alloc::vec::Vec::new();
+        buf.try_reserve_exact(self.capacity).ok()?;
+        // Below the count, which is at most `SLOTS`.
+        self.held = self.held.wrapping_add(1);
+        Some(OwnChain { buf, reserved: 0 })
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for OwnStaging<SLOTS, CAP> {
+    type Chain = OwnChain;
+
+    fn acquire(&mut self) -> Option<Self::Chain> {
+        let chain = self.take();
+        if chain.is_none() {
+            self.refused = self.refused.saturating_add(1);
+        }
+        chain
+    }
+
+    /// Dropped, the chain's buffer is the allocator's again.
+    fn release(&mut self, _chain: Self::Chain) {
+        self.held = self.held.saturating_sub(1);
+    }
+
+    fn append(&mut self, chain: &mut Self::Chain, payload: &[u8]) -> Result<(), StagingError> {
+        if !self.fits(chain, payload.len()) {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        // Within the room taken when the chain started, so the buffer does not grow.
+        chain.buf.extend_from_slice(payload);
+        Ok(())
+    }
+
+    /// The chain's buffer, taken out of the staging with what was staged in it: the chain's place
+    /// is free at once, and the buffer goes back to the allocator when the keeper drops it.
+    fn keep(&mut self, chain: Self::Chain) -> Result<KeptBytes, Self::Chain> {
+        self.held = self.held.saturating_sub(1);
+        Ok(KeptBytes::own(chain.buf))
+    }
+
+    fn bytes<'a>(&'a self, chain: &'a Self::Chain) -> &'a [u8] {
+        &chain.buf
+    }
+
+    fn fits(&self, chain: &Self::Chain, len: usize) -> bool {
+        chain
+            .buf
+            .len()
+            .checked_add(len)
+            .is_some_and(|total| total <= self.capacity)
+    }
+
+    fn buf<'a>(
+        &'a mut self,
+        chain: &'a mut Self::Chain,
+        want: usize,
+    ) -> Result<&'a mut [u8], StagingError> {
+        if !self.fits(chain, want) {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        let start = chain.buf.len();
+        // `fits` held the end to the capacity, within the room the chain took.
+        let end = start.wrapping_add(want);
+        chain.buf.resize(end, 0);
+        chain.reserved = want;
+        chain
+            .buf
+            .get_mut(start..end)
+            .ok_or(StagingError::ChainCapExceeded)
+    }
+
+    fn commit(&mut self, chain: &mut Self::Chain, filled: usize) -> Result<(), StagingError> {
+        if filled > chain.reserved {
+            return Err(StagingError::ChainCapExceeded);
+        }
+        // The reservation was materialised to lend it out, so what was not filled is given back.
+        let unused = chain.reserved.saturating_sub(filled);
+        chain.buf.truncate(chain.buf.len().saturating_sub(unused));
+        chain.reserved = 0;
+        Ok(())
+    }
+
+    fn available(&self) -> usize {
+        self.chains.saturating_sub(self.held)
     }
 }
 
