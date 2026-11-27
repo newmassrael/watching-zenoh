@@ -1265,7 +1265,12 @@ CITATION = re.compile(
 # gateway it qualifies (R2901 data, R2902 queries), are ported to the region-hat forwarder. It
 # leaves the PARTIAL set, so the atoms the pin counted before the retirement are the two again
 # (`api-compat-rust`, `session-close-ingress`). UNREACHED and NO_SYMBOL hold at 0 and 0.
-PIN_REACHED = 2
+# R4699 -- REACHED 2 -> 1, a RETIREMENT, and PAID LATE. `api-compat-rust` is regraded PARTIAL ->
+# COMPLETE when the shared-memory arm lands, and leaves the PARTIAL set, so the one atom the pin
+# counts is `session-close-ingress`. UNREACHED and NO_SYMBOL hold at 0 and 0. The regrading round
+# did not move this pin (pre-push defers this census to hosted CI). READ off the census's own
+# FAIL line, `reached: 1 against a pin of 2`.
+PIN_REACHED = 1
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 0
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2905,7 +2910,10 @@ PIN_NO_SYMBOL = 0
 # 62 -> 64, one atom. `session-close-ingress`'s access-control clause names the three files its
 # measurement read by their crate paths, where it named a switchboard and a bare observer file; the
 # observer pair are the two its later correction already cites, so the review table keeps its pairs.
-PIN_WZ_CITATIONS = 64
+# R4699 -- 64 -> 25, one atom, and PAID LATE. `api-compat-rust` departs (COMPLETE) carrying the 39
+# wz citations of its reason; `session-close-ingress` keeps its 25 and AMBIGUOUS holds at 0. READ
+# off the census's own FAIL line, `wz citations: 25 against a pin of 64`.
+PIN_WZ_CITATIONS = 25
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
