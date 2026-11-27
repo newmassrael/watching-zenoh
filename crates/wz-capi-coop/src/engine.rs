@@ -304,10 +304,7 @@ pub(crate) use registry::HELD_SET_BYTES;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
-#[cfg(all(
-    any(feature = "query", feature = "queryable"),
-    not(feature = "runtime-plan")
-))]
+#[cfg(all(feature = "queryable", not(feature = "runtime-plan")))]
 use state_places::PlacedTables;
 #[cfg(not(feature = "runtime-plan"))]
 pub(crate) use state_places::StatePlaces;
@@ -445,7 +442,7 @@ use {
     wz_session_core::query_options::QueryOptionsOf,
     wz_session_core::registry_error::RegisterError,
     wz_session_core::reply_acceptance::ReplyAcceptance,
-    wz_session_core::reply_sink::timeout_reply,
+    wz_session_core::reply_sink::{timeout_reply, ReplyView},
     wz_session_core::session_tables::{GetEnd, PendingGetHandle},
     wz_session_core::slot_map::Removal,
 };
@@ -9890,6 +9887,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 .release_drained_get(cursor)
                 .map(|row| row.into_callback())
         });
+    }
+
+    /// Make `call`, begun on a get's row under the session's lock, with no lock held, in either
+    /// form: hand it `reply`, then end it ([`Self::end_get_call`]). A callback that steps the
+    /// session inside the call hands out nothing itself; the delivery the caller is inside of, or
+    /// enters after, does.
+    #[cfg(feature = "query")]
+    fn make_get_call(&self, call: GetCall, reply: &dyn ReplyView) {
+        self.deliveries.within(|_| call.hand(reply));
+        self.end_get_call(call);
     }
 
     /// End `call`, made of a get's row: a get retired while it ran, whose last call it was, is let

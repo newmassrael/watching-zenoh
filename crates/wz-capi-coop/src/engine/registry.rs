@@ -957,7 +957,7 @@ impl<H: Holders> RegistryOf<H> {
             not(wz_round)
         ))]
         let decl_watches = DeclWatches::under(limits)?;
-        let mut registry = Self {
+        Ok(Self {
             app: ManuallyDrop::new(app),
             delivery,
             sets: ManuallyDrop::new(sets),
@@ -992,8 +992,7 @@ impl<H: Holders> RegistryOf<H> {
             replies_alone: 0,
             #[cfg(all(test, feature = "std", feature = "queryable"))]
             drains_within_frames: 0,
-        };
-        Ok(registry)
+        })
     }
 
     /// The count [`Self::peers_declare`]'s answers are good for: one taken while this read the

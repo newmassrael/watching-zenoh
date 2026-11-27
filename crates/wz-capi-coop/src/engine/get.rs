@@ -19,7 +19,7 @@
 use wz_capi_port::cancellation::FanKey;
 use wz_capi_port::ReplyCallback;
 use wz_session_core::reply_sink::ReplyView;
-use wz_session_core::session_tables::RowCallback;
+use wz_session_core::row_callback::RowCallback;
 use wz_session_core::timestamp_visibility::HiddenReplyTimestamp;
 
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -133,7 +133,7 @@ mod tests {
 
     use wz_capi_port::ReplyCallback;
     use wz_session_core::reply_sink::timeout_reply;
-    use wz_session_core::session_tables::RowCallback;
+    use wz_session_core::row_callback::RowCallback;
 
     use super::{GetCall, GetShown, ReplyRow};
 

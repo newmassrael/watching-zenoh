@@ -22,7 +22,6 @@ use super::*;
 use wz_session_core::declare::liveliness_get::token_reply;
 use wz_session_core::driver_loop::{InPlaceRecord, OwedToProjection};
 use wz_session_core::reply::{InboundReply, LentReply, ReplyRoom};
-use wz_session_core::reply_sink::ReplyView;
 #[cfg(feature = "liveliness-get")]
 use wz_session_core::wireexpr_resolve::{KeyexprOut, KeyexprRow};
 
@@ -71,18 +70,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let call = held.0.session.registry.admit_reply(face, reply);
         drop(held);
         if let Some(call) = call {
+            // A read a callback makes reads nothing, so no record is handed out inside the call.
             self.make_get_call(call, reply);
+            #[cfg(test)]
+            self.takes.pinned_replies.fetch_add(1, Ordering::Relaxed);
         }
-    }
-
-    /// Make `call`, begun on a get's row under the session's lock, with no lock held: hand it
-    /// `reply`, then end it, letting go of the row when it was the last call of a retired get.
-    pub(super) fn make_get_call(&self, call: GetCall, reply: &dyn ReplyView) {
-        // A read a callback makes reads nothing, so no record is handed out inside the call.
-        self.deliveries.within(|_| call.hand(reply));
-        self.end_get_call(call);
-        #[cfg(test)]
-        self.takes.pinned_replies.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Hand the alive token the Declare `record` of face `face` lends to the liveliness get it
@@ -132,6 +124,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         drop(held);
         if let Some(call) = call {
             self.make_get_call(call, &reply);
+            #[cfg(test)]
+            self.takes.pinned_replies.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
