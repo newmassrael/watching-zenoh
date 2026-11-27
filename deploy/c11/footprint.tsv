@@ -22,6 +22,7 @@ close	3086	21	0	0
 cobs_decode	116	0	0	0
 cobs_encode	152	0	0	0
 compressed_batch	3330	25	0	0
+counter_after	7248	102	0	0
 crc16_ccitt	62	0	0	0
 crc32	60	0	0	0
 decl_final	4900	50	0	0
