@@ -1097,6 +1097,47 @@ fn a_runtime_placed_for_an_open_that_adds_cells_is_refused_by_a_full_heap() {
     }
 }
 
+/// A runtime made of the heap by its form holds that form's table, as one placed by it does: one
+/// that hosts no task refuses a spawn for want of a cell, counted, and polls nothing; one made for
+/// one task runs it. Turned red by a form made as another (a taskless form given the rows' cells,
+/// or one made for one task given none).
+#[test]
+fn a_runtime_made_of_the_heap_by_its_form_holds_that_forms_table() {
+    let rows = RuntimeRows {
+        tasks: 1,
+        task_bytes: 256,
+        timers: 0,
+    };
+    let (runtime, local) =
+        CoopRuntime::try_formed(Still, rows, RuntimeForm::Taskless).expect("the heap has room");
+    assert_eq!(
+        local
+            .try_spawn_local(async { 1u8 })
+            .map(|_| ())
+            .map_err(|refused| refused.why),
+        Err(SpawnRefusal::NoTaskCell),
+        "no cell for any task"
+    );
+    assert_eq!(
+        runtime.task_refusals().no_task_cell,
+        1,
+        "the refusal is counted"
+    );
+    local.run_until_idle();
+    assert_eq!(
+        local.live_local_task_count(),
+        0,
+        "nothing was placed to run"
+    );
+    let (_one, local) =
+        CoopRuntime::try_formed(Still, rows, RuntimeForm::ForOne).expect("the heap has room");
+    assert!(
+        local.try_spawn_local(async { 1u8 }).is_ok(),
+        "CONTROL: a runtime made for one task takes it"
+    );
+    local.run_until_idle();
+}
+
 /// A runtime the heap has no room for is not made, whichever making is asked, and the same
 /// making with the heap's memory is. Turned red by a making that ends the process on the refusal,
 /// of its state or of its task cells, where it answers none.
@@ -1111,7 +1152,10 @@ fn a_runtime_the_heap_has_no_room_for_is_not_made() {
     assert!(refused(|| CoopRuntime::try_reserved(Still, rows)).is_none());
     assert!(refused(|| CoopRuntime::try_reserved_for_one(Still, rows)).is_none());
     assert!(refused(|| CoopRuntime::try_opening(Still, rows, 1)).is_none());
+    assert!(refused(|| CoopRuntime::try_taskless(Still, rows)).is_none());
+    assert!(refused(|| CoopRuntime::try_formed(Still, rows, RuntimeForm::Reserved)).is_none());
     assert!(CoopRuntime::try_new(Still).is_some());
+    assert!(CoopRuntime::try_taskless(Still, rows).is_some());
     assert!(CoopRuntime::try_opening(Still, rows, 1).is_some());
 }
 
