@@ -17,13 +17,22 @@ to 4.56 (the C ABI doors), and a change that grows one area while another shrink
 by their difference only. The architecture is judged area by area, so this gate is too: a change
 that grows an area is refused in that area.
 
+And one feature bundle does not say what the others cost. The ratio of a whole library grows with
+its features (by the ceiling's rows, the release client read 0.94 times zenoh-pico on 2026-11-25 and
+the cooperative peer 1.26 on 2026-11-26), so a ledger of the smallest client alone holds nothing of
+what a feature adds. Each case of the ledger is a feature bundle, every area of each is held, and
+`--per-feature` says what each feature adds to each area on both sides.
+
 ## What is read, and where it comes from
 
-One case of capability_cost_gate.py, the one the ledger names (`case`, the release form), and its
-zenoh-pico reference, built by that gate's own functions (`build`, `pico_reference_build`,
-`pico_reference_tree`) in its environment (`build_env`): the same commands, the same target
-directory and the same reference directory, so in Layer C1cs, after the cost gate built the case,
-neither is built a second time. A library that holds a build path, that another linker wrote, or
+Each case of capability_cost_gate.py the ledger names (`cases`): the client in its release form,
+the cooperative peer, and `pico-api-coop-nostd`, the Linux twin of the Windows release's
+like-for-like library, whose features that gate reads from the profile the Windows lane builds the
+library from. The cases are defined there and only named here. Each with its zenoh-pico reference,
+built by that gate's own functions (`build`, `pico_reference_build`, `pico_reference_tree`) in
+its environment (`build_env`): the same commands, the same target directory and the same
+reference directory, so in Layer C1cs, after the cost gate built a case, neither is built a second
+time. A library that holds a build path, that another linker wrote, or
 whose strip moved its code (below) is no figure here, as it is no figure there.
 
 Each is ONE build with its line tables, as the shipping entry builds a release
@@ -159,17 +168,35 @@ renamed module is seen.
 
 ## The ratchet
 
-Each area has a row, with the rule of a row of the pico ceiling (pico_host_ceiling.py, the one
-implementation): locked at WIN, or `ratio_at_most`, the ratio of the reading it was set from rounded
-up to four places, under the open-debt item it is registered under. A reading over its row by more
-than the tolerance fails; one under it by more prints the tighter row to commit; an area that reads
-WIN fails until its row is locked, and a locked area reads WIN or fails. A row whose ratio is null
-is unfilled and fails with the row this run reads. An area that reads no byte on one side has no
-ratio and fails: its rules give that side none of its code.
+Each area of each case has a row, with the rule of a row of the pico ceiling (pico_host_ceiling.py,
+the one implementation): locked at WIN, or `ratio_at_most`, the ratio of the reading it was set
+from rounded up to four places, under the open-debt item it is registered under. A reading over its
+row by more than the tolerance fails; one under it by more prints the tighter row to commit; an
+area that reads WIN fails until its row is locked, and a locked area reads WIN or fails. A row
+whose ratio is null is unfilled and fails with the row this run reads, and a case is added with
+every row unfilled: its rows are set from `--measure`'s output, never written by hand. An area
+that reads no byte on one side has no ratio and fails: its rules give that side none of its code.
+The areas and the rules are the ledger's, one set for every case, so an area means one thing in
+every bundle.
+
+## One feature at a time
+
+`--per-feature` steps from the ledger's `base_case` to each other case (or to the cases it names):
+for each feature the case names, in its order, that the features before it do not already turn on,
+it builds the base case's build (its profile and configuration files) with the features before it
+and this one, and zenoh-pico with the switches those features answer (`pico_reference`, the same
+derivation as every reference), and reads both by area as `--measure` does. Each step's
+additions are printed by area on each side, with wz's addition over zenoh-pico's, then the
+features by that excess, most first: a feature that costs wz more than it costs zenoh-pico is
+named, and so is the area it costs it in. A feature zenoh-pico has no switch of adds nothing to
+zenoh-pico, and says so. A step adds what the features before it make it cost, so the chain's
+order is the case's; a build that turns on the same features as a step of another chain is read
+once. It grades nothing, and the whole report goes to `size-ledger/per-feature-CASE.json` under the
+cost gate's target directory.
 
 ## What holds an area's bytes
 
-`--explain` reads the same case as `--measure` (the same builds, so after a measure it builds
+`--explain` reads the same cases as `--measure` (the same builds, so after a measure it builds
 nothing again) and says, for each area, what holds its bytes, and how many bytes the symbol reading
 gives it, and how many bytes of inlined language runtime code it counts by their caller's file and
 how many bytes of no source line by their frame's: on the wz side the owner modules and the source
@@ -190,17 +217,21 @@ mangled when it cannot.
 ## Where it runs
 
 Layer C1cs, as the leg after the cost gate, whose builds it reads; it builds nothing of its own.
-With `--shards N --shard K` the case is read only on the shard the cost gate deals it to, and every
-shard checks the ledger itself, which needs no build. Layer C0 runs `--selftest`, which holds the
-readers, the rules and the ratchet on synthetic input and the committed ledger to its own rules.
+With `--shards N --shard K` a case is read only on the shard the cost gate deals it to, and every
+shard checks the ledger itself, which needs no build. `--per-feature` builds a library and a
+reference for each step, so it is run by hand on one host and in no layer. Layer C0 runs
+`--selftest`, which holds the readers, the rules and the ratchet on synthetic input and the
+committed ledger to its own rules.
 
 Usage:
-    size_ledger_gate.py --check [--shards N --shard K]
-                               read the case and grade every area against its row
-    size_ledger_gate.py --measure [--shards N --shard K]
-                               read the case and print the table and the rows to commit
-    size_ledger_gate.py --explain [--shards N --shard K]
+    size_ledger_gate.py --check [--shards N --shard K] [ID...]
+                               read each case (or the named ones), grade every area against its row
+    size_ledger_gate.py --measure [--shards N --shard K] [ID...]
+                               read the same and print each table and the rows to commit
+    size_ledger_gate.py --explain [--shards N --shard K] [ID...]
                                --measure, then what holds each area's bytes, kept as JSON
+    size_ledger_gate.py --per-feature [ID...]
+                               step from the base case to each case, one feature at a time
     size_ledger_gate.py --selftest
 
 Exit codes: 0 the ledger holds, 1 a finding, 2 a usage error or a host that cannot build.
@@ -221,7 +252,7 @@ import sys
 import tempfile
 import zlib
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import build_normalization  # noqa: E402  (the prefixes a build's paths are mapped by)
@@ -235,9 +266,9 @@ from pico_host_ceiling import (  # noqa: E402  (the one rule of a ratio row)
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 LEDGER = ROOT / "deploy" / "size_ledger.json"
-LEDGER_SCHEMA = 2
-TABLE_KEYS = frozenset(("about", "schema", "case", "unclassified_bytes_at_most",
-                        "unattributed_bytes_at_most", "areas", "rows", "rules"))
+LEDGER_SCHEMA = 3
+TABLE_KEYS = frozenset(("about", "schema", "cases", "base_case", "unclassified_bytes_at_most",
+                        "unattributed_bytes_at_most", "areas", "rules"))
 SIDES = ("wz", "pico")
 RULE_KINDS = ("names", "owners")
 # The segment separator of an owner path on each side: a Rust path and a source path.
@@ -258,6 +289,8 @@ PICO_HEADER_TREES = ("include", "src")
 # How many unclassified bodies a finding names, largest first.
 UNCLASSIFIED_NAMED = 12
 MEASURE = "python3 scripts/lib/size_ledger_gate.py --measure"
+# --per-feature: the report it keeps under the target directory, beside --explain's.
+PER_FEATURE_SCHEMA = 1
 # --explain: how many rows each of its tables prints (the JSON keeps every row), the width a name
 # is cut to there, the tool that demangles, and where the report goes under the target directory.
 EXPLAIN_OWNERS = 30
@@ -2085,6 +2118,17 @@ def pico_case_ids() -> list[str]:
     return [c.id for c in cost.CASES if c.package == "wz-capi-pico"]
 
 
+def ledger_cases(table: object) -> dict:
+    """The ledger's cases, each id -> its rows by area; empty when it has none that reads."""
+    cases = table.get("cases") if isinstance(table, dict) else None
+    return cases if isinstance(cases, dict) else {}
+
+
+def measure_command(case_id: str) -> str:
+    """The command that prints a case's rows, which an unfilled row's finding names."""
+    return f"{MEASURE} {case_id}"
+
+
 def rule_findings(table: object, case_ids: Iterable[str]) -> list[str]:
     """What keeps the ledger from being read: its shape, its case, its areas and its rules. Static,
     so every shard and the selftest run it."""
@@ -2094,9 +2138,17 @@ def rule_findings(table: object, case_ids: Iterable[str]) -> list[str]:
     if table.get("schema") != LEDGER_SCHEMA:
         return [f"{where} is not schema {LEDGER_SCHEMA}"]
     out = [f"{where} has the unknown key {key!r}" for key in sorted(set(table) - TABLE_KEYS)]
-    if not isinstance(table.get("case"), str) or table["case"] not in set(case_ids):
-        out.append(f"{where}: case {table.get('case')!r} is no pico case of "
-                   f"capability_cost_gate.py, whose builds this gate reads")
+    cases = table.get("cases")
+    known = set(case_ids)
+    if not isinstance(cases, dict) or not cases:
+        out.append(f"{where}: cases is no object of the cases whose areas it holds")
+    else:
+        out += [f"{where}: case {case_id!r} is no pico case of capability_cost_gate.py, whose "
+                f"builds this gate reads" for case_id in cases if case_id not in known]
+        base = table.get("base_case")
+        if not isinstance(base, str) or base not in cases:
+            out.append(f"{where}: base_case {base!r} is none of its cases: --per-feature steps "
+                       f"from it to each other case")
     limit = table.get("unclassified_bytes_at_most")
     if type(limit) is not int or limit < 0:
         out.append(f"{where}: unclassified_bytes_at_most is no byte count")
@@ -2161,22 +2213,24 @@ def rule_findings(table: object, case_ids: Iterable[str]) -> list[str]:
 
 
 def row_population_findings(table: object) -> list[str]:
-    """What keeps every declared area from having exactly one well-formed row. A row whose
-    ratio_at_most is null is well formed here (the unfilled form), and the grade refuses it."""
+    """What keeps every declared area of every case from having exactly one well-formed row. A
+    row whose ratio_at_most is null is well formed here (the unfilled form), and the grade refuses
+    it."""
     where = LEDGER.relative_to(ROOT)
-    if not isinstance(table, dict):
-        return []
-    rows = table.get("rows")
-    if not isinstance(rows, dict):
-        return [f"{where} has no rows object"]
     ids = area_ids(table)
-    out = [f"{area}: no row in {where}: an area is held from the commit that declares it; "
-           f"{MEASURE} prints its row" for area in ids if area not in rows]
-    for area, row in rows.items():
-        if area not in ids:
-            out.append(f"{area}: a row in {where} for no declared area")
-        else:
-            out += row_findings(area, row)
+    out: list[str] = []
+    for case_id, rows in ledger_cases(table).items():
+        if not isinstance(rows, dict):
+            out.append(f"{case_id}: its rows in {where} are no object")
+            continue
+        out += [f"{case_id}: {area}: no row in {where}: an area is held from the commit that "
+                f"declares it, and a case from the commit that adds it; "
+                f"{measure_command(case_id)} prints its row" for area in ids if area not in rows]
+        for area, row in rows.items():
+            if area not in ids:
+                out.append(f"{case_id}: {area}: a row in {where} for no declared area")
+            else:
+                out += [f"{case_id}: {finding}" for finding in row_findings(area, row)]
     return out
 
 
@@ -2229,17 +2283,18 @@ def area_readings(areas: list[str], wz: Tally, pico: Tally, pin: str, toolchain:
     return readings, findings
 
 
-def grade_areas(rows: Mapping[str, object],
-                readings: Mapping[str, dict]) -> tuple[list[str], list[str]]:
-    """The findings and the notes of each area's reading against its well-formed row; a missing
-    or malformed row is `row_population_findings`' to name."""
+def grade_areas(rows: Mapping[str, object], readings: Mapping[str, dict],
+                remeasure: str = MEASURE) -> tuple[list[str], list[str]]:
+    """The findings and the notes of each area's reading against its well-formed row (one case's
+    rows); a missing or malformed row is `row_population_findings`' to name. `remeasure` is the
+    command that prints the case's rows."""
     findings: list[str] = []
     notes: list[str] = []
     for area, reading in readings.items():
         row = rows.get(area)
         if not isinstance(row, dict) or row_findings(area, row):
             continue
-        found, said = grade_ceiling(area, row, reading, MEASURE, table=LEDGER,
+        found, said = grade_ceiling(area, row, reading, remeasure, table=LEDGER,
                                     win_closes_debt=False)
         findings += found
         notes += said
@@ -2261,8 +2316,9 @@ def held_at(row: object) -> str:
     return f"at most {row['ratio_at_most']}"
 
 
-def table_lines(table: dict, wz: Tally, pico: Tally) -> list[str]:
-    rows = table["rows"] if isinstance(table.get("rows"), dict) else {}
+def table_lines(table: dict, rows: Mapping[str, object], wz: Tally, pico: Tally) -> list[str]:
+    """One case's areas against its rows, its total, and its unclassified and unattributed
+    bytes."""
     lines = [f"  size-ledger:   {'area':<10} {'wz':>9} {'zenoh-pico':>11} {'ratio':>8}  row"]
     for area in table["areas"]:
         aid = area["id"]
@@ -2665,52 +2721,23 @@ def shard_case_ids(shards: int, shard: int) -> list[str]:
     return ids
 
 
-def cmd_run(mode: str, shard: tuple[int, int] | None) -> int:
-    """`mode` is check, measure or explain; only check grades the rows."""
-    measure_only = mode != "check"
-    table = load_ledger()
-    blocking = rule_findings(table, pico_case_ids())
-    rows_found = [] if blocking else row_population_findings(table)
-    for finding in blocking:
-        print(f"  size-ledger FAIL: {finding}", file=sys.stderr)
-    if blocking or not isinstance(table, dict):
-        return 1
-    rc = 0
-    for finding in rows_found:
-        if measure_only:
-            print(f"  size-ledger: note: {finding}")
-        else:
-            print(f"  size-ledger FAIL: {finding}", file=sys.stderr)
-            rc = 1
-    case = next(c for c in cost.CASES if c.id == table["case"])
-    if shard is not None:
-        try:
-            planned = shard_case_ids(*shard)
-        except (OSError, ValueError) as e:
-            print(f"  size-ledger: {cost.CASE_WEIGHTS.name}: {e}", file=sys.stderr)
-            return 2
-        if case.id not in planned:
-            print(f"  size-ledger: {case.id} is built on another shard of {shard[0]}; this shard "
-                  f"checked the ledger itself")
-            return rc
-    try:
-        env, prefixes = cost.build_env()
-        linker = cost.gnu_ld_version(env)
-        cost.strip_tool()
-    except (ValueError, RuntimeError) as e:
-        print(f"  size-ledger: {e}", file=sys.stderr)
-        return 2
-    try:
-        read, refused = read_case(case, env, prefixes)
-    except (subprocess.CalledProcessError, OSError, RuntimeError, elf_facts.ElfError,
-            wz_config.PresetError) as e:
-        print(f"  size-ledger FAIL: {case.id}: the case or its reference could not be read: {e}",
-              file=sys.stderr)
-        return 1
-    for finding in refused:
-        print(f"  size-ledger FAIL: {finding}", file=sys.stderr)
-    if read is None:
-        return 1
+READ_ERRORS = (subprocess.CalledProcessError, OSError, RuntimeError, elf_facts.ElfError,
+               wz_config.PresetError)
+
+
+@dataclass(frozen=True)
+class Counted:
+    """A case's bytes read by area: each side's by line (`wz`, `pico`) and by symbol
+    (`by_symbol`), the pieces the line reading placed, and the owner of each source file."""
+    wz: Tally
+    pico: Tally
+    pieces: Mapping[str, list[Piece]]
+    by_symbol: Mapping[str, Tally]
+    sources: Mapping[str, Mapping[str, tuple[str | None, str | None]]]
+
+
+def count_case(read: CaseRead, table: dict, prefixes: build_normalization.Prefixes) -> Counted:
+    """The bytes of each area of a case `read_case` read, by the areas and rules of `table`."""
     areas = area_ids(table)
     rules = {side: side_rules(table, side) for side in SIDES}
     placed = {"wz": place_bodies(read.wz, rules["wz"], areas),
@@ -2721,13 +2748,87 @@ def cmd_run(mode: str, shard: tuple[int, int] | None) -> int:
                "pico": pico_source_owners(read.spans["pico"], read.pico_export)}
     pieces = {side: attribute(placed[side][0], read.spans[side], sources[side], rules[side], areas)
               for side in SIDES}
-    wz = tally_pieces(*pieces["wz"], areas)
-    pico = tally_pieces(*pieces["pico"], areas)
+    return Counted(tally_pieces(*pieces["wz"], areas), tally_pieces(*pieces["pico"], areas),
+                   {side: listed for side, (listed, _) in pieces.items()}, by_symbol, sources)
+
+
+def cmd_run(mode: str, shard: tuple[int, int] | None, only: Iterable[str] = ()) -> int:
+    """`mode` is check, measure or explain; only check grades the rows. `only` names the cases
+    of the ledger to read, every case when it names none."""
+    measure_only = mode != "check"
+    table = load_ledger()
+    blocking = rule_findings(table, pico_case_ids())
+    rows_found = [] if blocking else row_population_findings(table)
+    for finding in blocking:
+        print(f"  size-ledger FAIL: {finding}", file=sys.stderr)
+    if blocking or not isinstance(table, dict):
+        return 1
+    cases = ledger_cases(table)
+    named = list(only)
+    unknown = [case_id for case_id in named if case_id not in cases]
+    if unknown:
+        print(f"  size-ledger: no case of {LEDGER.relative_to(ROOT)}: {unknown}", file=sys.stderr)
+        return 2
+    rc = 0
+    for finding in rows_found:
+        if measure_only:
+            print(f"  size-ledger: note: {finding}")
+        else:
+            print(f"  size-ledger FAIL: {finding}", file=sys.stderr)
+            rc = 1
+    chosen = [case_id for case_id in cases if not named or case_id in named]
+    if shard is not None:
+        try:
+            planned = set(shard_case_ids(*shard))
+        except (OSError, ValueError) as e:
+            print(f"  size-ledger: {cost.CASE_WEIGHTS.name}: {e}", file=sys.stderr)
+            return 2
+        for case_id in chosen:
+            if case_id not in planned:
+                print(f"  size-ledger: {case_id} is built on another shard of {shard[0]}; this "
+                      f"shard checked the ledger itself")
+        chosen = [case_id for case_id in chosen if case_id in planned]
+        if not chosen:
+            return rc
+    try:
+        env, prefixes = cost.build_env()
+        linker = cost.gnu_ld_version(env)
+        cost.strip_tool()
+    except (ValueError, RuntimeError) as e:
+        print(f"  size-ledger: {e}", file=sys.stderr)
+        return 2
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    by_id = {c.id: c for c in cost.CASES}
+    for case_id in chosen:
+        rows = cases[case_id] if isinstance(cases[case_id], dict) else {}
+        rc = max(rc, run_case(mode, by_id[case_id], rows, table, env, prefixes, linker, today))
+    return rc
+
+
+def run_case(mode: str, case: cost.Case, rows: Mapping[str, object], table: dict,
+             env: Mapping[str, str], prefixes: build_normalization.Prefixes, linker: str,
+             today: str) -> int:
+    """Read one case of the ledger and print its areas and the rows it reads; in check mode grade
+    each area against its row of `rows`, and in explain mode say what holds each area's bytes."""
+    measure_only = mode != "check"
+    try:
+        read, refused = read_case(case, env, prefixes)
+    except READ_ERRORS as e:
+        print(f"  size-ledger FAIL: {case.id}: the case or its reference could not be read: {e}",
+              file=sys.stderr)
+        return 1
+    for finding in refused:
+        print(f"  size-ledger FAIL: {finding}", file=sys.stderr)
+    if read is None:
+        return 1
+    areas = area_ids(table)
+    counted = count_case(read, table, prefixes)
+    wz, pico = counted.wz, counted.pico
     print(f"  size-ledger: {case.id}: function bytes by area, each byte by the source its line "
           f"table names (inlined language runtime code by its caller's, code of no line by its "
           f"frame's, else by its body's symbols), against zenoh-pico "
           f"{read.pin} as the same build ({read.toolchain}; both linked by {linker})")
-    for line in table_lines(table, wz, pico):
+    for line in table_lines(table, rows, wz, pico):
         print(line)
     notes: list[str] = []
     if read.unread:
@@ -2738,7 +2839,7 @@ def cmd_run(mode: str, shard: tuple[int, int] | None) -> int:
         idle = unused_rules(table, side, tallied.used)
         if idle:
             notes.append(f"the {side} rules that placed no byte of this case: {', '.join(idle)}")
-    read_by = {how: sum(1 for _, found in sources["wz"].values() if found == how)
+    read_by = {how: sum(1 for _, found in counted.sources["wz"].values() if found == how)
                for how in (BY_PATH, BY_FUNCTIONS, BY_OUT_TREE, None)}
     notes.append(f"the owners of the wz source files: {read_by[BY_PATH]} read from their path, "
                  f"{read_by[BY_FUNCTIONS]} from the functions that begin in them, "
@@ -2750,35 +2851,35 @@ def cmd_run(mode: str, shard: tuple[int, int] | None) -> int:
                 + unclassified_findings("zenoh-pico", pico, limit)
                 + unattributed_findings("wz", wz, unlined)
                 + unattributed_findings("zenoh-pico", pico, unlined))
-    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
     readings, missing = area_readings(areas, wz, pico, read.pin, read.toolchain, today)
     findings += missing
-    rows = table["rows"] if isinstance(table.get("rows"), dict) else {}
     if not measure_only:
-        graded, said = grade_areas(rows, readings)
+        graded, said = grade_areas(rows, readings, measure_command(case.id))
         findings += graded
         notes += said
     for note in notes:
-        print(f"  size-ledger: {note}")
+        print(f"  size-ledger: {case.id}: {note}")
     if readings:
-        print(f"  size-ledger: the rows this run reads for {LEDGER.relative_to(ROOT)} rows (each "
-              f"replaces the row of its area):")
+        print(f"  size-ledger: {case.id}: the rows this run reads for its rows in "
+              f"{LEDGER.relative_to(ROOT)} (`cases`, {json.dumps(case.id)}; each replaces the "
+              f"row of its area):")
         for n, (area, reading) in enumerate(readings.items(), 1):
             row = ceiling_row(reading, row_debt(rows.get(area)))
             print(f"    {format_row(area, row)}{',' if n < len(readings) else ''}")
+    rc = 0
     for finding in findings:
         if measure_only:
-            print(f"  size-ledger: note: {finding}")
+            print(f"  size-ledger: {case.id}: note: {finding}")
         else:
-            print(f"  size-ledger FAIL: {finding}", file=sys.stderr)
+            print(f"  size-ledger FAIL: {case.id}: {finding}", file=sys.stderr)
             rc = 1
     if rc == 0 and not measure_only:
         print(f"  size-ledger: {case.id}: {len(readings)} area(s) under their rows against "
               f"zenoh-pico, unclassified text within {limit} bytes and text of no source line "
               f"within {unlined} bytes on each side")
     if mode == "explain":
-        rc = max(rc, explain_case(case.id, read, areas, {s: p for s, (p, _) in pieces.items()},
-                                  by_symbol, sources, today))
+        rc = max(rc, explain_case(case.id, read, areas, counted.pieces, counted.by_symbol,
+                                  counted.sources, today))
     return rc
 
 
@@ -2805,6 +2906,241 @@ def explain_case(case_id: str, read: CaseRead, areas: list[str],
             if previous is not None else "")
     print(f"  size-ledger: every row of these lists is at {path}{kept}")
     return 0
+
+
+# ── one feature at a time: --per-feature ────────────────────────────────────────────────────────
+
+
+def feature_steps(start: list[str], target: list[str], enabled: Callable[[list[str]], set[str]]
+                  ) -> tuple[list[tuple[str, list[str]]], list[str]]:
+    """The chain from the features `start` to those of `target`: each feature of `target`, in
+    its order, that the features before it do not already turn on (`enabled`, cargo's resolution
+    of a list), with the list its step builds (`start` and every feature added up to it); and the
+    features `start` turns on that `target` does not, which every step keeps."""
+    current = list(start)
+    steps: list[tuple[str, list[str]]] = []
+    for feature in target:
+        if feature in enabled(current):
+            continue
+        current = [*current, feature]
+        steps.append((feature, current))
+    goal = enabled(target)
+    return steps, sorted(f for f in enabled(start) if f not in goal)
+
+
+def side_bytes(tallied: Tally, areas: list[str]) -> dict[str, int]:
+    """One side's bytes by area, with its unclassified and its unattributed bytes apart: together
+    every byte of its text (`Tally.total`), so what a step adds sums to what it adds in all."""
+    out = {area: tallied.by_area[area] for area in areas}
+    out[UNCLASSIFIED_AREA] = tallied.unclassified_bytes
+    out[UNATTRIBUTED_AREA] = tallied.unattributed_bytes
+    return out
+
+
+def added_bytes(before: Mapping[str, int], after: Mapping[str, int]) -> dict[str, int]:
+    """What a step added to each area of one side, negative where it took bytes away."""
+    return {key: after[key] - before.get(key, 0) for key in after}
+
+
+def switch_moves(before: Mapping[str, int], after: Mapping[str, int]) -> list[str]:
+    """The zenoh-pico switches a step's reference sets otherwise than the step's before it."""
+    return [f"{name} {before.get(name)}->{after[name]}" for name in sorted(after)
+            if before.get(name) != after[name]]
+
+
+@dataclass(frozen=True)
+class Step:
+    """One build of a chain: the feature it adds (None for the base), the features it builds,
+    what else that feature turns on, the switches its zenoh-pico reference is built with, and
+    each side's bytes (`side_bytes`)."""
+    feature: str | None
+    features: tuple[str, ...]
+    turns_on: tuple[str, ...]
+    switches: Mapping[str, int]
+    wz: Mapping[str, int]
+    pico: Mapping[str, int]
+
+
+def per_feature_report(case_id: str, base_id: str, pin: str, toolchain: str, date: str,
+                       kept: list[str], steps: list[Step]) -> dict:
+    """The chain from `base_id` to `case_id` as JSON, `steps[0]` the base: each step's bytes,
+    what it added on each side by area, wz's addition over zenoh-pico's (`excess`), and the
+    switches of zenoh-pico it moved."""
+    rows = []
+    for before, step in zip(steps, steps[1:]):
+        wz = added_bytes(before.wz, step.wz)
+        pico = added_bytes(before.pico, step.pico)
+        rows.append({"feature": step.feature, "features": list(step.features),
+                     "turns_on": list(step.turns_on),
+                     "switches": switch_moves(before.switches, step.switches),
+                     "wz": dict(step.wz), "pico": dict(step.pico), "wz_added": wz,
+                     "pico_added": pico, "excess": {key: wz[key] - pico[key] for key in wz}})
+    base = steps[0]
+    return {"schema": PER_FEATURE_SCHEMA, "case": case_id, "base": base_id, "pin": pin,
+            "toolchain": toolchain, "date": date, "kept": list(kept),
+            "base_features": list(base.features), "base_wz": dict(base.wz),
+            "base_pico": dict(base.pico), "steps": rows}
+
+
+def ratio_text(wz: int, pico: int) -> str:
+    return f"{wz / pico:.4f}" if pico else "-"
+
+
+def per_feature_lines(report: dict, areas: list[str]) -> list[str]:
+    """`report` (`per_feature_report`) as tables: each step's additions by area, then the
+    features by how much more each costs wz than zenoh-pico, and the whole chain's ratio."""
+    keys = [*areas, UNCLASSIFIED_AREA, UNATTRIBUTED_AREA]
+    head = f"  size-ledger per-feature: {report['case']}"
+    lines = [f"{head}: from {report['base']} ({', '.join(report['base_features'])}), one feature "
+             f"at a time in the order the case names them, each step {report['base']}'s build "
+             f"with the features before it and its own, against zenoh-pico {report['pin']} with "
+             f"the switches those features answer ({report['toolchain']})"]
+    if report["kept"]:
+        lines.append(f"{head}: {report['base']} turns on {', '.join(report['kept'])}, which "
+                     f"{report['case']} does not; every step keeps them")
+    for n, step in enumerate(report["steps"], 1):
+        wz, pico, excess = step["wz_added"], step["pico_added"], step["excess"]
+        also = f", which turns on {', '.join(step['turns_on'])}" if step["turns_on"] else ""
+        moved = (f"zenoh-pico {', '.join(step['switches'])}" if step["switches"]
+                 else "zenoh-pico built as before: no switch of its answers it")
+        lines.append(f"{head}: step {n} +{step['feature']}{also} ({moved}): "
+                     f"wz {sum(wz.values()):+d} B, zenoh-pico {sum(pico.values()):+d} B, "
+                     f"wz - zenoh-pico {sum(excess.values()):+d} B")
+        lines.append(f"      {'area':<16} {'wz':>9} {'zenoh-pico':>11} {'wz - pico':>10}")
+        lines += [f"      {key:<16} {wz[key]:>+9d} {pico[key]:>+11d} {excess[key]:>+10d}"
+                  for key in keys if wz[key] or pico[key]]
+    lines.append(f"{head}: the features by what each costs wz over what it costs zenoh-pico, "
+                 f"most first:")
+    lines.append(f"      {'feature':<24} {'wz':>9} {'zenoh-pico':>11} {'wz - pico':>10}  "
+                 f"the areas it costs wz most over zenoh-pico in")
+    for step in sorted(report["steps"], key=lambda s: (-sum(s["excess"].values()), s["feature"])):
+        excess = step["excess"]
+        top = sorted((key for key in keys if excess[key] > 0), key=lambda k: (-excess[k], k))
+        where = ", ".join(f"{key} {excess[key]:+d}" for key in top[:3]) or "none"
+        lines.append(f"      {step['feature']:<24} {sum(step['wz_added'].values()):>+9d} "
+                     f"{sum(step['pico_added'].values()):>+11d} {sum(excess.values()):>+10d}  "
+                     f"{where}")
+    last = report["steps"][-1] if report["steps"] else None
+    first_wz, first_pico = sum(report["base_wz"].values()), sum(report["base_pico"].values())
+    end_wz = sum(last["wz"].values()) if last else first_wz
+    end_pico = sum(last["pico"].values()) if last else first_pico
+    lines.append(f"{head}: function bytes, wz against zenoh-pico: {first_wz} against "
+                 f"{first_pico} ({ratio_text(first_wz, first_pico)}) at {report['base']}, "
+                 f"{end_wz} against {end_pico} ({ratio_text(end_wz, end_pico)}) after the last "
+                 f"step")
+    return lines
+
+
+def per_feature_path(case_id: str) -> pathlib.Path:
+    return cost.TARGET / EXPLAIN_DIR / f"per-feature-{case_id}.json"
+
+
+def cmd_per_feature(only: Iterable[str]) -> int:
+    """Step from the ledger's base case to each case `only` names (every other case of the
+    ledger when it names none) one feature at a time, and print and keep what each feature adds to
+    each area on each side (`--per-feature`). It grades nothing: 0 when every step was read, 1
+    when one could not be, 2 on a usage error or a host that cannot build."""
+    table = load_ledger()
+    blocking = rule_findings(table, pico_case_ids())
+    for finding in blocking:
+        print(f"  size-ledger FAIL: {finding}", file=sys.stderr)
+    if blocking or not isinstance(table, dict):
+        return 1
+    cases = ledger_cases(table)
+    named = list(only)
+    unknown = [case_id for case_id in named if case_id not in cases]
+    if unknown:
+        print(f"  size-ledger: no case of {LEDGER.relative_to(ROOT)}: {unknown}", file=sys.stderr)
+        return 2
+    base_id = table["base_case"]
+    targets = [case_id for case_id in (named or list(cases)) if case_id != base_id]
+    if not targets:
+        print(f"  size-ledger: no case to step to from {base_id}, the ledger's base",
+              file=sys.stderr)
+        return 2
+    by_id = {c.id: c for c in cost.CASES}
+    base = by_id[base_id]
+    manifest = wz_config.manifest_features(cost.CRATES / base.package / "Cargo.toml")
+
+    def enabled(features: list[str]) -> set[str]:
+        return wz_config.enabled_features(manifest, features)
+
+    try:
+        env, prefixes = cost.build_env()
+        linker = cost.gnu_ld_version(env)
+        cost.strip_tool()
+        lists = {case_id: cost.feature_list(by_id[case_id]) for case_id in [base_id, *targets]}
+    except (ValueError, RuntimeError) as e:
+        print(f"  size-ledger: {e}", file=sys.stderr)
+        return 2
+    defaults = [case_id for case_id, listed in lists.items() if listed is None]
+    if defaults:
+        print(f"  size-ledger: {', '.join(defaults)} build their crate's default features, which "
+              f"no chain of named features reaches", file=sys.stderr)
+        return 2
+    start = [f for f in lists[base_id].split(",") if f]
+    decl = wz_config.load_decl()
+    areas = area_ids(table)
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    # Each build once a run, by the features it turns on: two chains through one set share it.
+    measured: dict[frozenset[str], tuple[dict[str, int], dict[str, int], dict[str, int]]] = {}
+    origin = {"pin": "", "toolchain": ""}
+    print(f"  size-ledger per-feature: every library and zenoh-pico reference is linked by "
+          f"{linker}")
+
+    def measure(features: list[str]) -> tuple[dict[str, int], dict[str, int],
+                                              dict[str, int]] | None:
+        on = frozenset(enabled(features))
+        if on not in measured:
+            step = replace(base, id="+".join([base.id, *features[len(start):]]),
+                           features=",".join(features), features_from=None)
+            print(f"  size-ledger per-feature: reading {step.id}")
+            try:
+                read, refused = read_case(step, env, prefixes)
+            except READ_ERRORS as e:
+                print(f"  size-ledger FAIL: {step.id}: the build or its reference could not be "
+                      f"read: {e}", file=sys.stderr)
+                return None
+            for finding in refused:
+                print(f"  size-ledger FAIL: {finding}", file=sys.stderr)
+            if read is None:
+                return None
+            counted = count_case(read, table, prefixes)
+            origin.update(pin=read.pin, toolchain=read.toolchain)
+            measured[on] = (wz_config.pico_reference(decl, set(on)), side_bytes(counted.wz, areas),
+                            side_bytes(counted.pico, areas))
+        return measured[on]
+
+    rc = 0
+    for case_id in targets:
+        chain, kept = feature_steps(start, [f for f in lists[case_id].split(",") if f], enabled)
+        steps: list[Step] = []
+        before: set[str] = set()
+        for feature, features in [(None, start), *chain]:
+            got = measure(features)
+            if got is None:
+                break
+            on = enabled(features)
+            also = tuple(sorted(on - before - {feature})) if feature is not None else ()
+            steps.append(Step(feature, tuple(features), also, *got))
+            before = on
+        if len(steps) != len(chain) + 1:
+            rc = 1
+            continue
+        report = per_feature_report(case_id, base_id, origin["pin"], origin["toolchain"], today,
+                                    kept, steps)
+        path = per_feature_path(case_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
+        except OSError as e:
+            print(f"  size-ledger FAIL: the chain of {case_id} could not be kept at {path}: {e}",
+                  file=sys.stderr)
+            rc = 1
+        for line in per_feature_lines(report, areas):
+            print(line)
+        print(f"  size-ledger per-feature: {case_id}: every number of these tables is at {path}")
+    return rc
 
 
 # ── selftest ───────────────────────────────────────────────────────────────────────────────────
@@ -3031,20 +3367,40 @@ def cmd_selftest() -> int:
     # The ledger: the committed one is well formed, and each refusal is reached.
     committed = load_ledger()
     cases = pico_case_ids()
-    expect("the committed ledger is well formed and names a pico case of the cost gate",
+    expect("the committed ledger is well formed and names pico cases of the cost gate",
            isinstance(committed, dict) and ledger_findings(committed, cases) == [])
-    if isinstance(committed, dict):
+    expect("the committed ledger holds the release client, the cooperative peer and the twin of "
+           "the Windows like-for-like library, and steps from the client",
+           {"pico-client-coop-nostd", "pico-peer-coop", "pico-api-coop-nostd"}
+           <= set(ledger_cases(committed))
+           and isinstance(committed, dict)
+           and committed.get("base_case") == "pico-client-coop-nostd")
+    expect("an unfilled row names the command that prints its case's rows",
+           measure_command("c") == f"{MEASURE} c")
+    if isinstance(committed, dict) and ledger_cases(committed):
         def broken(change) -> list[str]:
             table = json.loads(json.dumps(committed))
             change(table)
             return ledger_findings(table, cases)
 
         first = area_ids(committed)[0]
-        expect("an area without a row is refused",
-               any("no row" in f for f in broken(lambda t: t["rows"].pop(first))))
+        held = next(iter(ledger_cases(committed)))
+        expect("an area of a case without a row is refused, naming the case",
+               any("no row" in f and f.startswith(f"{held}: ")
+                   for f in broken(lambda t: t["cases"][held].pop(first))))
         expect("a row for no area is refused",
                any("for no declared area" in f
-                   for f in broken(lambda t: t["rows"].update({"ghost": unfilled}))))
+                   for f in broken(lambda t: t["cases"][held].update({"ghost": unfilled}))))
+        expect("a case whose rows are no object is refused",
+               any("are no object" in f
+                   for f in broken(lambda t: t["cases"].update({held: []}))))
+        expect("a ledger of no case is refused",
+               any("cases is no object" in f for f in broken(lambda t: t.update({"cases": {}}))))
+        expect("a base case that is none of its cases is refused",
+               any("base_case 'ghost' is none of its cases" in f
+                   for f in broken(lambda t: t.update({"base_case": "ghost"})))
+               and any("base_case" in f for f in broken(lambda t: t.pop("base_case")))
+               and any("base_case" in f for f in broken(lambda t: t.update({"base_case": []}))))
         expect("a rule naming no declared area is refused",
                any("no declared area" in f
                    for f in broken(lambda t: t["rules"]["wz"]["owners"].update({"zz": "ghost"}))))
@@ -3057,13 +3413,15 @@ def cmd_selftest() -> int:
 
         def lonely(t: dict) -> None:
             t["areas"].append({"id": "lonely", "title": "l"})
-            t["rows"]["lonely"] = unfilled
+            for rows in t["cases"].values():
+                rows["lonely"] = unfilled
             t["rules"]["wz"]["owners"]["zz"] = "lonely"
 
         expect("an area no rule of a side names is refused",
                any("no pico rule names the area 'lonely'" in f for f in broken(lonely)))
         expect("a case that is no pico case of the cost gate is refused",
-               any("no pico case" in f for f in broken(lambda t: t.update({"case": "ghost"}))))
+               any("no pico case" in f
+                   for f in broken(lambda t: t["cases"].update({"ghost": {}}))))
         expect("an area declared twice is refused",
                any("declared twice" in f
                    for f in broken(lambda t: t["areas"].append(dict(t["areas"][0])))))
@@ -3101,6 +3459,18 @@ def cmd_selftest() -> int:
                and placed("wz", "_R", "core::ptr::drop_glue") == "language"
                and placed("wz", "_R", "core_arch::x86::sse2") == "language"
                and placed("wz", "rust_eh_personality") == "language")
+        expect("the committed wz rules place what the peer and the like-for-like library bring as "
+               "zenoh-pico's rules place its counterpart",
+               placed("wz", "_R", "wz_ext_pubsub::advanced_publisher::put") == "doors"
+               and placed("pico", "ze_declare_advanced_publisher",
+                          "src/api/advanced_publisher.c") == "doors"
+               and placed("wz", "_R", "wz_session_core::multicast_rx::receive") == "transport"
+               and placed("pico", "_z_multicast_recv_t_msg", "src/transport/multicast/rx.c")
+               == "transport"
+               and placed("wz", "_R", "wz_session_core::join_decode::decode") == "codec"
+               and placed("wz", "_R", "wz_session_core::lent_request::encode") == "codec"
+               and placed("wz", "_R", "wz_session_core::lent_response::encode") == "codec"
+               and placed("wz", "_R", "wz_node_time::node_clock::stamp") == "driver")
         expect("the committed zenoh-pico rules place the same areas by source",
                placed("pico", "_z_transport_rx", "src/transport/unicast/rx.c") == "transport"
                and placed("pico", "_z_keyexpr_intersects", "src/session/keyexpr.c") == "keyexpr"
@@ -3776,14 +4146,62 @@ def cmd_selftest() -> int:
                and json.loads(kept_at.with_suffix(".previous.json").read_text(encoding="utf-8"))
                == {"n": 1})
 
+    # --per-feature: the chain, the bytes of a step, and the report.
+    graph = {"a": [], "b": ["a"], "c": [], "d": ["c"], "x": []}
+
+    def turned_on(features: list[str]) -> set[str]:
+        return wz_config.enabled_features(graph, features)
+
+    expect("a chain adds each feature of the case in its order, past what is already on",
+           feature_steps(["a"], ["b", "a", "d", "c"], turned_on)
+           == ([("b", ["a", "b"]), ("d", ["a", "b", "d"])], [])
+           and feature_steps(["a", "x"], ["b"], turned_on) == ([("b", ["a", "x", "b"])], ["x"])
+           and feature_steps(["a"], ["a"], turned_on) == ([], []))
+    counted_side = Tally({"x": 5, "y": 0}, total=12, unclassified=[(4, ("o",))],
+                         unattributed=[(3, ("n",))])
+    expect("a side's bytes by area, with the unclassified and the unattributed apart, are its text",
+           side_bytes(counted_side, ["x", "y"])
+           == {"x": 5, "y": 0, UNCLASSIFIED_AREA: 4, UNATTRIBUTED_AREA: 3}
+           and sum(side_bytes(counted_side, ["x", "y"]).values()) == counted_side.total)
+    expect("a step's switches are those it set otherwise than the step before it",
+           switch_moves({"Z_A": 0, "Z_B": 1}, {"Z_A": 1, "Z_B": 1}) == ["Z_A 0->1"]
+           and switch_moves({"Z_A": 1}, {"Z_A": 1}) == [])
+
+    def bytes_of(x: int, y: int, unplaced: int = 0) -> dict[str, int]:
+        return {"x": x, "y": y, UNCLASSIFIED_AREA: unplaced, UNATTRIBUTED_AREA: 0}
+
+    chain = [Step(None, ("a",), (), {"Z_A": 0}, bytes_of(10, 5), bytes_of(8, 5)),
+             Step("b", ("a", "b"), ("c",), {"Z_A": 1}, bytes_of(30, 5, 2), bytes_of(12, 6)),
+             Step("d", ("a", "b", "d"), (), {"Z_A": 1}, bytes_of(31, 5, 2), bytes_of(12, 6))]
+    pf_report = per_feature_report("t", "base", "p", "cc 1", "2026-11-27", [], chain)
+    expect("a step adds its bytes over the step before it, on each side and area by area",
+           [s["feature"] for s in pf_report["steps"]] == ["b", "d"]
+           and pf_report["steps"][0]["wz_added"] == bytes_of(20, 0, 2)
+           and pf_report["steps"][0]["pico_added"] == bytes_of(4, 1)
+           and pf_report["steps"][0]["excess"] == bytes_of(16, -1, 2)
+           and pf_report["steps"][0]["switches"] == ["Z_A 0->1"]
+           and pf_report["steps"][1]["switches"] == []
+           and json.loads(json.dumps(pf_report)) == pf_report)
+    pf_lines = per_feature_lines(pf_report, ["x", "y"])
+    ranked_at = next((i for i, line in enumerate(pf_lines) if line.endswith("most first:")), -2)
+    expect("the chain is printed step by step and its features most expensive first",
+           "  size-ledger per-feature: t: step 1 +b, which turns on c (zenoh-pico Z_A 0->1): "
+           "wz +22 B, zenoh-pico +5 B, wz - zenoh-pico +17 B" in pf_lines
+           and any(line.startswith("  size-ledger per-feature: t: step 2 +d (zenoh-pico built "
+                                   "as before") for line in pf_lines)
+           and pf_lines[ranked_at + 2].split()[0] == "b"
+           and pf_lines[ranked_at + 2].endswith("x +16, (unclassified) +2")
+           and pf_lines[ranked_at + 3].split()[0] == "d"
+           and pf_lines[-1].endswith("15 against 13 (1.1538) at base, 38 against 18 (2.1111) "
+                                     "after the last step"))
+
     print(f"  size-ledger selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2 or argv[1] not in ("--check", "--measure", "--explain", "--selftest") or (
-        argv[1] == "--selftest" and len(argv) != 2
-    ):
+    modes = ("--check", "--measure", "--explain", "--per-feature", "--selftest")
+    if len(argv) < 2 or argv[1] not in modes or (argv[1] == "--selftest" and len(argv) != 2):
         print(__doc__, file=sys.stderr)
         return 2
     if argv[1] == "--selftest":
@@ -3791,18 +4209,25 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog=f"size_ledger_gate.py {argv[1]}", add_help=False)
     parser.add_argument("--shards", type=int)
     parser.add_argument("--shard", type=int)
+    parser.add_argument("ids", nargs="*")
     try:
-        args = parser.parse_args(argv[2:])
+        args = parser.parse_intermixed_args(argv[2:])
     except SystemExit:
         return 2
     shard = None
     if args.shards is not None or args.shard is not None:
+        if argv[1] == "--per-feature":
+            print("  size-ledger: --per-feature reads its chains on one host, not on a shard",
+                  file=sys.stderr)
+            return 2
         if args.shards is None or args.shard is None or not 0 <= args.shard < args.shards:
             print("  size-ledger: give --shards N and --shard K with 0 <= K < N", file=sys.stderr)
             return 2
         shard = (args.shards, args.shard)
     sys.stdout.reconfigure(line_buffering=True)
-    return cmd_run(mode=argv[1][2:], shard=shard)
+    if argv[1] == "--per-feature":
+        return cmd_per_feature(args.ids)
+    return cmd_run(mode=argv[1][2:], shard=shard, only=args.ids)
 
 
 if __name__ == "__main__":
