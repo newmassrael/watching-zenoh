@@ -2743,19 +2743,20 @@ unsafe fn reply_past_the_read<'r, 'f>(
 /// End the next get at or after `cursor` that `picks` names in `registry`, standing or ended, as
 /// its asker's cancellation or the session's close ends it: marked cancelled, so no call of it
 /// hands anything from here (`get::GetShown`), retired, what it held back gone with it, and its
-/// legs forgotten on every face. Its handle and how its row left: taken, to drop with no lock held,
-/// or kept until the call that runs ends. `None` once the walk is through: the cursor moves past
-/// every get it reads, so a walk the caller carries across its holds of the session ends.
+/// legs forgotten on every face. Its handle and how its row left: taken, its key let go of here
+/// under the session's lock and its callback handed back to drop with no lock held, or kept until
+/// the call that runs ends. `None` once the walk is through: the cursor moves past every get it
+/// reads, so a walk the caller carries across its holds of the session ends.
 #[cfg(feature = "query")]
 fn cancel_next_get(
     registry: &mut Registry,
     cursor: &mut usize,
     picks: impl Fn(&ReplyRow) -> bool,
-) -> Option<(PendingGetHandle, Removal<CoopGet>)> {
+) -> Option<(PendingGetHandle, Removal<ReplyRow>)> {
     let (handle, retired) =
         tables_mut(registry).retire_next_get_of(cursor, picks, ReplyRow::cancel)?;
     registry.forget_get(handle);
-    Some((handle, retired))
+    Some((handle, retired.map(CoopGet::into_callback)))
 }
 
 /// The session's one table set, read where the registry keeps it: the application's tables are the
@@ -8512,7 +8513,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     .zip(tables.begin_reply(handle).map(GetCall::new)),
                 GetEnd::Answered | GetEnd::Standing => None,
             };
-            let retired = tables.retire_get(handle);
+            // The row's key is the key arena's, let go of under the session's lock: only its
+            // callback leaves it.
+            let retired = tables
+                .retire_get(handle)
+                .map(|removal| removal.map(CoopGet::into_callback));
             registry.forget_get(handle);
             drop(core);
             current = None;
@@ -8520,8 +8525,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 self.make_get_call(call, &timeout_reply(rid));
                 handed = true;
             }
-            // A row no call held is handed back here and dropped with no lock held; one a call
-            // still holds is let go of by the call that ends last.
+            // The callback of a row no call held is handed back here and dropped with no lock
+            // held; a row a call still holds is let go of by the call that ends last.
             drop(retired);
         }
         handed
@@ -12997,7 +13002,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for 
             })
         }) {
             match retired {
-                Removal::Taken(row) => drop(row),
+                Removal::Taken(callback) => drop(callback),
                 Removal::AfterCalls => self.wait_for_get_release(handle),
             }
         }
