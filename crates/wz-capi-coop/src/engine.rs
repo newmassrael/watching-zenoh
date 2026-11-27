@@ -227,7 +227,14 @@ use wz_session_core::reply_stage::ReplyStage;
 #[cfg(feature = "queryable")]
 mod query;
 #[cfg(feature = "queryable")]
-pub(crate) use query::{FinalHold, QueryableCall, RefusedFinal};
+pub(crate) use query::QueryableCall;
+// Read where a state lends the Finals and refusals their rows (`state_places`, `arena`): the
+// forms a build lays out at the open. The on-use form counts them in its own tables.
+#[cfg(all(
+    feature = "queryable",
+    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+))]
+pub(crate) use query::{FinalHold, RefusedFinal};
 
 #[cfg(feature = "group")]
 mod group;
