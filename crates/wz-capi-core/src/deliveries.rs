@@ -6,7 +6,7 @@
 //!
 //! Its callbacks run on the session's drive thread, on the threads of its runtime and on a
 //! program's thread that drains the local plane, so what a thread delivers for is the thread's to
-//! know: each thread keeps the sessions it delivers for now, innermost last, and each callback the
+//! know: each thread keeps the sessions it is delivering for, innermost last, and each callback the
 //! session mints enters its session's mark around the call. A callback that reaches another
 //! session's callback from inside it delivers for both until the inner call returns.
 
@@ -23,7 +23,7 @@ pub(crate) struct Deliveries(usize);
 static NEXT_MARK: AtomicUsize = AtomicUsize::new(1);
 
 thread_local! {
-    /// The marks of the sessions this thread delivers for now, innermost last.
+    /// The marks of the sessions this thread is delivering for, innermost last.
     static DELIVERING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 

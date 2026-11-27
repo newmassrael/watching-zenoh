@@ -506,7 +506,7 @@ impl<T: TransportFaces> TransportState<T> {
     /// holds, steps itself and drops once no step of it is under way
     /// ([`place_session_with_router`]). The session's Router is lent to it through the place the
     /// link holds, as to a task's pump, for the steps its owner lends the Router around. `None`
-    /// when the Router was not built in its place.
+    /// when the Router could not be built in its place.
     // Always inlined: its one caller holds these values in its own frame.
     #[inline(always)]
     pub fn place_link<'p, P>(
@@ -697,7 +697,7 @@ impl<T: TransportFaces> TransportState<T> {
     /// [`Self::make_wire`] with no task: the link's session built in `place`, which its owner
     /// holds and steps itself ([`Self::place_link`]), ended by `end`. The wire, what the link's
     /// session hands its reads to, which the owner hands each step of the pump, and the pump.
-    /// [`TransportRefusal::NoTask`] when the pump was not built in its place.
+    /// [`TransportRefusal::NoTask`] when the pump could not be built in its place.
     // Always inlined, as `make_wire` is: its one caller is never inlined.
     #[inline(always)]
     pub fn place_wire<'p, K: LinkCalls<T::Clock, T::Lock>, E: LinkEnd>(

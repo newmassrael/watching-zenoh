@@ -2993,7 +2993,7 @@ mod tests {
     /// A build that counts the run of expiries reads `TX_EXPIRY_CLOSE_AFTER` from the snapshot:
     /// the build's own count, stated, is selected and recorded as the open's. Turned red by the
     /// limit's `READ_FROM_SNAPSHOT` reading `false` in this build: the declaration's `read_by`
-    /// of the limit naming a feature the session core is not built with.
+    /// of the limit naming a feature the session core's build lacks.
     #[cfg(feature = "tx-expiry-run")]
     #[test]
     fn a_build_with_the_expiry_run_selects_its_count() {

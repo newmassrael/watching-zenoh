@@ -93,7 +93,7 @@ pub fn reflect(value: u64, width: u8) -> u64 {
 ///
 /// Built once, by whoever holds the parameters: a profile builds the engine of
 /// its CRC when it is read, so feeding a frame costs only the bytes fed. The
-/// table costs 2048 inner steps, which is why it is not built per frame.
+/// table costs 2048 inner steps, which is why no frame builds it.
 #[derive(Debug, Clone)]
 pub struct Crc {
     params: CrcParams,

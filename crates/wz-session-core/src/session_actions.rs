@@ -8174,7 +8174,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         Self::sn_mask_of(&self.params, peer)
     }
 
-    /// [`Self::sn_mask_for`] over the parameters `params`, for a session not built yet.
+    /// [`Self::sn_mask_for`] over the parameters `params`, for a session still to be built.
     fn sn_mask_of(params: &SessionInitParams, peer: Option<PeerInitCaps>) -> crate::sn::Sn {
         crate::sn::mask_from_res(PeerInitCaps::negotiated_seq_num_res(
             params.seq_num_res.wire_code(),
