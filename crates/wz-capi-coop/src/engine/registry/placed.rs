@@ -186,13 +186,14 @@ impl RegistryRegion {
         let mut set = 0;
         while set < FACE_SETS {
             // SAFETY: the caller's contract; the row is one of the sets' rows in the region, a
-            // `MaybeUninit` reached by this one reference alone, which `rowless_in` writes whole.
-            let place = unsafe {
-                &mut *addr_of_mut!((*at).rows.sets)
+            // `MaybeUninit` of all zero bytes reached by this one reference alone, which
+            // `rowless_over_zero` makes a whole set, its peer's tables left as those bytes.
+            unsafe {
+                let place = &mut *addr_of_mut!((*at).rows.sets)
                     .cast::<MaybeUninit<FaceTables>>()
-                    .add(set)
-            };
-            FaceTables::rowless_in(place, limits);
+                    .add(set);
+                FaceTables::rowless_over_zero(place, limits);
+            }
             set = set.wrapping_add(1);
         }
         #[cfg(feature = "local-queryable")]
@@ -299,6 +300,45 @@ mod tests {
                     std::alloc::Layout::new::<StateRegion>(),
                 );
             }
+        }
+    }
+
+    /// A set written over zero bytes leaves its peer's tables as those bytes, empty, and holds them
+    /// to the session's limits, before the region's walk hands them their rows. Turned red by a
+    /// set whose peer is not held to `limits` (a quota left at zero bytes admits nothing), or by
+    /// peer tables that are not empty at zero bytes.
+    #[test]
+    fn a_set_over_zero_bytes_holds_its_empty_peer_to_the_sessions_limits() {
+        use wz_session_core::limit_binding::Quota;
+        let mut limits = SessionLimits::BUILD;
+        if limits
+            .select_max_peer_keyexpr_aliases(Quota::at_most(2))
+            .is_err()
+        {
+            // A build whose limits keep the build's value alone states no other quota.
+            return;
+        }
+        let layout = std::alloc::Layout::new::<FaceTables>();
+        // SAFETY: the layout is of a type of some bytes.
+        let block = unsafe { std::alloc::alloc_zeroed(layout) };
+        let place = NonNull::new(block.cast::<MaybeUninit<FaceTables>>())
+            .expect("the test allocator answers");
+        // SAFETY: the block holds all zero bytes, aligned for a set, and is reached by this one
+        // reference alone until it is given back.
+        let set = unsafe { FaceTables::rowless_over_zero(&mut *place.as_ptr(), &limits) };
+        assert_eq!(
+            set.peer.subscribers.alias_quota().get(),
+            Quota::at_most(2),
+            "the peer's tables are held to the session's limits"
+        );
+        assert_eq!(set.peer.subscribers.alias_count(), 0);
+        assert_eq!(set.peer.remote_subscribers.declared_count(), 0);
+        assert_eq!(set.peer.finals.owed(), 0);
+        // SAFETY: the set was made whole and is dropped once, in place; then the block goes back
+        // with the layout it was given with.
+        unsafe {
+            core::ptr::drop_in_place(place.as_ptr().cast::<FaceTables>());
+            std::alloc::dealloc(block, layout);
         }
     }
 
