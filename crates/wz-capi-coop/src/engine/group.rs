@@ -417,8 +417,9 @@ impl MemberEvents {
 /// stack's own.
 struct Watched {
     inner: alloc::boxed::Box<dyn GroupTransport>,
+    /// What the group's face shares with its session, whose mark of input this sets.
     #[cfg(wz_round)]
-    took: Rc<Cell<bool>>,
+    shared: Rc<GroupShared>,
     /// The session's round of deliveries.
     #[cfg(wz_round)]
     lane: PlacedRef<Round>,
@@ -498,7 +499,7 @@ impl GroupTransport for Watched {
             self.inner.recv_with(f)
         };
         if took {
-            self.took.set(true);
+            self.shared.took.set(true);
         }
         took
     }
@@ -743,6 +744,27 @@ struct GroupParts {
     input_gate: GroupInputGate,
 }
 
+/// What one join of a group shares between its face and the session that runs it (the read
+/// slot that steps it, or its task where the faces are tasks of one set): one cell, made when the
+/// group is joined, of which each side holds a handle.
+struct GroupShared {
+    /// Whether the group's socket may hold a datagram not yet read (`GroupFace::took_input`).
+    took: Cell<bool>,
+    /// The members the group's JOINs admitted, in the rows of the group's member table.
+    members: RefCell<MemberRows>,
+    /// The keyexprs this join of the group was told, and the members' asks for them the session
+    /// owes an answer ([`GroupKeyexprAnswers`]).
+    keyexprs: RefCell<GroupKeyexprAnswers>,
+    /// The stop the session's close asks of the group's session.
+    stop: Cell<bool>,
+    /// Where the read that steps the group's session leaves how it ended.
+    #[cfg(not(wz_round))]
+    end: GroupEnd,
+    /// What the session's watchers of its faces are told of the members (`connectivity`).
+    #[cfg(feature = "connectivity")]
+    events: MemberEvents,
+}
+
 /// One group of the session: its face, its task, its queue, its members and its stop, the group's
 /// socket waited on with `W`, the waits of the session's stack.
 pub(super) struct GroupFace<W> {
@@ -751,10 +773,9 @@ pub(super) struct GroupFace<W> {
     /// The group's session; `None` once the session's end was read ([`Self::take_outcome`]).
     #[cfg(wz_round)]
     task: Option<CoopLocalJoinHandle<MulticastOutcome>>,
-    /// Where the read that steps the group's session leaves how it ended; `None` once that end
-    /// was read ([`Self::take_outcome`]).
+    /// Whether how the group's session ended was read ([`Self::take_outcome`]).
     #[cfg(not(wz_round))]
-    end: Option<Rc<GroupEnd>>,
+    end_read: bool,
     /// When the group, whose session ended on its own, is joined again.
     rejoin_at_us: Option<u64>,
     /// The group's stage, which the session's messages and the group's replies are pushed onto,
@@ -780,9 +801,8 @@ pub(super) struct GroupFace<W> {
     input: Option<WaitOn>,
     /// When the group's session is next due with nothing arriving on it, as its last step said.
     due: GroupDue,
-    members: Rc<RefCell<MemberRows>>,
-    took: Rc<Cell<bool>>,
-    stop: Rc<Cell<bool>>,
+    /// What this join shares with the group's session: its members, its marks, its asks.
+    shared: Rc<GroupShared>,
     /// The JOIN the session asks of the group between two beacons ([`Self::ask_join`]).
     join_ask: JoinAsk,
     /// What the group's session counted of what it sent and received (`transport-stats`), shared
@@ -794,9 +814,6 @@ pub(super) struct GroupFace<W> {
     /// session closes (`Core::retired_groups`).
     #[cfg(feature = "resource-snapshot")]
     messages: Rc<wz_session_core::interval_meter::BuildIntervalMeter>,
-    /// The keyexprs this join of the group was told, and the members' asks for them the session
-    /// owes an answer ([`GroupKeyexprAnswers`]).
-    keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
     /// Whether this join is still to ask the group for its members' keyexprs
     /// ([`Self::owes_keyexpr_ask`]).
     keyexpr_ask_owed: Cell<bool>,
@@ -804,9 +821,6 @@ pub(super) struct GroupFace<W> {
     filters: RefCell<Vec<(FilterId, u64)>>,
     /// The entities this join of the group was told of, which their retractions are told by.
     announced: RefCell<Vec<Announced>>,
-    /// What the session's watchers of its faces are told of the members (`connectivity`).
-    #[cfg(feature = "connectivity")]
-    events: Rc<MemberEvents>,
     /// The generation a member's query is held and answered under (`queryable`).
     #[cfg(feature = "queryable")]
     generation: u64,
@@ -856,28 +870,25 @@ impl<W: LinkWaits> GroupFace<W> {
         #[cfg(feature = "resource-snapshot")]
         let seed = seed.with_meter(Rc::clone(&face.messages));
         let on_event = {
-            let members = Rc::clone(&face.members);
+            let shared = Rc::clone(&face.shared);
             let replies = MulticastReplySink::new(face.tx.clone());
-            let keyexprs = Rc::clone(&face.keyexprs);
             let join_ask = face.join_ask.clone();
             let tx = face.tx.clone();
-            #[cfg(feature = "connectivity")]
-            let events = Rc::clone(&face.events);
             let mut dispatch = dispatch;
             move |event: IterationEvent<'_, '_>| {
-                answer_asks(&event, &keyexprs, &join_ask, &tx);
+                answer_asks(&event, &shared.keyexprs, &join_ask, &tx);
                 note_members(
                     &event,
-                    &members,
+                    &shared.members,
                     #[cfg(feature = "connectivity")]
-                    &events,
+                    &shared.events,
                 );
                 dispatch(event, &replies);
             }
         };
         let should_stop = {
-            let stop = Rc::clone(&face.stop);
-            move || stop.get()
+            let shared = Rc::clone(&face.shared);
+            move || shared.stop.get()
         };
         // Everything the group sends is pushed onto its stage, which the face and the task write
         // from: the task's pull seam yields nothing.
@@ -911,18 +922,10 @@ impl<W: LinkWaits> GroupFace<W> {
             #[cfg(feature = "resource-snapshot")]
             meter: Rc::clone(&face.messages),
         };
-        let end = Rc::new(GroupEnd::default());
-        face.end = Some(Rc::clone(&end));
         let reads = GroupReads {
-            took: Rc::clone(&face.took),
-            members: Rc::clone(&face.members),
-            keyexprs: Rc::clone(&face.keyexprs),
+            shared: Rc::clone(&face.shared),
             join_ask: face.join_ask.clone(),
             tx: face.tx.clone(),
-            stop: Rc::clone(&face.stop),
-            end,
-            #[cfg(feature = "connectivity")]
-            events: Rc::clone(&face.events),
         };
         let records = FaceRecords {
             face: face.face,
@@ -963,10 +966,18 @@ impl<W: LinkWaits> GroupFace<W> {
             #[cfg(feature = "connectivity")]
             watchers,
         } = joining;
-        #[cfg(feature = "connectivity")]
-        let events = Rc::new(MemberEvents {
-            watchers,
-            label: GroupLabel::of(&join),
+        let shared = Rc::new(GroupShared {
+            took: Cell::new(false),
+            members: RefCell::new(MemberRows::new()),
+            keyexprs: RefCell::new(GroupKeyexprAnswers::default()),
+            stop: Cell::new(false),
+            #[cfg(not(wz_round))]
+            end: GroupEnd::default(),
+            #[cfg(feature = "connectivity")]
+            events: MemberEvents {
+                watchers,
+                label: GroupLabel::of(&join),
+            },
         });
         // Bounded as the tokio engine bounds its group's pipeline: the queue's sizes, in batches
         // of the group's batch, one lane when it runs no QoS. The replies it holds are bounded by
@@ -978,9 +989,6 @@ impl<W: LinkWaits> GroupFace<W> {
         let room = transport.room_wait();
         let input = transport.input_wait();
         let due = GroupDue::default();
-        let members = Rc::new(RefCell::new(MemberRows::new()));
-        let took = Rc::new(Cell::new(false));
-        let stop = Rc::new(Cell::new(false));
         let join_ask = JoinAsk::default();
         // What the group's session receives and its beacons are counted by its task, and each
         // datagram of the stage by whichever writer wrote it.
@@ -1004,7 +1012,7 @@ impl<W: LinkWaits> GroupFace<W> {
         let link = GroupLink::new(Watched {
             inner: transport,
             #[cfg(wz_round)]
-            took: Rc::clone(&took),
+            shared: Rc::clone(&shared),
             #[cfg(wz_round)]
             lane,
         });
@@ -1024,7 +1032,6 @@ impl<W: LinkWaits> GroupFace<W> {
         };
         #[cfg(feature = "resource-snapshot")]
         let messages = Rc::new(wz_session_core::interval_meter::BuildIntervalMeter::new());
-        let keyexprs = Rc::new(RefCell::new(GroupKeyexprAnswers::default()));
         let keyexpr_ask_owed = Cell::new(join.declarations.declares_keyexprs());
         let face = Self {
             face,
@@ -1032,7 +1039,7 @@ impl<W: LinkWaits> GroupFace<W> {
             #[cfg(wz_round)]
             task: None,
             #[cfg(not(wz_round))]
-            end: None,
+            end_read: false,
             rejoin_at_us: None,
             #[cfg(feature = "queryable")]
             generation,
@@ -1048,20 +1055,15 @@ impl<W: LinkWaits> GroupFace<W> {
             room,
             input,
             due,
-            members,
-            took,
-            stop,
+            shared,
             join_ask,
             #[cfg(feature = "transport-stats")]
             stats,
             #[cfg(feature = "resource-snapshot")]
             messages,
-            keyexprs,
             keyexpr_ask_owed,
             filters: RefCell::new(Vec::new()),
             announced: RefCell::new(Vec::new()),
-            #[cfg(feature = "connectivity")]
-            events,
         };
         (face, parts)
     }
@@ -1220,7 +1222,7 @@ impl<W: LinkWaits> GroupFace<W> {
         if self.has_ended() {
             return 0;
         }
-        u32::try_from(self.members.borrow().len()).unwrap_or(u32::MAX)
+        u32::try_from(self.shared.members.borrow().len()).unwrap_or(u32::MAX)
     }
 
     /// The request id the group's next get is asked under (`query`).
@@ -1291,7 +1293,11 @@ impl<W: LinkWaits> GroupFace<W> {
         }
         #[cfg(not(wz_round))]
         {
-            self.end.as_ref().map(|end| end.finished.get())
+            if self.end_read {
+                None
+            } else {
+                Some(self.shared.end.finished.get())
+            }
         }
     }
 
@@ -1309,16 +1315,18 @@ impl<W: LinkWaits> GroupFace<W> {
         #[cfg(wz_round)]
         let task = self.task.take()?;
         #[cfg(not(wz_round))]
-        let end = self.end.take()?;
+        {
+            self.end_read = true;
+        }
         // The members go with the group's link, and a watcher of the faces is told each went. Those
         // a replaying listener was told stand stay as tombs until it was told they went.
-        let gone = core::mem::take(&mut *self.members.borrow_mut());
+        let gone = core::mem::take(&mut *self.shared.members.borrow_mut());
         #[cfg(feature = "connectivity")]
         {
             for member in gone.iter() {
-                self.events.tell(FaceEventKind::Down, member);
+                self.shared.events.tell(FaceEventKind::Down, member);
             }
-            self.members.borrow_mut().keep_tombs_of(&gone);
+            self.shared.members.borrow_mut().keep_tombs_of(&gone);
         }
         #[cfg(not(feature = "connectivity"))]
         let _ = gone;
@@ -1326,7 +1334,7 @@ impl<W: LinkWaits> GroupFace<W> {
         #[cfg(wz_round)]
         let outcome = local.block_on_local(task).ok();
         #[cfg(not(wz_round))]
-        let outcome = end.outcome.take();
+        let outcome = self.shared.end.outcome.take();
         self.link = None;
         outcome
     }
@@ -1344,13 +1352,13 @@ impl<W: LinkWaits> GroupFace<W> {
     /// Whether the group's socket may hold a datagram not yet read, since this was last asked:
     /// its task took one (`wz_round`), or the read's last step of it read to its bound.
     pub(super) fn took_input(&self) -> bool {
-        self.took.replace(false)
+        self.shared.took.replace(false)
     }
 
     /// Whether the group's task took a datagram since `took_input` was last asked, the mark left
     /// for it.
     pub(super) fn holds_input(&self) -> bool {
-        self.took.get()
+        self.shared.took.get()
     }
 
     /// What a read waits on for the group socket's next datagram, while the group's session runs
@@ -1391,7 +1399,7 @@ impl<W: LinkWaits> GroupFace<W> {
     /// Ask the group's session to stop: at its next step it tells the group it leaves and lets
     /// the group's link go.
     pub(super) fn stop(&self) {
-        self.stop.set(true);
+        self.shared.stop.set(true);
     }
 
     /// The first member at or past place `from` of the group's member table, whatever role it
@@ -1403,7 +1411,8 @@ impl<W: LinkWaits> GroupFace<W> {
         if self.has_ended() {
             return None;
         }
-        self.members
+        self.shared
+            .members
             .borrow()
             .iter()
             .enumerate()
@@ -1423,10 +1432,11 @@ impl<W: LinkWaits> GroupFace<W> {
         if self.has_ended() {
             return Vec::new();
         }
-        self.members
+        self.shared
+            .members
             .borrow()
             .iter()
-            .filter_map(|member| self.events.label.snapshot(member))
+            .filter_map(|member| self.shared.events.label.snapshot(member))
             .collect()
     }
 
@@ -1438,7 +1448,8 @@ impl<W: LinkWaits> GroupFace<W> {
         if self.has_ended() {
             return 0;
         }
-        self.members
+        self.shared
+            .members
             .borrow()
             .iter()
             .filter(|member| member.whatami.is_some())
@@ -1452,12 +1463,12 @@ impl<W: LinkWaits> GroupFace<W> {
         if self.has_ended() {
             return None;
         }
-        let members = self.members.borrow();
+        let members = self.shared.members.borrow();
         let member = members
             .iter()
             .filter(|member| member.whatami.is_some())
             .nth(at)?;
-        let label = &self.events.label;
+        let label = &self.shared.events.label;
         FaceLinkRow::of_group_member(member, &label.group, &label.endpoint, label.is_shm)
     }
 
@@ -1465,42 +1476,42 @@ impl<W: LinkWaits> GroupFace<W> {
     /// whether it is to be told; a group whose session ended holds none that stands.
     #[cfg(feature = "connectivity")]
     pub(super) fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        !self.has_ended() && self.members.borrow_mut().came(plane, listener, key)
+        !self.has_ended() && self.shared.members.borrow_mut().came(plane, listener, key)
     }
 
     /// Whether `listener` of `plane` is still to be told the member of `key` went.
     #[cfg(feature = "connectivity")]
     pub(super) fn owes_departure(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        self.members.borrow().owes(plane, listener, key)
+        self.shared.members.borrow().owes(plane, listener, key)
     }
 
     /// Note `listener` of `plane` told the member of `key` went (`SessionEngine::tell_went`):
     /// whether a tomb of the group owed it that.
     #[cfg(feature = "connectivity")]
     pub(super) fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        self.members.borrow_mut().went(plane, listener, key)
+        self.shared.members.borrow_mut().went(plane, listener, key)
     }
 
     /// The row of the first member whose departure `listener` of `plane` is owed, read from its
     /// tomb as `member_row` reads a member that stands.
     #[cfg(feature = "connectivity")]
     pub(super) fn first_told_gone(&self, plane: ToldPlane, listener: usize) -> Option<FaceLinkRow> {
-        let member = self.members.borrow().first_gone(plane, listener)?;
-        let label = &self.events.label;
+        let member = self.shared.members.borrow().first_gone(plane, listener)?;
+        let label = &self.shared.events.label;
         FaceLinkRow::of_group_member(&member, &label.group, &label.endpoint, label.is_shm)
     }
 
     /// Note nothing more for `listener` of `plane` (`SessionEngine::forget_told`).
     #[cfg(feature = "connectivity")]
     pub(super) fn forget_told(&self, plane: ToldPlane, listener: usize) {
-        self.members.borrow_mut().forget(plane, listener);
+        self.shared.members.borrow_mut().forget(plane, listener);
     }
 
     /// Take over the tombs of `ended`, the join of this group that ended, which this one replaces.
     #[cfg(feature = "connectivity")]
     pub(super) fn keep_tombs_of(&self, ended: &Self) {
-        let ended = ended.members.borrow();
-        self.members.borrow_mut().keep_tombs_of(&ended);
+        let ended = ended.shared.members.borrow();
+        self.shared.members.borrow_mut().keep_tombs_of(&ended);
     }
 
     /// Tell the group of `entity`, which the session declared, as the group's declarations say
@@ -1616,7 +1627,7 @@ impl<W: LinkWaits> GroupFace<W> {
         if kexpr_declaration(declared, keyexpr).is_err() {
             return;
         }
-        self.keyexprs.borrow_mut().declared(id, keyexpr);
+        self.shared.keyexprs.borrow_mut().declared(id, keyexpr);
         multicast_tx_declaration(
             GroupDeclare::Keyexpr {
                 mapping_id: declared,
@@ -1631,7 +1642,7 @@ impl<W: LinkWaits> GroupFace<W> {
         if self.has_ended() || !self.join.declarations.declares_keyexprs() {
             return;
         }
-        self.keyexprs.borrow_mut().retracted(id);
+        self.shared.keyexprs.borrow_mut().retracted(id);
         multicast_tx_declaration(
             GroupDeclare::UndeclareKeyexpr { mapping_id: id },
             |message| self.push_lent(message),
@@ -1756,20 +1767,14 @@ pub(super) struct GroupEnd {
     outcome: RefCell<Option<MulticastOutcome>>,
 }
 
-/// What the read of a group shares with the group's face: the mark of input the socket may still
-/// hold, the members, the keyexpr asks, the JOIN ask, the stage, its stop, and where its end is
-/// left.
+/// What the read of a group shares with the group's face: the cell of their join (the mark of
+/// input the socket may still hold, the members, the keyexpr asks, the stop, and where the end is
+/// left), the JOIN ask and the stage.
 #[cfg(not(wz_round))]
 struct GroupReads {
-    took: Rc<Cell<bool>>,
-    members: Rc<RefCell<MemberRows>>,
-    keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
+    shared: Rc<GroupShared>,
     join_ask: JoinAsk,
     tx: GroupTxStage,
-    stop: Rc<Cell<bool>>,
-    end: Rc<GroupEnd>,
-    #[cfg(feature = "connectivity")]
-    events: Rc<MemberEvents>,
 }
 
 /// What one join of a group gives its session: the parts the session is built of in the group's
@@ -1863,7 +1868,7 @@ impl<'a, C: ClockSource + 'static> GroupTurn<'a, C> {
             clock,
             stage: &reads.tx,
             join_ask: &reads.join_ask,
-            stop: &reads.stop,
+            stop: &reads.shared.stop,
             most,
             now_us,
         }
@@ -1874,8 +1879,8 @@ impl<'a, C: ClockSource + 'static> GroupTurn<'a, C> {
 impl GroupReads {
     /// Leave the session's `outcome` for the session to read, the session ended.
     fn end_with(&self, outcome: MulticastOutcome) {
-        *self.end.outcome.borrow_mut() = Some(outcome);
-        self.end.finished.set(true);
+        *self.shared.end.outcome.borrow_mut() = Some(outcome);
+        self.shared.end.finished.set(true);
     }
 }
 
@@ -2189,12 +2194,12 @@ struct GroupEvents<'a, H> {
 impl<H: GroupHand> EventSink for GroupEvents<'_, H> {
     fn event(&mut self, event: IterationEvent<'_, '_>) {
         let reads = self.reads;
-        answer_asks(&event, &reads.keyexprs, &reads.join_ask, &reads.tx);
+        answer_asks(&event, &reads.shared.keyexprs, &reads.join_ask, &reads.tx);
         note_members(
             &event,
-            &reads.members,
+            &reads.shared.members,
             #[cfg(feature = "connectivity")]
-            &reads.events,
+            &reads.shared.events,
         );
         self.hand.hand(&mut *self.records, event);
     }
@@ -2349,7 +2354,7 @@ impl<C: ClockSource + 'static> GroupPump<C> {
             &mut events,
         );
         let Some(outcome) = outcome else {
-            reads.took.set(self.place.read_to_bound());
+            reads.shared.took.set(self.place.read_to_bound());
             return false;
         };
         reads.end_with(outcome);
@@ -2363,7 +2368,7 @@ impl<C: ClockSource + 'static> GroupPump<C> {
         if !self.holds_session() {
             return;
         }
-        self.reads.stop.set(true);
+        self.reads.shared.stop.set(true);
         let now_us = self.now_us();
         let turn = GroupTurn::of(
             &self.runtime,
