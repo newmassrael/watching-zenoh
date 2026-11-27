@@ -1213,7 +1213,74 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
     face itself; on use its one reader in the library, `Core::face_chains`, spelled the full path,
     which left the import unused. The field names the import.
 
+### 7.22 R3, 3c (c): a udp port's memory through its kind's source
+
+- `5c5f545604`: the ports' memory is the links' kind's (`CountKind::Ports`,
+  `crates/wz-runtime-coop/src/link_cells.rs`), a `PortSource` (`udp_link.rs`):
+  `Option<LentPorts<F>>` for `OneTask`, `Atomic` and `OneFace` (the rows and the slots a session
+  lent, `None` giving no port), `HeapPorts` for `OnHeap` (rows `PortRows<OnUse, Vec<u8>>` counted
+  to the session's peers and datagrams and taken at the first of each, each port a read buffer of
+  the session's batch and the spare buffers it held datagrams in). A source is read once into the
+  stack's book (`shared_book`), which keeps the rows and what makes each port's reads
+  (`PortSource::Reads`: the slot table, or the bytes of a read buffer); a port opened takes its
+  reads there (`UdpPort::in_book`). `PortRx`, `Held`, `BookRows` and `with_rows!` became one
+  type each source names (`PortStore`: `LentRx` and `LentHeld`, `OwnRx` and `Vec<u8>`), so a form
+  compiles one walk of the rows and one read, chosen by type. The port, a peer's share and the book
+  take the source beside the count kind (`UdpPort<S, N, P>`, `PortPeer<S, N, P>`,
+  `SharedBook<N, P>`), `P` read off the links' kind because `OnHeap<N>` counts what its links
+  share as `N` does. `SessionLinks::lend_port_rows(rows, slots)` became `lend_ports(N::Ports)`;
+  links given nothing open no `udp/` port (`IpLinks::open_listener`, asked before the socket is
+  bound). `udp-port-lent-only`, its feature set `heap-lent-ports` and its gate leg went: the lent
+  form's instances are the D12 build's alone, as the selector made them (S1 of `feat-peer.md`),
+  and the heap's the on-use build's.
+- The heap form answers a refusal as a value: `PortRows::take` makes both tables' room before it
+  writes either, so a peer is never taken without its first datagram; `OwnRx::keep` reserves
+  before it copies and `give_back` before it keeps a spare buffer; a datagram refused memory is
+  dropped and counted as an overflow.
+- The plan (`crates/wz-capi-coop/src/arena.rs`): the counts are kept in both forms
+  (`TransportRows::port_rx`, `port_peers`); D12 lays out and lends the rows and the slots
+  (`TransportRows::ports_from`), on use none is laid out and the source is
+  `HeapPorts::sized(links, UDP_PORT_SLOTS, batch)` (`TransportRows::ports_sized`); the engine
+  hands either to its links with `lend_ports` (`engine.rs`). `LinkCellFlag`, the `SessionLock`
+  import and the `Lent` import are back to their D12 cfgs (`not(wz_on_use)`, `wz_lent`), which
+  `3689670ef3` had widened for the ports' rows on use.
+- Tests, wz-runtime-coop (`alloc,session-unicast,udp-listen`, and the heap set). `udp_link`:
+  `a_port_holds_each_datagram_in_a_buffer_a_read_gave_back` (the heap form),
+  `a_book_the_heap_has_no_room_for_is_refused_and_named`,
+  `a_port_counted_across_threads_is_shared_by_handles_that_cross_threads` (both sources),
+  `a_port_over_lent_slots_drops_a_datagram_it_has_no_slot_for`,
+  `a_peers_row_counts_what_waits_for_it` (rows on use),
+  `a_port_over_lent_memory_sorts_a_peers_datagrams_without_the_heap`,
+  `ports_share_their_rows_and_take_no_peer_past_them` (both sources), and three new:
+  `a_source_no_session_sized_or_lent_gives_no_port` (red if `HeapPorts::book` gives rows for an
+  unsized source), `heap_rows_take_their_counts_at_the_first_peer_and_no_more` (red if
+  `PortRows::counted` takes memory with the book or the rows grow past their counts),
+  `a_datagram_the_heap_has_no_room_for_is_dropped_and_counted` (red if `OwnRx::keep` copies
+  without `try_reserve_exact`, which ends the process). `ip_stack`: the `udp_listener` module
+  over a lent port (`udp_link::leaked_ports`), `a_port_reads_into_the_slots_its_session_lent`
+  with the refused case of links lent nothing, and
+  `an_on_use_stack_listens_on_udp_over_the_ports_its_session_sized_alone` (new; red if
+  `open_listener` makes a book of its own). The two lent-only tests went with the feature.
+  wz-capi-coop `tests::arena`: the D12 tests read `ports_from` and are `not(wz_on_use)`;
+  `an_on_use_listening_session_sizes_its_ports_and_lays_out_none` (new, `udp-listen` with
+  `tables-on-use`; red if the plan lays a port row out on use or sizes the source to other
+  counts).
+
 ## 8. What the main session runs
+
+- R3, 3c (c), the ports (`5c5f545604`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast,udp-listen
+  --lib udp_link` (three more, none fewer: the lent-only test of `udp_link` ran only under the
+  removed selector) and `... --lib ip_stack` (one more); the crate's first gate row (every feature
+  but the slot selector) the same. wz-capi-coop: `--features udp-listen --lib tests::arena`
+  unchanged in count, `--features udp-listen,tables-on-use --lib tests::arena` one more and two
+  fewer (the D12 tests of the ports' rows are `not(wz_on_use)`). Clippy of wz-runtime-coop with
+  its sets `heap` and `slot`, and of wz-capi-coop with `--features udp-listen`, `--features
+  udp-listen,tables-on-use` and `--features threads,udp-listen,tables-on-use`. Size: D12
+  unchanged to a few bytes (the lent form alone, by type as by the selector; the slot table moved
+  into the book); the client cases unchanged (no port); a listening on-use build smaller by the
+  ports' rows and slots of its arena. Receive Ir: unchanged (the client reads no port; a port's
+  read keeps one arm).
 
 - The listener's bound and the reds of hn12 (`de6a30cf2f`, `3689670ef3`, `ce7e699b2c`), not
   built or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
@@ -1713,7 +1780,8 @@ The order that builds at each step:
      feature, its feature set (`heap-lent-ports`), its gate leg
      (`scripts/lib/nondefault-tests-gate.sh`) and its tests go. A port no session sized is
      refused, as a lent kind's port lent nothing is: every port's memory is bounded by a session's
-     statement. The groups: on use the plan lays out a receive buffer for each group it counts and
+     statement. Written for the ports (7.22), as read, the lent form's and the heap's each
+     compiled for the kinds that name it. The groups: on use the plan lays out a receive buffer for each group it counts and
      lends them; not lending leaves each joiner to make its own (`GroupRx::lent_or_own`), whose
      length each joiner (`host_group`, `app_link`) must be read for before the plan drops the
      rows, so the on-use source hands the joiner the plan's group batch. The kept publishes:
