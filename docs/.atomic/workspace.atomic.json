@@ -9299,6 +9299,25 @@
       "carry_forward_bullets": [
         "Gate 2z runs only in the extended sweep, so a later landing can red a member again."
       ]
+    },
+    "Round 4735": {
+      "decision_summary": "Land five lanes as one integration, verified once: the release profiles\nkeep the advanced switches; peer listen and interest answers as switches;\nthe deterministic layer gate; cross-talk pinned; heap tables counted.",
+      "changes_bullets": [
+        "advanced retention and node clock switches, on in the release profiles.",
+        "udp-listen, interest-answer; arena interest pool; router stand-in order.",
+        "det-gate layer check; cross-talk Put plane; on-use counted face tables."
+      ],
+      "verification_bullets": [
+        "peer ratio 1.137 -> 1.0596; client size 199,515 B; W/P 0.7549 flat.",
+        "capi-coop 495/370/355/305, pico 544, ext-pubsub 130/129, session-core.",
+        "preflight 7 gates, ledger and cost rc 0, nondefault clippy 7 crates."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
