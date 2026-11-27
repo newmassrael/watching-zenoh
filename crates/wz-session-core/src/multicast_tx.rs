@@ -852,40 +852,45 @@ impl MulticastTxReply<'_> {
 }
 
 /// `f` handed the encoder of `item`'s network message: what a group that keeps the message's
-/// body until its sequence number can be minted encodes it with.
+/// body until its sequence number can be minted encodes it with. The encoder is `ItemBody`, so a
+/// crate that instantiates this function for its own `f` hands on this crate's one writer and
+/// compiles no encoder of its own.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub fn multicast_tx_item_body<R>(
     item: &MulticastTxItem,
     f: impl FnOnce(&crate::frame_encode::BodyEncoder<'_>) -> R,
 ) -> R {
-    match item {
-        MulticastTxItem::Push { push, .. } => f(&crate::frame_encode::push_body(push)),
-        #[cfg(feature = "codec-request")]
-        MulticastTxItem::Request { request } => {
-            f(&|sink: &mut crate::tx_buf::TxSink<'_>| request.encode(sink))
-        }
-        #[cfg(feature = "codec-response")]
-        MulticastTxItem::Response { response } => {
-            f(&|sink: &mut crate::tx_buf::TxSink<'_>| response.encode(sink))
-        }
-        #[cfg(feature = "codec-response-final")]
-        MulticastTxItem::ResponseFinal { request_id, qos } => {
-            let response_final =
-                crate::response_final_build::build_response_final(*request_id, *qos);
-            // Named, so the encoder that borrows the message is let go before the message is.
-            let body = |sink: &mut crate::tx_buf::TxSink<'_>| response_final.encode(sink);
-            f(&body)
-        }
-        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
-        MulticastTxItem::DeclareReply { declare } => {
-            f(&|sink: &mut crate::tx_buf::TxSink<'_>| declare.encode(sink))
-        }
-        #[cfg(feature = "codec-declare")]
-        MulticastTxItem::Declare { declare } => {
-            f(&|sink: &mut crate::tx_buf::TxSink<'_>| declare.encode(sink))
-        }
-        MulticastTxItem::Interest { interest } => {
-            f(&|sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink))
+    f(&ItemBody(item))
+}
+
+/// The writer of a group's item's network message, whatever its kind: one body, not generic, so
+/// it is compiled once, here. A closure per kind made inside [`multicast_tx_item_body`] would be
+/// generic with it and compiled again, with every encoder it reaches, in each crate that
+/// instantiates it for its own `f` (the group's stage does, in its own crate).
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+struct ItemBody<'a>(&'a MulticastTxItem);
+
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+impl crate::tx_buf::WireWrite for ItemBody<'_> {
+    fn write_wire(
+        &self,
+        sink: &mut crate::tx_buf::TxSink<'_>,
+    ) -> Result<(), sce_forge_runtime::codec::CodecError> {
+        match self.0 {
+            MulticastTxItem::Push { push, .. } => push.encode(sink),
+            #[cfg(feature = "codec-request")]
+            MulticastTxItem::Request { request } => request.encode(sink),
+            #[cfg(feature = "codec-response")]
+            MulticastTxItem::Response { response } => response.encode(sink),
+            #[cfg(feature = "codec-response-final")]
+            MulticastTxItem::ResponseFinal { request_id, qos } => {
+                crate::response_final_build::build_response_final(*request_id, *qos).encode(sink)
+            }
+            #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+            MulticastTxItem::DeclareReply { declare } => declare.encode(sink),
+            #[cfg(feature = "codec-declare")]
+            MulticastTxItem::Declare { declare } => declare.encode(sink),
+            MulticastTxItem::Interest { interest } => interest.encode(sink),
         }
     }
 }
@@ -3062,6 +3067,41 @@ mod push_tests {
             push: Box::new(crate::push_build::build_push_literal("k", payload).unwrap()),
             reliable,
             priority: Priority::DEFAULT,
+        }
+    }
+
+    /// The encoder a group is handed for an item writes the bytes the item's own message encodes
+    /// to: a Put, and a terminator where the build has one. Turned red by a writer whose arm for
+    /// the item's kind writes anything but that message.
+    #[test]
+    fn an_items_encoder_writes_its_own_messages_bytes() {
+        let written = |item: &MulticastTxItem| {
+            let mut out: Vec<u8> = Vec::new();
+            multicast_tx_item_body(item, |encode| {
+                let mut sink = crate::tx_buf::TxSink::new(&mut out);
+                encode.write_body(&mut sink)
+            })
+            .expect("the message encodes");
+            out
+        };
+        let item = put(true, b"value");
+        let MulticastTxItem::Push { push, .. } = &item else {
+            unreachable!("a put is a Push");
+        };
+        let mut own: Vec<u8> = Vec::new();
+        push.encode(&mut crate::tx_buf::TxSink::new(&mut own))
+            .expect("the message encodes");
+        assert!(!own.is_empty(), "CONTROL: the Put has bytes");
+        assert_eq!(written(&item), own);
+        #[cfg(feature = "codec-response-final")]
+        {
+            let qos = crate::sample::QosLevel::DEFAULT;
+            let terminal = MulticastTxItem::ResponseFinal { request_id: 7, qos };
+            let mut own: Vec<u8> = Vec::new();
+            crate::response_final_build::build_response_final(7, qos)
+                .encode(&mut crate::tx_buf::TxSink::new(&mut own))
+                .expect("the message encodes");
+            assert_eq!(written(&terminal), own);
         }
     }
 
