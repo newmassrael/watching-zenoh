@@ -8305,6 +8305,25 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4679": {
+      "decision_summary": "Hold the shared key id doors on the cooperative engine the release ships,\nnot only on the tokio one: one test body now runs on both engines and adds\na get answered by id and a get by an id the answering session does not hold.",
+      "changes_bullets": [
+        "capi-pico tests: key_ids_tokio.rs becomes key_ids.rs, run by the build's engine.",
+        "nondefault-tests gate: a coop leg for files::key_ids:: beside the tokio one.",
+        "release-proof ledger E05 and the public-surface census reason name the new file."
+      ],
+      "verification_bullets": [
+        "coop: 4/4 key_ids tests and programs:: pass; clippy -D warnings clean.",
+        "tokio (gate feature row): 4/4 key_ids tests pass; clippy clean.",
+        "release_proof_ledger_gate --check and feature_public_surface_census --check pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
