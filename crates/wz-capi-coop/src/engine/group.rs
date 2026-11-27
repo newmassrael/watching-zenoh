@@ -78,7 +78,7 @@ use wz_session_core::wire_id::{EntityId, ExprId};
 #[cfg(not(wz_round))]
 use {
     core::mem::MaybeUninit,
-    wz_runtime_coop::reassembly_rx::{mcu_reassembly, CoopReassembly},
+    wz_runtime_coop::reassembly_rx::{mcu_reassembly_in, CoopReassembly},
     wz_runtime_coop::CoopTime,
     wz_session_core::driver_loop::EventSink,
     wz_session_core::handshake_encode::encode_multicast_close_into_slice,
@@ -1799,24 +1799,26 @@ pub(super) struct GroupSeat {
 }
 
 /// The place of a group's session, made once for the group and kept across its joins: the
-/// session core's dispatcher, built where it lies, and the rest of the session beside it. The
-/// read steps the dispatcher and the stage itself, as it steps a link's session; the MCU image's
-/// loop over the same parts (`wz_session_mcu::group_drive::MulticastPump`) is that image's.
-/// The dispatcher is built exactly while `run` holds a session.
+/// session core's dispatcher and the Router that stages its members' fragment chains, each built
+/// where it lies (a slot machine for each peer and for each chain, kilobytes in all), and the
+/// rest of the session beside them. The read steps the dispatcher and the stage itself, as it
+/// steps a link's session; the MCU image's loop over the same parts
+/// (`wz_session_mcu::group_drive::MulticastPump`) is that image's. The dispatcher and the Router
+/// are built exactly while `run` holds a session.
 #[cfg(not(wz_round))]
 struct GroupPlace<T> {
     dispatcher: MaybeUninit<MulticastDispatcher<GROUP_MEMBERS>>,
+    reasm: MaybeUninit<CoopReassembly>,
     run: Option<GroupRun<T>>,
 }
 
-/// One session of a group, beside its dispatcher in the group's place: its parameters, its
-/// transport, the router that stages its members' fragment chains, where the walk of a datagram
-/// the transport keeps stopped, and its beacon's and sweep's cadences on the clock's epoch.
+/// One session of a group, beside its dispatcher and its Router in the group's place: its
+/// parameters, its transport, where the walk of a datagram the transport keeps stopped, and its
+/// beacon's and sweep's cadences on the clock's epoch.
 #[cfg(not(wz_round))]
 struct GroupRun<T> {
     params: MulticastParams,
     transport: T,
-    reasm: CoopReassembly,
     resume: Option<GroupResume>,
     next_join_ms: u64,
     next_sweep_ms: u64,
@@ -1883,6 +1885,7 @@ impl<T> GroupPlace<T> {
     fn empty() -> alloc::boxed::Box<Self> {
         alloc::boxed::Box::new(Self {
             dispatcher: MaybeUninit::uninit(),
+            reasm: MaybeUninit::uninit(),
             run: None,
         })
     }
@@ -1900,9 +1903,12 @@ impl<T> GroupPlace<T> {
     /// Let go of the session the place holds, its transport with it, and keep the place.
     fn leave(&mut self) {
         if self.run.take().is_some() {
-            // SAFETY: the dispatcher is built while a session is held (`Self::build`); the
-            // session is marked gone first, so it is dropped once.
-            unsafe { self.dispatcher.assume_init_drop() };
+            // SAFETY: the dispatcher and the Router are built while a session is held
+            // (`Self::build`); the session is marked gone first, so each is dropped once.
+            unsafe {
+                self.dispatcher.assume_init_drop();
+                self.reasm.assume_init_drop();
+            }
         }
     }
 }
@@ -1918,8 +1924,8 @@ impl<T> Drop for GroupPlace<T> {
 impl<T: GroupTransport> GroupPlace<T> {
     /// Build the session `seed` holds in the place at `now_ms` on the session's epoch, the one
     /// it held let go of first: the dispatcher comes up where it lies and opens the transport as
-    /// its link, and the first beacon and sweep are due at once. A transport that does not open is
-    /// reported by the first step.
+    /// its link, the Router is written in its field, and the first beacon and sweep are due at
+    /// once. A transport that does not open is reported by the first step.
     fn build(&mut self, seed: GroupSessionSeed<T>, now_ms: u64) {
         self.leave();
         let GroupSessionSeed {
@@ -1937,12 +1943,11 @@ impl<T: GroupTransport> GroupPlace<T> {
         let created = dispatcher.create();
         let lost_at_open = !perform_link_duties(dispatcher, &mut transport, created);
         // The group's `transport/link/rx/max_message_size`, as the AP group loop applies it.
-        let mut reasm = mcu_reassembly(&policy);
-        reasm.set_max_message_bytes(params.link_rx.max_message_size);
+        mcu_reassembly_in(&mut self.reasm, &policy)
+            .set_max_message_bytes(params.link_rx.max_message_size);
         self.run = Some(GroupRun {
             params,
             transport,
-            reasm,
             resume: None,
             next_join_ms: now_ms,
             next_sweep_ms: now_ms,
@@ -1969,12 +1974,18 @@ impl<T: GroupTransport> GroupPlace<T> {
         let Some(run) = self.run.as_mut() else {
             return Some(MulticastOutcome::Stopped);
         };
-        // SAFETY: the dispatcher is built while a session is held (`Self::build`).
-        let dispatcher = unsafe { self.dispatcher.assume_init_mut() };
+        // SAFETY: the dispatcher and the Router are built while a session is held
+        // (`Self::build`).
+        let (dispatcher, reasm) = unsafe {
+            (
+                self.dispatcher.assume_init_mut(),
+                self.reasm.assume_init_mut(),
+            )
+        };
         if asked {
             run.next_join_ms = 0;
         }
-        let outcome = run.step(dispatcher, &turn, events);
+        let outcome = run.step(dispatcher, reasm, &turn, events);
         if outcome.is_none() {
             run.due.publish(run.next_due_us(dispatcher, &turn));
         }
@@ -2012,6 +2023,7 @@ impl<T: GroupTransport> GroupRun<T> {
     fn step<C: ClockSource + 'static>(
         &mut self,
         dispatcher: &mut MulticastDispatcher<GROUP_MEMBERS>,
+        reasm: &mut CoopReassembly,
         turn: &GroupTurn<'_, C>,
         events: &mut dyn EventSink,
     ) -> Option<MulticastOutcome> {
@@ -2021,7 +2033,6 @@ impl<T: GroupTransport> GroupRun<T> {
         let Self {
             params,
             transport,
-            reasm,
             resume,
             next_join_ms,
             next_sweep_ms,
@@ -3288,5 +3299,36 @@ mod place_tests {
             Some(MulticastOutcome::LinkLost(LostCause::OsError))
         );
         assert_eq!(taken(&gone), ["join"], "no Close on a link that went away");
+    }
+
+    /// Each session built in the group's place writes its Router in the place's own field, with
+    /// the group's `max_message_size` as its bound, and a session built again there writes it
+    /// anew with its own; the place let go of holds neither. Turned red by a build that keeps the
+    /// last session's Router or bound (`GroupPlace::build`), or a leave that keeps a session.
+    #[test]
+    fn each_session_built_in_its_place_writes_its_router_there_with_the_groups_bound() {
+        let shell = Shell::new();
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let due = GroupDue::default();
+        let mut place = GroupPlace::empty();
+
+        let mut first = seed(&wire, &due);
+        first.params.link_rx.max_message_size = 100;
+        place.build(first, 0);
+        // SAFETY: a session the place holds was built with its Router whole.
+        let bound = unsafe { place.reasm.assume_init_ref() }.max_message_bytes();
+        assert_eq!(bound, 100);
+        assert!(shell.step(&mut place).is_none());
+
+        let mut second = seed(&wire, &due);
+        second.params.link_rx.max_message_size = 200;
+        place.build(second, 0);
+        // SAFETY: as above.
+        let bound = unsafe { place.reasm.assume_init_ref() }.max_message_bytes();
+        assert_eq!(bound, 200, "the second session's own bound");
+        assert!(shell.step(&mut place).is_none());
+
+        place.leave();
+        assert!(!place.holds());
     }
 }
