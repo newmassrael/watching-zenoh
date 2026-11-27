@@ -12,7 +12,9 @@
 //! Where the tables take their memory at their first row (`tables-on-use`), the same places lie
 //! in a state of the session's own (`OwnState`), beside the budget its keys are counted against:
 //! one allocation the open takes from the allocator apart from its arena, held by `OwnBlock`,
-//! which gives it back after every owner written in it.
+//! which gives it back after every owner written in it. The rows of the plain tables and of the
+//! round are not among those places: each of those tables takes its own at its first row
+//! (`PlacedTables::counted`, `RoundRows::counted`).
 
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 use core::alloc::Layout;
@@ -20,15 +22,28 @@ use core::mem::MaybeUninit;
 use core::ptr::{addr_of_mut, NonNull};
 
 use wz_session_core::bounded::{BoundedVec, ZeroEmpty};
-#[cfg(any(feature = "query", feature = "queryable"))]
+#[cfg(all(
+    any(feature = "query", feature = "queryable"),
+    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+))]
 use wz_session_core::caps;
 use wz_session_core::placed::Placed;
 #[cfg(feature = "query")]
-use wz_session_core::reply_hold::{HeldReplies, HeldReplyPlaces};
-#[cfg(wz_round)]
+use wz_session_core::reply_hold::HeldReplies;
+#[cfg(all(
+    feature = "query",
+    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+))]
+use wz_session_core::reply_hold::HeldReplyPlaces;
+#[cfg(all(
+    wz_round,
+    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+))]
 use wz_session_core::round::RoundRowPlaces;
 use wz_session_core::step_lend::LendCell;
 
+#[cfg(feature = "queryable")]
+use super::query;
 use super::registry::FACE_SETS;
 #[cfg(feature = "connectivity")]
 use super::FacePlane;
@@ -38,16 +53,22 @@ use super::GetPlane;
 use super::QueryPlane;
 #[cfg(wz_round)]
 use super::Registry;
-#[cfg(feature = "queryable")]
-use super::{query, FinalHold, RefusedFinal};
 #[cfg(feature = "query")]
 use super::{Ended, LegRow, PendingGet, Rows};
 #[cfg(feature = "query")]
 use super::{EndedLegs, LegRows};
+#[cfg(all(
+    feature = "queryable",
+    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+))]
+use super::{FinalHold, RefusedFinal};
 use super::{RoomPlace, RoomPlaces, SessionReassembly, StepPlaces};
 #[cfg(any(feature = "query", feature = "queryable"))]
 use crate::arena::SessionRows;
-#[cfg(wz_round)]
+#[cfg(all(
+    wz_round,
+    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+))]
 use crate::calls::CoopCalls;
 #[cfg(wz_round)]
 use crate::round::{Round, RoundRowCounts, RoundRows};
@@ -64,7 +85,10 @@ use crate::arena::ArenaRefused;
 /// The legs a region keeps a row of each table of for: one for each get its tables of pending gets
 /// hold, the dial role's face's and, with `local-queryable`, the session's own
 /// (`RegistryRegion`).
-#[cfg(feature = "query")]
+#[cfg(all(
+    feature = "query",
+    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+))]
 const LEG_ROWS: usize = (caps::MAX_PENDING_QUERIES
     + if cfg!(feature = "liveliness-get") {
         caps::MAX_PENDING_LIVELINESS_GETS
@@ -73,8 +97,9 @@ const LEG_ROWS: usize = (caps::MAX_PENDING_QUERIES
     })
     * (1 + cfg!(feature = "local-queryable") as usize);
 
-/// The plain tables of the session's state over the rows of its region
-/// ([`StatePlaces::tables`]): what an arena lends a session whose shape the open plans.
+/// The plain tables of the session's state, what an arena lends a session whose shape the open
+/// plans: over the rows of its region (`StatePlaces::tables`), or each counted and taking its rows
+/// at its first row where the tables take their memory on use (`PlacedTables::counted`).
 #[cfg(any(feature = "query", feature = "queryable"))]
 pub(super) struct PlacedTables {
     #[cfg(feature = "query")]
@@ -91,6 +116,34 @@ pub(super) struct PlacedTables {
     pub(super) refused_finals: query::RefusedFinals<StatePolicy>,
 }
 
+#[cfg(all(
+    any(feature = "query", feature = "queryable"),
+    all(feature = "tables-on-use", not(feature = "runtime-plan"))
+))]
+impl PlacedTables {
+    /// The session's plain tables where they take their memory on use: each counted as `rows`
+    /// counts its rows, under the build's bound, and holding none until its first row. A count past
+    /// the address space is a table whose first row the allocator refuses.
+    pub(super) fn counted(rows: &SessionRows) -> Self {
+        #[cfg(feature = "query")]
+        let legs = rows.gets().legs().unwrap_or(usize::MAX);
+        Self {
+            #[cfg(feature = "query")]
+            legs: BoundedVec::counted(legs),
+            #[cfg(feature = "query")]
+            leg_rows: BoundedVec::counted(legs),
+            #[cfg(feature = "query")]
+            pending_gets: BoundedVec::counted(legs),
+            #[cfg(feature = "query")]
+            held_replies: HeldReplies::counted(rows.held_replies()),
+            #[cfg(feature = "queryable")]
+            held_finals: BoundedVec::counted(rows.held_queries()),
+            #[cfg(feature = "queryable")]
+            refused_finals: BoundedVec::counted(rows.held_queries()),
+        }
+    }
+}
+
 /// The places of a session's region its state's own values are written in: see the module
 /// documentation.
 pub(crate) struct StatePlaces {
@@ -104,7 +157,10 @@ pub(crate) struct StatePlaces {
     round: MaybeUninit<Round>,
     /// The rows of the round's tables, which the round reads where they lie: the build's bound of
     /// each, as the round's form keeps them.
-    #[cfg(wz_round)]
+    #[cfg(all(
+        wz_round,
+        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+    ))]
     round_rows: RoundRowPlaces<CoopCalls>,
     #[cfg(feature = "query")]
     gets: MaybeUninit<GetPlane>,
@@ -118,17 +174,35 @@ pub(crate) struct StatePlaces {
     /// The rows of the session's plain tables, each table's at the build's bound: the ends of the
     /// legs, their callbacks, the session's note of each leg pending and the replies the gets that
     /// consolidate hold, and the Finals the queryables' plane holds and the requests it refused.
-    #[cfg(feature = "query")]
+    #[cfg(all(
+        feature = "query",
+        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+    ))]
     legs: [MaybeUninit<Ended>; LEG_ROWS],
-    #[cfg(feature = "query")]
+    #[cfg(all(
+        feature = "query",
+        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+    ))]
     leg_rows: [MaybeUninit<Option<LegRow>>; LEG_ROWS],
-    #[cfg(feature = "query")]
+    #[cfg(all(
+        feature = "query",
+        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+    ))]
     pending_gets: [MaybeUninit<PendingGet>; LEG_ROWS],
-    #[cfg(feature = "query")]
+    #[cfg(all(
+        feature = "query",
+        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+    ))]
     held_replies: HeldReplyPlaces<u64>,
-    #[cfg(feature = "queryable")]
+    #[cfg(all(
+        feature = "queryable",
+        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+    ))]
     held_finals: [MaybeUninit<FinalHold>; caps::MAX_PENDING_FINALS],
-    #[cfg(feature = "queryable")]
+    #[cfg(all(
+        feature = "queryable",
+        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+    ))]
     refused_finals: [MaybeUninit<RefusedFinal>; caps::MAX_PENDING_FINALS],
 }
 
@@ -172,22 +246,26 @@ impl StatePlaces {
         }
     }
 
-    /// The session's round over tables of `counts`, written in its field of the places at `at`,
-    /// its tables over the rows of the field beside it.
+    /// The session's round over tables of `counts`, written in its field of the places at `at`:
+    /// its tables over the rows of the field beside it, or, where the tables take their memory on
+    /// use, counted, taking their rows at the round's first record.
     ///
     /// # Safety
-    /// As [`Self::steps`], for the round's field and its rows' field.
+    /// As [`Self::steps`], for the round's field and, where the places keep them, its rows' field.
     #[cfg(wz_round)]
     pub(super) unsafe fn round(at: NonNull<Self>, counts: RoundRowCounts) -> Placed<Round> {
         let at = at.as_ptr();
         // SAFETY: the caller's contract; the rows' field holds no value and is reached by the
         // round's tables alone, which the round's owner drops before the region goes.
+        #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
         let rows = unsafe {
             RoundRows::placed_in(
                 NonNull::new_unchecked(addr_of_mut!((*at).round_rows)),
                 counts,
             )
         };
+        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+        let rows = RoundRows::counted(counts);
         // SAFETY: the caller's contract; the field is aligned for a round and the owner's alone.
         unsafe { Round::placed_at(value_at(addr_of_mut!((*at).round)), rows) }
     }
@@ -198,7 +276,10 @@ impl StatePlaces {
     /// # Safety
     /// As [`Self::steps`], for the tables' fields: each is reached by the one table placed over it
     /// here, which the session's planes and its state drop before the region goes.
-    #[cfg(any(feature = "query", feature = "queryable"))]
+    #[cfg(all(
+        any(feature = "query", feature = "queryable"),
+        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+    ))]
     pub(super) unsafe fn tables(at: NonNull<Self>, rows: &SessionRows) -> PlacedTables {
         let at = at.as_ptr();
         // A count past the address space is held to the region's rows as any other.
@@ -477,7 +558,10 @@ mod tests {
     /// the region keeps every one of, and lie in the places. Turned red by a field of fewer rows
     /// than the plan counts (`LEG_ROWS`), by a table held to other counts than the plan's, or by
     /// one placed anywhere but the places.
-    #[cfg(any(feature = "query", feature = "queryable"))]
+    #[cfg(all(
+        any(feature = "query", feature = "queryable"),
+        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+    ))]
     #[test]
     fn the_plain_tables_take_the_plans_rows_in_the_places() {
         let shape =
@@ -518,6 +602,48 @@ mod tests {
             assert_eq!(tables.refused_finals.free_slots(), held);
             assert!(within.contains(&(tables.held_finals.as_ptr() as usize)));
             assert!(within.contains(&(tables.refused_finals.as_ptr() as usize)));
+        }
+        drop(tables);
+    }
+
+    /// The plain tables of a session whose tables take their memory on use are counted as the build's
+    /// plan counts their rows and hold none until their first row: no place of the state keeps
+    /// them. Turned red by a table counted with the build's bound in place of the plan's count, or by
+    /// one that takes its rows when made (`PlacedTables::counted` over the region's places).
+    #[cfg(all(
+        any(feature = "query", feature = "queryable"),
+        all(feature = "tables-on-use", not(feature = "runtime-plan"))
+    ))]
+    #[test]
+    fn the_plain_tables_on_use_hold_the_plans_counts_and_no_row() {
+        let shape =
+            PlanShape::dial_only(1, 1024, &wz_session_core::policy::SessionPolicy::defaults());
+        let plan = ArenaPlan::planned(shape, &SessionLimits::BUILD).expect("the build's client");
+        let rows = plan.session();
+        let tables = PlacedTables::counted(rows);
+        #[cfg(feature = "query")]
+        {
+            let legs = rows.gets().legs().expect("within the address space");
+            assert_eq!(tables.legs.free_slots(), legs);
+            assert_eq!(tables.leg_rows.free_slots(), legs);
+            assert_eq!(tables.pending_gets.free_slots(), legs);
+            assert!(
+                !tables.legs.holds_rows()
+                    && !tables.leg_rows.holds_rows()
+                    && !tables.pending_gets.holds_rows(),
+                "no row before the first"
+            );
+            assert!(tables.held_replies.is_empty());
+        }
+        #[cfg(feature = "queryable")]
+        {
+            let held = rows.held_queries();
+            assert_eq!(tables.held_finals.free_slots(), held);
+            assert_eq!(tables.refused_finals.free_slots(), held);
+            assert!(
+                !tables.held_finals.holds_rows() && !tables.refused_finals.holds_rows(),
+                "no row before the first"
+            );
         }
         drop(tables);
     }

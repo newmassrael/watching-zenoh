@@ -419,10 +419,23 @@ impl QueryView for OwnGet<'_> {
 }
 
 /// A plane that holds the Finals of at most `rows` queries at once, in rows lent from an arena
-/// the test leaks. Only the registry's tests ask one, which a build that plans at the open runs, or
-/// one whose tables take their memory on use.
+/// the test leaks, or counted where the tables take their memory on use. Only the registry's tests
+/// ask one, which a build that plans at the open runs, or one whose tables take their memory on
+/// use.
 #[cfg(all(test, any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(super) fn leaked_plane(rows: usize) -> Box<QueryPlane> {
+    let holds = leaked_holds(rows);
+    let mut place = Box::<QueryPlane>::new_uninit();
+    // SAFETY: the box's place is valid for writes of the plane, which stays there.
+    unsafe {
+        QueryPlane::init_at(NonNull::from(&mut *place).cast::<QueryPlane>(), holds);
+        place.assume_init()
+    }
+}
+
+/// The Finals of at most `rows` queries, in rows lent from an arena the test leaks.
+#[cfg(all(test, feature = "runtime-plan"))]
+fn leaked_holds(rows: usize) -> FinalHolds<crate::StatePolicy> {
     use wz_session_core::bounded::Arena;
     let held = Arena::table_bytes::<FinalHold>(rows).expect("rows the address space holds");
     let refused = Arena::table_bytes::<RefusedFinal>(rows).expect("rows the address space holds");
@@ -436,12 +449,14 @@ pub(super) fn leaked_plane(rows: usize) -> Box<QueryPlane> {
     let mut lend = arena.lender();
     let holds = FinalHolds::over(lend.table(rows), lend.table(rows));
     lend.finish().expect("the arena has the rows");
-    let mut place = Box::<QueryPlane>::new_uninit();
-    // SAFETY: the box's place is valid for writes of the plane, which stays there.
-    unsafe {
-        QueryPlane::init_at(NonNull::from(&mut *place).cast::<QueryPlane>(), holds);
-        place.assume_init()
-    }
+    holds
+}
+
+/// The Finals of at most `rows` queries, counted, taking their rows at the first query held.
+#[cfg(all(test, feature = "tables-on-use", not(feature = "runtime-plan")))]
+fn leaked_holds(rows: usize) -> FinalHolds<crate::StatePolicy> {
+    use wz_session_core::bounded::BoundedVec;
+    FinalHolds::over(BoundedVec::counted(rows), BoundedVec::counted(rows))
 }
 
 /// The query each thread's callback is answering now: the thread, its engine (by address), the

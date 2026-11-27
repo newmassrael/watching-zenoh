@@ -1018,8 +1018,9 @@ fn lend_session(
     #[cfg(not(feature = "runtime-plan"))]
     let keys = unsafe { StateLayout::place(state.as_ptr(), resolve_limits(config)) };
     // The plane, the round, the step places, the queryables' plane and the plain tables' rows lie
-    // in the region where the build fixes the session's shape, or in the session's own state where
-    // its tables take their memory on use, each in a field of it no other owner reaches.
+    // in the region where the build fixes the session's shape, each in a field of it no other owner
+    // reaches; where its tables take their memory on use, the same values lie in the session's own
+    // state, and the plain tables and the round's take their rows at their first row instead.
     // SAFETY: the state was placed above, and nothing reaches its places' fields but this open,
     // which writes each once; the block is held after every owner written in it (`SessionLent`,
     // then `Core`), and neither moves nor goes back before them.
@@ -1027,6 +1028,19 @@ fn lend_session(
     let region_places = unsafe { StateLayout::places_at(state.as_ptr()) };
     // SAFETY: as above, for the plain tables' fields: each table is held by the plane or the
     // state it is moved into, both dropped before the block.
+    #[cfg(all(
+        any(feature = "query", feature = "queryable"),
+        not(any(feature = "runtime-plan", feature = "tables-on-use"))
+    ))]
+    let tables = unsafe { StatePlaces::tables(region_places, plan.session()) };
+    // Where the tables take their memory on use, each plain table is counted as the plan counts
+    // its rows and takes them at its first row, none of them in the state.
+    #[cfg(all(
+        any(feature = "query", feature = "queryable"),
+        feature = "tables-on-use",
+        not(feature = "runtime-plan")
+    ))]
+    let tables = PlacedTables::counted(plan.session());
     #[cfg(all(
         any(feature = "query", feature = "queryable"),
         not(feature = "runtime-plan")
@@ -1044,7 +1058,7 @@ fn lend_session(
         held_finals,
         #[cfg(feature = "queryable")]
         refused_finals,
-    } = unsafe { StatePlaces::tables(region_places, plan.session()) };
+    } = tables;
     // SAFETY: as above, for the rooms' places: the table is held by the rooms, which the session's
     // state drops before the block.
     #[cfg(not(feature = "runtime-plan"))]
@@ -2809,12 +2823,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, C> 
     }
 }
 
-/// A table of the session's own declarations: rows lent from the session's arena at its open, as
-/// many as the limit the open resolved, `N` the build's ceiling. A declaration that finds it full
-/// is refused before anything is taken, registered or sent.
+/// A plain table of the session's state, of the legs of its gets: rows lent from the session's arena
+/// at its open or placed in its region, or taken at the table's first row where the tables take
+/// their memory on use (`crate::StatePolicy`); as many as the limit the open resolved, `N` the
+/// build's ceiling.
 #[cfg(feature = "query")]
-type Rows<T, const N: usize> =
-    wz_session_core::bounded::BoundedVec<T, N, wz_session_core::bounded::Lent>;
+type Rows<T, const N: usize> = wz_session_core::bounded::BoundedVec<T, N, crate::StatePolicy>;
 
 /// What a move of the links left settled ([`Core::move_links`]): every face up or waiting for a
 /// time, no port to ask and no group. The links are moved again once a face's link ended, a face
@@ -2981,7 +2995,8 @@ impl SessionParts for CoopSession {
     type Queryables = Placed<QueryPlane>;
     #[cfg(not(feature = "queryable"))]
     type Queryables = ();
-    /// The legs of the session's gets still pending on its links, in rows the session's arena lent.
+    /// The legs of the session's gets still pending on its links, in rows of the policy of the
+    /// state's plain tables.
     #[cfg(feature = "query")]
     type PendingGets = Rows<PendingGet, { usize::MAX }>;
     #[cfg(not(feature = "query"))]

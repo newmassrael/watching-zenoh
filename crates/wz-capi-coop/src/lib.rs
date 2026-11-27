@@ -189,11 +189,22 @@ mod form_precedence_tests {
 }
 /// The storage policy of the tables the session core's planes and round keep for the engine (the
 /// ends of its gets' legs and their callbacks, the replies its gets hold, the Finals its queryables
-/// hold and the requests they refused, the round's records, callbacks and keys): lent, where the
-/// open lends them from its arena or the region places them, whichever policy the registry's tables
-/// are of.
-#[cfg(any(wz_round, feature = "query", feature = "queryable"))]
+/// hold and the requests they refused, the round's records, callbacks and keys) and of its note of
+/// each leg pending: lent, where the open lends them from its arena or the region places them,
+/// whichever policy the registry's tables are of; and taken at each table's first row where the
+/// tables take their memory on use.
+#[cfg(all(
+    any(wz_round, feature = "query", feature = "queryable"),
+    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+))]
 pub(crate) type StatePolicy = wz_session_core::bounded::Lent;
+/// See the form of a build without `tables-on-use`.
+#[cfg(all(
+    any(wz_round, feature = "query", feature = "queryable"),
+    feature = "tables-on-use",
+    not(feature = "runtime-plan")
+))]
+pub(crate) type StatePolicy = wz_session_core::bounded::OnUse;
 // How the engine's calls stand to its threads, and the locks that choice decides.
 mod form;
 
