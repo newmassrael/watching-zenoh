@@ -2714,7 +2714,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         feature = "multicast-transport"
     ))]
     let plan = wz_capi_coop::arena::PlanFrom::Config(
-        const { crate::object_slot::held_places(SessionPlace::LAYOUT) },
+        const { &crate::object_slot::held_places(SessionPlace::LAYOUT) },
     );
     // A host's session arena is the system's fresh pages, zero as handed, so the open writes no
     // row it does not use and a page no row uses is never resident; an image's is its heap's,

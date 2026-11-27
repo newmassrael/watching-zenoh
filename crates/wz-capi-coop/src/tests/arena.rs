@@ -197,7 +197,7 @@ fn an_open_holding_the_handle_reserves_the_plan_with_its_place() {
         OpenKeyIds::none(),
         OpenStorage {
             memory: &AllocatorMemory,
-            plan: crate::arena::PlanFrom::Config(held),
+            plan: crate::arena::PlanFrom::Config(Box::leak(Box::new(held))),
         },
     )
     .expect("the session opens");
@@ -3278,7 +3278,7 @@ fn an_open_refused_after_its_lend_gives_its_arena_back_once() {
         OpenKeyIds::none(),
         OpenStorage {
             memory: &RECORDED,
-            plan: crate::arena::PlanFrom::Config(HeldPlaces::NONE),
+            plan: crate::arena::PlanFrom::Config(&HeldPlaces::NONE),
         },
     )
     .err();

@@ -718,9 +718,11 @@ pub enum PlanFrom {
     Region(&'static OpenRegion),
     /// The config the open is handed, its rows laid out at the open ([`ArenaPlan::count`]) and
     /// after them the engine's places and the ABI's places named here: a build with
-    /// `runtime-plan`, whose image carries the walk of the rows.
+    /// `runtime-plan`, whose image carries the walk of the rows. The places are named where they
+    /// lie, a constant of the ABI as the region is one of the build, so what an open is handed
+    /// is a word and a tag whichever way its rows come, and no image copies them on the way.
     #[cfg(any(feature = "runtime-plan", test))]
-    Config(HeldPlaces),
+    Config(&'static HeldPlaces),
 }
 
 /// The rows of a session's tables a build knows when it is compiled: the plan of a session of

@@ -6407,7 +6407,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             key_ids,
             OpenStorage {
                 memory,
-                plan: PlanFrom::Config(HeldPlaces::NONE),
+                plan: PlanFrom::Config(&HeldPlaces::NONE),
             },
         )
     }
@@ -6556,13 +6556,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let tables = RuntimeTables::of::<C>(&config);
         #[cfg(not(wz_round))]
         let tables = RuntimeTables::of(&config);
-        let from = match &plan {
+        let from = match plan {
             PlanFrom::Region(region) => {
                 // Laid out with the places of this engine over the links its maker named
                 // (`Self::open_region_over`): those this open is handed.
                 debug_assert_eq!(region.cell_bytes(), link_cells::<C>(&links));
                 debug_assert_eq!(region.places().engine, Shared::<Self>::layout().size());
-                OpenFrom::Region(*region)
+                OpenFrom::Region(region)
             }
             #[cfg(any(feature = "runtime-plan", test))]
             PlanFrom::Config(held) => OpenFrom::Config(Self::open_holds(
