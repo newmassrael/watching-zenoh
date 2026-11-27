@@ -509,8 +509,9 @@ impl ArenaPart {
 /// The texts of the endpoints the session dials and listens on: one row of both tables.
 const ENDPOINT_ROWS: usize = 1;
 /// The links' receive flags and buffers and transmit flags and slots, and with `listen` their
-/// places.
-const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
+/// places: none where the tables take their memory on use, whose links take their own as they
+/// open.
+const LINK_ROWS: usize = (4 + cfg!(feature = "listen") as usize) * !cfg!(wz_on_use) as usize;
 /// The round's records where the arena lends them, the callbacks they owe, its keys and the round
 /// itself, where the open places them in the arena (`runtime-plan`); a region holds them otherwise:
 /// the round keeps no area, since every record is read where it lies, and a round of one thread
@@ -532,11 +533,13 @@ const REASSEMBLY_ROWS: usize = 2;
 /// such face at its place's first face, in an allocation of its own.
 const DIRECT_FACE_ROWS: usize =
     (!cfg!(wz_round) && cfg!(feature = "listen") && !cfg!(wz_on_use)) as usize;
-/// The receive buffers of the groups the session may join and their flags (`group`).
-const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
+/// The receive buffers of the groups the session may join and their flags (`group`): none where
+/// the tables take their memory on use, whose groups take their own as they are joined.
+const GROUP_RX_ROWS: usize = 2 * cfg!(all(feature = "group", not(wz_on_use))) as usize;
 /// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the
-/// rows of the peers the ports took and of the datagrams sorted for them (`udp-listen`).
-const PORT_RX_ROWS: usize = 4 * cfg!(feature = "udp-listen") as usize;
+/// rows of the peers the ports took and of the datagrams sorted for them (`udp-listen`): none
+/// where the tables take their memory on use, whose ports take theirs of the heap.
+const PORT_RX_ROWS: usize = 4 * cfg!(all(feature = "udp-listen", not(wz_on_use))) as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
 /// beside them (`listen` or `group`, in the work form, `wz_round`): a build of the dial face
 /// alone owes no other face, nor does one that sends each face its own leg (`direct`).
