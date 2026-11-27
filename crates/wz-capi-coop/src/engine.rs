@@ -4202,8 +4202,8 @@ fn leg_deadline_ms(now_us: u64, timeout_ms: u32) -> u64 {
 
 /// What every leg of one get is held pending with (`CoopEngine::hold_leg`): the key it was asked
 /// under, its options, the consolidation and the replies' keys its parameters state, read once
-/// for every leg, whether its callbacks show a reply's timestamp, and the mint of each leg's
-/// callback.
+/// for every leg, whether its callback shows a reply's timestamp, the mint of that callback and the
+/// get as its asker holds it, whose one callback every leg hands its replies to.
 #[cfg(feature = "query")]
 struct LegAsk<'a, 'o> {
     keyexpr: &'a str,
@@ -4214,6 +4214,8 @@ struct LegAsk<'a, 'o> {
     /// The fan the get was asked under, which its legs' rows name.
     fan: Option<FanKey>,
     mint: &'a mut dyn FnMut() -> ReplyCallback,
+    /// The get's callback's row, opened at its first leg, of which each leg holds a count.
+    get: get::AskedGet<'a>,
 }
 
 /// Where one leg of a get is held pending (`CoopEngine::hold_leg`): in the table of `face` (a
@@ -4261,7 +4263,8 @@ enum LegHeld {
     },
     /// The table is no longer the session's: the leg is asked of nobody.
     Gone,
-    /// No row of the table, or of the plane's callbacks, was free: no callback was minted.
+    /// No row of the table, or of the plane's callbacks or ends, was free: nothing was minted or
+    /// held for the leg.
     NoRoom,
     /// The table refused the registration, `table_full` when for want of a row: the leg's minted
     /// callback is to be let go of with no lock held.
@@ -10060,9 +10063,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         true
     }
 
-    /// Hold one leg of a get pending under `entry`: the leg's callback minted in a row of the
-    /// plane's, and its sink registered with the deadline and the accepted key the get states,
-    /// that deadline owed in `ledger` with it, so a read waits no longer and the step's
+    /// Hold one leg of a get pending under `entry`: a count of the get's callback's row, minted
+    /// at its first leg, and its sink registered with the deadline and the accepted key the get
+    /// states, that deadline owed in `ledger` with it, so a read waits no longer and the step's
     /// bookkeeping sweeps the leg when it is due. Out of line where a get issues more than one
     /// kind of leg (to groups, or to the session itself, besides its links), so those legs are
     /// held by one body and not by a copy each; a build whose get asks its links alone has one
@@ -10094,8 +10097,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             Some(_) => return LegHeld::NoRoom,
             None => return LegHeld::Gone,
         };
-        // The leg's callback, in a row of the plane's the entry's sink holds.
-        let Some(row) = self.gets.open_leg(&mut *ask.mint, ask.expose, ask.fan) else {
+        // A count of the get's callback's row, minted at its first leg, which the entry's sink
+        // holds.
+        let Some(row) = ask.get.leg(&mut *ask.mint, ask.expose, ask.fan) else {
             return LegHeld::NoRoom;
         };
         // SAFETY: the sink goes into a table of pending gets, which the session
@@ -11931,8 +11935,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // What every link is asked, read from the options once: the sink of each leg consolidates
         // as the Request states.
         let request = opts.query_parts();
-        // What every leg of this get is held with, the mint of each leg's callback among it; whether
-        // its callbacks show a reply's timestamp is read under the first hold.
+        // What every leg of this get is held with, the mint of its one callback among it; whether
+        // that callback shows a reply's timestamp is read under the first hold.
         let mut ask = LegAsk {
             keyexpr,
             opts,
@@ -11941,6 +11945,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             expose: false,
             fan: tag,
             mint: leg,
+            get: get::AskedGet::new(&self.gets),
         };
         let remote = opts.allowed_destination.allows_remote();
         let mut issued: usize = 0;
@@ -12216,6 +12221,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             set => set,
         };
         let mut issued: usize = 0;
+        // The snapshot's one callback, minted at its first leg and held by every leg after it.
+        let mut asked_get = get::AskedGet::new(&self.gets);
         // The faces whose links are up, each asked once, as a query's are.
         let mut asked = None;
         loop {
@@ -12250,7 +12257,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     return LegTurn::Skipped;
                 }
                 // A snapshot's replies are tokens, shown as they came.
-                let Some(row) = self.gets.open_leg(&mut *leg, true, tag) else {
+                let Some(row) = asked_get.leg(&mut *leg, true, tag) else {
                     return LegTurn::Skipped;
                 };
                 // SAFETY: the sink goes into a table of pending gets, which the session

@@ -27,6 +27,8 @@ use crate::EngineHold;
 pub(super) struct Leg {
     pub(super) replies: Vec<(ReplyKind, String, Vec<u8>)>,
     pub(super) ended: bool,
+    /// The callbacks minted, one for the get however many legs it issued.
+    pub(super) minted: usize,
     /// The callbacks minted and not yet dropped.
     open: usize,
 }
@@ -36,7 +38,10 @@ struct Ends(Arc<Mutex<Leg>>);
 
 impl Ends {
     fn mint(leg: &Arc<Mutex<Leg>>) -> Self {
-        leg.lock().unwrap().open += 1;
+        let mut seen = leg.lock().unwrap();
+        seen.minted += 1;
+        seen.open += 1;
+        drop(seen);
         Self(leg.clone())
     }
 }
@@ -127,6 +132,7 @@ fn a_get_is_answered_and_ends_with_its_final() {
         leg.lock().unwrap().replies,
         vec![(ReplyKind::Put, "demo/g/a".to_owned(), b"r".to_vec())]
     );
+    assert_eq!(leg.lock().unwrap().minted, 1, "one callback for the get");
     assert_eq!(router.seen(|s| s.queries), 1);
 }
 

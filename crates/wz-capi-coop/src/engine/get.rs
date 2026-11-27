@@ -46,6 +46,8 @@ pub(crate) type Uncaptured = wz_session_core::get_plane::EveryReplyCaptured;
 pub(crate) type LegSink = wz_session_core::get_plane::LegSink<CoopCalls, Uncaptured>;
 /// What a consolidating get holds of its replies until its Final.
 pub(crate) type LegHold = wz_session_core::get_plane::LegHold<CoopCalls>;
+/// A get as its asker holds it while it issues the legs, which share its one callback.
+pub(super) type AskedGet<'p> = wz_session_core::get_plane::AskedGet<'p, CoopCalls>;
 
 impl GetCalls for CoopCalls {
     /// A get is cancelled by the fan of the token it was asked under, when a token can.

@@ -203,7 +203,9 @@ fn within_five_seconds<R: Send + 'static>(
 
 /// A get made for any destination goes out and reaches the session's own queryables, and ends
 /// when both have answered: the own reply is there when the call returns, the leg is still open
-/// for the router's Final, and the router's reply and Final come with the steps.
+/// for the router's Final, and the router's reply and Final come with the steps. Both legs hand
+/// their replies to the one callback the get minted. Turned red by a leg that mints a callback of
+/// its own (`AskedGet::leg` opening a row for each leg).
 #[test]
 fn a_get_for_any_destination_waits_for_the_peer_and_the_session() {
     let router = Router::start(CatchAll::None);
@@ -226,6 +228,7 @@ fn a_get_for_any_destination_waits_for_the_peer_and_the_session() {
     );
     {
         let leg = leg.lock().unwrap();
+        assert_eq!(leg.minted, 1, "one callback for the get's two legs");
         assert!(!leg.ended, "CONTROL: the router's Final is still owed");
         assert_eq!(
             leg.replies,

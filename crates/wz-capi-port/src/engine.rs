@@ -686,8 +686,8 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// per peer the engine reaches, each ended by its peer's DeclFinal, `timeout_ms` (`0` is the
     /// platform default, never none) or the loss of its link. Its replies are token
     /// declarations, with the token's key as the reply's. `leg` and `fan` are as
-    /// [`Self::get_on_wire`]'s: `leg` mints each leg's [`ReplyCallback`], whose drop is that
-    /// leg's end, and `fan` is told of each leg as it is issued. The number of legs issued, `0`
+    /// [`Self::get_on_wire`]'s: `leg` mints the [`ReplyCallback`] the legs hand their replies
+    /// to, dropped once every leg it served ended, and `fan` is told of each leg as it is issued. The number of legs issued, `0`
     /// for a get that reached nobody; refused as [`Self::get_on_wire`] is, and with
     /// [`Refusal::NotBuilt`] by an engine with no liveliness get in this build, which is the
     /// provided answer.
@@ -746,8 +746,9 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
 
     /// Ask a query on `keyexpr` (named on the wire as `wire`) with `opts`: one leg per peer the
     /// engine reaches, and one to the session's own queryables where `opts` admits them. `leg`
-    /// mints each leg's [`ReplyCallback`], whose drop is that leg's end, so a get is over when
-    /// the last callback it minted is dropped. `fan`, when the get can be cancelled, has the engine
+    /// mints the [`ReplyCallback`] the legs hand their replies to, once for the get or once for
+    /// each leg as the engine holds them; a callback is dropped once every leg it served ended, so
+    /// a get is over when the last callback it minted is dropped. `fan`, when the get can be cancelled, has the engine
     /// attached as what ends the legs it tags with the fan's key ([`CancellableFan::attach`]), and
     /// a fan cancelled while the legs are issued stops the issuing.
     ///

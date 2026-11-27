@@ -443,8 +443,8 @@ fn a_legs_row_names_the_fan_its_get_was_asked_under() {
     assert_eq!(seen.drops(), 2);
 }
 
-/// A leg that finds every row held is refused before its callback is minted, and a row given back
-/// is the next leg's.
+/// A leg that finds every row held is refused before its callback is minted, and the row its
+/// leg's end gives back is the next leg's.
 #[test]
 fn a_leg_past_the_rows_mints_no_callback_and_a_row_given_back_is_reused() {
     let plane = plane::<Remote>(1, 1);
@@ -463,12 +463,116 @@ fn a_leg_past_the_rows_mints_no_callback_and_a_row_given_back_is_reused() {
     );
     assert_eq!(refused, None, "one row holds one leg");
     assert_eq!(minted, 0, "refused before its callback is minted");
-    drop(plane.release(row));
+    // SAFETY: the test hands the sink nothing, and the sink is dropped before the plane.
+    drop(unsafe { LegSink::new(1, row, plane.share(), EveryReplyCaptured) });
+    let end = plane.take_end().expect("the sink's drop is the leg's end");
+    drop(plane.release(end.row()));
     assert_eq!(first.drops(), 1);
     let again = plane.open_leg(&mut || Counted(second.clone()), true, None);
     assert_eq!(again, Some(row), "the row given back is the next leg's");
     drop(plane.release(row));
     assert_eq!(second.drops(), 1);
+}
+
+/// Every leg of one get hands its replies to the one callback the first leg minted, and the get is
+/// over, its callback dropped, once its last leg ended and its asker let go, in either order.
+/// Turned red by a later leg that mints a callback of its own (`AskedGet::leg` opening a row each
+/// leg), or by an asker that holds no count of its own (the callback dropped by the first leg's end
+/// while the get still issues its legs).
+#[test]
+fn a_gets_legs_share_the_callback_its_first_leg_minted() {
+    let plane = plane::<Remote>(4, 1);
+    let seen = Arc::new(Seen::default());
+    let mut minted = 0;
+    let mut asked = AskedGet::<Remote>::new(&plane);
+    let mut mint = || {
+        minted += 1;
+        Counted(seen.clone())
+    };
+    let one = asked.leg(&mut mint, true, Some(3)).expect("a row");
+    let two = asked.leg(&mut mint, true, Some(3)).expect("the same row");
+    assert_eq!(one, two, "both legs name the get's one row");
+    assert_eq!(minted, 1, "one callback for the get");
+    assert!(plane.in_fan(two, 3), "the row names the fan of the get");
+    // SAFETY: the test hands the sinks nothing, and they are dropped before the plane.
+    let (first, second) = unsafe {
+        (
+            LegSink::new(1, one, plane.share(), EveryReplyCaptured),
+            LegSink::new(2, two, plane.share(), EveryReplyCaptured),
+        )
+    };
+    plane.call(first.row(), &REPLY);
+    plane.call(second.row(), &REPLY);
+    assert_eq!(seen.calls(), 2, "each leg's reply reaches the one callback");
+    drop(first);
+    let end = plane.take_end().expect("the first leg's end");
+    drop(plane.release(end.row()));
+    assert_eq!(seen.drops(), 0, "the second leg and the asker hold it");
+    drop(asked);
+    assert_eq!(seen.drops(), 0, "the second leg holds it");
+    drop(second);
+    let end = plane.take_end().expect("the second leg's end");
+    drop(plane.release(end.row()));
+    assert_eq!(seen.drops(), 1, "the last leg's end drops it");
+    // A get whose one leg ended while it was issued: the asker's count is the last.
+    let mut asked = AskedGet::<Remote>::new(&plane);
+    let row = asked
+        .leg(&mut || Counted(seen.clone()), true, None)
+        .expect("a row");
+    // SAFETY: as above.
+    drop(unsafe { LegSink::new(3, row, plane.share(), EveryReplyCaptured) });
+    let end = plane.take_end().expect("the leg's end");
+    drop(plane.release(end.row()));
+    assert_eq!(seen.drops(), 1, "the asker holds the callback");
+    drop(asked);
+    assert_eq!(seen.drops(), 2, "the asker's count was the last");
+}
+
+/// The ends bound the legs held at once, a row set aside for each at its open, though the legs of
+/// one get share one row of the callbacks: a leg past them is refused with nothing held, and the
+/// row an end gives back once handed out is the next leg's. Turned red by a leg held with no row
+/// set aside (`EndedLegs::set_aside` left out of `GetPlane::join_leg`): its end would find none.
+#[test]
+fn the_ends_bound_the_legs_of_a_get_that_share_one_row() {
+    let plane = plane::<Remote>(2, 1);
+    let seen = Arc::new(Seen::default());
+    let mut asked = AskedGet::<Remote>::new(&plane);
+    let mut mint = || Counted(seen.clone());
+    let row = asked.leg(&mut mint, true, None).expect("a row");
+    assert_eq!(asked.leg(&mut mint, true, None), Some(row), "a second end");
+    assert_eq!(
+        asked.leg(&mut mint, true, None),
+        None,
+        "two ends bound two legs"
+    );
+    // SAFETY: the test hands the sinks nothing, and they are dropped before the plane.
+    let (first, second) = unsafe {
+        (
+            LegSink::new(1, row, plane.share(), EveryReplyCaptured),
+            LegSink::new(2, row, plane.share(), EveryReplyCaptured),
+        )
+    };
+    drop(first);
+    assert_eq!(
+        asked.leg(&mut mint, true, None),
+        None,
+        "an end waiting holds its row until it is handed out"
+    );
+    let end = plane.take_end().expect("the first leg's end");
+    drop(plane.release(end.row()));
+    assert_eq!(
+        asked.leg(&mut mint, true, None),
+        Some(row),
+        "its row is free"
+    );
+    // SAFETY: as above.
+    let third = unsafe { LegSink::new(3, row, plane.share(), EveryReplyCaptured) };
+    drop((second, third));
+    while let Some(end) = plane.take_end() {
+        drop(plane.release(end.row()));
+    }
+    drop(asked);
+    assert_eq!(seen.drops(), 1, "one callback, dropped once");
 }
 
 /// The plane let go of before its arena gives back the count an end waiting holds and drops every
@@ -734,7 +838,7 @@ fn an_end_keeps_the_timeout_that_ended_its_leg() {
 /// rows are had already; with room, the next open keeps it. The refusal is a value its caller
 /// answers (a get with no row), where the end, written by the drop of its leg's entry, could
 /// answer none. Turned red by an open that keeps a leg before the ends took their rows
-/// (`EndedLegs::make_room` left out of `GetPlane::open_leg`).
+/// (`EndedLegs::set_aside` left out of `GetPlane::open_leg`).
 #[test]
 fn a_leg_whose_ends_rows_the_heap_refuses_is_refused_at_its_open() {
     let plane = plane_on_use::<RemoteOnUse>(2, 1);
@@ -768,7 +872,7 @@ fn a_leg_whose_ends_rows_the_heap_refuses_is_refused_at_its_open() {
 
 /// The end of a leg of a plane whose tables take their rows on use is written in a row its open had
 /// the ends take, whatever the heap holds when the leg's entry goes, and handed out once. Turned red
-/// by an open that does not have the ends take their rows (`EndedLegs::make_room` left out of
+/// by an open that does not have the ends take their rows (`EndedLegs::set_aside` left out of
 /// `GetPlane::open_leg`): the end then asks the heap at the entry's drop, which answers no one.
 #[test]
 fn a_legs_end_finds_the_row_its_open_had_taken_whatever_the_heap_holds() {
@@ -790,9 +894,8 @@ fn a_legs_end_finds_the_row_its_open_had_taken_whatever_the_heap_holds() {
     assert_eq!(seen.drops(), 1);
 }
 
-/// A table lent no rows is the defect the plane's making rules out (a row of the ends for each row
-/// of the legs, the rows had at each leg's open): the end is not kept, and a debug build stops
-/// there.
+/// A table lent no rows is the defect the plane's making rules out (a row of the ends set aside at
+/// each leg's open): the end is not kept, and a debug build stops there.
 #[test]
 #[cfg_attr(debug_assertions, should_panic(expected = "an end finds the row"))]
 fn an_end_past_the_rows_is_a_defect() {
