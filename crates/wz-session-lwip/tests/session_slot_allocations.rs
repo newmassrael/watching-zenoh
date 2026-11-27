@@ -965,7 +965,6 @@ mod table {
                 },
                 Tracked,
             )
-            .ok()
             .expect("the slot that came back takes a link made in it");
         assert_eq!(
             third.driver().peer().map(|peer| peer.1),
