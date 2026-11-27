@@ -143,55 +143,16 @@ use crate::peer_init_caps::PeerInitCaps;
 // surface keeps its types when `session-reconnect` is off (R311g1).
 #[cfg(feature = "session-reconnect")]
 use crate::declaration_sync::DeclarationSync;
+#[cfg(feature = "routing-namespace")]
+use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
+#[cfg(feature = "routing-namespace")]
+use crate::namespace::NamespaceIngress;
 #[cfg(feature = "session-reconnect")]
 use crate::reconnect::DeclarationCache;
 #[cfg(feature = "alloc")]
 use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError, ReplayTurn};
 #[cfg(feature = "session-reconnect")]
 use crate::replay_cursor::{Insertion, Removal};
-// Reliability is the signature type of the R311kw `send_wire` seam, so it
-// is used iff at least one wire-emit body is active: the handshake / close
-// encoders, any consumer-plane frame emit (the frame_encode union), the
-// batch flush (`transport-batching` — its emits route through the seam
-// since R311kw, so the former "full-path return type only" exclusion no
-// longer holds), OR the keepalive emitter (`transport-keepalive`,
-// R311kx). `send_wire` itself carries the same cfg union; the two move
-// together.
-//
-// It is ALSO the type of a link's declared reliability class, which is a
-// `transport-multilink` field and accessor that emit nothing: they are gated on
-// that feature alone, so the union below carries it too. Without it the lib
-// does not compile under `--no-default-features --features transport-multilink`
-// (Layer C1ba's standalone clippy leg), because the use sits under one gate and
-// the import under another.
-#[cfg(feature = "routing-namespace")]
-use crate::keyexpr_prefix::OwnedNonWildKeyExpr;
-#[cfg(feature = "routing-namespace")]
-use crate::namespace::NamespaceIngress;
-// R311y516 — the establishment codecs enter this union ROLE-CONJOINED, not
-// bare: see the `send_wire` seam below for why `codec-init-body` /
-// `codec-open-body` alone carry no emit.
-#[cfg(any(
-    all(
-        any(feature = "codec-init-body", feature = "codec-open-body"),
-        any(feature = "session-unicast-open", feature = "session-unicast-accept")
-    ),
-    feature = "codec-close",
-    feature = "codec-push",
-    feature = "codec-request",
-    feature = "codec-response",
-    feature = "codec-response-final",
-    feature = "declare-interest",
-    feature = "declare-keyexpr",
-    feature = "declare-subscriber",
-    feature = "declare-queryable",
-    feature = "declare-token",
-    feature = "liveliness-token",
-    feature = "transport-batching",
-    feature = "transport-keepalive",
-    feature = "transport-multilink",
-))]
-use crate::reliability::Reliability;
 use crate::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 // R311y739 — this bundle answers for the session's own declarations (`own_keyexprs`), so it IS
 // the `M=0` id space an inbound resolver consults.
@@ -757,15 +718,15 @@ impl TxLimits {
         }
     }
 
-    fn word(&self, class: Reliability) -> &AtomicU32 {
+    fn word(&self, class: crate::reliability::Reliability) -> &AtomicU32 {
         match class {
-            Reliability::Reliable => &self.reliable,
-            Reliability::BestEffort => &self.best_effort,
+            crate::reliability::Reliability::Reliable => &self.reliable,
+            crate::reliability::Reliability::BestEffort => &self.best_effort,
         }
     }
 
     /// Settle the limits of `class`.
-    fn settle(&self, class: Reliability, budget: usize, ring: u8) {
+    fn settle(&self, class: crate::reliability::Reliability, budget: usize, ring: u8) {
         let budget = u32::from(u16::try_from(budget).unwrap_or(u16::MAX));
         self.word(class).store(
             Self::SETTLED | (budget << 8) | u32::from(ring),
@@ -777,14 +738,17 @@ impl TxLimits {
     /// again, and its next establishment settles them anew.
     #[cfg(feature = "session-reconnect")]
     fn unsettle(&self) {
-        for class in [Reliability::Reliable, Reliability::BestEffort] {
+        for class in [
+            crate::reliability::Reliability::Reliable,
+            crate::reliability::Reliability::BestEffort,
+        ] {
             self.word(class).store(0, Ordering::Release);
         }
     }
 
     /// The settled `(budget, ring resolution)` of `class`, or `None` while it is unsettled.
     #[inline]
-    fn get(&self, class: Reliability) -> Option<(usize, u8)> {
+    fn get(&self, class: crate::reliability::Reliability) -> Option<(usize, u8)> {
         let word = self.word(class).load(Ordering::Acquire);
         ((word & Self::SETTLED) != 0)
             .then_some((((word >> 8) & 0xFFFF) as usize, (word & 0xFF) as u8))
@@ -1807,7 +1771,7 @@ pub struct LinkState<R: SessionRuntime> {
     /// no word for — the reliability half of the two-source class R2941 closed
     /// for the band.
     #[cfg(feature = "transport-multilink")]
-    pub declared_reliability: R::Mutex<Option<Reliability>>,
+    pub declared_reliability: R::Mutex<Option<crate::reliability::Reliability>>,
     /// R311y217 (transport-multilink + transport-qos) — the QoS-priority band this
     /// link carries, so `TxRoute::select_link` pins each `(priority,
     /// reliability)` conduit to ONE link (the priority tier of zenoh's per-channel
@@ -2192,7 +2156,7 @@ impl<R: SessionRuntime> LinkState<R> {
             feature = "transport-batching",
         )
     ))]
-    pub(crate) fn reliability(&self) -> Option<Reliability> {
+    pub(crate) fn reliability(&self) -> Option<crate::reliability::Reliability> {
         R::with_mutex_mut(&self.declared_reliability, |d| *d).or_else(|| {
             self.tx
                 .link_driver()
@@ -2200,9 +2164,9 @@ impl<R: SessionRuntime> LinkState<R> {
                 .and_then(|s| s.kind)
                 .map(|kind| {
                     if kind.is_reliable() {
-                        Reliability::Reliable
+                        crate::reliability::Reliability::Reliable
                     } else {
-                        Reliability::BestEffort
+                        crate::reliability::Reliability::BestEffort
                     }
                 })
         })
@@ -4591,7 +4555,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     fn count_congestion_drop(
         &self,
-        reliability: Reliability,
+        reliability: crate::reliability::Reliability,
         route: Priority,
         message_priority: Priority,
         class: &crate::stats::NetworkStatsClass,
@@ -4665,7 +4629,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !installed {
             return Ok(false);
         }
-        let wire_reliability = Reliability::from_reliable_bool(reliable);
+        let wire_reliability = crate::reliability::Reliability::from_reliable_bool(reliable);
         let wait_us = self.params.tx_queue.wait_before_drop_us;
         let granted = self
             .route()
@@ -4758,7 +4722,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 sce_forge_runtime::codec::SceSink::write_bytes(sink, &body)
             }),
         );
-        let class = Reliability::from_reliable_bool(reliable);
+        let class = crate::reliability::Reliability::from_reliable_bool(reliable);
         self.route().with_conduit_link(class, route, |link| {
             link.link_driver()
                 .block_first_release_for(class, qos.priority())
@@ -5048,7 +5012,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let write = crate::transport_tx::lent_write(|buf| self.write_control(buf, body));
         match self.route().send_lent_on(
             &self.link.tx,
-            Reliability::Reliable,
+            crate::reliability::Reliability::Reliable,
             priority,
             want,
             &write,
@@ -5342,8 +5306,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "tx-lend-only"))]
         {
             let bytes = encode_close(reason, self.close_scope_is_session());
-            self.route()
-                .send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
+            self.route().send_wire_this_link(
+                &bytes,
+                crate::reliability::Reliability::Reliable,
+                Priority::Background,
+            );
         }
         #[cfg(feature = "tx-lend-only")]
         let _ = self.send_close_lent(reason);
@@ -5519,7 +5486,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "liveliness-token",
     ))]
     pub fn negotiated_tx_limits(&self) -> Option<(usize, crate::sn::Sn)> {
-        self.negotiated_tx_limits_for(Reliability::Reliable)
+        self.negotiated_tx_limits_for(crate::reliability::Reliability::Reliable)
     }
 
     /// [`Self::negotiated_tx_limits`] for the frames of one reliability class: the budget
@@ -5539,7 +5506,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "declare-interest",
         feature = "liveliness-token",
     ))]
-    pub fn negotiated_tx_limits_for(&self, class: Reliability) -> Option<(usize, crate::sn::Sn)> {
+    pub fn negotiated_tx_limits_for(
+        &self,
+        class: crate::reliability::Reliability,
+    ) -> Option<(usize, crate::sn::Sn)> {
         let (budget, ring) = self.link.tx_limits.get(class)?;
         Some((budget, crate::sn::mask_from_res(ring)))
     }
@@ -5562,7 +5532,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn settle_tx_limits(&self) {
         let peer = self.fact_inbound_peer_init_caps(|slot| *slot);
         let ring = PeerInitCaps::negotiated_seq_num_res(self.params.seq_num_res.wire_code(), peer);
-        for class in [Reliability::Reliable, Reliability::BestEffort] {
+        for class in [
+            crate::reliability::Reliability::Reliable,
+            crate::reliability::Reliability::BestEffort,
+        ] {
             let budget = self
                 .batch_mtu_for(peer, class)
                 .saturating_sub(self.batch_envelope_bytes_for(class));
@@ -6816,7 +6789,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// intrinsic class. `TxRoute::select_link` reads the pair through
     /// `LinkState::reliability`.
     #[cfg(feature = "transport-multilink")]
-    pub fn set_link_reliability(&self, declared: Option<Reliability>) {
+    pub fn set_link_reliability(&self, declared: Option<crate::reliability::Reliability>) {
         R::with_mutex_mut(&self.link.declared_reliability, |s| *s = declared);
     }
 
@@ -7069,8 +7042,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(feature = "transport-multilink", feature = "codec-close"))]
     pub fn send_link_close(&self, reason: u8) {
         let bytes = crate::handshake_encode::encode_close(reason, /*session=*/ false);
-        self.route()
-            .send_wire_this_link(&bytes, Reliability::Reliable, Priority::Background);
+        self.route().send_wire_this_link(
+            &bytes,
+            crate::reliability::Reliability::Reliable,
+            Priority::Background,
+        );
     }
 
     /// R311y839 — the SCOPE a teardown on THIS link should announce: `true` for a
@@ -8867,8 +8843,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if !copied || copy.is_empty() {
                 return false;
             }
-            self.route()
-                .send_wire(&copy[..], Reliability::Reliable, HANDSHAKE_LANE);
+            self.route().send_wire(
+                &copy[..],
+                crate::reliability::Reliability::Reliable,
+                HANDSHAKE_LANE,
+            );
             true
         }
         // The lend-only send writes the bytes from the hold straight into the slot the link
@@ -9557,7 +9536,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             });
             let bytes = encode_close(reason as u8, self.close_scope_is_session());
             self.route()
-                .send_wire_urgent_this_link(&bytes, Reliability::Reliable);
+                .send_wire_urgent_this_link(&bytes, crate::reliability::Reliability::Reliable);
         }
         #[cfg(not(all(
             feature = "codec-close",
@@ -10022,7 +10001,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // reopen withdraws them behind the closed gate, so limits not settled when they are read
         // are the same refusal as a gate found closed (the gate closed between the two reads).
         // Read once, here, before any conduit lock is taken.
-        let wire_reliability = Reliability::from_reliable_bool(reliable);
+        let wire_reliability = crate::reliability::Reliability::from_reliable_bool(reliable);
         let limits = if self.congestion_close_ordered() || !self.session_send_available() {
             None
         } else {
@@ -11262,7 +11241,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return Err(SendWireError::TransportUnavailable);
         }
         let priority = self.conduit_priority(priority);
-        let reliability = Reliability::from_reliable_bool(reliable);
+        let reliability = crate::reliability::Reliability::from_reliable_bool(reliable);
         Ok(self
             .route()
             .with_conduit_link(reliability, priority, |link| {
@@ -11296,7 +11275,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let message_priority = priority;
         let priority = self.conduit_priority(priority);
         // A message that may not be dropped is a reliable one.
-        let reliability = Reliability::from_reliable_bool(true);
+        let reliability = crate::reliability::Reliability::from_reliable_bool(true);
         let deadline = PushDeadline::new(false, &self.params.tx_queue);
         let answer = self
             .route()
@@ -11447,7 +11426,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 return Ok(1);
             };
             let (mtu, _) = self
-                .negotiated_tx_limits_for(Reliability::from_reliable_bool(reliable))
+                .negotiated_tx_limits_for(crate::reliability::Reliability::from_reliable_bool(
+                    reliable,
+                ))
                 .ok_or(SendWireError::TransportUnavailable)?;
             Ok(crate::frame_encode::chain_frames(body_len, mtu))
         }
@@ -11473,7 +11454,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return Err(SendWireError::TransportUnavailable);
         }
         let priority = self.conduit_priority(priority);
-        let reliability = Reliability::from_reliable_bool(reliable);
+        let reliability = crate::reliability::Reliability::from_reliable_bool(reliable);
         Ok(self
             .route()
             .with_conduit_link(reliability, priority, |link| {
@@ -11619,7 +11600,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return None;
         }
         let handoff = self.route().with_conduit_link(
-            Reliability::from_reliable_bool(reliable),
+            crate::reliability::Reliability::from_reliable_bool(reliable),
             self.conduit_priority(route),
             |link| R::with_mutex_mut(&link.shm_tx, |slot| slot.clone()),
         )?;
@@ -15340,7 +15321,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             #[cfg(feature = "transport-batching")]
             self.flush_open_batch();
-            self.send_keep_alive_apart(Reliability::Reliable);
+            self.send_keep_alive_apart(crate::reliability::Reliability::Reliable);
         }
     }
 
@@ -15356,7 +15337,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// after the open batches are drained, as zenoh-pico's one transport-message send drains
     /// them (`_z_transport_tx_send_t_msg_inner`).
     #[cfg(feature = "transport-keepalive")]
-    pub(crate) fn send_keep_alive_apart(&self, class: Reliability) {
+    pub(crate) fn send_keep_alive_apart(&self, class: crate::reliability::Reliability) {
         self.note_action(|t| t.send_keep_alive = t.send_keep_alive.saturating_add(1));
         let bytes = crate::handshake_encode::encode_keep_alive();
         // R311y205 (transport-multilink) — a keepalive is PER-LINK: it must ride the physical
@@ -16662,8 +16643,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                         .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = encoded {
-                    a.route()
-                        .send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                    a.route().send_wire(
+                        &bytes,
+                        crate::reliability::Reliability::Reliable,
+                        HANDSHAKE_LANE,
+                    );
                 }
             }
         }
@@ -16719,8 +16703,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                         .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = encoded {
-                    a.route()
-                        .send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                    a.route().send_wire(
+                        &bytes,
+                        crate::reliability::Reliability::Reliable,
+                        HANDSHAKE_LANE,
+                    );
                     a.hold_handshake_answer(&bytes);
                 }
             }
@@ -16921,8 +16908,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                         .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = &encoded {
-                    a.route()
-                        .send_wire(bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                    a.route().send_wire(
+                        bytes,
+                        crate::reliability::Reliability::Reliable,
+                        HANDSHAKE_LANE,
+                    );
                     a.hold_handshake_answer(bytes);
                 }
                 encoded.is_ok() && cookie_bytes.is_some()
@@ -16995,8 +16985,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                             .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                     }
                     if let Ok(bytes) = &encoded {
-                        a.route()
-                            .send_wire(bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                        a.route().send_wire(
+                            bytes,
+                            crate::reliability::Reliability::Reliable,
+                            HANDSHAKE_LANE,
+                        );
                         a.hold_handshake_answer(bytes);
                     }
                 }
@@ -17061,8 +17054,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
                         .inc_tx_drop(crate::stats::StatDrop::Transport, 1, 0);
                 }
                 if let Ok(bytes) = encoded {
-                    a.route()
-                        .send_wire(&bytes, Reliability::Reliable, HANDSHAKE_LANE);
+                    a.route().send_wire(
+                        &bytes,
+                        crate::reliability::Reliability::Reliable,
+                        HANDSHAKE_LANE,
+                    );
                 }
             }
         }
