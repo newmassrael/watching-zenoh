@@ -114,20 +114,31 @@ fn pooled(pool: usize, links: usize) -> usize {
 }
 
 /// How many links `plan` holds: the count every form keeps (`ArenaPlan::links`), which in a form
-/// that lays the links' tables out is also its row of places in a build that listens, and its
-/// transmit rows, one for each link, in a build that only dials.
-#[cfg(any(feature = "listen", not(wz_on_use)))]
+/// that lays the links' tables out is also its row of places.
+#[cfg(feature = "listen")]
 fn link_places(plan: &ArenaPlan) -> usize {
-    let links = plan.links();
     #[cfg(not(wz_on_use))]
     assert_eq!(
-        plan.rows()
-            .find(|row| row.part() == "link places")
-            .map_or_else(|| row(plan, "link transmit slots").count, |row| row.count),
-        links,
+        laid_link_places(plan),
+        plan.links(),
         "a place laid out for each link"
     );
-    links
+    plan.links()
+}
+
+/// How many links `plan` holds in a build that only dials, which counts them by its rows alone.
+#[cfg(all(not(feature = "listen"), not(wz_on_use)))]
+fn link_places(plan: &ArenaPlan) -> usize {
+    laid_link_places(plan)
+}
+
+/// The places laid out for `plan`'s links: its row of places in a build that listens, and its
+/// transmit rows, one for each link, in a build that only dials.
+#[cfg(not(wz_on_use))]
+fn laid_link_places(plan: &ArenaPlan) -> usize {
+    plan.rows()
+        .find(|row| row.part() == "link places")
+        .map_or_else(|| row(plan, "link transmit slots").count, |row| row.count)
 }
 
 /// How many receive buffers `plan`'s links hold at most: the row of the pool the arena lends, or,
