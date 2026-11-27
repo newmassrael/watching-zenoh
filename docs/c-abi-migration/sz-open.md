@@ -1,7 +1,7 @@
 # Structural lane sz-open: the session's open, line by line
 
 Status: the reading and the design of the lane, with its steps carried in beside it as section 5
-onwards records them (O1, O2, O4, O5, O6, half of O8; O3 and O7 held, sections 7 and 11).
+onwards records them (O1, O2, O4, O5, O6, half of O8; O3, O7 and O9 held, sections 7, 11 and 13).
 Nothing here was built or measured by this lane: every byte figure is either **read** (from the
 size ledger's explain document of the case, from the case's shipped library, or from a line table
 named below) or an **estimate** from the code, to be read on the explain document after the merge.
@@ -300,3 +300,21 @@ form; the step is written once both are. `checked_endpoint` stays for
   `ptr::read` of each field, unchecked, as O3's last point. What would carry it is `open_on_coop`
   reading the request where it lies, field by field through a reference, which is a rewrite of the
   door, to be read on the explain document before it is written.
+
+## 13. O9 held: what the plan would lay out is not known where it is laid out
+
+- The entropy source's cell (`SessionEntropy::try_held`) is a counted cell of the source's own type
+  (`CellRc<RefCell<S>>`, or `CellRc<HostMutex<S>, Atomic>` for a session of several threads), made
+  by `in_cells(None, ..)`, so of the heap. A cell lent from the plan would be one of
+  `SourceCell::<S>::cell_bytes()`, which only the source's type `S` gives; the source is a value
+  of `assemble` (`impl EntropySource`), and not a type of the engine (`CoopEngine<L, C>`) or of the
+  region a build lays out when it is compiled (`CoopEngine::open_region`, the pico ABI's
+  `PRESET_REGION`). Lending it from the plan takes the source's type, or its cell's bytes, into the
+  region's `const fn` and into every ABI's region: a change of the region's API first.
+- The face table's wait room (`WaitRoom`, O2) is taken out of the supervisor by each read's wait
+  and put back after (`LinkSupervisor::idle_wait`, `waited`): a room of the plan is a table of
+  another type on the read's path, whose instructions are to be read on the receive (perf matrix
+  arm W) before it is written, which this lane does not move.
+
+The two are 0 to -150 bytes by the estimate; the heap's grow path stays for its other callers
+either way (`BoundedString::push_str`, the IP stack, three doors).
