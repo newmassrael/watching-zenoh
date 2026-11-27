@@ -153,8 +153,10 @@ use wz_runtime_coop::session_drive::router_session_task_bytes;
 use wz_runtime_coop::session_drive::LinkWait;
 #[cfg(feature = "time-base")]
 use wz_runtime_coop::session_drive::StackWake;
+use wz_runtime_coop::session_drive::{
+    DynLink, OpenedLink, SessionDatagramLink, SessionLinks, SessionRole,
+};
 use wz_runtime_coop::session_drive::{LinkWaits, WaitOn};
-use wz_runtime_coop::session_drive::{OpenedLink, SessionDatagramLink, SessionLinks, SessionRole};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::sync::Lend;
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
@@ -4678,11 +4680,6 @@ type LinkGate<C> = <C as LinkGates>::Gate;
 /// the link's own handle, which the pump reads the link through with no cell of gates between.
 #[cfg(wz_round)]
 type HeldGate<C> = CellRc<LinkGate<C>, LinkCount>;
-/// The gates of a link as its session and its pump hold them (`LinkCalls::Gate`): a handle on
-/// their cell of the session's table where the round holds the link back, and where nothing does
-/// the link's own handle, which the pump reads the link through with no cell of gates between.
-#[cfg(not(wz_round))]
-type HeldGate<C> = LinkGate<C>;
 
 /// The table of cells a link's gates are placed in where they hold the link back
 /// (`TransportState::gate_cells`).
@@ -5066,8 +5063,18 @@ struct LinkMaking<'a> {
     limits: &'a SessionLimits,
 }
 
-impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
+impl<C: ClockSource + 'static, L: ?Sized + DynLink> LinkCalls<C, SessionLock, L>
+    for LinkMaking<'_>
+{
+    #[cfg(wz_round)]
     type Gate = HeldGate<C>;
+    // The link is its own gate (`gate`), read as the type the stack's links are.
+    #[cfg(not(wz_round))]
+    type Gate = CellRc<L, LinkCount>;
+    #[cfg(wz_round)]
+    type Link = dyn SessionDatagramLink;
+    #[cfg(not(wz_round))]
+    type Link = L;
     #[cfg(wz_round)]
     type Dispatch = FaceDispatch<C>;
     // What the read hands each step of the link it steps itself (`direct`).
@@ -5107,29 +5114,31 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
     }
 
     // Each record is handed out as it is read, so nothing holds the link back: the link is its own
-    // gate, read through its own table, and takes no cell of the gates.
+    // gate, read as the stack's links are, and takes no cell of the gates.
     #[cfg(not(wz_round))]
     fn gate(
         &self,
-        pump: CellRc<dyn SessionDatagramLink, LinkCount>,
+        pump: CellRc<L, LinkCount>,
         _actions: &LinkHandle<C>,
         _cells: Option<&GateCells>,
-    ) -> Option<HeldGate<C>> {
+    ) -> Option<CellRc<L, LinkCount>> {
         Some(pump)
     }
 
     #[cfg(not(wz_round))]
-    fn gated_link(gate: &HeldGate<C>) -> CellRc<dyn SessionDatagramLink, LinkCount> {
+    fn gated_link(gate: &CellRc<L, LinkCount>) -> CellRc<L, LinkCount> {
         gate.clone()
     }
 
     #[cfg(wz_round)]
     fn gate(
         &self,
-        pump: CellRc<dyn SessionDatagramLink, LinkCount>,
+        pump: CellRc<L, LinkCount>,
         actions: &LinkHandle<C>,
         cells: Option<&GateCells>,
     ) -> Option<HeldGate<C>> {
+        // The round's gates are one type for every stack, so they read the link behind its table.
+        let pump = L::into_dyn(pump);
         // The session is handed a record of a link only while its round of deliveries has the room
         // one record can take (decision Q4), and with `listen` only once the engine admitted it:
         // the link gives the session nothing between its handshake and the face table's decision
@@ -5159,7 +5168,7 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         &self,
         face: FaceId,
         actions: LinkHandle<C>,
-        gate: &HeldGate<C>,
+        gate: &Self::Gate,
     ) -> (Self::Dispatch, LinkSession<C>) {
         #[cfg(feature = "queryable")]
         let generation = self.session.plane.next_generation();
@@ -13191,13 +13200,16 @@ pub trait ComposedLinks {
     type WithGroups<J>;
     /// The links `waited_by_owner` makes.
     type WaitedByOwner;
+    /// The links `closed` makes, which their sessions read as the one type they are: what an ABI
+    /// names where its build adds no links of its own beside these.
+    type Closed;
 }
 
-impl<U, D, L, G, N: wz_runtime_coop::link_cells::CountKind, W> ComposedLinks
-    for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G, N, W>
+impl<U, D, L, G, N: wz_runtime_coop::link_cells::CountKind, W, F> ComposedLinks
+    for wz_runtime_coop::ip_stack::IpLinks<U, D, L, G, N, W, F>
 {
-    type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G, N, W>;
-    type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J, N, W>;
+    type WithTls<S> = wz_runtime_coop::ip_stack::IpLinks<U, D, S, G, N, W, F>;
+    type WithGroups<J> = wz_runtime_coop::ip_stack::IpLinks<U, D, L, J, N, W, F>;
     type WaitedByOwner = wz_runtime_coop::ip_stack::IpLinks<
         U,
         D,
@@ -13205,7 +13217,10 @@ impl<U, D, L, G, N: wz_runtime_coop::link_cells::CountKind, W> ComposedLinks
         G,
         N,
         wz_runtime_coop::session_drive::WaitedByOwner,
+        F,
     >;
+    type Closed =
+        wz_runtime_coop::ip_stack::IpLinks<U, D, L, G, N, W, wz_runtime_coop::ip_link::ClosedSet>;
 }
 
 #[cfg(all(feature = "queryable", wz_round))]

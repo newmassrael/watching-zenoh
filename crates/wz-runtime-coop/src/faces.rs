@@ -252,7 +252,7 @@ pub struct Wire<S, E = TaskEnd, N: CountKind = OneTask> {
 /// Whether `link` has input in its stack it cannot read until another link gives a receive buffer
 /// back (`SessionDatagramLink::waits_for_buffer`): never in a build that only dials, whose links
 /// read into buffers of their own.
-fn waits_for_buffer<N: CountKind>(link: &CellRc<dyn SessionDatagramLink, N>) -> bool {
+fn waits_for_buffer<L: ?Sized + SessionDatagramLink, N: CountKind>(link: &CellRc<L, N>) -> bool {
     #[cfg(feature = "session-unicast-accept")]
     {
         link.waits_for_buffer()
@@ -804,10 +804,10 @@ fn close_code(reason: CloseReason) -> u32 {
 }
 
 impl ReadFacts {
-    /// What the read tells of `link`, the link it steps, whose session is `established` and
-    /// staged the Close `close_reason`.
-    pub fn of_link<N: CountKind>(
-        link: &CellRc<dyn SessionDatagramLink, N>,
+    /// What the read tells of `link`, the link it steps, read as the type its pump reads it as,
+    /// whose session is `established` and staged the Close `close_reason`.
+    pub fn of_link<L: ?Sized + SessionDatagramLink, N: CountKind>(
+        link: &CellRc<L, N>,
         established: bool,
         close_reason: Option<CloseReason>,
     ) -> Self {

@@ -1600,13 +1600,6 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
             rx,
         )?))
     }
-
-    /// A link of these is shared already: the pump is the handle the sink is a clone of.
-    fn share_pump(
-        pump: Self::Pump,
-    ) -> Option<crate::link_cells::CellRc<dyn crate::session_drive::SessionDatagramLink, N>> {
-        Some(pump)
-    }
 }
 
 /// A `udp/` listener of [`AppLinks`]: each source the program accepts on it is a datagram link.

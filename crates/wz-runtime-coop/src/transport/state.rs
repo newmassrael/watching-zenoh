@@ -56,9 +56,9 @@ use crate::link_cells::{CellRc, CountKind, OneTask};
 use crate::locator_text::parse_listen_locator;
 use crate::reassembly_rx::SessionReassembly;
 use crate::session_drive::{
-    place_session_with_router, spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink,
-    PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionPump, SessionRole,
-    WaitOn,
+    place_session_with_router, spawn_session_with_router, DynLink, LinkOpenError, LinkWait,
+    OpenedLink, PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionPump,
+    SessionRole, SharedPump, WaitOn,
 };
 use crate::session_runtime::{EntropyCount, SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
@@ -110,9 +110,16 @@ type CountOf<T> = <<T as TransportFaces>::Lock as LockKind>::LinkCount;
 /// entropy): as the lock kind counts them (`LockKind::SharedCount`).
 type SharedOf<T> = <<T as TransportFaces>::Lock as LockKind>::SharedCount;
 
-/// The handle on the link a session over the transport of `T` sends and reads by, counted as the
-/// link's parts are.
-type LinkOf<T> = CellRc<dyn SessionDatagramLink, CountOf<T>>;
+/// The type the shared handle on a link over the network of `T` reads it as: the stack's own type
+/// where its set of links is closed, the link's trait where it is open (`SharedPump::Link`).
+pub type StackLinkOf<T> =
+    <<<T as TransportFaces>::Links as SessionLinks<CountOf<T>>>::Pump as SharedPump<
+        CountOf<T>,
+    >>::Link;
+
+/// The shared handle on the link a session over the transport of `T` reads by, counted as the
+/// link's parts are: what the pump of a link no gate holds back reads.
+pub type LinkOf<T> = CellRc<StackLinkOf<T>, CountOf<T>>;
 
 /// What a session's transport is made of: the session's clock, the network its links are opened
 /// on, and the engine's records of the session's half of a link, of a face and of a group it
@@ -305,7 +312,7 @@ pub struct PumpPlace<'p, T: TransportFaces, E> {
 
 /// A link whose session its owner steps itself, made ([`TransportState::place_wire`]): the
 /// wire its face keeps, what the session hands its reads to, and the pump, in its place.
-pub struct PlacedWire<'p, T: TransportFaces, K: LinkCalls<T::Clock, T::Lock>, E> {
+pub struct PlacedWire<'p, T: TransportFaces, K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>>, E> {
     /// The wire the face keeps.
     pub wire: Wire<K::Session, E, CountOf<T>>,
     /// What the owner hands each step of the pump.
@@ -315,12 +322,12 @@ pub struct PlacedWire<'p, T: TransportFaces, K: LinkCalls<T::Clock, T::Lock>, E>
 }
 
 /// What the making of a link's session builds before the session runs
-/// ([`TransportState::build_wire`]).
-struct WireBuilt<T: TransportFaces, D, S> {
-    fields: PumpFields<T::Clock, LinkOf<T>, dyn BoxedLinkDriver, T::Lock>,
+/// ([`TransportState::build_wire`]); `R` is the type its pump reads the link as.
+struct WireBuilt<T: TransportFaces, D, S, R: ?Sized + DynLink> {
+    fields: PumpFields<T::Clock, CellRc<R, CountOf<T>>, dyn BoxedLinkDriver, T::Lock>,
     dispatch: D,
     session: S,
-    link: LinkOf<T>,
+    link: CellRc<R, CountOf<T>>,
     input_wait: Option<WaitOn>,
     room_wait: Option<WaitOn>,
 }
@@ -679,7 +686,7 @@ impl<T: TransportFaces> TransportState<T> {
     // Always inlined: its one caller is never inlined, so what is built here lies in that frame,
     // which has returned before the link's task first runs.
     #[inline(always)]
-    pub fn make_wire<K: LinkCalls<T::Clock, T::Lock>>(
+    pub fn make_wire<K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>>>(
         &self,
         calls: &mut K,
         face: FaceId,
@@ -697,7 +704,7 @@ impl<T: TransportFaces> TransportState<T> {
         Ok(Wire::new(
             built.session,
             task,
-            built.link,
+            <K::Link as DynLink>::into_dyn(built.link),
             built.input_wait,
             built.room_wait,
         ))
@@ -709,14 +716,17 @@ impl<T: TransportFaces> TransportState<T> {
     /// [`TransportRefusal::NoTask`] when the pump could not be built in its place.
     // Always inlined, as `make_wire` is: its one caller is never inlined.
     #[inline(always)]
-    pub fn place_wire<'p, K: LinkCalls<T::Clock, T::Lock>, E: LinkEnd>(
+    pub fn place_wire<'p, K, E: LinkEnd>(
         &self,
         calls: &mut K,
         opened: OpenedOf<T>,
         opened_as: OpenedAs<'_>,
         making: WireMaking<'_, T::Clock, SharedOf<T>>,
         place: PumpPlace<'p, T, E>,
-    ) -> Result<PlacedWire<'p, T, K, E>, TransportRefusal> {
+    ) -> Result<PlacedWire<'p, T, K, E>, TransportRefusal>
+    where
+        K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, Link = StackLinkOf<T>>,
+    {
         let runtime = making.local.runtime().retyped();
         let OpenedAs {
             face,
@@ -732,7 +742,7 @@ impl<T: TransportFaces> TransportState<T> {
             wire: Wire::new(
                 built.session,
                 end,
-                built.link,
+                <K::Link as DynLink>::into_dyn(built.link),
                 built.input_wait,
                 built.room_wait,
             ),
@@ -745,7 +755,7 @@ impl<T: TransportFaces> TransportState<T> {
     /// halves placed in their cells, the session's tables told of the link, its pump behind the
     /// gates, placed in theirs, and the parts the session's pump is built of.
     #[inline(always)]
-    fn build_wire<K: LinkCalls<T::Clock, T::Lock>>(
+    fn build_wire<K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>>>(
         &self,
         calls: &mut K,
         face: FaceId,
@@ -753,7 +763,7 @@ impl<T: TransportFaces> TransportState<T> {
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
         making: WireMaking<'_, T::Clock, SharedOf<T>>,
-    ) -> Result<WireBuilt<T, K::Dispatch, K::Session>, TransportRefusal> {
+    ) -> Result<WireBuilt<T, K::Dispatch, K::Session, K::Link>, TransportRefusal> {
         let OpenedLink { sink, pump } = opened;
         let WireMaking {
             params,
@@ -782,9 +792,10 @@ impl<T: TransportFaces> TransportState<T> {
             return Err(TransportRefusal::EntropyUnavailable);
         }
         // One handle to the link, which its gates hold: a stack whose pump is a shared handle
-        // already gives that one (`SessionLinks::share_pump`). Had before the session's tables
-        // learn of the link, so a heap with no room for it leaves them as they were.
-        let pump = <T::Links as SessionLinks<CountOf<T>>>::share_pump(pump)
+        // already gives that one (`SharedPump::share`), read as the type the stack's links are.
+        // Had before the session's tables learn of the link, so a heap with no room for it leaves
+        // them as they were.
+        let pump = <PumpOf<T> as SharedPump<CountOf<T>>>::share(pump)
             .ok_or(TransportRefusal::HeapRefused)?;
         #[cfg(feature = "shared-key-ids")]
         let key_form = Some(self.key_form_of(endpoint));

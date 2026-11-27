@@ -34,8 +34,7 @@ use crate::ip_stack::HeapLink;
 use crate::link_cells::{CellRc, CountKind, OneTask};
 use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
 use crate::session_drive::{
-    LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionDatagramLink,
-    SessionLinks, WaitOn, WsLocator,
+    LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionLinks, WaitOn, WsLocator,
 };
 use crate::stream_link::{stream_ends_fit, StreamDial, StreamDriver, StreamListen, StreamSocket};
 use crate::udp_link::SERVICE_WAIT_MS;
@@ -632,10 +631,6 @@ where
         group: &GroupLocator,
     ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         self.links.open_group(endpoint, group)
-    }
-
-    fn share_pump(pump: HeapLink<N>) -> Option<CellRc<dyn SessionDatagramLink, N>> {
-        S::share_pump(pump)
     }
 }
 

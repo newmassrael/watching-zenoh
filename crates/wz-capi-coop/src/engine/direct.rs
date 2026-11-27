@@ -67,7 +67,7 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::session_drive::LinkWait;
 #[cfg(not(feature = "threads"))]
 use wz_runtime_coop::sync::ConfinedOwner;
-use wz_runtime_coop::transport::{LinkPump, OpenedAs, PlacedWire, PumpPlace};
+use wz_runtime_coop::transport::{LinkOf, LinkPump, OpenedAs, PlacedWire, PumpPlace};
 use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::link_life::{carry, LinkInput, LinkIo, LinkPhase, Refused, SessionEnded};
 
@@ -76,8 +76,9 @@ use super::registry::Planes;
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 
-/// The pump of the session's one link, which the read steps itself.
-type DirectPump<L, C> = LinkPump<Face<C, L>, CellRc<dyn SessionDatagramLink, LinkCount>>;
+/// The pump of the session's one link, which the read steps itself, reading the link as the type
+/// the stack's links are (`LinkOf`): where their set is closed, with no table.
+type DirectPump<L, C> = LinkPump<Face<C, L>, LinkOf<Face<C, L>>>;
 
 /// What the read and the link's end share of the link's session: whether its pump ended, and
 /// whether the session asked it to end. Read and written with loads and stores: the pump's end is

@@ -1065,6 +1065,78 @@ pub struct OpenedLink<P, N: crate::link_cells::CountKind = crate::link_cells::On
     pub pump: P,
 }
 
+/// A link as a handle on its cell can be read behind the table of [`SessionDatagramLink`]: what
+/// keeps a link to wait on it reads it so whatever type the stack's links are read as by the session
+/// that pumps them (`crate::faces::Wire`).
+#[cfg(not(feature = "session-slot"))]
+pub trait DynLink: SessionDatagramLink + 'static {
+    /// `link` read behind the table of [`SessionDatagramLink`].
+    fn into_dyn<N: crate::link_cells::CountKind>(
+        link: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn SessionDatagramLink, N>;
+}
+
+/// A link of a type of its own is read behind its type's table.
+#[cfg(not(feature = "session-slot"))]
+impl<T: SessionDatagramLink + 'static> DynLink for T {
+    fn into_dyn<N: crate::link_cells::CountKind>(
+        link: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn SessionDatagramLink, N> {
+        link.into_link()
+    }
+}
+
+/// A link already read behind the table is read so as it is.
+#[cfg(not(feature = "session-slot"))]
+impl DynLink for dyn SessionDatagramLink {
+    fn into_dyn<N: crate::link_cells::CountKind>(
+        link: crate::link_cells::CellRc<Self, N>,
+    ) -> crate::link_cells::CellRc<dyn SessionDatagramLink, N> {
+        link
+    }
+}
+
+/// What a stack's pump ([`SessionLinks::Pump`]) is once whatever reads the link shares it: one
+/// handle on a cell, whose clones the session's gates over the link and its loop read the same link
+/// through, of the type the link is read as ([`Self::Link`]). A pump that is such a handle already
+/// is shared as it is, so its link is behind one pointer and not two, and read as the type it names:
+/// a stack whose links are one closed type has them read as that type, with no table.
+#[cfg(not(feature = "session-slot"))]
+pub trait SharedPump<N: crate::link_cells::CountKind = crate::link_cells::OneTask>:
+    SessionDatagramLink + Sized + 'static
+{
+    /// The type the shared handle reads the link as.
+    type Link: ?Sized + DynLink;
+
+    /// The pump as one shared handle; `None`, with the pump let go of, when the heap has no room
+    /// for the handle's cell.
+    fn share(self) -> Option<crate::link_cells::CellRc<Self::Link, N>>;
+}
+
+/// A link in a cell is shared already: the pump is the handle the sink is a clone of.
+#[cfg(not(feature = "session-slot"))]
+impl<T: ?Sized + DynLink, N: crate::link_cells::CountKind> SharedPump<N>
+    for crate::link_cells::CellRc<T, N>
+{
+    type Link = T;
+
+    fn share(self) -> Option<Self> {
+        Some(self)
+    }
+}
+
+/// A pump behind a counted pointer of its own is shared behind a cell's handle of the heap.
+#[cfg(not(feature = "session-slot"))]
+impl<T: ?Sized + SessionDatagramLink + 'static, N: crate::link_cells::CountKind> SharedPump<N>
+    for Rc<T>
+{
+    type Link = Self;
+
+    fn share(self) -> Option<crate::link_cells::CellRc<Self, N>> {
+        crate::link_cells::CellRc::try_on_heap(self)
+    }
+}
+
 /// What a network stack gives a session shell that is written once for all of
 /// them: the means to open the two ends of a UDP session link.
 ///
@@ -1080,8 +1152,9 @@ pub struct OpenedLink<P, N: crate::link_cells::CountKind = crate::link_cells::On
 /// stack serves the sessions whose lock kind counts them so (`LockKind::LinkCount`).
 #[cfg(not(feature = "session-slot"))]
 pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneTask> {
-    /// What the drive loop pumps for a link this stack opened.
-    type Pump: SessionDatagramLink + 'static;
+    /// What the drive loop pumps for a link this stack opened, and how whatever reads the link
+    /// shares it ([`SharedPump`]).
+    type Pump: SharedPump<N>;
 
     /// A dial this stack began ([`Self::begin_initiator`]), held by value where the session holds
     /// its face: one type for each stack, so a dial is neither boxed nor called through a table of
@@ -1215,17 +1288,6 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
     ) -> Result<Box<dyn crate::group_transport::GroupTransport>, LinkOpenError> {
         let _ = (endpoint, group);
         Err(LinkOpenError::Unsupported)
-    }
-
-    /// The link `pump` as one handle that whatever reads it shares: a session's gates over it and
-    /// its loop reach the same link through clones of this. The default puts the
-    /// pump behind a pointer of its own; a stack whose pump is already a shared handle hands that
-    /// handle back, so its link is behind one pointer and not two. `None`, with `pump` let go
-    /// of, when the heap has no room for the pointer.
-    fn share_pump(
-        pump: Self::Pump,
-    ) -> Option<crate::link_cells::CellRc<dyn SessionDatagramLink, N>> {
-        crate::link_cells::CellRc::<Self::Pump, N>::try_on_heap(pump).map(|cell| cell.into_link())
     }
 }
 

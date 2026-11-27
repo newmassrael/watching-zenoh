@@ -25,7 +25,7 @@ use crate::executor::SpawnRefusal;
 use crate::faces::{DialEndpoint, FaceId, FaceSession, HandshakeEnd};
 use crate::link_cells::{CellRc, CountKind};
 use crate::locator_text::DialRefused;
-use crate::session_drive::{LinkOpenError, LinkWait, SessionDatagramLink};
+use crate::session_drive::{DynLink, LinkOpenError, LinkWait, SessionDatagramLink};
 use crate::session_runtime::SessionHandle;
 use crate::sync::LockKind;
 use crate::ClockSource;
@@ -36,8 +36,8 @@ use crate::ClockSource;
 mod state;
 #[cfg(feature = "reassembly")]
 pub use state::{
-    FaceStep, LinkPump, OpenedAs, PlacedWire, PumpPlace, RouterOf, TransportFaces, TransportRouter,
-    TransportState, WireMaking,
+    FaceStep, LinkOf, LinkPump, OpenedAs, PlacedWire, PumpPlace, RouterOf, StackLinkOf,
+    TransportFaces, TransportRouter, TransportState, WireMaking,
 };
 
 /// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
@@ -253,12 +253,23 @@ pub trait TransportSession<C: ClockSource + 'static, K: LockKind = crate::sync::
 /// What the session does in the making of each of its links' sessions, in the engine's own types
 /// ([`TransportState::make_wire`]): the transport makes the link's actions, its cells and its task;
 /// the session tells its tables of the link, puts the link's pump behind its gates, and says what
-/// the link's task hands its reads to and what its face keeps of the link.
-pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared> {
+/// the link's task hands its reads to and what its face keeps of the link. `L` is the type the
+/// stack's shared handle on a link reads it as (`crate::session_drive::SharedPump::Link`): the
+/// stack's own type where its set of links is closed, the link's trait where it is open.
+pub trait LinkCalls<
+    C: ClockSource + 'static,
+    K: LockKind = crate::sync::Shared,
+    L: ?Sized + DynLink = dyn SessionDatagramLink,
+>
+{
     /// The gates the session puts a link's pump behind, as the link's session and its pump hold
     /// them: a handle on their cell of the session's table where they hold the link back, or the
     /// link's own handle where nothing does ([`Self::gate`]).
     type Gate: Clone + 'static;
+    /// The type the pump of a link's session reads the link as behind its gates
+    /// ([`Self::gated_link`]): `L` where the link is its own gate, the gates' trait where they
+    /// hold it back.
+    type Link: ?Sized + DynLink;
     /// What a link's task hands what its session reads to, or, for a link whose session its
     /// owner steps itself, what the owner hands each step of it (`TransportState::place_wire`).
     type Dispatch;
@@ -282,14 +293,14 @@ pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>
     /// table of the gates over it.
     fn gate(
         &self,
-        pump: CellRc<dyn SessionDatagramLink, K::LinkCount>,
+        pump: CellRc<L, K::LinkCount>,
         actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
         cells: Option<&LentByteCells<<K::LinkCount as CountKind>::Flag>>,
     ) -> Option<Self::Gate>;
 
     /// The link as it is read behind `gate`: what the pump of its session steps and what its face
     /// waits on.
-    fn gated_link(gate: &Self::Gate) -> CellRc<dyn SessionDatagramLink, K::LinkCount>;
+    fn gated_link(gate: &Self::Gate) -> CellRc<Self::Link, K::LinkCount>;
 
     /// What the task of the link of face `face` hands its reads to, and what the face keeps of the
     /// link: its actions and its gates.

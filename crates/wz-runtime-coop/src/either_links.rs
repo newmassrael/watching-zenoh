@@ -21,8 +21,8 @@ use crate::group_transport::GroupTransport;
 use crate::link_cells::{CellRc, CountKind};
 use crate::link_storage::LinkTables;
 use crate::session_drive::{
-    LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
-    SessionDatagramLink, SessionLinks, StackWake, WaitOn,
+    DynLink, LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
+    SessionDatagramLink, SessionLinks, SharedPump, StackWake, WaitOn,
 };
 
 /// One of two network stacks, the one a session opens over: every link it opens is that stack's.
@@ -159,6 +159,19 @@ impl<P: SessionDatagramLink, Q: SessionDatagramLink> SessionDatagramLink for Eit
 
     fn room_wait(&self) -> Option<WaitOn> {
         on_side!(EitherPump, self, link => link.room_wait())
+    }
+}
+
+/// A link of either stack is shared as its own stack shares it, and read behind the table of its
+/// trait: the two stacks' links are of two types.
+impl<P: SharedPump<N>, Q: SharedPump<N>, N: CountKind> SharedPump<N> for EitherPump<P, Q> {
+    type Link = dyn SessionDatagramLink;
+
+    fn share(self) -> Option<CellRc<dyn SessionDatagramLink, N>> {
+        match self {
+            EitherPump::Left(pump) => pump.share().map(<P::Link as DynLink>::into_dyn),
+            EitherPump::Right(pump) => pump.share().map(<Q::Link as DynLink>::into_dyn),
+        }
     }
 }
 
@@ -320,15 +333,6 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
     ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         on_side!(EitherLinks, self, links => links.open_group(endpoint, group))
     }
-
-    // Each side shares its pump as its own stack does, so a stack whose pump is already a shared
-    // handle hands that handle back and its link stays behind one pointer.
-    fn share_pump(pump: Self::Pump) -> Option<CellRc<dyn SessionDatagramLink, N>> {
-        match pump {
-            EitherPump::Left(pump) => A::share_pump(pump),
-            EitherPump::Right(pump) => B::share_pump(pump),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -370,6 +374,12 @@ mod tests {
         }
         fn take_rx_dropped(&self) -> usize {
             usize::from(self.0)
+        }
+    }
+    impl<N: CountKind> crate::session_drive::SharedPump<N> for Tagged {
+        type Link = Self;
+        fn share(self) -> Option<CellRc<Self, N>> {
+            CellRc::try_on_heap(self)
         }
     }
 
@@ -435,9 +445,6 @@ mod tests {
             }
         }
         const LINK_CELL_BYTES: usize = 64;
-        fn share_pump(pump: SharedPump) -> Option<SharedPump> {
-            Some(pump)
-        }
     }
 
     /// The second stack: its pumps are values its stack shares by the provided form; it refuses
@@ -559,11 +566,12 @@ mod tests {
             panic!("the first stack's link");
         };
         let before = CellRc::as_ptr(inner);
-        let shared = Both::share_pump(made.pump).expect("the heap has room");
+        let shared = crate::session_drive::SharedPump::share(made.pump).expect("the heap has room");
         // The first stack hands its handle back: the same link, behind no second pointer.
         assert!(core::ptr::addr_eq(CellRc::as_ptr(&shared), before));
         assert!(shared.holds_input());
-        let other = Both::share_pump(EitherPump::Right(Tagged(RIGHT))).expect("the heap has room");
+        let right: EitherPump<SharedPump, Tagged> = EitherPump::Right(Tagged(RIGHT));
+        let other = crate::session_drive::SharedPump::share(right).expect("the heap has room");
         assert!(
             !other.holds_input(),
             "the second stack's link, shared by its own form"
