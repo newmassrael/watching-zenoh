@@ -4810,9 +4810,9 @@ impl RuntimeTables {
         Self::holding(groups, links, link_task_bytes::<C>())
     }
 
-    /// The tables of a session `config` opens whose one link a read steps itself: that link runs
-    /// as no task, and its session lies in the engine (`direct`), so no cell is reserved for it
-    /// and the clock's type sizes nothing here.
+    /// The tables of a session `config` opens whose read steps every face itself (`direct`): no
+    /// link runs as a task, as each face's session lies in the engine, so no cell is reserved for
+    /// one and the clock's type sizes nothing here.
     #[cfg(not(wz_round))]
     pub(crate) fn of(config: &CoopConfig<impl EndpointList>) -> Self {
         Self::of_groups(config.groups.len())
@@ -4826,7 +4826,7 @@ impl RuntimeTables {
         Self::of_groups(shape.groups)
     }
 
-    /// The tables of a session that joins `groups` groups, whose one link runs as no task.
+    /// The tables of a session that joins `groups` groups, whose links run as no task.
     #[cfg(not(wz_round))]
     const fn of_groups(groups: usize) -> Self {
         let groups = if groups < caps::MAX_TASKS {
@@ -4852,12 +4852,14 @@ impl RuntimeTables {
     /// The runtime these tables are reserved for. A build that joins groups reserves the links'
     /// cells and holds a bare cell for each group, given the bytes the group's task needs when the
     /// open spawns it, and sealed once the open is over (`open_links`). A build that joins none
-    /// reserves every cell for a link, and its runtime takes no memory after it is made: a config
-    /// that names a group is refused by name there, so the groups' cells are none. A build that
-    /// neither joins groups nor listens takes no face beside its dial role's, so its runtime hosts
-    /// that one link's task and is made for one (`CoopRuntime::try_reserved_for_one`), which links no
-    /// walk of a table of many cells; one whose read steps that link itself spawns no task, and its
-    /// runtime holds no cell (`RuntimeForm::Taskless`), which links no pass over a cell at all.
+    /// and runs each link as a task (`wz_round`) reserves every cell for a link, and its runtime
+    /// takes no memory after it is made: a config that names a group is refused by name there, so
+    /// the groups' cells are none; where it takes no face beside its dial role's, its runtime hosts
+    /// that one link's task and is made for one (`CoopRuntime::try_reserved_for_one`), which links
+    /// no walk of a table of many cells. A build that joins none and whose read steps every face
+    /// itself (`direct`) spawns no task, whether it dials, listens or reads on a thread beside the
+    /// program's calls, and its runtime holds no cell (`RuntimeForm::Taskless`), which links no
+    /// pass over a cell at all.
     ///
     /// The runtime is placed in `place`, the span of the session's arena the open lent it
     /// ([`Self::placed_bytes`]), with the session's local set: nothing of them is of the heap.
@@ -4897,18 +4899,20 @@ impl RuntimeTables {
     }
 
     /// The table of the build's runtime, a constant of the build: cells added while the open lasts
-    /// for the `groups` it joins (`group`), every cell reserved (`listen`), the one cell of the
-    /// dial role's link (`threads`), or no cell, for a read that steps its one link itself and
-    /// spawns no task (`direct`).
+    /// for the `groups` it joins (`group`), whose sessions are tasks; else, where each link runs
+    /// as a task (`wz_round`), every cell reserved (`listen`) or the one cell of the dial role's
+    /// link; else no cell (`direct`). That read steps every face where it lies and takes each
+    /// connection off its ports itself (`accept_links`), so a session that listens spawns no task
+    /// either, and a table of many cells would link its walks for a table no task is placed in.
     pub(crate) const fn form(groups: usize) -> RuntimeForm {
         if cfg!(feature = "group") {
             RuntimeForm::Opening { added: groups }
+        } else if cfg!(not(wz_round)) {
+            RuntimeForm::Taskless
         } else if cfg!(feature = "listen") {
             RuntimeForm::Reserved
-        } else if cfg!(feature = "threads") {
-            RuntimeForm::ForOne
         } else {
-            RuntimeForm::Taskless
+            RuntimeForm::ForOne
         }
     }
 }

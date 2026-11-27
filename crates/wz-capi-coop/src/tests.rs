@@ -4172,8 +4172,9 @@ mod congestion;
 mod decl_watch;
 mod dial_in_flight;
 mod direct_receive;
-// The runtime of a build whose read steps its one link itself, which runs no task.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+// The runtime of a build whose read steps every face itself and that joins no group, which runs
+// no task.
+#[cfg(not(any(wz_round, feature = "group")))]
 mod direct_runtime;
 mod entity_tables;
 // The mark the session's lock makes against a wait on a face is kept only in a debug build, and
