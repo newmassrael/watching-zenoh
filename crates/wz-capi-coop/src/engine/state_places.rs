@@ -49,6 +49,8 @@ use super::registry::FACE_SETS;
 use super::FacePlane;
 #[cfg(feature = "query")]
 use super::GetPlane;
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+use super::LinkRooms;
 #[cfg(feature = "queryable")]
 use super::QueryPlane;
 #[cfg(wz_round)]
@@ -458,6 +460,25 @@ impl OwnState {
         // SAFETY: the caller's contract: a field of a value that lies at a pointer that is not null
         // is not null either.
         unsafe { NonNull::new_unchecked(addr_of_mut!((*state.as_ptr()).places)) }
+    }
+}
+
+/// The place the faces' rooms lie in where the tables take their memory on use: an allocation of
+/// their own (`OwnBlock`), holding no value until the open writes the rooms there, which their
+/// owner (`Core::rooms`) drops in place before the block goes.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[repr(transparent)]
+pub(crate) struct RoomsPlace<W>(MaybeUninit<LinkRooms<W>>);
+
+// SAFETY: a `MaybeUninit` holds no value at any bytes.
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+unsafe impl<W> ZeroEmpty for RoomsPlace<W> {}
+
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+impl<W> RoomsPlace<W> {
+    /// Where the rooms lie in the place at `at`: the place itself, being the rooms' bytes alone.
+    pub(crate) fn rooms_at(at: NonNull<Self>) -> NonNull<LinkRooms<W>> {
+        at.cast()
     }
 }
 

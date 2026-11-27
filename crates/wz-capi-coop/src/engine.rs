@@ -300,7 +300,7 @@ use state_places::PlacedTables;
 #[cfg(not(feature = "runtime-plan"))]
 pub(crate) use state_places::StatePlaces;
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-use state_places::{OwnBlock, OwnState};
+use state_places::{OwnBlock, OwnState, RoomsPlace};
 
 /// The state the places of the session's own values and the store of its keys lie in where the
 /// open lends neither from its arena: the region at the head of the arena's block where the build
@@ -2899,8 +2899,13 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     registry_lend: RegistryLend,
     /// Where each link that comes up leaves its wait for room, for the publishes that find the
     /// session held ([`CoopEngine::live_to_publish`]). They lie in the arena, owned here, before
-    /// the arena, and reached by the engine through a handle that counts nothing.
+    /// the arena, or in an allocation of their own (`_rooms`) where the tables take their memory
+    /// on use, and are reached by the engine through a handle that counts nothing.
     rooms: Placed<LinkRooms<L::Waits>>,
+    /// The allocation the rooms lie in where the tables take their memory on use: after their
+    /// owner, which drops them in place, and given back after it. Held for its drop alone.
+    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    _rooms: OwnBlock<RoomsPlace<L::Waits>>,
     /// The wake of the links' stack that the program's word that the clock moved on wakes, which
     /// a read waits on beside its links (`CoopConfig::clock_moves`); none for a clock that moves
     /// by itself, or a stack that makes no wake. Held for the session: a wait names it by value.
@@ -4727,6 +4732,9 @@ pub(crate) const fn lay_out_open<const ROWS: usize>(
     holds: &OpenHolds<'_>,
 ) -> Result<(), ArenaRefused> {
     plan.lay_cells(holds.cells);
+    // The rooms of a session whose tables take their memory on use lie in an allocation of their
+    // own (`state_places::RoomsPlace`) and take no place of the arena.
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
     plan.lay_rooms(holds.rooms);
     if let Err(refused) = plan.lay_held(holds.held) {
         return Err(refused);
@@ -6934,14 +6942,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let (waits, places) = (links.waits(), lent.room_places);
             // SAFETY: the arena hands a place aligned for the rooms and valid for writes of
             // them, where they stay.
+            #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
             let rooms = unsafe {
                 lent.arena
                     .arena_mut()
                     .place_with(|at| LinkRooms::init_at(NonNull::new_unchecked(at), waits, places))
             }
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+            // Where the tables take their memory on use, the rooms lie in an allocation of their
+            // own, held beside their owner.
+            #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+            let rooms = {
+                let block = OwnBlock::<RoomsPlace<L::Waits>>::take().map_err(OpenError::Arena)?;
+                // SAFETY: the block is zeroed, aligned for the rooms and this open's alone; the
+                // session's state holds it after the rooms' owner (`Core::rooms`), and it neither
+                // moves nor goes back before the rooms are dropped in it.
+                let placed = unsafe {
+                    Placed::written_at(RoomsPlace::rooms_at(block.as_ptr()), |at| {
+                        LinkRooms::init_at(NonNull::new_unchecked(at), waits, places)
+                    })
+                };
+                (placed, block)
+            };
             Ok((wire, entropy, rooms))
         })?;
+        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+        let (rooms, rooms_block) = rooms;
         // The read slots and send places of the faces past the dial role's, each with a Router of
         // its own over the session's chain buffers, lent to its pump in a cell of its own.
         #[cfg(all(not(wz_round), feature = "listen"))]
@@ -7063,6 +7089,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             local,
             clock,
             rooms,
+            #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+            _rooms: rooms_block,
             transport: TransportState {
                 #[cfg(feature = "listen")]
                 tx_pool_short: lent.tx_pool_short,
@@ -7468,6 +7496,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(feature = "group")]
         core.local.runtime().seal();
         Ok(())
+    }
+
+    /// Where the faces' rooms lie, which the test of the form that holds them apart reads.
+    #[cfg(all(
+        test,
+        feature = "std",
+        all(feature = "tables-on-use", not(feature = "runtime-plan"))
+    ))]
+    pub(crate) fn rooms_place(&self) -> *const u8 {
+        core::ptr::from_ref::<LinkRooms<L::Waits>>(&self.rooms).cast::<u8>()
     }
 
     /// Whether `at` is a byte of the session's arena.

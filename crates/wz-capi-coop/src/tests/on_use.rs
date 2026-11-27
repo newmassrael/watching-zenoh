@@ -124,18 +124,23 @@ fn a_subscriber_declared_after_the_open_is_told_and_handed_a_push() {
     until(&engine, "the push", || received.load(Ordering::SeqCst) == 1);
 }
 
-/// A session whose tables take their memory on use holds its engine in an allocation of its own,
-/// claimed beside its row before its arena is reserved, and not at a place of the arena, where the
-/// D12 forms' test of the same accessor in `tests::arena` finds theirs. Turned red by an open that
-/// writes the engine at a place the arena lends (`SessionArena::engine_place` and
-/// `Shared::placed_with` in `CoopEngine::engine_of`).
+/// A session whose tables take their memory on use holds its engine and its faces' rooms each in an
+/// allocation of its own, the engine's claimed beside its row before its arena is reserved, and
+/// neither at a place of the arena, where the D12 forms' test of the same accessor in
+/// `tests::arena` finds their engine. Turned red by an open that writes the engine at a place the
+/// arena lends (`SessionArena::engine_place` and `Shared::placed_with` in `CoopEngine::engine_of`),
+/// or the rooms (`Arena::place_with` in `CoopEngine::assemble`).
 #[test]
-fn an_on_use_engine_lies_apart_from_its_arena() {
+fn an_on_use_engine_and_its_rooms_lie_apart_from_its_arena() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     assert!(
         !engine.arena_holds(EngineHold::as_ptr(&engine).cast()),
         "the engine lies apart from the arena"
+    );
+    assert!(
+        !engine.arena_holds(engine.rooms_place()),
+        "the rooms lie apart from the arena"
     );
 }
 
