@@ -5275,8 +5275,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> LinkIo for RoundL
 
     /// A dial the life walked past with no answer read is over, and its endpoint names the
     /// reason.
-    fn give_up_dial(&mut self) {
-        if let Some(endpoint) = self.core.transport.links.end_dial(self.at) {
+    fn give_up_dial(&mut self, row: usize) {
+        if let Some(endpoint) = self.core.transport.links.end_dial(self.at, row) {
             self.core
                 .refuse(self.last, Some(&endpoint), Refusal::NoAnswerInTime);
         }

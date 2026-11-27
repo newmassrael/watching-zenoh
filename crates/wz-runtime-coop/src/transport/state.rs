@@ -825,7 +825,7 @@ impl<T: TransportFaces> TransportState<T> {
     #[inline(always)]
     pub fn dial_row(&mut self, at: usize, row: usize) -> Result<AnswerOf<T>, TransportRefusal> {
         let begun = self.begin_dial(self.endpoints.dial_text(row))?;
-        Ok(self.links.ask_dial(at, DialEndpoint::Listed(row), begun))
+        Ok(self.links.ask_dial(at, begun))
     }
 
     /// The link a dial of `endpoint` answered with, or why it is none: the endpoint and the

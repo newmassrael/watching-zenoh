@@ -251,11 +251,12 @@ impl Effects {
     }
 
     /// The dial under way was not answered by its deadline: let go of it, its endpoint refused
-    /// for want of an answer in time. Only a dial the network has not answered is given up so;
-    /// one answered (made or refused) was taken with its answer, and a close lets go of
+    /// for want of an answer in time, named by the row of the endpoint it was dialled to (the
+    /// life has walked past it by then). Only a dial the network has not answered is given up
+    /// so; one answered (made or refused) was taken with its answer, and a close lets go of
     /// everything ([`Self::let_go`]).
-    pub fn gives_up_dial(self) -> bool {
-        self.gave_up_dial
+    pub fn gives_up_dial(self) -> Option<usize> {
+        self.gave_up_dial.then_some(self.from)
     }
 
     /// The established link ended: what its peer declared goes with it.
@@ -437,6 +438,14 @@ impl UnicastLink {
     /// Which face of the session the link is.
     pub fn role(&self) -> LinkRole {
         self.data.role
+    }
+
+    /// The row of the endpoint the link dials, or whose link's handshake runs: what names the
+    /// endpoint of a dial under way or of the link it made, so the owner keeps no copy of it
+    /// beside the dial. Row 0 for a taken face, which dials none of the session's endpoints.
+    /// Read while the link is `Dialing` or `Handshaking`; elsewhere it is the last row walked.
+    pub fn endpoint_row(&self) -> usize {
+        self.data.row
     }
 
     /// Where the link stands.
@@ -713,9 +722,9 @@ pub trait LinkIo {
     /// The time now, in microseconds: read after the I/O of each effect.
     fn now_us(&mut self) -> u64;
 
-    /// Let go of the dial under way the life gave up at its deadline
+    /// Let go of the dial under way to endpoint `row` the life gave up at its deadline
     /// ([`Effects::gives_up_dial`]).
-    fn give_up_dial(&mut self);
+    fn give_up_dial(&mut self, row: usize);
 
     /// End the handshake of the link dialled to endpoint `row` ([`Effects::end_handshake`]).
     fn end_handshake(&mut self, row: usize);
@@ -756,8 +765,8 @@ pub fn carry<I: LinkIo>(
     let (mut effects, mut now_us) = (effects, now_us);
     loop {
         debug_assert!(!effects.let_go(), "a close told to the life is not carried");
-        if effects.gives_up_dial() {
-            io.give_up_dial();
+        if let Some(row) = effects.gives_up_dial() {
+            io.give_up_dial(row);
         }
         // Why the handshake ended is read off its link before the link goes, and names the
         // endpoint the life names with the end.
@@ -1302,23 +1311,28 @@ mod tests {
         let deadline = 1000 * MS;
         let mut slot = MaybeUninit::uninit();
         let link = made(&mut slot, TIMES, 3);
-        assert!(!link.input(LinkInput::Open, 0).gives_up_dial());
+        assert_eq!(link.input(LinkInput::Open, 0).gives_up_dial(), None);
         assert!(link.input(LinkInput::DialPending, 0).is_empty());
         let early = link.input(LinkInput::Tick, deadline - 1);
         assert!(early.is_empty());
-        assert!(!early.gives_up_dial());
+        assert_eq!(early.gives_up_dial(), None);
         let late = link.input(LinkInput::Tick, deadline);
-        assert!(late.gives_up_dial());
+        assert_eq!(late.gives_up_dial(), Some(0), "named by the row it dialled");
         assert_eq!(late.dial(), Some(1));
         assert!(!late.is_empty());
         link.input(LinkInput::DialPending, deadline);
         let refused = link.input(LinkInput::DialRefused, deadline + 10);
-        assert!(!refused.gives_up_dial(), "a refusal is the dial's answer");
+        assert_eq!(
+            refused.gives_up_dial(),
+            None,
+            "a refusal is the dial's answer"
+        );
         assert_eq!(refused.dial(), Some(2));
         link.input(LinkInput::DialPending, deadline + 10);
         let made_link = link.input(LinkInput::DialMade, deadline + 20);
-        assert!(
-            !made_link.gives_up_dial(),
+        assert_eq!(
+            made_link.gives_up_dial(),
+            None,
             "a made link is the dial's answer"
         );
         assert!(made_link.begin_handshake());
@@ -1328,7 +1342,7 @@ mod tests {
         lone.input(LinkInput::Open, 0);
         lone.input(LinkInput::DialPending, 0);
         let ended = lone.input(LinkInput::Tick, deadline);
-        assert!(ended.gives_up_dial());
+        assert_eq!(ended.gives_up_dial(), Some(0));
         assert!(ended.ends_session());
         assert_eq!(ended.dial(), None);
 
@@ -1338,7 +1352,36 @@ mod tests {
         closing.input(LinkInput::DialPending, 0);
         let close = closing.input(LinkInput::Close, deadline);
         assert!(close.let_go());
-        assert!(!close.gives_up_dial(), "a close lets go of the dial itself");
+        assert_eq!(
+            close.gives_up_dial(),
+            None,
+            "a close lets go of the dial itself"
+        );
+    }
+
+    /// The row that names a dial under way and its link's handshake is the life's: the row each
+    /// dial asked for, kept while the handshake of its link runs, and 0 for a taken face. Turned
+    /// red by a row read off anything but the walk's (`LinkData::row`).
+    #[test]
+    fn the_endpoint_row_names_the_dial_under_way_and_its_handshake() {
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 3);
+        link.input(LinkInput::Open, 0);
+        assert_eq!(link.endpoint_row(), 0);
+        link.input(LinkInput::DialRefused, 0);
+        assert_eq!(link.endpoint_row(), 1, "the next endpoint dialled");
+        link.input(LinkInput::DialMade, 0);
+        link.input(LinkInput::HandshakeBegun, 0);
+        assert!(matches!(
+            link.phase(),
+            LinkPhase::Handshaking { row: 1, .. }
+        ));
+        assert_eq!(link.endpoint_row(), 1, "kept while its handshake runs");
+
+        let mut slot = MaybeUninit::uninit();
+        let taken = UnicastLink::init_in(&mut slot, TIMES, LinkRole::Taken, 3);
+        taken.input(LinkInput::Taken, 0);
+        assert_eq!(taken.endpoint_row(), 0);
     }
 
     /// Tell `link` `input` at `now_us`: the wake its answer names, held to what `wake_at` reads
@@ -1393,7 +1436,7 @@ mod tests {
     /// What a recording owner was asked, in the order it was asked.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Asked {
-        GiveUpDial,
+        GiveUpDial(usize),
         EndHandshake(usize),
         Lose(bool),
         BringUp(u64),
@@ -1452,8 +1495,8 @@ mod tests {
             self.clock_us
         }
 
-        fn give_up_dial(&mut self) {
-            self.asked.push(Asked::GiveUpDial);
+        fn give_up_dial(&mut self, row: usize) {
+            self.asked.push(Asked::GiveUpDial(row));
         }
 
         fn end_handshake(&mut self, row: usize) {
@@ -1554,7 +1597,11 @@ mod tests {
         assert_eq!(io.give(LinkInput::Tick), Err(SessionEnded));
         assert_eq!(
             io.asked,
-            [Asked::GiveUpDial, Asked::Dial(2), Asked::Now(deadline + 10)]
+            [
+                Asked::GiveUpDial(1),
+                Asked::Dial(2),
+                Asked::Now(deadline + 10)
+            ]
         );
         assert_eq!(io.life.phase(), LinkPhase::Closed);
     }

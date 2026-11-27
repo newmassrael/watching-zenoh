@@ -59,7 +59,7 @@ use wz_runtime_coop::faces::SiteSend;
 #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
 use wz_runtime_coop::faces::WireLook;
 use wz_runtime_coop::faces::{
-    Dial, FaceAt, FaceSite, LinkEnd, ReadFacts, SendParts, WireParts, WriteMark,
+    Dial, DialNamed, FaceAt, FaceSite, LinkEnd, ReadFacts, SendParts, WireParts, WriteMark,
 };
 use wz_runtime_coop::link_cells::{FaceHeld, FaceParts};
 use wz_runtime_coop::session_drive::LinkOpenError;
@@ -947,8 +947,10 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// Where the Router is lent to the pump's receive: the face's own cell
     /// (`DirectFace::router_cell`), which no other face's pump looks in.
     lend: RouterLend<SessionReassembly, RouterPlace>,
-    /// The link a dial made, and the endpoint it reached, until its handshake is begun.
-    opened: Option<(OpenedLink<L::Pump, LinkCount>, DialEndpoint)>,
+    /// The link a dial made until its handshake is begun, with what the dial named of the
+    /// endpoint it reached beside its life's row: nothing in a build without `listen`, whose
+    /// endpoint is the life's row alone.
+    opened: Option<(OpenedLink<L::Pump, LinkCount>, DialNamed)>,
     /// Why the last endpoint tried came to no link: what the session ends with when the life
     /// ends it.
     last: Option<OpenError>,
@@ -1262,9 +1264,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
                 return LinkInput::DialRefused;
             }
         };
-        core.transport
-            .links
-            .put_dial(self.at(), Dial::begun(DialEndpoint::Listed(row), begun));
+        core.transport.links.put_dial(self.at(), Dial::begun(begun));
         self.take_dial_answer(core)
             .unwrap_or(LinkInput::DialPending)
     }
@@ -1301,7 +1301,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
     ) -> LinkInput {
         match core.transport.dialled(Some(&endpoint), answer) {
             Ok(opened) => {
-                self.opened = Some((opened, endpoint));
+                self.opened = Some((opened, endpoint.into_named()));
                 LinkInput::DialMade
             }
             Err(refused) => {
@@ -1695,8 +1695,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> LinkIo for Direct
 
     /// A dial the life gave up on before the network answered it is its endpoint's refusal for
     /// want of an answer in time, as a build whose links are tasks names it.
-    fn give_up_dial(&mut self) {
-        if let Some(endpoint) = self.core.transport.links.end_dial(self.slot.at()) {
+    fn give_up_dial(&mut self, row: usize) {
+        if let Some(endpoint) = self.core.transport.links.end_dial(self.slot.at(), row) {
             self.slot.keep_refusal(
                 self.core.transport.endpoint_text(Some(&endpoint)),
                 Refusal::NoAnswerInTime,
@@ -2983,9 +2983,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         core: &mut Core<L, C>,
         slot: &mut DirectSlot<L, C>,
     ) -> LinkInput {
-        let Some((opened, endpoint)) = slot.opened.take() else {
+        let Some((opened, named)) = slot.opened.take() else {
             return LinkInput::HandshakeRefused(Refused::Endpoint);
         };
+        // The endpoint is the one the life's row names unless the dial named one apart: the life
+        // stands at the dial that made the link until its handshake is told begun.
+        let row = core
+            .transport
+            .links
+            .face(slot.at())
+            .map_or(0, |record| record.life.endpoint_row());
+        let endpoint = DialEndpoint::of(row, named);
         match self.place_link_session(
             face,
             core,
