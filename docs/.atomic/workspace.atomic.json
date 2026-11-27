@@ -9109,6 +9109,23 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4724": {
+      "decision_summary": "Compile a held face place's answer and a lock kind import only where they\nare read, paying two reds of builds the gates did not hold.",
+      "changes_bullets": [
+        "capi-coop: for_held_place and its two tests not(wz_round).",
+        "face_order: LockKind imported inside the one threads test."
+      ],
+      "verification_bullets": [
+        "clippy of the round lane form; capi-coop tests 261 without threads, 290.",
+        "nondefault-features for capi-coop; lane form tests 476."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
