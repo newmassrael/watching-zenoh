@@ -150,7 +150,7 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
     assert_eq!(payloads, [b"from-first".to_vec(), b"from-second".to_vec()]);
 
     // Each client answers a query with its own payload; the listener's one get is one leg for each
-    // face, and ends when both Finals are in.
+    // face, with one callback for the get, dropped once both Finals are in.
     for (peer, text) in [(&first, &b"a-first"[..]), (&second, &b"a-second"[..])] {
         peer.declare_queryable_on_wire(
             "demo/g/**",
@@ -190,7 +190,9 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
         },
     );
     assert_eq!(issued, Ok(2), "one leg for each face the listener holds");
-    eventually("both legs to end", || *ended.lock().unwrap() == 2);
+    eventually("the get to end with both legs", || {
+        *ended.lock().unwrap() == 1
+    });
     let mut answers = replies.lock().unwrap().clone();
     answers.sort();
     assert_eq!(answers, [b"a-first".to_vec(), b"a-second".to_vec()]);
