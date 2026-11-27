@@ -528,28 +528,72 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore> UdpDriver<S, B, T> {
 impl<S: DatagramSocket, B: RxStore, T: TxStore, W: InputWaiter> UdpDriver<S, B, T, W> {
     /// [`UdpDriver::initiator_in`] when `peer` is known, [`UdpDriver::acceptor_in`] when it is
     /// not, its input waited for as `W` says: what a stack that opens both from one body asks.
-    pub(crate) fn with_peer(socket: S, peer: Option<SocketAddr>, mut rx_buf: B, tx: T) -> Self {
+    pub(crate) fn with_peer(socket: S, peer: Option<SocketAddr>, rx_buf: B, tx: T) -> Self {
+        let mut place = core::mem::MaybeUninit::uninit();
+        Self::with_peer_in(&mut place, socket, peer, rx_buf, tx);
+        // SAFETY: `with_peer_in` wrote every field of the driver in `place`.
+        unsafe { place.assume_init() }
+    }
+
+    /// [`Self::with_peer`] written field by field in `place`, where the link stays: a stack that
+    /// opens the link in a cell writes it there, and no whole driver is built in its frame and
+    /// moved into the cell.
+    pub(crate) fn with_peer_in(
+        place: &mut core::mem::MaybeUninit<Self>,
+        socket: S,
+        peer: Option<SocketAddr>,
+        mut rx_buf: B,
+        tx: T,
+    ) -> &mut Self {
+        // A field added to the driver and not written below would be read uninitialised. This
+        // names every field with no `..`, so adding one without naming it here (and so without
+        // writing it below) does not compile.
+        let _every_field_is_written = |driver: &Self| {
+            let Self {
+                socket: _,
+                binding: _,
+                rx_buf: _,
+                rx_len: _,
+                tx: _,
+                stash: _,
+                kept: _,
+                keeping: _,
+                #[cfg(feature = "alloc")]
+                    rx_drops: _,
+                rx_error: _,
+                idle_wait_ms: _,
+                armed_wait_ms: _,
+                owner_waits: _,
+                waiter: _,
+            } = driver;
+        };
         let rx_len = rx_buf.capacity();
-        Self {
-            socket,
-            binding: match peer {
-                Some(peer) => PeerBinding::dialled(peer),
-                None => PeerBinding::accepting(),
-            },
-            rx_buf: RefCell::new(rx_buf),
-            rx_len,
-            tx: TxLender::new(tx),
-            stash: Cell::new(None),
-            kept: Cell::new(None),
-            keeping: Cell::new(false),
+        let binding = match peer {
+            Some(peer) => PeerBinding::dialled(peer),
+            None => PeerBinding::accepting(),
+        };
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is the place, aligned for the driver and this call's alone; each field is
+        // written once, in place.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).socket).write(socket);
+            core::ptr::addr_of_mut!((*at).binding).write(binding);
+            core::ptr::addr_of_mut!((*at).rx_buf).write(RefCell::new(rx_buf));
+            core::ptr::addr_of_mut!((*at).rx_len).write(rx_len);
+            core::ptr::addr_of_mut!((*at).tx).write(TxLender::new(tx));
+            core::ptr::addr_of_mut!((*at).stash).write(Cell::new(None));
+            core::ptr::addr_of_mut!((*at).kept).write(Cell::new(None));
+            core::ptr::addr_of_mut!((*at).keeping).write(Cell::new(false));
             #[cfg(feature = "alloc")]
-            rx_drops: crate::link_storage::RxDrops::new(),
-            rx_error: Cell::new(None),
-            idle_wait_ms: SERVICE_WAIT_MS as u32,
-            armed_wait_ms: Cell::new(SERVICE_WAIT_MS),
-            owner_waits: false,
-            waiter: core::marker::PhantomData,
+            core::ptr::addr_of_mut!((*at).rx_drops).write(crate::link_storage::RxDrops::new());
+            core::ptr::addr_of_mut!((*at).rx_error).write(Cell::new(None));
+            core::ptr::addr_of_mut!((*at).idle_wait_ms).write(SERVICE_WAIT_MS as u32);
+            core::ptr::addr_of_mut!((*at).armed_wait_ms).write(Cell::new(SERVICE_WAIT_MS));
+            core::ptr::addr_of_mut!((*at).owner_waits).write(false);
+            core::ptr::addr_of_mut!((*at).waiter).write(core::marker::PhantomData);
         }
+        // SAFETY: every field of the driver was written above.
+        unsafe { place.assume_init_mut() }
     }
 
     /// The same link, waited on by its owner when its socket can be
@@ -3073,6 +3117,36 @@ mod tests {
             looped.input_wait().is_none(),
             "CONTROL: and names its owner no wait"
         );
+    }
+
+    /// A link written where it lies is the link a value of it is, at the place it was handed: its
+    /// peer, the datagram it receives whole, its tick and its loop's wait are those of a link made
+    /// by value. Turned red by a field `with_peer_in` writes otherwise than `with_peer` did, or a
+    /// driver answered from elsewhere than its place.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_link_written_where_it_lies_is_the_link_a_value_is() {
+        let mut place = core::mem::MaybeUninit::<UdpDriver<Loop, Vec<u8>, HeapTx>>::uninit();
+        let at = place.as_ptr();
+        let link = UdpDriver::with_peer_in(
+            &mut place,
+            Loop::default(),
+            Some(PEER),
+            vec![0u8; 64],
+            HeapTx::new(2, 32),
+        );
+        assert!(core::ptr::eq(link, at), "the link lies where it was handed");
+        assert_eq!(link.peer(), Some(PEER));
+        assert_eq!(link.link_rx_capacity(), 64);
+        assert!(
+            !link.uses_wake_budget(),
+            "the tick, as a link made by value"
+        );
+        assert!(link.input_wait().is_none(), "its loop waits, not its owner");
+        link.service();
+        assert_eq!(link.socket.waits.get(), 1, "the loop's wait of the tick");
+        // SAFETY: `with_peer_in` wrote the driver whole in `place`, dropped once, here.
+        unsafe { place.assume_init_drop() };
     }
 
     #[test]

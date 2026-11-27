@@ -165,3 +165,17 @@ stream family and the secure channel's.
 
 Measured on the case's explain report: the driver row and the `wz_runtime_coop::udp_link` owner
 line; expected -700 to -790, the receive's instructions a message unchanged or fewer.
+
+## 6. Step S5: a datagram link written where it lies
+
+`UdpDriver::with_peer_in` writes the driver field by field in the place it is handed, and the
+stack makes each datagram link with it in its cell (`LinkPlace::datagram`), so
+`begin_initiator` builds no driver in its frame to move there (the 273 bytes of
+`MaybeUninit::write`); `with_peer` is the same body over a place in its own frame. Test:
+`udp_link::tests::a_link_written_where_it_lies_is_the_link_a_value_is`.
+
+Left: the stream link's placement (217 bytes, `LinkPlace::stream`), whose link is the stream's
+type (`StreamSocket::Link`), the same seam as S2's stream share.
+
+Measured on the case's explain report: `begin_initiator` and the `wz_runtime_coop::ip_stack`
+owner line; expected -150 to -270, the receive untouched (an open).

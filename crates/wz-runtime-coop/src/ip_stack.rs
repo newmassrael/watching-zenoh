@@ -517,7 +517,7 @@ impl<N: CountKind> LinkPlace<N> {
         tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         heap_link::<_, N>(self.cells.as_ref(), datagram_ends_fit(&socket, peer))?.open(|place| {
-            let link = place.write(UdpDriver::<U, _, _, W>::with_peer(socket, peer, rx, tx));
+            let link = UdpDriver::<U, _, _, W>::with_peer_in(place, socket, peer, rx, tx);
             if self.owner_waits {
                 link.wait_by_owner();
             }
