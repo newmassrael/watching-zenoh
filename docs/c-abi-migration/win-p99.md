@@ -1,10 +1,10 @@
 # Windows lane (win-p99): the round trip's tail against zenoh-pico's
 
 Status: attribution measured on pc3-win (Windows 11 x64, Intel Core Ultra 7 155H, timer resolution 1 ms
-set by another process, power plan Balanced), 2026-11-28. One change is on branch `win-p99-1128`
-(the bench, section 2); the structural fix of section 4 is designed and was tried, and its first form
-regressed, so it is not on the branch (section 4.3). Every figure below is a reading of this lane, and
-says which.
+set by another process, power plan Balanced), 2026-11-28. Branch `win-p99-1128` holds the bench's
+change (section 2), the put sent with the session let go of (section 4.2) and the fix of the spin its
+first form made (section 4.3). Under disturbance W's tail is still longer than P's (section 4.4).
+Every figure below is a reading of this lane, and says which.
 
 ## 1. What the ceilings say
 
@@ -123,25 +123,77 @@ not take that path: `put_leg` sends it under the session's lock. The change rout
 plan's key is re-lent by the put's own text (`PlannedPut::key_on`), the session is let go of, and
 the leg is sent by the face's send place (`send_leg_alone`).
 
-### 4.3 Its first form regressed, and is kept aside
+### 4.3 Its first form spun, on a write the read told as owed
 
-Commit 456b5798ac (branch `win-p99-1128-alone-wip`, not merged) is that change. Built into the
-preset package on pc3-win it removed the read's lock waits (0 against 280 in the same trace) but,
-quiet host, tcp/off/rtt/8, three repetitions against the base package in the same runs:
+Commit 456b5798ac (that change alone) removed the read's lock waits (0 against 280 in the same
+trace) but, quiet host, tcp/off/rtt/8, three repetitions against the base package in the same runs:
 
 | package | p50 (us) | p99 (us) | p99.9 (us) | round trips over 0.5 ms |
 |---|---|---|---|---|
 | 99c88e8372 | 47.8 to 48.2 | 61.7 to 65.6 | 82.5 to 87.1 | 0 |
 | 456b5798ac | 47.9 to 48.0 | 60.1 to 62.9 | 2,008 to 2,011 | 26 to 32 |
 
-A CPU profile (`xperf -on PROFILE -stackwalk Profile`) shows both read tasks spinning in
-`read_quiet`: `WSAPoll` (`direct.rs` @ `let ready = self.rooms.waits().wait_ready(waits, left_ms);`)
-and `WindowsTcpSocket::try_read` answering `WSAEWOULDBLOCK` through `step_pump` (pong's read task
-11,729 samples in `try_read` against 462 before), so the read task spends its quantum, is preempted
-at its end by the spinning main thread on the same CPU, and waits a whole quantum (about 2 ms) ready
-to run. The answers pong gave in the same window fell from about 81,000 to 51,000 to 60,000. Which
-fact the read loop reads as input held, or as due at once, after a leg written outside the session is
-what remains to find; the change lands only with it.
+A CPU profile (`xperf -on PROFILE -stackwalk Profile`) showed both read tasks spinning: pong's in
+`read_quiet` (`WSAPoll` and `WindowsTcpSocket::try_read` answering `WSAEWOULDBLOCK`, 11,729
+samples in `try_read` against 462 before), ping's in the whole read's wait (`IdleWait::wait` in
+`crates/wz-runtime-coop/src/faces.rs`), and pong answered about 51,000 to 60,000 pings in the window
+against 81,000.
+
+**The stale fact: a write owed that nobody owed.** The read tells the face's facts what its step left
+owed on the link (`DirectSlot::tell_facts`, `SiteFacts::wrote`). It asked the link's
+`owes_write`, and a stream link answers that as owing while another holder has its send half
+(`StreamDriver::owes`: right for a wait, which must not take a debt for paid). With the put sent
+outside the session's lock, the read's step runs while the main thread is inside `WSASend` holding
+that half, so the read counted a write owed (`written` moved on). The send then let go having left
+nothing, and drained only to the mark it took as it began, before that count: the face kept owing a
+write after every byte left. The read then waited for room as well as input (`POLLWRNORM`), which a
+socket always has, and stepped a link that brought nothing, and each step that again found a send
+under way told the debt again. The mistake is not Windows': a read's tell made beside a send on any
+host counts it, and Windows' loopback, whose answer arrives inside `WSASend`, makes the overlap
+the common case.
+
+**The fix** (the commit before the put's on the branch): a link answers a teller separately from a wait
+(`SessionDatagramLink::owes_write_if_free`: `None` while another holder has the send half; the
+stream link's `try_hold` gives it), and the read (`SiteFacts::read_wrote`) and a holder of the
+place as it lets go (`FaceSite::tell_written`, `pay_held`) tell nothing then: the other holder
+tells what it left as it lets go. Regression tests, platform-independent:
+`faces::tests::a_read_told_while_a_send_holds_the_link_leaves_nothing_owed` and
+`stream_link::tests::a_held_send_half_is_owing_to_a_wait_and_untold_to_a_teller`.
+
+Quiet host, tcp/off/rtt/8, W only, three repetitions of each package interleaved
+(`mrun.ps1`, 20,000 counted round trips each, `perf_probe -H`), 2026-11-28:
+
+| package | p99 (us) | p99.9 (us) | round trips over 0.5 ms | longest (us) | answers in the window |
+|---|---|---|---|---|---|
+| 99c88e8372 (base) | 61.8, 63.8, 64.5 | 82.7, 83.7, 90.5 | 0, 0, 0 | 137 to 186 | 81,000 to 81,400 |
+| 456b5798ac alone | 62.7, 62.8, 63.0 | 125, 1,751, 2,012 | 16, 20, 30 | 4,459 to 4,531 | 53,800 to 57,900 |
+| fix + 456b5798ac (22f68c8733) | 61.1, 64.2, 64.6 | 81.8, 85.5, 90.6 | 0, 0, 0 | 125 to 141 | 80,900 to 81,400 |
+
+P (zenoh-pico) in the same session: p99 61.6 to 63.2, p99.9 86.9 to 121.4 us, none over 0.5 ms.
+
+### 4.4 Under disturbance the alone send does not shorten W's tail
+
+The same runs under `hog.exe 0x3FC,2000,40` (2 ms busy every 40 ms on CPUs 2 to 9):
+
+| package | p99 (us) | p99.9 (us) | round trips over 0.5 ms |
+|---|---|---|---|
+| 99c88e8372 (base) | 70.4, 131.1, 132.9 | 566.3, 566.5, 567.6 | 35, 35, 38 |
+| 456b5798ac alone | 137.0, 137.0, 138.9 | 3,276 to 4,017 | 58, 73, 76 |
+| fix + 456b5798ac | 122.0, 131.6, 134.5 | 556.6, 558.9, 560.9 | 36, 38, 44 |
+| P | 119.9, 124.1, 124.6 | 319.2, 360.9, 379.6 | 10, 15, 15 |
+
+A second set of three a side, on a host nothing else measured on, read the same: base p99.9 568.3
+to 569.6 us with 32 to 39 over 0.5 ms, fix + 456b5798ac 560.8 to 562.4 us with 33 to 44.
+
+The fix removes the spin and the alone send costs nothing, but W's disturbed p99.9 stays about
+560 us against P's 320 to 380: the session-lock wait of 4.1 was not the whole of W's disturbed tail,
+or another wait of the same length took its place. A context-switch trace of each arm under the
+disturbance (`trace.ps1 -Tag t3h`, `C:\wzperf\win-p99\t3h-{W,P}.an.txt`, both slowed by the
+stack walks to p50 70 us; over 0.5 ms W 43, P 25) puts the excess on ping's side: the time from the
+ping's arrival at pong's read to the answer's arrival at ping's read passed 0.4 ms once in W's run
+and never in P's. Which wait of ping's main thread or read task makes it is not read yet: the stacks
+`analyze.py` pairs with a switch made while `hog.exe` shares the CPU carry the hog's frames, so
+the pairing has to be checked before a frame is named.
 
 ## 5. Recipe
 
