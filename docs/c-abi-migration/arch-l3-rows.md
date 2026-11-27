@@ -925,6 +925,59 @@ is removed, which leaves both to a later read's sweep). Expected size and Ir: un
 fix, which moves one body and changes no path. Still owed: `crates/wz-capi-pico/link/run-text.ld`
 regenerated once the lane is green.
 
+**The switch, green in every form** (`fix(capi-coop): Name the engine's calls only where a plane
+reads them`, `fix(capi-coop): Let a retired get's key go under the session's lock`,
+`fix(session-core): Bound the gets' table by its queries and snapshots`, `fix(capi-coop): Count
+the rows the arena lays out for the gets`). The switch built, but four of its facts were left
+where the get plane had put them:
+
+- The engine's calls (`calls`), the state's policy (`StatePolicy`) and the planes' lock
+  (`CoopLocks`) were compiled under `query` for the get plane, which no longer names them; a
+  build that asks queries and keeps no round (`query` alone, `tables-on-use`, `runtime-plan`)
+  compiled them unused. They follow the round and the queryables' plane, the two that read them,
+  as does the subscriber and token call each reads (`SubscriberCall::hand`,
+  `LivelinessCall::same_row`). The on-use registry is made as it is returned.
+- A get's row holds its gate, a key of the session's key arena, which the session's lock guards.
+  The hand-out of the ended gets, a cancellation and the close each dropped the retired row after
+  the lock, so the key arena's check of its owner's lock failed in every test that ends a get
+  that way. The row is split under the lock, as the walk of the drained rows splits it
+  (`release_drained_get` then `into_callback`): the key goes there and the callback, the one
+  part to drop with no lock held, leaves (`Removal::map`, `cancel_next_get` now hands back
+  `Removal<ReplyRow>`).
+- A liveliness snapshot is a row of the gets' table, as a query is, and the plan lends that table
+  `MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS` rows (24 by default), while the table's
+  bound was `MAX_PENDING_QUERIES` (16): every open of a `liveliness-get` build of the arena form
+  was refused (`OverCeiling { rows: 24, ceiling: 16 }`). The bound is the sum
+  (`session_tables::PENDING_GET_ROWS`), in the lent, the region and the on-use tables alike.
+- The plan's count of its rows (`ARENA_ROWS`) still counted four rows of the gets and a row of
+  their plane; the plan lays out one, the faces' legs, and no plane of the gets.
+
+Tests: `slot_map::tests::a_removal_keeps_what_its_part_keeps_of_a_taken_row` (red if
+`Removal::map` runs its part on a pinned row or answers a taken one as pinned);
+`session_tables::tests::the_gets_table_holds_a_row_for_each_query_and_snapshot_pending` (red if
+`PendingGets` is bound by `MAX_PENDING_QUERIES` alone in a `liveliness-get` build). The tests the
+reds named hold the rest: the five tests of a get ended by its Final, a cancellation or its fan
+(red if a retired row is dropped whole after the lock), the opens of `tests::arena` and
+`tests.rs` under `liveliness-get` (red at the old bound) and
+`a_plan_with_every_row_holds_exactly_arena_rows` (red at the old `GET_ROWS` or `PLANE_ROWS`).
+
+Expected size and Ir: the receive is unchanged (none of the four is on a Push's path). A build of
+`liveliness-get` in the region form holds `MAX_PENDING_LIVELINESS_GETS` more rows of the gets'
+table, which the snapshots' rows need; a build without it is unchanged. The pico-compare preset
+asks no snapshot, so its cases do not move.
+
+**A face's legs bound by their kind** (`fix(session-core): Bound a face's legs by the kind of get
+they name`). A face's table of its snapshots' legs (`Gets::snapshots`) was a `GetLegs` bound by
+`MAX_PENDING_QUERIES` and lent `MAX_PENDING_LIVELINESS_GETS` rows: a build whose snapshots
+outnumber its queries was refused at its open, and a region laid out the queries' rows for the
+snapshots. `GetLegs` and `GetLegsRows` take their bound `N` (`MAX_PENDING_QUERIES` by
+default), and the snapshots' table names `MAX_PENDING_LIVELINESS_GETS` (`SNAPSHOT_LEGS` in the
+registry). Test: `get_legs::tests::a_table_of_legs_is_bound_by_its_kind_of_get` (red if the table
+is bound by `MAX_PENDING_QUERIES` whatever `N`, which lends the row past `N` and lays out
+`MAX_PENDING_QUERIES` rows). Expected size: a region-form build of `liveliness-get` lays out
+`MAX_PENDING_QUERIES - MAX_PENDING_LIVELINESS_GETS` fewer leg rows per face (8 by default); no
+code path changes, so no Ir moves.
+
 ## 7. The receive
 
 None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message
