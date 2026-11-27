@@ -52,6 +52,25 @@ The debt names three sites, each read on main `df994d7913`:
    it mirrors, and `reply::decode_isolation_tests` builds the heap registry
    (`ReplyRegistry::new`) and an owned Response; the last was gated on `storage-profile`, the
    slot profile's too. Eighty resolution errors, all in these three modules. On main as well.
+7. Arm 21's features, `cargo test --lib`, with D9 in: four tests of `declare::local_token`,
+   which no build of these features had compiled before, fail. Each expects the Interest pattern
+   `group1/**` to match a token under `group1/`. `**` is the matcher's optional dialect
+   (`keyexpr-wildcard-double`, a default feature the slot builds leave off, as the minimal MCU
+   preset does), and without it `**` is a literal chunk
+   (`keyexpr_match::tests::double_wildcard_off_degrades_to_literal`). The registry stages the
+   same way in every build; what differed is the matcher it is handed. So the claim of each test
+   was wrong for that build, and the code is right: `matching_token_stages_token_then_final` and
+   `a_token_unregistered_between_stage_and_drain_resolves_to_none` staged no token,
+   `multiple_matching_tokens_each_stage_a_token` staged none of its two, and
+   `a_chain_that_does_not_fit_whole_is_refused_and_stages_nothing` met a one-item chain that
+   fits. Three tests of the heap's owned parse (`tokens_interest_stages_matching_response`, the
+   own-space pair) make the same assumption in a heap build without the dialect, and
+   `unregister_removes_token_from_responses` and `future_only_interest_stages_nothing` pass
+   there only because nothing matches.
+8. Arm 22's features with `--all-targets`, with D9 in: the integration test
+   `tests/lent_control_alloc.rs` was gated on the codecs of the writers it counts and not on
+   `alloc`, while its control, the owned builders (`declare_build`, `response_final_build`,
+   `interest_build::build_interest_*`), compiles only with it. Five resolution errors.
 
 No leg built any of these: Layer C1h builds the heap's forms or no session, and the slot profile
 is clippied only in its largest set (every feature beside it).
@@ -90,6 +109,8 @@ of it twice.
 | D7 | `e5c7de0d22` | `local_token`'s tests of the owned Interest parse carry its gate, `alloc`; the peer map's import comes with `alloc` (site 4) |
 | D8 | `4709f8e0ab` | the record walk and every item only it reads say `all(test, alloc)` where they said `test`; `is_transport_mid` and the `SceCursor` import drop `test`; `request_view_admission` is gated on its two readers (site 5) |
 | D9 | `bf9b5f6516` | the three test modules of site 6 are gated on `alloc` |
+| D10 | `c9567ce5d7` | `local_token`'s tests that expect a match use a literal key or match-all, so they hold the staging in every dialect (site 7) |
+| D11 | `a8ab51d4b6` | `tests/lent_control_alloc.rs` is gated on `alloc` beside its codecs (site 8) |
 
 ### 2.1 Why D1 is the structure and not a marker on the lifetime
 
@@ -191,6 +212,37 @@ name the walk narrow with it, which only widens where their `allow(dead_code)` a
 changes; arm 21 is the check, and the heap build's test count must not move. D9 removes three
 test modules from builds that could not compile them; every build that ran them still does.
 
+### 4.4 D10
+
+D10 changes fixtures, not code, and no test is gated: every test of the module runs where it ran.
+A pattern a test expects to match is now a literal key (which matches itself in every dialect) or
+match-all (`None`, the tokens Interest without a key). Wildcard matching stays the matcher's,
+tested in `keyexpr_match`. Per test, in every build that compiles it:
+
+- `matching_token_stages_token_then_final`: `Some("group1/zenoh-pico")` stages the token and
+  then the `Final`; red if staging drops the token or puts the `Final` first;
+- `a_token_unregistered_between_stage_and_drain_resolves_to_none`: the same pattern stages one
+  token, which resolves to `None` after `unregister`; red if `keyexpr_for` reads a stale row;
+- `unregister_removes_token_from_responses`: the pattern names the token's own key, so the
+  `(0, 1)` it asserts is the unregister's and not a non-match; red if `unregister` keeps the row;
+- `multiple_matching_tokens_each_stage_a_token`: two tokens on `group1/a` and one on
+  `other/c`, pattern `group1/a`: two tokens staged, ids `[1, 2]` in table order, then the
+  `Final`; red if staging stops at the first match or stages the token on another key;
+- `a_chain_that_does_not_fit_whole_is_refused_and_stages_nothing`: match-all over two tokens is
+  a chain of three into two free slots, refused with nothing staged; `group1/a` is a chain of
+  two that fits; red if the chain is staged in part (the fixed backing and the slot profile);
+- `future_only_interest_stages_nothing` and `tokens_interest_stages_matching_response` (heap):
+  the Interest names `group1/zenoh-pico`, so the first's empty staging is the C bit's verdict
+  and the second's `(1, 1)` holds without the dialect;
+- the own-space pair (heap): id 7 resolves to `ours/tok` in our space and `theirs/tok` in the
+  peer's; reading the wrong space stages token 2. Unchanged in what it discriminates.
+
+### 4.5 D11
+
+D11 is the test target's gate. Every build that compiled it has `alloc` (its owned builders
+need it), so it runs where it ran; a build without `alloc` compiles it as an empty target. Its
+one test is unchanged.
+
 ## 5. What the main session runs
 
 Per commit, each a single command from the workspace root:
@@ -217,6 +269,11 @@ Per commit, each a single command from the workspace root:
 - D9: `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,session-unicast,liveliness-token,codec-push,rx-push,codec-response,codec-response-final,rx-response,codec-request --all-targets -- -D warnings`;
   `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib mandatory_extension_rule_tests`;
   `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib lent_control::`.
+- D10: `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,liveliness-token --lib local_token::`;
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib local_token::` (the heap build, same count as before D10);
+  `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,liveliness-token --all-targets -- -D warnings`.
+- D11: `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,session-unicast,liveliness-token,codec-push,rx-push,codec-response,codec-response-final,rx-response,codec-request --all-targets -- -D warnings`;
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --all-features --test lent_control_alloc` (1 test; the default features leave out the codecs it counts, so there it is 0).
 
 ## 6. Left open
 
@@ -224,8 +281,10 @@ Per commit, each a single command from the workspace root:
   (link and group form) at the merge, which takes that lane's form; nothing here builds on D1's.
 - `docs/win-budget/codec-scale.md` records the step that introduced `local_token::token_reply_len`;
   D1 removed it. That record is the codec-scale lane's and is left as written.
-- Arm 22 stays `--lib`: its `--all-targets` form is site 6, and an arm is added after the
-  command it runs has been seen green.
+- Arm 22 stays `--lib`: its `--all-targets` form is sites 6 and 8, and an arm is added after
+  the command it runs has been seen green.
+- Arm 22's features under `cargo test --lib` have not been run; other modules' tests may assume
+  the wildcard dialect as site 7's did.
 - `pubsub::decode_isolation_tests` has site 6's shape (gated on `storage-profile`, reads the
   owned Push and the heap registry); no build of this lane reached it, so it is left as read.
 - The ledger keeps wz-runtime-coop's two `session_drive.rs` findings (a redundant explicit link
