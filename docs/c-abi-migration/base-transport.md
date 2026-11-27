@@ -227,7 +227,7 @@ lent chain, after for a borrowed one).
 | step | what | expected | send Ir | receive Ir | before it |
 |------|------|---------:|---------|------------|-----------|
 | B3a | **built** (commit "Borrow the open frame's lease into its send"): the open frame's lease lent to `send_lent_batch` by reference, so a message that does not join the open frame copies no lease whole (the 52 of 5.1) | -40 to -55 | lower: one 56-byte copy fewer on that message, no call added | none | built |
-| B3b | the conduit's open frame written where it lies: one write cursor over the slot's memory, the one `TxBuf` table of a lent frame, which the lease holds as a field, so neither the pick-up nor the put-down copies the frame's state | -150 to -250 | lower | none | a build loop: the lease and its put-down forms are named on 115 lines of 9 other files |
+| B3b | the conduit's open frame written where it lies: one write cursor over the slot's memory, the one `TxBuf` table of a lent frame, which the lease holds as a field, so neither the pick-up nor the put-down copies the frame's state (its change read in 5.4) | -150 to -250 | lower | none | a build loop: the lease and its put-down forms are named on 115 lines of 9 other files |
 | B3c | the slot held for the batch: a single-conduit lend-only link lends the batch one slot, and a frame that does not join leaves before the next opens in it, as zenoh-pico's batch does; no per-frame `acquire`, no holder record | -250 to -500 | lower: no lend per frame | none | B3b; the cooperative link's slot pool (driver area) |
 | B3d | the chain's length read off its first fragment's run (`BodyWindow` counts the message's position already): no counting pass, so `emit_fragments_encoded`, `try_encoded_len` and `CountTxBuf`'s table leave the lend-only build | -200 to -300 | none (a chain only) | none | B3b; the cap's refusal moved between the first fragment's write and its emit |
 | B4a | one open chain per reliability in a `OnePeer` Router: the slot is the reliability's index, so no search, no free-slot walk and no quota count | -150 to -250 | none | none per sample (a fragment is the cold path) | a line reading of the case's own Router |
@@ -236,6 +236,50 @@ lent chain, after for a borrowed one).
 B3 is -640 to -1,105 by these lines, below the earlier -800 to -1,300 at both ends; B4 is -350
 to -650, below the earlier -600 to -1,000. None of the steps touches the receive's hot path (a
 frame's records are walked as before), and none adds a call to the send path.
+
+### 5.4 B3b's change, read in the code (not built)
+
+What the 360 bytes of 5.1 copy is the frame's write state: `TxLease` is `{ driver, slot, base,
+total, headroom, len, sent }` and `OpenSlot` `{ slot, base, total, headroom, len }`
+(`wz-session-core/src/tx_lease.rs`), so `pick_up` builds a lease of seven words out of the five
+the stage keeps (`BatchStage::lent`, `session_actions.rs`) and `keep_open` copies five back, at
+every message that joins the open frame; the holder record is read around it. The form that copies
+nothing keeps the write state in one place and writes through it where it lies:
+
+- `FrameCursor { base, total, headroom, len }` (in `tx_lease.rs`): the one `TxBuf` of a lent
+  slot, with `append`, `append_byte`, `reserve`, `reserve_rest`, `truncate`, `as_slice`
+  and `hold_to` as the lease's are now. `TxLease` is `{ driver, slot, frame: FrameCursor, sent }`
+  and `OpenSlot` `{ slot, frame: FrameCursor }`: `keep_open` and `pick_up` move the cursor
+  whole, and `OpenSlot::frame_mut` (unsafe, the safety `pick_up`'s: the record says the slot is
+  still lent) lends the cursor where the stage keeps it.
+- The join (`push_unicast`'s lent arm, line "if let Some(open) = batch.stage.lent.take()"): the
+  stage's `OpenSlot` stays in the stage; the reliability is read off `frame_mut().as_slice()`,
+  the message written through `TxSink::new(open.frame_mut())`, and a write that does not fit
+  truncated in place. Only a frame that does not join is taken out of the stage and picked up as
+  a lease for `send_lent_batch`, the cold arm.
+- One `TxBuf` table: `TxLease` no longer implements `TxBuf`; every place that unsizes a lease
+  into `EncodeBuf` writes through `lease.frame_mut()` instead, and the lease keeps `len`,
+  `as_slice`, `truncate`, `capacity` and `hold_to` as inherent methods forwarding to the
+  cursor, so the readers do not change. Were both to implement it, a lease's table (267 in the
+  case) and the cursor's would both be linked.
+
+The sites that change are those that write into a lease through `TxBuf`: in `wz-session-core`
+`session_actions.rs` (the join; `emit_on_link` reads the lease's bytes, sends it or gives it
+back, and writes nothing through `TxBuf`),
+`multicast_tx.rs` (`TxSink::new(&mut slot)`), and in the drivers and tests that name the lease
+(`wz-runtime-tokio` `stream_link.rs`, `quic_pipeline.rs` and three test files,
+`wz-session-lwip` `driver.rs`, `bundle_tests.rs`): the 115 lines of 5.3 hold the lease's name,
+and of them only the writes through `TxBuf` change. `wz-runtime-tokio` and `wz-session-lwip`
+are what the build loop is for: neither is in the case, and a call there that reads the lease as a
+`TxBuf` is found only by compiling them.
+
+Expected as 5.3 says, -150 to -250 on the transport row: `pick_up`'s 53 and the put-downs' 64
+and 70 at the join go, the open frame's state no longer copied, and the lease's `TxBuf` table
+becomes the cursor's (one table either way). Send Ir lower at each joined message (no 7-word
+build, no 5-word copy back); receive untouched. Tests: `tx_lease`'s tests over the cursor (a frame
+kept open and written again in place holds what was written, its budget, and gives the slot back
+once), the batching tests of `bundle_tests.rs` (`transport-batching` with `transport-tx-lend`),
+and the case's join counted by `BatchLendCounts`.
 
 ## 6. The work steps as built
 
