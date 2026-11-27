@@ -28,6 +28,12 @@ use core::net::{Ipv4Addr, SocketAddr};
 // A buffer a session lends exists only where the crate carries sessions.
 #[cfg(feature = "session-unicast")]
 use wz_session_core::byte_cells::ByteBuf;
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+use wz_session_core::byte_cells::LentByteCells;
 
 /// The interface a group is joined on and sent out of, in the form the group's family names one:
 /// IPv4 by an address the interface holds (`IP_ADD_MEMBERSHIP`'s `imr_interface`,
@@ -291,7 +297,7 @@ pub enum GroupSend {
 }
 
 /// The buffer a group transport receives into: one of its own, or one its session lent from the
-/// memory it reserved when it opened (`SessionLinks::lend_group_rx`), which goes back to the
+/// memory it reserved when it opened (`SessionLinks::lend_groups`), which goes back to the
 /// session as the group is left ([`GroupTransport::give_back_rx`]). The transport reads and writes it whole,
 /// whichever it is, and says what a datagram longer than it comes to: a host's socket cuts it, as
 /// it cut one past a buffer of the transport's own.
@@ -352,6 +358,143 @@ impl<O: AsRef<[u8]> + AsMut<[u8]>> GroupRx<O> {
                 None
             }
         }
+    }
+}
+
+/// The receive buffer a session gives a group its links join ([`GroupJoiner::join`]).
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+pub enum GroupBuffer {
+    /// A buffer of the table the session lent, which the group gives back as it is left.
+    Lent(ByteBuf),
+    /// One of the transport's own, this many bytes long: the session's group batch, the length a
+    /// buffer of its table would have, as a session that takes its links' memory on use gives it.
+    Sized(usize),
+    /// None: the transport's own, of the largest datagram it reads whole, as links no session
+    /// gave group buffers hold it.
+    Unsized,
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+impl<O: AsRef<[u8]> + AsMut<[u8]>> GroupRx<O> {
+    /// The buffer `given` names: the session's, or one of the transport's own that `own` makes
+    /// of the bytes the session sized, or of `widest`, the largest datagram the transport reads
+    /// whole, where it sized none. `None`, nothing held, when `own` has no memory for it.
+    pub fn given(
+        given: GroupBuffer,
+        widest: usize,
+        own: impl FnOnce(usize) -> Option<O>,
+    ) -> Option<Self> {
+        match given {
+            GroupBuffer::Lent(buf) => Some(Self::Lent(buf)),
+            GroupBuffer::Sized(bytes) => own(bytes).map(Self::Own),
+            GroupBuffer::Unsized => own(widest).map(Self::Own),
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+impl GroupRx<alloc::vec::Vec<u8>> {
+    /// [`Self::given`], a buffer of the transport's own taken from the heap, which may refuse it.
+    pub fn of_heap(given: GroupBuffer, widest: usize) -> Option<Self> {
+        Self::given(given, widest, crate::link_storage::zeroed_bytes)
+    }
+}
+
+/// Where the receive buffers of the groups a stack's links join come from, for links of the kind
+/// that names it ([`CountKind::Groups`](crate::link_cells::CountKind::Groups)), which a session
+/// hands the stack once (`SessionLinks::lend_groups`): a table the session lent, for a kind whose
+/// sessions lend their links tables, or the length of the buffer each group takes of its own, for
+/// [`OnHeap`](crate::link_cells::OnHeap)'s. What a stack holds before a session hands it one gives
+/// each group the transport's own buffer, of the largest datagram it reads whole.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+pub trait GroupSource: Copy + Default {
+    /// The buffer of a group joined now: a claim of the table, where a table with none left
+    /// refuses the join as [`LinkOpenError::Exhausted`](crate::session_drive::LinkOpenError)
+    /// before the joiner is asked.
+    fn buffer(&self) -> Result<GroupBuffer, crate::session_drive::LinkOpenError>;
+
+    /// The table a group's buffer is claimed of: `None` for a source that lends none.
+    fn table(&self) -> Option<&LentByteCells>;
+}
+
+/// A table a session lent, while it lent one: each group claims a buffer of it, a group past it
+/// is refused as exhausted, and the buffer goes back as the group is left.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+impl GroupSource for Option<LentByteCells> {
+    fn buffer(&self) -> Result<GroupBuffer, crate::session_drive::LinkOpenError> {
+        match self {
+            Some(table) => table
+                .claim()
+                .map(GroupBuffer::Lent)
+                .ok_or(crate::session_drive::LinkOpenError::Exhausted),
+            None => Ok(GroupBuffer::Unsized),
+        }
+    }
+
+    fn table(&self) -> Option<&LentByteCells> {
+        self.as_ref()
+    }
+}
+
+/// Each group a buffer of its own taken from the heap as it is joined, as long as the session's
+/// group batch (`Self::sized`): the source of a kind whose sessions take their links' memory on
+/// use, so a group holds what the session's table would have lent it and nothing is laid out for
+/// it before it is joined. The groups a session joins at once are its config's, which bounds them.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HeapGroups {
+    /// The bytes of a group's buffer, the session's group batch.
+    bytes: Option<usize>,
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+impl HeapGroups {
+    /// Every group a buffer of `bytes`, the session's group batch.
+    pub const fn sized(bytes: usize) -> Self {
+        Self { bytes: Some(bytes) }
+    }
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+impl GroupSource for HeapGroups {
+    fn buffer(&self) -> Result<GroupBuffer, crate::session_drive::LinkOpenError> {
+        Ok(self.bytes.map_or(GroupBuffer::Unsized, GroupBuffer::Sized))
+    }
+
+    fn table(&self) -> Option<&LentByteCells> {
+        None
     }
 }
 
@@ -441,12 +584,13 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
 ))]
 pub trait GroupJoiner {
     /// The group `group` names, joined: the transport a group session runs over. `rx` is the
-    /// buffer the transport receives into when its session lent one
-    /// (`SessionLinks::lend_group_rx`); `None` and the transport makes its own.
+    /// buffer the transport receives into, as its session gave it ([`GroupSource::buffer`]): the
+    /// session's, or the length of one of the transport's own ([`GroupRx::given`]). A buffer of
+    /// its own the heap refuses is [`LinkOpenError::Exhausted`](crate::session_drive::LinkOpenError).
     fn join(
         &self,
         group: &wz_session_core::group_locator::GroupLocator,
-        rx: Option<ByteBuf>,
+        rx: GroupBuffer,
     ) -> Result<alloc::boxed::Box<dyn GroupTransport>, crate::session_drive::LinkOpenError>;
 }
 
@@ -470,7 +614,7 @@ impl GroupJoiner for NoGroups {
     fn join(
         &self,
         group: &wz_session_core::group_locator::GroupLocator,
-        rx: Option<ByteBuf>,
+        rx: GroupBuffer,
     ) -> Result<alloc::boxed::Box<dyn GroupTransport>, crate::session_drive::LinkOpenError> {
         let _ = (group, rx);
         Err(crate::session_drive::LinkOpenError::Unsupported)
@@ -507,6 +651,68 @@ mod tests {
         assert_eq!(CELLS.in_use(), 1, "held by whoever it was given back to");
         drop(back);
         assert_eq!(CELLS.in_use(), 0);
+    }
+
+    /// A group's buffer is what its session gave it: the lent one; one of the transport's own of
+    /// the length the session sized; or, where it sized none, of the widest datagram. An own
+    /// buffer the maker has no memory for gives no buffer. Turned red by a sized buffer made at
+    /// the widest length, which each group would hold where its session takes memory on use.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "alloc",
+        not(feature = "session-slot")
+    ))]
+    #[test]
+    fn a_group_buffer_is_the_one_its_session_gave() {
+        use wz_session_core::byte_cells::{ByteCells, ByteSource};
+
+        static CELLS: ByteCells<4, 1> = ByteCells::new();
+        let own = |len: usize| Some(alloc::vec![0u8; len]);
+        let sized = GroupRx::given(GroupBuffer::Sized(48), 1_500, own).expect("made");
+        assert_eq!(sized.as_slice().len(), 48, "the session's batch");
+        assert!(!sized.is_lent());
+        let widest = GroupRx::given(GroupBuffer::Unsized, 1_500, own).expect("made");
+        assert_eq!(widest.as_slice().len(), 1_500, "the widest datagram");
+        let lent = GroupRx::given(
+            GroupBuffer::Lent(CELLS.claim().expect("the cell")),
+            1_500,
+            own,
+        )
+        .expect("the lent cell");
+        assert!(lent.is_lent());
+        assert_eq!(lent.as_slice().len(), 4, "the lent cell, as long as it is");
+        assert!(
+            GroupRx::<alloc::vec::Vec<u8>>::given(GroupBuffer::Sized(48), 1_500, |_| None)
+                .is_none(),
+            "no memory, no buffer"
+        );
+        drop(lent);
+        assert_eq!(CELLS.in_use(), 0);
+    }
+
+    /// A source of the heap hands each group the length it was sized to, and none given, or a
+    /// session that lent no table, the widest. Turned red by a heap source that hands no length,
+    /// which leaves each group the widest datagram's buffer.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "alloc",
+        not(feature = "session-slot")
+    ))]
+    #[test]
+    fn a_heap_source_hands_each_group_its_sized_length() {
+        assert!(matches!(
+            HeapGroups::sized(48).buffer(),
+            Ok(GroupBuffer::Sized(48))
+        ));
+        assert!(HeapGroups::sized(48).table().is_none());
+        assert!(matches!(
+            HeapGroups::default().buffer(),
+            Ok(GroupBuffer::Unsized)
+        ));
+        assert!(matches!(
+            None::<LentByteCells>.buffer(),
+            Ok(GroupBuffer::Unsized)
+        ));
     }
 
     /// An interface is named to a group in the group's own family, and the routing's choice to

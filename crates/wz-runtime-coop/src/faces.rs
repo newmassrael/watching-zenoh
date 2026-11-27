@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::Deref;
 
-use wz_session_core::bounded::{push_text, BoundedVec, Lent, Static};
+use wz_session_core::bounded::{push_text, BoundedVec, Lent, OnUse, Static, Storage};
 use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::DriverOutcome;
@@ -1430,15 +1430,18 @@ pub type DialPlace<D> = Option<Dial<D>>;
 /// a dial or a port names its endpoint by its row, and nothing copies the text after the open.
 /// The dial rows are at most the build's `MAX_STATIC_CONNECT`, and the listen rows at most its
 /// `MAX_ADMIN_LOCATORS`, the listening locators a node holds, which the session's plan holds each
-/// count to before it lends the rows; each row at most `MAX_LOCATOR_LEN` bytes.
-pub struct EndpointTexts {
-    dial: EndpointRows,
-    listen: EndpointRows,
+/// count to before it lends the rows; each row at most `MAX_LOCATOR_LEN` bytes. The rows are of
+/// the storage `P` of the session's own state: the rows its open lent ([`Lent`]), or, where the
+/// session's tables take their memory on use ([`OnUse`]), rows of the allocator counted to the
+/// endpoints the session names, taken at the first text of each role written.
+pub struct EndpointTexts<P: Storage = Lent> {
+    dial: EndpointRows<P>,
+    listen: EndpointRows<P>,
 }
 
 /// The rows of one role's endpoint texts ([`EndpointTexts`]). The two roles' tables are one type,
 /// bounded by the larger of their two limits, so one body writes and reads either.
-pub type EndpointRows = BoundedVec<LocatorText, ENDPOINT_TEXT_ROWS, Lent>;
+pub type EndpointRows<P = Lent> = BoundedVec<LocatorText, ENDPOINT_TEXT_ROWS, P>;
 
 /// The most rows of either role's endpoint texts a build lends: the larger of
 /// `MAX_STATIC_CONNECT` and `MAX_ADMIN_LOCATORS`.
@@ -1467,12 +1470,29 @@ pub enum EndpointTextRefused {
     },
     /// Every row the session reserved for its endpoints holds one already.
     Full,
+    /// The rows are taken of the allocator at the first text of their role, and it had no room
+    /// for them; `bytes` is what they take.
+    NoMemory {
+        /// The bytes of the role's rows.
+        bytes: usize,
+    },
 }
 
-impl EndpointTexts {
+impl EndpointTexts<OnUse> {
+    /// The texts of a session that names `dials` endpoints to dial and `listens` to listen on,
+    /// each role's table held to the build's bound and taking no memory before its first text.
+    pub const fn counted(dials: usize, listens: usize) -> Self {
+        Self {
+            dial: EndpointRows::<OnUse>::counted(dials),
+            listen: EndpointRows::<OnUse>::counted(listens),
+        }
+    }
+}
+
+impl<P: Storage> EndpointTexts<P> {
     /// The texts of a session whose open lent `dial` for its endpoints to dial and `listen` for
     /// those to listen on, none written yet.
-    pub fn over(dial: EndpointRows, listen: EndpointRows) -> Self {
+    pub fn over(dial: EndpointRows<P>, listen: EndpointRows<P>) -> Self {
         Self { dial, listen }
     }
 
@@ -1489,7 +1509,17 @@ impl EndpointTexts {
         let mut row = LocatorText::new();
         push_text(&mut row, text).map_err(|_| EndpointTextRefused::TooLong { len: text.len() })?;
         let at = rows.len();
-        rows.push(row).map_err(|_| EndpointTextRefused::Full)?;
+        let free = rows.free_slots();
+        if free == 0 {
+            return Err(EndpointTextRefused::Full);
+        }
+        // A free row the push does not take is one whose memory the allocator refused, which
+        // only a table that takes its rows at its first value asks it for.
+        let bytes = at
+            .saturating_add(free)
+            .saturating_mul(core::mem::size_of::<LocatorText>());
+        rows.push(row)
+            .map_err(|_| EndpointTextRefused::NoMemory { bytes })?;
         Ok(at)
     }
 
@@ -1582,7 +1612,7 @@ impl DialEndpoint {
     }
 
     /// The endpoint's text, read in `texts`, the session's; a row past the last reads empty.
-    pub fn text<'a>(&'a self, texts: &'a EndpointTexts) -> &'a str {
+    pub fn text<'a, P: Storage>(&'a self, texts: &'a EndpointTexts<P>) -> &'a str {
         match self {
             DialEndpoint::Listed(at) => texts.dial_text(*at),
             #[cfg(feature = "listen")]
@@ -5857,6 +5887,44 @@ mod tests {
             0,
             "a dial of such a build holds nothing of its endpoint"
         );
+    }
+
+    /// Where the tables take their memory on use, a role's texts take no memory before its first
+    /// text and then the rows the session counted, past which a text is refused as full; a role
+    /// that names no endpoint takes none, and the texts read as the lent rows' do. Turned red by
+    /// rows taken when the texts are made or by the other role's text, a text written past the
+    /// count, or a refused text that takes the rows.
+    #[test]
+    fn on_use_texts_take_their_rows_at_the_first_written_and_no_more() {
+        let mut texts = EndpointTexts::counted(2, 0);
+        assert!(!texts.dial.holds_rows() && !texts.listen.holds_rows());
+        let long = "a".repeat(caps::MAX_LOCATOR_LEN + 1);
+        assert_eq!(
+            texts.write_dial(&long),
+            Err(EndpointTextRefused::TooLong { len: long.len() })
+        );
+        assert!(!texts.dial.holds_rows(), "a refused text takes no rows");
+        assert_eq!(texts.write_dial("udp/10.0.0.1:7447"), Ok(0));
+        assert!(
+            texts.dial.holds_rows(),
+            "the first text takes its role's rows"
+        );
+        assert!(!texts.listen.holds_rows(), "and none of the other role's");
+        assert_eq!(texts.write_dial("tcp/10.0.0.2:7447"), Ok(1));
+        assert_eq!(
+            texts.write_dial("tcp/10.0.0.3:7447"),
+            Err(EndpointTextRefused::Full),
+            "past the count"
+        );
+        assert_eq!(
+            texts.write_listen("tcp/0.0.0.0:7447"),
+            Err(EndpointTextRefused::Full),
+            "a role that names no endpoint"
+        );
+        assert!(!texts.listen.holds_rows());
+        assert_eq!(texts.dials(), 2);
+        assert_eq!(DialEndpoint::Listed(1).text(&texts), "tcp/10.0.0.2:7447");
+        assert_eq!(texts.listen_text(0), "");
     }
 
     /// A text is written in the next row and answered with its place; one longer than a row is

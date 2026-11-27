@@ -1044,6 +1044,12 @@ tests::direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg"
     # crate's all-features build compiles and no other on-use leg does. Not measured on a build
     # host yet.
     "wz-capi-coop|hook|link-admission,tables-on-use|on_use"
+    # The same tables on use in the form that keeps the round (`WZ_COOP_VALUE_LOCKS=off`, rows
+    # below): the one build of a session that listens and keeps the publishes a held session
+    # dropped for its other faces, whose table is then its own, counted at the open and taken as
+    # publishes are kept, with no row of the arena. No other leg compiles that table on use; the
+    # plan's tests read it (`tests::arena::`). Scope `lane`: not measured on a build host yet.
+    "wz-capi-coop|lane|@env:WZ_COOP_VALUE_LOCKS=off,listen,tables-on-use|tests::arena::"
     # The crate's whole suite in the build form the C library ships: a domain of
     # `declaration-sync-pacing` without `on`, where a link is told the session's declarations in
     # one lap when it comes up and the engine holds no code of paced turns
@@ -1419,16 +1425,6 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
     # end it cannot reach; an acceptor whose full handshake table leaves the next connection on the
     # port, and lets go of a handshake that runs out of time. The slot row above with the feature.
     "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast,ws|ws_link::slot::"
-    # The heap profile's udp ports in the form the cooperative C engine builds them
-    # (`udp-port-lent-only`, the selector its `listen` names): a port keeps only the rows and the
-    # read slots its session lent and makes none of its own, and links lent no rows or no slots
-    # refuse a `udp/` listener as exhausted. A row of its own because the selector compiles out the
-    # heap form's port tests, which the first row of this crate runs. The filter is the stem of
-    # the two tests only it reaches (2):
-    #   udp_link::tests::a_lent_only_port_keeps_what_its_session_lent_and_nothing_of_its_own
-    #   ip_stack::tests::a_lent_only_port_opens_over_the_rows_and_slots_its_session_lent_alone
-    # NOT YET MEASURED.
-    "wz-runtime-coop|hook|alloc,session-unicast,udp-listen,udp-port-lent-only|a_lent_only_port"
     # The links over a transport the program supplies (`app_link::`): a dial, a listener and its
     # accepted streams and sources, a datagram that goes whole or not at all, a group joined, read
     # by member and left, and a group's room answered from the table, inside the loop and out.

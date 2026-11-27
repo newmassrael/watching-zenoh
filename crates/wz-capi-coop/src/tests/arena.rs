@@ -113,13 +113,46 @@ fn pooled(pool: usize, links: usize) -> usize {
     }
 }
 
-/// How many links `plan` holds places for: its row of places in a build that listens, its
-/// transmit rows, one for each link, in a build that only dials.
-#[cfg(any(feature = "listen", not(wz_on_use)))]
+/// How many links `plan` holds: the count every form keeps (`ArenaPlan::links`), which in a form
+/// that lays the links' tables out is also its row of places.
+#[cfg(feature = "listen")]
 fn link_places(plan: &ArenaPlan) -> usize {
+    #[cfg(not(wz_on_use))]
+    assert_eq!(
+        laid_link_places(plan),
+        plan.links(),
+        "a place laid out for each link"
+    );
+    plan.links()
+}
+
+/// How many links `plan` holds in a build that only dials, which counts them by its rows alone.
+#[cfg(all(not(feature = "listen"), not(wz_on_use)))]
+fn link_places(plan: &ArenaPlan) -> usize {
+    laid_link_places(plan)
+}
+
+/// The places laid out for `plan`'s links: its row of places in a build that listens, and its
+/// transmit rows, one for each link, in a build that only dials.
+#[cfg(not(wz_on_use))]
+fn laid_link_places(plan: &ArenaPlan) -> usize {
     plan.rows()
         .find(|row| row.part() == "link places")
         .map_or_else(|| row(plan, "link transmit slots").count, |row| row.count)
+}
+
+/// How many receive buffers `plan`'s links hold at most: the row of the pool the arena lends, or,
+/// where the tables take their memory on use and each link holds its own, one for each link.
+#[cfg(feature = "listen")]
+fn link_receive_buffers(plan: &ArenaPlan) -> usize {
+    #[cfg(not(wz_on_use))]
+    {
+        row(plan, "link receive buffers").count
+    }
+    #[cfg(wz_on_use)]
+    {
+        plan.links()
+    }
 }
 
 /// The row of `plan` named `part`.
@@ -581,7 +614,7 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
 /// A session that listens is lent the slots its udp ports share for their datagrams, each a
 /// link's batch long, with the ports' rows; one that listens on nothing is lent none. Turned
 /// red by slots of anything but the links' batch, or slots reserved for a session with no port.
-#[cfg(feature = "udp-listen")]
+#[cfg(all(feature = "udp-listen", not(wz_on_use)))]
 #[test]
 fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     let listening = ArenaPlan::of(
@@ -604,11 +637,10 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     let mut session =
         SessionArena::reserve(&listening, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    #[cfg(not(wz_on_use))]
     let _links = listening.transport().links_from(&mut lend);
-    let slots = listening.transport().port_slots_from(&mut lend);
+    let ports = listening.transport().ports_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
-    let table = slots.expect("a table for the ports");
+    let table = ports.expect("a table for the ports").slots();
     assert_eq!(
         (table.capacity(), table.size()),
         (caps::UDP_PORT_SLOTS, batch)
@@ -637,13 +669,51 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     let mut session =
         SessionArena::reserve(&dialling, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    #[cfg(not(wz_on_use))]
     let _links = dialling.transport().links_from(&mut lend);
-    let slots = dialling.transport().port_slots_from(&mut lend);
+    let ports = dialling.transport().ports_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
     assert!(
-        slots.is_none(),
+        ports.is_none(),
         "a session that listens on nothing is lent no table for ports"
+    );
+}
+
+/// Where the tables take their memory on use, a session that listens on `udp/` lays out no row of
+/// its ports and sizes the heap's memory for them to the counts the lent form lends: a peer's row
+/// for each link it may hold, `UDP_PORT_SLOTS` datagrams, each port's read buffer a link's batch.
+/// One that listens on nothing sizes none, so its links open no port. Turned red by a plan that
+/// still lays the ports' rows out, or a source sized to other counts than the lent form's.
+#[cfg(all(feature = "udp-listen", wz_on_use))]
+#[test]
+fn an_on_use_listening_session_sizes_its_ports_and_lays_out_none() {
+    use wz_runtime_coop::udp_link::HeapPorts;
+
+    let listening = ArenaPlan::of(
+        &CoopConfig {
+            listen: vec!["udp/127.0.0.1:0".to_owned()],
+            max_faces: 2,
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    assert!(
+        listening
+            .rows()
+            .all(|row| !PORT_PARTS.contains(&row.part())),
+        "an on-use plan lays out no row of the ports: {listening:?}"
+    );
+    let batch = usize::from(client_config().batch_size);
+    assert_eq!(
+        listening.transport().ports_sized(),
+        HeapPorts::sized(listening.links(), caps::UDP_PORT_SLOTS, batch)
+    );
+
+    let dialling = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
+    assert_eq!(
+        dialling.transport().ports_sized(),
+        HeapPorts::default(),
+        "a session that listens on nothing sizes no port"
     );
 }
 
@@ -652,7 +722,7 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
 /// row is printed, so a run with `--nocapture` shows the bytes the tcp listener does not reserve.
 /// Turned red by port rows planned from the count of listeners rather than of the `udp/` ones,
 /// or laid out empty for a session with no port.
-#[cfg(feature = "udp-listen")]
+#[cfg(all(feature = "udp-listen", not(wz_on_use)))]
 #[test]
 fn a_session_that_listens_on_tcp_alone_is_lent_no_port_slot() {
     let config = |listen: &[&str]| CoopConfig {
@@ -816,28 +886,10 @@ const PORT_PARTS: [&str; 4] = [
 /// batch a group it names sends, under the build's multicast batch, after the links' tables: the
 /// stack claims one when a group is joined. Turned red by a buffer for each group asked past the
 /// task cells, or one shorter than the largest group's batch.
-#[cfg(feature = "group")]
+#[cfg(all(feature = "group", not(wz_on_use)))]
 #[test]
 fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
-    use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
-
-    let join = |batch_size: u16| GroupJoin {
-        endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
-        profile: GroupProfile {
-            lease_ms: 10_000,
-            join_interval_ms: 2_500,
-            max_sessions: None,
-            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
-            req_id_res: 0x02,
-            batch_size,
-            is_qos: false,
-            compression: false,
-            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
-        },
-        is_shm: false,
-        declarations: GroupDeclarations::Entities,
-    };
-    let groups = vec![join(1_024), join(2_048)];
+    let groups = vec![group_join(1_024), group_join(2_048)];
     let asked = groups.len().min(caps::MAX_TASKS);
     let plan = ArenaPlan::of(
         &CoopConfig {
@@ -855,7 +907,6 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
     let mut session =
         SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    #[cfg(not(wz_on_use))]
     let _links = plan.transport().links_from(&mut lend);
     let groups = plan.transport().group_rx_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
@@ -871,11 +922,66 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
     let mut session =
         SessionArena::reserve(&none, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    #[cfg(not(wz_on_use))]
     let _links = none.transport().links_from(&mut lend);
     let groups = none.transport().group_rx_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
     assert!(groups.is_none(), "and lends none");
+}
+
+/// A group the config names, `udp/239.7.7.7:7447` on `lan7`, sending batches of `batch_size`.
+#[cfg(feature = "group")]
+fn group_join(batch_size: u16) -> wz_capi_port::group::GroupJoin {
+    use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
+
+    GroupJoin {
+        endpoint: "udp/239.7.7.7:7447#iface=lan7".to_owned(),
+        profile: GroupProfile {
+            lease_ms: 10_000,
+            join_interval_ms: 2_500,
+            max_sessions: None,
+            seq_num_res: wz_session_core::policy::SnResolution::Bits32,
+            req_id_res: 0x02,
+            batch_size,
+            is_qos: false,
+            compression: false,
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Pico,
+        },
+        is_shm: false,
+        declarations: GroupDeclarations::Entities,
+    }
+}
+
+/// Where the tables take their memory on use, a session that joins groups lays out no buffer for
+/// them and sizes each group's own to the largest group's batch under the build's multicast batch,
+/// the length the arena would lend; one that names no group sizes none. Turned red by a plan that
+/// still lays the groups' buffers out on use, or a source sized to another length.
+#[cfg(all(feature = "group", wz_on_use))]
+#[test]
+fn an_on_use_session_sizes_its_groups_buffers_and_lays_out_none() {
+    use wz_runtime_coop::group_transport::HeapGroups;
+
+    let plan = ArenaPlan::of(
+        &CoopConfig {
+            groups: vec![group_join(1_024), group_join(2_048)],
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    assert!(
+        plan.rows()
+            .all(|row| !row.part().starts_with("link group receive")),
+        "an on-use plan lays out no buffer of a group: {plan:?}"
+    );
+    let bytes = 2_048_usize.min(caps::PICO_MULTICAST_BATCH_BYTES);
+    assert_eq!(plan.transport().groups_sized(), HeapGroups::sized(bytes));
+
+    let none = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
+    assert_eq!(
+        none.transport().groups_sized(),
+        HeapGroups::default(),
+        "a config that names no group sizes none"
+    );
 }
 
 /// The tokens of faces that went before each was retracted are owed apart from the sets those
@@ -1245,43 +1351,17 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         &SessionLimits::defaults(),
     )
     .expect("lays an arena out");
-    // The gets pending on the session's own queryables are held apart from every face's. A build
-    // that asks no query lays out no table of them.
-    #[cfg(feature = "query")]
-    {
-        let own = usize::from(cfg!(feature = "local-queryable"));
-        assert_eq!(row(&dial, "pending gets").count, 1 + own);
-        assert_eq!(row(&listening, "pending gets").count, 3 + own);
+    // The gets pending on the session's own queryables are held apart from every face's, and what a
+    // face's peer writes is held once for each face, never for the session's own gets: counted
+    // in every form, and laid out as rows where the arena lends them (`wz_lent`).
+    let own = usize::from(cfg!(feature = "local-queryable"));
+    if cfg!(feature = "query") {
         assert_eq!(listening.gets().tables, 3 + own);
-        assert_eq!(
-            row(&listening, "pending gets").entry_bytes,
-            row(&dial, "pending gets").entry_bytes,
-            "every face's table is the same"
-        );
     }
-    #[cfg(not(feature = "query"))]
-    assert!(
-        dial.rows().all(|row| row.part() != "pending gets"),
-        "a build that asks no query lays out no table of gets"
-    );
-    // What a face's peer writes is held once for each face, as its gets are, and never for the
-    // session's own gets.
-    assert_eq!(row(&dial, "peer tables").count, 1);
-    assert_eq!(row(&listening, "peer tables").count, 3);
     assert_eq!(listening.peers().tables, 3);
     assert!(dial.peers().dial && !listening.peers().dial);
-    assert_eq!(
-        row(&listening, "peer tables").entry_bytes,
-        row(&dial, "peer tables").entry_bytes,
-        "every face's peer tables are the same"
-    );
-    assert_eq!(row(&dial, "link receive buffers").count, 1);
     assert_eq!(link_places(&listening), 3 + handshakes);
-    assert_eq!(
-        row(&listening, "link receive buffers").count,
-        pooled(caps::RX_POOL_BUFFERS, 3 + handshakes),
-        "the links share a pool of receive buffers"
-    );
+    assert_eq!(link_receive_buffers(&dial), 1);
     assert_eq!(
         dial.gets().rows.queries,
         if cfg!(feature = "query") {
@@ -1291,11 +1371,41 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         },
         "a build that asks no query lends its gets no row"
     );
-    assert_eq!(
-        row(&listening, "session tables"),
-        row(&dial, "session tables"),
-        "the application's tables are held once"
-    );
+    #[cfg(wz_lent)]
+    {
+        // A build that asks no query lays out no table of them.
+        if cfg!(feature = "query") {
+            assert_eq!(row(&dial, "pending gets").count, 1 + own);
+            assert_eq!(row(&listening, "pending gets").count, 3 + own);
+            assert_eq!(
+                row(&listening, "pending gets").entry_bytes,
+                row(&dial, "pending gets").entry_bytes,
+                "every face's table is the same"
+            );
+        } else {
+            assert!(
+                dial.rows().all(|row| row.part() != "pending gets"),
+                "a build that asks no query lays out no table of gets"
+            );
+        }
+        assert_eq!(row(&dial, "peer tables").count, 1);
+        assert_eq!(row(&listening, "peer tables").count, 3);
+        assert_eq!(
+            row(&listening, "peer tables").entry_bytes,
+            row(&dial, "peer tables").entry_bytes,
+            "every face's peer tables are the same"
+        );
+        assert_eq!(
+            row(&listening, "link receive buffers").count,
+            pooled(caps::RX_POOL_BUFFERS, 3 + handshakes),
+            "the links share a pool of receive buffers"
+        );
+        assert_eq!(
+            row(&listening, "session tables"),
+            row(&dial, "session tables"),
+            "the application's tables are held once"
+        );
+    }
 }
 
 /// The dial role's face is lent a link's buffers and a face's tables only when the session dials:
@@ -1330,6 +1440,8 @@ fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
         (1 + 3, 1 + 3 + own)
     );
     assert!(dialling.peers().dial && !only.peers().dial);
+    // The bytes are the arena's, which lays a face's tables out only where it lends them.
+    #[cfg(not(wz_on_use))]
     assert!(
         only.reserved_bytes() < dialling.reserved_bytes(),
         "the listener that dials nothing reserves less"
@@ -1342,7 +1454,7 @@ fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
         crate::arena::dials(&nothing),
         "its open tries the dial role"
     );
-    assert_eq!(row(&plan(&nothing), "link receive buffers").count, 1);
+    assert_eq!(link_receive_buffers(&plan(&nothing)), 1);
 }
 
 /// Each face's peer tables are lent the values of their limits the open resolved, the build's for a
@@ -1598,7 +1710,7 @@ fn a_pool_past_what_a_u16_names_refuses_the_open_by_its_limit() {
 /// faces: `HANDED_LEG_BYTES` cut into places of its links' batch, with their flags, under the
 /// build's `held-faces` value of `held-publish-drop`, and none under `every-face`. Turned red
 /// by places sized by anything but the links' batch, or reserved when the policy keeps none.
-#[cfg(all(feature = "listen", wz_round))]
+#[cfg(all(feature = "listen", wz_round, not(wz_on_use)))]
 #[test]
 fn a_listening_session_reserves_places_for_the_publishes_it_keeps() {
     use wz_session_core::policy::HeldPublishDrop;
@@ -1619,6 +1731,55 @@ fn a_listening_session_reserves_places_for_the_publishes_it_keeps() {
     assert_eq!(row(&plan, "handed leg flags").count, expected);
 }
 
+/// Where the tables take their memory on use, a listening session lays out no row of the publishes
+/// it keeps, and its table keeps as many as the lent form reserves places for, each a links' batch
+/// long, and none past them. Turned red by a plan that still lays the handed rows out on use, or a
+/// table counted or sized to anything but the lent form's places.
+#[cfg(all(feature = "listen", wz_round, wz_on_use))]
+#[test]
+fn an_on_use_session_counts_the_publishes_it_keeps_and_lays_out_none() {
+    use crate::arena::DroppedOn;
+    use wz_session_core::policy::HeldPublishDrop;
+
+    let config = CoopConfig {
+        max_faces: 2,
+        ..client_config()
+    };
+    let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
+    for part in ["handed leg places", "handed leg flags", "handed legs"] {
+        assert!(
+            plan.rows().all(|row| row.part() != part),
+            "an on-use plan lays out no row of {part}"
+        );
+    }
+    let batch = plan.link_bytes();
+    let expected = match SessionPolicy::defaults().held_publish_drop() {
+        HeldPublishDrop::HeldFaces => caps::HANDED_LEG_BYTES / batch,
+        HeldPublishDrop::EveryFace => 0,
+    };
+    let mut session =
+        SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
+    let mut lend = session.lender();
+    let mut handed = plan.transport().lent_from(&mut lend).handed;
+    // A publish whose key and payload fill a batch fits a place; one a byte longer does not.
+    let whole = vec![0u8; batch - 1];
+    let longer = vec![0u8; batch];
+    assert!(
+        !handed.keep("k", &longer, &PublishOptions::put(), DroppedOn::none(0)),
+        "a publish longer than a place is not kept"
+    );
+    for kept in 0..expected {
+        assert!(
+            handed.keep("k", &whole, &PublishOptions::put(), DroppedOn::none(0)),
+            "publish {kept} of {expected} is kept"
+        );
+    }
+    assert!(
+        !handed.keep("k", b"x", &PublishOptions::put(), DroppedOn::none(0)),
+        "none past the places the lent form reserves"
+    );
+}
+
 /// A session that listens and sends each face its own leg (`direct`) reserves no place for a
 /// handed publish, whatever `held-publish-drop` says: a leg dropped is dropped on its own face,
 /// and no other face is owed it. The CONTROL is the links' receive buffers, which it reserves.
@@ -1632,8 +1793,8 @@ fn a_session_that_sends_each_face_its_own_leg_reserves_no_handed_places() {
     };
     let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
     assert!(
-        row(&plan, "link receive buffers").count > 0,
-        "CONTROL: the links' buffers are laid out"
+        link_receive_buffers(&plan) > 0,
+        "CONTROL: the links hold buffers"
     );
     for part in ["handed leg places", "handed leg flags", "handed legs"] {
         assert!(
@@ -2362,7 +2523,7 @@ fn a_face_past_max_faces_is_not_attached() {
         ..config(&router)
     };
     let plan = ArenaPlan::of(&one, &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(row(&plan, "link receive buffers").count, 1);
+    assert_eq!(link_receive_buffers(&plan), 1);
     let engine = open_with(one);
     until(&engine, "the dial role's link", || engine.faces_up() == 1);
     assert!(matches!(
@@ -2754,8 +2915,9 @@ const TX_PARTS: [&str; 2] = ["link transmit flags", "link transmit slots"];
 /// client's arena lends one set of a face's tables and the buffers of one link; a peer's lends the
 /// same rows, with a set and a link for each of the ten faces it admits and a link for its one
 /// handshake: every other row is the client's, item for item, which is the sum
-/// `docs/c-abi-no-heap-pools.md` (section 9.6) states. The peer listens, so a build without
-/// `listen` refuses its faces.
+/// `docs/c-abi-no-heap-pools.md` (section 9.6) states. Where the tables take their memory on use
+/// the arena lays out neither the links' rows nor the faces', and the counts are the sum. The peer
+/// listens, so a build without `listen` refuses its faces.
 #[cfg(feature = "listen")]
 #[test]
 fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
@@ -2822,20 +2984,25 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     let own = usize::from(cfg!(feature = "local-queryable"));
     assert_eq!(client.peers().tables, 1);
     assert_eq!(client.gets().tables, 1 + own);
-    assert_eq!(row(&client, "link receive buffers").count, 1);
+    assert_eq!(link_receive_buffers(&client), 1);
     assert_eq!(peer.peers().tables, faces);
     assert_eq!(peer.gets().tables, faces + own);
     assert_eq!(link_places(&peer), faces + handshakes);
-    assert_eq!(
-        row(&peer, "link transmit slots").count,
-        pooled(preset("TX_POOL_SLOTS"), faces + handshakes),
-        "the peer's links share the preset's outbound pool"
-    );
-    assert_eq!(
-        row(&peer, "link receive buffers").count,
-        pooled(preset("RX_POOL_BUFFERS"), faces + handshakes),
-        "the peer's links share the preset's pool"
-    );
+    // The pools the links share are the arena's; where the tables take their memory on use each
+    // link holds its own buffers, which no row counts.
+    #[cfg(not(wz_on_use))]
+    {
+        assert_eq!(
+            row(&peer, "link transmit slots").count,
+            pooled(preset("TX_POOL_SLOTS"), faces + handshakes),
+            "the peer's links share the preset's outbound pool"
+        );
+        assert_eq!(
+            row(&peer, "link receive buffers").count,
+            pooled(preset("RX_POOL_BUFFERS"), faces + handshakes),
+            "the peer's links share the preset's pool"
+        );
+    }
 
     // The pools hold the fewer of the session's limit and what the faces could hold, each at a
     // peer's own bound: a client's one face what its tables held, and the peer's ten the
@@ -2950,28 +3117,34 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             theirs.part()
         );
     }
-    let at_the_build = ArenaPlan::of(
-        &CoopConfig {
-            listen: vec!["tcp/127.0.0.1:0".to_owned()],
-            ..client_config()
-        },
-        &SessionLimits::defaults(),
-    )
-    .expect("lays an arena out")
-    .reserved_bytes();
-    // A build that admits no more faces and handshakes than the preset, one made at it, lays out
-    // the peer's links and faces at its defaults too, and so has nothing of them to lower.
-    let build = SessionLimits::defaults();
-    if admitted_faces(&build) == Ok(faces) && admitted_handshakes(&build) == Ok(handshakes) {
-        assert!(
-            peer.reserved_bytes() <= at_the_build,
-            "a peer at the preset reserves no more than a listener at a build of the preset"
-        );
-    } else {
-        assert!(
-            peer.reserved_bytes() < at_the_build,
-            "a peer at the preset reserves less than a listener at the build's defaults"
-        );
+    // The preset lowers what the arena reserves by the rows of the links and the faces it lends;
+    // where the tables take their memory on use the arena holds none of them, and the preset's
+    // counts above are what bounds the memory each takes.
+    #[cfg(not(wz_on_use))]
+    {
+        let at_the_build = ArenaPlan::of(
+            &CoopConfig {
+                listen: vec!["tcp/127.0.0.1:0".to_owned()],
+                ..client_config()
+            },
+            &SessionLimits::defaults(),
+        )
+        .expect("lays an arena out")
+        .reserved_bytes();
+        // A build that admits no more faces and handshakes than the preset, one made at it, lays
+        // out the peer's links and faces at its defaults too, and so has nothing of them to lower.
+        let build = SessionLimits::defaults();
+        if admitted_faces(&build) == Ok(faces) && admitted_handshakes(&build) == Ok(handshakes) {
+            assert!(
+                peer.reserved_bytes() <= at_the_build,
+                "a peer at the preset reserves no more than a listener at a build of the preset"
+            );
+        } else {
+            assert!(
+                peer.reserved_bytes() < at_the_build,
+                "a peer at the preset reserves less than a listener at the build's defaults"
+            );
+        }
     }
 }
 

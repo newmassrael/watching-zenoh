@@ -283,6 +283,15 @@ S1 removes a form the C library had beside its one reachable form, so it stands 
 to: with `udp/` listening out of the pico preset the step still holds every build that listens on
 `udp/`.
 
+Later the form is chosen by the links' kind and not by a selector (`heap-native.md` 7.22):
+`udp-port-lent-only` and its feature set went, and a port's memory is `CountKind::Ports`, the rows
+and slots a session lent for the D12 kinds and the heap's for `OnHeap`. S1's bytes stand: the D12
+library instantiates the lent form alone, by type, which C1cs's `nm -C` reading of section 6 checks
+(no `PortRows<..OnUse..>` body in the peer library). S1's two tests went with the selector; their
+cases are held by `udp_link::a_source_no_session_sized_or_lent_gives_no_port` and
+`ip_stack::a_port_reads_into_the_slots_its_session_lent`. The row above and section 6's lines that
+name the selector are this step's history.
+
 ## 6. Verification (the main session's)
 
 - Build and clippy of `wz-runtime-coop` with `alloc,session-unicast,udp-listen` and with

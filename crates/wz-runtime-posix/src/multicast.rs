@@ -853,6 +853,14 @@ impl<S: MulticastSocket> HostGroupTransport<S> {
     /// one of its own that reads a datagram up to the largest UDP payload whole. A datagram longer
     /// than the buffer is cut by the stack, which the session reads as a bad frame.
     pub fn new(read: S, write: S, group: SocketAddr, rx: Option<ByteBuf>) -> Self {
+        let rx = GroupRx::lent_or_own(rx, || alloc::vec![0; UDP_RX_CAPACITY]);
+        Self::with_rx(read, write, group, rx)
+    }
+
+    /// [`Self::new`] receiving into `rx`, made by the joiner: the buffer its session lent, or one
+    /// of the transport's own of the length the session sized, which a joiner takes before it
+    /// binds, so a buffer the heap refuses refuses the join with no socket made.
+    pub fn with_rx(read: S, write: S, group: SocketAddr, rx: GroupRx<Vec<u8>>) -> Self {
         let own = write.local();
         // Dropped in the kernel where it takes a filter, so the reader is never woken by them; the
         // receive still drops what reaches it.
@@ -861,12 +869,7 @@ impl<S: MulticastSocket> HostGroupTransport<S> {
         Self {
             write: Some(write),
             group,
-            receive: Some(HostGroupReceive::of(
-                Some(read),
-                own,
-                group,
-                GroupRx::lent_or_own(rx, || alloc::vec![0; UDP_RX_CAPACITY]),
-            )),
+            receive: Some(HostGroupReceive::of(Some(read), own, group, rx)),
         }
     }
 

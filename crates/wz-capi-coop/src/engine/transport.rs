@@ -37,6 +37,7 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> TransportFaces for Face<C
     // (`super::direct`).
     #[cfg(not(wz_round))]
     type Router = ();
+    type Policy = crate::StatePolicy;
 }
 
 /// What the session tells the groups it joined of its entities (`group`): this engine's, since

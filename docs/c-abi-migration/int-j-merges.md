@@ -186,3 +186,34 @@ The lane states the tables' policy once, in the build script (`wz_lent`,
   (the sim is its unit tests' `tests::sim`), and the test must be a binary of
   its own built without `engine-rows`. So it takes a `pending` row, as its
   sibling `tests/engine_rows.rs` has for the same reason.
+
+## heap-native (3d8b5368d9), second merge
+
+The lane's later fixes: a table the on-use plan lays out none of counts no
+row (`LINK_ROWS`, `GROUP_RX_ROWS`, `PORT_RX_ROWS`), a udp port's memory and a
+group's buffer taken through the links' kind (`CountKind::Ports`,
+`CountKind::Groups`, `SessionLinks::lend_ports`, `lend_groups`), and
+`udp-port-lent-only` gone with the port's memory of its own.
+
+- `crates/wz-runtime-coop/src/udp_link.rs`: peer-prop's `LinkSocket` (a
+  dialled socket and a port's peer, one driver) keeps its variants and takes
+  the port's source as a third parameter, `P: PortSource<N::Flag>`, as the
+  lane's `PortPeer<S, N, P>` and `UdpPort<S, N, P>` do. The lane's
+  `leaked_ports` is kept beside it. The lent-only port test goes with its
+  feature, as the lane removed it; peer-prop's one-driver test makes its port
+  over `leaked_ports` and `shared_book` in place of the arena it built and
+  `UdpPort::lent_in_book`.
+- `crates/wz-runtime-coop/src/ip_link.rs`: `UdpOf` names the socket
+  `LinkSocket<U, N::Shared, N::Ports>`, the same port source as the lane's
+  `PortPeerOf<U, N>`, so a kind on use (whose `Shared` is the kind it wraps)
+  holds the shares of ports over the heap's memory.
+- `crates/wz-runtime-coop/src/ip_stack.rs`: base-td's one closed link type
+  stays, so `LINK_CELL_BYTES` is the cell of `IpLinkOf`; the `udp/` listener
+  is the lane's (a port only over the book its session gave, `UdpPort::in_book`)
+  built as base-td's `IpUdpListener<U, S, T, N, W, F>`; the port's peer and the
+  own socket are `LinkSocket<U, N::Shared, N::Ports>`. `IpLinks::closed` loses
+  the `port_slots` an earlier fix of this integration gave it, the field being
+  gone with the slots now kept in the ports' book.
+- `crates/wz-capi-coop/src/arena.rs`: `Lent` is imported under
+  `all(feature = "query", wz_lent)`, its one reader (the held replies' row);
+  the lane dropped the `udp-listen` arm, as the arena names no port row.

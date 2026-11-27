@@ -46,9 +46,14 @@ pub type UdpOf<U, N, W> = UdpDriver<U, RxOf<N>, TxOf<N>, W>;
 /// A `udp/` link of [`IpLink`] in a build that listens on `udp/`: a dial's or an acceptor's
 /// over a socket of its own, or a port's peer's over its share of the port, each held as a
 /// [`LinkSocket`], so the driver is one body for both kinds and a port's peer is no variant of its
-/// own.
+/// own. A share is over the memory the ports of the kind `N` keep (`CountKind::Ports`).
 #[cfg(feature = "udp-listen")]
-pub type UdpOf<U, N, W> = UdpDriver<LinkSocket<U, <N as CountKind>::Shared>, RxOf<N>, TxOf<N>, W>;
+pub type UdpOf<U, N, W> = UdpDriver<
+    LinkSocket<U, <N as CountKind>::Shared, <N as CountKind>::Ports>,
+    RxOf<N>,
+    TxOf<N>,
+    W,
+>;
 
 /// A stream link over `S` of [`IpLink`]: a `tcp/` link over the plain streams, a `tls/` one over
 /// the secure channels.

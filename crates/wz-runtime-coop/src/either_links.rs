@@ -318,16 +318,12 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
     }
 
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(
-        &mut self,
-        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-        slots: Option<wz_session_core::byte_cells::LentByteCells<N::Flag>>,
-    ) -> Result<(), usize> {
-        on_side!(EitherLinks, self, links => links.lend_port_rows(rows, slots))
+    fn lend_ports(&mut self, ports: N::Ports) -> Result<(), usize> {
+        on_side!(EitherLinks, self, links => links.lend_ports(ports))
     }
 
-    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
-        on_side!(EitherLinks, self, links => links.lend_group_rx(buffers))
+    fn lend_groups(&mut self, groups: N::Groups) {
+        on_side!(EitherLinks, self, links => links.lend_groups(groups))
     }
 
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
