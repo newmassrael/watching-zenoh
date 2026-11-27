@@ -175,7 +175,7 @@ async fn answer_scouts(
     let Some(socket) = scouting else {
         return Ok(());
     };
-    // A sessions document has no `wz` member: its sessions run under the demo's own snapshot.
+    // A sessions document has no `zext` member: its sessions run under the demo's own snapshot.
     let policy = crate::args::resolve_policy();
     crate::runner::spawn_scouting_responder(socket, &policy, whatami, zid, locators.clone())
         .await

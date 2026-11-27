@@ -579,7 +579,7 @@ fn clock_beside(
 
 /// The policies a session `CoopEngine::open` opens from `config` runs under: the one place that
 /// open decides them. The build defaults: the config is what the ABI read from its own keys and
-/// values, not a zenoh document with a `wz` member, and it has no field for a policy yet; the
+/// values, not a zenoh document with a `zext` member, and it has no field for a policy yet; the
 /// ABI's door for one is a key of its own.
 #[cfg(any(feature = "runtime-plan", feature = "listen", feature = "group", test))]
 pub(crate) fn resolve_policy<E>(_config: &CoopConfig<E>) -> SessionPolicy {

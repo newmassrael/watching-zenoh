@@ -170,7 +170,7 @@ async fn bind_window(group: SocketAddr, socket: &ScoutSocketArgs) -> Result<Scou
     } else {
         scout_interface_addresses().unwrap_or_default()
     };
-    // The snapshot of a sessions document's node, which has no `wz` member: every socket of the
+    // The snapshot of a sessions document's node, which has no `zext` member: every socket of the
     // window is opened under it.
     let policy = crate::args::resolve_policy();
     let (mut ask, refused) = bind_scout_sockets(group_ip, port, &locals, socket.ttl, &policy).await;

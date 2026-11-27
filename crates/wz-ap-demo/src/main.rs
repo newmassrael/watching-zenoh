@@ -264,7 +264,7 @@ fn demo_main() -> ExitCode {
     #[cfg(feature = "zenoh-config")]
     let expanded;
     //
-    // The node's snapshot of the policies is decided here too, once: what the file's `wz` member
+    // The node's snapshot of the policies is decided here too, once: what the file's `zext` member
     // resolved to, or the demo's own for a node no file describes. It is handed to the tuning
     // below, and through it to every session, router and socket the node makes. The node's runtime
     // limits are decided with it and reach, through the tuning, the clock and the resource
