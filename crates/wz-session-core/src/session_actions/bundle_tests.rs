@@ -3876,7 +3876,9 @@ mod link_stamps {
         ];
         for (n, (class, priority)) in frames.into_iter().enumerate() {
             actions.link.spoke.store(false, Ordering::Relaxed);
-            actions.emit_on_link(&actions.link, &[0x04], None, class, priority, false);
+            actions
+                .tx
+                .emit_on_link(&actions.link, &[0x04], None, class, priority, false);
             assert!(
                 actions.link.spoke.load(Ordering::Relaxed),
                 "frame {n} marks the line"
@@ -3958,7 +3960,9 @@ mod link_stamps {
         let interval = actions.keepalive_interval_ms();
         let marks = |class, priority| {
             actions.link.spoke.store(false, Ordering::Relaxed);
-            actions.emit_on_link(&actions.link, &[0x04], None, class, priority, false);
+            actions
+                .tx
+                .emit_on_link(&actions.link, &[0x04], None, class, priority, false);
             actions.link.spoke.load(Ordering::Relaxed)
         };
         assert!(
