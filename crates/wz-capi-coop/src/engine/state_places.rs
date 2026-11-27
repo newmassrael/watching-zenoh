@@ -476,9 +476,14 @@ unsafe impl<W> ZeroEmpty for RoomsPlace<W> {}
 
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 impl<W> RoomsPlace<W> {
-    /// Where the rooms lie in the place at `at`: the place itself, being the rooms' bytes alone.
-    pub(crate) fn rooms_at(at: NonNull<Self>) -> NonNull<LinkRooms<W>> {
-        at.cast()
+    /// Where the rooms lie in the place at `at`.
+    ///
+    /// # Safety
+    /// `at` points at a place of the rooms that is not null.
+    pub(crate) unsafe fn rooms_at(at: NonNull<Self>) -> NonNull<LinkRooms<W>> {
+        // SAFETY: the caller's contract: the field of a value at a pointer that is not null is not
+        // null either.
+        unsafe { value_at(addr_of_mut!((*at.as_ptr()).0)) }
     }
 }
 
