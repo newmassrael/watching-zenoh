@@ -387,6 +387,35 @@ What remains of the plane's holders: the cache's ring (`SessionCacheBytes`) keep
 own, as its store holds no plane, and the place's lender and the plane hold one each, as every
 entity of the session and its declaring task do.
 
+### 11.2 Two reds of the merge, repaid
+
+The merge's verification found two reds of this lane, each repaid in its own commit:
+
+- `fix(session-core): Write a time's decimal form with no index or overflow`. A17's
+  `decimal_text` and `decimal_digits` indexed their buffer and summed with the plain operators,
+  which `wz-session-core` denies in release code (its totality lints, `lib.rs`), so every crate
+  linted over it was red. The form is now written through a sink (`Sink`) that writes a byte only
+  where the buffer has one and refuses past it, so a `Decimal::Written` length has its NUL after it
+  by construction and not by the buffer's arithmetic; the literal is split into its sign, its
+  integer and fraction digits and its exponent by slices (`split_sign`, `split_digits`,
+  `read_exponent`), and every sum saturates, which is exact here: `scale` moves one step a byte
+  of the literal and the exponent is held at `u32::MAX`. The copy of a literal that fits is taken
+  through `get_mut(..=len)`. Tests: `the_longest_form_fills_the_buffer_to_its_nul` (a sign, 800
+  digits and a power under `-DECIMAL_EXPONENT`, which writes `DECIMAL_TEXT - 1` bytes and the
+  NUL: red with a buffer a byte short, or a writer that cuts the form), and two exponents past
+  `i64` in the corpus of
+  `a_decimal_written_for_a_platform_reader_reads_as_core_reads_the_literal` (red with an exponent
+  that wraps).
+- `fix(capi-pico): Import Arc in the advanced tests only beside its users`. A8 imported `Arc` in
+  `advanced.rs`'s tests for the tests that share a session, all of which run on the tokio engine;
+  the default build (the cooperative engine) had the import unused. It is gated as they are.
+
+A19's measurement is main's: no harness in the tree counts an advanced subscriber's receive.
+`pico-compare.sh subprofile` counts `count_sub`, a plain subscriber, which does not reach
+`OnSample`, so its receive Ir is unchanged by A19 on either engine by construction; the advanced
+subscriber's sample path is read in the explain report (`State::admit`, `hand_on`) of
+`pico-api-coop-nostd`.
+
 ## 10. Rows for `contract-switches.md`
 
 The behaviours of this lane read as contract. `docs/c-abi-migration/contract-switches.md` is not on
