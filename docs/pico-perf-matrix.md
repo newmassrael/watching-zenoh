@@ -16,7 +16,7 @@ API and is compiled from the same source for each arm:
 | arm | library | headers | carries |
 |---|---|---|---|
 | P | zenoh-pico at the submodule's pin, built as the same build (below) | that build's own (`include` of the export with the `config.h` its CMake generated) | tcp, multicast |
-| W | `wz-capi-pico` for zenoh-pico's preset (`configs/zenoh-pico_defconfig`, below) on the engine of the run, in the form the release ships (without `std`), built as the size gate builds that form (below) | arm P's headers, the pinned pico's, with the `config.h` of its own feature list (`wz_config.pico_config_header`) in place of P's | tcp, udp, multicast |
+| W | `wz-capi-pico` for zenoh-pico's preset (`configs/zenoh-pico_defconfig`, below) on the engine of the run, in the form the release ships (without `std`), built as the size gate builds that form (below) | arm P's headers, the pinned pico's, with the `config.h` of its own feature list (`wz_config.pico_config_header`) in place of P's | tcp, multicast; udp when its build has the `udp/` listener (below) |
 | W (program transport) | the same build with `app-transport` | the same, for that feature list | the program transport |
 | X | an external library of the pico API, named by the environment (below); measured only when named | its own, with its own `config.h` | tcp, udp, multicast |
 
@@ -136,6 +136,15 @@ only, so a peer dialling it never completes its handshake: the dialling session'
 with that reason, as its program cells are. The accept task of a listening pico peer:
 
 `vendor/zenoh-pico/src/transport/unicast/accept.c` @ `_z_tcp_accept(`
+
+Arm W listens on a `udp/` unicast locator only when its build has the `udp/` listener (`wz-capi-pico`'s
+`udp-listen`, `CONFIG_WZ_CAP_UDP_LISTEN`). zenoh-pico's preset leaves it off, as pico's own peer has
+none, and a build without it refuses a `udp/` endpoint to listen on: the server side's open fails with
+-102. The run reads which build arm W is from the features its record lists (`wz_features`) and, for a
+build without the listener, records arm W's udp cells as not applicable with that reason
+(`perf_matrix.py` `not_applicable`), so the preset's run measures udp for arm X alone. The refusal:
+
+`crates/wz-capi-coop/src/tests.rs` @ `fn a_build_without_the_udp_listener_refuses_a_udp_endpoint_to_listen_on(`
 
 **The workloads**, at each payload size (default 8, 64 and 1024 bytes, each below pico's default
 unicast batch of 2048 bytes, so no message is fragmented):
@@ -286,8 +295,9 @@ share does not tell a performance core from an efficiency core; both arms run on
 the comparison stays fair, but the absolute figures belong to the cores named in the record.
 
 A full run is every transport, both batching settings, both workloads and three sizes, for both arms,
-three times: 288 cells, of which the 72 of arm P on udp and the program transport are not applicable; arm X
-adds as many again, its program cells not applicable. Narrow it with the variables above when a question
+three times: 288 cells, of which the 72 of arm P on udp and the program transport are not applicable, and the
+36 of arm W on udp too when its build has no `udp/` listener, as the preset's has not; arm X adds as many
+again, its program cells not applicable. Narrow it with the variables above when a question
 needs fewer; the gate then reports the rows the run did not measure (section 5). The selftest of the reader
 and of the gate runs anywhere and builds nothing:
 
@@ -580,6 +590,7 @@ python3 scripts/host-bench/perf_matrix.py --gate "$out/<run>/perf.json" --withou
 ```
 
 A full run is 3 repetitions of tcp, udp and multicast, both batchings, both workloads and three sizes: 216 cells,
-of which the 36 of arm P on udp are not applicable, about 180 measured, at some 8 s a round-trip cell and 14 s a
+of which the 36 of arm P on udp are not applicable, and the 36 of arm W on udp too for a package without the
+`udp/` listener (the plan says which, `not_applicable`), so about 144 measured for the preset's package, at some 8 s a round-trip cell and 14 s a
 throughput cell, so about 35 minutes with the build, more when cells are disturbed. Filling the table is as in
 section 5, with `deploy/pico_perf_ceiling_windows.json` in place of the Linux table.
