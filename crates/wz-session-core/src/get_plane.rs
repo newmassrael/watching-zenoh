@@ -15,13 +15,13 @@
 //! shared by every leg after it ([`AskedGet`]), and the count of what stands of it, its legs'
 //! entries and its asker while it issues them. The get consolidates as one: what the entries of
 //! its legs hold back is held in the plane's rows under the get's row, shared by every leg
-//! ([`LegHold`]), and what an entry gave up whole in the plane's held table under the same row.
+//! ([`LegHold`]).
 //! A leg's end (its Final, its deadline, the loss of its link) is said when its entry is dropped,
 //! by a guard the sink owns; the get's end is said by whichever of its legs and its asker stands
 //! last, with the request id of the timeout that ended that leg when one did, as zenoh flushes a
 //! query at its last Final (`api/session.rs` @ `if query.nb_final == 0 {`). The deliveries hand it
 //! out with no lock held, once the round has handed every reply held before it: what the get held
-//! back, what was given up whole, the timeout, and then the drop of its callback, which is how a
+//! back, the timeout, and then the drop of its callback, which is how a
 //! program learns its get is over.
 //!
 //! The ends wait in a table of the plane's ([`EndedLegs`]), one for each get. An end is written
@@ -49,7 +49,6 @@
 //! [`AskedGet`]: crate::get_plane::AskedGet
 //! [`RoundCalls::TablePolicy`]: crate::round::RoundCalls::TablePolicy
 
-use alloc::collections::VecDeque;
 use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::Ordering;
 // The split `round` uses: the host profile has the native atomics, the `no_std` profile gets the
@@ -62,7 +61,6 @@ use portable_atomic::AtomicU32;
 use crate::bounded::{BoundedVec, Storage, Taken};
 use crate::placed::PlacedRef;
 use crate::plane_lock::{LockFamily, Pending, Queued};
-use crate::reply::InboundReply;
 use crate::reply_hold::{HeldReplies, HeldReply, HoldRefused, ReplyHold};
 use crate::reply_sink::{ReplySink, ReplyView};
 use crate::round::{LegHolders, PlaneCalls, Round};
@@ -352,9 +350,6 @@ impl<C: GetCalls> Capturing<C> {
 pub struct GetPlane<C: GetCalls> {
     /// The gets that ended, handed out after the replies queued before them.
     ended: Queued<C::Queues, EndedLegs<C::TablePolicy>>,
-    /// The replies the entries of the gets' legs gave up whole, each with its get's row, in the
-    /// order they gave them up: handed to the get's callback at its end, before its timeout.
-    held: Queued<C::Queues, VecDeque<(LegId, InboundReply)>>,
     /// The replies the gets that consolidate hold to their ends, each tagged with its get's row
     /// ([`LegHold`]): rows of the plane's policy, shared by every get of the session and reached
     /// only from the sinks, under the session's lock.
@@ -392,9 +387,6 @@ impl<C: GetCalls> GetPlane<C> {
         unsafe {
             Queued::init_at(NonNull::new_unchecked(addr_of_mut!((*at).ended)), |queue| {
                 queue.write(ended)
-            });
-            Queued::init_at(NonNull::new_unchecked(addr_of_mut!((*at).held)), |queue| {
-                queue.write(VecDeque::new())
             });
             C::Locks::init_at(
                 NonNull::new_unchecked(addr_of_mut!((*at).replies)),
@@ -509,7 +501,6 @@ impl<C: GetCalls> GetPlane<C> {
             self.forget_due(ended.row);
             drop(self.release_row(ended.row));
         }
-        drop(self.take_all_held());
         drop(C::Locks::with(&self.legs, core::mem::take));
         self.ended
             .with(|ends| *ends = EndedLegs::over(BoundedVec::default()));
@@ -530,29 +521,6 @@ impl<C: GetCalls> GetPlane<C> {
     /// for no delivery.
     pub fn forget_end(&self, row: LegId) -> Option<Ended> {
         self.ended.with(|ends| ends.forget(row))
-    }
-
-    /// Keep `reply`, given up whole by an entry of a leg of the get in row `row`, after what the
-    /// get holds already.
-    fn keep_held(&self, row: LegId, reply: InboundReply) {
-        self.held.with(|held| held.push_back((row, reply)));
-    }
-
-    /// The first reply the entries of the get in row `row` gave up whole, taken out; `None` once
-    /// there is nothing. Read without the lock while nothing is held.
-    pub fn take_held(&self, row: LegId) -> Option<InboundReply> {
-        if !self.held.is_pending() {
-            return None;
-        }
-        self.held.with(|held| {
-            let at = held.iter().position(|(of, _)| *of == row)?;
-            held.remove(at).map(|(_, held)| held)
-        })
-    }
-
-    /// Everything held for every get, taken out: the session is closed.
-    pub fn take_all_held(&self) -> VecDeque<(LegId, InboundReply)> {
-        self.held.with(core::mem::take)
     }
 
     /// The next reply the get in row `row` held back over its legs, taken out of its row for the
@@ -709,8 +677,7 @@ impl<C: GetCalls> UncapturedReplies<C> for EveryReplyCaptured {
 /// the session's own queryables made while the plane captures is the thread's that made it, which
 /// hands it to the callback once it lets go of the session ([`GetPlane::capture`]); any other is
 /// handed to `U`, the session's round of deliveries ([`Round::offer_reply`]) unless the engine
-/// captures every reply ([`EveryReplyCaptured`]). What the entry gives up whole waits in the plane's
-/// held table under the get's row ([`GetPlane::take_held`]). The sink's drop is the leg's end: the
+/// captures every reply ([`EveryReplyCaptured`]). The sink's drop is the leg's end: the
 /// Final says nothing more, as the registry drops the entry once its Finals are in, and the leg no
 /// longer stands; the timeout of a leg that timed out goes with it, to the get's end when the leg
 /// stood last ([`Ended`]). The entry's count of the row is given back there, or passed to the
@@ -763,10 +730,6 @@ impl<C: GetCalls, U: UncapturedReplies<C>> ReplySink for LegSink<C, U> {
 
     fn on_timeout(&mut self, rid: RequestId) {
         self.end.timed_out = Some(rid);
-    }
-
-    fn on_reply_owned(&mut self, reply: InboundReply) {
-        self.end.plane.keep_held(self.end.row, reply);
     }
 }
 

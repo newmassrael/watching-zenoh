@@ -8514,16 +8514,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// Hand the callback of the get that `ended` what it held to its end, with no lock held: the
-    /// replies it held back over its legs, each taken out of its row, then those its entries gave up
-    /// whole, each taken out of the plane's held table, then the timeout that ended it, as upstream's
-    /// querier hands them.
+    /// replies it held back over its legs, each taken out of its row, then the timeout that ended
+    /// it, as upstream's querier hands them.
     #[cfg(feature = "query")]
     fn hand_held(&self, ended: Ended) {
         let row = ended.row();
         while let Some(reply) = self.gets.take_due(row) {
-            self.gets.call(row, &reply);
-        }
-        while let Some(reply) = self.gets.take_held(row) {
             self.gets.call(row, &reply);
         }
         if let Some(rid) = ended.timed_out() {
@@ -10094,7 +10090,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(feature = "query")]
     fn end_get_now(&self, row: LegId) {
         self.gets.forget_due(row);
-        while self.gets.take_held(row).is_some() {}
         if let Some(ended) = self.gets.forget_end(row) {
             drop(self.gets.release(ended.row()));
         }
@@ -12829,7 +12824,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
                 self.gets.forget_due(ended.row());
                 drop(self.gets.release(ended.row()));
             }
-            drop(self.gets.take_all_held());
         }
         // A round sealed and handed out by no delivery is emptied unhanded, its calls ended: no
         // callback of the session is called after its close. The rows whose last call that was
