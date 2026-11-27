@@ -146,25 +146,25 @@
       }
     },
     "pico-default": {
-      "ratio_at_most": 2.0095,
+      "ratio_at_most": 1.934,
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
         "date": "2026-11-27",
-        "wz_text": 1220146,
+        "wz_text": 1174269,
         "pico_text": 607197,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"
+        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
       }
     },
     "pico-api-coop-nostd": {
-      "ratio_at_most": 1.9889,
+      "ratio_at_most": 1.9036,
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
         "date": "2026-11-27",
-        "wz_text": 1003489,
+        "wz_text": 960432,
         "pico_text": 504559,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 4.4.2"
+        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
       }
     },
     "pico-release-windows-x64": {
