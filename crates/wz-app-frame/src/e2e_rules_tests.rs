@@ -1022,6 +1022,101 @@ fn the_sender_keeps_a_counter_per_stream_and_refuses_what_it_cannot_send() {
     ));
 }
 
+/// The rollover rule both senders ask (`sources/algorithms/counter_after.scxml`, generated) is
+/// the rule each wrote by hand before: the next value below the field's largest, and past it the
+/// restart value when the sender restarts and none when it does not, at every counter width.
+#[test]
+fn the_generated_rollover_is_the_rule_each_sender_had() {
+    for bytes in 1..=8u8 {
+        let largest = crate::e2e_crc::width_mask(bytes * 8);
+        for sent in [0, 1, largest / 2, largest - 1, largest] {
+            for (restarts, restart_at) in [(false, 0), (true, 0), (true, 1), (true, largest)] {
+                let want = if sent < largest {
+                    Some(sent + 1)
+                } else if restarts {
+                    Some(restart_at)
+                } else {
+                    None
+                };
+                assert_eq!(
+                    crate::sending_counter::counter_after(sent, largest, restarts, restart_at),
+                    want,
+                    "{bytes} bytes, sent {sent}, restarts {restarts} at {restart_at}"
+                );
+            }
+        }
+    }
+}
+
+/// The sender's rollover and the receiver's verdict together, as `docs/formal/E2eCounters.tla`
+/// models them: across the wrap of the counter, a frame after lost ones (fewer than the profile's
+/// gap) is in range by the step it skipped, the same frame again is a repetition, and a frame the
+/// sender refused took no number, so it reads as no loss.
+#[test]
+fn across_the_wrap_the_receiver_reads_every_loss_and_repetition_the_sender_made() {
+    for (p, values, repeated) in [
+        (left(), left_values(ADDR_A), Status::CounterError),
+        (right(), right_values(ADDR_B), Status::Repeated),
+    ] {
+        let max = p.fields()[p.counter().field].max_value();
+        let options = SenderOptions {
+            first_counter: max - 15,
+            rollover: Rollover::Wrap,
+            ..SenderOptions::default()
+        };
+        let mut tx = StreamSender::new(p.clone(), values.clone(), options).expect("made");
+        let mut rx = indexed(p.clone(), &values, 1);
+        let mut out = [0u8; 64];
+        let need = tx.frame_bytes(3);
+        let mut lost = 0u64;
+        let mut now = 0u64;
+        for i in 0..48u64 {
+            if i % 5 == 4 {
+                assert!(
+                    tx.protect_into(0, b"abc", &mut out[..need - 1]).is_err(),
+                    "a buffer one byte short is refused"
+                );
+            }
+            let written = tx.protect_into(0, b"abc", &mut out).expect("written");
+            if i % 4 == 2 {
+                lost += 1;
+                continue;
+            }
+            now += 1;
+            let v = rx.receive(0, &out[..written.len], now).expect("judged");
+            let want = if i == 0 {
+                (Status::First, None)
+            } else {
+                (Status::Ok, Some(lost + 1))
+            };
+            assert_eq!(
+                (v.status, v.step),
+                want,
+                "{}: frame {i}, counter {}",
+                p.name(),
+                written.counter
+            );
+            lost = 0;
+            if i % 7 == 3 {
+                now += 1;
+                let again = rx.receive(0, &out[..written.len], now).expect("judged");
+                assert_eq!(
+                    (again.status, again.step),
+                    (repeated, Some(0)),
+                    "{}: frame {i} again",
+                    p.name()
+                );
+            }
+        }
+        assert_eq!(
+            tx.next(0),
+            Ok(Some(32)),
+            "{}: the counter wrapped",
+            p.name()
+        );
+    }
+}
+
 #[test]
 fn a_sent_frame_is_the_reference_build_and_the_receiver_reads_it_back() {
     for (p, values) in [

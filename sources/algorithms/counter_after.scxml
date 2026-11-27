@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The number a sender's next message carries after one that carried `sent`, in a field whose
+  largest value is `largest`: the next value while `sent` is below it; past it, `restart_at`
+  when the sender restarts, and absent when it does not, which refuses every later message until
+  the host sets another number.
+
+  `sent + 1` cannot leave the width: `sent` is below `largest`, which is a uint64. The interval
+  analysis keeps no relation between two values, so it would not prove that from the guard
+  (SCE ADR 0063, Context); `wrappingAdd` says it, and is the same addition where it cannot wrap.
+
+  Both senders of wz-app-frame ask it after every message they sent, with the rule each states
+  as its `Rollover`:
+    - the end-to-end stream sender (`e2e_stream_sender`): `Wrap` restarts at 0, `Refuse` does
+      not restart. 0 is the bottom of the ring the receiving judge takes its step in
+      (`e2e_counter_step`), so the largest value then 0 is a step of one there;
+    - the segment sender (`segment_sender`): `Restart` restarts at the number it was made with,
+      `Refuse` does not restart. Its reader tells a transfer from the one before by the number
+      changing, not by a step.
+  A message that is refused does not ask it: a refused message consumes no number. Each sender
+  asks it only once a message was taken.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="counter_after"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="sent" type="uint64"/>
+    <sce:param name="largest" type="uint64"/>
+    <sce:param name="restarts" type="bool"/>
+    <sce:param name="restart_at" type="uint64"/>
+    <sce:return type="optional&lt;uint64&gt;"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="sent &lt; largest">
+      <sce:return expr="wrappingAdd(sent, 1)"/>
+    </sce:if>
+    <sce:if cond="restarts">
+      <sce:return expr="restart_at"/>
+    </sce:if>
+    <sce:return expr="null"/>
+  </sce:body>
+</scxml>

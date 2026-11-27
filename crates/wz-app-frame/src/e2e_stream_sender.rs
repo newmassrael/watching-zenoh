@@ -460,16 +460,12 @@ impl StreamSender {
         );
     }
 
-    /// The value after `sent`, which a frame has just carried.
+    /// The value after `sent`, which a frame has just carried: the next one below the field's
+    /// largest, and past it 0 under [`Rollover::Wrap`] or none under [`Rollover::Refuse`]. The
+    /// rule is the generated `counter_after`, which the segment sender shares; 0 is where the
+    /// receiving judge's step ring starts, so the largest value then 0 is a step of one there.
     fn after(&self, sent: u64) -> Option<u64> {
-        if sent < self.max {
-            Some(sent + 1)
-        } else {
-            match self.rollover {
-                Rollover::Wrap => Some(0),
-                Rollover::Refuse => None,
-            }
-        }
+        crate::sending_counter::counter_after(sent, self.max, self.rollover == Rollover::Wrap, 0)
     }
 }
 

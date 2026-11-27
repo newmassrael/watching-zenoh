@@ -483,6 +483,8 @@ fn regen_codec_deployment(
 ///                      key_facts_schema, reset_peer_schema, take_generation_duplicate
 ///                      (event-schemas); take_generation_kind, put_outcome (enums);
 ///                      take_generation_result (union)
+///   wz-app-frame     : e2e_counter_step, e2e_counter_verdict, drop_report_due,
+///                      replay_reply_admission, counter_after (algorithms)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
 ///                      session_rx_pool_ap_small, session_tx_pool_ap,
 ///                      session_tx_pool_ap_small (buffer-pools)
@@ -595,11 +597,14 @@ fn regen_statecharts_and_pools(root: &Path) {
     mkdir(&app_frame_out);
     // The replay cache's admission of a reply to that judge (wz-app-frame `replay_admission`):
     // whether a reply is judged, a duplicate of the baseline, or a frame the judge has passed.
+    // And the number the next message of either sender carries after one it sent, the rollover
+    // rule the end-to-end stream sender and the segment sender share (`counter_after`).
     for stem in [
         "e2e_counter_step",
         "e2e_counter_verdict",
         "drop_report_due",
         "replay_reply_admission",
+        "counter_after",
     ] {
         codegen.emit_algorithm(stem, &algorithms, &app_frame_out);
     }
