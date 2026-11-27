@@ -33,28 +33,43 @@ per step: the explain report (`size_ledger_gate.py --explain`) of `pico-peer-coo
 ## 2. What zenoh-pico does for `Z_FEATURE_UNICAST_PEER`
 
 - The accept task: `_zp_unicast_accept_task_fn` (552 bytes) takes a TCP connection
-  (`vendor/zenoh-pico/src/transport/unicast/accept.c:76`, `_z_tcp_accept`), refuses past the
-  build's bound (`accept.c:85`, `Z_LISTEN_MAX_CONNECTION_NB`, 10 in
-  `include/zenoh-pico/config.h.in:312`), runs the handshake on that socket to its end
-  (`accept.c:117`) and adds the peer to a list.
-  The task exists only with TCP or TLS (`accept.c:29`).
+  (`vendor/zenoh-pico/src/transport/unicast/accept.c` @
+  `_z_tcp_accept(&listen_socket, &con_socket)`), refuses past the build's bound
+  (`vendor/zenoh-pico/src/transport/unicast/accept.c` @
+  `_z_transport_peer_unicast_slist_len(ztu->_peers) >= Z_LISTEN_MAX_CONNECTION_NB`, 10 in
+  `vendor/zenoh-pico/include/zenoh-pico/config.h.in` @ `#define Z_LISTEN_MAX_CONNECTION_NB 10`),
+  runs the handshake on that socket to its end (`vendor/zenoh-pico/src/transport/unicast/accept.c` @
+  `ret = _z_unicast_handshake_listen(&param, ztu->_common._link,`) and adds the peer to a list.
+  The task exists only with TCP or TLS (`vendor/zenoh-pico/src/transport/unicast/accept.c` @
+  `(Z_FEATURE_LINK_TCP == 1 || Z_FEATURE_LINK_TLS == 1)`).
 - The handshake's accepting side, `_z_unicast_handshake_listen` (655 bytes), answers an
-  `InitSyn` with an `InitAck` whose cookie is empty (`src/transport/unicast/transport.c:220`):
-  it waits for the `OpenSyn` on the same socket, the state in its frame. It is in the client
-  build already (an exported function of the library), so the step does not count it.
-- The peers are a list on the heap (`src/transport/peer.c:200`); a batch is encoded once and
-  written to every peer's socket (`src/transport/common/tx.c:139`).
-- The read task waits on every peer's socket (`src/transport/unicast/read.c:146`, +1,197 bytes
-  to `_zp_unicast_read_task_fn`); the lease and keep-alive tasks walk the list
-  (`src/transport/unicast/lease.c:152`, `:194`); a second connect locator is retried by a task
-  (`_zp_add_peers_task_fn`, `_z_add_peers`, 1,132 bytes).
+  `InitSyn` with an `InitAck` whose cookie is `_z_slice_null()`
+  (`vendor/zenoh-pico/src/transport/unicast/transport.c` @
+  `_z_t_msg_make_init_ack(mode, *local_zid, cookie)`): it waits for the `OpenSyn` on the same
+  socket, the state in its frame. It is in the client build already (an exported function of
+  the library), so the step does not count it.
+- The peers are a list on the heap (`vendor/zenoh-pico/src/transport/peer.c` @
+  `ztu->_peers = _z_transport_peer_unicast_slist_push_empty(ztu->_peers);`); a batch is encoded
+  once and written to every peer's socket (`vendor/zenoh-pico/src/transport/common/tx.c` @
+  `static z_result_t _z_transport_tx_flush_buffer(`).
+- The read task waits on every peer's socket (`vendor/zenoh-pico/src/transport/unicast/read.c` @
+  `return _z_socket_wait_readable(&iter, Z_CONFIG_SOCKET_TIMEOUT);`, +1,197 bytes to
+  `_zp_unicast_read_task_fn`); the lease and keep-alive tasks walk the list
+  (`vendor/zenoh-pico/src/transport/unicast/lease.c` @
+  `_z_transport_peer_unicast_slist_extract_all_filter(ztu->_peers, &dropped_peers,` and
+  `vendor/zenoh-pico/src/transport/unicast/lease.c` @
+  `_z_transport_tx_send_t_msg(&ztu->_common, &t_msg, ztu->_peers)`); a second connect locator
+  is retried by a task (`_zp_add_peers_task_fn`, `_z_add_peers`, 1,132 bytes).
 - Declarations: a new peer is pushed every declaration once, with interest id 0 and a
-  `DeclareFinal` (`src/session/interest.c:194`); an `Interest` that arrives on a unicast
-  transport is not answered (`interest.c:535`).
+  `DeclareFinal` (`vendor/zenoh-pico/src/session/interest.c` @
+  `_z_interest_send_declare_final(zn, 0, peer)`, in `_z_interest_push_declarations_to_peer`);
+  an `Interest` that arrives on a unicast transport is not answered
+  (`vendor/zenoh-pico/src/session/interest.c` @ `// Nothing to do on unicast`).
 - A `udp/` unicast listener does not exist on POSIX: `_z_udp_posix_listen` answers
-  `_Z_ERR_GENERIC` (`src/link/transport/udp/udp_posix.c:83`).
+  `_Z_ERR_GENERIC` (`vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @
+  `static z_result_t _z_udp_posix_listen(`).
 - No two links to one remote node are told apart: each accepted or dialled link is a peer of its
-  own (`peer.c:184`).
+  own (`vendor/zenoh-pico/src/transport/peer.c` @ `z_result_t _z_transport_peer_unicast_add(`).
 
 ## 3. The pairing
 
