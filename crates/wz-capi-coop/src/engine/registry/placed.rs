@@ -16,14 +16,14 @@ use core::mem::{offset_of, size_of, MaybeUninit};
 use core::ptr::{self, addr_of_mut, NonNull};
 
 use wz_session_core::bounded::{LendRefused, Region, RegionLines, SeqPlace, ZeroEmpty};
+#[cfg(feature = "query")]
+use wz_session_core::get_legs::{GetLegs, GetLegsRows, GET_LEGS_LINES};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerTableRows, PeerTables, PEER_TABLE_LINES};
 #[cfg(feature = "query")]
-use wz_session_core::reply_sink::ConsolidatingSink;
+use wz_session_core::session_tables::PendingGetHandle;
 use wz_session_core::session_tables::{SessionRows, SessionTables, TableRows, SESSION_TABLE_LINES};
 use wz_session_core::slot_observer::{ObserverRegionRows, SLOT_OBSERVER_LINES};
-#[cfg(feature = "query")]
-use wz_session_core::slot_observer::{RequesterRegionRows, REQUESTER_LINES};
 
 use super::held::OneHolder;
 #[cfg(any(
@@ -35,19 +35,54 @@ use super::DeclWatches;
 use super::Gets;
 use super::{App, CoopSinks, FaceTables, Registry, RegistryOf, FACE_SETS};
 use crate::engine::{CoopRows, RoundDelivery};
-#[cfg(feature = "query")]
-use crate::engine::{LegHold, LegSink};
 use crate::region::RegionField;
 
-/// The requesters' rows of one face, or of the session's own gets.
+/// The rows of the legs one face holds of the session's gets, or the session's own queryables
+/// hold: its queries' and, with `liveliness-get`, its snapshots'.
 #[cfg(feature = "query")]
-type GetRows = RequesterRegionRows<ConsolidatingSink<LegSink, LegHold>, LegSink>;
+struct GetRows {
+    legs: GetLegsRows<PendingGetHandle>,
+    #[cfg(feature = "liveliness-get")]
+    snapshots: GetLegsRows<PendingGetHandle>,
+}
 
-/// The lines a face's requesters take in a region's description: none in a build that asks nothing.
+// SAFETY: each field is rows of `MaybeUninit` (`ZeroEmpty`), holding no value until placed.
 #[cfg(feature = "query")]
-const GET_LINES: usize = REQUESTER_LINES;
+unsafe impl ZeroEmpty for GetRows {}
+
+/// The lines a face's legs take in a region's description: a table of legs each for its queries
+/// and its snapshots, none in a build that asks nothing.
+#[cfg(all(feature = "query", not(feature = "liveliness-get")))]
+const GET_LINES: usize = GET_LEGS_LINES;
+#[cfg(all(feature = "query", feature = "liveliness-get"))]
+const GET_LINES: usize = 2 * GET_LEGS_LINES;
 #[cfg(not(feature = "query"))]
 const GET_LINES: usize = 0;
+
+#[cfg(feature = "query")]
+impl super::Gets {
+    /// The description of a face's legs at `at` in a region and their [`GetRows`] at `rows`:
+    /// each table of legs placed over its rows. A leg keeps no key and the tables state no quota
+    /// (the session's table of gets bounds them), so nothing holds them to the limits after.
+    const fn places(at: usize, rows: usize) -> RegionLines<GET_LINES> {
+        let lines = RegionLines::EMPTY.with(
+            &GetLegs::<PendingGetHandle, Region>::places(
+                at.wrapping_add(offset_of!(super::Gets, legs)),
+                rows.wrapping_add(offset_of!(GetRows, legs)),
+            ),
+            0,
+        );
+        #[cfg(feature = "liveliness-get")]
+        let lines = lines.with(
+            &GetLegs::<PendingGetHandle, Region>::places(
+                at.wrapping_add(offset_of!(super::Gets, snapshots)),
+                rows.wrapping_add(offset_of!(GetRows, snapshots)),
+            ),
+            0,
+        );
+        lines
+    }
+}
 
 /// The rows of one set of face tables: its peer's stagings, the Finals owed to its peer's queries,
 /// and its pending gets.
@@ -238,9 +273,7 @@ impl RegistryRegion {
         // SAFETY: the caller's contract. Every field of the registry is written here or holds its
         // empty value already: the application's tables, the sets' table and the count of the
         // faces' writes at zero bytes, each set and the session's own gets by `write_parts`, and
-        // the delivery and the watches here, each once, whole, before the registry is read. The
-        // own gets' row of the index of the gets' deadlines is valid at zero bytes, and
-        // `index_dues` writes it with the sets' rows before the index is read.
+        // the delivery and the watches here, each once, whole, before the registry is read.
         unsafe {
             let registry = addr_of_mut!((*at.as_ptr()).registry).cast::<Registry>();
             ptr::write(addr_of_mut!((*registry).delivery), delivery);
@@ -253,13 +286,6 @@ impl RegistryRegion {
             let mut held = RegionField::new(NonNull::new_unchecked(registry));
             held.app.limit_to(limits);
             held.app.tables.limit_to(tables);
-            #[cfg(feature = "query")]
-            for set in held.sets.iter_mut() {
-                set.gets.limit_to(limits);
-            }
-            #[cfg(feature = "local-queryable")]
-            held.local.limit_to(limits);
-            held.index_dues();
             Ok(held)
         }
     }

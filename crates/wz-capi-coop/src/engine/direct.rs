@@ -398,6 +398,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
                         .session
                         .registry
                         .dispatch_reply(self.records.face, record);
+                    // The Final may have ended its get: the delivery after the read hands it out.
+                    self.engine.note_ended_gets(&held.0);
                 }
                 self.records.after_pushes = true;
                 return;
@@ -2551,6 +2553,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 slot.router.sweep(now_ms);
             }
             core.sweep_gets(now_us);
+            // A get the sweep timed out is handed out by the delivery after the read.
+            #[cfg(feature = "query")]
+            self.note_ended_gets(core);
             let moved = if moves_link {
                 #[cfg(test)]
                 core.link_polls.set(core.link_polls.get() + 1);
@@ -2860,6 +2865,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 }
                 if let Some(id) = slot.face_id(core) {
                     core.lose_face_link(slot.at(), id);
+                    // A get whose last leg the face held ended with it: the delivery after the
+                    // read hands it out.
+                    #[cfg(feature = "query")]
+                    self.note_ended_gets(core);
                 }
                 slot.drop_link(&face.site);
                 if effects.ends_session() {

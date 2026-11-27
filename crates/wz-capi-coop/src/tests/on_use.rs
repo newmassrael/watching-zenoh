@@ -263,7 +263,7 @@ fn an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart(
         engine.arena_bytes().max(ARENA_ALIGN),
         "the block is the plan's arena alone"
     );
-    #[cfg(any(feature = "queryable", feature = "query", feature = "connectivity"))]
+    #[cfg(any(feature = "queryable", feature = "connectivity"))]
     for at in engine.plane_places() {
         assert!(engine.state_holds(at), "the plane lies in the state");
         assert!(!engine.arena_holds(at), "and not in the arena");

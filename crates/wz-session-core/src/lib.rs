@@ -830,12 +830,6 @@ pub mod get_legs;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 pub mod round;
 
-/// The requesting end of the session's gets: the rows of their legs' callbacks, held by count, the
-/// replies they hold to their ends and the ends the deliveries hand out, with the sink and the
-/// hold a leg's pending entry owns. Gated as [`round`] is, whose records hold counts of its rows.
-#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-pub mod get_plane;
-
 /// The answering end of the session's queries: the Finals its queryables still owe, held by link
 /// generation and request id, the generation each query belongs to, and the calls a get of the
 /// session's own hands its queryables. Gated as [`round`] is, which holds the queries.

@@ -5,12 +5,11 @@
 //! link itself (`direct`).
 //!
 //! The Response is read into its reply under the session's lock, where its frame lies (or into its
-//! owned projection, for one the lent form does not represent), and handed to the face's pending
-//! gets as the face's dispatch hands it, with the get plane capturing the leg it reaches: the
-//! leg's callback, with a count of its row, and nothing of the reply in the round. The lock is let
-//! go of, the reply is handed to the callback, and the count is given back with no lock held. A
-//! get's request id is the session's own, given to no other get, so a reply reaches one leg at
-//! most.
+//! owned projection, for one the lent form does not represent); the face's legs find the get its
+//! id names in one look, and the tables admit it to that get's row (its standing, its gate, its
+//! consolidation), beginning a call of the get's callback for a reply they let through. The lock
+//! is let go of, the call is made, and ended with no lock held. A leg's request id names one leg
+//! of one face, so a reply reaches one get at most.
 //!
 //! The reply's key is the frame's, a text of the face's peer, or this walk's own room's. The peer
 //! is written only by the dispatch of the face's records, which the read makes one at a time and
@@ -45,7 +44,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // the pump the read holds through it, `room` stays in this frame, and the face's peer
             // is neither written nor let go of while it runs (see the module's docs).
             Ok(Some(reply)) => {
-                lent = unsafe { past_the_lock(reply, record) };
+                lent = unsafe { reply_past_the_read(reply, record) };
                 &lent
             }
             Ok(None) => return,
@@ -60,18 +59,30 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.hand_reply(held, face, reply);
     }
 
-    /// Hand `reply`, read under `held` for face `face`, to the get it answers: the pending gets
-    /// are handed it under the lock with the get plane capturing the leg it reaches, and the leg's
-    /// callback is called once the lock is let go of, its count given back after.
+    /// Hand `reply`, read under `held` for face `face`, to the get it answers: admitted to the
+    /// get's row under the lock, and handed to its callback by the call that admission began once
+    /// the lock is let go of.
     pub(super) fn hand_reply(
         &self,
         mut held: LiveCore<'_, L, C>,
         face: HeldFace,
         reply: &dyn ReplyView,
     ) {
-        self.gets.capture();
-        held.0.session.registry.fire_reply(face, reply);
-        self.hand_captured(held, reply);
+        let call = held.0.session.registry.admit_reply(face, reply);
+        drop(held);
+        if let Some(call) = call {
+            self.make_get_call(call, reply);
+        }
+    }
+
+    /// Make `call`, begun on a get's row under the session's lock, with no lock held: hand it
+    /// `reply`, then end it, letting go of the row when it was the last call of a retired get.
+    pub(super) fn make_get_call(&self, call: GetCall, reply: &dyn ReplyView) {
+        // A read a callback makes reads nothing, so no record is handed out inside the call.
+        self.deliveries.within(|_| call.hand(reply));
+        self.end_get_call(call);
+        #[cfg(test)]
+        self.takes.pinned_replies.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Hand the alive token the Declare `record` of face `face` lends to the liveliness get it
@@ -102,7 +113,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// Hand the alive token at `keyexpr`, claimed under `held` for the pending liveliness get
     /// `interest_id` of face `face`, to that get, as a peer's reply is handed
-    /// (`Self::hand_reply`).
+    /// (`Self::hand_reply`): admitted to the snapshot's row under the lock, and handed to its
+    /// callback by the call that admission began once the lock is let go of.
     #[cfg(feature = "liveliness-get")]
     pub(super) fn hand_token(
         &self,
@@ -111,41 +123,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         interest_id: u64,
         keyexpr: &str,
     ) {
-        self.gets.capture();
-        held.0
+        let reply = token_reply(interest_id, keyexpr);
+        let call = held
+            .0
             .session
             .registry
-            .fire_token(face, interest_id, keyexpr);
-        self.hand_captured(held, &token_reply(interest_id, keyexpr));
-    }
-
-    /// Let go of `held`, then hand `reply` to the callback of the leg the answers fired since
-    /// the get plane began capturing reached, its count given back after. A leg none reached is
-    /// handed nothing.
-    fn hand_captured(&self, held: LiveCore<'_, L, C>, reply: &dyn ReplyView) {
-        let reached = self.gets.captured();
+            .admit_token(face, interest_id, &reply);
         drop(held);
-        let Some(leg) = reached else {
-            return;
-        };
-        // A read a callback makes reads nothing, so no record is handed out inside the call.
-        self.deliveries.within(|_| self.gets.call(leg, reply));
-        drop(self.gets.release(leg));
-        #[cfg(test)]
-        self.takes.pinned_replies.fetch_add(1, Ordering::Relaxed);
+        if let Some(call) = call {
+            self.make_get_call(call, &reply);
+        }
     }
-}
-
-/// `reply`, read under the session's lock, held past it for as long as the read lends `_frame`.
-///
-/// # Safety
-///
-/// Nothing the reply borrows is written or let go of while the result is held.
-unsafe fn past_the_lock<'r, 'f>(
-    reply: LentReply<'_, 'f>,
-    _frame: &'r InPlaceRecord<'_, 'f>,
-) -> LentReply<'r, 'f> {
-    // SAFETY: the two types differ in one lifetime alone, so they are laid out alike; what the
-    // result borrows is the caller's to keep where it lies.
-    unsafe { core::mem::transmute::<LentReply<'_, 'f>, LentReply<'r, 'f>>(reply) }
 }

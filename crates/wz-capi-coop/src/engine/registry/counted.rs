@@ -15,8 +15,6 @@ use wz_session_core::bounded::BoundedVec;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::on_use::BudgetKeys;
 use wz_session_core::peer_tables::PeerRows;
-#[cfg(feature = "local-queryable")]
-use wz_session_core::pending_get::DueRow;
 use wz_session_core::session_tables::TableRows;
 use wz_session_core::slot_observer::RequesterRows;
 
@@ -104,8 +102,6 @@ impl RegistryOf<OneHolder> {
             holders: OneHolder,
             #[cfg(feature = "local-queryable")]
             local,
-            #[cfg(feature = "local-queryable")]
-            local_due: DueRow::NEVER,
             #[cfg(any(
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
@@ -125,7 +121,6 @@ impl RegistryOf<OneHolder> {
             #[cfg(all(test, feature = "std", feature = "queryable"))]
             drains_within_frames: 0,
         };
-        registry.index_dues();
         Ok(registry)
     }
 }

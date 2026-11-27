@@ -11,7 +11,7 @@ use wz_session_core::round::{PlaneCalls, RoundCall, RoundCalls, SampleCall};
 use wz_session_core::sink::SampleRef;
 
 #[cfg(feature = "query")]
-use crate::engine::LegId;
+use crate::engine::GetCall;
 #[cfg(feature = "liveliness")]
 use crate::engine::LivelinessCall;
 #[cfg(feature = "queryable")]
@@ -26,8 +26,6 @@ use crate::engine::SubscriberCall;
 ))]
 use crate::engine::WatchCall;
 use crate::form::CoopForm;
-#[cfg(feature = "query")]
-use wz_capi_port::ReplyCallback;
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
 
@@ -63,13 +61,9 @@ impl RoundCalls for CoopCalls {
     )))]
     type Watch = core::convert::Infallible;
     #[cfg(feature = "query")]
-    type Leg = LegId;
+    type Get = GetCall;
     #[cfg(not(feature = "query"))]
-    type Leg = core::convert::Infallible;
-    #[cfg(feature = "query")]
-    type ReplyCallback = ReplyCallback;
-    #[cfg(not(feature = "query"))]
-    type ReplyCallback = core::convert::Infallible;
+    type Get = core::convert::Infallible;
     #[cfg(feature = "liveliness")]
     type Tokens = wz_session_core::session_tables::Present;
     #[cfg(not(feature = "liveliness"))]
@@ -120,12 +114,6 @@ impl PlaneCalls for CoopCalls {
     type LocalAnswers = wz_session_core::session_tables::Present;
     #[cfg(not(feature = "local-queryable"))]
     type LocalAnswers = wz_session_core::session_tables::Absent;
-    // The read that hands each record out as it is read hands a peer's reply to its get itself
-    // (`engine::replies`).
-    #[cfg(any(feature = "local-queryable", not(wz_round)))]
-    type Captures = wz_session_core::session_tables::Present;
-    #[cfg(not(any(feature = "local-queryable", not(wz_round))))]
-    type Captures = wz_session_core::session_tables::Absent;
     type Queues = crate::engine::CoopLocks;
 }
 
@@ -157,6 +145,20 @@ impl RoundCall for SubscriberCall {
 impl SampleCall for SubscriberCall {
     fn hand(&self, sample: &SampleRef<'_>) {
         SubscriberCall::hand(self, sample);
+    }
+}
+
+#[cfg(feature = "query")]
+impl RoundCall for GetCall {
+    fn end(self) -> bool {
+        GetCall::end(self)
+    }
+}
+
+#[cfg(feature = "query")]
+impl wz_session_core::round::ReplyCall for GetCall {
+    fn hand(&self, reply: &dyn wz_session_core::reply_sink::ReplyView) {
+        GetCall::hand(self, reply);
     }
 }
 

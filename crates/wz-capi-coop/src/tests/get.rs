@@ -394,6 +394,55 @@ fn a_cancelled_get_ends_without_a_step() {
     assert_eq!(token.active(), 0);
 }
 
+/// A get its token cancels before its peer's answer is read is handed nothing after the cancel
+/// returns, though the answer comes after it: the cancel retires the get's row and forgets its
+/// legs, so the reply and the Final read later reach no get, and the callback is dropped before
+/// the cancel returns. A get asked after it is handed its own answer alone. Turned red by a
+/// cancellation that keeps the get's row or its legs, so the reply read later reaches its callback,
+/// or that hands a reply to a get other than the one it answers.
+#[test]
+fn a_get_cancelled_before_its_answer_is_handed_nothing_after_the_cancel() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Answer("demo/g/**", b"r"));
+    let token = CancellationToken::new().expect("a token place is free");
+    let fan = register_fan(&token)
+        .expect("the test's heap")
+        .expect("a fresh token registers");
+    let (issued, cancelled) = ask(
+        &engine,
+        "demo/g/a",
+        &remote_get(),
+        Some(&fan),
+        Some(fan.clone()),
+        None,
+    );
+    drop(fan);
+    assert_eq!(issued, Ok(1));
+    token.cancel();
+    assert!(
+        cancelled.lock().unwrap().ended,
+        "cancel returns once the callback is dropped"
+    );
+    // The answer the router sent to the cancelled get is read with the later get's.
+    let (issued, later) = ask(&engine, "demo/g/b", &remote_get(), None, None, None);
+    assert_eq!(issued, Ok(1));
+    until(&engine, "the later get to end", || {
+        later.lock().unwrap().ended
+    });
+    assert!(
+        cancelled.lock().unwrap().replies.is_empty(),
+        "nothing after the cancel: {:?}",
+        cancelled.lock().unwrap().replies
+    );
+    assert_eq!(
+        later.lock().unwrap().replies,
+        vec![(ReplyKind::Put, "demo/g/b".to_owned(), b"r".to_vec())],
+        "the later get is handed its own answer alone"
+    );
+    assert_eq!(token.active(), 0);
+}
+
 /// A get whose link goes ends with it, long before its deadline: the peer that owed its Final is
 /// gone, and the face's table of pending gets is emptied with the loss, each entry's drop being
 /// its leg's end. Turned red by a loss that leaves the face's entries standing, where the leg would

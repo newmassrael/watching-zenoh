@@ -148,22 +148,14 @@ use wz_session_core::peer_tables::PeerTables;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, KEEPS_INTEREST_ROWS, SHARES_ROWS};
 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 use wz_session_core::policy::HeldPublishDrop;
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
-use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
 #[cfg(feature = "runtime-plan")]
 use wz_session_core::slot_observer::HeapSinks;
 use wz_session_core::slot_observer::RequesterRows;
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
-use wz_session_core::slot_observer::Requesters;
 #[cfg(feature = "runtime-plan")]
 use wz_session_core::slot_observer::SlotObserverOf;
 
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
-use crate::engine::LegHold;
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
-use crate::engine::LegSink;
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::engine::HELD_SET_BYTES;
 #[cfg(all(feature = "runtime-plan", wz_round))]
@@ -182,8 +174,6 @@ use crate::round::CALLBACK_BYTES;
 #[cfg(wz_round)]
 use crate::round::{RoundRowCounts, RECORD_BYTES};
 use crate::CoopConfig;
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
-use wz_session_core::reply_hold::HeldReply;
 
 /// `?` where a const fn reads a result: the value of an `Ok`, or the `Err` handed back as it is.
 macro_rules! tried {
@@ -273,9 +263,6 @@ pub enum ArenaPart {
     HandedLegs,
     DeclarationWatchers,
     PendingGets,
-    EndedLegs,
-    LegCallbacks,
-    HeldReplies,
     FaceTables,
     HeldFaces,
     PeerTables,
@@ -333,7 +320,6 @@ pub enum ArenaPart {
     RuntimeState,
     EngineState,
     QueryPlaneState,
-    GetPlaneState,
     FacePlaneState,
     LinkAdmissionState,
 }
@@ -385,9 +371,6 @@ impl ArenaPart {
             Self::HandedLegs => ("handed legs", "HANDED_LEG_BYTES"),
             Self::DeclarationWatchers => ("declaration watchers", "MAX_DECL_OBSERVERS"),
             Self::PendingGets => ("pending gets", GETS),
-            Self::EndedLegs => ("ended legs", GETS),
-            Self::LegCallbacks => ("leg callbacks", GETS),
-            Self::HeldReplies => ("held replies", "MAX_PENDING_REPLIES"),
             Self::FaceTables => ("face tables", "MAX_FACES + 1"),
             Self::HeldFaces => ("held faces", "MAX_FACES + 1"),
             Self::PeerTables => ("peer tables", "MAX_PENDING_DECLARES + MAX_PENDING_FINALS"),
@@ -479,7 +462,6 @@ impl ArenaPart {
             Self::RuntimeState => ("runtime state", "MAX_TASKS + MAX_TIMERS"),
             Self::EngineState => ("engine state", ""),
             Self::QueryPlaneState => ("query plane", ""),
-            Self::GetPlaneState => ("get plane", ""),
             Self::FacePlaneState => ("face plane", ""),
             Self::LinkAdmissionState => ("link admission", ""),
         }
@@ -1159,23 +1141,6 @@ pub struct GetTables {
     /// How many tables.
     pub tables: usize,
 }
-
-impl GetTables {
-    /// How many gets every table together holds pending at once: the rows of the tables of the
-    /// ends of the legs and of their callbacks (`crate::engine`'s `EndedLegs` and `LegRows`).
-    /// `None` past the address space.
-    pub const fn legs(&self) -> Option<usize> {
-        match self.rows.queries.checked_add(self.rows.liveliness_gets) {
-            Some(each) => each.checked_mul(self.tables),
-            None => None,
-        }
-    }
-}
-
-/// One face's table of pending gets, as the arena lends it. A build that asks no query keeps none
-/// (`engine::registry::Gets`) and lays out none.
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
-type FaceGets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
 /// each table of one is lent, and how many there are, one for each face the session may hold at
@@ -2196,40 +2161,18 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // A build of the region's form holds its face's gets in its region (`RegistryRegion`).
         #[cfg(all(feature = "query", feature = "runtime-plan"))]
         {
-            let get_bytes = self.sized(FaceGets::arena_bytes(self.session.gets.rows));
+            let get_bytes = self.sized(crate::engine::face_leg_bytes(self.session.gets.rows));
             self.put(ArenaPart::PendingGets, self.session.gets.tables, get_bytes);
         }
-        // The ends of the legs and the rows of their callbacks, a row of each for each get every
-        // table holds (`GetTables::legs`). A build of the region's form holds them in its region,
-        // at the build's bound (`crate::engine::StatePlaces`).
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
-        {
-            let legs = self.sized(self.session.gets.legs());
-            self.put(
-                ArenaPart::EndedLegs,
-                legs,
-                core::mem::size_of::<crate::engine::Ended>(),
-            );
-            self.put(
-                ArenaPart::LegCallbacks,
-                legs,
-                core::mem::size_of::<Option<crate::engine::LegRow>>(),
-            );
-        }
-        // The replies the gets that consolidate hold to their Finals: a row for each reply, in one
-        // table shared by every get, each tagged with its get's row (`engine::get::LegHold`).
-        // The limit is held either way, so a config over the build's is refused under its name.
+        // The replies the gets that consolidate hold to their ends: a row for each reply, in one
+        // table of the session's tables shared by every get, each tagged with its get's handle,
+        // laid out with the tables (`Self::tables`). The limit is held either way, so a config
+        // over the build's is refused under its name.
         #[cfg(feature = "query")]
         {
             self.session.held_replies = self.lent_to::<{ caps::MAX_PENDING_REPLIES }>(
                 ArenaLimit::MaxPendingReplies,
                 limits.max_pending_replies(),
-            );
-            #[cfg(feature = "runtime-plan")]
-            self.put(
-                ArenaPart::HeldReplies,
-                self.session.held_replies,
-                core::mem::size_of::<HeldReply<crate::engine::LegId, Lent>>(),
             );
         }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
@@ -2446,6 +2389,15 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// others.
     pub const fn tables(&self) -> TableRows {
         let rows = &self.session.entities;
+        // Each get the ABI holds pending, a query's or a liveliness snapshot's, is a row of the
+        // tables' gets, and the replies the gets hold back rows of the tables' held replies.
+        let pending_gets = rows
+            .of_kind(EntityKind::PendingGet)
+            .saturating_add(rows.of_kind(EntityKind::PendingLivelinessGet));
+        #[cfg(feature = "query")]
+        let held_replies = self.session.held_replies;
+        #[cfg(not(feature = "query"))]
+        let held_replies = 0;
         TableRows {
             keyexprs: rows.keyexprs,
             subscribers: rows.of_kind(EntityKind::Subscriber),
@@ -2456,8 +2408,8 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             queriers: rows.of_kind(EntityKind::Querier),
             matching_listeners: rows.of_kind(EntityKind::MatchingListener),
             key_listeners: rows.key_listeners(),
-            pending_gets: 0,
-            held_replies: 0,
+            pending_gets,
+            held_replies,
         }
     }
 
@@ -2763,8 +2715,6 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // (`crate::engine::StatePlaces`).
         #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         self.put(ArenaPart::QueryPlaneState, 1, planes.queries);
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
-        self.put(ArenaPart::GetPlaneState, 1, planes.gets);
         #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
         self.put(ArenaPart::FacePlaneState, 1, planes.faces);
         let _ = planes;

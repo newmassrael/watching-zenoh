@@ -1797,11 +1797,15 @@ fn a_session_rejoins_as_many_chains_at_once_as_its_config_states() {
     }
 }
 
-/// The ends of the session's legs and the rows of their callbacks are lent a row for each get
-/// every table of pending gets holds: a leg takes one of each, and none is held anywhere else.
+/// Each get the session holds pending, a query's or a liveliness snapshot's, is a row of the
+/// session's tables, and each reply a get holds back a row of the tables' held replies: the plan
+/// lends the tables a row of each for every get and reply the limits admit at once, and lays out no
+/// table of a get's own apart from them. Turned red by a plan that lends the tables no row of a
+/// get (the snapshots' left out), or that lays out the ends of legs, their callbacks or the held
+/// replies as parts of their own again.
 #[cfg(feature = "query")]
 #[test]
-fn the_plan_lends_a_row_for_the_end_of_each_get() {
+fn the_tables_hold_a_row_for_each_get_and_each_held_reply() {
     let plan = ArenaPlan::of(
         &CoopConfig {
             max_faces: BESIDE_DIAL,
@@ -1810,46 +1814,25 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
         &SessionLimits::defaults(),
     )
     .expect("lays an arena out");
-    let gets = plan.gets();
-    let legs = gets.tables * (gets.rows.queries + gets.rows.liveliness_gets);
-    assert_eq!(gets.legs(), Some(legs));
-    // A build of the region's form keeps these rows in its region at the build's bound
-    // (`StatePlaces::tables`): its arena lays out none of them.
-    #[cfg(not(feature = "runtime-plan"))]
-    for part in ["ended legs", "leg callbacks", "held replies"] {
+    let tables = plan.tables();
+    let snapshots = if cfg!(feature = "liveliness-get") {
+        caps::MAX_PENDING_LIVELINESS_GETS
+    } else {
+        0
+    };
+    assert_eq!(
+        tables.pending_gets,
+        caps::MAX_PENDING_QUERIES + snapshots,
+        "a row of the tables for each query and each snapshot pending at once"
+    );
+    assert_eq!(tables.held_replies, plan.session().held_replies());
+    assert_eq!(tables.held_replies, caps::MAX_PENDING_REPLIES);
+    for part in ["ended legs", "leg callbacks", "held replies", "get plane"] {
         assert!(
             plan.rows().all(|laid| laid.part() != part),
-            "the region holds the {part}"
+            "no part of its own holds the {part}"
         );
     }
-    #[cfg(feature = "runtime-plan")]
-    the_arena_lends_a_row_for_the_end_of_each_get(&plan, legs);
-}
-
-/// The rows of the ends of `legs` legs, their callbacks and the replies the gets hold, as `plan`
-/// lays them out where the arena lends them.
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
-fn the_arena_lends_a_row_for_the_end_of_each_get(plan: &ArenaPlan, legs: usize) {
-    assert_eq!(row(plan, "ended legs").count, legs);
-    assert_eq!(
-        row(plan, "ended legs").entry_bytes,
-        core::mem::size_of::<crate::engine::Ended>()
-    );
-    assert_eq!(row(plan, "leg callbacks").count, legs);
-    assert_eq!(
-        row(plan, "leg callbacks").entry_bytes,
-        core::mem::size_of::<Option<crate::engine::LegRow>>()
-    );
-    // The replies held to their Finals are a row each, as many as the session holds at once, of
-    // the rows the engine lends them (`HeldReplies::lent`).
-    let held = row(plan, "held replies");
-    assert_eq!(held.count, plan.session().held_replies());
-    assert_eq!(
-        held.span(),
-        wz_session_core::reply_hold::HeldReplies::<crate::engine::LegId, Lent>::arena_bytes(
-            held.count
-        )
-    );
 }
 
 /// The queries held for their callbacks are the value of `MAX_PENDING_FINALS` the open resolved,
@@ -3789,7 +3772,7 @@ fn a_groups_face_counts_every_members_aliases_in_the_pool() {
 /// red by a plane made on the heap apart from that state, or by one placed anywhere but where its
 /// build puts it.
 #[test]
-#[cfg(any(feature = "queryable", feature = "query", feature = "connectivity"))]
+#[cfg(any(feature = "queryable", feature = "connectivity"))]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_sessions_planes_lie_in_its_own_arena() {
     let router = Router::start(CatchAll::None);

@@ -13,7 +13,7 @@ use std::string::String;
 use std::sync::Mutex;
 use std::vec::Vec;
 
-/// What a test's calls were handed, and how many calls and counts of legs were ended.
+/// What a test's calls were handed, and how many calls were ended.
 #[derive(Default)]
 pub(crate) struct Log {
     handed: Mutex<Vec<String>>,
@@ -55,6 +55,13 @@ impl SampleCall for Call {
     fn hand(&self, sample: &SampleRef<'_>) {
         self.log
             .note(format!("{} sample {}", self.row, sample.keyexpr));
+    }
+}
+
+impl ReplyCall for Call {
+    fn hand(&self, reply: &dyn ReplyView) {
+        self.log
+            .note(format!("{} reply {}", self.row, reply.keyexpr()));
     }
 }
 
@@ -105,8 +112,7 @@ impl RoundCalls for Kept {
     type Liveliness = Call;
     type Queryable = Call;
     type Watch = Call;
-    type Leg = u32;
-    type ReplyCallback = ();
+    type Get = Call;
     type Tokens = Present;
     type Replies = Present;
     type Queries = Present;
@@ -127,8 +133,7 @@ impl RoundCalls for Lean {
     type Liveliness = Call;
     type Queryable = Call;
     type Watch = Call;
-    type Leg = u32;
-    type ReplyCallback = ();
+    type Get = Call;
     type Tokens = Absent;
     type Replies = Absent;
     type Queries = Absent;
@@ -149,8 +154,7 @@ impl RoundCalls for Single {
     type Liveliness = Call;
     type Queryable = Call;
     type Watch = Call;
-    type Leg = u32;
-    type ReplyCallback = ();
+    type Get = Call;
     type Tokens = Absent;
     type Replies = Absent;
     type Queries = Absent;
@@ -171,8 +175,7 @@ impl RoundCalls for KeptSingle {
     type Liveliness = Call;
     type Queryable = Call;
     type Watch = Call;
-    type Leg = u32;
-    type ReplyCallback = ();
+    type Get = Call;
     type Tokens = Present;
     type Replies = Present;
     type Queries = Present;
@@ -193,8 +196,7 @@ impl RoundCalls for KeptOnUse {
     type Liveliness = Call;
     type Queryable = Call;
     type Watch = Call;
-    type Leg = u32;
-    type ReplyCallback = ();
+    type Get = Call;
     type Tokens = Present;
     type Replies = Present;
     type Queries = Present;
@@ -464,25 +466,6 @@ impl ReplyView for Reply {
     }
 }
 
-/// The holder of the one leg 4, which notes the replies its callback is handed and the counts of
-/// it given back.
-struct OneLeg(Arc<Log>);
-
-impl<C: RoundCalls<Leg = u32, ReplyCallback = ()>> LegHolders<C> for OneLeg {
-    fn hold(&self, leg: u32) -> bool {
-        leg == 4
-    }
-
-    fn call(&self, leg: u32, reply: &dyn ReplyView) {
-        self.0.note(format!("{leg} reply {}", reply.keyexpr()));
-    }
-
-    fn release(&self, _leg: u32) -> Option<()> {
-        self.0.end();
-        None
-    }
-}
-
 /// What answers the queries a round hands out: it notes each one's key and generation.
 struct Answers(Arc<Log>);
 
@@ -742,42 +725,34 @@ fn a_gated_record_with_a_part_past_the_rounds_keys_is_counted_and_not_a_defect()
     assert!(log.handed().is_empty(), "nothing is handed");
 }
 
-/// A reply is held for its leg's callback where the round keeps replies, and the record's count of
-/// the leg given back once it was handed; where it keeps none it is refused, the legs it was told
-/// of held by none.
+/// A reply is held for the call begun on its get's row where the round keeps replies, and the
+/// call ended once it was handed; where it keeps none it is refused and its call ended at once.
 #[test]
 fn a_reply_is_held_where_replies_are_kept_and_refused_where_they_are_not() {
     let log = Arc::new(Log::default());
-    // Declared before the rounds, so dropped after them.
-    let (kept_leg, lean_leg) = (OneLeg(log.clone()), OneLeg(log.clone()));
-    let mut kept = round::<Kept>();
-    let legs: NonNull<dyn LegHolders<Kept>> = NonNull::from(&kept_leg);
-    // SAFETY: the leg outlives the round.
-    unsafe { kept.get_mut().calls_legs_of(legs) };
+    let call = |row| Call {
+        row,
+        log: log.clone(),
+    };
+    let kept = round::<Kept>();
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
     unsafe {
-        kept.offer_reply(4, &Reply("r/1"));
+        kept.offer_reply(call(4), &Reply("r/1"));
         kept.seal();
     }
     assert!(kept.deliver());
     assert_eq!(log.handed(), ["4 reply r/1"]);
-    assert_eq!(
-        log.ended(),
-        1,
-        "the record's count of the leg is given back"
-    );
+    assert_eq!(log.ended(), 1, "the record's call is ended once handed");
 
-    let mut lean = round::<Lean>();
-    let legs: NonNull<dyn LegHolders<Lean>> = NonNull::from(&lean_leg);
-    // SAFETY: the leg outlives the round.
-    unsafe { lean.get_mut().calls_legs_of(legs) };
+    let lean = round::<Lean>();
     // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
     unsafe {
-        lean.offer_reply(4, &Reply("r/2"));
+        lean.offer_reply(call(4), &Reply("r/2"));
         lean.seal();
     }
     assert!(!lean.deliver(), "nothing was held");
     assert_eq!(log.handed(), ["4 reply r/1"]);
+    assert_eq!(log.ended(), 2, "the refused call is ended at once");
     assert_eq!(lean.counts().held_over, 1);
 }
 
@@ -1479,8 +1454,7 @@ impl RoundCalls for Grouped {
     type Liveliness = Call;
     type Queryable = Call;
     type Watch = Call;
-    type Leg = u32;
-    type ReplyCallback = ();
+    type Get = Call;
     type Tokens = Absent;
     type Replies = Absent;
     type Queries = Absent;
