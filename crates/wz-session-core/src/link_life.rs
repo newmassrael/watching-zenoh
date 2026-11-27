@@ -40,10 +40,12 @@
 //! with its link: where the dial role's face would dial on, back off, stand by or end the
 //! session, a taken face's link is closed and the owner takes the face out ([`Effects::removes`]).
 //!
-//! A handshake that completed is established even when its link ended after: the owner reports
-//! `Established` before `Ended` when it reads both at one look.
+//! A handshake that completed is established even when its link ended after: a look at the link
+//! asks its establishment before its end ([`UnicastLink::read_link`]), so it reads `Established`
+//! before `Ended` when both hold.
 //!
 //! [`UnicastLink`]: crate::link_life::UnicastLink
+//! [`UnicastLink::read_link`]: crate::link_life::UnicastLink::read_link
 //! [`Effects`]: crate::link_life::Effects
 //! [`Effects::removes`]: crate::link_life::Effects::removes
 //! [`LinkRole::Taken`]: crate::link_life::LinkRole::Taken
@@ -214,6 +216,25 @@ pub enum LinkPhase {
     Held,
     /// Closed, ended, or, for a taken face, gone.
     Closed,
+}
+
+/// What a look at a face's link reads for its life ([`UnicastLink::read_link`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkRead {
+    /// The input the link's I/O comes to: [`LinkInput::Established`], [`LinkInput::Ended`] or
+    /// [`LinkInput::Tick`].
+    pub input: LinkInput,
+    /// Whether the handshake under way is over, its link ended or its deadline passed: where the
+    /// dial role's face asks whether another face holds the node its link reached.
+    pub over: bool,
+}
+
+impl LinkRead {
+    /// What a look reads of a face whose record holds no link: only the time moved.
+    pub const NOTHING: Self = Self {
+        input: LinkInput::Tick,
+        over: false,
+    };
 }
 
 /// What the owner does after an input, in this order: let go of what a close leaves
@@ -489,6 +510,41 @@ impl UnicastLink {
             | UnicastLinkState::Up
             | UnicastLinkState::Held
             | UnicastLinkState::Closed => None,
+        }
+    }
+
+    /// What a look at the link its owner holds reads for the life at `now_us`, given the link's
+    /// two facts of its I/O: `established`, asked of a link in its handshake alone and before
+    /// its end, so a handshake that completed reads established even when its link ended after;
+    /// and `ended` (its pump ended or was asked to), asked of every link. A handshake is over
+    /// once its link ended or its deadline passed. The one reading of a link every owner makes,
+    /// so no owner reads the life's phase to make its input; inlined into each, so a look of an
+    /// up link reads the machine's state and the end alone.
+    #[inline]
+    pub fn read_link(
+        &self,
+        now_us: u64,
+        established: impl FnOnce() -> bool,
+        ended: impl FnOnce() -> bool,
+    ) -> LinkRead {
+        let handshake = matches!(
+            self.engine.get_current_state(),
+            UnicastLinkState::Handshaking
+        );
+        if handshake && established() {
+            return LinkRead {
+                input: LinkInput::Established,
+                over: false,
+            };
+        }
+        let ended = ended();
+        LinkRead {
+            input: if ended {
+                LinkInput::Ended
+            } else {
+                LinkInput::Tick
+            },
+            over: handshake && (ended || now_us >= self.data.deadline_us),
         }
     }
 
@@ -1115,6 +1171,76 @@ mod tests {
         let lost = link.input(LinkInput::Ended, 5);
         assert!(lost.lose());
         assert_eq!(lost.dial(), Some(0));
+    }
+
+    /// A look at a link in its handshake reads it established before its end, so a handshake
+    /// that completed is established even when its link ended after; ended, or at its deadline,
+    /// the handshake is over. Turned red by an end read before the establishment, or a handshake
+    /// read over that neither ended nor passed its deadline (`UnicastLink::read_link`).
+    #[test]
+    fn a_look_at_a_handshake_reads_it_established_before_its_end_and_over_at_its_deadline() {
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 1);
+        link.input(LinkInput::Open, 0);
+        link.input(LinkInput::DialMade, 0);
+        link.input(LinkInput::HandshakeBegun, 0);
+        let LinkPhase::Handshaking { deadline_us, .. } = link.phase() else {
+            panic!("the handshake runs: {:?}", link.phase());
+        };
+        let read = |now_us: u64, established: bool, ended: bool| {
+            link.read_link(now_us, || established, || ended)
+        };
+        assert_eq!(
+            read(10, true, true),
+            LinkRead {
+                input: LinkInput::Established,
+                over: false,
+            },
+            "completed, then ended: established first"
+        );
+        assert_eq!(
+            read(10, false, true),
+            LinkRead {
+                input: LinkInput::Ended,
+                over: true,
+            }
+        );
+        assert_eq!(read(10, false, false), LinkRead::NOTHING);
+        assert_eq!(
+            read(deadline_us, false, false),
+            LinkRead {
+                input: LinkInput::Tick,
+                over: true,
+            },
+            "over at its deadline"
+        );
+    }
+
+    /// A look asks a link's establishment only while its handshake runs: an idle link and one
+    /// that is up are read by their end alone, and never over. Turned red by an establishment
+    /// asked at every look, which would cost each look of an up link a read of its session, or
+    /// an end read as a handshake over outside one.
+    #[test]
+    fn a_look_asks_a_links_establishment_only_in_its_handshake() {
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 1);
+        let asked = core::cell::Cell::new(0_u32);
+        let established = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+        assert_eq!(link.read_link(0, &established, || false), LinkRead::NOTHING);
+        bring_up(link, 0);
+        assert_eq!(link.read_link(5, &established, || false), LinkRead::NOTHING);
+        assert_eq!(
+            link.read_link(5, &established, || true),
+            LinkRead {
+                input: LinkInput::Ended,
+                over: false,
+            },
+            "an up link whose pump ended"
+        );
+        assert_eq!(asked.get(), 0, "no look outside a handshake asked");
     }
 
     /// A close lets go of the dial under way or of the link, and of nothing in a wait; a closed

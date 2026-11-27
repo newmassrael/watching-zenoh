@@ -26,7 +26,7 @@ use wz_session_core::bounded::{push_text, BoundedVec, Lent, Static};
 use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::DriverOutcome;
-use wz_session_core::link_life::{LinkInput, LinkPhase, LinkRole, UnicastLink};
+use wz_session_core::link_life::{LinkInput, LinkPhase, LinkRead, LinkRole, UnicastLink};
 use wz_session_core::locator_directory::LocatorText;
 #[cfg(feature = "resource-snapshot")]
 use wz_session_core::resource_snapshot::{BuildMessageReading, BuildReceiveLedger};
@@ -2717,6 +2717,8 @@ impl<
                 input: LinkInput::Tick,
             };
         };
+        // What the node's reading asks: whether the dial role's face stands by.
+        #[cfg(feature = "listen")]
         let phase = face.life().phase();
         let endpoint_row = face.life().endpoint_row();
         // A place's row holds a dial only while its face's link is that dial (`Self::put_dial`).
@@ -2737,22 +2739,12 @@ impl<
             face.link_mut().end_dialing();
             return FaceRead { role, input };
         }
-        // An established link and one in its handshake read their wire's end by one look; only
-        // the handshake's has an establishment to report, and only its end can find the node it
-        // reached held by another face.
-        let (input, over) = match (face.link().wire(), phase) {
-            (Some(wire), LinkPhase::Handshaking { deadline_us, .. }) => {
-                if wire.established() {
-                    (LinkInput::Established, false)
-                } else if wire.finished() {
-                    (LinkInput::Ended, true)
-                } else {
-                    (LinkInput::Tick, now_us >= deadline_us)
-                }
-            }
-            (Some(wire), _) if wire.finished() => (LinkInput::Ended, false),
-            _ => (LinkInput::Tick, false),
-        };
+        // The life reads its link off the wire: an establishment only in its handshake, whose end
+        // alone can find the node it reached held by another face, and an end at every phase.
+        let LinkRead { input, over } = face.link().wire().map_or(LinkRead::NOTHING, |wire| {
+            face.life()
+                .read_link(now_us, || wire.established(), || wire.finished())
+        });
         #[cfg(feature = "listen")]
         let input = self.read_node(at, id, role, phase, input, over);
         #[cfg(not(feature = "listen"))]

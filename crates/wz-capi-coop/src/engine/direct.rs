@@ -1169,40 +1169,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
     /// the dial role's face reads the node its link reached too (`Self::read_node`), and a dial an
     /// attach began has its life looked at in this turn (`Self::wake_for_record_dial`).
     fn next_input(&mut self, core: &mut Core<L, C>, end: &EndFlags, now_us: u64) -> LinkInput {
-        // The face's record holds the link exactly while its parts hold the pump.
-        let linked = core
-            .transport
-            .links
-            .face(self.at())
-            .filter(|face| face.link.wire().is_some());
-        if let Some(face) = linked {
-            let phase = face.life.phase();
-            let established = matches!(phase, LinkPhase::Handshaking { .. })
-                && face.link.wire().is_some_and(|wire| wire.established());
-            if established {
-                return LinkInput::Established;
-            }
-            let input = if end.over() {
-                LinkInput::Ended
-            } else {
-                LinkInput::Tick
-            };
-            // A handshake is over once its link ended or its deadline passed.
+        // The face's record holds the link exactly while its parts hold the pump. The life reads
+        // it: its establishment off the wire, its end off the flags the read and the link's end
+        // share.
+        let read = core.transport.links.face(self.at()).and_then(|face| {
+            let wire = face.link.wire()?;
+            Some(
+                face.life
+                    .read_link(now_us, || wire.established(), || end.over()),
+            )
+        });
+        if let Some(read) = read {
             #[cfg(feature = "listen")]
-            {
-                let over = match phase {
-                    LinkPhase::Handshaking { deadline_us, .. } => {
-                        input == LinkInput::Ended || now_us >= deadline_us
-                    }
-                    _ => false,
-                };
-                return self.read_node(core, input, over);
-            }
+            return self.read_node(core, read.input, read.over);
             #[cfg(not(feature = "listen"))]
-            return input;
+            return read.input;
         }
-        #[cfg(not(feature = "listen"))]
-        let _ = now_us;
         match self.take_dial_answer(core) {
             Some(input) => input,
             #[cfg(feature = "listen")]
