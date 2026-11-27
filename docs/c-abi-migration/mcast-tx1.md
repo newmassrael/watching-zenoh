@@ -535,3 +535,49 @@ the registry cells' recording and the compression choice the emit reads move int
 `TransportTx`, which owns them as zenoh-pico's `_z_transport_common_t` does; no facts behind a
 trait object and no walk generic over them. T3a-2 moves them first, then the emit, the flush,
 `write_n_msg` and the fragment walk.
+
+## 14. Step T3a-2, first commits: the emit's facts and the emit, as landed
+
+- **Compression is the link's.** Section 13 put the compression choice on
+  `TransportTx`. Read in the code, it is not a transport's fact: the predicate the emit and the
+  receive's un-wrap read had an established conjunct, and establishment is stamped per link
+  (`LinkState`'s `established_at`), as upstream's batch configuration is a link's. A link that
+  joins an aggregate writes its handshake bare while another link of the session compresses, and
+  one flag on the shared transmit state would have compressed that handshake. So the link keeps
+  it (`LinkState::compresses`, an `R::Flag`), settled by `enter_established` from the
+  negotiated capability less a lowlatency link (`negotiated_batch_compression`), before the send
+  limits are settled from it, and withdrawn by `reset_for_reopen`. The emit reads the link it
+  writes on; `SessionLinkActions::compresses_batches` reads the binding's link. Held by
+  `bundle_tests::a_link_compresses_from_its_establishment_what_its_session_negotiated` (red if
+  the establishment settles anything but the negotiated capability, if a link compresses before
+  it is established, or if a reopen leaves it compressing) and by the compression end-to-end
+  tests of `wz-runtime-tokio` (`compression_e2e`, `transport_compose_e2e`,
+  `transport_mode_pairs_e2e`).
+- **The counters are the transmit state's.** The wire counters (`stats`), the
+  registry partition (`metrics`, under a lock of its own instead of the session's facts lock)
+  and the lend-only refusals (one `R::Word` per cause, where they were a row of the facts) move
+  into `TransportTx`, with `record_on_link` and `refuse` (was `refuse_tx`). The receive's
+  counters ride with the transmit's, `TransportStats` being one value of both directions; the
+  readers (`stats_report`, `stats_metrics`, `tx_refusals`, the receive's counting in
+  `drive`) read them at `tx`. A reopen keeps them. Held by the tests that count through them,
+  unchanged: the lend-only refusal tests of `bundle_tests` (`lent_handshake`,
+  `lent_frame_refusal`: red if `refuse` does not count its cause),
+  `a_datagram_dropped_before_the_session_read_it_is_a_receive_drop`, `wz-session-lwip`'s
+  `tx_allocations` and `wz-runtime-tokio`'s `transport_stats_e2e`.
+- **The emit is the transmit state's.** `emit_on_link` moves onto
+  `TransportTx` unchanged in what it does and in its `#[inline(never)]`; the session's sends
+  (`send_wire`, the per-link keepalive and close, the lent batch and fragment sends) call
+  `self.tx.emit_on_link` with the link they route to. The driver is called by its trait's path,
+  the module importing no trait a bound already names. Held by every test that sends, and
+  directly by `bundle_tests`' tests that emit on the bundle's link.
+
+Expected: `pico-api-coop-nostd` -50 to -200 (a refusal is a word's add where it held the facts
+lock; the pico cases compile neither `transport-stats` nor `transport-compression`, so the
+other two moves are a field's path there), +8 bytes of RAM a session (two words for two 32-bit
+counts); `pico-client-coop-nostd` the same; receive Ir none; arm W's send Ir unchanged (the
+emit's body and its call are the ones they were).
+
+Next in T3a-2, one family a commit: the routing of a send over a borrow of the transmit state and
+the links (`send_wire`, `with_conduit_link`, `lease_on`), the lent batch's holder
+(`with_batch_holder`, `close_lent_batch`, `send_lent_batch`), the flush (`flush_conduit`,
+`drain_conduits`), `write_n_msg`, the fragment walk.
