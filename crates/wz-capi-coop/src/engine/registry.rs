@@ -1226,24 +1226,17 @@ impl<H: Holders> RegistryOf<H> {
     /// each member's own keyexprs for every member the group admits (`GROUP_FACE_ALIASES`), which
     /// the open reserved in the session's pool. A face whose quota admits them already, one bound
     /// by the pool alone among them, keeps it, as does a build whose limits keep the build's value
-    /// alone.
+    /// alone; a table whose rows are counted when it is made is counted up to them where it is
+    /// counted fewer, whatever its quota admits (`SubscriberPeer::hold_aliases_at_least`).
     #[cfg(feature = "multicast-declarations")]
     pub(super) fn hold_member_aliases(&mut self, face: HeldFace) {
         let Some(set) = self.place(face).and_then(|at| self.sets.get_mut(at)) else {
             return;
         };
-        let aliases = &mut set.peer.subscribers;
-        if aliases
-            .alias_quota()
-            .get()
-            .admits(crate::arena::GROUP_FACE_ALIASES)
-        {
-            return;
-        }
         if let Ok(quota) =
             MaxPeerKeyexprAliasesHeld::select(Quota::at_most(crate::arena::GROUP_FACE_ALIASES))
         {
-            aliases.limit_aliases_to(quota);
+            set.peer.subscribers.hold_aliases_at_least(quota);
         }
     }
 

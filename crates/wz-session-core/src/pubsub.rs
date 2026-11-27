@@ -3676,6 +3676,26 @@ impl<P: Storage> SubscriberPeer<P> {
         }
     }
 
+    /// Hold the peer's alias table to admit at least the most `quota` states: its quota raised to
+    /// `quota` where it admits fewer, and a table whose rows are counted when it is made counted
+    /// up to it where it is counted fewer and holds no alias ([`PeerIds::recount`]). A quota that
+    /// admits as many is kept, and so is a count of as many rows: a table counted when made holds
+    /// no more ids than its count, whatever its quota admits, so both are asked. A quota of no most
+    /// is no bound to hold the table to.
+    #[cfg(feature = "storage-profile")]
+    pub fn hold_aliases_at_least(&mut self, quota: crate::limits::MaxPeerKeyexprAliasesHeld) {
+        let Some(rows) = quota.get().most() else {
+            return;
+        };
+        if !self.naming.alias_quota.get().admits(rows) {
+            self.naming.alias_quota = quota;
+        }
+        let counted = PeerIds::<KeyText<P>, P::Keys>::counted_rows(&self.naming.aliases);
+        if counted.is_some_and(|held| held < rows) {
+            PeerIds::<KeyText<P>, P::Keys>::recount(&mut self.naming.aliases, rows);
+        }
+    }
+
     /// Hold the peer's alias table to the `MAX_KEYEXPR_BYTES` the creator of the session's
     /// tables resolved: a `DeclKexpr` whose keyexpr is longer than `quota` admits is dropped, as
     /// one longer than a fixed row holds is, and the aliases already held are kept.

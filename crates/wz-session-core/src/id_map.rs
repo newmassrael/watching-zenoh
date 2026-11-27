@@ -508,6 +508,13 @@ pub trait PeerIds<V, H>: Default {
         let _ = rows;
         false
     }
+
+    /// The rows the table is counted to, for a table whose rows are counted when it is made
+    /// (`CountedIdMap`): the most ids it holds whatever its quota admits. `None` for a table of a
+    /// fixed capacity, of rows lent from a pool, or that grows, which has no count.
+    fn counted_rows(&self) -> Option<usize> {
+        None
+    }
 }
 
 impl<V, const N: usize, H> PeerIds<V, H> for FixedIdMap<V, N> {
@@ -887,6 +894,10 @@ impl<V, const N: usize> PeerIds<V, crate::on_use::BudgetKeys> for CountedIdMap<V
 
     fn recount(&mut self, rows: usize) -> bool {
         CountedIdMap::recount(self, rows)
+    }
+
+    fn counted_rows(&self) -> Option<usize> {
+        Some(self.capacity())
     }
 }
 
