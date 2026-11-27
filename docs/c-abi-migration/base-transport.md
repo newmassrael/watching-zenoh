@@ -227,7 +227,7 @@ lent chain, after for a borrowed one).
 | step | what | expected | send Ir | receive Ir | before it |
 |------|------|---------:|---------|------------|-----------|
 | B3a | **built** (commit "Borrow the open frame's lease into its send"): the open frame's lease lent to `send_lent_batch` by reference, so a message that does not join the open frame copies no lease whole (the 52 of 5.1) | -40 to -55 | lower: one 56-byte copy fewer on that message, no call added | none | built |
-| B3b | the conduit's open frame written where it lies: one write cursor over the slot's memory, the one `TxBuf` table of a lent frame, which the lease holds as a field, so neither the pick-up nor the put-down copies the frame's state (its change read in 5.4) | -150 to -250 | lower | none | a build loop: the lease and its put-down forms are named on 115 lines of 9 other files |
+| B3b | the conduit's open frame written where it lies: one write cursor over the slot's memory, the one `TxBuf` table of a lent frame, which the lease holds as a field, so neither the pick-up nor the put-down copies the frame's state (its change read in 5.4) | -150 to -250 | lower | none | **built** (5.5) |
 | B3c | the slot held for the batch: a single-conduit lend-only link lends the batch one slot, and a frame that does not join leaves before the next opens in it, as zenoh-pico's batch does; no per-frame `acquire`, no holder record | -250 to -500 | lower: no lend per frame | none | B3b; the cooperative link's slot pool (driver area) |
 | B3d | the chain's length read off its first fragment's run (`BodyWindow` counts the message's position already): no counting pass, so `emit_fragments_encoded`, `try_encoded_len` and `CountTxBuf`'s table leave the lend-only build | -200 to -300 | none (a chain only) | none | B3b; the cap's refusal moved between the first fragment's write and its emit |
 | B4a | one open chain per reliability in a `OnePeer` Router: the slot is the reliability's index, so no search, no free-slot walk and no quota count | -150 to -250 | none | none per sample (a fragment is the cold path) | a line reading of the case's own Router |
@@ -280,6 +280,31 @@ build, no 5-word copy back); receive untouched. Tests: `tx_lease`'s tests over t
 kept open and written again in place holds what was written, its budget, and gives the slot back
 once), the batching tests of `bundle_tests.rs` (`transport-batching` with `transport-tx-lend`),
 and the case's join counted by `BatchLendCounts`.
+
+### 5.5 B3b as built (not built or run by this lane)
+
+Two commits. "Drop the held slot no sender puts down": `HeldSlot`, `TxLease::hold` and
+`TxLease::resume` had no caller but `tx_lease`'s own tests, so the open slot is the one form a
+frame kept across calls takes. "Write a joined message where its frame lies": as 5.4 reads it,
+with one change of shape. `FrameCursor` is private to `tx_lease.rs`, and both holders lend it as
+`&mut dyn TxBuf<Error = CodecError>` (`TxLease::frame_mut`, and `OpenSlot::frame_mut`, unsafe);
+a cursor reached by `&mut FrameCursor` could be swapped between two leases by safe code, which
+would send one slot with another's lengths. The lease keeps `len`, `is_empty`, `as_slice`,
+`truncate`, `capacity` and `hold_to` as inherent forwards, and the open slot `len`, `is_empty`,
+`truncate` and `written` (unsafe), so the join reads the frame's reliability, its length and its
+roll-back with no call through the table. The join (`write_n_msg`) keeps the stage's open slot
+where it is and writes through `TxSink::new(open.frame_mut())`; only a frame that does not take
+the message is taken out of the stage and picked up for `send_lent_batch`. The `TxBuf` imports
+the lease's readers needed in `session_actions.rs` went; `wz-runtime-tokio`'s and
+`wz-session-lwip`'s tests write a lease through `frame_mut`.
+
+Tests: `tx_lease::tests::a_frame_written_where_it_is_kept_open_is_what_the_link_is_handed` (red
+if `OpenSlot::frame_mut` writes from the headroom or drops the hold, or a pick-up loses what was
+written in place), the other `tx_lease` tests over the cursor, and the joins of
+`bundle_tests::lent_window` (`tx-lend-only`, `transport-batching`, `codec-push`, `alloc`):
+`puts_of_one_reliability_share_a_frame_and_the_other_opens_its_own` and
+`a_put_the_open_frame_has_no_room_for_sends_it_once_and_opens_the_next`, whose second put is the
+message written in place and rolled back in place. Expected as 5.4 says; not measured.
 
 ## 6. The work steps as built
 

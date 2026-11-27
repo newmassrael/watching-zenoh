@@ -159,7 +159,20 @@ The pico library names the waited links in its chain of link types (`WaitedSocke
 engine's tests do (`PosixLinks` in `crates/wz-capi-coop/src/tests.rs`). Test:
 `udp_link::tests::a_link_of_a_stack_its_owner_waits_for_has_no_wait_of_its_own`.
 
-Left for a step of its own: the stream link's share (about 120 bytes of `StreamDriver::service`).
+The stream link's share (about 120 bytes of `StreamDriver::service`), built in two commits (not
+built or run by this lane), as read below with one change. "Carry the stack's input waiter to
+stream links": the GAT takes `W`, `StreamDriver` takes `W = WaitsInLoop` after its framing, and
+`IpLinks` hands its `W` to every stream link it makes (`LinkPlace::stream`, and the pending
+dial, the `tcp/` and the `tls/` listeners, which carry it as the `udp/` listener does); the
+slot profile's `IpDriver` and the unixpipe and WebSocket stacks name `WaitsInLoop`. The change:
+`over` and `over_in` stay inherent on the default `W` (their callers do not name one), and the
+`StreamLink` impl builds through `framed` and `framed_in`, which are generic over `W`. "Name
+the stream's input wait as a type fact": the POSIX, Windows and Zephyr TCP streams set
+`StreamSocket::NAMES_INPUT_WAIT`. Tests:
+`stream_link::tests::a_link_of_a_stack_its_owner_waits_for_has_no_wait_of_its_own` (red if
+`owner_waits_input` drops `W::OWNER && S::NAMES_INPUT_WAIT`) and, on Linux,
+`wz-runtime-posix` `stream::tests::a_stream_link_its_owner_waits_for_names_the_streams_wait_unasked`
+(red if the POSIX stream's constant is left out). The read as it stood before the build:
 A stream link's type is its stream's (`StreamSocket::Link`), so carrying `W` there touches each
 stream family and the secure channel's. Its change, read in the code and not built: the GAT takes
 the waiter, `type Link<B: RxStore + 'static, X: TxStore + 'static, W: InputWaiter>`;

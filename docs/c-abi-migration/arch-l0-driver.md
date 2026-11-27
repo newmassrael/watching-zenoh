@@ -318,6 +318,14 @@ passed its deadline), `a_look_asks_a_links_establishment_only_in_its_handshake` 
 outside a handshake asks it, which would cost each look of an up link a read of its session);
 `faces`' `read_face` tests hold the round's reading, the direct engine's tests the direct read's.
 
-Left open for the owner: `UnicastTransport<_, UnicastLink>` (`init_in`, `input`, `pumped`,
-`life`) has no driver in the tree, only tests; it is the form of a driver of one face with no
-face table, kept or removed by that decision, not by this step.
+The form `UnicastTransport<_, UnicastLink>` (`init_in`, `input`, `pumped`, `life`) had no
+driver in the tree, only tests. The owner's decision: no form exists only for tests. Removed
+(commit "Build a link's transport with no life inside"): `UnicastTransport<Router>` is the
+receive and the timers alone, built by `init_in(place, timeouts, make_router)`, its due instant
+the timers' (`LinkWake`, `MadeLink` and `UnicastLink::pumped` went with the form). The tests
+moved onto that form: `unicast_transport::tests` (the maker's Router, a maker that lends back
+another place), `bundle_tests::unicast_transport::the_transport_is_due_when_its_session_is` (red
+if `due_ms` leaves the session's deadline out) and
+`session_drive::tests::a_session_stepped_with_its_owners_transport_is_due_at_that_transports_timers`
+(red if `LinkSession::due_ms` leaves the transport it is handed out). The life's own behaviour
+stays held by `link_life::tests`.
