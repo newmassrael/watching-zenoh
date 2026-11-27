@@ -409,6 +409,27 @@ HEAP_ABORT = r"handle_alloc_error"
 # with why: the selftest holds every other forbidden pattern to a case that requires it. A pattern
 # leaves this table in the commit that adds its control.
 CONTROL_PENDING: dict[str, str] = {}
+# The operations a session runs with every face's send place held, each wrapped in a value of its
+# own whose one method ran it (`HeldOperation`, `UnderHeldFaces`): a copy of the wrapper for each
+# operation, which docs/c-abi-migration/peer-rows.md R6 took out of the source.
+HELD_OPERATION = r"HeldOperation|UnderHeldFaces"
+# Forms a structural step took out of the source, each with the step: no build can link a form
+# its source no longer defines, so no case is a forbidden pattern's control, and the control is the
+# source itself. The selftest holds each to a tree whose crates define none of its names
+# (`removed_form_defined`), so a commit that writes the form again fails before any case is built,
+# and a library that links it fails each case that forbids it.
+REMOVED_FORMS: dict[str, str] = {
+    HELD_OPERATION: "peer-rows.md R6: an operation that holds every face's send place runs in its "
+                    "caller under one hold of the faces, which keeps each place in its face",
+}
+
+
+def removed_form_defined(pattern: str) -> list[str]:
+    """The source files of the crates (`crates/*/src`) that define a type, an enum or a trait
+    whose name `pattern` matches (`REMOVED_FORMS`): none while the form stays out of the source."""
+    definition = re.compile(r"\b(?:struct|enum|trait|type|union)\s+(?:" + pattern + r")\b")
+    return sorted(str(path.relative_to(ROOT)) for path in CRATES.glob("*/src/**/*.rs")
+                  if definition.search(path.read_text(encoding="utf-8", errors="replace")))
 # The engine a pico build runs its sessions on (`engine-tokio` / `os-host`,
 # docs/capi-pico-on-coop-engine.md): a build of one links none of the other.
 TOKIO_ENGINE = r"wz_capi_core::|wz_runtime_tokio::"
@@ -1154,7 +1175,7 @@ CASES: tuple[Case, ...] = (
          # 1,195,275 hosted, +9,544 on one machine.
          "os-host,link-udp,peer", 1_208_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE),
+                 MULTICAST, TOKIO_ENGINE, HELD_OPERATION),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop-scout build with the listening role, which `peer` brings "
@@ -1177,7 +1198,7 @@ CASES: tuple[Case, ...] = (
     # pico-default's are.
     Case("pico-api-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", None, 1_056_200,
          forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK,
-                 STD_RUNTIME),
+                 STD_RUNTIME, HELD_OPERATION),
          require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
          **NOSTD_RELEASE_FORM, features_from=pico_windows_package.LIKE_PROFILE,
          note="pico-client-coop-nostd's form (NOSTD_RELEASE_FORM: the profile, the configuration "
@@ -3518,9 +3539,17 @@ def cmd_selftest() -> int:
     forbidden = {p for c in CASES for p in c.forbid}
     expect("every forbidden pattern is required of a build that has the plane, or names why "
            "its control is not yet in the table",
-           forbidden <= required | set(CONTROL_PENDING))
+           forbidden <= required | set(CONTROL_PENDING) | set(REMOVED_FORMS))
     expect("a pattern whose control is in the table no longer waits for one",
            not (set(CONTROL_PENDING) & required))
+    expect("a removed form is forbidden to a case and required of none",
+           set(REMOVED_FORMS) <= forbidden and not (set(REMOVED_FORMS) & required))
+    expect("a removed form's names match its symbols and no other",
+           bool(re.search(HELD_OPERATION, "wz_capi_coop::engine::direct::HeldOperation<F, U>::run"))
+           and not re.search(HELD_OPERATION, "wz_capi_coop::engine::direct::FacesHeld::parts"))
+    for form in REMOVED_FORMS:
+        expect(f"no crate defines the removed form {form!r} again ({REMOVED_FORMS[form]})",
+               removed_form_defined(form) == [])
     expect("case ids are unique", len({c.id for c in CASES}) == len(CASES))
     expect("a patterned plane's own symbol matches its pattern",
            all(re.search(p, s) for p, s in (

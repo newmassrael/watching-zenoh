@@ -774,6 +774,79 @@ fn a_listeners_walk_ends_at_its_last_held_row() {
     });
 }
 
+/// An operation of a listener holds the send place of each face that holds a link, reaches each
+/// face through the wire its hold keeps in that face, and lets every place go as it ends: with two
+/// clients, both faces are held and reached, none by a try, and no place is held after. Turned red
+/// by a hold that keeps a face's place past the operation (`FacesMark`'s drop), skips a face
+/// (`CoopEngine::hold_faces`), or finds a face's wire by anything but the face it holds
+/// (`FacesMark::wire_of`).
+#[cfg(not(wz_round))]
+#[test]
+fn an_operation_holds_every_face_with_a_link_and_lets_each_go() {
+    let (listener, endpoint) = listening(|config| config.max_faces = 2);
+    let first = client(&endpoint, 0xc1);
+    let second = client(&endpoint, 0xc2);
+    eventually("both faces", || listener.faces_up() == 2);
+    assert_eq!(
+        listener.faces_reached_by_an_operation(),
+        (2, 0),
+        "each face that is up is reached through the wire the operation's hold keeps in it"
+    );
+    assert_eq!(
+        listener.places_held_by_an_operation(),
+        (2, 0),
+        "each face whose place holds a link is held inside the operation"
+    );
+    eventually("every place let go after the operation", || {
+        listener.places_held_now() == 0
+    });
+    drop((first, second));
+}
+
+/// The faces an operation holds name the one hold that keeps each: inside an operation, its own
+/// hold finds both faces of a listener with two clients, and a hold under another mark finds
+/// neither. Turned red by a face that answers its kept wire whatever the mark it is asked with
+/// (`KeptSend::wire_for`), which would hand another holder's place to an operation that never
+/// took it.
+#[cfg(not(wz_round))]
+#[test]
+fn a_face_held_by_an_operation_is_found_by_that_hold_alone() {
+    let (listener, endpoint) = listening(|config| config.max_faces = 2);
+    let first = client(&endpoint, 0xc1);
+    let second = client(&endpoint, 0xc2);
+    eventually("both faces", || listener.faces_up() == 2);
+    assert_eq!(
+        listener.faces_found_by_an_operation_and_another_hold(),
+        (2, 0),
+        "the operation's hold finds both faces, a hold under another mark none"
+    );
+    drop((first, second));
+}
+
+/// An operation on a closed listener runs nothing, and leaves no face's place held: the places
+/// taken before the session was found closed are let go of with the hold. CONTROL: the open
+/// listener runs it. Turned red by a hold that runs the operation on a closed session
+/// (`CoopEngine::hold_faces` without `CoopEngine::live`), or that keeps the places it took.
+#[cfg(not(wz_round))]
+#[test]
+fn an_operation_on_a_closed_listener_runs_nothing_and_holds_nothing() {
+    let (listener, endpoint) = listening(|config| config.max_faces = 2);
+    let first = client(&endpoint, 0xc1);
+    eventually("the face", || listener.faces_up() == 1);
+    assert!(
+        listener.an_operation_runs(),
+        "CONTROL: an open session runs it"
+    );
+    SessionDrive::close(&*listener);
+    assert!(!listener.an_operation_runs(), "the closed session ran it");
+    assert_eq!(
+        listener.places_held_now(),
+        0,
+        "the places taken before the session was found closed are let go of"
+    );
+    drop(first);
+}
+
 /// A row a face left is noted at rest by that face's last look, and the face an attach gives it
 /// next wakes it: the attached dial lies in the face's record, asked only by the face's own look,
 /// so a read that passed the row over would never dial. CONTROL: the row's first

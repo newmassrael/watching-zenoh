@@ -948,11 +948,11 @@ fn a_redeclare_inside_the_reads_step_is_told() {
 
 /// An operation reaches each face that is up through the wire its hold of that face's place
 /// holds, and none by a try: each face's record names its face by the flags its link's end shares
-/// with the read. Turned red by a hold that names another face's flags (`HeldSend::face`), a
-/// `FaceTx::held_of` that compares anything but those flags, a walk that holds no place
-/// (`CoopEngine::hold_faces_from`), or, where the dial role's face is the only face, a hold
-/// that hands the operation no wire (`DialHeld::parts`). A build whose faces share the session's
-/// lock as their one send place holds none (its twin is
+/// with the read. Turned red by a hold whose faces answer a wire for another mark than their own
+/// (`KeptSend::wire_for`), a `FacesMark::wire_of` that compares anything but those flags, a
+/// walk that holds no place (`CoopEngine::hold_faces`), or, where the dial role's face is the
+/// only face, a hold that hands the operation no wire (`DialHeld::parts`). A build whose faces
+/// share the session's lock as their one send place holds none (its twin is
 /// `an_operation_holds_no_face_place_where_the_faces_share_the_sessions_lock`).
 #[cfg(not(any(wz_round, wz_one_send_place)))]
 #[test]
@@ -969,7 +969,7 @@ fn an_operation_reaches_each_face_through_the_wire_it_holds() {
 /// Inside an operation, the place of every face that holds a link is held, so a send to any
 /// face under the session's lock is made through a held wire and never finds a place another
 /// holder has. Turned red by a walk that takes the session's lock before the faces' places, or
-/// that skips a face whose place holds a link (`CoopEngine::hold_faces_from`), or by a hold of
+/// that skips a face whose place holds a link (`CoopEngine::hold_faces`), or by a hold of
 /// the dial role's face alone that takes no place (`CoopEngine::hold_dial`) or keeps it past
 /// the operation (`DialHeld`'s drop). A build whose faces share the session's lock as their one
 /// send place holds none (its twin is
