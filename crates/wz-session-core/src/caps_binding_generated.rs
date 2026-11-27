@@ -898,6 +898,18 @@ pub const MAX_CONNECTIVITY_TOLD_ROWS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::MAX_SCOUT_INTERFACES`] is bound.
+pub const MAX_SCOUT_INTERFACES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Local),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Runtime],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: Some(Binding::Build),
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_STATIC_CONNECT`] is bound.
 pub const MAX_STATIC_CONNECT: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

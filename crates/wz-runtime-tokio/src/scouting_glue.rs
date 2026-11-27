@@ -114,9 +114,9 @@ use crate::LinkDriver;
 pub type ScoutingActions<R = TokioRuntime> = wz_session_core::scouting_host::ScoutingActions<R>;
 
 /// The generated policy's owner of the shared state, over the tokio runtime unless a runtime is
-/// named.
+/// named: a binding that reaches the state through the caller's `Arc`.
 pub type ScoutActionsBinding<R = TokioRuntime> =
-    wz_session_core::scouting_host::ScoutActionsBinding<R>;
+    wz_session_core::scouting_host::ScoutActionsBinding<Arc<ScoutingActions<R>>>;
 
 /// Build a production scouting engine: an [`Engine`] over the generated engine-free
 /// [`ScoutingPolicy`], parameterised over a [`ScoutActionsBinding`] wrapping a clone of `actions`.
@@ -241,7 +241,7 @@ mod tests {
         dgram: &[u8],
     ) {
         if let Some(hello) = decode_scouted_hello(dgram) {
-            *actions.pending_hello.lock().unwrap() = Some(hello);
+            *actions.record().pending_hello.lock().unwrap() = Some(hello);
         }
         engine.process_hello_received_with(ScoutingHelloReceivedRef {
             exit_on_first: u8::from(actions.params.exit_on_first),

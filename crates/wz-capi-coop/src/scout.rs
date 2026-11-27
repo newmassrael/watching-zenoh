@@ -8,7 +8,7 @@
 //! (`wz_session_core::scouting_host`: what a Scout says, which datagrams are answers and which are
 //! named and dropped, when it is over) and the sockets are the host's
 //! (`wz_runtime_posix::scouting`: an ask socket pinned to each interface that can carry multicast,
-//! and the group socket, over either host's sockets). What this module adds is the blocking host
+//! and with `scout-group-socket` the group socket, over either host's sockets). What this module adds is the blocking host
 //! that pumps the one with the other: it opens the sockets, sends the Scout, reads what arrives
 //! and reads the clock, on the calling thread, which is what a C program that calls `z_scout`
 //! expects, and what zenoh-pico's own `__z_scout_loop` does. It needs no `std`: a host library
@@ -17,18 +17,21 @@
 #[cfg(all(test, feature = "std", unix))]
 use alloc::sync::Arc;
 use core::ffi::c_int;
-use core::net::IpAddr;
 
 use wz_capi_port::ScoutAsk;
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_runtime_posix::group::MulticastSocket;
-use wz_runtime_posix::scouting::ScoutMembers;
-#[cfg(all(test, feature = "std", unix))]
-use wz_session_core::scouting_host::ScoutingActions;
+use wz_runtime_posix::scouting::{ReadableAmong, ScoutMembers};
 use wz_session_core::scouting_host::{
-    deliver_rows_in_upstream_order, HelloRow, HelloTable, ScoutWindow, ScoutWindowPlace,
+    deliver_rows_in_upstream_order, HelloRow, HelloTable, LentWindowState, ScoutWindow,
+    ScoutWindowPlace, WindowHolding,
 };
+#[cfg(all(test, feature = "std", unix))]
+use wz_session_core::scouting_host::{ScoutingActions, SharedWindowState};
 
+// Only the tests hold what the heap gives (the buffer `run_window` reads into, and theirs through
+// `super::*`): a window run for a host reads into the caller's buffer and records in its table.
+#[cfg(all(test, feature = "std", unix))]
 use crate::prelude::*;
 
 pub use wz_session_core::scouting_host::{
@@ -41,13 +44,6 @@ pub use wz_session_core::scouting_host::{
 /// arrives ends the wait at once.
 const IDLE_WAIT_MS: c_int = 2;
 
-/// The interface addresses a window asks by: the first IPv4 address of every interface that is up
-/// and can carry multicast (the host's own reading; none when it cannot be read, which is a window
-/// on the group socket alone).
-fn interface_addresses() -> Vec<IpAddr> {
-    wz_runtime_posix::interfaces::multicast_interface_addresses().unwrap_or_default()
-}
-
 /// One scouting window over `members`: send the Scout, read until the machine resolves, and answer
 /// what was collected.
 ///
@@ -55,20 +51,16 @@ fn interface_addresses() -> Vec<IpAddr> {
 /// whose Scout could not leave by any, ends at once (the machine returns to `Idle` on a failed
 /// send), as a window nobody answers does.
 #[cfg(all(test, feature = "std", unix))]
-fn run_window<S: MulticastSocket, C: ClockSource + Clone + 'static>(
+fn run_window<S: MulticastSocket + ReadableAmong, C: ClockSource + Clone + 'static>(
     clock: &C,
     members: ScoutMembers<S>,
     params: ScoutParams,
 ) -> Arc<ScoutingActions<CoopRuntime<C>>> {
     // Built in this frame's place and pumped from it: the machine is made in a frame that has
     // returned before the first datagram is read.
-    let mut place = ScoutWindowPlace::<CoopRuntime<C>>::empty();
+    let mut place = ScoutWindowPlace::<SharedWindowState<CoopRuntime<C>>>::empty();
     let window = place.build(params);
-    let actions = Arc::clone(
-        window
-            .shared_actions()
-            .expect("a window built over its params shares its state"),
-    );
+    let actions = Arc::clone(window.shared_actions());
     // The most a single datagram can carry over UDP.
     let mut buffer = vec![0u8; 65_507];
     pump(clock, members, window, &mut buffer);
@@ -78,14 +70,14 @@ fn run_window<S: MulticastSocket, C: ClockSource + Clone + 'static>(
 /// [`run_window`] recording its Hellos in `table` and reading each datagram into `buffer`, both
 /// the host's where it keeps the scout's state, which the window clears and holds only until it
 /// returns. Its own state lies in this frame's place: the window makes no allocation.
-fn run_window_over<S: MulticastSocket, C: ClockSource + Clone + 'static>(
+fn run_window_over<S: MulticastSocket + ReadableAmong, C: ClockSource + Clone + 'static>(
     clock: &C,
     members: ScoutMembers<S>,
     params: ScoutParams,
     table: &mut HelloTable,
     buffer: &mut [u8],
 ) {
-    let mut place = ScoutWindowPlace::<CoopRuntime<C>>::empty();
+    let mut place = ScoutWindowPlace::<LentWindowState<CoopRuntime<C>>>::empty();
     // SAFETY: `table` outlives the place, which this frame drops before it returns, nothing else
     // reaches it while the window is pumped, and the window is pumped where the place holds it.
     let window = unsafe { place.build_over(params, table) };
@@ -93,11 +85,12 @@ fn run_window_over<S: MulticastSocket, C: ClockSource + Clone + 'static>(
 }
 
 /// Pump `window` over `members` until it resolves, reading each datagram into `buffer`: a
-/// datagram longer than it is read cut short, and is no Hello the window takes.
-fn pump<S: MulticastSocket, C: ClockSource + Clone + 'static>(
+/// datagram longer than it is read cut short, and is no Hello the window takes. The window holds
+/// its state as its caller made it: the pump reads neither.
+fn pump<S: ReadableAmong, C: ClockSource, H: WindowHolding>(
     clock: &C,
     mut members: ScoutMembers<S>,
-    window: &mut ScoutWindow<CoopRuntime<C>>,
+    window: &mut ScoutWindow<H>,
     buffer: &mut [u8],
 ) {
     if members.is_empty() {
@@ -133,7 +126,7 @@ fn pump<S: MulticastSocket, C: ClockSource + Clone + 'static>(
 ///
 /// `ask.zid` is the asker the Scout names, `None` for none; a configured zid that is not one is
 /// the ABI's to refuse before it scouts.
-pub fn run_scout<S: MulticastSocket, C: ClockSource + Clone + 'static>(
+pub fn run_scout<S: MulticastSocket + ReadableAmong, C: ClockSource + Clone + 'static>(
     clock: &C,
     ask: ScoutAsk,
     table: &mut HelloTable,
@@ -150,7 +143,7 @@ pub fn run_scout<S: MulticastSocket, C: ClockSource + Clone + 'static>(
 /// `_z_hello_slist_t *hellos = _z_scout_inner(what, *zid, &mcast_locator, timeout, true);`). The
 /// `true` is `exit_on_first`: the window ends at the first Hello. `table` is where the window
 /// records it and `buffer` what it reads into, as [`run_scout`]'s.
-pub fn scout_first<S: MulticastSocket, C: ClockSource + Clone + 'static>(
+pub fn scout_first<S: MulticastSocket + ReadableAmong, C: ClockSource + Clone + 'static>(
     clock: &C,
     ask: ScoutAsk,
     table: &mut HelloTable,
@@ -160,14 +153,20 @@ pub fn scout_first<S: MulticastSocket, C: ClockSource + Clone + 'static>(
     table.first().map(HelloRow::to_hello)
 }
 
-fn window_hellos<S: MulticastSocket, C: ClockSource + Clone + 'static>(
+fn window_hellos<S: MulticastSocket + ReadableAmong, C: ClockSource + Clone + 'static>(
     clock: &C,
     ask: ScoutAsk,
     exit_on_first: bool,
     table: &mut HelloTable,
     buffer: &mut [u8],
 ) {
-    let members = ScoutMembers::<S>::open(ask.group, ask.port, &interface_addresses());
+    // The window asks by the first IPv4 address of every interface that is up and can carry
+    // multicast, walked where the host holds its list; a list that cannot be read is a window
+    // asked by no interface.
+    let members = wz_runtime_posix::interfaces::walk_multicast_interface_addresses(|locals| {
+        ScoutMembers::<S>::open(ask.group, ask.port, locals)
+    })
+    .unwrap_or_else(|| ScoutMembers::<S>::open(ask.group, ask.port, core::iter::empty()));
     let params = ScoutParams {
         what: ask.what,
         zid: ask.zid,

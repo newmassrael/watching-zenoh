@@ -745,6 +745,14 @@ scouting-static = []
 # per-capability-feature one.
 scouting-active = ["dep:sce-rust-runtime"]
 
+# What a scouting window keeps of a datagram it does not take as a Hello, a behaviour zenoh-pico's
+# scout does not have: each is classified (`scout_initiator::classify_ignored_scout_rx`: our own
+# Scout looped back, another node's Scout, a Hello with no locator, an unknown MID, bytes that do
+# not decode), counted by verdict, logged at the verdict's severity, and listed by the heap record.
+# Without it a window counts what it did not take in one count, as zenoh-pico's scout names one
+# error, and classifies nothing. The tokio engine's runtime selects it with its window.
+scout-rx-verdicts = []
+
 # R311il — unicast session FSM (docs/session-fsm.md §2.1/§2.2/§2.4/§2.5/
 # §2.7). Gates the SCE-generated `session_fsm_unicast` statechart module
 # (build.rs codegens sources/session/session_fsm_unicast.scxml with

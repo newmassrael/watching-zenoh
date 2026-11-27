@@ -320,7 +320,7 @@ fn a_face_lost_is_told_to_a_watcher_of_its_rows_with_nothing_allocated() {
 fn rows_past_the_room_of_a_session_watched_after_its_open_are_told_lost_with_nothing_allocated() {
     use wz_capi_port::SessionEngine;
     use wz_session_core::caps;
-    use wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceRowSink, RowText};
+    use wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceRowSink, LentEnd, RowEnds};
 
     let router = Router::start(CatchAll::None);
     let engine = CoopEngine::open(
@@ -369,8 +369,11 @@ fn rows_past_the_room_of_a_session_watched_after_its_open_are_told_lost_with_not
         is_shm: false,
         link: 0,
         links: 1,
-        src: RowText::of("tcp/127.0.0.1:1"),
-        dst: RowText::of("tcp/127.0.0.1:2"),
+        ends: RowEnds::Lent {
+            kind: wz_session_core::link::LinkKind::Tcp,
+            src: LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 1))),
+            dst: LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 2))),
+        },
         kind: None,
         mtu: 0,
         group_endpoint: None,

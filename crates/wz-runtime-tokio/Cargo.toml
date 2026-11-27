@@ -1907,6 +1907,9 @@ scouting-active = [
     # the day it was written.
     "wz-session-core/codec-scout",
     "wz-session-core/codec-hello",
+    # The window's verdicts on what it does not take, which this runtime lists and reads
+    # (`ScoutingActions::ignored_datagrams`) whatever an ABI names.
+    "wz-session-core/scout-rx-verdicts",
     "dep:socket2",
 ]
 

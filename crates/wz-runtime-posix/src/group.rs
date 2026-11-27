@@ -24,8 +24,6 @@
 
 use core::net::{IpAddr, SocketAddr};
 
-#[cfg(feature = "host-multicast")]
-use core::ffi::c_int;
 use wz_runtime_coop::group_transport::{GroupInterface, GroupTransport};
 use wz_runtime_coop::udp_link::{unspecified_like, DatagramSocket, SERVICE_WAIT_MS};
 use wz_session_core::group_locator::sent_by_own;
@@ -105,12 +103,6 @@ pub trait MulticastSocket: DatagramSocket {
     /// is up first.
     #[cfg(feature = "host-multicast")]
     fn wait_writable(&self, timeout_us: u64) -> bool;
-
-    /// Wait up to `timeout_ms` milliseconds for any of `sockets` to have a datagram, returning at
-    /// once when one has; with none to wait on, the time passes. A failed wait returns early: the
-    /// read that follows finds what there is.
-    #[cfg(feature = "host-multicast")]
-    fn wait_readable_any(sockets: &[&Self], timeout_ms: c_int);
 
     wz_runtime_coop::with_heap_link_seams! {
         /// What a thread other than the one that owns the socket waits on for the room
@@ -330,17 +322,26 @@ impl MulticastSocket for PosixUdpSocket {
         PosixUdpSocket::wait_writable(self, timeout_us)
     }
 
-    #[cfg(feature = "host-multicast")]
-    fn wait_readable_any(sockets: &[&Self], timeout_ms: c_int) {
-        PosixUdpSocket::wait_readable_any(sockets, timeout_ms)
-    }
-
     wz_runtime_coop::with_heap_link_seams! {
         #[cfg(feature = "host-multicast")]
         fn room_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
             PosixUdpSocket::room_wait(self)
         }
 
+    }
+}
+
+/// The POSIX kernels' socket in a scouting window's wait: a `pollfd` of the set `poll` is handed.
+#[cfg(all(unix, feature = "host-multicast"))]
+impl crate::scouting::ReadableAmong for PosixUdpSocket {
+    type Entry = libc::pollfd;
+
+    fn readable_entry(&self) -> libc::pollfd {
+        PosixUdpSocket::readable_entry(self)
+    }
+
+    fn wait_readable_among(set: &mut [libc::pollfd], timeout_ms: core::ffi::c_int) {
+        PosixUdpSocket::wait_readable_among(set, timeout_ms)
     }
 }
 

@@ -13,9 +13,11 @@ use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::scouting::ScoutMember;
 use wz_runtime_posix::PosixClock;
 use wz_session_core::caps;
+#[cfg(feature = "scout-rx-verdicts")]
 use wz_session_core::scout_initiator::ScoutRxIgnored;
 use wz_session_core::scouting_host::{
-    decode_scouted_hello, HelloRow, HelloTable, ScoutWindow, ScoutWindowPlace,
+    decode_scouted_hello, HelloRow, HelloTable, LentTable, LentWindowState, ScoutWindow,
+    ScoutWindowPlace, SharedWindowState, WindowHolding,
 };
 
 use super::*;
@@ -128,16 +130,14 @@ impl Drop for Responder {
     }
 }
 
-/// A window member on a fresh loopback socket of the host's that writes its Scout to `peer`.
-fn member(peer: SocketAddr, asks: bool) -> ScoutMember<PosixUdpSocket> {
-    let socket =
-        PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind a member");
-    ScoutMember::new(socket, peer, asks)
+/// A fresh loopback socket of the host's for a window member.
+fn member_socket() -> PosixUdpSocket {
+    PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind a member")
 }
 
-/// A member that asks.
+/// An ask member on a fresh loopback socket that writes its Scout to `peer`.
 fn asking(peer: SocketAddr) -> ScoutMember<PosixUdpSocket> {
-    member(peer, true)
+    ScoutMember::new(member_socket(), peer)
 }
 
 fn params(timeout_ms: u64, exit_on_first: bool) -> ScoutParams {
@@ -158,7 +158,7 @@ fn a_survey_collects_every_answer_for_its_whole_budget() {
         hello_datagram(0, &[0x11; 4], &["tcp/10.0.0.1:7447"]),
         hello_datagram(1, &[0x22; 4], &["tcp/10.0.0.2:7447", "udp/10.0.0.2:7447"]),
     ]);
-    let members = ScoutMembers::from_parts(None, vec![asking(responder.at)]);
+    let members = ScoutMembers::asking([asking(responder.at)]);
     let started = Instant::now();
     let actions = run_window(&PosixClock, members, params(300, false));
     let took = started.elapsed();
@@ -189,7 +189,7 @@ fn a_lookup_ends_at_the_first_answer() {
         hello_datagram(0, &[0x11; 4], &["tcp/10.0.0.1:7447"]),
         hello_datagram(0, &[0x22; 4], &["tcp/10.0.0.2:7447"]),
     ]);
-    let members = ScoutMembers::from_parts(None, vec![asking(responder.at)]);
+    let members = ScoutMembers::asking([asking(responder.at)]);
     let started = Instant::now();
     let actions = run_window(&PosixClock, members, params(5_000, true));
     let took = started.elapsed();
@@ -280,7 +280,7 @@ fn the_window_over_one_datagram_socket_finds_nothing_when_nobody_answers() {
 #[test]
 fn a_window_nobody_answers_ends_empty_at_its_deadline() {
     let responder = Responder::start(Vec::new());
-    let members = ScoutMembers::from_parts(None, vec![asking(responder.at)]);
+    let members = ScoutMembers::asking([asking(responder.at)]);
     let started = Instant::now();
     let actions = run_window(&PosixClock, members, params(200, false));
 
@@ -296,15 +296,16 @@ fn a_window_nobody_answers_ends_empty_at_its_deadline() {
 #[test]
 fn a_datagram_that_is_not_an_answer_is_named_and_the_window_goes_on() {
     // The Scout the window itself sends, as a host that loops its multicast back hears it.
-    let own_scout = ScoutWindow::<CoopRuntime<PosixClock>>::new(params(3_000, true))
-        .open()
-        .expect("a window opens with a Scout")
-        .to_vec();
+    let own_scout =
+        ScoutWindow::<SharedWindowState<CoopRuntime<PosixClock>>>::new(params(3_000, true))
+            .open()
+            .expect("a window opens with a Scout")
+            .to_vec();
     let truncated = vec![0x22, 0x09];
     let locatorless = hello_datagram(0, &[0x33; 4], &[]);
     let answer = hello_datagram(0, &[0x44; 4], &["tcp/10.0.0.4:7447"]);
     let responder = Responder::start(vec![own_scout, truncated, locatorless, answer]);
-    let members = ScoutMembers::from_parts(None, vec![asking(responder.at)]);
+    let members = ScoutMembers::asking([asking(responder.at)]);
     let actions = run_window(&PosixClock, members, params(3_000, true));
 
     assert_eq!(
@@ -312,19 +313,27 @@ fn a_datagram_that_is_not_an_answer_is_named_and_the_window_goes_on() {
         Some("tcp/10.0.0.4:7447"),
         "the window went past all three and took the real answer"
     );
-    let ignored = actions.ignored_datagrams();
-    assert!(
-        ignored.contains(&ScoutRxIgnored::SelfEcho),
-        "our own Scout: {ignored:?}"
+    assert_eq!(
+        actions.ignored_counts().total(),
+        3,
+        "each datagram not taken is counted once, with or without its verdict"
     );
-    assert!(
-        ignored.contains(&ScoutRxIgnored::Undecodable),
-        "the truncated Hello: {ignored:?}"
-    );
-    assert!(
-        ignored.contains(&ScoutRxIgnored::LocatorlessHello),
-        "the Hello with no address: {ignored:?}"
-    );
+    #[cfg(feature = "scout-rx-verdicts")]
+    {
+        let ignored = actions.ignored_datagrams();
+        assert!(
+            ignored.contains(&ScoutRxIgnored::SelfEcho),
+            "our own Scout: {ignored:?}"
+        );
+        assert!(
+            ignored.contains(&ScoutRxIgnored::Undecodable),
+            "the truncated Hello: {ignored:?}"
+        );
+        assert!(
+            ignored.contains(&ScoutRxIgnored::LocatorlessHello),
+            "the Hello with no address: {ignored:?}"
+        );
+    }
     assert_eq!(
         actions.scouted_hellos().len(),
         1,
@@ -339,7 +348,7 @@ fn a_dead_ask_member_does_not_end_the_window() {
     let responder = Responder::start(vec![hello_datagram(0, &[0x55; 4], &["tcp/10.0.0.5:7447"])]);
     // A member whose peer is an address nothing can be sent to from an IPv4 socket.
     let dead = asking(SocketAddr::from(([0, 0, 0, 0], 0)));
-    let members = ScoutMembers::from_parts(None, vec![dead, asking(responder.at)]);
+    let members = ScoutMembers::asking([dead, asking(responder.at)]);
     let actions = run_window(&PosixClock, members, params(3_000, true));
 
     assert_eq!(
@@ -349,12 +358,13 @@ fn a_dead_ask_member_does_not_end_the_window() {
 }
 
 /// With no ask member the group socket asks, the floor a host whose interface enumeration fails
-/// still scouts on; with no member at all there is no window, and it ends at once with nothing.
+/// still scouts on.
+#[cfg(feature = "scout-group-socket")]
 #[test]
-fn the_group_socket_asks_when_nothing_else_can_and_no_member_is_no_window() {
+fn the_group_socket_asks_when_nothing_else_can() {
     let responder = Responder::start(vec![hello_datagram(0, &[0x66; 4], &["tcp/10.0.0.6:7447"])]);
-    let group = member(responder.at, false);
-    let members = ScoutMembers::from_parts(Some(group), Vec::new());
+    let members =
+        ScoutMembers::asking(Vec::new()).listening_on_group(member_socket(), responder.at);
     assert_eq!(
         members.askers(),
         1,
@@ -365,11 +375,15 @@ fn the_group_socket_asks_when_nothing_else_can_and_no_member_is_no_window() {
         actions.discovered_locator().as_deref(),
         Some("tcp/10.0.0.6:7447")
     );
+}
 
+/// With no member at all there is no window, and it ends at once with nothing.
+#[test]
+fn no_member_is_no_window() {
     let started = Instant::now();
     let none = run_window(
         &PosixClock,
-        ScoutMembers::<PosixUdpSocket>::from_parts(None, Vec::new()),
+        ScoutMembers::<PosixUdpSocket>::asking(Vec::new()),
         params(5_000, false),
     );
     assert!(none.scouted_hellos().is_empty());
@@ -429,28 +443,28 @@ fn the_collection_has_no_bound_and_a_lent_table_counts_past_its_rows() {
         timeout_ms: 1_000,
         exit_on_first: false,
     };
-    let pump = |window: &mut ScoutWindow<CoopRuntime<PosixClock>>| {
+    fn pump<H: WindowHolding>(window: &mut ScoutWindow<H>, hellos: &[Vec<u8>]) {
         assert!(window.open().is_some());
         window.sent(0, true);
-        for datagram in &hellos {
+        for datagram in hellos {
             window.datagram(datagram);
         }
-    };
+    }
 
-    let mut collected = ScoutWindow::<CoopRuntime<PosixClock>>::new(params.clone());
-    pump(&mut collected);
+    let mut collected =
+        ScoutWindow::<SharedWindowState<CoopRuntime<PosixClock>>>::new(params.clone());
+    pump(&mut collected, &hellos);
     let all = collected.actions().scouted_hellos();
     assert_eq!(all.len(), past, "the collection records every Hello");
     assert_eq!(all[past - 1].locators, ["tcp/10.0.0.1:7447"]);
-    assert_eq!(collected.actions().hellos_refused(), 0);
 
     let mut lent = table();
     {
-        let mut place = ScoutWindowPlace::<CoopRuntime<PosixClock>>::empty();
+        let mut place = ScoutWindowPlace::<LentWindowState<CoopRuntime<PosixClock>>>::empty();
         // SAFETY: `lent` outlives the place, dropped at the end of this block, and nothing else
         // reaches it meanwhile.
         let window = unsafe { place.build_over(params, &mut lent) };
-        pump(window);
+        pump(window, &hellos);
         assert_eq!(window.actions().hellos_refused(), 2);
     }
     assert_eq!(lent.len(), caps::MAX_SCOUT_HELLOS);
@@ -463,7 +477,7 @@ fn the_collection_has_no_bound_and_a_lent_table_counts_past_its_rows() {
 /// table, or one of its rows, moved into the window's state.
 #[test]
 fn a_windows_state_holds_no_table() {
-    let actions = core::mem::size_of::<ScoutingActions<CoopRuntime<PosixClock>>>();
+    let actions = core::mem::size_of::<LentWindowState<CoopRuntime<PosixClock>>>();
     let row = core::mem::size_of::<HelloRow>();
     assert!(
         actions < row,
@@ -475,26 +489,34 @@ fn a_windows_state_holds_no_table() {
     );
 }
 
-/// A window built over a lent table in its place holds its state there: it shares no `Arc`, opens
-/// to the Scout a window by value opens, keeps no list of the datagrams it drops but counts each
-/// verdict, and reads what it discovered from the table's rows. Turned red by a window over a lent
-/// table whose state is shared on the heap, or that keeps a list of what it drops.
+/// A window built over a lent table in its place holds its state there: its record is the
+/// table's pointer and owns nothing it would drop, it opens to the Scout a window by value opens,
+/// counts each verdict of the datagrams it drops, records its answer in the table and reads what it
+/// discovered from the table's rows. Turned red by a lent record that grows a collection, a
+/// counter of its own or a shared state, or by a window over a lent table that records elsewhere.
 #[test]
 fn a_window_over_a_lent_table_holds_its_state_in_its_place() {
-    let mut by_value = ScoutWindow::<CoopRuntime<PosixClock>>::new(params(1_000, false));
     assert!(
-        by_value.shared_actions().is_some(),
-        "CONTROL: a window by value shares its state"
+        !core::mem::needs_drop::<LentTable>(),
+        "the lent record owns nothing it would drop: no list, no string, no `Arc`"
+    );
+    assert_eq!(
+        core::mem::size_of::<LentTable>(),
+        core::mem::size_of::<usize>(),
+        "the lent record is the table's pointer"
+    );
+    let mut by_value =
+        ScoutWindow::<SharedWindowState<CoopRuntime<PosixClock>>>::new(params(1_000, false));
+    assert_eq!(
+        Arc::strong_count(by_value.shared_actions()),
+        2,
+        "CONTROL: a window by value shares its state with its machine"
     );
     let mut lent = table();
-    let mut place = ScoutWindowPlace::<CoopRuntime<PosixClock>>::empty();
+    let mut place = ScoutWindowPlace::<LentWindowState<CoopRuntime<PosixClock>>>::empty();
     // SAFETY: `lent` outlives the place, nothing else reaches it meanwhile, and the window is
     // pumped where the place holds it.
     let window = unsafe { place.build_over(params(1_000, false), &mut lent) };
-    assert!(
-        window.shared_actions().is_none(),
-        "a window over a lent table shares no state"
-    );
     let scout = window.open().expect("a window opens with a Scout");
     assert_eq!(Some(scout), by_value.open(), "the same Scout either way");
     window.sent(0, true);
@@ -504,15 +526,12 @@ fn a_window_over_a_lent_table_holds_its_state_in_its_place() {
     window.datagram(&hello_datagram(1, &[0x44; 4], &["tcp/10.0.0.4:7447"]));
     let actions = window.actions();
     let counts = actions.ignored_counts();
+    #[cfg(feature = "scout-rx-verdicts")]
     assert_eq!((counts.self_echo, counts.undecodable), (1, 1));
     assert_eq!(
         counts.total(),
         2,
         "every datagram not taken is counted once"
-    );
-    assert!(
-        actions.ignored_datagrams().is_empty(),
-        "a window over a lent table keeps no list of what it drops"
     );
     assert_eq!(
         actions.discovered_locator().as_deref(),
@@ -520,6 +539,13 @@ fn a_window_over_a_lent_table_holds_its_state_in_its_place() {
         "what it discovered is the table's first row with a locator"
     );
     assert_eq!(actions.hellos_refused(), 0);
+    drop(place);
+    assert_eq!(
+        lent.len(),
+        1,
+        "the answer is recorded in the table it was lent"
+    );
+    assert_eq!(lent.first().map(|row| row.zid[0]), Some(0x44));
 }
 
 /// The window reads each datagram into the buffer its caller lends and no further: a Hello longer

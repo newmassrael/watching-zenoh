@@ -1162,22 +1162,25 @@ impl PosixUdpSocket {
         poll_writable(self.fd, timeout_us)
     }
 
-    /// Wait up to `timeout_ms` milliseconds for any of `sockets` to have a datagram: one `poll`
-    /// over their descriptors, which with none passes the time.
+    /// This socket as an entry of a set waited on for a datagram ([`Self::wait_readable_among`]).
     #[cfg(feature = "host-multicast")]
-    pub(crate) fn wait_readable_any(sockets: &[&Self], timeout_ms: c_int) {
-        let mut fds: alloc::vec::Vec<libc::pollfd> = sockets
-            .iter()
-            .map(|socket| libc::pollfd {
-                fd: socket.fd,
-                events: libc::POLLIN,
-                revents: 0,
-            })
-            .collect();
-        // SAFETY: `fds` is live for the call and its length is the count passed; every descriptor
+    pub(crate) fn readable_entry(&self) -> libc::pollfd {
+        libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        }
+    }
+
+    /// Wait up to `timeout_ms` milliseconds for any socket of `set` to have a datagram: one `poll`
+    /// over the set, which with none passes the time. The set is the caller's, made once with the
+    /// sockets it watches; `poll` writes only what it found in each entry.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn wait_readable_among(set: &mut [libc::pollfd], timeout_ms: c_int) {
+        // SAFETY: `set` is live for the call and its length is the count passed; every descriptor
         // is one of a socket the caller holds for the call, and the timeout bounds the wait. A
         // failed or interrupted wait returns early, and the read that follows reports the error.
-        unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+        unsafe { libc::poll(set.as_mut_ptr(), set.len() as libc::nfds_t, timeout_ms) };
     }
 
     /// The port the kernel bound this socket to.

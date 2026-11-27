@@ -11064,15 +11064,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
 
     // The told bits live on the session's own face rows (`told`), not in a ledger.
     #[cfg(feature = "connectivity")]
-    fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+    fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> Option<FaceLinkRow> {
         self.live()
-            .is_some_and(|mut core| core.0.tell_came(plane, listener, key))
+            .and_then(|mut core| core.0.tell_came(plane, listener, key))
     }
 
     #[cfg(feature = "connectivity")]
-    fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
+    fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> Option<FaceLinkRow> {
         self.live()
-            .is_some_and(|mut core| core.0.tell_went(plane, listener, key))
+            .and_then(|mut core| core.0.tell_went(plane, listener, key))
     }
 
     #[cfg(feature = "connectivity")]

@@ -26,8 +26,8 @@ use wz_capi_port::ScoutAsk;
 use wz_runtime_coop::udp_link::{unspecified_like, DatagramSocket};
 use wz_runtime_coop::{ClockSource, CoopRuntime};
 use wz_session_core::scouting_host::{
-    deliver_rows_in_upstream_order, HelloRow, HelloTable, ScoutParams, ScoutWindowPlace,
-    ScoutedHello,
+    deliver_rows_in_upstream_order, HelloRow, HelloTable, LentWindowState, ScoutParams,
+    ScoutWindowPlace, ScoutedHello,
 };
 
 /// How long one wait for a Hello lasts before the window reads its clock again: a few
@@ -113,7 +113,7 @@ fn window<U, C>(
 {
     // Built in this frame's place and pumped from it: the machine is made in a frame that has
     // returned before the first datagram is read.
-    let mut place = ScoutWindowPlace::<CoopRuntime<C>>::empty();
+    let mut place = ScoutWindowPlace::<LentWindowState<CoopRuntime<C>>>::empty();
     // SAFETY: `table` outlives the place, which this frame drops before it returns, nothing else
     // reaches it while the window is pumped, and the window is pumped where the place holds it.
     let window = unsafe { place.build_over(params, table) };
@@ -162,7 +162,7 @@ mod tests {
     fn a_window_built_in_its_place_is_the_window_built_by_value() {
         use alloc::sync::Arc;
         use wz_runtime_posix::PosixClock;
-        use wz_session_core::scouting_host::{ScoutOutcome, ScoutWindow};
+        use wz_session_core::scouting_host::{ScoutOutcome, ScoutWindow, SharedWindowState};
 
         let params = ScoutParams {
             what: 0x03,
@@ -170,8 +170,9 @@ mod tests {
             timeout_ms: 100,
             exit_on_first: false,
         };
-        let mut by_value = ScoutWindow::<CoopRuntime<PosixClock>>::new(params.clone());
-        let mut place = ScoutWindowPlace::<CoopRuntime<PosixClock>>::empty();
+        let mut by_value =
+            ScoutWindow::<SharedWindowState<CoopRuntime<PosixClock>>>::new(params.clone());
+        let mut place = ScoutWindowPlace::<SharedWindowState<CoopRuntime<PosixClock>>>::empty();
         let in_place = place.build(params);
         let scout = in_place.open();
         assert!(scout.is_some(), "a window opens with a Scout");
@@ -189,11 +190,7 @@ mod tests {
         assert!(in_place.resolved() && by_value.resolved());
         assert_eq!(in_place.outcome(), ScoutOutcome::TimedOut);
         assert_eq!(by_value.outcome(), ScoutOutcome::TimedOut);
-        let actions = Arc::clone(
-            in_place
-                .shared_actions()
-                .expect("a window built over its params shares its state"),
-        );
+        let actions = Arc::clone(in_place.shared_actions());
         let held = Arc::strong_count(&actions);
         drop(place);
         assert!(

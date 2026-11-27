@@ -691,8 +691,11 @@ mod tests {
             is_shm: false,
             link: 0,
             links: 1,
-            src: crate::face::RowText::of("tcp/127.0.0.1:1"),
-            dst: crate::face::RowText::of("tcp/127.0.0.1:2"),
+            ends: crate::face::RowEnds::Lent {
+                kind: crate::link::LinkKind::Tcp,
+                src: crate::face::LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 1))),
+                dst: crate::face::LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 2))),
+            },
             kind: None,
             mtu: 0,
             group_endpoint: None,

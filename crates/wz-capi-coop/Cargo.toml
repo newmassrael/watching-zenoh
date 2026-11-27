@@ -187,6 +187,13 @@ advanced = ["advanced-cache"]
 # carry multicast (`wz_runtime_posix::scouting`), which needs no `std`, so a host library without
 # it scouts as one with it does.
 scout = ["scout-datagram", "dep:wz-runtime-posix"]
+# A host window's socket joined to the scouting group beside its ask sockets
+# (`wz-runtime-posix`'s `scout-group-socket`), which zenoh-pico's scout does not open. Weak: a
+# build that does not scout on a host has no window to add it to.
+scout-group-socket = ["wz-runtime-posix?/scout-group-socket"]
+# A window's verdicts on the datagrams it does not take (`wz-session-core`'s `scout-rx-verdicts`),
+# which zenoh-pico's scout does not name: without it they are one count.
+scout-rx-verdicts = ["wz-session-core/scout-rx-verdicts"]
 # Active scouting over ONE datagram socket of the stack the engine runs on (`scout_datagram`),
 # without `std`: zenoh-pico's window on a platform with no interface iterator (Zephyr), a socket the
 # Scout leaves by and the Hellos come back to. The session's window rules and the two codecs, and

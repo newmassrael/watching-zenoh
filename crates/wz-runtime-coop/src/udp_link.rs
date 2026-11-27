@@ -52,7 +52,6 @@ use wz_session_core::byte_cells::ByteBuf;
 use wz_session_core::byte_cells::ByteSource;
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use wz_session_core::byte_cells::{CellFlag, LentByteCells};
-use wz_session_core::caps;
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use wz_session_core::datagram_peer::is_init_syn;
 use wz_session_core::datagram_peer::{ForeignCounts, PeerBinding};
@@ -373,17 +372,37 @@ pub const fn dial_bind(local: IpAddr, peer: SocketAddr) -> SocketAddr {
     SocketAddr::new(ip, 0)
 }
 
-/// Whether a link of `proto` from `local` to `peer` names both its ends in the rows its faces are
-/// read in, at most [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes each
-/// (`wz_session_core::face::RowText`): this engine refuses a link that does not where it admits
-/// it, so no row of its faces is ever held on the heap. Every IPv4 end fits; a bound that holds
-/// the longest IPv6 end answers at compile time, and only a shorter one writes the ends to measure
-/// them.
+/// Whether a link of `proto` from `local` to `peer` names both its ends in the pair of locators a
+/// reader of the build keeps them in, held to
+/// [`LinkEndpoints::BOUND`](wz_session_core::link::LinkEndpoints::BOUND): this engine refuses a
+/// link that does not where it admits it, so no link stands with an end its reports would refuse.
+/// A face's row holds an IP end as its address, so a build whose pair is of `String`s admits
+/// every IP link.
 pub fn ends_fit(proto: LinkProto, local: SocketAddr, peer: SocketAddr) -> bool {
-    caps::MAX_LOCATOR_LEN >= LONGEST_IP_LOCATOR_LEN
-        || [local, peer]
-            .into_iter()
-            .all(|at| IpLocator { proto, at }.text().demanded() <= caps::MAX_LOCATOR_LEN)
+    ends_fit_within(
+        wz_session_core::link::LinkEndpoints::BOUND,
+        proto,
+        local,
+        peer,
+    )
+}
+
+/// Whether both ends of a link of `proto` from `local` to `peer` are written in at most `bound`
+/// bytes each, every pair when there is no bound. Every IPv4 end fits a bound the build admits; a
+/// bound that holds the longest IPv6 end answers at compile time, and only a shorter one writes the
+/// ends to measure them.
+fn ends_fit_within(
+    bound: Option<usize>,
+    proto: LinkProto,
+    local: SocketAddr,
+    peer: SocketAddr,
+) -> bool {
+    bound.is_none_or(|bound| {
+        bound >= LONGEST_IP_LOCATOR_LEN
+            || [local, peer]
+                .into_iter()
+                .all(|at| IpLocator { proto, at }.text().demanded() <= bound)
+    })
 }
 
 /// Whether a datagram link over `socket` to `peer` names both its ends in the rows of the build
@@ -654,8 +673,9 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore, W: InputWaiter> UdpDriver<S, B, 
     // (`Self::next_admitted`) and the wait's that reads as it waits (`Self::wait_for_datagram`).
     #[inline(never)]
     fn admit(&self, from: SocketAddr, datagram: &[u8]) -> bool {
-        // An accepting link takes the first `InitSyn`'s source as its peer: one whose locator no
-        // row of the build holds is not taken, so no session stands on a link it cannot name.
+        // An accepting link takes the first `InitSyn`'s source as its peer: one whose locator the
+        // build's pair of locators does not hold is not taken, so no session stands on a link it
+        // cannot name.
         if self.binding.peer().is_none() && !ends_fit(LinkProto::Udp, self.socket.local(), from) {
             return false;
         }
@@ -2339,13 +2359,14 @@ mod tests {
     }
 
     /// The text of every IP locator is written whole, the longest IPv6 end too, and a link is
-    /// admitted exactly when both its ends fit a row of the build: every IPv4 link, and an IPv6
-    /// one as its text's length says (every one under the default bound, which holds the longest;
-    /// the widest one refused under a bound below it, which the build of a short bound runs).
-    /// Turned red by a text that cuts an end, or by an admission that answers otherwise than the
-    /// length.
+    /// admitted exactly when the bound of the build's pair of locators holds both its ends: every
+    /// link where the pair states no bound, and under a bound every IPv4 link and an IPv6 one as
+    /// its text's length says (the widest one refused under a bound below it). Turned red by a
+    /// text that cuts an end, by a bound applied where the pair states none (a build of a short
+    /// `MAX_LOCATOR_LEN` without `session-slot` refusing the widest IPv6 link), or by an
+    /// admission that answers otherwise than the length.
     #[test]
-    fn a_link_is_admitted_exactly_when_both_its_ends_fit_a_row() {
+    fn a_link_is_admitted_exactly_when_its_pairs_bound_holds_both_ends() {
         use crate::session_drive::LONGEST_IP_LOCATOR_LEN;
         use core::net::SocketAddrV6;
         let widest_v4 = SocketAddr::from(([255, 255, 255, 255], 65535));
@@ -2361,9 +2382,27 @@ mod tests {
         for proto in [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls] {
             let v6 = Locator::ip(proto, widest_v6).text();
             assert_eq!(v6.finish().map(str::len), Ok(LONGEST_IP_LOCATOR_LEN));
+            assert!(
+                ends_fit_within(None, proto, widest_v6, widest_v6),
+                "no bound"
+            );
+            let short = Some(LONGEST_IP_LOCATOR_LEN - 1);
+            assert!(
+                ends_fit_within(short, proto, widest_v4, widest_v4),
+                "every IPv4 link"
+            );
+            assert!(ends_fit_within(short, proto, short_v6, short_v6));
+            assert!(!ends_fit_within(short, proto, widest_v4, widest_v6));
+            assert!(!ends_fit_within(short, proto, widest_v6, widest_v4));
+            assert!(ends_fit_within(
+                Some(LONGEST_IP_LOCATOR_LEN),
+                proto,
+                widest_v6,
+                widest_v6
+            ));
+            let fits = wz_session_core::link::LinkEndpoints::BOUND
+                .is_none_or(|bound| LONGEST_IP_LOCATOR_LEN <= bound);
             assert!(ends_fit(proto, widest_v4, widest_v4), "every IPv4 link");
-            assert!(ends_fit(proto, short_v6, short_v6));
-            let fits = LONGEST_IP_LOCATOR_LEN <= caps::MAX_LOCATOR_LEN;
             assert_eq!(ends_fit(proto, widest_v4, widest_v6), fits);
             assert_eq!(ends_fit(proto, widest_v6, widest_v4), fits);
         }
