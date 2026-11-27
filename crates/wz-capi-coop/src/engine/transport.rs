@@ -54,12 +54,16 @@ pub(super) trait TellGroups {
 
 #[cfg(feature = "group")]
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> TellGroups for TransportState<L, C> {
+    // Out of line, as each is below: every declaration's group leg is this one call, not the
+    // walk of the groups and each group's message inlined into each operation's body.
+    #[inline(never)]
     fn announce_to_groups(&self, entity: GroupEntity<'_>) {
         for group in &self.groups {
             group.announce(entity);
         }
     }
 
+    #[inline(never)]
     fn retract_from_groups(&self, entity: EntityId) {
         for group in &self.groups {
             group.retract(entity);
