@@ -113,13 +113,35 @@ fn pooled(pool: usize, links: usize) -> usize {
     }
 }
 
-/// How many links `plan` holds places for: its row of places in a build that listens, its
+/// How many links `plan` holds: the count every form keeps (`ArenaPlan::links`), which in a form
+/// that lays the links' tables out is also its row of places in a build that listens, and its
 /// transmit rows, one for each link, in a build that only dials.
 #[cfg(any(feature = "listen", not(wz_on_use)))]
 fn link_places(plan: &ArenaPlan) -> usize {
-    plan.rows()
-        .find(|row| row.part() == "link places")
-        .map_or_else(|| row(plan, "link transmit slots").count, |row| row.count)
+    let links = plan.links();
+    #[cfg(not(wz_on_use))]
+    assert_eq!(
+        plan.rows()
+            .find(|row| row.part() == "link places")
+            .map_or_else(|| row(plan, "link transmit slots").count, |row| row.count),
+        links,
+        "a place laid out for each link"
+    );
+    links
+}
+
+/// How many receive buffers `plan`'s links hold at most: the row of the pool the arena lends, or,
+/// where the tables take their memory on use and each link holds its own, one for each link.
+#[cfg(feature = "listen")]
+fn link_receive_buffers(plan: &ArenaPlan) -> usize {
+    #[cfg(not(wz_on_use))]
+    {
+        row(plan, "link receive buffers").count
+    }
+    #[cfg(wz_on_use)]
+    {
+        plan.links()
+    }
 }
 
 /// The row of `plan` named `part`.
@@ -1313,43 +1335,17 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         &SessionLimits::defaults(),
     )
     .expect("lays an arena out");
-    // The gets pending on the session's own queryables are held apart from every face's. A build
-    // that asks no query lays out no table of them.
-    #[cfg(feature = "query")]
-    {
-        let own = usize::from(cfg!(feature = "local-queryable"));
-        assert_eq!(row(&dial, "pending gets").count, 1 + own);
-        assert_eq!(row(&listening, "pending gets").count, 3 + own);
+    // The gets pending on the session's own queryables are held apart from every face's, and what a
+    // face's peer writes is held once for each face, never for the session's own gets: counted
+    // in every form, and laid out as rows where the arena lends them (`wz_lent`).
+    let own = usize::from(cfg!(feature = "local-queryable"));
+    if cfg!(feature = "query") {
         assert_eq!(listening.gets().tables, 3 + own);
-        assert_eq!(
-            row(&listening, "pending gets").entry_bytes,
-            row(&dial, "pending gets").entry_bytes,
-            "every face's table is the same"
-        );
     }
-    #[cfg(not(feature = "query"))]
-    assert!(
-        dial.rows().all(|row| row.part() != "pending gets"),
-        "a build that asks no query lays out no table of gets"
-    );
-    // What a face's peer writes is held once for each face, as its gets are, and never for the
-    // session's own gets.
-    assert_eq!(row(&dial, "peer tables").count, 1);
-    assert_eq!(row(&listening, "peer tables").count, 3);
     assert_eq!(listening.peers().tables, 3);
     assert!(dial.peers().dial && !listening.peers().dial);
-    assert_eq!(
-        row(&listening, "peer tables").entry_bytes,
-        row(&dial, "peer tables").entry_bytes,
-        "every face's peer tables are the same"
-    );
-    assert_eq!(row(&dial, "link receive buffers").count, 1);
     assert_eq!(link_places(&listening), 3 + handshakes);
-    assert_eq!(
-        row(&listening, "link receive buffers").count,
-        pooled(caps::RX_POOL_BUFFERS, 3 + handshakes),
-        "the links share a pool of receive buffers"
-    );
+    assert_eq!(link_receive_buffers(&dial), 1);
     assert_eq!(
         dial.gets().rows.queries,
         if cfg!(feature = "query") {
@@ -1359,11 +1355,41 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         },
         "a build that asks no query lends its gets no row"
     );
-    assert_eq!(
-        row(&listening, "session tables"),
-        row(&dial, "session tables"),
-        "the application's tables are held once"
-    );
+    #[cfg(wz_lent)]
+    {
+        // A build that asks no query lays out no table of them.
+        if cfg!(feature = "query") {
+            assert_eq!(row(&dial, "pending gets").count, 1 + own);
+            assert_eq!(row(&listening, "pending gets").count, 3 + own);
+            assert_eq!(
+                row(&listening, "pending gets").entry_bytes,
+                row(&dial, "pending gets").entry_bytes,
+                "every face's table is the same"
+            );
+        } else {
+            assert!(
+                dial.rows().all(|row| row.part() != "pending gets"),
+                "a build that asks no query lays out no table of gets"
+            );
+        }
+        assert_eq!(row(&dial, "peer tables").count, 1);
+        assert_eq!(row(&listening, "peer tables").count, 3);
+        assert_eq!(
+            row(&listening, "peer tables").entry_bytes,
+            row(&dial, "peer tables").entry_bytes,
+            "every face's peer tables are the same"
+        );
+        assert_eq!(
+            row(&listening, "link receive buffers").count,
+            pooled(caps::RX_POOL_BUFFERS, 3 + handshakes),
+            "the links share a pool of receive buffers"
+        );
+        assert_eq!(
+            row(&listening, "session tables"),
+            row(&dial, "session tables"),
+            "the application's tables are held once"
+        );
+    }
 }
 
 /// The dial role's face is lent a link's buffers and a face's tables only when the session dials:
@@ -1398,6 +1424,8 @@ fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
         (1 + 3, 1 + 3 + own)
     );
     assert!(dialling.peers().dial && !only.peers().dial);
+    // The bytes are the arena's, which lays a face's tables out only where it lends them.
+    #[cfg(not(wz_on_use))]
     assert!(
         only.reserved_bytes() < dialling.reserved_bytes(),
         "the listener that dials nothing reserves less"
@@ -1410,7 +1438,7 @@ fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
         crate::arena::dials(&nothing),
         "its open tries the dial role"
     );
-    assert_eq!(row(&plan(&nothing), "link receive buffers").count, 1);
+    assert_eq!(link_receive_buffers(&plan(&nothing)), 1);
 }
 
 /// Each face's peer tables are lent the values of their limits the open resolved, the build's for a
@@ -1700,8 +1728,8 @@ fn a_session_that_sends_each_face_its_own_leg_reserves_no_handed_places() {
     };
     let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
     assert!(
-        row(&plan, "link receive buffers").count > 0,
-        "CONTROL: the links' buffers are laid out"
+        link_receive_buffers(&plan) > 0,
+        "CONTROL: the links hold buffers"
     );
     for part in ["handed leg places", "handed leg flags", "handed legs"] {
         assert!(
@@ -2439,7 +2467,7 @@ fn a_face_past_max_faces_is_not_attached() {
         ..config(&router)
     };
     let plan = ArenaPlan::of(&one, &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(row(&plan, "link receive buffers").count, 1);
+    assert_eq!(link_receive_buffers(&plan), 1);
     let engine = open_with(one);
     until(&engine, "the dial role's link", || engine.faces_up() == 1);
     assert!(matches!(
