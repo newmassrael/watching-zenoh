@@ -240,19 +240,25 @@ impl<F> Drop for Lent<F> {
     }
 }
 
-/// The sample callback of a machine: the program's closure, boxed, or a function over a context
-/// lent in the raw form an engine's own callbacks take, which takes no memory.
-pub struct OnSample(SampleForm);
+/// The sample callback of a machine: a function over a context, in the raw form an engine's own
+/// callbacks take, with the context's drop run once after the last call. A host lends one, which
+/// takes no memory ([`Self::lent`]), or hands the program's closure, boxed behind one
+/// ([`Self::boxed`]). One form, so a sample is handed on by one call, and a host that lends its
+/// callback links no code of a boxed one.
+pub struct OnSample(Lent<unsafe fn(*mut c_void, Delivery<'_>)>);
 
-enum SampleForm {
-    Boxed(Box<dyn FnMut(Delivery<'_>) + Send>),
-    Lent(Lent<unsafe fn(*mut c_void, Delivery<'_>)>),
-}
+/// A program's sample closure, as [`OnSample::boxed`] takes it.
+type BoxedSample = Box<dyn FnMut(Delivery<'_>) + Send>;
 
 impl OnSample {
     /// The program's closure.
-    pub fn boxed(on_sample: Box<dyn FnMut(Delivery<'_>) + Send>) -> Self {
-        Self(SampleForm::Boxed(on_sample))
+    pub fn boxed(on_sample: BoxedSample) -> Self {
+        // Boxed once more, so the context is one word.
+        let context = Box::into_raw(Box::new(on_sample)).cast::<c_void>();
+        // SAFETY: the context is the box made just above, read by `call_boxed` through the one
+        // caller `Self::call`'s `&mut self` admits and dropped once by `drop_boxed`; the closure
+        // is `Send`.
+        unsafe { Self::lent(call_boxed, context, Some(drop_boxed)) }
     }
 
     /// `call(context, sample)`, with `drop(context)` run once after the last call, when this
@@ -265,20 +271,36 @@ impl OnSample {
         context: *mut c_void,
         drop: Option<unsafe fn(*mut c_void)>,
     ) -> Self {
-        Self(SampleForm::Lent(Lent {
+        Self(Lent {
             call,
             context,
             drop,
-        }))
+        })
     }
 
     fn call(&mut self, sample: Delivery<'_>) {
-        match &mut self.0 {
-            SampleForm::Boxed(on_sample) => on_sample(sample),
-            // SAFETY: the maker lets it be called from any thread until its drop (`Self::lent`).
-            SampleForm::Lent(lent) => unsafe { (lent.call)(lent.context, sample) },
-        }
+        // SAFETY: the maker lets it be called from any thread until its drop (`Self::lent`).
+        unsafe { (self.0.call)(self.0.context, sample) }
     }
+}
+
+/// Call the program's closure [`OnSample::boxed`] made `context` of.
+///
+/// # Safety
+/// `context` is that box, not dropped yet, and no other call of it runs.
+unsafe fn call_boxed(context: *mut c_void, sample: Delivery<'_>) {
+    // SAFETY: the caller's.
+    let on_sample = unsafe { &mut *context.cast::<BoxedSample>() };
+    on_sample(sample);
+}
+
+/// Let go of the program's closure [`OnSample::boxed`] made `context` of.
+///
+/// # Safety
+/// `context` is that box, dropped once, here, after its last call.
+unsafe fn drop_boxed(context: *mut c_void) {
+    // SAFETY: the caller's.
+    drop(unsafe { Box::from_raw(context.cast::<BoxedSample>()) });
 }
 
 // SAFETY: a boxed callback is `Send`, and a lent one's maker lets it be called and let go of from

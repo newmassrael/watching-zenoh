@@ -155,6 +155,7 @@ engine-tokio = [
     "wz-host-sync/std",
     "wz-capi-port/std",
     "wz-ext-pubsub?/std",
+    "wz-ext-pubsub?/cache-heap",
     "wz-node-time?/std",
 ]
 # `os-zephyr`: the library in a Zephyr image, without `std`: the cooperative engine over Zephyr's

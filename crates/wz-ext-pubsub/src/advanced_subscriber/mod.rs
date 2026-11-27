@@ -30,7 +30,7 @@ pub mod plans;
 pub mod state;
 
 #[cfg(feature = "engine-host")]
-pub use host::{EngineSubscriber, HostError, LentCore, SubscriberCore};
+pub use host::{Callbacks, EngineSubscriber, HostError, LentCore, SubscriberCore};
 
 #[cfg(feature = "advanced-history")]
 pub use options::HistoryConfig;

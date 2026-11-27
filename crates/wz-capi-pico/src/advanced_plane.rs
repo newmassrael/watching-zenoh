@@ -33,21 +33,29 @@ use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
+use wz_session_core::WhatAmI;
 
-use crate::liveliness::TokenState;
 use crate::prelude::*;
 use crate::pubsub::{PlainPublisher, PublisherQos};
 use crate::query::PlainQueryable;
 use crate::result::{ZResult, Z_ERR_TRANSPORT_TX_FAILED, Z_OK};
+use crate::session::EngineHold;
 use crate::write_filter::PicoSession;
 
 /// The plane of one pico session.
 pub(crate) struct PicoPlane {
-    session: PicoSession,
+    /// The session's engine, which the plane declares on from a task of its own and so keeps a
+    /// count of where it keeps it.
+    engine: EngineHold,
+    /// The session's role, which its declarations follow.
+    mode: WhatAmI,
     /// The session's own clock ([`crate::session_ext::PicoSessionExt::new`]): it
     /// proposes the plane's stamps, which the session's times then order
     /// ([`AdvancedPublisherPlane::order_stamp`]).
     hlc: NodeHlc,
+    /// Every time the session gives, which the plane's stamps are ordered through, as a
+    /// program's `z_timestamp_new` is.
+    time: crate::last_timestamp::SessionTime,
     /// What the advanced publisher's own publisher is declared with: the
     /// `publisher_options` the program embedded in its advanced options, which
     /// pico hands to the `z_declare_publisher` that builds it. The heartbeat
@@ -58,13 +66,35 @@ pub(crate) struct PicoPlane {
 }
 
 impl PicoPlane {
-    /// The plane of `session`, whose advanced publisher's publisher is declared
-    /// with `declared`.
-    pub(crate) fn new(session: PicoSession, declared: PublisherQos) -> Self {
+    /// The plane of `session`, whose clock is `hlc` and whose times are `time`, and whose
+    /// advanced publisher's publisher is declared with `declared`.
+    pub(crate) fn new(
+        session: PicoSession<'_>,
+        hlc: NodeHlc,
+        time: crate::last_timestamp::SessionTime,
+        declared: PublisherQos,
+    ) -> Self {
         Self {
-            hlc: session.hlc.clone(),
-            session,
+            engine: session.engine.clone(),
+            mode: session.mode,
+            hlc,
+            time,
             declared,
+        }
+    }
+
+    /// The engine of the plane's session: the one count the advanced publisher keeps of it, which
+    /// its publisher, its cache's queryable and its token are used and retracted on, and which the
+    /// door reaches the publisher's key and write filter through.
+    pub(crate) fn engine(&self) -> &EngineHold {
+        &self.engine
+    }
+
+    /// The session the plane declares on, lent from what it keeps.
+    fn session(&self) -> PicoSession<'_> {
+        PicoSession {
+            engine: &self.engine,
+            mode: self.mode,
         }
     }
 
@@ -72,6 +102,28 @@ impl PicoPlane {
     /// it gave.
     fn refusal(entity: &'static str, code: ZResult) -> AdvancedPublisherError {
         AdvancedPublisherError::Plane { entity, code }
+    }
+}
+
+/// The publisher a heartbeat beacon is sent on, and the count of its session's engine it is sent
+/// and retracted on: the timer's tick sends it with no plane, and its last holder (the composite,
+/// or a tick that was running when the timer stopped) lets it go, which retracts it, as
+/// zenoh-pico's heartbeat state undeclares its publisher when its last holder lets it go.
+pub(crate) struct BeaconPublisher {
+    engine: EngineHold,
+    publisher: PlainPublisher,
+}
+
+impl BeaconPublisher {
+    /// Publish a beacon on the publisher's key ([`PlainPublisher::publish`]).
+    fn publish<'a>(&'a self, payload: &[u8], opts: Option<&mut PublishOptions<'a>>) -> ZResult {
+        self.publisher.publish(&self.engine, payload, opts)
+    }
+}
+
+impl Drop for BeaconPublisher {
+    fn drop(&mut self) {
+        self.publisher.retract(&self.engine);
     }
 }
 
@@ -105,11 +157,22 @@ fn pico_publish(options: &mut PublishOptions<'_>) {
     options.allowed_destination = crate::locality::default_locality!("local-subscriber");
 }
 
+/// What a heartbeat beacon is sent with, on its publisher or on the key: a plain put of this ABI.
+fn beacon_options() -> PublishOptions<'static> {
+    let mut options = PublishOptions::default();
+    pico_publish(&mut options);
+    options.kind = SampleKind::Put;
+    options
+}
+
 impl AdvancedPublisherPlane for PicoPlane {
+    /// Used and retracted on the plane's engine: it keeps no count of its own.
     type Publisher = PlainPublisher;
+    /// Retracted on the plane's engine.
     type Queryable = PlainQueryable;
-    type Token = TokenState;
-    type Beacon = PlainPublisher;
+    /// The token's id, retracted on the plane's engine.
+    type Token = wz_capi_port::TokenId;
+    type Beacon = BeaconPublisher;
     /// The engine's periodic job, which is its own to run: a task of the runtime on the tokio
     /// engine, a step of the session on the cooperative one. `None` from an engine with no
     /// periodic jobs, whose publisher then declares and sends no heartbeat. The job names the
@@ -128,7 +191,7 @@ impl AdvancedPublisherPlane for PicoPlane {
     ) -> Option<Ticker<crate::session::EngineHold>> {
         // A period under a millisecond is raised to one by the engine, as the composite does.
         let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
-        Ticker::start_on(self.session.engine.clone(), period_ms, tick).ok()
+        Ticker::start_on(self.engine.clone(), period_ms, tick).ok()
     }
 
     /// Always: a pico session stamps from its own clock and zid with no
@@ -147,7 +210,7 @@ impl AdvancedPublisherPlane for PicoPlane {
     /// a sample's time and a program's are one strictly increasing sequence of the session, and a
     /// session with no time left refuses the sample as pico refuses the put.
     fn order_stamp(&self, proposed: u64) -> Result<u64, PublishError> {
-        self.session.time.order_data_stamp(proposed)
+        self.time.order_data_stamp(proposed)
     }
 
     fn declare_publisher(
@@ -165,7 +228,7 @@ impl AdvancedPublisherPlane for PicoPlane {
             .declared
             .try_clone()
             .ok_or_else(|| Self::refusal("publisher", crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY))?;
-        let publisher = PlainPublisher::declare(&self.session, keyexpr, declared)
+        let publisher = PlainPublisher::declare(self.session(), keyexpr, declared)
             .map_err(|code| Self::refusal("publisher", code))?;
         Ok(DeclaredPublisher {
             eid: publisher.entity_id(),
@@ -180,7 +243,10 @@ impl AdvancedPublisherPlane for PicoPlane {
     ) -> Result<PlainQueryable, AdvancedPublisherError> {
         // One handler for the queryable, kept in its row: it needs no face's session, as a reply
         // goes out on the query's own.
-        let answer = store.query_handler(wz_node_time::timestamp_source::wall_clock_ntp64);
+        let answer = store.query_handler_reading(
+            wz_node_time::timestamp_source::wall_clock_ntp64,
+            time_number,
+        );
         let sink = QueryableSink::shared(
             move |query: &dyn QueryView, out: &mut dyn ReplyOut, _face: &dyn QueryHolder| {
                 answer(query, out)
@@ -188,7 +254,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         );
         // INCOMPLETE, which is the only honest answer a bounded ring can give
         // (R2556, the tokio runtime's `AdvancedCache::declare` answers the same).
-        PlainQueryable::declare(&self.session, keyexpr, None, false, sink)
+        PlainQueryable::declare(self.session(), keyexpr, None, false, sink)
             .map_err(|code| Self::refusal("cache queryable", code))
     }
 
@@ -196,20 +262,29 @@ impl AdvancedPublisherPlane for PicoPlane {
     /// which reserved it at its open), so a put takes no memory; a ring that holds no record
     /// refuses the cache. On the heap on an engine that keeps none.
     fn cache_store(&self, config: CacheConfig) -> Result<CacheStore, AdvancedPublisherError> {
-        if SessionEngine::cache_bytes(&*self.session.engine).is_none() {
+        if SessionEngine::cache_bytes(&*self.engine).is_none() {
+            // The tokio engine's sessions keep no ring, and its build keeps a cache's heap form
+            // (`cache-heap`); the cooperative engine's always keep one, and its library links no
+            // heap form beside it.
+            #[cfg(feature = "engine-tokio")]
             return Ok(CacheStore::new(config));
+            #[cfg(not(feature = "engine-tokio"))]
+            return Err(AdvancedPublisherError::CacheRingUnavailable);
         }
         CacheStore::in_ring(
             config,
             Box::new(SessionCacheBytes(crate::session::EngineHold::clone(
-                &self.session.engine,
+                &self.engine,
             ))),
         )
         .ok_or(AdvancedPublisherError::CacheRingUnavailable)
     }
 
-    fn declare_token(&self, keyexpr: &str) -> Result<TokenState, AdvancedPublisherError> {
-        TokenState::declare(&self.session, keyexpr, None)
+    fn declare_token(
+        &self,
+        keyexpr: &str,
+    ) -> Result<wz_capi_port::TokenId, AdvancedPublisherError> {
+        crate::liveliness::declare_token(self.session(), keyexpr, None)
             .map_err(|code| Self::refusal("liveliness token", code))
     }
 
@@ -217,9 +292,26 @@ impl AdvancedPublisherPlane for PicoPlane {
         &self,
         keyexpr: &str,
         _sporadic: bool,
-    ) -> Result<PlainPublisher, AdvancedPublisherError> {
-        PlainPublisher::declare(&self.session, keyexpr, PublisherQos::pico_default())
-            .map_err(|code| Self::refusal("beacon publisher", code))
+    ) -> Result<BeaconPublisher, AdvancedPublisherError> {
+        let publisher =
+            PlainPublisher::declare(self.session(), keyexpr, PublisherQos::pico_default())
+                .map_err(|code| Self::refusal("beacon publisher", code))?;
+        Ok(BeaconPublisher {
+            engine: self.engine.clone(),
+            publisher,
+        })
+    }
+
+    fn retract_publisher(&self, publisher: PlainPublisher) {
+        publisher.retract(&self.engine);
+    }
+
+    fn retract_queryable(&self, queryable: PlainQueryable) {
+        queryable.retract(&self.engine);
+    }
+
+    fn retract_token(&self, token: wz_capi_port::TokenId) {
+        self.engine.undeclare_liveliness_token(token);
     }
 
     fn publish(
@@ -237,7 +329,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         // Bound again so the options' borrow may be as short as the publisher's.
         let mut options = options;
         pico_publish(&mut options);
-        match publisher.publish(payload, Some(&mut options)) {
+        match publisher.publish(&self.engine, payload, Some(&mut options)) {
             code if code == Z_OK => Ok(payload.len()),
             // Dropped behind a held conduit: the same drop, so the advanced put answers it as
             // the plain one does.
@@ -246,33 +338,21 @@ impl AdvancedPublisherPlane for PicoPlane {
         }
     }
 
-    fn publish_beacon(
-        &self,
-        beacon: Option<&PlainPublisher>,
-        keyexpr: &str,
-        payload: &[u8],
-        _sporadic: bool,
-    ) {
-        let mut options = PublishOptions::default();
-        pico_publish(&mut options);
-        options.kind = SampleKind::Put;
-        match beacon {
-            // Through the beacon publisher, as pico's heartbeat task does, so
-            // the beacon is held back while nothing subscribes to it.
-            Some(publisher) => {
-                let _ = publisher.publish(payload, Some(&mut options));
-            }
-            // An on-demand beacon from a publisher that declared none: on the
-            // key itself.
-            None => {
-                let _ = self.session.engine.publish_on_wire_all(
-                    keyexpr,
-                    &WireKey::literal(),
-                    payload,
-                    &options,
-                );
-            }
-        }
+    /// Through the beacon publisher, as pico's heartbeat task does, so the beacon is held back
+    /// while nothing subscribes to it.
+    fn send_beacon(beacon: &BeaconPublisher, _keyexpr: &str, payload: &[u8], _sporadic: bool) {
+        let mut options = beacon_options();
+        let _ = beacon.publish(payload, Some(&mut options));
+    }
+
+    /// An on-demand beacon from a publisher that declared none: on the key itself.
+    fn publish_beacon(&self, keyexpr: &str, payload: &[u8], _sporadic: bool) {
+        let _ = self.engine.publish_on_wire_all(
+            keyexpr,
+            &WireKey::literal(),
+            payload,
+            &beacon_options(),
+        );
     }
 
     fn retained_key(&self, publisher: &PlainPublisher) -> Option<Retained> {
@@ -280,7 +360,117 @@ impl AdvancedPublisherPlane for PicoPlane {
         // pico's does (`_z_declared_keyexpr_copy` in `_z_sample_copy_data`), so
         // the key stays declared until the ring lets the sample go. A key whose declaration's
         // count has no room keeps nothing, as a plane whose key is not a declaration does.
-        Some(Retained::new(Arc::new(publisher.key_copy().ok()?)))
+        Some(Retained::new(Arc::new(
+            publisher.key_copy(&self.engine).ok()?,
+        )))
+    }
+}
+
+/// The number of a `_time` selector, read by the C library's own reader as zenoh-pico reads it:
+/// `strtod` over a NUL-terminated copy of the literal wz's grammar admitted
+/// ([`decimal_text`](wz_session_core::time_range::decimal_text)), so the value is the literal
+/// correctly rounded and the library links no float reader of its own. A reader that stops before
+/// the copy's end reads a radix character other than `.` (the locale a program set), and the
+/// literal is read again as
+/// [`decimal_digits`](wz_session_core::time_range::decimal_digits) writes it, with none.
+#[cfg(unix)]
+fn time_number(text: &str) -> Result<f64, wz_session_core::time_range::FloatError> {
+    use wz_session_core::time_range::{decimal_digits, decimal_text, Decimal, FloatError};
+    let mut written = [0u8; wz_session_core::time_range::DECIMAL_TEXT];
+    let len = match decimal_text(text, &mut written)? {
+        Decimal::Read(value) => return Ok(value),
+        Decimal::Written(len) => len,
+    };
+    if let Some(value) = read_whole(&written, len) {
+        return Ok(value);
+    }
+    match decimal_digits(text, &mut written)? {
+        Decimal::Read(value) => Ok(value),
+        Decimal::Written(len) => read_whole(&written, len).ok_or(FloatError::Invalid),
+    }
+}
+
+/// `strtod` over the `len` bytes `written` holds before a NUL: `None` when it stops before their
+/// end.
+#[cfg(unix)]
+fn read_whole(
+    written: &[u8; wz_session_core::time_range::DECIMAL_TEXT],
+    len: usize,
+) -> Option<f64> {
+    let mut end: *mut libc::c_char = core::ptr::null_mut();
+    // SAFETY: `written` holds a NUL at `len`, so the reader reads inside the array, and `end` is
+    // the place the reader writes where it stopped.
+    let value = unsafe { libc::strtod(written.as_ptr().cast(), &mut end) };
+    (end.cast_const().cast::<u8>() == written.as_ptr().wrapping_add(len)).then_some(value)
+}
+
+/// A host whose C library's reader is not named here reads with core's.
+#[cfg(not(unix))]
+use wz_session_core::time_range::core_float as time_number;
+
+/// The C library's reader reads a `_time` number as core's does, and refuses what core refuses.
+/// Turned red by a literal handed to the reader in another form than the one it reads (the
+/// halfway point `1 + 2^-53` and the literals a digit either side of it, which a reading short of
+/// their digits rounds the wrong way), or a grammar the platform reader admits more of.
+#[cfg(all(test, unix))]
+mod time_number_tests {
+    use wz_session_core::time_range::{core_float, DECIMAL_TEXT};
+
+    #[test]
+    fn the_c_librarys_reader_reads_a_time_as_core_does() {
+        const HALF: &str = "1.00000000000000011102230246251565404236316680908203125";
+        let zeros = "0".repeat(DECIMAL_TEXT);
+        let long = [
+            std::format!("{HALF}{zeros}"),
+            std::format!("{HALF}{zeros}1"),
+        ];
+        let next = f64::from_bits(1.0_f64.to_bits() + 1);
+        for (text, value) in [
+            (HALF, 1.0),
+            (
+                "1.00000000000000011102230246251565404236316680908203124",
+                1.0,
+            ),
+            (
+                "1.00000000000000011102230246251565404236316680908203126",
+                next,
+            ),
+            (long[0].as_str(), 1.0),
+            (long[1].as_str(), next),
+        ] {
+            assert_eq!(
+                super::time_number(text).map(f64::to_bits),
+                Ok(value.to_bits()),
+                "{text:?} is rounded as its digits say"
+            );
+        }
+        for text in [
+            "30",
+            "1.5",
+            "-0.25",
+            "2.5e-3",
+            "1e400",
+            "4.9e-324",
+            "0.30000000000000004",
+            "123456789012345678901234567890123456789012345678901234567890",
+            "inf",
+            "nan",
+            "",
+            "1,5",
+            "0x10",
+            " 1",
+        ]
+        .into_iter()
+        .chain([HALF, long[0].as_str(), long[1].as_str()])
+        {
+            match (super::time_number(text), core_float(text)) {
+                (Ok(a), Ok(b)) => assert!(
+                    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                    "{text:?}: {a} against {b}"
+                ),
+                (a, b) => assert_eq!(a.map(f64::to_bits), b.map(f64::to_bits), "{text:?}"),
+            }
+        }
     }
 }
 
@@ -385,11 +575,11 @@ mod tests {
         );
         let plane = PicoPlane::new(
             PicoSession {
-                engine: shared.as_engine(),
+                engine: &shared.as_engine(),
                 mode: WhatAmI::Peer,
-                hlc: NodeHlc::default(),
-                time: crate::last_timestamp::SessionTime::new(),
             },
+            NodeHlc::default(),
+            crate::last_timestamp::SessionTime::new(),
             PublisherQos::pico_default(),
         );
         let ticks = Arc::new(AtomicUsize::new(0));
@@ -450,15 +640,15 @@ mod tests {
             )
             .expect("test host entropy"),
         );
-        let plane = Arc::new(PicoPlane::new(
+        let plane = PicoPlane::new(
             PicoSession {
-                engine: shared.as_engine(),
+                engine: &shared.as_engine(),
                 mode: WhatAmI::Peer,
-                hlc: hlc.clone(),
-                time: time.clone(),
             },
+            hlc.clone(),
+            time.clone(),
             PublisherQos::pico_default(),
-        ));
+        );
         // The options are non-exhaustive, so they are built from their default and set.
         let mut options = AdvancedPublisherOptions::default();
         options.cache = None;
@@ -466,6 +656,64 @@ mod tests {
         let publisher = AdvancedPublisherOn::declare_on(plane, "demo/pico/ts", options, ZID.into())
             .expect("the declaration is accepted");
         (shared, publisher)
+    }
+
+    /// The publisher's entities keep no count of the engine: the plane's is the one the advanced
+    /// publisher adds, and its drop hands each entity to the plane, which retracts it on that
+    /// count, so no key its publisher, its cache's queryable or its token declared stands after it
+    /// and the count goes with the plane. Turned red by an entity that keeps a count again (more
+    /// than one added), or by a plane that lets go of an entity without retracting it (a key left
+    /// declared).
+    #[test]
+    fn the_publishers_entities_are_retracted_on_the_planes_one_count() {
+        for cached in [false, true] {
+            let shared = Arc::new(
+                SharedSession::new(
+                    TokioTime::new(),
+                    ZID.into(),
+                    wz_session_core::policy::SessionPolicy::defaults(),
+                )
+                .expect("test host entropy"),
+            );
+            let before = Arc::strong_count(&shared);
+            let plane = PicoPlane::new(
+                PicoSession {
+                    engine: &shared.as_engine(),
+                    mode: WhatAmI::Peer,
+                },
+                NodeHlc::default(),
+                SessionTime::new(),
+                PublisherQos::pico_default(),
+            );
+            let mut options = AdvancedPublisherOptions::default();
+            options.cache = cached.then(CacheConfig::default);
+            options.publisher_detection = true;
+            let publisher =
+                AdvancedPublisherOn::declare_on(plane, "demo/pico/retract", options, ZID.into())
+                    .expect("the declaration is accepted");
+            if !cached {
+                assert_eq!(
+                    Arc::strong_count(&shared) - before,
+                    1,
+                    "the plane's count alone: the publisher and the token keep none"
+                );
+            }
+            assert!(
+                !shared.keyexpr_declarations().is_empty(),
+                "the publisher's key and its `@adv` key are declared"
+            );
+            drop(publisher);
+            let left = shared.keyexpr_declarations();
+            assert!(
+                left.is_empty(),
+                "every entity was retracted (cached: {cached}): {left:?}"
+            );
+            assert_eq!(
+                Arc::strong_count(&shared),
+                before,
+                "the plane's count went with it (cached: {cached})"
+            );
+        }
     }
 
     /// With the policy off, the default and upstream's, a sample is stamped through the session's

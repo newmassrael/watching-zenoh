@@ -34,7 +34,7 @@ use super::super::options::{
     RecoveryConfig, SubscriberDetection,
 };
 use super::super::state::{Delivery, Miss, MissHandlers, OnSample, State};
-use super::{EngineSubscriber, HostError, LentCore, SubscriberCore};
+use super::{Callbacks, EngineSubscriber, HostError, LentCore, SubscriberCore};
 use crate::test_alloc::allocations;
 use wz_capi_port::lodge::{Lodging, Strong};
 
@@ -1690,17 +1690,23 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
             given_back_into(&given),
         )
     };
+    let mut place = core::mem::MaybeUninit::uninit();
     let subscriber = EngineSubscriber::declare_in(
+        &mut place,
         &engine(&script),
         "demo/data",
-        options(),
-        OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
-        MissHandlers::default(),
+        &options(),
+        None,
+        Callbacks {
+            on_sample: OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+            misses: MissHandlers::default(),
+        },
         lent,
     )
     .expect("the subscriber declares in the lent place");
     let listener = subscriber.sample_miss_listener(|_| {});
-    drop(subscriber);
+    // SAFETY: the declaration wrote the subscriber in `place`, which is read out of it once.
+    drop(unsafe { place.assume_init_read() });
     assert_eq!(
         given.load(Ordering::SeqCst),
         0,
@@ -1726,17 +1732,192 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
             given_back_into(&refused_back),
         )
     };
+    let mut refused_place = core::mem::MaybeUninit::uninit();
     let refused = EngineSubscriber::declare_in(
+        &mut refused_place,
         &engine(&script),
         "demo/data",
-        AdvancedSubscriberOptions::new().with_history(HistoryConfig::new().max_samples(0)),
-        OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
-        MissHandlers::default(),
+        &AdvancedSubscriberOptions::new().with_history(HistoryConfig::new().max_samples(0)),
+        None,
+        Callbacks {
+            on_sample: OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+            misses: MissHandlers::default(),
+        },
         lent,
     );
     assert!(matches!(refused, Err(HostError::HistoryBoundZero { .. })));
     assert_eq!(refused_back.load(Ordering::SeqCst), 1, "given back at once");
     assert!(script.events().is_empty(), "nothing was declared");
+}
+
+/// A subscriber declared in a place its host gives is written there and handed back as that
+/// place, and one refused after its first declaration leaves the place as it found it. Turned red
+/// by a declaration that makes the subscriber elsewhere and moves it in, or a refusal that writes
+/// the place.
+#[test]
+fn a_subscriber_is_declared_in_the_place_its_host_gives() {
+    let given = AtomicU64::new(0);
+    let mut core = SubscriberCore::<Arc<dyn SessionEngine>>::vacant();
+    let script = Script::new(1);
+    // SAFETY: `core` is free and outlives the subscriber and every holder of its part; `given`
+    // outlives the give-back.
+    let lent = unsafe {
+        LentCore::new(
+            core::ptr::NonNull::from(&mut core),
+            count_given_back,
+            given_back_into(&given),
+        )
+    };
+    let mut place = core::mem::MaybeUninit::<EngineSubscriber>::uninit();
+    let at = place.as_ptr();
+    let declared = EngineSubscriber::declare_in(
+        &mut place,
+        &engine(&script),
+        "demo/data",
+        &AdvancedSubscriberOptions::new(),
+        None,
+        Callbacks {
+            on_sample: OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+            misses: MissHandlers::default(),
+        },
+        lent,
+    )
+    .expect("the subscriber declares in the given place");
+    assert!(core::ptr::eq(&*declared, at), "handed back as the place");
+    assert_eq!(declared.keyexpr(), "demo/data");
+    let id = declared.id();
+    // SAFETY: the declaration wrote the subscriber in `place`, which is read out of it once.
+    let subscriber = unsafe { place.assume_init_read() };
+    assert_eq!(
+        subscriber.id(),
+        id,
+        "the place holds the subscriber declared"
+    );
+    drop(subscriber);
+    drop(script);
+    assert_eq!(given.load(Ordering::SeqCst), 1, "the core goes back once");
+
+    // An engine that runs no periodic job refuses the subscriber after its subscription stands.
+    let refused_back = AtomicU64::new(0);
+    let mut refused_core = SubscriberCore::<Arc<dyn SessionEngine>>::vacant();
+    let script = Script::new(1);
+    script.no_tickers.store(true, Ordering::SeqCst);
+    // SAFETY: as above.
+    let lent = unsafe {
+        LentCore::new(
+            core::ptr::NonNull::from(&mut refused_core),
+            count_given_back,
+            given_back_into(&refused_back),
+        )
+    };
+    let size = core::mem::size_of::<EngineSubscriber>();
+    let mut refused_place = core::mem::MaybeUninit::<EngineSubscriber>::uninit();
+    // SAFETY: the place is valid for `size` bytes, written here so they can be read back.
+    unsafe {
+        refused_place
+            .as_mut_ptr()
+            .cast::<u8>()
+            .write_bytes(0xA5, size)
+    };
+    let refused = EngineSubscriber::declare_in(
+        &mut refused_place,
+        &engine(&script),
+        "demo/data",
+        &AdvancedSubscriberOptions::new()
+            .with_recovery(RecoveryConfig::new().with_periodic_queries(Duration::from_millis(500))),
+        None,
+        Callbacks {
+            on_sample: OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+            misses: MissHandlers::default(),
+        },
+        lent,
+    )
+    .map(|_| ());
+    assert!(matches!(refused, Err(HostError::Refused(_))));
+    assert_eq!(
+        script.events(),
+        ["declare subscriber demo/data", "retract demo/data"],
+        "what stood before the refusal is retracted"
+    );
+    // SAFETY: every byte of the place was written above and the refusal wrote none.
+    let bytes = unsafe { core::slice::from_raw_parts(refused_place.as_ptr().cast::<u8>(), size) };
+    assert!(
+        bytes.iter().all(|&byte| byte == 0xA5),
+        "a refusal leaves the place unwritten"
+    );
+    drop(script);
+    assert_eq!(
+        refused_back.load(Ordering::SeqCst),
+        1,
+        "the core goes back once"
+    );
+}
+
+/// A form named where it lies reads as the one its builders make, and gives its keep up whole to
+/// the entity declared in it: the count is the form's, with none added. Turned red by a setter
+/// that writes another field than its builder, or a keep handed on as a copy.
+#[test]
+fn a_form_named_in_place_reads_as_its_builders_and_gives_up_its_keep() {
+    let anchor = Arc::new(());
+    let built = EntityForm::aliased(5, Some("/data".into()))
+        .keeping(Kept::shared(anchor.clone()))
+        .with_retraction_naming(Some(RetractionKey::literal()))
+        .with_token_retraction_naming_the_key(true);
+    let mut named = EntityForm::aliased(5, Some("/data".into()));
+    named.keep(Kept::shared(anchor.clone()));
+    named.name_on_retraction(Some(RetractionKey::literal()));
+    named.name_key_on_token_retraction(true);
+    assert_eq!(format!("{named:?}"), format!("{built:?}"));
+    drop(built);
+    assert_eq!(
+        Arc::strong_count(&anchor),
+        2,
+        "the named form holds one count"
+    );
+    let kept = named.into_kept().expect("the form keeps its anchor");
+    assert_eq!(
+        Arc::strong_count(&anchor),
+        2,
+        "the keep is the form's own count, handed on"
+    );
+    drop(kept);
+    assert_eq!(Arc::strong_count(&anchor), 1);
+}
+
+/// A subscriber declared in a lent place is named by the forms handed to it by value; forms set in
+/// the options as well are refused, in a build that checks, so one subscriber is never named by
+/// two. Turned red by a declaration that reads the options' forms or takes both.
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "named by the forms handed over")]
+fn a_subscriber_declared_in_a_lent_place_refuses_forms_in_its_options() {
+    struct Literal;
+    impl DeclarationForms for Literal {}
+    let given = AtomicU64::new(0);
+    let mut core = SubscriberCore::<Arc<dyn SessionEngine>>::vacant();
+    let script = Script::new(1);
+    // SAFETY: `core` is free and outlives the call; `given` outlives the give-back.
+    let lent = unsafe {
+        LentCore::new(
+            core::ptr::NonNull::from(&mut core),
+            count_given_back,
+            given_back_into(&given),
+        )
+    };
+    let mut place = core::mem::MaybeUninit::<EngineSubscriber>::uninit();
+    let _ = EngineSubscriber::declare_in(
+        &mut place,
+        &engine(&script),
+        "demo/data",
+        &AdvancedSubscriberOptions::new()
+            .with_declaration_forms(FormsHandle::new(Arc::new(Literal))),
+        Some(FormsHandle::new(Arc::new(Literal))),
+        Callbacks {
+            on_sample: OnSample::boxed(Box::new(|_: Delivery<'_>| {})),
+            misses: MissHandlers::default(),
+        },
+        lent,
+    );
 }
 
 /// The late-publisher subscription's callback is the engine's plain form over a count of the

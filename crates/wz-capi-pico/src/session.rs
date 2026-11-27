@@ -999,19 +999,16 @@ pub(crate) struct PicoSessionHandle {
     /// What the session's report of its memory is computed from, as its open decided it.
     #[cfg(feature = "session-memory")]
     pub(crate) memory: crate::session_memory::MemoryBasis,
-    /// What an entity declared on the session needs of it, made once by the open and lent to each
-    /// declaring door (`crate::write_filter::PicoSession::of`), so no door makes its own copy and
-    /// lets it go on each of its ways out.
-    pub(crate) pico: crate::write_filter::PicoSession,
 }
 
 impl PicoSessionHandle {
+    /// The handle of the session `drive` runs, whose pico-side state is `ext`. A door that
+    /// declares on it borrows the drive's engine and the role from here
+    /// (`crate::write_filter::PicoSession::of`), so the handle holds the engine once.
     pub(crate) fn new(drive: HeldDrive, ext: crate::session_ext::PicoSessionExt) -> Self {
-        let pico = crate::write_filter::PicoSession::over(drive.engine(), &ext);
         Self {
             drive,
             ext,
-            pico,
             #[cfg(feature = "session-memory")]
             memory: crate::session_memory::MemoryBasis::default(),
         }
@@ -3545,11 +3542,12 @@ pub unsafe extern "C" fn z_publisher_id(
     publisher: *const crate::pubsub::z_loaned_publisher_t,
 ) -> crate::entity::z_entity_global_id_t {
     entity_id_of(
-        crate::abi::handle_ref::<
-            crate::pubsub::z_loaned_publisher_t,
-            crate::pubsub::PublisherState,
-        >(publisher)
-        .map(|s| (s.shared_zid(), s.entity_id())),
+        crate::abi::handle_at::<_, crate::pubsub::PublisherState>(publisher).map(|state| {
+            // SAFETY: the caller's: a live loaned publisher names a live state in its place.
+            let engine = unsafe { crate::object_slot::entity_engine(state) };
+            // SAFETY: as above.
+            (engine.zid(), unsafe { (*state).entity_id() })
+        }),
     )
 }
 
@@ -3584,10 +3582,12 @@ pub unsafe extern "C" fn z_querier_id(
     querier: *const crate::querier::z_loaned_querier_t,
 ) -> crate::entity::z_entity_global_id_t {
     entity_id_of(
-        crate::abi::handle_ref::<crate::querier::z_loaned_querier_t, crate::querier::QuerierState>(
-            querier,
-        )
-        .map(|s| (s.shared_zid(), s.entity_id())),
+        crate::abi::handle_at::<_, crate::querier::QuerierState>(querier).map(|state| {
+            // SAFETY: the caller's: a live loaned querier names a live state in its place.
+            let engine = unsafe { crate::object_slot::entity_engine(state) };
+            // SAFETY: as above.
+            (engine.zid(), unsafe { (*state).entity_id() })
+        }),
     )
 }
 
@@ -3624,12 +3624,14 @@ pub unsafe extern "C" fn z_subscriber_keyexpr(
 pub unsafe extern "C" fn z_subscriber_id(
     subscriber: *const crate::pubsub::z_loaned_subscriber_t,
 ) -> crate::entity::z_entity_global_id_t {
-    entity_id_of(crate::pubsub::subscriber_at(subscriber).and_then(|state| {
-        // SAFETY: the caller's: a live loaned subscriber names a live state.
-        let engine = unsafe { crate::pubsub::subscriber_engine(state) };
-        // SAFETY: as above.
-        Some((engine.zid(), unsafe { (*state).id() }?))
-    }))
+    entity_id_of(
+        crate::abi::handle_at::<_, crate::pubsub::SubscriberState>(subscriber).and_then(|state| {
+            // SAFETY: the caller's: a live loaned subscriber names a live state.
+            let engine = unsafe { crate::object_slot::entity_engine(state) };
+            // SAFETY: as above.
+            Some((engine.zid(), unsafe { (*state).id() }?))
+        }),
+    )
 }
 
 /// A queryable's global entity id (pico `z_queryable_id`).

@@ -46,6 +46,7 @@
 //! [`crate::time_range`]); a value zenoh's parser rejects is no range at all, so
 //! every sample replies, as upstream does.
 
+#[cfg(any(test, feature = "cache-heap"))]
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 
@@ -329,6 +330,7 @@ pub struct SampleBody<'a> {
     pub shared: Option<wz_session_core::extshm::ShmSendHandle>,
 }
 
+#[cfg(any(test, feature = "cache-heap"))]
 impl SampleBody<'_> {
     /// A sample of its own on the heap, these parts copied.
     fn to_cached(&self, source_info: Option<SourceInfo>, timestamp: TimestampHint) -> CachedSample {
@@ -423,6 +425,7 @@ struct Held<'a> {
     shared: Option<&'a wz_session_core::extshm::ShmSendHandle>,
 }
 
+#[cfg(any(test, feature = "cache-heap"))]
 impl<'a> Held<'a> {
     /// `sample`, read where it lies.
     fn of(sample: &'a CachedSample) -> Self {
@@ -446,6 +449,7 @@ trait HeldSamples {
     fn for_each_held(&self, each: &mut dyn FnMut(Held<'_>));
 }
 
+#[cfg(any(test, feature = "cache-heap"))]
 impl HeldSamples for VecDeque<CachedSample> {
     fn for_each_held(&self, each: &mut dyn FnMut(Held<'_>)) {
         self.iter().for_each(|sample| each(Held::of(sample)));
@@ -453,9 +457,10 @@ impl HeldSamples for VecDeque<CachedSample> {
 }
 
 /// Where a cache keeps its samples: on the heap, each a [`CachedSample`] of its own, or as records
-/// of its session's ring.
+/// of its session's ring. The heap's form is a build's whose engine keeps no ring (`cache-heap`).
 enum Samples {
     /// On the heap, at most `max_samples` of them.
+    #[cfg(any(test, feature = "cache-heap"))]
     Heap {
         samples: VecDeque<CachedSample>,
         max_samples: usize,
@@ -467,6 +472,7 @@ enum Samples {
 impl HeldSamples for Samples {
     fn for_each_held(&self, each: &mut dyn FnMut(Held<'_>)) {
         match self {
+            #[cfg(any(test, feature = "cache-heap"))]
             Self::Heap { samples, .. } => samples.for_each_held(each),
             Self::Ring(cache) => {
                 let owner = cache.owner;
@@ -493,6 +499,7 @@ impl Ring {
         timestamp: TimestampHint,
     ) -> Option<CachedSample> {
         match &mut self.samples {
+            #[cfg(any(test, feature = "cache-heap"))]
             Samples::Heap {
                 samples,
                 max_samples,
@@ -518,6 +525,7 @@ impl Ring {
     /// How many samples the cache holds.
     fn len(&self) -> usize {
         match &self.samples {
+            #[cfg(any(test, feature = "cache-heap"))]
             Samples::Heap { samples, .. } => samples.len(),
             Samples::Ring(cache) => {
                 let (owner, mut live) = (cache.owner, 0);
@@ -537,6 +545,7 @@ impl Ring {
 /// `max_samples == 0` (`0 >= 0` stays true while `pop_front()` on the empty
 /// ring never reduces `len`), hanging the thread WITH the ring mutex held.
 /// `if` matches zenoh and bounds a 0-depth cache at one retained sample.
+#[cfg(any(test, feature = "cache-heap"))]
 fn evict_for_one(samples: &mut VecDeque<CachedSample>, max_samples: usize) -> Option<CachedSample> {
     if samples.len() >= max_samples {
         samples.pop_front()
@@ -556,10 +565,10 @@ fn evict_for_one(samples: &mut VecDeque<CachedSample>, max_samples: usize) -> Op
 /// the same on both, so they are one type and the host brings only the
 /// declaration (`AdvancedPublisherPlane::declare_cache_queryable` of the runtime).
 ///
-/// The samples lie on the heap ([`Self::new`]) or as records of the session's ring
-/// ([`Self::in_ring`]), memory the session reserved at its open and shares among its caches: a put
-/// into the ring takes no memory, and is refused when its record is longer than the whole ring
-/// ([`Self::check_room`]).
+/// The samples lie on the heap (`CacheStore::new`, in a build with `cache-heap`) or as records of
+/// the session's ring ([`Self::in_ring`]), memory the session reserved at its open and shares among
+/// its caches: a put into the ring takes no memory, and is refused when its record is longer than
+/// the whole ring ([`Self::check_room`]).
 ///
 /// Cloning shares the ring: the publisher feeds it and the queryable's handler
 /// reads it, and both hold one of these.
@@ -576,7 +585,9 @@ pub struct CacheStore {
 }
 
 impl CacheStore {
-    /// An empty cache of `config`'s depth on the heap.
+    /// An empty cache of `config`'s depth on the heap, for an engine whose sessions keep no ring
+    /// of cached samples (`cache-heap`).
+    #[cfg(any(test, feature = "cache-heap"))]
     pub fn new(config: CacheConfig) -> Self {
         Self::over(
             Samples::Heap {
@@ -633,11 +644,21 @@ impl CacheStore {
         &self,
         now: impl Fn() -> u64 + Send + Sync + 'static,
     ) -> impl Fn(&dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static {
+        self.query_handler_reading(now, wz_session_core::time_range::core_float)
+    }
+
+    /// [`Self::query_handler`], the numbers of a `_time` selector read by `read`: a C library
+    /// reads them with its platform's reader, as zenoh-pico does, and links no reader of its own.
+    pub fn query_handler_reading(
+        &self,
+        now: impl Fn() -> u64 + Send + Sync + 'static,
+        read: wz_session_core::time_range::FloatRead,
+    ) -> impl Fn(&dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static {
         let ring = Arc::clone(&self.ring);
         let replies_config = self.replies_config;
         move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
             let guard = lock_or_panic(&ring, RING_POISONED);
-            answer_from_ring(&guard.samples, view, out, now(), replies_config);
+            answer_from_ring(&guard.samples, view, out, now(), replies_config, read);
         }
     }
 
@@ -683,30 +704,33 @@ impl CacheStore {
     /// (zenoh advanced_cache.rs:368-377); a cache in the ring copies it into a record, as
     /// [`Self::retain`] does. What was let go of is dropped after the lock is released, as there.
     pub fn cache_sample(&self, sample: CachedSample) {
-        if self.ring_bytes.is_some() {
-            self.retain(
-                sample.body(),
-                sample.source_info.clone(),
-                sample.timestamp.clone(),
-            );
-            return;
-        }
-        let evicted = {
-            let mut ring = lock_or_panic(&self.ring, RING_POISONED);
-            match &mut ring.samples {
-                Samples::Heap {
-                    samples,
-                    max_samples,
-                } => {
-                    let evicted = evict_for_one(samples, *max_samples);
-                    samples.push_back(sample);
-                    evicted
-                }
-                // A store is made over a ring or over the heap once, and `ring_bytes` says which.
-                Samples::Ring(_) => None,
+        // A store is made over a ring or over the heap once, and `ring_bytes` says which.
+        #[cfg(any(test, feature = "cache-heap"))]
+        {
+            if self.ring_bytes.is_none() {
+                let evicted = {
+                    let mut ring = lock_or_panic(&self.ring, RING_POISONED);
+                    match &mut ring.samples {
+                        Samples::Heap {
+                            samples,
+                            max_samples,
+                        } => {
+                            let evicted = evict_for_one(samples, *max_samples);
+                            samples.push_back(sample);
+                            evicted
+                        }
+                        Samples::Ring(_) => None,
+                    }
+                };
+                drop(evicted);
+                return;
             }
-        };
-        drop(evicted);
+        }
+        self.retain(
+            sample.body(),
+            sample.source_info.clone(),
+            sample.timestamp.clone(),
+        );
     }
 
     /// Keep `key` declared for as long as the cache is: zenoh-pico's cached sample holds a
@@ -747,6 +771,7 @@ fn answer_from_ring<R: HeldSamples + ?Sized>(
     out: &mut dyn ReplyOut,
     now_ntp64: u64,
     replies_config: RepliesConfig,
+    read: wz_session_core::time_range::FloatRead,
 ) {
     let params = view.parameters();
     let sn_range = param_value(params, "_sn").map(parse_sn_range);
@@ -760,7 +785,7 @@ fn answer_from_ring<R: HeldSamples + ?Sized>(
     // rejects, leaves this `None` = unfiltered, which is what upstream does with
     // a range it cannot read.
     let time_range = param_value(params, "_time")
-        .and_then(time_range::parse)
+        .and_then(|value| time_range::parse_with(value, read))
         .map(|r| time_range::resolve(r, ntp64_to_system_time(now_ntp64)));
     let matches = |s: &Held<'_>| {
         sample_matches_sn(s.source_info.as_ref().map(|si| si.sn), sn_range)
