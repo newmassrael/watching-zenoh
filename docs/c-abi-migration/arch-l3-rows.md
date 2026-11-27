@@ -150,7 +150,7 @@ What it shows:
 | H4 | what keeps a key's declaration alive | the tables' count of the declaration (`KeyexprCount`) | none where no ABI makes an anchor: `KeyAnchor` is of no size without the port's `key-anchors`, which only the ABIs that retract by an object of their own name (the advanced subscriber's host, the Rust API) | no | gone (D5) |
 | H5 | the callback protocol of a row | one record for every kind (`LatchedRow<S, A>` in `wz-capi-coop/src/engine.rs`) | none | no | gone (D6) |
 | H6 | the session's L3 tables as a value | `SessionTables` and `PeerTables` in `wz-session-core` | `RegistryOf<H>` in `wz-capi-coop/src/engine/registry.rs`: the application's observer (`SlotObserverOf`, whose `tables` is the `SessionTables`), the faces' `FaceTables` (`peer`, `gets`, the due row), the holders' index and the written count; every operation reaches the tables through it | 1,101 bytes; 7,938 in the peer case, 18,542 in the api case | D7, read (6.6): what peer-rows R3 leaves of it |
-| H7 | a pending get | each leg's entry in its face's table of pending gets (`FaceTables::gets`, `Requesters<ConsolidatingSink<LegSink, LegHold>>`); the tables' `PendingGetRow` is not built on this engine (6.3) | the get's own facts (mode, accepted key, deadline) once for each leg; the session's note of each leg went with H7a, the callback for each leg with H7b | no | D8: H7a, H7b, H7c1 landed; H7c2a, H7c2b, H7c2c (6.7), H7d (6.3) |
+| H7 | a pending get | each leg's entry in its face's table of pending gets (`FaceTables::gets`, `Requesters<ConsolidatingSink<LegSink, LegHold>>`); the tables' `PendingGetRow` is not built on this engine (6.3) | the get's own facts (mode, accepted key, deadline) once for each leg; the session's note of each leg went with H7a, the callback for each leg with H7b | no | D8: H7a, H7b, H7c1, H7c2a landed; H7c2b, H7c2c (6.7), H7d (6.3) |
 | H8 | a query kept past its callback | the queries' plane (`wz-session-core/src/query_plane.rs`, `FinalHold::kept`) | none: the engine keeps no copy, only the query's name across the port (`HeldQueryId`), read in 6.2 | no | not held twice |
 | H9 | the session's own tokens | the application's tables (`ObserverTables::held_tokens`) | none; the tokens a lost face owes are kept apart (`OwedTokens`), read with D7 | no | gone (D9a, D9b) |
 | H10 | a sample between a read and a callback | the read's frame | the round, under `wz_round` | no | D10 |
@@ -181,7 +181,7 @@ reverted when its row does not move by its expectation.
 | D5 | H4 | landed (6.5) | the port's `KeyAnchor` as a type of no size where no ABI keeps an anchor | -100 to -200 text, 32 bytes a row of the region | 0 | the anchor test of `tests/liveliness.rs` kept on the build that keeps anchors; a size assertion of the row on one that does not |
 | D6 | H5 | landed | `wz-capi-coop/src/engine.rs` (`LatchedRow<S, A>`, `RowCall<S, A>`, one `RowCallback` impl), `engine/query.rs` and `engine/liveliness.rs` (`QueryableRow`, `LivelinessRow` its instances); the subscriber's timestamp choice is the row's `shown` field, so its row is laid out as before | 0: the measured case builds the subscriber's instance alone, whose layout, constructor (out of line) and calls are unchanged; the api case 0 (each kind is still its own instance) | 0 | `closure_drops`, `queryable`, `liveliness`, `round` unchanged |
 | D7 | H6 | read (6.6): its premise does not hold on this tree; read again on one that holds peer-rows R3b | the registry becomes the session core's (`wz-session-core`: the table set and the faces' sets, a face named by its set's handle) | -300 to -800; `pico-peer-coop` and the api case to be read (7,938 and 18,542 held now) | to be read: the receive's one look at its face's set is kept, and no call is added | the registry's tests move with it; `direct_receive`, `in_place` |
-| D8 | H7 (H8 read as not held twice, 6.2) | designed (6.3, 6.7); H7a, H7b, H7c1 landed, H7c2a, H7c2b, H7c2c, H7d to come | the note of each leg, then a callback for each leg, then the faces' copies of the get, then the snapshot's | 0; the api case by step (6.3) | 0; H7c read on the reply's receive | `get`, `local_query`, `queryable`, `snapshot`, `cancel` |
+| D8 | H7 (H8 read as not held twice, 6.2) | designed (6.3, 6.7); H7a, H7b, H7c1, H7c2a landed, H7c2b, H7c2c, H7d to come | the note of each leg, then a callback for each leg, then the faces' copies of the get, then the snapshot's | 0; the api case by step (6.3) | 0; H7c read on the reply's receive | `get`, `local_query`, `queryable`, `snapshot`, `cancel` |
 | D9a | H9: the answering apart from the holder | landed | `local_token.rs` (`TokenAnswers`), `peer_tables.rs` (`PeerTables::token_answers`), the observer's answer and drain | 0 (no liveliness); the api case 0 to -100 (the observer's sum of refusals and its `try_from`, read on `dispatch_event_among` and `answer_iteration_event`) | 0 (an Interest's path only) | `local_token::tests` (the staging's tests now stage through `TokenAnswers`, and `a_chain_that_does_not_fit_whole_is_refused_and_stages_nothing` reads the refusal it counts), `peer_tables::lent_tests::a_lent_peer_holds_a_liveliness_answer` (the refusal counted by the lent row's staging), `limits::tests::max_pending_declares_stated_refuses_the_next_chain_whole` (the quota reaches the staging through `PeerTables::limit_to`, and the observer reads the refusal off it) |
 | D9b | H9: one holder | landed | `slot_observer.rs` (`RegistryTables::local_tokens`, `RegistryRows::local_tokens`, `ObserverTables::held_tokens` and `init_empty_at`; `ObserverRows` and the observer's field, region rows and line gone), `observer.rs` (the heap view reads the tables' registry), `local_token.rs` (the registry's region and counted forms gone), the coop engine's three callers of the observer's lent and counted forms and its region rows | 0 (no liveliness); the api case -100 to -400 (the observer's `LocalTokenRegistry<Region>` state, its region line, its lend of no row, its two `limit_*` calls, and the `HeldTokens` of `LocalTokenRegistry<Lent>`, whose vtable the `unwrap_or` named) | 0 | `slot_observer::lent_tests::a_lent_observers_tokens_are_a_registry_of_its_tables_lent_their_own_rows`; `limits::tests::max_local_tokens_*` (the token quota reaches the registry through `RegistryTables::hold_to`); `liveliness` |
 | D10 | H10 | the MCU matrix | a lock per value on a target without 64-bit atomics (the kernel's), so no `threads` form keeps the round | 0 on a host; the MCU images' to be read | to be read on the MCU matrix | `one_thread`, `round` until they go |
@@ -580,7 +580,7 @@ untouched.
   it to the one entry its id names (`ReplyRegistry::reply_to_one`, the Final's look). Receive: a
   reply's walk of the face's entries less one look; equal with one get pending. Size: about 0;
   the walk (`fire_replies_for`) is no longer reached from the engine where `reply_to_one` is built
-  already.
+  already. Landed (below).
 - H7c2b. The get in the tables' row: `GetPresence = Present` on this engine, its callback record,
   mode, gate, deadline and Finals in the row, its consolidation in the tables' `held`, its end a
   state of the row handed out by the deliveries; the plane's rows of callbacks, its ends, its held
@@ -605,6 +605,21 @@ untouched.
   the group's counters and `local_requests` no longer read by a get) and `registry.rs`'s `Gets`.
   Expected: the api case a few hundred bytes (the per-face table's rows, an id a leg); receive: the
   Response's find in the tables is the one look the face's table made.
+
+**H7c2a, landed.** `Registry::fire_reply` (`wz-capi-coop/src/engine/registry.rs`) hands a reply
+read past the lock, by the direct read (`hand_lent_reply`) or the copying one (`take_reply`), to
+`ReplyRegistry::reply_to_one`, as the Final's dispatch hands its id to `final_to_one`: the row
+the id carries is read first, the id compared whole, and the walk is left for an entry an earlier
+end moved toward the front. What a reply is handed is unchanged: the key gate, the entry's accepted
+keys and the sink are the same, and a face's table holds no two entries of one id on this engine
+(each id is `request_id_at` of the face's serial and the entry's row). Held by
+`reply::tests::a_row_held_again_is_not_named_by_the_id_of_its_earlier_entry` (red if the carried
+row is taken without the whole id compared) and
+`an_entry_moved_by_an_earlier_end_is_found_and_ends_at_its_last_final` (red if the walk is left
+out of `row_of`), which now read the engine's path for every peer's reply, and by `tests::get`
+and `tests::local_query` unchanged. No test tells the two finds apart by what they hand: the
+step is read on the receive of a reply, where a face with `n` gets pending loses the walk over
+them for one look. Size: about 0 (the call changes; both bodies are built already).
 
 H7c2b and H7c2c write `registry.rs`' `Gets` and `FaceTables`, which `peer-rows.md` R3b makes a
 part of the face's row: the merge of the two lanes is the main session's to order, and H7c2c's
