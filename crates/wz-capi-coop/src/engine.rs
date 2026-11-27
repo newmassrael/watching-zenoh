@@ -9531,11 +9531,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             (core, groups)
         };
         drop(core);
-        let mut outcome = Ok(0);
+        // What the publish came to before the leg: the groups' failure, where a build has groups.
         #[cfg(feature = "group")]
-        if groups.is_err() {
-            outcome = groups;
-        }
+        let outcome = groups.and(Ok(0));
+        #[cfg(not(feature = "group"))]
+        let outcome = Ok(0);
         self.send_leg_alone(&leg, alone, tx, up, run, outcome)
     }
 
