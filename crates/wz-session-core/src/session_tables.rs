@@ -2266,9 +2266,19 @@ fn release_drained<K, R: Entity, P: Storage, const N: usize>(
     table: &mut SlotMap<K, R, N, P>,
     cursor: &mut usize,
 ) -> Option<R> {
+    release_drained_by(table, cursor, R::drained)
+}
+
+/// [`release_drained`] for a table whose rows are not declared entities (the pending gets),
+/// `drained` reading the row's latch.
+fn release_drained_by<K, R, P: Storage, const N: usize>(
+    table: &mut SlotMap<K, R, N, P>,
+    cursor: &mut usize,
+    drained: impl Fn(&R) -> bool,
+) -> Option<R> {
     let handle = loop {
         let (handle, row) = table.next_retired_from(cursor)?;
-        if row.drained() {
+        if drained(row) {
             break handle;
         }
     };
@@ -3619,6 +3629,32 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// last: its row, to drop where no lock is held.
     pub fn release_get(&mut self, handle: PendingGetHandle) -> Option<PendingGet<F, P>> {
         self.kept_pending_gets_mut()?.release(handle)
+    }
+
+    /// [`Self::release_drained_subscriber`] for the pending gets: a get retired while a call of
+    /// it ran, whose last call has ended since, where that call ended with no handle of the get
+    /// (a reply a round of deliveries held).
+    pub fn release_drained_get(&mut self, cursor: &mut usize) -> Option<PendingGet<F, P>> {
+        release_drained_by(self.kept_pending_gets_mut()?, cursor, |row| {
+            row.callback.drained()
+        })
+    }
+
+    /// The next get at or after `cursor` still in the table, standing or ended, whose callback
+    /// `picks` names: what a caller that ends every get of one asker (a cancellation) or of the
+    /// session (its close) retires. A walk from cursor `0` to `None` finds each such get once,
+    /// and a get retired on the way is not found again.
+    pub fn next_get_of(
+        &self,
+        cursor: &mut usize,
+        picks: impl Fn(&F::Reply) -> bool,
+    ) -> Option<PendingGetHandle> {
+        loop {
+            let (handle, row) = self.kept_pending_gets()?.next_from(cursor)?;
+            if picks(&row.callback) {
+                return Some(handle);
+            }
+        }
     }
 
     /// One leg of the standing get `handle` names has its Final, or will have none (its face is

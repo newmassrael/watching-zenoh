@@ -1554,6 +1554,84 @@ fn a_full_get_table_refuses_and_hands_the_callback_back() {
     assert_eq!(refused.callback, 5);
 }
 
+/// A get retired while a call of it ran keeps its slot until that call ends, and is then taken
+/// out by the walk, once, as the other rows a call may outlive are. The CONTROL is the walk while
+/// the call still runs, which takes nothing.
+#[test]
+fn a_get_retired_while_its_call_ran_is_let_go_by_the_walk_once_the_call_ended() {
+    let mut tables = latched_tables();
+    let get = tables
+        .begin_get(
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            u64::MAX,
+            latched(1),
+        )
+        .unwrap();
+    let call = tables.begin_reply(get.handle).unwrap();
+    assert!(matches!(
+        tables.retire_get(get.handle),
+        Some(Removal::AfterCalls)
+    ));
+    assert!(
+        tables.begin_reply(get.handle).is_none(),
+        "a retired get begins no call"
+    );
+    assert!(
+        tables.release_drained_get(&mut 0).is_none(),
+        "CONTROL: its call still runs"
+    );
+    assert!(
+        ended::<CClosure<u32>>(call),
+        "the last call of a retired get"
+    );
+    let mut cursor = 0;
+    assert!(tables.release_drained_get(&mut cursor).is_some());
+    assert!(
+        tables.release_drained_get(&mut cursor).is_none(),
+        "each once"
+    );
+    assert!(tables.release_drained_get(&mut 0).is_none());
+    assert!(!tables.pending_gets().holds_slot(get.handle));
+}
+
+/// A walk of the gets by their callbacks finds every get its pick names, standing or ended, each
+/// once, and none of another asker's; a get retired is not found again.
+#[test]
+fn a_walk_finds_each_get_its_pick_names_standing_or_ended() {
+    let mut tables = Tables::new();
+    let mut begin = |callback| {
+        tables
+            .begin_get(
+                ReplyAcceptance::Any,
+                ConsolidationMode::None,
+                1,
+                u64::MAX,
+                callback,
+            )
+            .unwrap()
+            .handle
+    };
+    let (first, other, last) = (begin(7), begin(8), begin(7));
+    assert_eq!(tables.end_leg(last), Some(LegEnded::Over));
+    let mut found = Vec::new();
+    let mut cursor = 0;
+    while let Some(handle) = tables.next_get_of(&mut cursor, |callback| *callback == 7) {
+        found.push(handle);
+    }
+    assert_eq!(found.len(), 2, "each once");
+    assert!(found.contains(&first));
+    assert!(found.contains(&last), "the ended get too");
+    assert!(!found.contains(&other));
+    assert!(tables.retire_get(first).is_some());
+    assert_eq!(
+        tables.next_get_of(&mut 0, |callback| *callback == 7),
+        Some(last),
+        "a retired get is not found again"
+    );
+}
+
 /// A `Latest` get holds its replies in the tables until its caller takes them out, and a get
 /// retired with replies still held lets them go with it.
 #[cfg(feature = "storage-profile")]
