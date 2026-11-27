@@ -1,0 +1,37 @@
+impact = ["watching-zenoh/local-ci-gates"]
+decision = '''
+Land rulings D16 to D18 and grade session-close-ingress COMPLETE: one
+reference monitor decides every lifecycle verb on both profiles, a
+command sealed by its commander's key (COSE_Sign1 ES256, OSCORE-style
+replay window and Echo) is judged for that commander through any
+router, and the passive hold is witnessed on the shipped Zephyr image.
+Repay the main reds found on the way: a client profile left three new
+peer capabilities on, two coop test modules reached the host with no
+layer row, a linker name test failed on case, and a store round left
+four upstream citations half-rooted.
+'''
+changes = '''
+- lifecycle_monitor.rs: decide(); drive.rs authority removed (D16).
+- wz-command-seal crate; sealed_command.rs claim; PsaEs256 (D17).
+- Zephyr passive witness and target matrix test (D18).
+- Layer Z legs Zseal 4 and 3; Qza passive leg; census rows S1 S4 S6 S9.
+- session-close-ingress COMPLETE; depth pins 1 and 26 to 0.
+- host-client-tcp-query.conf: link-admission, accept-cookie off.
+- coop on_use and face_routers run in the simulated world.
+- links_without_sdk lowercases before it strips .exe.
+- four store reasons rooted; store citation budgets 69/17/170 lowered.
+'''
+verification = '''
+- Layers C1m, C2, C1own, C1pc, E6, Z, Qza green on the merged branch.
+- Layer C1 red only at udp extra-join, unattributed (see carry).
+- sealed zenohd legs: fixed 4/4, heap 3/3; Zseal in Layer Z pass.
+- coop on_use and face_routers on four feature sets; suite 57/57.
+- clippy -D warnings per touched crate; round_fed gates; citations.
+- validate-workspace: T1 orphan 14, new +0; audit-catalog-status OK.
+'''
+carry = '''
+- udp extra-join test red 3/3 on this workstation; read hosted C1.
+- Owner: heap replay window N=64 and whether it persists.
+- Owner: Echo reply unsigned; Configure object omits the value.
+- Kit run of the D18 matrix not done; QEMU and host only.
+'''
