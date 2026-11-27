@@ -76,7 +76,7 @@ pub(crate) enum Kind {
     ))]
     DeclWatch = 18,
     /// A transport events listener, held while its session's hub can reach it
-    /// (`crate::connectivity::TransportPlace`).
+    /// (`crate::connectivity::ListenerPlace`).
     #[cfg(feature = "connectivity")]
     TransportEventsListener = 19,
     /// An advanced publisher (`crate::advanced::AdvPubState`). Its number follows those the
@@ -87,7 +87,7 @@ pub(crate) enum Kind {
     #[cfg(feature = "advanced")]
     AdvancedSubscriber = 21,
     /// A link events listener, held while its session's hub can reach it
-    /// (`crate::connectivity::LinkPlace`).
+    /// (`crate::connectivity::ListenerPlace`, as a transport events listener's).
     #[cfg(feature = "connectivity")]
     LinkEventsListener = 22,
 }
@@ -402,7 +402,7 @@ const fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::all
         #[cfg(feature = "connectivity")]
         Kind::TransportEventsListener => Some((
             EntityKind::TransportEventsListener,
-            InSession::<crate::connectivity::TransportPlace>::LAYOUT,
+            InSession::<crate::connectivity::ListenerPlace>::LAYOUT,
         )),
         #[cfg(feature = "advanced")]
         Kind::AdvancedPublisher => Some((
@@ -417,7 +417,7 @@ const fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::all
         #[cfg(feature = "connectivity")]
         Kind::LinkEventsListener => Some((
             EntityKind::LinkEventsListener,
-            InSession::<crate::connectivity::LinkPlace>::LAYOUT,
+            InSession::<crate::connectivity::ListenerPlace>::LAYOUT,
         )),
         _ => None,
     }

@@ -864,7 +864,7 @@ impl Plan {
         }
         #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
         {
-            plan = plan.with::<crate::connectivity::TransportPlace>(
+            plan = plan.with::<crate::connectivity::ListenerPlace>(
                 Kind::TransportEventsListener,
                 objects.transport_events_listeners,
             );
@@ -882,7 +882,7 @@ impl Plan {
         }
         #[cfg(all(feature = "engine-tokio", feature = "connectivity"))]
         {
-            plan = plan.with::<crate::connectivity::LinkPlace>(
+            plan = plan.with::<crate::connectivity::ListenerPlace>(
                 Kind::LinkEventsListener,
                 objects.link_events_listeners,
             );
@@ -2830,7 +2830,7 @@ mod tests {
         row(
             "transport_events_listener",
             Kind::TransportEventsListener,
-            core::mem::size_of::<crate::connectivity::TransportPlace>(),
+            core::mem::size_of::<crate::connectivity::ListenerPlace>(),
         );
         #[cfg(all(feature = "engine-tokio", feature = "advanced"))]
         row(
@@ -2848,7 +2848,7 @@ mod tests {
         row(
             "link_events_listener",
             Kind::LinkEventsListener,
-            core::mem::size_of::<crate::connectivity::LinkPlace>(),
+            core::mem::size_of::<crate::connectivity::ListenerPlace>(),
         );
         // What a config is made of, the largest object: its entries' rows and text, and the
         // statements of wz's own doors beside them.

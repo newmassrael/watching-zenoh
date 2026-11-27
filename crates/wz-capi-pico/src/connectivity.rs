@@ -887,29 +887,26 @@ impl Drop for Delivery {
     }
 }
 
-/// What a listener's place keeps past its handle that the hub lets go of with the listener: its
-/// closure, once no call is running it.
-trait LetGo {
-    fn let_go(&self);
+/// Behind an owned listener of either plane: its session's hub and its id there, which the
+/// listener's undeclare takes off the hub. It lies in the listener's place, a place of the
+/// session's own for the listener's plane (`crate::object_slot::Kind::TransportEventsListener`,
+/// `crate::object_slot::Kind::LinkEventsListener`).
+pub(crate) struct ListenerState {
+    hub: Strong<Connectivity>,
+    id: u64,
 }
 
-impl LetGo for Delivery {
-    fn let_go(&self) {
-        self.retire();
-    }
-}
-
-/// What a link events listener's place keeps past its handle: its delivery and the transport it
-/// is filtered to, if any.
-pub(crate) struct LinkListener {
+/// What a listener's place keeps past its handle, which the hub calls: its delivery, of its
+/// plane, and the transport a link listener is filtered to, if any.
+pub(crate) struct Listener {
     delivery: Delivery,
     /// `(zid, is_multicast)` — pico's transport filter matches on exactly these
     /// two (`vendor/zenoh-pico/src/api/api.c` @
-    /// `bool _z_info_transport_filter_match(`).
+    /// `bool _z_info_transport_filter_match(`). `None` for a transport listener.
     filter: Option<([u8; 16], bool)>,
 }
 
-impl LinkListener {
+impl Listener {
     fn wants(&self, transport: &z_loaned_transport_t) -> bool {
         self.filter.is_none_or(|(zid, multicast)| {
             zid == transport.zid.id && multicast == transport.is_multicast
@@ -917,68 +914,27 @@ impl LinkListener {
     }
 }
 
-impl LetGo for LinkListener {
-    fn let_go(&self) {
-        self.delivery.retire();
-    }
-}
-
-/// Behind an owned transport events listener: its session's hub and its id there, which the
-/// listener's undeclare takes off the hub. It lies in the listener's place, a place of the
-/// session's own for the kind (`crate::object_slot::Kind::TransportEventsListener`).
-pub(crate) struct TransportListenerState {
-    hub: Strong<Connectivity>,
-    id: u64,
-}
-
-/// A transport events listener's place: its handle's state, which the handle lets go of (none for
-/// a background listener), and the delivery the hub calls, kept past it; the last of the handle,
-/// the hub's hold and a dispatch in flight gives the place back (`crate::object_slot::Answering`).
-pub(crate) type TransportPlace = Answering<TransportListenerState, TransportKept>;
-
-/// What a transport events listener's place keeps past its handle: the delivery the hub calls.
-pub(crate) type TransportKept = Delivery;
-
-/// Behind an owned link events listener, as [`TransportListenerState`] is behind a transport one,
-/// in a place of the session's own for the kind (`crate::object_slot::Kind::LinkEventsListener`).
-pub(crate) struct LinkListenerState {
-    hub: Strong<Connectivity>,
-    id: u64,
-}
-
-/// A link events listener's place, as [`TransportPlace`] is a transport one's: what it keeps past
-/// its handle is its delivery and its filter.
-pub(crate) type LinkPlace = Answering<LinkListenerState, LinkListener>;
-
-/// A listener's state as its place lays it beside what the place keeps past it.
-trait Listened {
-    type Kept: LetGo;
-}
-
-impl Listened for TransportListenerState {
-    type Kept = TransportKept;
-}
-
-impl Listened for LinkListenerState {
-    type Kept = LinkListener;
-}
+/// A listener's place, of either plane: its handle's state, which the handle lets go of (none for
+/// a background listener), and what the hub calls, kept past it; the last of the handle, the
+/// hub's hold and a dispatch in flight gives the place back (`crate::object_slot::Answering`).
+pub(crate) type ListenerPlace = Answering<ListenerState, Listener>;
 
 /// A declared listener as the hub holds it: its id, its object, and the hub's hold of its place,
 /// which keeps the place standing while a dispatch can reach it.
-struct Entry<S> {
+struct Entry {
     id: u64,
-    object: *mut S,
+    object: *mut ListenerState,
     held: HeldIn,
 }
 
 // SAFETY: the object is reached only through the place the entry holds, whose kept part is behind
 // its own locks; the entry is moved between threads only under the hub's lock.
-unsafe impl<S> Send for Entry<S> {}
+unsafe impl Send for Entry {}
 
-/// The hub's listeners of one kind: a row for each the session's limit of the kind admits, and
+/// The hub's listeners of one plane: a row for each the session's limit of the plane admits, and
 /// the id the next one is given.
-struct Table<S, const N: usize> {
-    rows: [Option<Entry<S>>; N],
+struct Table<const N: usize> {
+    rows: [Option<Entry>; N],
     /// The rows whose listener's history is being replayed. The engine notes what the listener
     /// was told under its row (`wz_capi_port::told`), so the row is not given to another listener
     /// until the replay forgot those notes, even when the listener was undeclared meanwhile (from
@@ -987,7 +943,7 @@ struct Table<S, const N: usize> {
     last_id: u64,
 }
 
-impl<S, const N: usize> Table<S, N> {
+impl<const N: usize> Table<N> {
     fn new() -> Self {
         Self {
             rows: core::array::from_fn(|_| None),
@@ -1005,24 +961,33 @@ impl<S, const N: usize> Table<S, N> {
     }
 }
 
-type TransportTable =
-    Table<TransportListenerState, { wz_session_core::caps::MAX_TRANSPORT_EVENTS_LISTENERS }>;
-type LinkTable = Table<LinkListenerState, { wz_session_core::caps::MAX_LINK_EVENTS_LISTENERS }>;
+type TransportTable = Table<{ wz_session_core::caps::MAX_TRANSPORT_EVENTS_LISTENERS }>;
+type LinkTable = Table<{ wz_session_core::caps::MAX_LINK_EVENTS_LISTENERS }>;
+
+/// What the listener whose state is at `object` keeps past its handle.
+///
+/// # Safety
+/// `object` is the state of a listener's place that stands while the returned borrow is used.
+unsafe fn listener_at<'a>(object: *const ListenerState) -> &'a Listener {
+    // SAFETY: the caller's: the place holds a `ListenerPlace`, whose kept part is read only
+    // through its locks.
+    unsafe { &*kept_at::<ListenerState, Listener>(object) }
+}
 
 /// The listener of the first row of `table` from `at` on that holds one, and a hold of its place
 /// for the call, with `at` moved past its row; `None` past the last row. The table's lock is let
 /// go of before this returns, so a call made with the hold does not wait on it.
-fn next_in<S: Listened, const N: usize>(
-    table: &Mutex<Table<S, N>>,
+fn next_in<const N: usize>(
+    table: &Mutex<Table<N>>,
     at: &mut usize,
-) -> Option<(*mut S, HeldIn)> {
+) -> Option<(*mut ListenerState, HeldIn)> {
     let table = lock(table);
     while let Some(row) = table.rows.get(*at) {
         *at = at.saturating_add(1);
         if let Some(entry) = row {
             // SAFETY: the entry's place stands while the entry holds it, which it does under the
             // lock held here.
-            let hold = unsafe { hold_entity::<S, S::Kept>(entry.object) };
+            let hold = unsafe { hold_entity::<ListenerState, Listener>(entry.object) };
             return Some((entry.object, hold));
         }
     }
@@ -1030,7 +995,7 @@ fn next_in<S: Listened, const N: usize>(
 }
 
 /// The entry of listener `id`, taken off `table`; `None` when no listener has that id.
-fn take_in<S, const N: usize>(table: &Mutex<Table<S, N>>, id: u64) -> Option<Entry<S>> {
+fn take_in<const N: usize>(table: &Mutex<Table<N>>, id: u64) -> Option<Entry> {
     let mut table = lock(table);
     let row = table
         .rows
@@ -1040,15 +1005,15 @@ fn take_in<S, const N: usize>(table: &Mutex<Table<S, N>>, id: u64) -> Option<Ent
 }
 
 /// Any entry left in `table`, taken off it.
-fn take_any_in<S, const N: usize>(table: &Mutex<Table<S, N>>) -> Option<Entry<S>> {
+fn take_any_in<const N: usize>(table: &Mutex<Table<N>>) -> Option<Entry> {
     lock(table).rows.iter_mut().find_map(Option::take)
 }
 
 /// Let go of a listener taken off the hub: its closure, once no call is running it, and the hub's
 /// hold of its place, which gives the place back when its owner went first.
-fn retire_entry<S: Listened>(entry: Entry<S>) {
+fn retire_entry(entry: Entry) {
     // SAFETY: the entry's hold keeps the place standing until it is dropped below.
-    unsafe { (*kept_at::<S, S::Kept>(entry.object)).let_go() };
+    unsafe { listener_at(entry.object) }.delivery.retire();
     // The hold may be the place's last, whose give-back takes the session's lock.
     debug_assert!(
         !wz_capi_port::sync::SessionHeld::any_here(),
@@ -1064,18 +1029,18 @@ fn retire_entry<S: Listened>(entry: Entry<S>) {
 /// row is held, the listener's closure let go of and its owner's place given back.
 ///
 /// # Safety
-/// `object` is a place of `Answering<S, S::Kept>` its owner filled and holds, and lets go of here
+/// `object` is a place of a [`ListenerPlace`] its owner filled and holds, and lets go of here
 /// when this answers `None`.
-unsafe fn admit<S: Listened, const N: usize>(
-    table: &Mutex<Table<S, N>>,
-    object: *mut S,
+unsafe fn admit<const N: usize>(
+    table: &Mutex<Table<N>>,
+    object: *mut ListenerState,
     name: impl FnOnce(u64),
     replays: bool,
 ) -> Option<usize> {
     // SAFETY: the caller's: the owner holds the place.
-    let held = unsafe { hold_entity::<S, S::Kept>(object) };
+    let held = unsafe { hold_entity::<ListenerState, Listener>(object) };
     let mut guard = lock(table);
-    let rows: &mut Table<S, N> = &mut guard;
+    let rows: &mut Table<N> = &mut guard;
     let id = rows.last_id.wrapping_add(1);
     if let Some(at) = rows.free_row() {
         if let (Some(row), Some(replaying)) = (rows.rows.get_mut(at), rows.replaying.get_mut(at)) {
@@ -1089,29 +1054,31 @@ unsafe fn admit<S: Listened, const N: usize>(
     drop(guard);
     retire_entry(Entry { id, object, held });
     // SAFETY: the caller's: the owner lets go of the place once, here, with no other hold left.
-    unsafe { retire_entity::<S, S::Kept>(object) };
+    unsafe { retire_entity::<ListenerState, Listener>(object) };
     None
 }
 
 /// The replay of the listener of row `at` of `table` ended and the engine forgot what it was told
 /// (`SessionEngine::forget_told`): the row is free for another listener once its own went.
-fn end_replay<S, const N: usize>(table: &Mutex<Table<S, N>>, at: usize) {
+fn end_replay<const N: usize>(table: &Mutex<Table<N>>, at: usize) {
     if let Some(replaying) = lock(table).replaying.get_mut(at) {
         *replaying = false;
     }
 }
 
-/// Count the closure `gate` holds in the place of the listener at `object`: the place stands until
-/// its `drop(context)` has run, which the hub's let-go runs while it still holds the place, and
+/// Count the closure of the listener at `object` in its place: the place stands until its
+/// `drop(context)` has run, which the hub's let-go runs while it still holds the place, and
 /// nothing is allocated for the closure's release.
 ///
 /// # Safety
-/// As [`count_in_entity`]: `object` is the place of an `Answering<S, K>` its owner filled and
-/// holds, and `gate` lies in it.
-unsafe fn count_closure<S, K, C>(object: *const S, gate: &Mutex<Option<CClosure<C>>>) {
-    if let Some(closure) = lock(gate).as_mut() {
+/// As [`count_in_entity`]: `object` is the place of a [`ListenerPlace`] its owner filled and
+/// holds.
+unsafe fn count_closure(object: *const ListenerState) {
+    // SAFETY: the caller's.
+    let delivery = &unsafe { listener_at(object) }.delivery;
+    if let Some(closure) = lock(&delivery.gate).as_mut() {
         // SAFETY: the caller's.
-        unsafe { count_in_entity::<S, K, C>(object, closure) };
+        unsafe { count_in_entity::<ListenerState, Listener, _>(object, closure) };
     }
 }
 
@@ -1129,7 +1096,7 @@ fn told(engine: &Engine, plane: ToldPlane, listener: usize, came: bool, key: &To
 /// was replayed, to the faces as they stand: each row it was told came that has gone is told left,
 /// then each row that stands and it was not told is told came. A row that went and came back under
 /// its key is told neither, the one reconnect the contract says may be lost past the queue.
-fn converge_transports(engine: &Engine, listener: usize, delivery: &TransportKept) {
+fn converge_transports(engine: &Engine, listener: usize, delivery: &Delivery) {
     let plane = ToldPlane::Transports;
     while let Some(row) = SessionEngine::first_told_gone(engine, plane, listener) {
         if !SessionEngine::tell_went(engine, plane, listener, &ToldKey::of_row(&row)) {
@@ -1152,7 +1119,7 @@ fn converge_transports(engine: &Engine, listener: usize, delivery: &TransportKep
 
 /// Bring the link listener of row `slot` to the links as they stand, as [`converge_transports`]
 /// does a transport listener, the links it is filtered to only.
-fn converge_links(engine: &Engine, slot: usize, listener: &LinkListener) {
+fn converge_links(engine: &Engine, slot: usize, listener: &Listener) {
     let plane = ToldPlane::Links;
     while let Some(row) = SessionEngine::first_told_gone(engine, plane, slot) {
         if !SessionEngine::tell_went(engine, plane, slot, &ToldKey::of_row(&row)) {
@@ -1295,7 +1262,7 @@ impl Connectivity {
     }
 
     /// The transport listener of the first row from `at` on, held for a call (`next_in`).
-    fn next_transport(&self, at: &mut usize) -> Option<(*mut TransportListenerState, HeldIn)> {
+    fn next_transport(&self, at: &mut usize) -> Option<(*mut ListenerState, HeldIn)> {
         next_in(&self.transports, at)
     }
 
@@ -1403,7 +1370,7 @@ impl Connectivity {
         let mut at = 0;
         while let Some((object, hold)) = self.next_transport(&mut at) {
             // SAFETY: `hold` keeps the place, and so its delivery, standing for the call.
-            let delivery = unsafe { &*kept_at::<TransportListenerState, TransportKept>(object) };
+            let delivery = &unsafe { listener_at(object) }.delivery;
             delivery.deliver(
                 ConnEvent::Transport(z_loaned_transport_event_t {
                     kind,
@@ -1420,7 +1387,7 @@ impl Connectivity {
         let mut at = 0;
         while let Some((object, hold)) = next_in(&self.links, &mut at) {
             // SAFETY: `hold` keeps the place, and so its listener, standing for the call.
-            let listener = unsafe { &*kept_at::<LinkListenerState, LinkListener>(object) };
+            let listener = unsafe { listener_at(object) };
             if listener.wants(&transport) {
                 listener.delivery.deliver(
                     ConnEvent::Link(z_loaned_link_event_t {
@@ -1434,6 +1401,60 @@ impl Connectivity {
         }
     }
 
+    /// A listener of `plane` in a place of `engine`'s session for the plane, its owner holding
+    /// it: its delivery to `closure` holding what arrives while it replays its `history`, `filter`
+    /// kept with it, and its closure counted in the place. `None` when every place of the plane is
+    /// held; the closure is let go of then, which runs its `drop(context)`.
+    fn place_listener(
+        hub: &Strong<Self>,
+        engine: &crate::session::EngineHold,
+        plane: ToldPlane,
+        history: bool,
+        filter: Option<([u8; 16], bool)>,
+        closure: CClosure<EventCall>,
+    ) -> Option<*mut ListenerState> {
+        let kind = match plane {
+            ToldPlane::Transports => Kind::TransportEventsListener,
+            ToldPlane::Links => Kind::LinkEventsListener,
+        };
+        let place = Slot::<ListenerPlace>::take_entity(engine, kind)?;
+        let state = ListenerState {
+            hub: hub.clone(),
+            id: 0,
+        };
+        let write_state = |at: NonNull<ListenerState>| {
+            // SAFETY: the place `write_at` hands is valid for writes of the state and holds none.
+            unsafe { at.as_ptr().write(state) }
+        };
+        let write_kept = |at: NonNull<Listener>| {
+            let listener = at.as_ptr();
+            // SAFETY: the place is the listener's, valid for its delivery and filter, holding
+            // none, never moved while the listener's place stands; each field is written once
+            // through a pointer to it, not null as it is inside the place; the door erased a
+            // callback of `plane`.
+            unsafe {
+                Delivery::write_in(
+                    NonNull::new_unchecked(addr_of_mut!((*listener).delivery)),
+                    plane,
+                    closure,
+                    history,
+                );
+                addr_of_mut!((*listener).filter).write(filter);
+            }
+        };
+        let write = |at: *mut ListenerPlace| {
+            // SAFETY: the slot hands a place valid for writes of a `ListenerPlace`, holding none;
+            // the two writers write its state and what it keeps whole.
+            unsafe { Answering::write_at(at, write_state, write_kept) }
+        };
+        // SAFETY: `write` leaves a whole `ListenerPlace` in the place it is handed.
+        let object = unsafe { place.fill_in_place(write) }.cast::<ListenerState>();
+        // SAFETY: the place was filled just above and its owner holds it; the closure is counted
+        // in it before anything can call it or let it go.
+        unsafe { count_closure(object) };
+        Some(object)
+    }
+
     /// Declare a transport listener in a place of `engine`'s session, replaying the peers
     /// connected now first when `history` is set: its object, which its owner lets go of with
     /// [`release_transport_listener`]. `_Z_ERR_SYSTEM_OUT_OF_MEMORY` when every place or every
@@ -1443,40 +1464,12 @@ impl Connectivity {
         engine: &crate::session::EngineHold,
         history: bool,
         closure: CClosure<EventCall>,
-    ) -> Result<*mut TransportListenerState, ZResult> {
-        let Some(place) =
-            Slot::<TransportPlace>::take_entity(engine, Kind::TransportEventsListener)
+    ) -> Result<*mut ListenerState, ZResult> {
+        let Some(object) =
+            Self::place_listener(hub, engine, ToldPlane::Transports, history, None, closure)
         else {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
-        let state = TransportListenerState {
-            hub: hub.clone(),
-            id: 0,
-        };
-        let write_state = |at: NonNull<TransportListenerState>| {
-            // SAFETY: the place `write_at` hands is valid for writes of the state and holds none.
-            unsafe { at.as_ptr().write(state) }
-        };
-        let write_kept = |at: NonNull<TransportKept>| {
-            // SAFETY: the place is the listener's, valid for its delivery, holding none, never
-            // moved while the listener's place stands; the door erased a transport callback.
-            unsafe { Delivery::write_in(at, ToldPlane::Transports, closure, history) }
-        };
-        let write = |at: *mut TransportPlace| {
-            // SAFETY: the slot hands a place valid for writes of a `TransportPlace`, holding none;
-            // the two writers write its state and its delivery whole.
-            unsafe { Answering::write_at(at, write_state, write_kept) }
-        };
-        // SAFETY: `write` leaves a whole `TransportPlace` in the place it is handed.
-        let object = unsafe { place.fill_in_place(write) }.cast::<TransportListenerState>();
-        // SAFETY: the place was filled just above and its owner holds it; the closure is counted
-        // in it before anything can call it or let it go.
-        unsafe {
-            count_closure::<TransportListenerState, TransportKept, _>(
-                object,
-                &(*kept_at::<TransportListenerState, TransportKept>(object)).gate,
-            );
-        }
         // Registered BEFORE the peers are read, so a peer that arrives in
         // between is queued rather than missed.
         // SAFETY: the place was filled just above and its owner holds it; the id is written
@@ -1488,7 +1481,7 @@ impl Connectivity {
         };
         if history {
             // SAFETY: the owner holds the place for the length of the replay.
-            let delivery = unsafe { &*kept_at::<TransportListenerState, TransportKept>(object) };
+            let delivery = &unsafe { listener_at(object) }.delivery;
             let engine = crate::session::EngineHold::as_ref(engine);
             let plane = ToldPlane::Transports;
             for row in rows(engine).filter(|row| row.link == 0) {
@@ -1519,49 +1512,12 @@ impl Connectivity {
         history: bool,
         filter: Option<([u8; 16], bool)>,
         closure: CClosure<EventCall>,
-    ) -> Result<*mut LinkListenerState, ZResult> {
-        let Some(place) = Slot::<LinkPlace>::take_entity(engine, Kind::LinkEventsListener) else {
+    ) -> Result<*mut ListenerState, ZResult> {
+        let Some(object) =
+            Self::place_listener(hub, engine, ToldPlane::Links, history, filter, closure)
+        else {
             return Err(Z_ERR_SYSTEM_OUT_OF_MEMORY);
         };
-        let state = LinkListenerState {
-            hub: hub.clone(),
-            id: 0,
-        };
-        let write_state = |at: NonNull<LinkListenerState>| {
-            // SAFETY: the place `write_at` hands is valid for writes of the state and holds none.
-            unsafe { at.as_ptr().write(state) }
-        };
-        let write_kept = |at: NonNull<LinkListener>| {
-            let listener = at.as_ptr();
-            // SAFETY: the place is the listener's, valid for its delivery and filter, holding
-            // none, never moved while the listener's place stands; each field is written once
-            // through a pointer to it, not null as it is inside the place; the door erased a link
-            // callback.
-            unsafe {
-                Delivery::write_in(
-                    NonNull::new_unchecked(addr_of_mut!((*listener).delivery)),
-                    ToldPlane::Links,
-                    closure,
-                    history,
-                );
-                addr_of_mut!((*listener).filter).write(filter);
-            }
-        };
-        let write = |at: *mut LinkPlace| {
-            // SAFETY: as in `declare_transport`, of a `LinkPlace`.
-            unsafe { Answering::write_at(at, write_state, write_kept) }
-        };
-        // SAFETY: `write` leaves a whole `LinkPlace` in the place it is handed.
-        let object = unsafe { place.fill_in_place(write) }.cast::<LinkListenerState>();
-        // SAFETY: as in `declare_transport`.
-        unsafe {
-            count_closure::<LinkListenerState, LinkListener, _>(
-                object,
-                &(*kept_at::<LinkListenerState, LinkListener>(object))
-                    .delivery
-                    .gate,
-            );
-        }
         // SAFETY: as in `declare_transport`.
         let Some(slot) = (unsafe { admit(&hub.links, object, |id| (*object).id = id, history) })
         else {
@@ -1569,7 +1525,7 @@ impl Connectivity {
         };
         if history {
             // SAFETY: the owner holds the place for the length of the replay.
-            let listener = unsafe { &*kept_at::<LinkListenerState, LinkListener>(object) };
+            let listener = unsafe { listener_at(object) };
             let engine = crate::session::EngineHold::as_ref(engine);
             let plane = ToldPlane::Links;
             for row in rows(engine) {
@@ -2339,11 +2295,11 @@ pub unsafe extern "C" fn z_link_events_listener_options_default(
 ///
 /// # Safety
 /// `object` is a live handle [`Connectivity::declare_transport`] answered, let go of once, here.
-unsafe fn release_transport_listener(object: *mut TransportListenerState) {
+unsafe fn release_transport_listener(object: *mut ListenerState) {
     // SAFETY: the caller's: the state stands until `retire_entity` below.
     unsafe { (*object).hub.undeclare_transport((*object).id) };
     // SAFETY: the caller's; the owner lets go of the place once, here.
-    unsafe { retire_entity::<TransportListenerState, TransportKept>(object) };
+    unsafe { retire_entity::<ListenerState, Listener>(object) };
 }
 
 /// Undeclare the link events listener whose state is at `object` and let go of its handle, as
@@ -2351,11 +2307,11 @@ unsafe fn release_transport_listener(object: *mut TransportListenerState) {
 ///
 /// # Safety
 /// `object` is a live handle [`Connectivity::declare_link`] answered, let go of once, here.
-unsafe fn release_link_listener(object: *mut LinkListenerState) {
+unsafe fn release_link_listener(object: *mut ListenerState) {
     // SAFETY: the caller's: the state stands until `retire_entity` below.
     unsafe { (*object).hub.undeclare_link((*object).id) };
     // SAFETY: the caller's; the owner lets go of the place once, here.
-    unsafe { retire_entity::<LinkListenerState, LinkListener>(object) };
+    unsafe { retire_entity::<ListenerState, Listener>(object) };
 }
 
 /// Generates the handle functions of one listener family: the owned, loaned and
@@ -2525,9 +2481,7 @@ pub unsafe extern "C" fn z_declare_background_transport_events_listener(
         }
         // The handle is let go of without undeclaring: the listener stays, its place held by the
         // hub until the session's end.
-        retire_entity::<TransportListenerState, TransportKept>(
-            listener.handle.cast::<TransportListenerState>(),
-        );
+        retire_entity::<ListenerState, Listener>(listener.handle.cast::<ListenerState>());
         Z_OK
     })
 }
@@ -2543,7 +2497,7 @@ pub unsafe extern "C" fn z_undeclare_transport_events_listener(
         }
         let object = core::mem::replace(&mut (*listener)._this.handle, core::ptr::null_mut());
         if !object.is_null() {
-            release_transport_listener(object.cast::<TransportListenerState>());
+            release_transport_listener(object.cast::<ListenerState>());
         }
         Z_OK
     })
@@ -2625,9 +2579,7 @@ pub unsafe extern "C" fn z_declare_background_link_events_listener(
             return rc;
         }
         // The handle is let go of without undeclaring, as a background transport listener's.
-        retire_entity::<LinkListenerState, LinkListener>(
-            listener.handle.cast::<LinkListenerState>(),
-        );
+        retire_entity::<ListenerState, Listener>(listener.handle.cast::<ListenerState>());
         Z_OK
     })
 }
@@ -2643,7 +2595,7 @@ pub unsafe extern "C" fn z_undeclare_link_events_listener(
         }
         let object = core::mem::replace(&mut (*listener)._this.handle, core::ptr::null_mut());
         if !object.is_null() {
-            release_link_listener(object.cast::<LinkListenerState>());
+            release_link_listener(object.cast::<ListenerState>());
         }
         Z_OK
     })
@@ -3304,7 +3256,7 @@ pub(crate) mod tests {
     /// A free row read from `rows` alone (the replay's mark ignored) reds the first assertion.
     #[test]
     fn a_row_a_replay_keeps_is_given_to_no_other_listener_until_it_ended() {
-        let table = Mutex::new(Table::<TransportListenerState, 2>::new());
+        let table = Mutex::new(Table::<2>::new());
         lock(&table).replaying[0] = true;
         assert_eq!(lock(&table).free_row(), Some(1), "the replay keeps row 0");
         lock(&table).replaying[1] = true;
@@ -3460,7 +3412,7 @@ pub(crate) mod tests {
         let engine: Arc<Engine> = Arc::new(shared());
         let log = log();
         let rows = wz_session_core::caps::MAX_TRANSPORT_EVENTS_LISTENERS;
-        let held: Vec<*mut TransportListenerState> = (0..rows)
+        let held: Vec<*mut ListenerState> = (0..rows)
             .map(|_| {
                 Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
                     .expect("a row is free")
@@ -3502,7 +3454,7 @@ pub(crate) mod tests {
             Connectivity::declare_transport(&hub, &engine, false, transport_closure(log))
                 .expect("a transport row is free");
         let rows = wz_session_core::caps::MAX_LINK_EVENTS_LISTENERS;
-        let held: Vec<*mut LinkListenerState> = (0..rows)
+        let held: Vec<*mut ListenerState> = (0..rows)
             .map(|_| {
                 Connectivity::declare_link(&hub, &engine, false, None, link_closure(log))
                     .expect("a link row is free")
