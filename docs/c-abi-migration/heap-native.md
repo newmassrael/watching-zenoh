@@ -65,13 +65,13 @@ from the explain document's reading by build (`lend_session` 4,290 here, 3,351 i
 
 | wz | zenoh-pico | where |
 |----|------------|-------|
-| the session's state | one `z_malloc(sizeof(_z_session_t))` at open, in a counted handle | `vendor/zenoh-pico/src/api/api.c:896`, `:908` |
-| the session's declared keys | `_z_resource_slist_t *_local_resources`, a list; each key a copy of its own length | `vendor/zenoh-pico/include/zenoh-pico/net/session.h:148`, `vendor/zenoh-pico/src/session/resource.c:40`, `:104`, `:172` |
-| a peer's declared keys | `_remote_resources`, a list per peer | `vendor/zenoh-pico/include/zenoh-pico/transport/transport.h:54` |
-| subscribers | `_z_subscription_rc_slist_t *_subscriptions`, a counted struct per declaration pushed on a list | `net/session.h:159`, `vendor/zenoh-pico/src/session/subscription.c:169`, `:179` |
-| tokens, pending liveliness gets | `_z_*_intmap_t`, a map of lists | `net/session.h:167-171` |
-| queryables, pending queries, interests, a peer's declarations | lists | `net/session.h:177-189` |
-| a transport's buffers | one write and one read buffer of the batch, at the transport's open | `vendor/zenoh-pico/src/transport/unicast/transport.c:51-52` |
+| the session's state | one `z_malloc(sizeof(_z_session_t))` at open, in a counted handle | `vendor/zenoh-pico/src/api/api.c` @ `_z_session_t *s = (_z_session_t *)z_malloc(sizeof(_z_session_t));`, `vendor/zenoh-pico/src/api/api.c` @ `_z_session_rc_t zsrc = _z_session_rc_new(s);` |
+| the session's declared keys | `_z_resource_slist_t *_local_resources`, a list; each key a copy of its own length | `vendor/zenoh-pico/include/zenoh-pico/net/session.h` @ `_z_resource_slist_t *_local_resources;`, `vendor/zenoh-pico/src/session/resource.c` @ `_z_keyexpr_copy(&dst->_key, &src->_key);`, `vendor/zenoh-pico/src/session/resource.c` @ `return _z_string_copy(&ret->_keyexpr, &expr->_suffix);`, `vendor/zenoh-pico/src/session/resource.c` @ `*resources = _z_resource_slist_push_empty(*resources);` |
+| a peer's declared keys | `_remote_resources`, a list per peer | `vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @ `_z_resource_slist_t *_remote_resources;` |
+| subscribers | `_z_subscription_rc_slist_t *_subscriptions`, a counted struct per declaration pushed on a list | `vendor/zenoh-pico/include/zenoh-pico/net/session.h` @ `_z_subscription_rc_slist_t *_subscriptions;`, `vendor/zenoh-pico/src/session/subscription.c` @ `_z_subscription_rc_t out = _z_subscription_rc_new_from_val(s);`, `vendor/zenoh-pico/src/session/subscription.c` @ `zn->_subscriptions = _z_subscription_rc_slist_push_empty(zn->_subscriptions);` |
+| tokens, pending liveliness gets | `_z_*_intmap_t`, a map of lists | `vendor/zenoh-pico/include/zenoh-pico/net/session.h` @ `_z_declared_keyexpr_intmap_t _local_tokens;` and the maps after it |
+| queryables, pending queries, interests, a peer's declarations | lists | `vendor/zenoh-pico/include/zenoh-pico/net/session.h` @ `_z_session_queryable_rc_slist_t *_local_queryable;` and the lists after it |
+| a transport's buffers | one write and one read buffer of the batch, at the transport's open | `vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._wbuf = _z_wbuf_make(wbuf_size, false);` and the read buffer after it |
 | an object a program holds | a `z_malloc` each | |
 
 Its collections in the case's reading: `collections/list.c` 2,525, `vec.c` 1,867, `string.c` 1,899,
