@@ -9000,6 +9000,23 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4718": {
+      "decision_summary": "Step past a group's handshake by the lent reader, so the group transport\nlinks no owned decoder to learn one message's length (feature lane, F1).",
+      "changes_bullets": [
+        "session-core multicast_rx: Init and Open stepped over by read_control.",
+        "docs/c-abi-migration/feat-mcast.md: the pairing with zenoh-pico, F1-F8."
+      ],
+      "verification_bullets": [
+        "size ledger pico-api-coop-nostd 930,535 -> 921,051 B (-9,484); client same.",
+        "control_extent_tests 7, control_read_tests 6; nondefault-features pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
