@@ -1,0 +1,17 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"]
+decision = '''
+Pay a red the push-form landing left: a helper that returned the writer
+count for one test outside lent_push went dead in the feature sets that
+build no such test; the test now reads the kept count itself.
+'''
+changes = '''
+- session-core lent_push: WRITER_RUNS pub(crate); plain_writer_runs gone.
+- bundle_tests: the head test reads the count and needs storage-profile.
+'''
+verification = '''
+- nondefault-features gate for wz-session-core passes (heap, slot, fixed).
+- lent_frame_refusal 7 pass in the lend-only build.
+'''
+carry = '''
+- none for this lane.
+'''
