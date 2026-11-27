@@ -112,6 +112,7 @@
   <sce:feature name="rx-shared-bytes" requires="alloc"/>
   <sce:feature name="scouting-active"/>
   <sce:feature name="scouting-static"/>
+  <sce:feature name="sealed-commands" requires="query-attachment"/>
   <sce:feature name="secure-channel"/>
   <sce:feature name="session-close-ingress"/>
   <sce:feature name="session-extauth" requires="alloc"/>

@@ -89,6 +89,9 @@ pub mod app_layer;
 pub mod node_opening;
 // Its out-of-band transport: one line of a channel the node's host owns is one command.
 pub mod control_port;
+// The bounded record of a fixed node's lifecycle decisions (decision D16): the latest decisions of
+// its reference monitor and the count of all of them.
+pub mod decision_log;
 // The table every transport of that contract is held to, for a test or a sibling crate's
 // adapter (`test-support`); no production build names it.
 #[cfg(any(test, feature = "test-support"))]

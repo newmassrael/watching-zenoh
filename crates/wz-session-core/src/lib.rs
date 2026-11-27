@@ -2317,6 +2317,16 @@ pub mod lifecycle_wire;
 #[cfg(feature = "storage-profile")]
 pub mod lifecycle_node;
 
+// The reference monitor every lifecycle verb of both profiles is judged by (decision D16): one
+// function over the request, a policy that is data, and the record of every decision. Gated with
+// the contract it judges for.
+#[cfg(feature = "storage-profile")]
+pub mod lifecycle_monitor;
+// Decision D17: a lifecycle query that carries a sealed command, read the same way at the in-band
+// entry point of either profile. The verification itself is `sealed-commands`.
+#[cfg(feature = "storage-profile")]
+pub mod sealed_command;
+
 // The lifecycle reset's table of generations (decision D6): the rule is the SCE algorithm
 // `sources/algorithms/take_generation.scxml`, and each profile states the table's bound.
 #[cfg(feature = "storage-profile")]

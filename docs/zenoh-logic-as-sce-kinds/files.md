@@ -404,6 +404,13 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-codecs/src/lib.rs` | S9 | |
 | `crates/wz-codecs/src/vle.rs` | S9 | |
 | `crates/wz-codecs/src/whatami.rs` | S9 | |
+| `crates/wz-command-seal/src/cbor.rs` | S6 | |
+| `crates/wz-command-seal/src/fresh.rs` | S6 | |
+| `crates/wz-command-seal/src/key.rs` | S6 | |
+| `crates/wz-command-seal/src/lib.rs` | S6 | |
+| `crates/wz-command-seal/src/replay.rs` | S6 | |
+| `crates/wz-command-seal/src/ring_es256.rs` | S6 | |
+| `crates/wz-command-seal/src/tests.rs` | excluded: test | The crate's tests, by the file's name. |
 | `crates/wz-eth-lan865x/src/an1760.rs` | S9 | |
 | `crates/wz-eth-lan865x/src/config.rs` | S9 | |
 | `crates/wz-eth-lan865x/src/identity.rs` | S9 | |
@@ -611,6 +618,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/keepalive_pacer.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/keyexpr_index.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/lib.rs` | S4, S5, S10, S12 | |
+| `crates/wz-runtime-tokio/src/lifecycle_seal.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/link_collision.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/link_interfaces.rs` | S10 | |
 | `crates/wz-runtime-tokio/src/link_pipeline.rs` | S5 | |
@@ -630,6 +638,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/multicast_glue.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/multicast_pipeline.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/multilink.rs` | S4 | |
+| `crates/wz-runtime-tokio/src/node_declaration.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/node_stats.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/observer.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/peer_board.rs` | S4 | |
@@ -873,6 +882,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/lent_response.rs` | S2 | |
 | `crates/wz-session-core/src/lib.rs` | S1, S3, S10, S11, S12 | |
 | `crates/wz-session-core/src/lifecycle_contract.rs` | S1 | |
+| `crates/wz-session-core/src/lifecycle_monitor.rs` | S1 | |
 | `crates/wz-session-core/src/lifecycle_node.rs` | S1 | |
 | `crates/wz-session-core/src/lifecycle_query.rs` | S2 | |
 | `crates/wz-session-core/src/lifecycle_wire.rs` | S1 | |
@@ -994,6 +1004,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/scouting_host/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/scouting_message.rs` | S1 | |
 | `crates/wz-session-core/src/scouting_message_parity.rs` | excluded: test | Parity tests of Scout and Hello against their documents, compiled only under `#[cfg(all(test, ...))]` (`lib.rs:1139`). |
+| `crates/wz-session-core/src/sealed_command.rs` | S1 | |
 | `crates/wz-session-core/src/selector_params.rs` | S2 | |
 | `crates/wz-session-core/src/send_declare_error.rs` | S3 | |
 | `crates/wz-session-core/src/send_deferral.rs` | S1 | |
@@ -1083,6 +1094,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-mcu/src/connect_manager.rs` | S5 | |
 | `crates/wz-session-mcu/src/contract.rs` | excluded: test | Decision D7's conformance table and recording opener, compiled only for tests and the test-support feature (`lib.rs:70`); S5 row M19 calls it test support. |
 | `crates/wz-session-mcu/src/control_port.rs` | S5 | |
+| `crates/wz-session-mcu/src/decision_log.rs` | S5 | |
 | `crates/wz-session-mcu/src/dial.rs` | S5 | |
 | `crates/wz-session-mcu/src/get_mailbox.rs` | S5 | |
 | `crates/wz-session-mcu/src/group_drive.rs` | S5 | |
@@ -1123,6 +1135,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-switchboard-codegen/src/lib.rs` | S10 | |
 | `crates/wz-switchboard-schema/src/lib.rs` | S10 | |
 | `crates/wz-tls-mbedtls/src/channel.rs` | S9 | |
+| `crates/wz-tls-mbedtls/src/es256.rs` | S9 | |
 | `crates/wz-tls-mbedtls/src/ffi.rs` | S9 | |
 | `crates/wz-tls-mbedtls/src/lib.rs` | S9 | |
 | `crates/wz-tls-mbedtls/src/lock.rs` | S9 | |

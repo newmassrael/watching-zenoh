@@ -1270,7 +1270,11 @@ CITATION = re.compile(
 # counts is `session-close-ingress`. UNREACHED and NO_SYMBOL hold at 0 and 0. The regrading round
 # did not move this pin (pre-push defers this census to hosted CI). READ off the census's own
 # FAIL line, `reached: 1 against a pin of 2`.
-PIN_REACHED = 1
+# The D16-D18 regrade -- REACHED 1 -> 0, a RETIREMENT. `session-close-ingress` is regraded PARTIAL -> COMPLETE when
+# rulings D16 to D18 pay its residues (one reference monitor, the sealed commander, the passive hold
+# on the shipped Zephyr image), and the PARTIAL set is empty. UNREACHED and NO_SYMBOL hold at 0 and
+# 0. READ off the census's own FAIL line, `reached: 0 against a pin of 1`.
+PIN_REACHED = 0
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 0
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2917,7 +2921,10 @@ PIN_NO_SYMBOL = 0
 # the declared commander's zenohd interop file, where the fixed profile's passive hold and the
 # dialling side's pinned control are witnessed. READ off the census's own FAIL line, `wz citations:
 # 26 against a pin of 25`.
-PIN_WZ_CITATIONS = 26
+# The D16-D18 regrade -- 26 -> 0, one atom. `session-close-ingress` departs (COMPLETE) carrying its citations, and
+# no PARTIAL atom remains to cite a wz file. READ off the census's own FAIL line, `wz citations: 0
+# against a pin of 26`.
+PIN_WZ_CITATIONS = 0
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

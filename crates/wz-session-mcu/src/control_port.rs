@@ -27,9 +27,8 @@
 //! repeated `close` is `already_closed`, and a repeated `reset` carries its generation, so an agent
 //! that lost a reply may send it again.
 
-use wz_session_core::lifecycle_node::{
-    lifecycle_verdict, Command as Asked, Commander, LifecycleNode,
-};
+use wz_session_core::lifecycle_monitor::Asker;
+use wz_session_core::lifecycle_node::{lifecycle_verdict, Command as Asked, LifecycleNode};
 use wz_session_core::lifecycle_wire::{write_zid_json, OpenMode, PASSIVE_CHUNK};
 use wz_session_core::text_out::TextOut;
 
@@ -112,8 +111,8 @@ where
         Err(malformed) => return malformed.write_json(out),
     };
     // The agent that writes to the node's pipe owns the pipe, and the pipe proves no zid
-    // (decision D12), so its commander is the pipe's.
-    lifecycle_verdict(node, command, Commander::Pipe, out);
+    // (decision D12), so its commander is the pipe's, which the node's policy speaks for.
+    lifecycle_verdict(node, command, Asker::PIPE, out);
 }
 
 #[cfg(test)]
@@ -132,9 +131,25 @@ mod tests {
         opened: Cell<u32>,
     }
 
-    impl NodeOpening for Node {
-        fn permitted(&self, _commander: Commander<'_>) -> bool {
+    /// What the node says of its pipe.
+    impl wz_session_core::lifecycle_monitor::Policy for Node {
+        fn pipe_commands(&self, _verb: wz_session_core::lifecycle_node::Verb) -> bool {
             self.permit
+        }
+        fn each_grant(
+            &self,
+            _verb: wz_session_core::lifecycle_node::Verb,
+            _visit: &mut dyn FnMut(wz_session_core::lifecycle_monitor::Grant<'_>) -> bool,
+        ) {
+        }
+    }
+
+    impl NodeOpening for Node {
+        fn monitor(&self) -> wz_session_core::lifecycle_monitor::Monitor<'_> {
+            wz_session_core::lifecycle_monitor::Monitor::new(
+                self,
+                &wz_session_core::lifecycle_monitor::NoRecord,
+            )
         }
         fn open(&self, _zid: &[u8; CREDENTIAL_ZID_BYTES], _mode: OpenMode) -> OpenOutcome {
             self.opened.set(self.opened.get() + 1);

@@ -26,9 +26,19 @@
 //! read task beside the program's calls sends from another thread (`threads`); else one place for
 //! every face, the session's lock on the one thread of the form, as the cfg `wz_one_send_place`
 //! reads it (`src/engine/direct.rs`). A build whose only face is the dial role's has neither.
+//!
+//! It also states whether the session core answers a peer's Interest, as the cfg
+//! `wz_interest_answer` the engine's half of that answer reads. This crate's `interest-answer`
+//! asks the core for it, but Cargo unifies the core's features across the graph, so another crate
+//! can turn the core's on while this crate's stays off; the core's build script says what it built
+//! (`links = "wz_session_core"`), handed to this direct dependent as
+//! `DEP_WZ_SESSION_CORE_INTEREST_ANSWER`.
 
 /// The environment word that withholds the value locks a host lock would give ([`withheld`]).
 const VALUE_LOCKS: &str = "WZ_COOP_VALUE_LOCKS";
+
+/// The session core's statement of whether it answers a peer's Interest (`1` it does).
+const INTEREST_ANSWER: &str = "DEP_WZ_SESSION_CORE_INTEREST_ANSWER";
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(wz_round)");
@@ -56,6 +66,11 @@ fn main() {
         } else {
             println!("cargo:rustc-cfg=wz_one_send_place");
         }
+    }
+    println!("cargo:rustc-check-cfg=cfg(wz_interest_answer)");
+    println!("cargo:rerun-if-env-changed={INTEREST_ANSWER}");
+    if std::env::var(INTEREST_ANSWER).is_ok_and(|answers| answers == "1") {
+        println!("cargo:rustc-cfg=wz_interest_answer");
     }
 }
 

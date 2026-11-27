@@ -52,6 +52,9 @@ mod ffi;
 mod lock;
 
 pub mod channel;
+/// ES256 for a sealed lifecycle command, over the library's PSA Crypto (decision D17).
+#[cfg(feature = "es256")]
+pub mod es256;
 pub mod stream;
 
 // The tests run the channel, so they link the library `vendored` builds.

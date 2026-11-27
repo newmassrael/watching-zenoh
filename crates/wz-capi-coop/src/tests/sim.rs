@@ -624,6 +624,29 @@ impl Sim {
         .expect("the session opens")
     }
 
+    /// [`Self::open`] in the memory and by the plan `storage` names (`CoopEngine::open_made_in`):
+    /// the open whose reservations a test counts.
+    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    pub(super) fn open_made_in(
+        &self,
+        config: CoopConfig,
+        storage: crate::arena::OpenStorage,
+    ) -> EngineHold<SimEngine> {
+        CoopEngine::open_made_in(
+            SimLinks {
+                net: self.net.clone(),
+                host: SESSION_HOST,
+            },
+            self.clock.clone(),
+            SeededEntropy(self.seed),
+            move || config,
+            wz_session_core::policy::SessionPolicy::defaults(),
+            crate::OpenKeyIds::none(),
+            storage,
+        )
+        .expect("the session opens")
+    }
+
     /// A router stand-in accepting at [`STAND_IN_AT`], with the router's catch-all subscriber or
     /// without it.
     pub(super) fn stand_in(&self, catch_all: CatchAll) -> StandIn {

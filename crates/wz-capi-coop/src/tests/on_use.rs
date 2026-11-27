@@ -17,10 +17,22 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
 
-use super::{open, until, CatchAll, Command, Engine, Router};
+use super::sim::{Sim, SimEngine, StandIn};
+use super::CatchAll;
+use crate::EngineHold;
+
+/// The simulation's seed.
+const SEED: u64 = 0x0e5e;
+
+/// A router stand-in and the session the simulation opens against it.
+fn opened(sim: &Sim) -> (StandIn, EngineHold<SimEngine>) {
+    let stand_in = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
+    (stand_in, engine)
+}
 
 /// What the engine answers its objects' keys through.
-fn keys(engine: &Engine) -> &dyn SessionKeys {
+fn keys(engine: &SimEngine) -> &dyn SessionKeys {
     engine
         .key_arena()
         .expect("the engine answers its objects' keys")
@@ -33,8 +45,8 @@ fn keys(engine: &Engine) -> &dyn SessionKeys {
 /// whose bytes do not go back with it.
 #[test]
 fn a_declarations_key_is_counted_against_the_sessions_budget_and_given_back() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let (_router, engine) = opened(&sim);
     let opened = engine.key_counts();
     assert_eq!(
         opened.bytes,
@@ -65,8 +77,8 @@ fn a_declarations_key_is_counted_against_the_sessions_budget_and_given_back() {
 /// against the budget, or by a hold past the bound that is kept.
 #[test]
 fn an_objects_key_is_a_copy_of_its_own_and_refused_past_the_sessions_bound() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let (_router, engine) = opened(&sim);
     let before = engine.key_counts().used;
     let held = keys(&engine)
         .key(KeyAsk::Hold("demo/held"))
@@ -103,8 +115,8 @@ fn an_objects_key_is_a_copy_of_its_own_and_refused_past_the_sessions_bound() {
 /// receive that does not reach a table of the on-use policy.
 #[test]
 fn a_subscriber_declared_after_the_open_is_told_and_handed_a_push() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let (router, engine) = opened(&sim);
     let received = Arc::new(AtomicUsize::new(0));
     let declares = router.seen(|s| s.declares);
     engine
@@ -116,11 +128,13 @@ fn a_subscriber_declared_after_the_open_is_told_and_handed_a_push() {
             })
         })
         .expect("the session declares the subscriber");
-    until(&engine, "the router to see the subscriber", || {
+    sim.steps_until(&engine, 0, "the stand-in to see the subscriber", || {
         router.seen(|s| s.declares) > declares
     });
-    router.send(Command::Push("demo/a", b"hello"));
-    until(&engine, "the push", || received.load(Ordering::SeqCst) == 1);
+    router.push("demo/a", b"hello");
+    sim.steps_until(&engine, 0, "the push", || {
+        received.load(Ordering::SeqCst) == 1
+    });
 }
 
 /// A session whose tables take their memory on use takes the state its own values and its key
@@ -130,15 +144,11 @@ fn a_subscriber_declared_after_the_open_is_told_and_handed_a_push() {
 /// arena's block (`SessionArena::reserve_after`), which asks the memory for the state's bytes too,
 /// or by a plane placed anywhere but the state.
 #[test]
-#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart() {
-    use super::{host_links, LOOPBACK};
     use crate::arena::{
         AllocatorMemory, ArenaMemory, ArenaRegion, HeldPlaces, OpenRegion, OpenStorage, PlanFrom,
         PlanShape,
     };
-    use wz_runtime_posix::stream::PosixTcpDial;
-    use wz_runtime_posix::{PosixClock, PosixEntropy};
     use wz_session_core::bounded::ARENA_ALIGN;
 
     /// The allocator, counting its reservations and keeping the bytes it was last asked for.
@@ -165,29 +175,24 @@ fn an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart(
         reserves: AtomicUsize::new(0),
         last: AtomicUsize::new(0),
     };
-    let router = Router::start(CatchAll::None);
-    let config = super::config(&router);
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let config = sim.config();
     let region: &'static OpenRegion = Box::leak(Box::new(
-        Engine::open_region(
+        SimEngine::open_region(
             ArenaRegion::of(PlanShape::of(&config), config.limits)
                 .expect("the client's limits lay a region out"),
             HeldPlaces::NONE,
         )
         .expect("the engine's places lay out"),
     ));
-    let engine = Engine::open_made_in(
-        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
-        PosixClock,
-        PosixEntropy,
-        || super::config(&router),
-        wz_session_core::policy::SessionPolicy::defaults(),
-        crate::OpenKeyIds::none(),
+    let engine = sim.open_made_in(
+        config,
         OpenStorage {
             memory: &BLOCK,
             plan: PlanFrom::Region(region),
         },
-    )
-    .expect("the session opens");
+    );
     assert_eq!(
         BLOCK.reserves.load(Ordering::SeqCst),
         1,

@@ -499,8 +499,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "`tests/key_store_exhaustion.rs`). `session-slot` (with `alloc`) selects the slot form of "
         "the cooperative engine's task, and what it gates off, `CountedTlsListener` and "
         "`TlsDial::listen_counted`, is the heap form's accept counting that the cooperative "
-        "engine's listener calls, run by its `stream` tests",
-        frozenset({"host-lock", "vendored", "session-slot"}),
+        "engine's listener calls, run by its `stream` tests. `es256` gates `es256::PsaEs256` and "
+        "`random_echo`, the ES256 verifier and the echo of a sealed lifecycle command over PSA "
+        "(decision D17), which a fixed node's verbs verify with and the crate's `es256` tests "
+        "hold to a signature `ring` made",
+        frozenset({"host-lock", "vendored", "session-slot", "es256"}),
     ),
     "wz-capi-port": (
         "the port between a wz C ABI and its engine: a workspace-internal rlib with no path a C "
@@ -1082,6 +1085,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # for the `Rc` one (`app_layer::dispatch_to` takes either).
         frozenset(
             {
+                # D17 -- `sealed-commands` gates `admin_fixed::FixedSeal` and
+                # `VerbLegs::verify_sealed_with`, the fixed node's verifier of a sealed
+                # lifecycle command, chosen by the declared node's `verbs`.
+                "sealed-commands",
                 "adminspace-core",
                 # Round 3301 -- `adminspace-fixed` joins (see the lwip row above).
                 "adminspace-fixed",
@@ -1640,6 +1647,8 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # clause's subject; the row is excused only while that stays true.
     "wz-session-mcu": frozenset(
         {
+            # D17 -- `sealed-commands` (see its OFF_AXIS row).
+            "sealed-commands",
             "adminspace-core",
             "adminspace-fixed",
             "adminspace-write",

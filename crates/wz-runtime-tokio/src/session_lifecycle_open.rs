@@ -499,15 +499,11 @@ mod tests {
                 SessionLinks::default()
             }
         }
-        struct Permit;
-        impl wz_session_core::lifecycle_query::SessionLifecycleAuthority for Permit {
-            fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
-                false
-            }
-            fn admits_open(&self, _key: &LifecycleKey<'_>) -> bool {
-                true
-            }
-        }
+        // The commander of the open: the zid the link of the query proved, granted the open
+        // verb alone, as a declaration's `commander` grant states it.
+        const COMMANDER: &str = "5c";
+        let grants =
+            wz_session_core::lifecycle_query::HeapGrants::parse(["5c=open"]).expect("a grant");
         #[derive(Default)]
         struct Replies(Vec<String>);
         impl ReplyOut for Replies {
@@ -533,7 +529,7 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let seed = crate::lifecycle_reset_seed_from_os_entropy().expect("os entropy");
-        let node = LifecycleQueries::new("0100", "router", Permit, NoSessions, seed)
+        let node = LifecycleQueries::new("0100", "router", grants, NoSessions, seed)
             .with_opener(LinkstateOpener::new(seeded(&[ADVERTISED]), tx));
         let key = format!("@/0100/router/session/open/{}", zid_to_zenoh_hex(PEER_ZID));
         let view = BorrowedQuery {
@@ -547,9 +543,14 @@ mod tests {
             is_local: false,
             qos: QosLevel::DEFAULT,
         };
+        let proven = wz_session_core::query_sink::ProvenQuery {
+            inner: &view as &dyn QueryView,
+            peer: wz_session_core::credential_identity::zid_from_key_text(COMMANDER),
+            encoding: None,
+        };
         let mut out = Replies::default();
         assert_eq!(
-            node.answer(&view as &dyn QueryView, &mut out),
+            node.answer(&proven, &mut out),
             Answered::Open(OpenVerdict::Opening)
         );
         assert_eq!(out.0, vec![String::from("{\"verdict\":\"opening\"}")]);

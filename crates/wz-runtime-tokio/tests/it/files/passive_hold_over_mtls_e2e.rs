@@ -57,12 +57,11 @@ use wz_runtime_tokio::tls_config::{
     client_config_from_pem, server_config_from_pem, ClientAuthPem, ServerNameVerification,
 };
 use wz_runtime_tokio_test_support::{fixture_session_init_params, loopback_mtls_pems};
-use wz_session_core::drive::{LifecycleKey, SessionLifecycleAuthority};
 use wz_session_core::lifecycle_query::{
     Answered, CloseVerdict, LifecycleQueries, OpenVerdict, ResetVerdict, SessionLinks,
     StatusVerdict,
 };
-use wz_session_core::query_sink::{BorrowedQuery, QueryView, ReplyError, ReplyOut};
+use wz_session_core::query_sink::{BorrowedQuery, ProvenQuery, QueryView, ReplyError, ReplyOut};
 use wz_session_core::sample::{EncodingHint, QosLevel};
 use wz_session_core::zid_hex::zid_to_zenoh_hex;
 
@@ -80,27 +79,24 @@ fn zid_named_by(key_pem: &str) -> [u8; 16] {
     wz_session_core::credential_identity::zid_from_spki_der(&key.public_key_der())
 }
 
-/// Every verb permitted: the commander is not what these tests are about.
-struct Permit;
+/// The operator that asks the waiting node its verbs, as a key the query's link proved names it.
+/// It is granted every verb: the commander is not what these tests are about.
+const OPERATOR: &str = "5c";
 
-impl SessionLifecycleAuthority for Permit {
-    fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
-        true
-    }
-    fn admits_open(&self, _key: &LifecycleKey<'_>) -> bool {
-        true
-    }
-    fn admits_reset(&self, _key: &LifecycleKey<'_>) -> bool {
-        true
-    }
-    fn admits_status(&self, _key: &LifecycleKey<'_>) -> bool {
-        true
-    }
+/// The grants of the waiting node: every verb to [`OPERATOR`] (decision D16).
+fn operator_grants() -> wz_session_core::lifecycle_query::HeapGrants {
+    wz_session_core::lifecycle_query::HeapGrants::parse(["5c=open,close,reset,status"])
+        .expect("a grant")
 }
 
 /// The lifecycle queries of the waiting node, over the ports a node hosts them with.
-type Queries =
-    LifecycleQueries<Permit, RouterSessionDirectory, LoopIntent, PeerBoard, LinkstateOpener>;
+type Queries = LifecycleQueries<
+    wz_session_core::lifecycle_query::HeapGrants,
+    RouterSessionDirectory,
+    LoopIntent,
+    PeerBoard,
+    LinkstateOpener,
+>;
 
 #[derive(Default)]
 struct Recorder {
@@ -185,7 +181,12 @@ impl Pair {
         let mut out = Recorder::default();
         // The view borrows `key`; it is bound so that it is dropped before `key` is.
         let asked = query(&key);
-        self.queries.answer(&asked, &mut out)
+        let proven = ProvenQuery {
+            inner: &asked,
+            peer: wz_session_core::credential_identity::zid_from_key_text(OPERATOR),
+            encoding: None,
+        };
+        self.queries.answer(&proven, &mut out)
     }
 
     /// The dialling node's zid as a key carries it.
@@ -345,7 +346,7 @@ where
     let queries = LifecycleQueries::new(
         &zid_to_zenoh_hex(&a_zid),
         "peer",
-        Permit,
+        operator_grants(),
         a_router.lifecycle_directory(),
         wz_runtime_tokio::lifecycle_reset_seed_from_os_entropy().expect("os entropy"),
     )

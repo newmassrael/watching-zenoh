@@ -6748,7 +6748,7 @@ first and drop markers of a Fragment are used when the peer states 1 too.
 [[protocol_fact]]
 id = "batch-compression"
 pico = "no"
-lacks = ["crates/wz-capi-pico/Cargo.toml @ compression"]
+lacks = ["crates/wz-capi-pico/Cargo.toml @ transport-compression", "crates/wz-capi-pico/Cargo.toml @ session-extcompression"]
 help = '''
 Whether a session offers and accepts batch compression. The pico ABI never
 compiles the compression handshake: its crate takes the session model without
@@ -6787,7 +6787,7 @@ states it with the router-node capability instead.
 id = "tcp-link"
 pico = "yes"
 c = "yes"
-holds = ["crates/wz-capi-core/Cargo.toml @ transport-link-tcp", "crates/wz-runtime-posix/src/links.rs @ pub type PosixLinks = wz_runtime_coop::ip_stack::IpLinks<PosixUdpSocket, PosixTcpDial>;", "crates/wz-runtime-zephyr/src/links.rs @ pub type ZephyrIpLinks = wz_runtime_coop::ip_stack::IpLinks<ZephyrUdpSocket, ZephyrTcpDial>;"]
+holds = ["crates/wz-capi-core/Cargo.toml @ transport-link-tcp", "crates/wz-runtime-posix/src/links.rs @ wz_runtime_coop::ip_stack::IpLinks<PosixUdpSocket, PosixTcpDial,", "crates/wz-runtime-zephyr/src/links.rs @ wz_runtime_coop::ip_stack::IpLinks<ZephyrUdpSocket, ZephyrTcpDial,"]
 help = '''
 Whether a session runs over the tcp link, a link that does not keep message
 boundaries. Every engine and platform the ABIs build for has it: the tokio

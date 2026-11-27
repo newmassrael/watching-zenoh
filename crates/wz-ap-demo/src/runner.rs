@@ -308,6 +308,7 @@ struct SpawnedTasks {
 /// locators to.
 fn build_dial_config(
     tls_ca: &Option<String>,
+    tls_connect: &crate::args::TlsConnectIdentity,
     quic_ca: &Option<String>,
     tuning: &TransportTuning,
 ) -> io::Result<DialConfig> {
@@ -315,33 +316,65 @@ fn build_dial_config(
         .with_link_defaults(tuning.link_defaults.clone())
         .with_open_timeout(tuning.open_timeout)
         .with_runtime_limits(tuning.runtime_limits);
-    let cfg = apply_tls_ca(cfg, tls_ca)?;
+    let cfg = apply_tls_ca(cfg, tls_ca, tls_connect)?;
     let cfg = apply_quic_ca(cfg, quic_ca)?;
     Ok(cfg)
 }
 
 /// Thread the `--tls-ca` root-CA into `DialConfig.tls` — a `tls/...` dial verifies
-/// the peer's server cert against it (server name `localhost`). No-op when no
-/// `--tls-ca` was given.
+/// the peer's server cert against it (server name `localhost`) — and, when
+/// `--tls-connect-cert` / `--tls-connect-key` are given, the certificate the dial
+/// presents to a listener that asks for one (mutual TLS). No-op when neither was given.
 #[cfg(feature = "tls")]
-fn apply_tls_ca(cfg: DialConfig, tls_ca: &Option<String>) -> io::Result<DialConfig> {
+fn apply_tls_ca(
+    cfg: DialConfig,
+    tls_ca: &Option<String>,
+    tls_connect: &crate::args::TlsConnectIdentity,
+) -> io::Result<DialConfig> {
     use wz::runtime_tokio::session_open::TlsDialConfig;
-    use wz::runtime_tokio::tls_config::read_pem_file;
-    match tls_ca {
-        Some(path) => {
-            let ca_pem = read_pem_file(path)?;
-            let tls = TlsDialConfig::from_ca_pem(Some(ca_pem.as_slice()), "localhost")?;
-            Ok(cfg.with_tls(tls))
-        }
-        None => Ok(cfg),
-    }
+    use wz::runtime_tokio::tls_config::{read_pem_file, ClientAuthPem, ServerNameVerification};
+    let identity =
+        match (&tls_connect.cert, &tls_connect.key) {
+            (Some(cert), Some(key)) => Some((read_pem_file(cert)?, read_pem_file(key)?)),
+            (None, None) => None,
+            _ => return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a tls/... client certificate needs BOTH --tls-connect-cert and --tls-connect-key",
+            )),
+        };
+    let Some(path) = tls_ca else {
+        return match identity {
+            None => Ok(cfg),
+            Some(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a tls/... client certificate needs --tls-ca, the root the listener is verified \
+                 against",
+            )),
+        };
+    };
+    let ca_pem = read_pem_file(path)?;
+    let client_auth = identity.as_ref().map(|(cert, key)| ClientAuthPem {
+        cert_chain_pem: cert.as_slice(),
+        private_key_pem: key.as_slice(),
+    });
+    let tls = TlsDialConfig::from_pem(
+        Some(ca_pem.as_slice()),
+        "localhost",
+        client_auth,
+        ServerNameVerification::Verify,
+    )?;
+    Ok(cfg.with_tls(tls))
 }
 
 /// The `tls`-less build: a `tls/...` dial surfaces the runtime's typed
-/// `Unsupported` at [`dial_endpoint`], so `--tls-ca` is inert (the field is
-/// feature-uniform on [`Role`], only its USE is gated).
+/// `Unsupported` at [`dial_endpoint`], so `--tls-ca` and the client certificate are
+/// inert (the client's key is not even read: `args::TlsConnectIdentity`).
 #[cfg(not(feature = "tls"))]
-fn apply_tls_ca(cfg: DialConfig, _tls_ca: &Option<String>) -> io::Result<DialConfig> {
+fn apply_tls_ca(
+    cfg: DialConfig,
+    _tls_ca: &Option<String>,
+    _tls_connect: &crate::args::TlsConnectIdentity,
+) -> io::Result<DialConfig> {
     Ok(cfg)
 }
 
@@ -715,6 +748,9 @@ impl ConnectPhaseWatch {
 pub(crate) struct AcceptCertPaths {
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    /// The root a `tls/` listen verifies its clients against (`--tls-mtls`); `None` asks no
+    /// client for a certificate.
+    pub tls_client_ca: Option<String>,
     pub quic_cert: Option<String>,
     pub quic_key: Option<String>,
 }
@@ -725,6 +761,7 @@ impl AcceptCertPaths {
         build_accept_config(
             &self.tls_cert,
             &self.tls_key,
+            &self.tls_client_ca,
             &self.quic_cert,
             &self.quic_key,
             link_defaults,
@@ -753,13 +790,15 @@ impl AcceptCertPaths {
 #[derive(Default)]
 pub(crate) struct DialCertPaths {
     pub tls_ca: Option<String>,
+    /// The certificate a `tls/` dial presents when the listener asks for one.
+    pub tls_connect: crate::args::TlsConnectIdentity,
     pub quic_ca: Option<String>,
 }
 
 #[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
 impl DialCertPaths {
     fn build(&self, tuning: &TransportTuning) -> io::Result<DialConfig> {
-        build_dial_config(&self.tls_ca, &self.quic_ca, tuning)
+        build_dial_config(&self.tls_ca, &self.tls_connect, &self.quic_ca, tuning)
     }
 }
 
@@ -776,24 +815,28 @@ impl DialCertPaths {
 fn build_accept_config(
     tls_cert: &Option<String>,
     tls_key: &Option<String>,
+    tls_client_ca: &Option<String>,
     quic_cert: &Option<String>,
     quic_key: &Option<String>,
     link_defaults: &LinkDefaults,
 ) -> io::Result<AcceptConfig> {
     let cfg = AcceptConfig::default().with_link_defaults(link_defaults.clone());
-    let cfg = apply_tls_accept(cfg, tls_cert, tls_key)?;
+    let cfg = apply_tls_accept(cfg, tls_cert, tls_key, tls_client_ca)?;
     let cfg = apply_quic_accept(cfg, quic_cert, quic_key)?;
     Ok(cfg)
 }
 
 /// Thread the `--tls-cert` / `--tls-key` PEM into `AcceptConfig.tls` — the cert a
 /// `tls/...` acceptor PRESENTS. Both-or-neither; neither leaves the cert-free
-/// default. The accept mirror of [`apply_tls_ca`].
+/// default. The accept mirror of [`apply_tls_ca`]. With `tls_client_ca` (`--tls-mtls`)
+/// the acceptor asks every client for a certificate that chains to that root, and the
+/// key of the one it presents is what proves the client's zid.
 #[cfg(feature = "tls")]
 fn apply_tls_accept(
     cfg: AcceptConfig,
     tls_cert: &Option<String>,
     tls_key: &Option<String>,
+    tls_client_ca: &Option<String>,
 ) -> io::Result<AcceptConfig> {
     use wz::runtime_tokio::session_open::TlsAcceptConfig;
     use wz::runtime_tokio::tls_config::read_pem_file;
@@ -801,9 +844,15 @@ fn apply_tls_accept(
         (Some(cert_path), Some(key_path)) => {
             let cert_pem = read_pem_file(cert_path)?;
             let key_pem = read_pem_file(key_path)?;
-            let tls = TlsAcceptConfig::from_cert_key_pem(&cert_pem, &key_pem)?;
+            let client_ca_pem = tls_client_ca.as_ref().map(read_pem_file).transpose()?;
+            let tls = TlsAcceptConfig::from_pem(&cert_pem, &key_pem, client_ca_pem.as_deref())?;
             Ok(cfg.with_tls(tls))
         }
+        (None, None) if tls_client_ca.is_some() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--tls-mtls asks a tls/... listen for client certificates, and the listen needs \
+             --tls-cert and --tls-key of its own",
+        )),
         (None, None) => Ok(cfg),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -820,6 +869,7 @@ fn apply_tls_accept(
     cfg: AcceptConfig,
     _tls_cert: &Option<String>,
     _tls_key: &Option<String>,
+    _tls_client_ca: &Option<String>,
 ) -> io::Result<AcceptConfig> {
     Ok(cfg)
 }
@@ -1479,13 +1529,16 @@ async fn establish_link(
             // matching `AcceptConfig` server-cert slot (the accept mirror of the
             // Initiator's `--<scheme>-ca` -> DialConfig); every cert-free acceptor
             // (tcp/ws/udp) takes the default.
+            // The one-shot listen asks no client for a certificate: `--tls-mtls` is the
+            // mesh run-modes' (refused here by `main`).
             let accept_cfg =
-                build_accept_config(tls_cert, tls_key, quic_cert, quic_key, link_defaults)?;
+                build_accept_config(tls_cert, tls_key, &None, quic_cert, quic_key, link_defaults)?;
             Ok((accept_endpoint(listen, &accept_cfg).await?, offer))
         }
         Role::Initiator {
             connect,
             tls_ca,
+            tls_connect,
             quic_ca,
             ..
         } => {
@@ -1496,7 +1549,7 @@ async fn establish_link(
             // R311y365/y366 — a `tls/...` / `quic/...` --connect threads its
             // `--tls-ca` / `--quic-ca` root-CA into the matching `DialConfig` slot;
             // every cert-free transport takes the default.
-            let dial_cfg = build_dial_config(tls_ca, quic_ca, tuning)?;
+            let dial_cfg = build_dial_config(tls_ca, tls_connect, quic_ca, tuning)?;
             // R2099 (open-debt item 512, the `connect/endpoints` residue) — try
             // EVERY candidate in order and take the first that opens, which is
             // upstream's client: `connect_peers_single_link`
@@ -2677,6 +2730,7 @@ async fn open_initiator_in_connect_phase(
     let Role::Initiator {
         connect,
         tls_ca,
+        tls_connect,
         quic_ca,
         south_partition,
         ..
@@ -2693,7 +2747,7 @@ async fn open_initiator_in_connect_phase(
             "wz-ap-demo: --connect named no endpoint to dial",
         ));
     }
-    let dial_cfg = build_dial_config(tls_ca, quic_ca, tuning)?;
+    let dial_cfg = build_dial_config(tls_ca, tls_connect, quic_ca, tuning)?;
     // R2948 — each candidate on its own schedule: `connect/retry` with the
     // endpoint's `#retry_period_*` tail on top, raced by the runtime's
     // `drive_connect_phase` as upstream's single-link connect races them.
@@ -3182,8 +3236,13 @@ pub(crate) async fn run_demo(
                         if attempt > 1 {
                             log::info!("wz-ap-demo: connect attempt {attempt} to {endpoint}");
                         }
-                        let dial_config = build_dial_config(&None, &None, dial_tuning)
-                            .map_err(|e| e.to_string())?;
+                        let dial_config = build_dial_config(
+                            &None,
+                            &crate::args::TlsConnectIdentity::default(),
+                            &None,
+                            dial_tuning,
+                        )
+                        .map_err(|e| e.to_string())?;
                         supervise_reconnect(
                             endpoint,
                             params,
@@ -4115,39 +4174,23 @@ pub(crate) struct ScoutAutoconnectArgs {
     pub strategy: wz::runtime_tokio::routing_policy::AutoConnectStrategies,
 }
 
-/// The authority of a node that hosts the lifecycle queries: one answer for every
-/// close, the node's `--session-close-permit`. Default-deny, as zenoh's own
-/// `permissions.write` is, and the same answer for every target: a policy that
-/// names which peers may be closed is a host's own authority to write, and the
-/// demo has no policy language to read one from.
+/// The policy of a node that hosts the lifecycle queries (decision D16): the `commander` rows of
+/// its `--node-declaration <file>`, the declaration a fixed node of the same policy is built from
+/// (`wz::runtime_tokio::node_declaration`), read when the node starts. No file, or a file that
+/// names no commander, grants nothing, so every verb is refused to every commander; a commander is
+/// a zid the key of the asking link proved, so a grant takes effect over a secure session only.
+/// `Err` names the file and what is wrong with it.
 #[cfg(feature = "session-close-ingress")]
-struct ClosePermit(bool);
-
-#[cfg(feature = "session-close-ingress")]
-impl wz::runtime_tokio::lifecycle_query::SessionLifecycleAuthority for ClosePermit {
-    fn admits_close(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
-        self.0
-    }
-
-    /// A reset closes the session too (once per generation), so the permit to
-    /// close is the permit to reset: the demo has no policy that tells them apart.
-    fn admits_reset(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
-        self.0
-    }
-
-    /// Reading what the node holds for a peer is under the same permit: the demo
-    /// has no policy that separates a reader of the lifecycle from a user of it.
-    fn admits_status(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
-        self.0
-    }
-
-    /// An open creates a session the node would not otherwise hold, which is a
-    /// stronger act than a close, and it is under the same permit: the demo has no
-    /// policy that tells the verbs apart, and a node that permits none of them
-    /// permits none.
-    fn admits_open(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
-        self.0
-    }
+pub(crate) fn declared_session_grants(
+    path: Option<&str>,
+) -> Result<wz::runtime_tokio::lifecycle_query::HeapGrants, String> {
+    let Some(path) = path else {
+        return Ok(wz::runtime_tokio::lifecycle_query::HeapGrants::default());
+    };
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("--node-declaration: cannot read {path}: {e}"))?;
+    wz::runtime_tokio::node_declaration::commander_grants(&text)
+        .map_err(|e| format!("--node-declaration {path}: {e}"))
 }
 
 /// What a host's loop gives the lifecycle queries beyond its sessions (decision
@@ -4162,17 +4205,19 @@ struct LoopLifecycle<I, M, P> {
     opener: P,
 }
 
-/// Say once what the session lifecycle verbs this host serves are permitted to do.
+/// Say once to whom the session lifecycle verbs this host serves are granted.
 #[cfg(feature = "session-close-ingress")]
-fn log_lifecycle_verbs(whatami: &str, permit: bool) {
-    log::info!(
-        "wz-ap-demo {whatami}: session lifecycle verbs {}",
-        if permit {
-            "PERMITTED (--session-close-permit)"
-        } else {
-            "refused until --session-close-permit"
-        }
-    );
+fn log_lifecycle_verbs(whatami: &str, grants: &wz::runtime_tokio::lifecycle_query::HeapGrants) {
+    match grants.grants().len() {
+        0 => log::info!(
+            "wz-ap-demo {whatami}: session lifecycle verbs refused to every commander until \
+             a --node-declaration names one"
+        ),
+        n => log::info!(
+            "wz-ap-demo {whatami}: session lifecycle verbs granted by {n} commander row(s) of \
+             the --node-declaration, to the zid a secure link or a sealed command proves"
+        ),
+    }
 }
 
 /// Host the session lifecycle queries -- the close, reset, status, open and
@@ -4191,7 +4236,7 @@ fn log_lifecycle_verbs(whatami: &str, permit: bool) {
 fn host_session_lifecycle<D, I, M, P, E>(
     zid_hex: &str,
     whatami: &str,
-    permit: bool,
+    grants: wz::runtime_tokio::lifecycle_query::HeapGrants,
     directory: D,
     loop_side: LoopLifecycle<I, M, P>,
     mut register: impl FnMut(
@@ -4224,11 +4269,28 @@ fn host_session_lifecycle<D, I, M, P, E>(
             return;
         }
     };
+    // A verb may come as a command sealed by its commander's key (decision D17), judged for that
+    // commander whatever link carried it. The verifier holds a counter for every commander the
+    // declaration grants and an echo drawn now, so a command sealed before this start is not taken;
+    // a host that cannot hold it serves no lifecycle query rather than judge a sealed command as
+    // the link's.
+    let seal =
+        match wz::runtime_tokio::lifecycle_seal::lifecycle_seal_from_os_entropy(zid_hex, &grants) {
+            Ok(seal) => seal,
+            Err(e) => {
+                log::warn!(
+                    "wz-ap-demo {whatami}: {e}; the session lifecycle queries are not hosted"
+                );
+                return;
+            }
+        };
+    log_lifecycle_verbs(whatami, &grants);
     let queries = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
-        LifecycleQueries::new(zid_hex, whatami, ClosePermit(permit), directory, reset_seed)
+        LifecycleQueries::new(zid_hex, whatami, grants, directory, reset_seed)
             .with_intent(loop_side.intent)
             .with_machines(loop_side.machines)
-            .with_opener(loop_side.opener),
+            .with_opener(loop_side.opener)
+            .with_seal(seal),
     ));
     let patterns = queries.guard().patterns();
     for pattern in patterns {
@@ -4247,7 +4309,6 @@ fn host_session_lifecycle<D, I, M, P, E>(
             ),
         }
     }
-    log_lifecycle_verbs(whatami, permit);
 }
 
 #[cfg(feature = "routing-peer")]
@@ -4317,16 +4378,18 @@ pub(crate) struct PeerOpts {
     /// `--session-lifecycle` -- host the session lifecycle queries on this peer:
     /// the close query `@/<zid>/peer/session/close/<peer-zid>` and the capability
     /// query `@/<zid>/peer/session/verbs` (`wz_session_core::lifecycle_query`).
-    /// HOSTS the surface; whether a close is carried out is
-    /// [`session_close_permit`](Self::session_close_permit). Inert, and said so,
+    /// HOSTS the surface; who may command its verbs is
+    /// [`node_declaration`](Self::node_declaration). Inert, and said so,
     /// without the `session-close-ingress` feature.
     pub session_lifecycle: bool,
-    /// `--session-close-permit` -- the node's authority ADMITS closing a session over
-    /// the lifecycle query. Default-deny: without it every close is answered
-    /// `refused`, and the capability query still lists the verb, because the node
-    /// knows it. Host vs permit, as [`config_writable`](Self::config_writable) is to
+    /// `--node-declaration <file>` -- the node's declaration, whose `commander` rows are the
+    /// commanders the node grants its lifecycle verbs to (decision D16), read when the node
+    /// starts (`declared_session_grants`). Default deny: with no file, or a file that names no
+    /// commander, every verb is answered `refused`, and the capability query still lists the
+    /// verbs, because the node knows them. Host vs grant, as
+    /// [`config_writable`](Self::config_writable) is to
     /// [`config_write_permit`](Self::config_write_permit).
-    pub session_close_permit: bool,
+    pub node_declaration: Option<String>,
     /// §5.23 `adminspace-core` — `--metadata <value>`, the node config's
     /// `metadata`, served as `local_data`'s field. `None` = unset, served `null`.
     pub metadata: Option<wz::runtime_tokio::json5::Json5Value>,
@@ -4401,6 +4464,10 @@ pub(crate) struct PeerOpts {
     /// slots of a pair are required together (enforced by `build_accept_config`).
     pub tls_cert: Option<String>,
     pub tls_key: Option<String>,
+    /// `--tls-mtls`: the root a `tls/` listen verifies its clients' certificates against
+    /// (`crate::args::parse_tls_client_ca`), so the key a client presents proves its zid.
+    /// `None` asks no client for a certificate.
+    pub tls_client_ca: Option<String>,
     pub quic_cert: Option<String>,
     pub quic_key: Option<String>,
     /// R2233 (open-debt item 585) — the DIAL twin of the four above: the
@@ -4531,7 +4598,7 @@ async fn run_peer_until(
     let config_write_permit = opts.config_write_permit;
     let no_admin_read = opts.no_admin_read;
     let session_lifecycle = opts.session_lifecycle;
-    let session_close_permit = opts.session_close_permit;
+    let node_declaration = opts.node_declaration.clone();
     let put_key = opts.put_key.as_deref();
     let put_payload = opts.put_payload.as_deref();
     #[cfg(feature = "pubsub-delete")]
@@ -4596,6 +4663,7 @@ async fn run_peer_until(
     let accept_cfg = build_accept_config(
         &opts.tls_cert,
         &opts.tls_key,
+        &opts.tls_client_ca,
         &opts.quic_cert,
         &opts.quic_key,
         &tuning.link_defaults,
@@ -5244,16 +5312,22 @@ async fn run_peer_until(
     // `--session-lifecycle`: host the session lifecycle queries -- close a session
     // by its peer's zid and be told what happened, and ask which verbs this node
     // has. Independent of `--config-queryable`: it is not an upstream admin leg but
-    // a wz-native one, and a node may serve either alone. The close is carried out
-    // only with `--session-close-permit`; without it every close is answered
-    // `refused`, and a build without `session-close-ingress` hosts nothing and says
-    // so.
+    // a wz-native one, and a node may serve either alone. A verb is carried out only
+    // for a commander a row of the `--node-declaration` names, as the key of the asking
+    // link proved it; every other is answered `refused`, and a build without
+    // `session-close-ingress` hosts nothing and says so.
     #[cfg(feature = "session-close-ingress")]
     if session_lifecycle {
+        // The file was read when the arguments were, so a malformed one stopped the demo
+        // there; this is the same reading.
+        let grants = declared_session_grants(node_declaration.as_deref()).unwrap_or_else(|e| {
+            log::warn!("wz-ap-demo peer: {e}; every lifecycle verb is refused");
+            wz::runtime_tokio::lifecycle_query::HeapGrants::default()
+        });
         host_session_lifecycle(
             &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
             params.whatami.to_str(),
-            session_close_permit,
+            grants,
             forwarder.lifecycle_directory(),
             // The peer's loop holds no intent it is told of at run time: it dials
             // its static connect list and the peers gossip names, by no machine,
@@ -5272,7 +5346,7 @@ async fn run_peer_until(
     }
     #[cfg(not(feature = "session-close-ingress"))]
     if session_lifecycle {
-        let _ = session_close_permit;
+        let _ = node_declaration;
         log::warn!(
             "wz-ap-demo peer: --session-lifecycle requires the `session-close-ingress` \
              feature; no lifecycle query is hosted"
@@ -5341,7 +5415,10 @@ async fn run_peer_until(
         let handler = move |sample: &dyn SampleView| {
             // Gate (permissions.write) + decode via the wz-session-core SSOT, the
             // write-side counterpart of answer_admin_query.
-            let write_permitted = admin_write_permit(&write_cfg.guard().admin_permissions());
+            let write_permitted = wz::runtime_tokio::admin_write_permitted(
+                sample.keyexpr(),
+                &write_cfg.guard().admin_permissions(),
+            );
             match parse_admin_config_write(
                 &write_space,
                 sample.keyexpr(),
@@ -6263,9 +6340,9 @@ pub(crate) struct RouterHatOpts {
     /// the peer twin (`PeerOpts::session_lifecycle`) has the reasoning. The same
     /// bare presence flag in both run-modes, so one spelling means one thing.
     pub session_lifecycle: bool,
-    /// `--session-close-permit` -- the router's authority admits a close over the
-    /// lifecycle query. Default-deny; see `PeerOpts::session_close_permit`.
-    pub session_close_permit: bool,
+    /// `--node-declaration <file>` -- the declaration whose `commander` rows the router
+    /// grants its lifecycle verbs to. Default deny; see `PeerOpts::node_declaration`.
+    pub node_declaration: Option<String>,
     /// R311y232 (transport-qos ACTIVATION) — offer the per-priority multicast QoS
     /// conduit on the router's data-plane group (`--multicast-qos`). Consumed only
     /// by the `router-multicast-faces` spawns; a build without that face has no
@@ -6490,7 +6567,7 @@ async fn run_router_hat_until(
     // a build without those legs warning-clean.
     let no_admin_read = opts.no_admin_read;
     let session_lifecycle = opts.session_lifecycle;
-    let session_close_permit = opts.session_close_permit;
+    let node_declaration = opts.node_declaration.clone();
     // R2393 — the write-side twin, read into a local for the SAME reason: the field
     // is unconditional so the bundle stays feature-stable, and only the
     // `adminspace-router-linkstate` arm below consumes it.
@@ -7408,7 +7485,7 @@ async fn run_router_hat_until(
 
     // `--session-lifecycle` on the router host: the same two queries the peer
     // hosts, answered from this router's faces and the links joined to them. See the
-    // peer arm for what is hosted and what the permit decides.
+    // peer arm for what is hosted and what the grants decide.
     #[cfg(feature = "session-close-ingress")]
     if session_lifecycle {
         // Decision D6 — the router's loop holds its connect endpoints by their
@@ -7433,10 +7510,14 @@ async fn run_router_hat_until(
         );
         #[cfg(not(feature = "router-connect-reconcile"))]
         let opener = wz::runtime_tokio::lifecycle_query::NoOpener;
+        let grants = declared_session_grants(node_declaration.as_deref()).unwrap_or_else(|e| {
+            log::warn!("wz-ap-demo router-hat: {e}; every lifecycle verb is refused");
+            wz::runtime_tokio::lifecycle_query::HeapGrants::default()
+        });
         host_session_lifecycle(
             &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
             params.whatami.to_str(),
-            session_close_permit,
+            grants,
             forwarder.lifecycle_directory(),
             LoopLifecycle {
                 intent,
@@ -7451,7 +7532,7 @@ async fn run_router_hat_until(
     }
     #[cfg(not(feature = "session-close-ingress"))]
     if session_lifecycle {
-        let _ = session_close_permit;
+        let _ = node_declaration;
         log::warn!(
             "wz-ap-demo router-hat: --session-lifecycle requires the \
              `session-close-ingress` feature; no lifecycle query is hosted"
@@ -7536,8 +7617,10 @@ async fn run_router_hat_until(
             // a permit captured at setup could not answer a permission changed
             // since, which is the frozen-permit divergence this tree has already
             // paid for twice.
-            let write_permitted =
-                wz::runtime_tokio::admin_write_permit(&write_cfg.guard().admin_permissions());
+            let write_permitted = wz::runtime_tokio::admin_write_permitted(
+                sample.keyexpr(),
+                &write_cfg.guard().admin_permissions(),
+            );
             match parse_admin_config_write(
                 &write_space,
                 sample.keyexpr(),
@@ -8846,7 +8929,7 @@ pub(crate) async fn run_storage_host(listen: &str, opts: StorageHostOpts) -> io:
     // the storage host's links take the node's per-link-kind socket config too.
     // It carries no server cert (the host has no cert flags), which is what the
     // cert-free `bind_endpoint` it replaces bound with.
-    let accept_cfg = build_accept_config(&None, &None, &None, &None, &tuning.link_defaults)?;
+    let accept_cfg = build_accept_config(&None, &None, &None, &None, &None, &tuning.link_defaults)?;
     let mut listener = bind_endpoint_with_config(listen, &accept_cfg).await?;
     let local = listener.local_addr_display()?;
 
@@ -10424,6 +10507,7 @@ mod router_hat_quic_cert_tests {
         let cert_paths = AcceptCertPaths {
             tls_cert: None,
             tls_key: None,
+            tls_client_ca: None,
             quic_cert: Some(cert_path.clone()),
             quic_key: Some(key_path.clone()),
         };
@@ -10542,7 +10626,7 @@ mod peer_quic_cert_tests {
             config_write_permit: false,
             no_admin_read: false,
             session_lifecycle: false,
-            session_close_permit: false,
+            node_declaration: None,
             metadata: None,
             put_key: None,
             put_payload: None,
@@ -10566,6 +10650,7 @@ mod peer_quic_cert_tests {
             publish_band: None,
             tls_cert: None,
             tls_key: None,
+            tls_client_ca: None,
             quic_cert: Some(cert_path.clone()),
             quic_key: Some(key_path.clone()),
             // R2233 — these two legs are BIND witnesses with no `--connect`, so
@@ -10682,7 +10767,7 @@ mod peer_failfast_tests {
             config_write_permit: false,
             no_admin_read: false,
             session_lifecycle: false,
-            session_close_permit: false,
+            node_declaration: None,
             metadata: None,
             put_key: None,
             put_payload: None,
@@ -10706,6 +10791,7 @@ mod peer_failfast_tests {
             publish_band: None,
             tls_cert: None,
             tls_key: None,
+            tls_client_ca: None,
             quic_cert: None,
             quic_key: None,
             // R2233 — this fixture never dials, so there is no client trust
