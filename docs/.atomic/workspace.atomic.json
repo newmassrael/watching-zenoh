@@ -10344,6 +10344,11 @@
       "source": "open-debt register",
       "reason": "OPEN 2026-11-21 (docs/upstream-parity.md D11, deploy/completeness_ratchet.json a.pico-api.shortfall = 2). Two of zenoh-pico's own API tests pass against the original and not against wz: z_api_source_info_test and z_api_admin_space_test, which call internal `_z_*` functions wz does not export. Closed when both pass on wz (the export or the equivalent public path) and the row is locked at 0."
     },
+    "debt-coop-admission-held-for-drop": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: in the D12 form `Core::_admission` (wz-capi-coop engine.rs) is a field held only for its drop under an underscore name, the shape the on-use rooms had until 7f05e7df93 gave them one owner (`OwnPlaced` in engine/state_places.rs) that drops the value in place and frees its allocation. A value held for its drop states its owner by type, not by a name the compiler is told to ignore. Closes when the admission has one owner whose type frees it and no field of Core is held for its drop alone."
+    },
     "debt-coop-serial-sample-not-handed": {
       "status": "deprecated",
       "source": "open-debt register",
@@ -10393,6 +10398,11 @@
       "status": "active",
       "source": "open-debt register",
       "reason": "OPEN: wz-runtime-tokio writer_queue Lanes::a_sender_may_write (Round 4616) leaves a one-way stream to the writer only on a queue that knows what its link hears (LinkHearing, wired for the TCP stream link alone); the multicast groups' queues (multicast_pipeline GroupInline) have no count, so a group sender still writes its own datagram whenever 8 us passed since the last flush, which an unoptimised build or a slow core always exceeds inside a burst. Closed by counting a group's received datagrams into its queue, or by measuring that a group burst is batched anyway."
+    },
+    "debt-host-peer-advanced-comment-stale": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: configs/profiles/host-peer.conf says in a comment that the profile leaves the advanced subscriber's two switches off, while its lines turn them on since a65b209884 (read 2026-11-28 by the api-rest lane). A profile's comment is the reason a reader trusts its lines. Closes when the comment states what the lines do and why."
     },
     "debt-host-slot-node-let-unit-value": {
       "status": "active",
@@ -10506,14 +10516,29 @@
       "source": "open-debt register",
       "reason": "CLOSED (fixed): wz-session-core states the two facts once, in its build script (links = \"wz_session_core\"): it emits the cfgs wz_unicast_runtime_items and wz_wrap_actions that its own declarations of SessionRuntime's items read (crates/wz-session-core/src/link.rs), and the same facts as the metadata keys unicast_runtime_items and wrap_actions. wz-runtime-tokio's and wz-runtime-coop's build scripts read DEP_WZ_SESSION_CORE_* and bind the items on the same cfgs, so an implementor follows the core whatever crate in the graph turned its features on. The reduced builds that left the impl short (transport-qos, transport-lowlatency, session-extcompression, adminspace-core, none) compile; the C1bzr ledger line is gone and no reduced build of wz-runtime-tokio carries a finding it did not; tests runtime_impl::session_runtime_items (2) and session_runtime::wrap_actions_tests (1)."
     },
+    "debt-runtime-coop-doc-links-default-form": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: `cargo doc -p wz-runtime-coop --no-deps` with the crate's defaults fails on unresolved intra-doc links in src/lib.rs (`executor`, `join_handle`, `time`, `time::ClockSource`, `time::CoopTime`), read on main df994d7913 and on the driver lane on 2026-11-28; the modules they name are compiled only under features the default form lacks. Closes when every link resolves in each form the doc lane builds, or the crate doc says which form it documents and that form builds clean."
+    },
     "debt-sce-codegen-provenance": {
       "status": "active",
       "reason": "Round 1994's open item 468, the half `scripts/lib/sce-codegen-oracle.sh` answers for: an untracked build oracle must record WHAT it was built from, not merely that it exists (Layers B/B2 SKIP-green) or when it was built (R114's mtime, which a backwards pin defeats). The sce-codegen instance is closed and gated; the item stays open for the oracles that still carry no provenance record at all -- `target/zenohd`, `target/zenoh-pico-cli`, the capture fixtures, and `binary_freshness_lint.py`, which grades the sibling class by mtime."
+    },
+    "debt-sce-compiled-machines-m9-unmeasured": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: SCE ADR 0155 (compiled reactive machines; prototype b35754b54a4 on SCE branch compiled-reactive; owned by session scxml-core-engine-07, which measured -7,864 B of text, rodata and data.rel.ro and receive Ir unchanged) waits on wz's cell M9 (docs/win-budget/text.md): a handshake's Ir and a fragmented message's receive Ir on the prototype pin against main. Read so far: on df994d7913 `bash scripts/pico-compare.sh opprofile open 8` gives the open op W 65,024.5 Ir. Two attempts failed: the pool tree had not fetched the prototype's SCE commit (run from worktree sce-proto, branch sce-proto f3b7958435, regenerated, or fetch the SCE checkout's compiled-reactive branch into the tree's vendor/sce first), and `subprofile 100000 1200 600` was refused (`count is not above PICO_CMP_SUBPROF_BASE 2000`). Closes when both figures are read on both pins and sent to the SCE session, which decides the ADR."
     },
     "debt-sce-pin-with-policy-overlapping-borrows": {
       "status": "active",
       "source": "open-debt register",
       "reason": "OPEN: Layer Vmiri reports a Stacked Borrows violation inside the pinned SCE runtime: the engine's with_policy hands a policy hook a &mut that overlaps the engine state it borrows. SCE fixed it at b9140288 (SCE ADR 0131: hooks take &mut EngineState<Self>); the wz pin is older. Moving the pin changes the two hand-written StatePolicy impls (crates/wz-statechart-bridge/src/lib.rs, crates/wz-integration-tests/tests/it/files/hal_timer_routing.rs) to the new hook signature, and goes with the SCE pin chain the int-fix lane carries (asked of that lane 2026-11-25). Closed when main pins b9140288 or later and Vmiri reads green."
+    },
+    "debt-session-core-unbuilt-combinations": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: three sites of wz-session-core fail in feature combinations no leg of scripts/lib/nondefault-tests-gate.sh builds, each read on main df994d7913 on 2026-11-28: (1) `--no-default-features --features session-slot,session-unicast,liveliness-token --lib` fails E0392, the lifetime of `LentDeclaration<'a>` (session_actions.rs) unused because the one variant left borrows no key; (2) with `codec-declare` and `rx-control` (or `codec-push` and `rx-push`) and no session role (`session-slot,liveliness-token`), `judge_chain`, `judge_entries`, `then_judge` and `judge_declare_chains` (network_message.rs) compile with no caller and clippy refuses them as dead; a fix gating them on their callers' union is on branch codec-scale (b1032d3f2c) but conflicts with query Q5, which moves the readers to network_message/body_read.rs, so it is redone on main after Q5; (3) tests/bounded_heapless_backing.rs has five unused imports and an unused fn `declares` under `session-slot,liveliness-token --all-targets`. Closes when each site compiles clean and a leg builds session-slot with liveliness-token, with and without session-unicast."
     },
     "debt-shm-reader-keeps-segments-of-gone-providers": {
       "status": "deprecated",
@@ -10539,6 +10564,11 @@
       "status": "active",
       "source": "open-debt register",
       "reason": "OPEN: the Platform workflow job C ABI (windows-latest) fails the same test at f1dc5fa4f, 1eb3817e7 and dc898a1e1 (runs 45184042866, 45312531140, 45329750154): files::fragmentation_roundtrip::a_chain_up_to_the_largest_message_sent_arrives_whole panics at crates/wz-capi-c/tests/it/files/fragmentation_roundtrip.rs:345 with 4000000 bytes never arrived whole at the subscriber; 126 other tests pass. The four pico library package jobs of the same workflow are red on the same heads and were not read. Nothing registers either, and the Platform runs are not part of the land queue's verdict. Closes when the 4 MB chain arrives whole on Windows (read on pc3-win, the Windows verification host) and the package jobs are read and attributed."
+    },
+    "debt-windows-s3-stop-unverified": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: Windows step S3 was stopped by a code reading (docs/c-abi-migration/win-perf.md section 6c, branch win-s3 0518262a0d): the direct engine makes no per-message WSAEWOULDBLOCK recv, so a tcp pong round trip is three Winsock calls as zenoh-pico's select, recv and send, and the tcp cells' +2.2 to +3.5 us gap is read as per-call cost, not call count. The M1 AFD trace on pc3-win that would confirm it has not run. Closes when M1 reads three calls per round trip and no refused recv per message (S3 stays stopped), or reads otherwise and S3 reopens."
     },
     "debt-windows-x86-pico-ratchet-loss": {
       "status": "deprecated",
