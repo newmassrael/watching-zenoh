@@ -179,6 +179,59 @@ fn routing_table_sharing_rwlock_makes_a_writer_wait_for_the_reader() {
     );
 }
 
+/// While a step keeps the writers out ([`TablesCell::between_writes`]), a write on another thread
+/// does not return and a read on a third does; the write returns once the step lets go. Turned
+/// red by a step that keeps no writer out, or that keeps the readers out as well.
+fn between_writes_keeps_the_writer_out_and_lets_the_reader_in(sharing: RoutingTableSharing) {
+    let fwd = router_with_a_client(sharing);
+    let between = fwd.tables.between_writes();
+    let (returned_tx, returned) = mpsc::channel();
+    let writer = declare_on_another_thread(&fwd, returned_tx);
+    let (read_tx, read) = mpsc::channel();
+    let reader = {
+        let fwd = Arc::clone(&fwd);
+        std::thread::spawn(move || {
+            read_tx
+                .send(holds(&fwd.on_tables().tables, KEY))
+                .expect("the test is waiting");
+        })
+    };
+    let read_during = read.recv_timeout(FINISHES_WITHIN);
+    let wrote_during = returned.recv_timeout(HELD_FOR);
+    drop(between);
+    let wrote_after = returned.recv_timeout(FINISHES_WITHIN);
+    writer.join().expect("the writer finishes");
+    reader.join().expect("the reader finishes");
+
+    assert_eq!(
+        read_during,
+        Ok(false),
+        "{sharing:?}: a reader read the tables, without the write, while the writers were kept out"
+    );
+    assert!(
+        wrote_during.is_err(),
+        "{sharing:?}: the writer did not return while the writers were kept out"
+    );
+    assert!(
+        wrote_after.is_ok(),
+        "{sharing:?}: the writer returned once the step let go"
+    );
+    assert!(
+        holds(&fwd.on_tables().tables, KEY),
+        "{sharing:?}: the write was published"
+    );
+}
+
+#[test]
+fn routing_table_sharing_rwlock_between_writes_keeps_the_writer_out_and_lets_the_reader_in() {
+    between_writes_keeps_the_writer_out_and_lets_the_reader_in(RoutingTableSharing::Rwlock);
+}
+
+#[test]
+fn routing_table_sharing_snapshot_between_writes_keeps_the_writer_out_and_lets_the_reader_in() {
+    between_writes_keeps_the_writer_out_and_lets_the_reader_in(RoutingTableSharing::Snapshot);
+}
+
 /// Under `snapshot` a read nested inside another on the same thread routes by the version the
 /// outer read loaded, even after a writer on another thread has published a newer one, as a
 /// nested read under `rwlock` sees the one state no writer can enter (section 4: the pin per

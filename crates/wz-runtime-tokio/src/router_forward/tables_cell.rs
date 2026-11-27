@@ -21,7 +21,9 @@
 //!
 //! The router's code is one for both forms: it reads through [`TablesCell::read`] and
 //! [`TablesCell::read_behind_a_writer_waiting`], and writes through [`TablesCell::write`], each of
-//! which answers a value that derefs to [`Tables`].
+//! which answers a value that derefs to [`Tables`]. A step that must come between two writes and
+//! never inside one holds [`TablesCell::between_writes`], which keeps the writers out and lets
+//! the readers in.
 
 use super::Tables;
 use crate::counter::Counter;
@@ -219,6 +221,28 @@ impl TablesCell {
         })
     }
 
+    /// The writers kept out, and only them, until the result is dropped: no write is under way
+    /// while it is held, and the readers go on as they would. For a step that must come between
+    /// two writes and never inside one: a face watch is made under it, so that a transition a
+    /// write queues is told to the watches made before that write, and a watch made after the
+    /// write reads tables that hold it.
+    ///
+    /// Under `rwlock` a read ([`Self::read`]), which a writer waits for. Under `snapshot` the
+    /// writers' lock, with no draft copied. A thread that holds the tables for writing must not
+    /// take it, as it would wait for itself.
+    #[cfg_attr(debug_assertions, track_caller)]
+    #[must_use = "the writers are kept out only while the result is held"]
+    pub(crate) fn between_writes(&self) -> BetweenWrites<'_> {
+        BetweenWrites {
+            _held: match &self.form {
+                Form::Locked(lock) => Between::Locked { _read: lock.read() },
+                Form::Snapshot(snapshot) => Between::Snapshot {
+                    _writer: snapshot.writer.guard(),
+                },
+            },
+        }
+    }
+
     /// The tables for writing, alone among the writers, until [`TablesWrite::publish`] or the drop.
     ///
     /// Under `rwlock` the write guard, which waits for every reader. Under `snapshot` the writers'
@@ -387,6 +411,19 @@ impl std::ops::Deref for TablesRead<'_> {
             Read::Pinned(pinned) => &pinned.version,
         }
     }
+}
+
+/// The writers of a cell kept out: [`TablesCell::between_writes`].
+pub(crate) struct BetweenWrites<'a> {
+    _held: Between<'a>,
+}
+
+/// What keeps the writers out, in each form of the cell.
+enum Between<'a> {
+    /// `rwlock`: a read, which a writer waits for.
+    Locked { _read: PlainReadGuard<'a, Tables> },
+    /// `snapshot`: the writers' lock.
+    Snapshot { _writer: PlainGuard<'a, ()> },
 }
 
 /// The tables held for writing: [`TablesCell::write`]. [`Self::publish`] ends the write; a write

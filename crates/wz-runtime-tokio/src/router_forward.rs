@@ -464,6 +464,8 @@ mod egress;
 mod egress_tests;
 mod face_runtime;
 mod face_table;
+#[cfg(test)]
+mod face_watch_tests;
 #[cfg(all(test, feature = "transport-batching"))]
 mod fanout_io_tests;
 use face_table::FaceTable;
@@ -3329,12 +3331,10 @@ pub struct RouterForwarder {
     /// The observers of the faces coming up and going down, by the id [`RouterForwarder::watch_faces`]
     /// answered: the program that holds the node is told, outside every lock, as a session is told of
     /// its transports and links.
-    face_watchers: PlainMutex<Vec<(u64, FaceEventSink)>>,
-    /// The allocator of the ids of `face_watchers`.
-    next_face_watcher: std::sync::atomic::AtomicU64,
-    /// The transitions a write of the tables made, to be told once it is released
+    face_watchers: PlainMutex<FaceWatches>,
+    /// The transitions the writes of the tables made, to be told once each write is released
     /// ([`WrittenTables`]): an observer runs user code, and the tables are held for writing.
-    face_events: PlainMutex<Vec<(FaceEventKind, FaceSnapshot)>>,
+    face_events: PlainMutex<Vec<QueuedFaceEvent>>,
     /// Whether `face_events` holds something, so that the write that made nothing pays no lock.
     face_events_pending: std::sync::atomic::AtomicBool,
     /// Whether the face has been told the tables were written since it last looked.
@@ -4324,55 +4324,54 @@ impl RouterForwarder {
     }
 
     /// Be told each time a face comes up or goes down, from now on, until
-    /// [`unwatch_faces`](Self::unwatch_faces) is called with the id answered. `sink` runs on the
-    /// thread of the face, outside every lock of the router.
+    /// [`unwatch_faces`](Self::unwatch_faces) is called with the id answered. `sink` runs on a
+    /// face's thread, outside every lock of the router, and is told the transitions in the order
+    /// the writes of the tables made them.
+    ///
+    /// The watch is made between two writes of the tables, never inside one: it is told the
+    /// transitions of the writes after it and none of a write before it, whose tables a read
+    /// after it finds (a history it reads lists the faces those writes brought). It takes the
+    /// tables as a declaration does, so a thread that holds them for writing (a handler a writer
+    /// calls) must not call it.
     pub fn watch_faces(&self, sink: FaceEventSink) -> u64 {
-        let id = self
-            .next_face_watcher
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        self.face_watchers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push((id, sink));
+        let _between = self.tables.between_writes();
+        let mut watches = self.face_watchers.guard();
+        watches.made += 1;
+        let id = watches.made;
+        watches.sinks.push((id, sink));
         id
     }
 
     /// End the watch `id`. `false` for one that is gone.
     pub fn unwatch_faces(&self, id: u64) -> bool {
-        let mut watchers = self
-            .face_watchers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let before = watchers.len();
-        watchers.retain(|(held, _)| *held != id);
-        watchers.len() != before
+        let mut watches = self.face_watchers.guard();
+        let before = watches.sinks.len();
+        watches.sinks.retain(|(held, _)| *held != id);
+        watches.sinks.len() != before
     }
 
-    /// Keep a transition of a face to be told when the tables are released. A face whose
-    /// identity the handshake has not given is no transport and is not told.
+    /// Keep a transition of a face to be told when the tables are released, to the watches made
+    /// by now: the write that makes it holds the tables, so no watch is made until the write is
+    /// published ([`Self::watch_faces`]). A face whose identity the handshake has not given is no
+    /// transport and is not told.
     fn queue_face_event(&self, kind: FaceEventKind, actions: &SessionLinkActions) {
-        let watched = !self
-            .face_watchers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty();
-        if !watched {
-            return;
-        }
-        let Some(snapshot) = FaceSnapshot::of_actions(actions) else {
+        let Some(watched) = self.face_watchers.guard().up_to_now() else {
             return;
         };
-        self.face_events
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push((kind, snapshot));
+        let Some(face) = FaceSnapshot::of_actions(actions) else {
+            return;
+        };
+        self.face_events.guard().push(QueuedFaceEvent {
+            kind,
+            face,
+            watched,
+        });
         self.face_events_pending
             .store(true, std::sync::atomic::Ordering::Release);
     }
 
-    /// Tell the observers the transitions queued, in the order they were made. Called with no lock
-    /// of the router held.
+    /// Tell the observers the transitions queued, in the order they were made, each to the watches
+    /// it is told to that are still made. Called with no lock of the router held.
     fn tell_face_events(&self) {
         if !self
             .face_events_pending
@@ -4380,25 +4379,62 @@ impl RouterForwarder {
         {
             return;
         }
-        let events = std::mem::take(
-            &mut *self
-                .face_events
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        );
-        let sinks: Vec<FaceEventSink> = self
-            .face_watchers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .map(|(_, sink)| sink.clone())
-            .collect();
-        for (kind, snapshot) in &events {
+        let events = std::mem::take(&mut *self.face_events.guard());
+        for event in &events {
+            // Read for each transition: a watch let go of since is told nothing more.
+            let sinks: Vec<FaceEventSink> = self
+                .face_watchers
+                .guard()
+                .sinks
+                .iter()
+                .filter(|(id, _)| event.watched.includes(*id))
+                .map(|(_, sink)| sink.clone())
+                .collect();
             for sink in &sinks {
-                sink.tell(*kind, snapshot);
+                sink.tell(event.kind, &event.face);
             }
         }
     }
+}
+
+/// The face watches of a router ([`RouterForwarder::watch_faces`]).
+#[derive(Default)]
+struct FaceWatches {
+    /// Each watch not let go of, with the id it was answered.
+    sinks: Vec<(u64, FaceEventSink)>,
+    /// How many watches were ever made, which is the id of the last: the ids count from 1.
+    made: u64,
+}
+
+impl FaceWatches {
+    /// The watches made by now, those a transition made now is told to: `None` while none is
+    /// held, as a watch made later is not told it.
+    fn up_to_now(&self) -> Option<WatchesUpTo> {
+        (!self.sinks.is_empty()).then_some(WatchesUpTo(self.made))
+    }
+}
+
+/// The face watches a transition of a face is told to: those made by the write that made it.
+/// [`RouterForwarder::watch_faces`] makes a watch between two writes, so one made after that write
+/// was published reads the tables as the write left them: a face that came up is in the history
+/// the watch reads, and a face that went was never shown to it. Told of the transition all the
+/// same, a listener with the history would be told twice that the face came up, and one without
+/// it that a face came up that was open before it was declared.
+#[derive(Clone, Copy)]
+struct WatchesUpTo(u64);
+
+impl WatchesUpTo {
+    /// Whether the watch numbered `id` was made by then.
+    fn includes(self, id: u64) -> bool {
+        id <= self.0
+    }
+}
+
+/// A transition of a face a write made, and the watches it is told to.
+struct QueuedFaceEvent {
+    kind: FaceEventKind,
+    face: FaceSnapshot,
+    watched: WatchesUpTo,
 }
 
 /// The tables held for writing. When they are let go the node's own face is told that they may
@@ -5379,8 +5415,7 @@ impl RouterForwarder {
             egress_interceptors: PlainRwLock::new(InterceptorChain::new()),
             interceptor_version: PlainCell::new(0),
             watchers: std::sync::atomic::AtomicUsize::new(0),
-            face_watchers: PlainMutex::new(Vec::new()),
-            next_face_watcher: std::sync::atomic::AtomicU64::new(0),
+            face_watchers: PlainMutex::new(FaceWatches::default()),
             face_events: PlainMutex::new(Vec::new()),
             face_events_pending: std::sync::atomic::AtomicBool::new(false),
             change_told: std::sync::atomic::AtomicBool::new(false),

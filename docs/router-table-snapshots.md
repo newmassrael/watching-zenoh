@@ -154,6 +154,18 @@ What a peer of the zenoh preset can observe must not change under A, which is un
 5. **Callbacks.** A handler called by a reader under B holds a version and no lock, so it may declare,
    which takes the writer mutex. A handler called by a writer (the local face sink for token pushes) must
    still not re-enter the router, under both values, as its documentation says today.
+6. **The faces' coming and going, told to the face watches.** A write that brings a face in or lets one
+   go queues the transition with the number of the last face watch made, and once the write is released
+   the transition is told to the watches up to that number that are still made (`WatchesUpTo`). A watch
+   is numbered between two writes (`TablesCell::between_writes`: a read under A, the writer mutex with
+   no draft under B), so under both values it is made either before a write, and is told what the write
+   did, or after the write is published, and reads tables that hold it: a history it reads lists a face
+   that came up, and it is told nothing of a face it never saw. A watch numbered with no such step could
+   fall inside a write after its transition was queued, and be told nothing while, under B, its history
+   read the version before; or between the publishing and the telling, and be told a face came up that its
+   history listed. A handler a writer calls must not make a watch, as it must not declare. Held under
+   both values by `router_forward/face_watch_tests.rs` and the `between_writes` pair in
+   `table_sharing_pair_tests.rs`.
 
 ## 6. Phases
 
