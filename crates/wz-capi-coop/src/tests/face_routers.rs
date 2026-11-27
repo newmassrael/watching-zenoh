@@ -69,7 +69,9 @@ fn each_faces_router_keys_its_chains_by_channel_and_ends_them_alone() {
 
     const DIAL_PEER: &[u8] = &[0x5a; 16];
     const TAKEN_PEER: &[u8] = &[0x5b; 16];
-    let engine = listening();
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = peer(&sim);
     assert!(
         engine.direct_faces().0 >= 2,
         "CONTROL: the face table holds a row beside the dial role's"
