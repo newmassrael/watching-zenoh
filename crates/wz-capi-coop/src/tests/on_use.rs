@@ -147,8 +147,8 @@ fn an_on_use_engine_and_its_rooms_lie_apart_from_its_arena() {
 /// The plan of a session whose tables take their memory on use lays out no place for its engine or
 /// its faces' rooms, which lie in allocations of their own, while the CONTROL rows, the runtime's
 /// span and the count the arena is kept by, are laid out as the D12 plan lays them. Turned red by
-/// `lay_out_open` laying the engine's place (`ArenaPlan::lay_engine`) or the rooms'
-/// (`ArenaPlan::lay_rooms`) in the on-use form.
+/// `lay_out_open` laying the engine's place (`ArenaPlan::lay_engine`) or a place of the rooms
+/// (`ArenaPlan::lay_rooms`, of any bytes) in the on-use form, whose holds name no rooms' bytes.
 #[test]
 fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
     use crate::arena::{ArenaPart, ArenaPlan, HeldPlaces, LinkCells, PlanShape};
@@ -166,7 +166,6 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
                 actions: 64,
                 halves: 64,
             },
-            rooms: 64,
             held: &HeldPlaces::NONE,
             runtime: 64,
             engine: 64,

@@ -251,6 +251,7 @@ fn held_plan(
         &mut plan,
         &crate::engine::OpenHolds {
             cells: crate::engine::link_cells::<PosixClock>(&links),
+            #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
             rooms: crate::engine::link_rooms_bytes::<crate::tests::PosixLinks>(),
             held,
             runtime,
@@ -1063,7 +1064,8 @@ fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
 /// of the plan the limits lay out, and the rooms themselves, whose size is the stack's waits', a
 /// row the open lays out over the links (`lay_out_open`). Turned red by a plan that leaves either
 /// out, whose open would place it past what the arena has, or that lays the rooms out before the
-/// open knows the stack.
+/// open knows the stack. A session whose tables take their memory on use holds its rooms in an
+/// allocation of their own, and its open lays out no row of them (`tests::on_use`).
 #[test]
 fn the_plan_lays_out_the_faces_rooms_and_their_places() {
     let config = CoopConfig {
@@ -1087,10 +1089,15 @@ fn the_plan_lays_out_the_faces_rooms_and_their_places() {
         "the limits alone do not know the rooms' size"
     );
     let open = host_plan(&config).expect("the build's limits lay an arena out");
-    let rooms = row(&open, "link rooms");
-    let bytes = crate::engine::link_rooms_bytes::<crate::tests::PosixLinks>();
-    assert!(bytes > 0, "CONTROL: the rooms take bytes");
-    assert_eq!((rooms.count, rooms.entry_bytes), (1, bytes));
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    {
+        let rooms = row(&open, "link rooms");
+        let bytes = crate::engine::link_rooms_bytes::<crate::tests::PosixLinks>();
+        assert!(bytes > 0, "CONTROL: the rooms take bytes");
+        assert_eq!((rooms.count, rooms.entry_bytes), (1, bytes));
+    }
+    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    assert!(open.rows().all(|laid| laid.part() != "link rooms"));
 }
 
 /// The key arena is the `KEY_ARENA_BYTES` the session's limits state, one area with its state: a

@@ -276,7 +276,7 @@ session takes its row at its open, as every policy's does.
 | **N3a (landed, `1243d2623f`)** | the session's tables made counted on `OnUse` (`SessionTables::counted`, `Presence::counted`, `CountedTable`, `HeldReplies::counted`) | `session_tables.rs`, `reply_hold.rs` | 0 (no engine makes them yet) | 0 | 0 |
 | **N3b (landed, `ffde81a72e`, `b83c368fbd`, `3da7536dde`)** | the session core's other tables a face and the application hold, counted on `OnUse`, each a constructor as N3a's from the limits the open resolved: `PeerTables::counted` and `count_rows` (the in-place form, as `lend_rows`), `SubscriberPeer::counted`, `ReplyStage::counted`, `FinalStage::counted`, `Requesters::counted` (`ReplyRegistry`, `LivelinessGetRegistry`), `SlotObserverOf::counted` over `CountedTables` (the watcher lists, `LocalTokenRegistry`); `LentRoom` and `PeerTokens` need none (on `OnUse` the composing room is inline, `ComposeInline`, and a peer's tokens a `FixedIdMap` whose keys `keep_keys_in` hands). `ReplyStage::stage_parts` makes both its columns' rooms before it writes either, and the query dispatch asks `FinalStaging::make_room` before a query runs, on a first-use policy (each arm folds away on every other) | `peer_tables.rs`, `slot_observer.rs`, `pubsub.rs`, `reply_stage.rs`, `reply.rs`, `decl_sink.rs`, `declare/{subscriber,queryable,liveliness,liveliness_get,local_token}.rs`, `query.rs`, `query/{in_place,pinned}.rs` | 0 (no case names them; the two room arms fold away on the D12 policies) | 0 | 0 |
 | N3c | the cooperative engine on `OnUse` under `tables-on-use`: `RowPolicy = OnUse`, the registry made by value (a third form beside `RegistryRegion` and the arena's), the open with no plan, no region and no lender (3.1), the session's `KeyBudget` in the boxed engine state (3.2); the moment assertion of N1 reads `AtFirstUse` in that form | `crates/wz-capi-coop` (`lib.rs`, `engine.rs` `lend_session` and `assemble`, `engine/registry.rs`, `registry/placed.rs`; `arena.rs` and `region.rs` not compiled in the form) | -4,500 to -8,200 (3.1, 3.2, 3.3, 3.5) | 0 to -6 (3.2); +3 at worst (3.5) | section 5 |
-| **N3c, step 3a (landed on the lane: `f104d31bc8`, `81cebf0f4c`, `b0afa53110`)** | the engine and the faces' rooms of an on-use session each in an allocation of its own, the engine's claimed before anything is reserved and keeping the arena's memory by a count (11, 3a) | `crates/wz-runtime-coop/src/kept.rs` (`SharedClaim`), `crates/wz-capi-coop` (`engine.rs` `assemble`, `engine_of`, `lay_out_open`; `engine/state_places.rs` `RoomsPlace`; `arena.rs`) | the on-use case +100 to +300 (the claim and the rooms' block, until 3d); D12 0 | 0 | the on-use arena smaller by the engine's and the rooms' bytes, the same bytes from the allocator |
+| **N3c, step 3a (landed on the lane: `f104d31bc8`, `81cebf0f4c`, `b0afa53110`)** | the engine and the faces' rooms of an on-use session each in an allocation of its own, the engine's claimed before anything is reserved and keeping the arena's memory by a count (11, 3a) | `crates/wz-runtime-coop/src/kept.rs` (`SharedClaim`), `crates/wz-capi-coop` (`engine.rs` `assemble`, `engine_of`, `lay_out_open`; `engine/state_places.rs` `OwnPlaced`; `arena.rs`) | the on-use case +100 to +300 (the claim and the rooms' block, until 3d); D12 0 | 0 | the on-use arena smaller by the engine's and the rooms' bytes, the same bytes from the allocator |
 | N3d (11, 3c) | link memory on the heap arm alone (3.6), its source a type the engine names, not a feature | `crates/wz-runtime-coop` (`link_cells.rs` `heap_head`, `kept.rs`, `link_storage.rs`) | -1,000 to -2,000 | 0 to -30 | section 5 |
 | N3e | a key held apart from every row (an object outside the lock: `KeyRef::hold_apart`, `KeysLocked::adopt`, `SampleView::keyexpr_held`) as a `HeapKey` clone taken and let go of under the lock, read by its text outside it | `key_arena.rs` beside `on_use.rs`, `sink.rs`, the engine's object paths | -200 to +200 | 0 | 0 |
 | N4 | the doors: 3.7 | `crates/wz-capi-pico` (`process_pool.rs`, `object_slot.rs`, `bytes.rs`) | -2,000 to -3,000 | 0; the put's to be read | -0 to -8 KiB a pair |
@@ -600,8 +600,13 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   alone, and `lay_out_open` lays the engine's and the rooms' places out there alone, so the on-use
   arena is smaller by both and
   `tests::on_use::an_on_use_open_asks_its_memory_for_the_arena_alone_and_holds_its_state_apart`
-  reads the plan's bytes as it did. The rooms' block is held after their owner in `Core`, whose
-  fields drop in order.
+  reads the plan's bytes as it did. The rooms have one owner in the form, `OwnPlaced`
+  (`engine/state_places.rs`, `Core::rooms`), which drops them where they lie and gives their
+  allocation back after: no field is held for its drop alone. What only the arena's rooms read
+  compiles where the arena holds them: `OpenHolds::rooms`, `link_rooms_bytes`, and
+  `SessionArena::arena_mut` outside the tests (the on-use open lends the arena nothing past its
+  lender's tables); `tests::arena::the_plan_lays_out_the_faces_rooms_and_their_places` reads
+  the rooms' row in the D12 forms and its absence in the on-use one.
 - Not tested: the open refused when the allocator has no room for the engine
   (`ArenaRefused::NoMemory` with the engine's bytes, before anything is reserved) or for the
   rooms (`OwnBlock::take`); only a refusing allocator reaches either.
@@ -903,8 +908,8 @@ The order that builds at each step:
      (`SessionArena::keep`, `SharedClaim::made_with`), so what the engine holds that lies in the
      arena (the lodgings, the handle's place) stands while the engine is held, and the arena's
      memory goes back after the engine's last holder, as before. The rooms lie in an allocation of
-     their own (`RoomsPlace` in an `OwnBlock`, `engine/state_places.rs`), held by the session's
-     state after their owner. The plan lays out neither place in the form (`lay_out_open`). No
+     their own (`OwnPlaced`, `engine/state_places.rs`), whose one owner drops them in place and
+     gives the allocation back. The plan lays out neither place in the form (`lay_out_open`). No
      body of the open's lay-out leaves yet: the arena still lends the transport's tables, the
      ABI's places and the runtime's span, and the form's code grows by the claim (one maker and one
      drop, instantiated for the engine alone) until 3d.

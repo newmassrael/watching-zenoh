@@ -3989,7 +3989,13 @@ impl SessionArena {
         TableLender::new(&mut self.arena)
     }
 
-    /// The arena, to lend from.
+    /// The arena, to lend from: by the open, where it lends the arena more than its lender's
+    /// tables (a session whose tables take their memory on use lends it none of those), and by
+    /// the tests that lend its rows.
+    #[cfg(any(
+        not(all(feature = "tables-on-use", not(feature = "runtime-plan"))),
+        test
+    ))]
     pub(crate) fn arena_mut(&mut self) -> &mut Arena {
         &mut self.arena
     }

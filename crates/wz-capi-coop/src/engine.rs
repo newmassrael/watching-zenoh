@@ -300,7 +300,7 @@ use state_places::PlacedTables;
 #[cfg(not(feature = "runtime-plan"))]
 pub(crate) use state_places::StatePlaces;
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-use state_places::{OwnBlock, OwnState, RoomsPlace};
+use state_places::{OwnBlock, OwnPlaced, OwnState};
 
 /// The state the places of the session's own values and the store of its keys lie in where the
 /// open lends neither from its arena: the region at the head of the arena's block where the build
@@ -1885,7 +1885,9 @@ pub(crate) type RoomPlaces = wz_session_core::bounded::BoundedVec<
 pub(crate) const ROOM_PLACE_BYTES: usize = core::mem::size_of::<Option<RoomPlace>>();
 
 /// The bytes of the rooms of a session over links of `L`, which the open places in the session's
-/// arena (`ArenaPlan::holding_rooms`): how large they are is the stack's waits'.
+/// arena (`ArenaPlan::holding_rooms`): how large they are is the stack's waits'. A session whose
+/// tables take their memory on use places them in an allocation of their own, and lays out none.
+#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
 pub(crate) const fn link_rooms_bytes<L: CoopLinks>() -> usize {
     core::mem::size_of::<LinkRooms<L::Waits>>()
 }
@@ -2899,13 +2901,14 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     registry_lend: RegistryLend,
     /// Where each link that comes up leaves its wait for room, for the publishes that find the
     /// session held ([`CoopEngine::live_to_publish`]). They lie in the arena, owned here, before
-    /// the arena, or in an allocation of their own (`_rooms`) where the tables take their memory
-    /// on use, and are reached by the engine through a handle that counts nothing.
+    /// the arena, and are reached by the engine through a handle that counts nothing.
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
     rooms: Placed<LinkRooms<L::Waits>>,
-    /// The allocation the rooms lie in where the tables take their memory on use: after their
-    /// owner, which drops them in place, and given back after it. Held for its drop alone.
+    /// See the form of a build without `tables-on-use`: where the tables take their memory on use,
+    /// the rooms lie in an allocation of their own, which their owner gives back after it drops
+    /// them where they lie.
     #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-    _rooms: OwnBlock<RoomsPlace<L::Waits>>,
+    rooms: OwnPlaced<LinkRooms<L::Waits>>,
     /// The wake of the links' stack that the program's word that the clock moved on wakes, which
     /// a read waits on beside its links (`CoopConfig::clock_moves`); none for a clock that moves
     /// by itself, or a stack that makes no wake. Held for the session: a wait names it by value.
@@ -4635,7 +4638,9 @@ pub(crate) const fn cells_of<C: ClockSource + 'static>(driver: usize) -> LinkCel
 pub(crate) struct OpenHolds<'h> {
     /// The bytes of each link's cells.
     pub(crate) cells: LinkCells<usize>,
-    /// The bytes of the faces' rooms.
+    /// The bytes of the faces' rooms, where the arena holds them: a session whose tables take their
+    /// memory on use holds them in an allocation of their own, and its plan lays out no place.
+    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
     pub(crate) rooms: usize,
     /// The ABI's places.
     pub(crate) held: &'h HeldPlaces,
@@ -6794,6 +6799,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     const fn open_holds(driver: usize, held: &HeldPlaces, runtime: usize) -> OpenHolds<'_> {
         OpenHolds {
             cells: cells_of::<C>(driver),
+            #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
             rooms: link_rooms_bytes::<L>(),
             held,
             runtime,
@@ -6950,24 +6956,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
             // Where the tables take their memory on use, the rooms lie in an allocation of their
-            // own, held beside their owner.
+            // own, which their owner (`Core::rooms`) gives back after it drops them.
+            // SAFETY: the owner hands a place aligned for the rooms and valid for writes of them,
+            // where they stay until it drops them.
             #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-            let rooms = {
-                let block = OwnBlock::<RoomsPlace<L::Waits>>::take().map_err(OpenError::Arena)?;
-                // SAFETY: the block is zeroed, aligned for the rooms and this open's alone; the
-                // session's state holds it after the rooms' owner (`Core::rooms`), and it neither
-                // moves nor goes back before the rooms are dropped in it.
-                let placed = unsafe {
-                    Placed::written_at(RoomsPlace::rooms_at(block.as_ptr()), |at| {
-                        LinkRooms::init_at(NonNull::new_unchecked(at), waits, places)
-                    })
-                };
-                (placed, block)
-            };
+            let rooms = unsafe {
+                OwnPlaced::written(|at| {
+                    LinkRooms::init_at(NonNull::new_unchecked(at), waits, places)
+                })
+            }
+            .map_err(OpenError::Arena)?;
             Ok((wire, entropy, rooms))
         })?;
-        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-        let (rooms, rooms_block) = rooms;
         // The read slots and send places of the faces past the dial role's, each with a Router of
         // its own over the session's chain buffers, lent to its pump in a cell of its own.
         #[cfg(all(not(wz_round), feature = "listen"))]
@@ -7089,8 +7089,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             local,
             clock,
             rooms,
-            #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-            _rooms: rooms_block,
             transport: TransportState {
                 #[cfg(feature = "listen")]
                 tx_pool_short: lent.tx_pool_short,

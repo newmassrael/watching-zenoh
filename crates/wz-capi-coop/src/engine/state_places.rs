@@ -18,6 +18,8 @@
 
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
 use core::alloc::Layout;
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+use core::mem::ManuallyDrop;
 use core::mem::MaybeUninit;
 use core::ptr::{addr_of_mut, NonNull};
 
@@ -28,6 +30,8 @@ use wz_session_core::bounded::{BoundedVec, ZeroEmpty};
 ))]
 use wz_session_core::caps;
 use wz_session_core::placed::Placed;
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+use wz_session_core::placed::PlacedRef;
 #[cfg(feature = "query")]
 use wz_session_core::reply_hold::HeldReplies;
 #[cfg(all(
@@ -49,8 +53,6 @@ use super::registry::FACE_SETS;
 use super::FacePlane;
 #[cfg(feature = "query")]
 use super::GetPlane;
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-use super::LinkRooms;
 #[cfg(feature = "queryable")]
 use super::QueryPlane;
 #[cfg(wz_round)]
@@ -463,27 +465,78 @@ impl OwnState {
     }
 }
 
-/// The place the faces' rooms lie in where the tables take their memory on use: an allocation of
-/// their own (`OwnBlock`), holding no value until the open writes the rooms there, which their
-/// owner (`Core::rooms`) drops in place before the block goes.
+/// A value written where it lies in an allocation of its own the allocator gave, owned here as a
+/// [`Placed`] owns one whose memory an arena or a region holds: the value is dropped where it lies
+/// when this is, and its allocation given back after it, so one owner answers for both and no
+/// field is held for its drop alone. What the faces' rooms lie in where the tables take their
+/// memory on use (`Core::rooms`).
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-#[repr(transparent)]
-pub(crate) struct RoomsPlace<W>(MaybeUninit<LinkRooms<W>>);
+pub(crate) struct OwnPlaced<T> {
+    /// Dropped by this owner's drop, before the allocation it lies in is given back.
+    value: ManuallyDrop<Placed<T>>,
+}
 
-// SAFETY: a `MaybeUninit` holds no value at any bytes.
 #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-unsafe impl<W> ZeroEmpty for RoomsPlace<W> {}
-
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
-impl<W> RoomsPlace<W> {
-    /// Where the rooms lie in the place at `at`.
+impl<T> OwnPlaced<T> {
+    /// The value `write` writes at the place it is handed, in an allocation of its own. Refused,
+    /// having taken nothing and called nothing, when the allocator has no room for it.
     ///
     /// # Safety
-    /// `at` points at a place of the rooms that is not null.
-    pub(crate) unsafe fn rooms_at(at: NonNull<Self>) -> NonNull<LinkRooms<W>> {
-        // SAFETY: the caller's contract: the field of a value at a pointer that is not null is not
-        // null either.
-        unsafe { value_at(addr_of_mut!((*at.as_ptr()).0)) }
+    /// `write` writes a whole valid `T` at the pointer it is given, which is aligned for `T` and
+    /// valid for writes of one.
+    pub(crate) unsafe fn written(write: impl FnOnce(*mut T)) -> Result<Self, ArenaRefused> {
+        const {
+            assert!(
+                core::mem::size_of::<T>() != 0,
+                "an allocation of its own holds some bytes"
+            )
+        };
+        let layout = Layout::new::<T>();
+        // SAFETY: the layout's size is not zero (above).
+        let at = NonNull::new(unsafe { alloc::alloc::alloc(layout) }.cast::<T>()).ok_or(
+            ArenaRefused::NoMemory {
+                bytes: layout.size(),
+            },
+        )?;
+        // SAFETY: the allocation is aligned and valid for writes of one `T`, which `write` writes
+        // whole (the caller's contract); it is reached through this owner and its handles alone,
+        // and is given back only after the value is dropped (`Drop`).
+        let value = unsafe { Placed::written_at(at, write) };
+        Ok(Self {
+            value: ManuallyDrop::new(value),
+        })
+    }
+
+    /// A handle of the value that counts nothing, as [`Placed::share`] hands one.
+    ///
+    /// # Safety
+    /// As [`Placed::share`]'s, of this owner.
+    pub(crate) unsafe fn share(&self) -> PlacedRef<T> {
+        // SAFETY: the caller's contract, which is the owner's.
+        unsafe { self.value.share() }
+    }
+}
+
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+impl<T> core::ops::Deref for OwnPlaced<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+impl<T> Drop for OwnPlaced<T> {
+    fn drop(&mut self) {
+        let at = NonNull::from(&**self.value).cast::<u8>();
+        // SAFETY: the value is dropped once, here, where it lies, and nothing reaches it after
+        // (`Placed::share`'s contract); its allocation is the one `written` took with this layout,
+        // given back once, after it.
+        unsafe {
+            ManuallyDrop::drop(&mut self.value);
+            alloc::alloc::dealloc(at.as_ptr(), Layout::new::<T>());
+        }
     }
 }
 
