@@ -8685,6 +8685,22 @@
       "carry_forward_bullets": [
         "The register's CRITICAL item 15 (the PARTIAL atom track) loses api-compat-rust. C1d's own-space alias test: read the next hosted run that reaches it. The Windows pico ratchet stays registered."
       ]
+    },
+    "Round 4700": {
+      "decision_summary": "Fill the two Windows time-base rows the hosted size judge left null, from\nthe rows it printed for Platform run 45923879841, so the lane judges them\ninstead of failing on an empty row.",
+      "changes_bullets": [
+        "pico_host_ceiling.json: pico-api-windows-x64/x86-with-time-base rows."
+      ],
+      "verification_bullets": [
+        "rows copied from the judge output of jobs 140263726171 and 140263726199.",
+        "pico_host_ceiling --check and pico_windows_package --selftest pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
