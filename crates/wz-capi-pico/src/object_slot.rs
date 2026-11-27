@@ -378,7 +378,7 @@ pub(crate) unsafe fn entity_engine<'a, T: SessionEntity>(
 /// # Safety
 /// `object` is a live object, which stands for `'a`.
 #[cfg(feature = "engine-tokio")]
-pub(crate) unsafe fn entity_engine<'a, T: SessionEntity>(
+pub(crate) unsafe fn entity_engine<'a, T: SessionEntity + 'a>(
     object: *const T,
 ) -> &'a crate::session::EngineHold {
     // SAFETY: the caller's.
