@@ -1,0 +1,14 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Tighten the size ledger's rows that the landed lanes moved under their
+ratchets, as the gate asks once a ratio falls past its tolerance.
+'''
+changes = '''
+- size_ledger.json: seven area rows of three cases, as --check printed.
+'''
+verification = '''
+- size_ledger_gate --check printed each row on main 239ec7d4d7.
+'''
+carry = '''
+- none for this lane.
+'''
