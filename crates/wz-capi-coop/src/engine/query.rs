@@ -43,8 +43,6 @@
 //! the session's: a router that asked on a link since lost will never read the answer, and a new
 //! router never asked.
 
-use core::ptr::NonNull;
-
 #[allow(unused_imports)]
 use crate::prelude::*;
 
@@ -382,7 +380,10 @@ pub(super) fn leaked_plane(rows: usize) -> Box<QueryPlane> {
     let mut place = Box::<QueryPlane>::new_uninit();
     // SAFETY: the box's place is valid for writes of the plane, which stays there.
     unsafe {
-        QueryPlane::init_at(NonNull::from(&mut *place).cast::<QueryPlane>(), holds);
+        QueryPlane::init_at(
+            core::ptr::NonNull::from(&mut *place).cast::<QueryPlane>(),
+            holds,
+        );
         place.assume_init()
     }
 }
@@ -554,6 +555,7 @@ mod round_tests {
     use super::*;
     use crate::round::AnswersQueries;
     use alloc::sync::Arc;
+    use core::ptr::NonNull;
     use wz_capi_port::WireKey;
 
     /// What the test's engine stand-in was asked to answer: each query's key, its parameters and
