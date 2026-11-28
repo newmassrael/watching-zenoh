@@ -1710,7 +1710,47 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   bodies of the same tables, and the counted tables' constructors. The two libraries' `nm
   --size-sort` after these two commits names which of them is over its D12 twin.
 
+### 7.38 The on-use listener's outbound slots: the red on main
+
+- The red (`tests::tx_pool::a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_does_not`,
+  `listen,tables-on-use`, deterministic, on main too): on use each link held slots of its own
+  and the plan counted no `TX_POOL_SLOTS` (`pooled_buffers` read `LINKS_SHARE_POOLS`, false on
+  use, for both pools; `tx_pool_short` answered never), so the session's bound of the links that
+  hold a frame at once was the lent form's alone, and a droppable publish found a slot while the
+  slow link held the one the session states.
+- `2c9bb35b02`: one bound, both forms. `pooled_buffers` counts the outbound slots for every
+  listening build (the receive pool stays the lent form's), `TransportRows::tx_slots` and
+  `tx_pool_short` read it on use too. The links' account of a shared pool is one type,
+  `PoolClaim` (`wz-runtime-coop` `link_storage.rs`), which `PooledTx` (a slot of the arena's
+  pool) and the new `HeapLinkTx::Bounded` (a slot of the link's own, sent from only while the
+  link holds one of a count of no bytes) both hold. The count's flags lie in the on-use state
+  (`OwnState::tx_slots`, `TX_POOL_SLOTS` of them, zero is free), which outlives every link
+  (`Core::_state` last); the open hands them to the links' source where the slots are fewer than
+  the links (`TransportRows::bound_links`, `HeapBuffers::bounded`). A session that accepts no
+  link (`session-unicast-accept` off) keeps `HeapTx` as its links' store, so the on-use client
+  of the size case is unchanged. `LentByteCells::over` is public (unsafe, its contract as before)
+  and its handles compare by identity.
+- Tests: wz-runtime-coop
+  `link_storage::tests::heap_links_bounded_by_their_sessions_slots_take_one_for_a_grant` (new;
+  red if the bound is read by no link or its claim counts nothing; CONTROL the unbounded source);
+  wz-capi-coop `tests::on_use::an_on_use_listeners_links_are_bounded_by_the_slots_they_share`
+  (new, `listen`; red if the plan counts no slots on use, `tx_pool_short` answers never, or the
+  source is not bounded); `an_on_use_sessions_links_take_their_batch_of_the_heap` reads the
+  shared slots in a listening build.
+
 ## 8. What the main session runs
+
+- The on-use listener's outbound slots (`2c9bb35b02`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --features listen,tables-on-use --lib
+  tests::tx_pool` and `--features listen --lib tests::tx_pool`; `--features listen,tables-on-use
+  --lib tests::on_use` (one more), `--features tables-on-use --lib`, `--features threads,tables-on-use
+  --lib` and the default set's `--lib`; `cargo test --manifest-path crates/Cargo.toml -p
+  wz-runtime-coop --features alloc,session-unicast,listen --lib link_storage` (one more) and
+  `--features alloc,session-unicast --lib link_storage` (count unchanged); clippy of
+  wz-runtime-coop in both of those sets, of wz-session-core `--features alloc`, of wz-capi-coop
+  `--features listen,tables-on-use` and `--features tables-on-use`, and the non-default features
+  gate. Size: the on-use pico client (no `listen`) unchanged; D12 unchanged but for `PooledTx`'s
+  bookkeeping moved into `PoolClaim` (same code); on-use listeners carry `HeapLinkTx`'s match.
 
 - The reds of hn24, N5's areas and the sessions area's two gains (`10cb0b947a`, `55cbf7bb77`,
   `17db2be753`, `d6e0898b3a`), not built or run by this lane. `cargo test --manifest-path
