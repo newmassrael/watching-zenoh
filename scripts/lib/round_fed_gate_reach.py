@@ -362,6 +362,15 @@ DEFERRED: dict[str, str] = {
         "settle job; it reads the source only at the place rustc points to, "
         "to tell a `compile_error!` guard from a defect."
     ),
+    "python_selftest_determinism.py": (
+        "runs each of the 222 Python selftests twice, under two hash seeds "
+        "and two temporary directories: 549s measured on 2026-11-28 at "
+        "load 34-40, eight times the whole round-fed block, so it would "
+        "make every push wait on the slowest selftest twice. What a round "
+        "can make false without running the selftests, the population's "
+        "arms and the table's rows, is its --selftest. Hosted Layer C0 runs "
+        "both legs (run-ci.sh, python_selftest_determinism)."
+    ),
     "z8_upstream_suite.py": (
         "R3866 -- it provisions the pinned upstream tree with a network "
         "clone and then compiles and runs each of upstream's integration "
