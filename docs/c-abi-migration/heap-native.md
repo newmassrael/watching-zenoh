@@ -1662,7 +1662,71 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   `HeapByteCells`' separate count allocation, if one holder can own it. Each that the reading
   shows smaller is taken (the measured-gain rule); none is changed before it is read.
 
+### 7.36 The reds of hn24, and N5's areas
+
+- `10cb0b947a`: two `tests::arena` tests whose premise was the arena `f90e925543` removed on use.
+  `an_open_whose_arena_the_memory_refuses_dials_nothing` is restated for the on-use open: its
+  plan reserves no arena (asserted, CONTROL) and the one block it asks the memory for is its state,
+  so the refusal names `size_of::<OwnState>()` (`crate::engine::OwnState`, now `pub(crate)` for
+  this). `a_region_with_the_engines_places_holds_every_row_an_open_lays_out` is the arena forms'
+  alone: on use neither plan lays out a row or a byte, which
+  `tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime` holds.
+- `55cbf7bb77`: the size ledger's rows of `pico-client-coop-nostd-on-use` from the main session's
+  reading of 2026-11-28: sessions 67,318 / 27,508 (ratchet 2.4473), doors 40,291 / 19,034 (2.1168),
+  transport 24,976 / 13,951 (1.7903), driver 23,076 / 16,049 (1.4379), each the reading's ratio
+  rounded up as the rule asks; keyexpr, codec and language read WIN and are locked.
+  `--per-feature` gives `tables-on-use` +3,534 function bytes: sessions +6,798, doors +922,
+  language -4,075, the other areas about none.
+
+### 7.37 The on-use sessions area: what the reading showed, and what was taken
+
+- `17db2be753`: every on-use column takes its rows by one body. `FirstUse<T, N>::take_memory`
+  was out of line and generic, one copy for each row type the client links; it is replaced by
+  `on_use::take_column(&mut Option<NonNull<u8>>, size, align, count)`, which knows no row type
+  (`take_rows` is inlined into it, no longer a body of its own). A column keeps its rows untyped
+  and reads them as `T` where it reads them (`FirstUse::base`, a `T`'s dangling place for rows of
+  no bytes, whose mark is no place of a `T`). Removes every `FirstUse<T, N>::take_memory`
+  instance and `take_rows`; adds `take_column` and three argument loads at each column's
+  first-take call. Test: `on_use::tests::one_body_takes_every_columns_rows_and_marks_rows_of_no_bytes`
+  (red if the mark is read as a row's place, or a refusal marked taken).
+- `d6e0898b3a`: an own chain buffer is written within its room alone. `OwnBuf` lent its
+  `Vec` (`written`), so `OwnStaging`'s `append` (`extend_from_slice`), `buf` (`resize`) and
+  `commit` carried `Vec`'s growth path though the room was reserved whole at the claim.
+  `OwnBuf::append`, `lend_tail` and `truncate` write in the spare capacity the claim took,
+  bounded by the table's length, and refuse past it. Removes from `OwnStaging`'s three bodies the
+  inlined grow branch (`RawVecInner::reserve` and its `do_reserve_and_handle` call,
+  `extend_with`); `RawVec`'s out-of-line grow bodies leave the library only if no other `Vec<u8>`
+  of the client grows. Receive Ir on use: the fragment's copy has no capacity check before it;
+  unchanged in D12, which links neither. Test:
+  `byte_cells::tests::an_own_buffer_is_written_within_its_room_and_never_grows` (red if a write
+  grows the buffer, a refused write writes part, or a lent tail is not zeroed).
+- Not taken: `HeapByteCells`' count in an allocation of its own. Its premise, one holder that
+  outlives every buffer, is not one wz holds: a rejoined message's buffer is kept by the round
+  (`Round::end_rejoined`) apart from the transport that owns the table, and no drop order ties
+  the two, so the count is held by every handle and every buffer and given back by the last
+  (7.30). Its code is the count's take, a clone and a drop.
+- Left for the next reading: the rest of the sessions area's +6,798 bytes is the per-type bodies
+  of the first-use columns themselves (`push`, `remove`, `retain`, drops), against D12's lent
+  bodies of the same tables, and the counted tables' constructors. The two libraries' `nm
+  --size-sort` after these two commits names which of them is over its D12 twin.
+
 ## 8. What the main session runs
+
+- The reds of hn24, N5's areas and the sessions area's two gains (`10cb0b947a`, `55cbf7bb77`,
+  `17db2be753`, `d6e0898b3a`), not built or run by this lane. `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features tables-on-use --lib`, `--features
+  listen,tables-on-use --lib`, `--features threads,tables-on-use --lib` and the default set's
+  `--lib tests::arena`; `cargo test --manifest-path crates/Cargo.toml -p wz-session-core
+  --features alloc --lib on_use` (one more), `--features alloc --lib byte_cells` (one more),
+  `--features alloc,reassembly --lib chain_staging` and `--lib reassembly_dispatch` (counts
+  unchanged); `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-coop --features
+  alloc,session-unicast,reassembly --lib reassembly_rx`; clippy of wz-session-core `--features
+  alloc` and `--features alloc,reassembly`, of wz-capi-coop `--features tables-on-use`, and the
+  non-default features gate. Then `python3 scripts/lib/size_ledger_gate.py --check` and
+  `--per-feature` for the on-use case, and `capability_cost_gate.py --measure
+  pico-client-coop-nostd-on-use`. Size: on use smaller by one `take_memory` body for each row
+  type linked, and by `OwnStaging`'s inlined grow branches; D12 unchanged (it links neither).
+  Receive Ir (pico-compare, D12): unchanged.
 
 - The reds of hn22 and N5's figures (`6fb3b5d4fc`, `7f5cda0bbe`, `5a728e6395`, `839961f86e`), not
   built or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
