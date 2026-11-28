@@ -169,6 +169,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/arena.rs` | S7 | |
 | `crates/wz-capi-coop/src/calls.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/cache_ring.rs` | S7 |  |
 | `crates/wz-capi-coop/src/engine/decl_watch.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/deliveries.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/direct.rs` | S7 | |
@@ -178,6 +179,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/hold.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/ledger.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/liveliness.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/once_rows.rs` | S7 |  |
 | `crates/wz-capi-coop/src/engine/pinned.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/queries.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/query.rs` | S7 | |
@@ -185,7 +187,9 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine/registry.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/adding.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/registry/counted.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/registry/described.rs` | S7 |  |
 | `crates/wz-capi-coop/src/engine/registry/held.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/registry/owed.rs` | S7 |  |
 | `crates/wz-capi-coop/src/engine/registry/placed.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/replay.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/replies.rs` | S7 | |
@@ -233,6 +237,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/local.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/local_query.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/on_use.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/on_use_listen.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/one_face.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/one_thread.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/plain_put.rs` | excluded: test | Test-only file by its name. |
@@ -512,6 +517,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/faces.rs` | S5 | |
 | `crates/wz-runtime-coop/src/group_transport.rs` | S5 | |
 | `crates/wz-runtime-coop/src/handed.rs` | S5 | |
+| `crates/wz-runtime-coop/src/ip_link.rs` | S5 |  |
 | `crates/wz-runtime-coop/src/ip_stack.rs` | S5 | |
 | `crates/wz-runtime-coop/src/join_handle.rs` | S5 | |
 | `crates/wz-runtime-coop/src/kept.rs` | S5 | |
@@ -847,8 +853,8 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/foreign_version.rs` | S10 | |
 | `crates/wz-session-core/src/fragment_pacing.rs` | S1 | |
 | `crates/wz-session-core/src/frame_encode.rs` | S1 | |
-| `crates/wz-session-core/src/get_plane.rs` | S2 | |
-| `crates/wz-session-core/src/get_plane/tests.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-session-core/src/get_legs.rs` | S2 |  |
+| `crates/wz-session-core/src/get_legs/tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-session-core/src/group_locator.rs` | S1 | |
 | `crates/wz-session-core/src/group_membership.rs` | S1 | |
 | `crates/wz-session-core/src/group_view.rs` | S1 | |
@@ -1056,6 +1062,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/transport_profile.rs` | S1 | |
 | `crates/wz-session-core/src/transport_profile/owned.rs` | S1 | |
 | `crates/wz-session-core/src/transport_timers.rs` | S1 | |
+| `crates/wz-session-core/src/transport_tx.rs` | S1 |  |
 | `crates/wz-session-core/src/ts_stack.rs` | S2 | |
 | `crates/wz-session-core/src/tx_buf.rs` | S1 | |
 | `crates/wz-session-core/src/tx_deadline.rs` | S1 | |
@@ -1101,6 +1108,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-mcu/src/dial.rs` | S5 | |
 | `crates/wz-session-mcu/src/get_mailbox.rs` | S5 | |
 | `crates/wz-session-mcu/src/group_drive.rs` | S5 | |
+| `crates/wz-session-mcu/src/group_drive/driver.rs` | S5 |  |
 | `crates/wz-session-mcu/src/group_drive/stage.rs` | S5 | |
 | `crates/wz-session-mcu/src/latest.rs` | S10 | |
 | `crates/wz-session-mcu/src/lib.rs` | S5, S10 | |
