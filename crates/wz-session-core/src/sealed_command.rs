@@ -62,8 +62,9 @@ pub enum SealRefused {
         /// The last counter taken from the commander.
         last: u64,
     },
-    /// The node has no room for another commander's counter.
-    WindowFull,
+    /// The node keeps no counter for the commander: no grant of its policy names it, so the
+    /// monitor refuses it, and a policy that permits it all the same gives it no counter to take.
+    NoContext,
     /// The node holds no counter for the commander and the command does not carry the echo the
     /// node drew when it last started: the commander repeats the command, under a new counter,
     /// carrying `echo` (RFC 8613, appendix B.1.2).
@@ -88,7 +89,7 @@ impl SealRefused {
             Self::Replay { .. } => {
                 "the counter of the sealed command is not above its commander's last"
             }
-            Self::WindowFull => "this node has no room for another commander's counter",
+            Self::NoContext => "this node keeps no counter for the commander of the sealed command",
             Self::EchoRequired { .. } => "the sealed command must carry this node's echo",
         }
     }
@@ -133,7 +134,7 @@ impl From<seal::SealError> for SealRefused {
             SealError::WrongNode => Self::WrongNode,
             SealError::BadSignature => Self::BadSignature,
             SealError::Replay { last } => Self::Replay { last },
-            SealError::WindowFull => Self::WindowFull,
+            SealError::NoContext => Self::NoContext,
             SealError::EchoRequired { echo } => Self::EchoRequired { echo },
         }
     }
@@ -158,19 +159,21 @@ pub trait SealVerifier {
 }
 
 /// The verifier of a node whose queries are answered one at a time on one thread (the heap
-/// profile's `LifecycleQueries`): its zid, its ES256 and its freshness, in a cell.
+/// profile's `LifecycleQueries`): its zid, its ES256 and its freshness, in a cell. `S` holds
+/// the slots of the commanders the node's policy grants (decision D19).
 #[cfg(feature = "sealed-commands")]
-pub struct SealedCommands<E, const N: usize> {
+pub struct SealedCommands<E, S> {
     node: Zid,
     es256: E,
-    fresh: core::cell::RefCell<seal::Freshness<N>>,
+    fresh: core::cell::RefCell<seal::Freshness<S>>,
 }
 
 #[cfg(feature = "sealed-commands")]
-impl<E, const N: usize> SealedCommands<E, N> {
+impl<E, S> SealedCommands<E, S> {
     /// The verifier of the node `node`, verifying with `es256`, fresh as `fresh` says: after a
-    /// start, [`seal::Freshness::echo`] with an echo drawn from the host's entropy.
-    pub const fn new(node: Zid, es256: E, fresh: seal::Freshness<N>) -> Self {
+    /// start, [`seal::Freshness::started`] with a slot for each granted commander and an echo
+    /// drawn from the host's entropy.
+    pub const fn new(node: Zid, es256: E, fresh: seal::Freshness<S>) -> Self {
         Self {
             node,
             es256,
@@ -180,7 +183,9 @@ impl<E, const N: usize> SealedCommands<E, N> {
 }
 
 #[cfg(feature = "sealed-commands")]
-impl<E: seal::Es256, const N: usize> SealVerifier for SealedCommands<E, N> {
+impl<E: seal::Es256, S: AsRef<[seal::Slot]> + AsMut<[seal::Slot]>> SealVerifier
+    for SealedCommands<E, S>
+{
     fn verify(&self, bytes: &[u8]) -> Result<seal::Verified, SealRefused> {
         seal::verify_sealed(bytes, &self.node, &self.es256).map_err(SealRefused::from)
     }

@@ -934,13 +934,14 @@ impl VerbLegs {
 }
 
 /// The verifier of the sealed commands a fixed-memory node is sent (decision D17): its ES256 (the
-/// TLS library's, `wz_tls_mbedtls::es256::PsaEs256`), and once the node has started, its zid and
-/// the freshness of the commands of up to `N` commanders, in a static behind the runtime's
-/// critical section. `N` is the number of commanders the node's declaration grants a verb to,
-/// so a window filled only by commanders the node permits never refuses one for room.
+/// TLS library's, `wz_tls_mbedtls::es256::PsaEs256`), the `N` commanders its declaration grants
+/// a verb to, and once the node has started, its zid and the freshness of their commands, in a
+/// static behind the runtime's critical section. The commanders are the build's, so the window
+/// has a slot for each of them and for no other key (decision D19).
 #[cfg(feature = "sealed-commands")]
 pub struct FixedSeal<E, const N: usize> {
     es256: E,
+    commanders: [wz_session_core::lifecycle_node::Zid; N],
     state: Mutex<RefCell<Option<SealState<N>>>>,
 }
 
@@ -948,16 +949,20 @@ pub struct FixedSeal<E, const N: usize> {
 #[cfg(feature = "sealed-commands")]
 struct SealState<const N: usize> {
     node: wz_session_core::lifecycle_node::Zid,
-    fresh: wz_session_core::sealed_command::seal::Freshness<N>,
+    fresh: wz_session_core::sealed_command::seal::Freshness<
+        [wz_session_core::sealed_command::seal::Slot; N],
+    >,
 }
 
 #[cfg(feature = "sealed-commands")]
 impl<E, const N: usize> FixedSeal<E, N> {
-    /// A verifier that verifies with `es256` and verifies nothing until it is started. `const`,
-    /// so the image declares it in a `static`.
-    pub const fn new(es256: E) -> Self {
+    /// A verifier that verifies with `es256` the commands of `commanders`, the distinct zids the
+    /// declaration grants a verb to, and verifies nothing until it is started. `const`, so the
+    /// image declares it in a `static`.
+    pub const fn new(es256: E, commanders: [wz_session_core::lifecycle_node::Zid; N]) -> Self {
         Self {
             es256,
+            commanders,
             state: Mutex::new(RefCell::new(None)),
         }
     }
@@ -966,27 +971,11 @@ impl<E, const N: usize> FixedSeal<E, N> {
     /// a commander's first command carries `echo`, drawn from the node's entropy at this start
     /// (RFC 8613, appendix B.1.2). Once: `false` if it was started before, which stays.
     pub fn start(&self, node: wz_session_core::lifecycle_node::Zid, echo: [u8; 16]) -> bool {
-        use wz_session_core::sealed_command::seal::Freshness;
-        self.start_with(node, Freshness::echo(echo))
-    }
-
-    /// Start verifying for the node `node` with the window it wrote down before it stopped and
-    /// gave back now (RFC 8613, appendix B.1.1): no echo is asked. A port that keeps the window
-    /// writes it down after each command the node takes, before it answers. Once, as [`Self::start`].
-    pub fn start_persisted(
-        &self,
-        node: wz_session_core::lifecycle_node::Zid,
-        window: wz_session_core::sealed_command::seal::ReplayWindow<N>,
-    ) -> bool {
-        use wz_session_core::sealed_command::seal::Freshness;
-        self.start_with(node, Freshness::persisted(window))
-    }
-
-    fn start_with(
-        &self,
-        node: wz_session_core::lifecycle_node::Zid,
-        fresh: wz_session_core::sealed_command::seal::Freshness<N>,
-    ) -> bool {
+        use wz_session_core::sealed_command::seal::{Freshness, ReplayWindow, Slot};
+        let fresh = Freshness::started(
+            ReplayWindow::granting(self.commanders.map(Slot::granted)),
+            echo,
+        );
         wz_runtime_coop::cs::with(|cs| {
             let Ok(mut state) = self.state.borrow(cs).try_borrow_mut() else {
                 return false;
@@ -999,12 +988,12 @@ impl<E, const N: usize> FixedSeal<E, N> {
         })
     }
 
-    /// The counters taken so far, for a port that writes the window down; `None` before the
-    /// start.
-    pub fn window(&self) -> Option<wz_session_core::sealed_command::seal::ReplayWindow<N>> {
+    /// The last counter taken from `commander` since the start; `None` before the start, for a
+    /// commander none was taken from, and for a key no grant names.
+    pub fn last(&self, commander: &wz_session_core::lifecycle_node::Zid) -> Option<u64> {
         wz_runtime_coop::cs::with(|cs| {
             let state = self.state.borrow(cs).try_borrow().ok()?;
-            state.as_ref().map(|state| state.fresh.window().clone())
+            state.as_ref()?.fresh.window().last(commander)
         })
     }
 }
@@ -1298,7 +1287,7 @@ mod sealed_tests {
             listed: LISTED.commander(),
             closes: Cell::new(0),
         };
-        let verifier: FixedSeal<DigestEs256, 2> = FixedSeal::new(DigestEs256);
+        let verifier: FixedSeal<DigestEs256, 1> = FixedSeal::new(DigestEs256, [LISTED.commander()]);
         assert_eq!(
             ask(&node, Some(&verifier), Some(&close(1, Some(BOOT)))),
             SealRefused::NotVerified.document(),
@@ -1334,12 +1323,7 @@ mod sealed_tests {
             SealRefused::BadSignature.document()
         );
         assert_eq!(node.closes.get(), 1);
-        assert_eq!(
-            verifier
-                .window()
-                .and_then(|window| window.last(&LISTED.commander())),
-            Some(2)
-        );
+        assert_eq!(verifier.last(&LISTED.commander()), Some(2));
     }
 
     /// A node given no verifier refuses a query that carries an attachment, even from a link its

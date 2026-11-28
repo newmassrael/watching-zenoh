@@ -1884,7 +1884,8 @@ mod tests {
         }
 
         /// A node that grants `close` and `reset` to [`LISTED`] and nothing to the router, holds a
-        /// session with [`PEER_A`], and verifies sealed commands after a start with [`BOOT`].
+        /// session with [`PEER_A`], and verifies sealed commands after a start with [`BOOT`], with
+        /// the one slot its grant makes (decision D19).
         fn node() -> LifecycleQueries<HeapGrants, Table> {
             let grant = alloc::format!("{}=close,reset", zid_text(&LISTED.commander()));
             LifecycleQueries::new(
@@ -1894,10 +1895,13 @@ mod tests {
                 Table(RefCell::new(vec![fake(PEER_A)])),
                 TEST_SEED,
             )
-            .with_seal(SealedCommands::<_, 4>::new(
+            .with_seal(SealedCommands::new(
                 me(),
                 DigestEs256,
-                Freshness::echo(BOOT),
+                Freshness::started(
+                    seal::ReplayWindow::granting([seal::Slot::granted(LISTED.commander())]),
+                    BOOT,
+                ),
             ))
         }
 
@@ -2058,9 +2062,9 @@ mod tests {
             );
         }
 
-        /// A verified command no grant permits takes no counter: its commander is still asked for
-        /// the echo afterwards, so a key nobody granted takes no slot of the window. Red if the
-        /// counter were taken before the monitor decided.
+        /// A verified command of a key no grant names is the monitor's to refuse, each time: the
+        /// node holds no slot for it, so it is neither asked for the echo nor given a counter.
+        /// Red if the window made a slot for a key it was sent, or judged it before the monitor.
         #[test]
         fn a_sealed_command_no_grant_permits_takes_no_counter() {
             let node = node();
@@ -2073,9 +2077,10 @@ mod tests {
             let again = sealed_by(STRANGER, &command(seal::Verb::Close, 2, None));
             assert_eq!(
                 ask_with(&node, &close_key(), Some(&again)).0,
-                Answered::Sealed(SealRefused::EchoRequired { echo: BOOT }),
-                "the stranger has no counter here"
+                Answered::Close(CloseVerdict::Refused(RefusedReason::NotPermitted)),
+                "the stranger has no slot here, so no echo is asked of it"
             );
+            assert!(!closed(&node));
         }
 
         /// A node given no verifier refuses a query that carries an attachment, even from a link

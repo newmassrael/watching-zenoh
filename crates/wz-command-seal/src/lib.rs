@@ -10,7 +10,7 @@
 //! the object and a counter, signed with ES256 by the commander's key, which the object carries.
 //! The node derives the commander's zid from that key ([`zid_of_point`]), so the name needs no
 //! authority between key and name, and a counter per commander that only rises refuses a replay
-//! ([`ReplayWindow`]). This is OSCORE's model (RFC 8613, sections 3 and 7.4) for one object: the
+//! ([`ReplayWindow`], one slot per commander the node's policy grants). This is OSCORE's model (RFC 8613, sections 3 and 7.4) for one object: the
 //! router carries it and holds no authority over it. The format is `docs/command-seal.md`.
 //!
 //! [`open_sealed`] is what a node calls, or [`verify_sealed`] and then [`Verified::take`] when it
@@ -45,12 +45,12 @@ mod replay;
 mod ring_es256;
 
 use cbor::{Reader, Writer, MAJOR_ARRAY, MAJOR_BSTR, MAJOR_MAP, MAJOR_NINT, MAJOR_TAG, MAJOR_UINT};
-pub use fresh::{Freshness, Restart};
+pub use fresh::Freshness;
 pub use key::{
     point_of_spki, spki_of_point, zid_of_point, zid_of_spki, Zid, COORDINATE_LEN, P256_SPKI_LEN,
     P256_SPKI_PREFIX, POINT_LEN, UNCOMPRESSED, ZID_LEN,
 };
-pub use replay::ReplayWindow;
+pub use replay::{ReplayWindow, Slot};
 #[cfg(feature = "ring")]
 pub use ring_es256::{RingEs256, RingSigner};
 
@@ -131,9 +131,9 @@ pub enum SealError {
         /// The last counter taken from the commander.
         last: u64,
     },
-    /// The node holds counters for as many commanders as it has room for, and this commander is
-    /// not one of them.
-    WindowFull,
+    /// The node holds no replay state for this commander: no grant of its policy names it, so no
+    /// slot was made for it (RFC 8613, section 8.2, step 2, a recipient context not found).
+    NoContext,
     /// The node holds no counter for this commander and the command does not carry the echo the
     /// node drew when it started, so it may be a command sealed before the node last started: the
     /// commander repeats it, under a new counter, carrying `echo` (RFC 8613, appendix B.1.2).
@@ -157,7 +157,7 @@ impl core::fmt::Display for SealError {
             Self::WrongNode => f.write_str("a command for another node"),
             Self::BadSignature => f.write_str("the signature does not verify"),
             Self::Replay { last } => write!(f, "a replay: the last counter taken is {last}"),
-            Self::WindowFull => f.write_str("no room for another commander's counter"),
+            Self::NoContext => f.write_str("no counter is kept for this commander"),
             Self::EchoRequired { .. } => f.write_str("the command must carry the node's echo"),
             Self::BufferTooSmall => f.write_str("the buffer cannot hold the sealed command"),
             Self::Signer => f.write_str("the signer did not sign"),
@@ -289,24 +289,24 @@ pub trait Es256Signer {
 ///
 /// [`verify_sealed`] and [`Verified::take`] are the same two steps apart, for a node that
 /// judges the commander between them.
-pub fn open_sealed<E, const N: usize>(
+pub fn open_sealed<E, S>(
     bytes: &[u8],
     this_node: &Zid,
-    window: &mut ReplayWindow<N>,
+    window: &mut ReplayWindow<S>,
     es256: &E,
 ) -> Result<Sealed, SealError>
 where
     E: Es256 + ?Sized,
+    S: AsRef<[Slot]> + AsMut<[Slot]>,
 {
     verify_sealed(bytes, this_node, es256)?.take(window)
 }
 
 /// A sealed command whose signature verified and whose counter is not taken yet.
 ///
-/// Anyone can make a key and seal a command its own signature verifies, so a node that took the
-/// counter of every verified command would give a slot of its window to every key that writes
-/// to it, and a full window refuses the commanders it grants. A node judges the commander first
-/// and takes the counter of a command it permits; one it refuses takes no slot.
+/// Anyone can make a key and seal a command its own signature verifies, so a node judges the
+/// commander first and takes the counter of a command it permits: a key no grant names has no
+/// slot, and a refused command moves no counter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "a verified command is not fresh until its counter is taken"]
 pub struct Verified {
@@ -321,8 +321,11 @@ impl Verified {
     }
 
     /// Take the counter from the window: the command, unless the counter is not above the
-    /// commander's last or the window has no room for the commander.
-    pub fn take<const N: usize>(self, window: &mut ReplayWindow<N>) -> Result<Sealed, SealError> {
+    /// commander's last or the window holds no slot for the commander.
+    pub fn take<S: AsRef<[Slot]> + AsMut<[Slot]>>(
+        self,
+        window: &mut ReplayWindow<S>,
+    ) -> Result<Sealed, SealError> {
         window.accept(&self.sealed.commander, self.sealed.counter)?;
         Ok(self.sealed)
     }
