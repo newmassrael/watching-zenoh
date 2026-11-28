@@ -327,7 +327,10 @@ use state_places::PlacedTables;
 #[cfg(not(wz_lent))]
 pub(crate) use state_places::StatePlaces;
 #[cfg(wz_on_use)]
-use state_places::{OwnBlock, OwnPlaced, OwnState};
+use state_places::{OwnBlock, OwnPlaced};
+// The one block an on-use open asks its memory for, whose size a refused open names.
+#[cfg(wz_on_use)]
+pub(crate) use state_places::OwnState;
 
 /// The state the places of the session's own values and the store of its keys lie in where the
 /// open lends neither from its arena: the region at the head of the arena's block where the build

@@ -310,8 +310,9 @@ fn held_plan(
 }
 
 /// An open whose memory has none to give is refused with the bytes it asked for, before anything
-/// is dialled. The CONTROL is the same open with memory, which dials the probe (and fails, as
-/// nothing answers it).
+/// is dialled: its arena's (with its region's in the region's form), and on use its state's
+/// block. The CONTROL is the same open with memory, which dials the probe (and fails, as nothing
+/// answers it).
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_open_whose_arena_the_memory_refuses_dials_nothing() {
@@ -320,8 +321,13 @@ fn an_open_whose_arena_the_memory_refuses_dials_nothing() {
         .expect("the build's limits lay an arena out");
     let bytes = plan.reserved_bytes().expect("within the address space");
     // A session of the region's form asks for its region and its arena as one block, the arena
-    // after the region on a span's alignment; one whose tables take their memory on use takes its
-    // state from the allocator apart, and asks the memory for its arena alone.
+    // after the region on a span's alignment; one whose tables take their memory on use reserves
+    // no arena, and the one block it asks the memory for is its state.
+    #[cfg(wz_on_use)]
+    let bytes = {
+        assert_eq!(bytes, 0, "CONTROL: an on-use plan reserves no arena");
+        core::mem::size_of::<crate::engine::OwnState>()
+    };
     #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     let bytes = bytes
         + wz_session_core::bounded::Arena::span(core::mem::size_of::<crate::region::StateRegion>())
@@ -3916,7 +3922,10 @@ fn a_region_lays_out_its_rows_for_its_own_shape_and_limits_alone() {
 /// lays out at the open, the links' cells, the rooms, the ABI's places, the runtime's span and the
 /// engine's place after the tables included, so an open by it takes the plan whole and lays out
 /// no row. Turned red by a region that leaves a place out (`OpenRegion::laid` laying none) or
-/// sizes one by anything but the engine's types and the ABI's constants.
+/// sizes one by anything but the engine's types and the ABI's constants. The forms that reserve
+/// an arena alone: on use neither plan lays out a row or a byte
+/// (`tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn a_region_with_the_engines_places_holds_every_row_an_open_lays_out() {
     use crate::arena::HeldPlaces;
