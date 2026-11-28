@@ -1,0 +1,21 @@
+impact = ["watching-zenoh/local-ci-gates"]
+decision = '''
+Hold every test and every Python selftest to the owner's rule that a flake is made impossible by the structure of the test, not lowered by retries, longer timeouts or sleeps: what reaches a clock, a process, a socket, a thread or unseeded randomness is a row with a reason, and a Python selftest must run the same twice.
+'''
+changes = '''
+- scripts/lib/python_selftest_layer_gate.py: the Python selftest layer by ast reach through a script's own functions and the scripts/lib modules it imports; docs/deterministic-tests/python-system-layer.tsv ratchets the 64 scripts that reach a source today.
+- scripts/lib/python_selftest_determinism.py: every selftest run twice with the hash seed and the temporary directory changed; docs/deterministic-tests/python-nondeterministic.tsv starts with no row.
+- scripts/lib/deterministic_test_layer_gate.py covers every crate, placing a module by its target's module tree; system-layer.tsv gains 521 rows; one token read per text instead of a regex per call (35 s to 14 s).
+- Wiring: C0 legs for both Python gates, pre-push for the Python layer gate; docs/deterministic-tests.md sections 5, 9 and 10.
+'''
+verification = '''
+- python_selftest_layer_gate --selftest and --check: ok, 225 scripts, 161 unit, 64 rows.
+- python_selftest_determinism --selftest and --check: ok, 221 selftests ran the same twice, none failing or stalled, about six minutes.
+- deterministic_test_layer_gate --selftest and --check: ok, 884 test modules of 40 crates, 317 unit, 567 rows; the wz-capi-coop rows read as before.
+- gate_provenance_lint, relicense_spdx, script_exercise_census, hook_script_reference_gate, tree_citation_gate, lanes_gate, unguarded_test_filter_lint, prose_named_identifier_gate: ok.
+'''
+carry = '''
+- 269 Rust test modules and 63 Python selftests are pending a move behind a seam; each move deletes its row.
+- The zero-test refusal already exists (lane_decline_read.py, unguarded_test_filter_lint.py); nothing new was added for it.
+- SCE ADR 0156 D15 (seeded simulation host) and D16 (model paths as tests) are the general form; wz's simulated world in wz-capi-coop moves onto D15 when it lands.
+'''
