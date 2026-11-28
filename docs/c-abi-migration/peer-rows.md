@@ -1245,6 +1245,13 @@ which is main's gain and not moved here. The on-use builds that take faces lend 
 arena and make the dial role's face at the open in an allocation of its own; their walks read the
 table's rows through one load of each row's pointer, as main's taken faces did.
 
+**Imports read by the merged arms.** The pair cell main's link halves were laid in
+(`LinkHalves`, of `LinkState` and `SessionCore`) is gone with the lane's `ActionsCell`, so the
+engine imports neither; `ActionsCell` is imported where the arena lays the links' cells out
+(`not(wz_on_use)`, its one reader `cells_of`). `HeldPlaces::rows_of` is built where the tables
+are lent, or taken on use by a build that adds faces: the lent and on-use policies are one choice
+of `build.rs`, so a test's lent arm never meets the on-use one and its gate names neither.
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)
