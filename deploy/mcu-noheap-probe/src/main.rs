@@ -23,8 +23,8 @@
 //!      `::dispatch_sample_borrowed`                            (LivelinessSampleSink)
 //!
 //! R311ho adds a sixth stage that proves the no-heap *emit* (not just the
-//! inbound fire): `declare::local_token::LocalTokenRegistry`
-//! `::respond_to_interest_borrowed` stages borrowed `DeclResponseItem`s,
+//! inbound fire): `declare::local_token::TokenAnswers::stage` stages, from
+//! the tokens a `LocalTokenRegistry` holds, borrowed `DeclResponseItem`s,
 //! and this probe — playing the MCU `ResponseSink` — encodes each into a
 //! stack buffer through SCE's `SliceSink` (`encode<S: SceSink>`). A clean
 //! no-allocator link + a non-zero encode position is the whole-program
@@ -85,10 +85,9 @@ use wz_session_core::sink::{BorrowedSample, SampleSink, SampleView};
 // R311ho — declarer-side liveliness-token no-heap EMIT proof. The
 // registry stages borrowed `DeclResponseItem`s; this probe encodes each
 // into a stack buffer via SCE's `SliceSink` (no allocator).
-use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps;
 use wz_session_core::declare::local_token::{
-    build_final_reply, build_token_reply, DeclResponseItem, LocalTokenRegistry,
+    build_final_reply, build_token_reply, DeclResponseItem, LocalTokenRegistry, TokenAnswers,
 };
 
 use sce_forge_runtime::codec::SliceSink;
@@ -398,6 +397,8 @@ fn main() -> ! {
         let decl_fired = rsub.dispatch_declared_borrowed(&BorrowedDecl {
             id: 3,
             keyexpr: "peer/sub",
+            // The probe keeps no key arena, so no row holds the keyexpr.
+            held: None,
         });
         let undecl_fired = rsub.dispatch_undeclared(3);
         require(
@@ -438,13 +439,10 @@ fn main() -> ! {
             "local-token register",
             lt.register(1, "group1/dev").unwrap_or(false),
         );
-        let mut pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =
-            BoundedVec::new();
+        let mut answers: TokenAnswers = TokenAnswers::default();
         // `Ok(n)` is the whole chain staged; `Err` would be the chain refused
         // whole for want of room, which an empty buffer cannot be.
-        let staged = lt
-            .respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending)
-            .ok();
+        let staged = answers.stage(&lt, Some("group1/**"), 42).ok();
         require("local-token stage", staged == Some(1));
         // The stack buffer one reply is encoded into: the longest interest
         // reply this probe writes, read off the wire layout of the borrowed
@@ -457,7 +455,7 @@ fn main() -> ! {
         // be refused by the sink, and the `require` below says so.
         const REPLY_BUF: usize = 1 + 10 + 1 + 10 + 10 + 3 + caps::MAX_KEYEXPR_BYTES;
         let mut emitted: u32 = 0;
-        for item in pending {
+        while let Some(item) = answers.next_answer() {
             // The full `Declare` envelope is the real emitted unit, so the
             // no-heap proof covers the outer header and the interest id
             // exactly as the AP sink emits them, not just the inner leaf.
