@@ -89,6 +89,7 @@ reaches a source and has none: the census that put every crate in the table at o
 from __future__ import annotations
 
 import argparse
+import functools
 import posixpath
 import re
 import subprocess
@@ -499,13 +500,28 @@ def refs_in(place: Place, a: int, b: int) -> list[tuple[tuple[str, ...], str]]:
     return out
 
 
+NAME_REF = re.compile(r"(?<![A-Za-z0-9_:])(?<![^.]\.)(" + IDENT + r")")
+
+
+@functools.lru_cache(maxsize=None)
+def referred(text: str) -> frozenset[str]:
+    """Every identifier a text refers to: not as a method, nor as a later segment of a path. An
+    identifier is matched whole, so a name is referred to exactly when one of these equals it."""
+    return frozenset(NAME_REF.findall(text))
+
+
 def named(text: str, names: set[str]) -> set[str]:
     """The names a text refers to: not as a method, nor as a later segment of a path."""
     if not names:
         return set()
-    alternatives = "|".join(re.escape(n) for n in sorted(names, key=lambda n: (-len(n), n)))
-    pattern = re.compile(r"(?<![A-Za-z0-9_:])(?<![^.]\.)(" + alternatives + r")\b")
-    return set(pattern.findall(text))
+    plain = {n for n in names if re.fullmatch(IDENT, n)}
+    found = set(referred(text)) & plain
+    other = names - plain
+    if other:
+        alternatives = "|".join(re.escape(n) for n in sorted(other, key=lambda n: (-len(n), n)))
+        pattern = re.compile(r"(?<![A-Za-z0-9_:])(?<![^.]\.)(" + alternatives + r")\b")
+        found |= set(pattern.findall(text))
+    return found
 
 
 def taken(refs: list[tuple[tuple[str, ...], str]], text: str,

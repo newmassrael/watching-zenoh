@@ -1,0 +1,71 @@
+# The system layer of the Python selftests the Python selftest layer gate covers
+# (scripts/lib/python_selftest_layer_gate.py; docs/deterministic-tests.md section 10).
+# One row per script whose selftest reaches a source a unit selftest may not: kind pending is
+# owed a seam between its judgement and its fact-gathering, and its row goes when it has one;
+# kind system has the host as its subject. The gate holds each row to the sources its script
+# reaches, both ways. A row is added only for a script whose subject is the host.
+path	kind	sources	reason
+scripts/host-bench/parity.py	pending	clock,process	census 2026-11-28: reached before the gate
+scripts/host-bench/perf_matrix.py	pending	clock,random,process	census 2026-11-28: reached before the gate
+scripts/lib/admin_node_verdict.py	pending	clock,socket,thread,process	census 2026-11-28: reached before the gate
+scripts/lib/armed_oracle_census.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/armed_skip_guard.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/atom_test_graph.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/build_evidence_lint.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/build_normalization.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/bump_sweep.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/capability_cost_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/capi_c_config_verdict_population.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/capi_unknown_value_policy.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/cargo_workspaces.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/changed_crate_packages.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/debt_plane_census.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/decline_arming_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/drop_in_header_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/ensure_zenohd_at_pin.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/facility_trace.py	pending	clock,process	census 2026-11-28: reached before the gate
+scripts/lib/feature_public_surface_census.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/gate_ledger.py	pending	clock,random,process	census 2026-11-28: reached before the gate
+scripts/lib/gate_reason_claims.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/git_tree.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/guarded_count_gate.py	pending	clock,process	census 2026-11-28: reached before the gate
+scripts/lib/home_path_range_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/hook_script_reference_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/hosted_cancelled_kind.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/hosted_red_ack.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/kit_compare.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/kit_size_delta.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/lane_decline_read.py	pending	clock,process	census 2026-11-28: reached before the gate
+scripts/lib/lane_digest.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/lane_feature_membership_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/lane_graph.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/lane_input_closure.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/lanes_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/message_catalog_map.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/newest_completed_ancestor_run.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/no_allocator_link_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/oracle_pin_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/oracle_provenance_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/oracle_store.py	pending	clock,process	census 2026-11-28: reached before the gate
+scripts/lib/pico_option_field_reader_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/pico_windows_package.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/platform_surface_matrix.py	pending	clock,thread,process	census 2026-11-28: reached before the gate
+scripts/lib/prose_named_identifier_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/python_selftest_determinism.py	system	clock,process	its subject is running a selftest as a process twice and its stall guard; the fixtures it runs are scripts it writes
+scripts/lib/reason_citation_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/relicense_spdx.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/router_interest_qos_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/runci_plan.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/sce_autoroll.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/size_ledger_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/stack_bound_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/stream_fault.py	pending	clock,socket,thread,process	census 2026-11-28: reached before the gate
+scripts/lib/upstream_citation_anchor_gate.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/upstream_feature_census.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/upstream_release_distance.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/upstream_switch_map.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/verdict_leg_mutation.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/verify_plan.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/wz_config.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/wz_node.py	pending	process	census 2026-11-28: reached before the gate
+scripts/lib/wz_package.py	pending	process	census 2026-11-28: reached before the gate

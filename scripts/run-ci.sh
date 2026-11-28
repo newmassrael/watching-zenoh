@@ -2465,6 +2465,17 @@ layer_c0_test_discipline() {
     # moved to the simulated world is stale.
     _runci_leg deterministic_test_layer_gate.selftest -- python3 scripts/lib/deterministic_test_layer_gate.py --selftest
     _runci_leg deterministic_test_layer_gate --after deterministic_test_layer_gate.selftest -- python3 scripts/lib/deterministic_test_layer_gate.py --check
+    # The same rule for the Python selftests (docs/deterministic-tests.md section 10): a selftest
+    # reaches no wall clock, process, socket, thread of its own or unseeded randomness, through
+    # its own functions or the scripts/lib modules it imports, unless its row of
+    # docs/deterministic-tests/python-system-layer.tsv declares it with a reason.
+    _runci_leg python_selftest_layer_gate.selftest -- python3 scripts/lib/python_selftest_layer_gate.py --selftest
+    _runci_leg python_selftest_layer_gate --after python_selftest_layer_gate.selftest -- python3 scripts/lib/python_selftest_layer_gate.py --check
+    # Every Python selftest run twice, the hash seed and the temporary directory changed between
+    # the runs (section 9): two runs that differ are a finding unless a row of
+    # docs/deterministic-tests/python-nondeterministic.tsv names the selftest. About six minutes.
+    _runci_leg python_selftest_determinism.selftest -- python3 scripts/lib/python_selftest_determinism.py --selftest
+    _runci_leg python_selftest_determinism --after python_selftest_determinism.selftest -- python3 scripts/lib/python_selftest_determinism.py --check
     # The completeness scoreboard (docs/completeness-scoreboard.md): four criteria by which wz is
     # held to be more complete than zenoh-pico, each a figure read from the gate or the lane that
     # computes it and held to its row of deploy/completeness_ratchet.json. A figure worse than its

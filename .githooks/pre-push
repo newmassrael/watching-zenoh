@@ -1272,6 +1272,9 @@ round_fed_gates=(
     # host entropy or process unless its row of the system layer's table says why. Fed by the
     # crates' test modules and docs/deterministic-tests/system-layer.tsv; a text read, no build.
     "deterministic_test_layer_gate.py --check"
+    # The same rule for the Python selftests, read with ast over scripts/ and
+    # docs/deterministic-tests/python-system-layer.tsv; no selftest is run, ~6s.
+    "python_selftest_layer_gate.py --check"
     "expired_blocker_lint.py"
     "reason_citation_gate.py"
     # Items 221 and 255 -- a `path:LINE` citation of this tree in a source or script

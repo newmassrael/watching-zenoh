@@ -1,0 +1,6 @@
+# The Python selftests that do not run the same twice (scripts/lib/python_selftest_determinism.py;
+# docs/deterministic-tests.md section 9). Each is run twice, the hash seed and the temporary
+# directory changed between the runs; a row names one whose two runs differ, with the reason,
+# and goes when the selftest is made a function of its input. A row is never added for a
+# selftest that ran the same.
+path	reason
