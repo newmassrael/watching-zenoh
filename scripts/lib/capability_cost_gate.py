@@ -961,15 +961,16 @@ CASES: tuple[Case, ...] = (
     # exports and patterns are pico-client-coop-nostd's, and its features differ by the moment
     # alone, so the size ledger steps from that case to this one by `tables-on-use`.
     Case("pico-client-coop-nostd-on-use", "wz-capi-pico", "libwz_capi_pico.so",
-         "os-host,link-udp,tables-on-use", None,
+         "os-host,link-udp,tables-on-use", 246_600,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, ON_USE_ROWS),
          exports=443, **NOSTD_RELEASE_FORM,
          note="pico-client-coop-nostd with its tables on use: each allocation of the form answers "
               "a refusal as a value (the engine's claim, the state's block, the tables' first "
-              "rows, a key's), so the allocator's abort is forbidden as it is there. No budget "
-              "and no ceiling row until the first reading: --measure prints both"),
+              "rows, a key's), so the allocator's abort is forbidden as it is there. Its budget "
+              "is the one its first reading set (241,680 bytes of text, 0.73x zenoh-pico's, "
+              "+3,702 over its D12 twin read in the same run)"),
     # The cooperative client with the unstable API, which the reference pico of the test lanes is
     # built with (`-DZ_FEATURE_UNSTABLE_API`): entity global ids, source info, cancellation
     # tokens. Nothing of it is the engine's, so it costs the ABI's own code and no engine's.

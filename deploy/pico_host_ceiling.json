@@ -46,6 +46,17 @@
         "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
       }
     },
+    "pico-client-coop-nostd-on-use": {
+      "verdict": "win",
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-28",
+        "wz_text": 241680,
+        "pico_text": 329664,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+      }
+    },
     "pico-client-coop-unstable": {
       "verdict": "win",
       "debt": "debt-pico-host-size-ceiling",
