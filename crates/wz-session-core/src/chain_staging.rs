@@ -688,8 +688,11 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for OwnStagi
             return Err(StagingError::ChainCapExceeded);
         }
         // Within the room taken when the chain started, so the buffer does not grow.
-        chain.buf.written().extend_from_slice(payload);
-        Ok(())
+        if chain.buf.append(payload) {
+            Ok(())
+        } else {
+            Err(StagingError::ChainCapExceeded)
+        }
     }
 
     /// The chain's buffer, taken out of the staging with what was staged in it: the chain's place
@@ -721,15 +724,13 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for OwnStagi
         if !self.fits(chain, want) {
             return Err(StagingError::ChainCapExceeded);
         }
-        let written = chain.buf.written();
-        let start = written.len();
         // `fits` held the end to the capacity, within the room the chain took.
-        let end = start.wrapping_add(want);
-        written.resize(end, 0);
+        let tail = chain
+            .buf
+            .lend_tail(want)
+            .ok_or(StagingError::ChainCapExceeded)?;
         chain.reserved = want;
-        written
-            .get_mut(start..end)
-            .ok_or(StagingError::ChainCapExceeded)
+        Ok(tail)
     }
 
     fn commit(&mut self, chain: &mut Self::Chain, filled: usize) -> Result<(), StagingError> {
@@ -738,8 +739,8 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for OwnStagi
         }
         // The reservation was materialised to lend it out, so what was not filled is given back.
         let unused = chain.reserved.saturating_sub(filled);
-        let written = chain.buf.written();
-        written.truncate(written.len().saturating_sub(unused));
+        let kept = chain.buf.as_slice().len().saturating_sub(unused);
+        chain.buf.truncate(kept);
         chain.reserved = 0;
         Ok(())
     }

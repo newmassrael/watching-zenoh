@@ -436,11 +436,57 @@ impl OwnBuf {
         &self.bytes
     }
 
-    /// What was written in the buffer, to write more in the room it was claimed with: a chain's
-    /// staging writes its fragments through it.
+    /// The room left after what was written: the table's length, which the buffer took room for
+    /// when it was claimed, less what was written.
     #[cfg(any(test, feature = "reassembly"))]
-    pub(crate) fn written(&mut self) -> &mut alloc::vec::Vec<u8> {
-        &mut self.bytes
+    fn room(&self) -> usize {
+        self.table.size().saturating_sub(self.bytes.len())
+    }
+
+    /// Write `bytes` after what was written, in the room the buffer was claimed with; `false`,
+    /// nothing written, past it. The buffer never grows: no path here asks the allocator.
+    #[cfg(any(test, feature = "reassembly"))]
+    pub(crate) fn append(&mut self, bytes: &[u8]) -> bool {
+        let start = self.bytes.len();
+        if bytes.len() > self.room() {
+            return false;
+        }
+        // The claim reserved the table's length, so the spare capacity holds the room.
+        let Some(free) = self.bytes.spare_capacity_mut().get_mut(..bytes.len()) else {
+            return false;
+        };
+        for (to, from) in free.iter_mut().zip(bytes) {
+            to.write(*from);
+        }
+        // SAFETY: the `bytes.len()` bytes after the length are within the capacity and were
+        // written above.
+        unsafe { self.bytes.set_len(start.wrapping_add(bytes.len())) };
+        true
+    }
+
+    /// The `want` bytes after what was written, zeroed and counted as written, for a reader to
+    /// fill in place; `None`, nothing counted, past the room the buffer was claimed with.
+    #[cfg(any(test, feature = "reassembly"))]
+    pub(crate) fn lend_tail(&mut self, want: usize) -> Option<&mut [u8]> {
+        let start = self.bytes.len();
+        if want > self.room() {
+            return None;
+        }
+        let free = self.bytes.spare_capacity_mut().get_mut(..want)?;
+        for byte in free.iter_mut() {
+            byte.write(0);
+        }
+        let end = start.wrapping_add(want);
+        // SAFETY: the `want` bytes after the length are within the capacity and were written
+        // above.
+        unsafe { self.bytes.set_len(end) };
+        self.bytes.get_mut(start..end)
+    }
+
+    /// Keep the first `len` bytes written, and no more.
+    #[cfg(any(test, feature = "reassembly"))]
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.bytes.truncate(len);
     }
 }
 
@@ -641,7 +687,7 @@ mod tests {
     fn kept_bytes_of_an_own_buffer_are_read_where_it_lies() {
         let table = HeapByteCells::try_new(8, 1).expect("the allocator has the count");
         let mut buf = table.claim().expect("the table's one buffer");
-        buf.written().extend_from_slice(&[5, 6, 7]);
+        assert!(buf.append(&[5, 6, 7]), "within the buffer's room");
         let base = buf.as_slice().as_ptr();
         let kept = KeptBytes::own(buf);
         assert_eq!(kept.as_slice(), &[5, 6, 7]);
@@ -649,6 +695,39 @@ mod tests {
         assert_eq!(table.in_use(), 1, "kept, the buffer is out of its table");
         drop(kept);
         assert_eq!(table.in_use(), 0, "let go of, it is the table's again");
+    }
+
+    /// A buffer of the allocator's is written within the room it was claimed with and never
+    /// grows: a write or a lend past the room is refused and writes nothing, a lent tail is zeroed
+    /// and counted as written, and every write lies in the bytes the claim took. Turned red by a
+    /// write that grows the buffer (`Vec::extend_from_slice`), a refusal that writes part, or a
+    /// tail lent with what lay there before.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_own_buffer_is_written_within_its_room_and_never_grows() {
+        let table = HeapByteCells::try_new(4, 1).expect("the allocator has the count");
+        let mut buf = table.claim().expect("the table's one buffer");
+        assert!(buf.append(&[5, 6, 7]), "CONTROL: within the room");
+        let base = buf.as_slice().as_ptr();
+        assert!(!buf.append(&[1, 2]), "past the room");
+        assert_eq!(buf.as_slice(), &[5, 6, 7], "a refused write writes nothing");
+        assert!(
+            buf.lend_tail(2).is_none(),
+            "a tail past the room is refused"
+        );
+        let tail = buf.lend_tail(1).expect("the last byte of the room");
+        assert_eq!(tail, &[0], "a lent tail is zeroed");
+        tail[0] = 9;
+        assert_eq!(buf.as_slice(), &[5, 6, 7, 9], "and counted as written");
+        buf.truncate(2);
+        assert_eq!(buf.as_slice(), &[5, 6]);
+        assert!(buf.append(&[1, 2]), "what was given back is room again");
+        assert_eq!(buf.as_slice(), &[5, 6, 1, 2]);
+        assert_eq!(
+            buf.as_slice().as_ptr(),
+            base,
+            "every write lies where the claim took it"
+        );
     }
 
     /// A table of the allocator's buffers lends as a lent table does: a buffer of room for its
