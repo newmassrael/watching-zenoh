@@ -1,9 +1,10 @@
-# The system layer of the test modules the deterministic test layer gate covers
-# (scripts/lib/deterministic_test_layer_gate.py; docs/deterministic-tests.md sections 4 to 6).
+# The system layer of the test modules of every crate under crates/ (the deterministic test layer
+# gate, scripts/lib/deterministic_test_layer_gate.py; docs/deterministic-tests.md sections 4 to 6).
 # One row per module that reaches a source a unit test may not: kind pending is owed a move to the
-# simulated world (tests::sim) and its row goes when it moves; kind system has the host as its
-# subject. The gate holds each row to the sources its module reaches, both ways. A row is added
-# only for a module whose subject is the host.
+# simulated world and its row goes when it moves; kind system has the host as its subject. The
+# gate holds each row to the sources its module reaches, both ways. Every crate is covered: the
+# rows of each crate's first day are every module of it that reached a source then (the gate's
+# --rows), and a row is added after that only for a module whose subject is the host.
 path	kind	sources	reason
 crates/wz-capi-coop/src/scout/tests.rs	system	clock,socket,thread	the scouting window over sockets the test owns on loopback: the host datagram sockets are its subject
 crates/wz-capi-coop/src/tests.rs	system	clock,socket,thread,random	the test root: the router stand-in on the host and the helpers that open a session on the host links; it stays while a module of this table needs them

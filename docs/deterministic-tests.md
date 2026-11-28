@@ -293,22 +293,36 @@ implementation of the protocol) is declared, with the reason, in the gate's tabl
 
 ## 5. The gate
 
-`scripts/lib/deterministic_test_layer_gate.py`, `--check` and `--selftest`, Python 3.10 at the
-lowest, a text read with no build:
+`scripts/lib/deterministic_test_layer_gate.py`, `--check`, `--selftest` and `--rows`, Python 3.10
+at the lowest, a text read with no build:
 
 - **Population**, derived: every tracked `.rs` file of a covered crate whose path is a test's (a
   `tests/` or `benches/` directory, a file named `tests.rs` or `*_tests.rs`). The covered crates
-  are `wz-capi-coop`; another crate joins with its first table rows. Each file is read with its
-  comments and the bodies of its literals blanked (`scripts/lib/rust_comments.py`).
+  are derived, not listed: every crate with a tracked manifest below `crates/` that declares a
+  `[package]`, and a file belongs to the deepest of them whose directory holds it. Each file is
+  read with its comments and the bodies of its literals blanked
+  (`scripts/lib/rust_comments.py`).
+- **Place**, derived: the target a module is compiled into and its path from that target's
+  root. Each target (`src/lib.rs`, `src/main.rs`, `src/bin/*`, each `tests/*`, `benches/*` and
+  `examples/*`, and every target path a manifest names) is walked from its root through the
+  `mod name;` declarations of its files by the compiler's rule: a `#[path]` from the declaring
+  file's directory, the children of a root or a `mod.rs` in its own directory and those of any
+  other file in the directory of its name, an inline module adding its name. So a file of
+  `tests/it/files/` is `crate::files::..` of the `tests/it` target, a support module two test
+  targets declare is a module of each, and one a `#[path]` brings from another crate (the TLS
+  helpers of `wz-tls-mbedtls`) is the module of the target that declares it. A test file no walk
+  reaches is placed by its path, where the compiler would look for it.
 - **Reach**, derived: a module reaches a source when its text names one of the source's needles
-  (section 4), or when it takes from another module of the population an item that reaches it:
-  a `use super::..` or `use crate::tests::..` import, or such a path in its code (a `super`
-  inside an inline module stays in its file). An item's text is its definition and, for a type,
-  every impl block of that type in its file; an item reaches what its text names, what the items
-  of its own module it names reach, and what its module's imports it names reach, to a fixed
-  point. The read through imports is load-bearing: `tests::admission_heap` names no source and
-  opens its sessions on the host's links through the test root's `open_with`, and a read of what
-  a module names alone put it in the unit layer.
+  (section 4), or when it takes from another module of the population placed in the same target
+  an item that reaches it: a `use` of a `crate::`, `super::` or `self::` path, or of a path
+  that starts at a file module it declares (`mod common; use common::..`), or such a path in its
+  code (a `super`, a `self` or a declared module's name inside an inline module stays in its
+  file). An item's text is its definition and, for a type, every impl block of that type in its
+  file; an item reaches what its text names, what the items of its own module it names reach,
+  and what its module's imports it names reach, to a fixed point. The read through imports is
+  load-bearing: `tests::admission_heap` names no source and opens its sessions on the host's
+  links through the test root's `open_with`, and a read of what a module names alone put it in
+  the unit layer.
 - **Table**: `docs/deterministic-tests/system-layer.tsv`, a header and one row per system-layer
   module: path, kind (`pending`: owed a move to the simulated world; `system`: the host is its
   subject), the sources it reaches (`clock`, `socket`, `thread`, `random`, `process`), the
@@ -319,11 +333,18 @@ lowest, a text read with no build:
   the module moved, and the source or the row goes) or that leaves out one it reaches; a
   population of zero modules or a table read as empty (the gate lost its subject). A line that
   does not read as a row is a finding, never dropped.
-- **Ratchet**: the first table listed every module that reached a source the day it was written
-  (47 rows of 50 modules: 40 `pending`, 7 `system`), so the gate is green on the day it lands
-  and every migration deletes a row; a row is never added for a module that is unit-layer
-  today. That last rule is the review's: the gate cannot tell a new system-layer module from a
-  unit module that went back to the host.
+- **Ratchet**: the first table listed every module of `wz-capi-coop` that reached a source the
+  day it was written (47 rows of 50 modules: 40 `pending`, 7 `system`). Every crate is covered
+  since 2026-11-28, and the table took that day a row for each module of the other crates that
+  reached a source (`--rows`: kind `system` in the interoperation suites `wz-integration-tests`
+  and `wz-host-interop-tests`, `pending` elsewhere, the census as the reason), so the gate is
+  green on the day each crate joined and every migration deletes a row. A crate made later is
+  covered from its first file, with no census of its own. A row is never added for a module that
+  is unit-layer today; that rule is the review's: the gate cannot tell a new system-layer module
+  from a unit module that went back to the host.
+- **Census**: `--rows` prints to stdout, and writes nothing, a row for each module of the tree
+  that reaches a source and has no row, in the table's form; the table is changed by a commit
+  that adds what it printed.
 - **Wiring**, beside the census coverage gate: the pre-push list (`.githooks/pre-push`, after
   `"logic_census_coverage_gate.py --check"`), and in Layer C0 of `scripts/run-ci.sh` the two legs
   `deterministic_test_layer_gate.selftest` and `deterministic_test_layer_gate`, the second
@@ -336,13 +357,20 @@ lowest, a text read with no build:
   declares them it is green; a module with its row taken out, a row for a missing file, a row
   with no reason, a stale source, a row for a module that reaches nothing, a source left out, an
   unknown kind or source, a row of three cells and a wrong header are each a finding; an empty
-  population and a table of no row are each refused.
+  population and a table of no row are each refused. A second tree holds the other layouts: a
+  `tests/it` target whose files take a `crate::` item of a `#[path]` module and a `super::`
+  item of a sibling, test targets that share a declared `common` module by `use` and by a path
+  in code, a `#[path]` into another crate, and under `src/` a `tests.rs` with a child, a
+  `#[path]` test file and a file an inline module declares; each is placed where the compiler
+  puts it and reaches what it takes, the CONTROLs (an item that reaches nothing, a root that
+  only declares) reach nothing, and the census gives the interoperation suites kind `system`,
+  another crate `pending`, and no row to a module with one or that reaches nothing.
 
 What the gate does not see, by its construction: a source reached through a macro, a re-export,
-an impl block in another file than its type, or a product item; an integration test target
-(`tests/*.rs`) is a crate of its own, read for what it names alone; an inline
-`#[cfg(test)] mod tests` inside a product file is outside the population (section 2); and a
-`cfg` is not read, so a source under a `cfg` no lane builds still counts.
+an impl block in another file than its type, or a product item; a module an `include!` brings or
+a `path` a `cfg_attr` gives is not walked; an inline `#[cfg(test)] mod tests` inside a product
+file is outside the population (section 2); and a `cfg` is not read, so a source under a `cfg`
+no lane builds still counts.
 
 ## 6. Migration order
 

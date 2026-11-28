@@ -20,17 +20,31 @@ nothing said which modules had not moved yet.
 
 ## What is derived
 
-The POPULATION is every tracked `.rs` file of a crate in `COVERED` whose path is a test's: in a
+The COVERED crates are every crate with a tracked manifest below `crates/`: a `Cargo.toml` that
+declares a `[package]`, at any depth; a file belongs to the deepest of them whose directory holds
+it. The POPULATION is every tracked `.rs` file of a covered crate whose path is a test's: in a
 `tests/` or `benches/` directory, or named `tests.rs` or `*_tests.rs`. Each is read with its
 comments and the bodies of its literals blanked (`rust_comments.py`), so a source named in prose
 or in a message is not a reach.
 
+A module's PLACE is the target it is compiled into and its path from that target's root. The
+targets are cargo's: `src/lib.rs`, `src/main.rs`, each `src/bin/*`, `tests/*`, `benches/*` and
+`examples/*` (a file, or a directory's `main.rs`), each a crate of its own, and every target path
+a manifest names. Each target's module tree is walked from its root through the `mod name;`
+declarations of its files, product files too, by the compiler's rule: a `#[path]` is read from
+the declaring file's directory; a root or a `mod.rs` holds its children in its own directory and
+any other file in the directory of its name; an inline module adds its name. A file the walk
+reaches from several targets (a support module two test targets declare) has a place in each; a
+test file no walk reaches is placed by its path alone, where the compiler would look for it.
+
 A module REACHES a source when its text names one of the source's needles (`SOURCES`), or when it
-takes from another module of the population (a `use super::..` or `use crate::tests::..` import,
-or such a path in its code) an item that reaches it. An item's text is its definition and, for a
-type, every impl block of that type in its file; an item reaches what its text names, what the
-items of its own module it names reach, and what the items its module imports and its text names
-reach, to a fixed point. A `super` inside an inline module stays in its file.
+takes from another module of the population placed in the same target an item that reaches it: a
+`use` of a `crate::`, `super::` or `self::` path, or of a path whose first segment is a file
+module it declares (`mod common; use common::..`), or such a path in its code. An item's text is
+its definition and, for a type, every impl block of that type in its file; an item reaches what
+its text names, what the items of its own module it names reach, and what the items its module
+imports and its text names reach, to a fixed point. A `super`, a `self` or a declared module's
+name inside an inline module stays in its file.
 
 The read through imports is not decoration. Read on the tree this was written against: the module
 of the open's admission heap names no source and opens the host's links through the test root's
@@ -58,17 +72,28 @@ deletes a row; a row is added only for a module whose subject is the host.
 - That a unit-layer module is deterministic. The simulated world's own order (a hash map's,
   the engine's real sleeps) is the design's audit, not a needle here.
 - Name resolution beyond the text: a source reached through a macro, a re-export, a type whose
-  impl block is in another file, or code outside the population (a product item) is not seen,
-  and an integration test target is a crate of its own, read for what it names alone.
+  impl block is in another file, or code outside the population (a product item) is not seen;
+  a module an `include!` brings, or a `path` given by `cfg_attr`, is not walked.
 - That a `cfg` builds the module: a source under a `cfg` no lane builds still counts.
+
+## R4745 (no register item) -- every crate
+
+The gate first covered `wz-capi-coop` alone, whose test modules sit under `src/tests` of one
+library target, and placed a module by its path. Every crate is covered now, and a module is
+placed by the module tree of its target: a file under `tests/it/files/` takes its helpers from
+`crate::..` of the `tests/it` target, and one a `#[path]` brings from another directory or
+another crate is the module its declaration names. `--rows` prints a row for each module that
+reaches a source and has none: the census that put every crate in the table at once.
 """
 
 from __future__ import annotations
 
 import argparse
+import posixpath
 import re
 import subprocess
 import sys
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -77,8 +102,11 @@ from rust_comments import strip_comments  # noqa: E402  -- after the path insert
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TABLE = "docs/deterministic-tests/system-layer.tsv"
 
-# The crates whose test modules are held to the layer rule.
-COVERED = ("wz-capi-coop",)
+# The crates whose test modules are the interoperation suites: another implementation of the
+# protocol over the host is their subject, so the census gives their modules kind `system` and
+# every other crate's kind `pending`.
+SYSTEM_CRATES = ("crates/wz-integration-tests", "crates/wz-host-interop-tests")
+CENSUS_REASON = "census 2026-11-28: reached before the crate joined the gate"
 
 HEADER = ("path", "kind", "sources", "reason")
 KINDS = ("pending", "system")
@@ -101,7 +129,17 @@ IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 ITEM_HEAD = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:(?:async|unsafe|const|extern)\s+)*"
                        r"(?:fn|type|const|static|struct|enum|union|trait)\s+(" + IDENT + ")", re.M)
 IMPL_HEAD = re.compile(r"^(?:unsafe\s+)?impl\b", re.M)
-INLINE_MOD = re.compile(r"\bmod\s+" + IDENT + r"\s*\{")
+INLINE_MOD = re.compile(r"\bmod\s+(" + IDENT + r")\s*\{")
+# A `mod name;` declaration: rustfmt puts each on a line of its own, after any attribute on it.
+MOD_DECL = re.compile(r"^[ \t]*(?:#\[[^\]\n]*\][ \t]*)*(?:pub(?:\([^)]*\))?[ \t]+)?mod[ \t]+("
+                      + IDENT + r")[ \t]*;", re.M)
+MOD_DECL_HINT = re.compile(r"\bmod\s+" + IDENT + r"\s*;")
+PATH_ATTR = re.compile(r'#\[\s*path\s*=\s*"([^"\\]*)"\s*\]')
+PACKAGE = re.compile(r"^\s*\[package\]\s*$", re.M)
+# A target root cargo finds by itself, as a path below its crate's directory.
+TARGET_ROOT = re.compile(r"^(?:src/(?:lib|main)\.rs|(?:src/bin|tests|benches|examples)/"
+                         r"(?:[^/]+\.rs|[^/]+/main\.rs))$")
+TARGET_TABLES = ("[lib]", "[[bin]]", "[[test]]", "[[bench]]", "[[example]]")
 USE_DECL = re.compile(r"\buse\s+([^;]*);")
 PATH_EXPR = re.compile(r"(?<![A-Za-z0-9_:])((?:super|crate|self)(?:::" + IDENT + ")+)")
 
@@ -124,18 +162,66 @@ def is_test_path(rel: str) -> bool:
                                      or leaf == "tests.rs" or leaf.endswith("_tests.rs"))
 
 
-def module_path(rel: str) -> tuple[str, ...] | None:
-    """The module a file below a crate's directory is, as its path from the crate's root; None
-    outside src/, where an integration test is a crate of its own that nothing here imports
-    from."""
-    if not rel.startswith("src/") or not rel.endswith(".rs"):
+def owner(path: str, crates: Iterable[str]) -> str:
+    """The deepest covered crate whose directory holds a path; the first directory below
+    `crates/` for a path no covered crate holds."""
+    best = ""
+    for crate in crates:
+        if path.startswith(crate + "/") and len(crate) > len(best):
+            best = crate
+    return best or "/".join(path.split("/")[:2])
+
+
+def covered_crates(manifests: Mapping[str, str]) -> list[str]:
+    """The directory of each manifest below `crates/` that declares a package: the workspace's
+    own manifest and a virtual one are no crate."""
+    return sorted(posixpath.dirname(path) for path, text in manifests.items()
+                  if path.startswith("crates/") and path.count("/") >= 2
+                  and PACKAGE.search(text))
+
+
+def target_paths(manifest: str) -> list[str]:
+    """The `path` of each target table of a manifest, relative to its crate's directory."""
+    out: list[str] = []
+    in_target = False
+    for line in manifest.splitlines():
+        cell = line.strip()
+        if cell.startswith("["):
+            in_target = cell in TARGET_TABLES
+            continue
+        m = re.match(r'path\s*=\s*"([^"]*)"', cell)
+        if in_target and m:
+            out.append(m.group(1))
+    return out
+
+
+def derived_place(path: str, crate: str,
+                  tree: Mapping[str, str]) -> tuple[str, tuple[str, ...]] | None:
+    """The target root and the module a file is by its path alone, where the compiler would look
+    for its declaration; None outside the directories of a crate's targets."""
+    rel = path[len(crate) + 1:]
+    if not rel.endswith(".rs"):
         return None
-    segs = rel[len("src/"):-len(".rs")].split("/")
-    if segs[-1] == "mod":
-        segs.pop()
-    if segs in (["lib"], ["main"]):
-        segs = []
-    return ("crate", *segs)
+    parts = rel[:-len(".rs")].split("/")
+    if parts[0] in ("tests", "benches", "examples") or parts[:2] == ["src", "bin"]:
+        k = 3 if parts[0] == "src" else 2
+        if len(parts) <= k:
+            root, segs = rel, []
+        else:
+            root, segs = "/".join(parts[:k]) + "/main.rs", parts[k:]
+        if segs == ["main"]:
+            segs = []
+    elif parts[0] == "src":
+        lone_main = f"{crate}/src/lib.rs" not in tree and f"{crate}/src/main.rs" in tree
+        root = "src/main.rs" if lone_main else "src/lib.rs"
+        segs = parts[1:]
+        if segs in (["lib"], ["main"]):
+            segs = []
+    else:
+        return None
+    if segs and segs[-1] == "mod":
+        segs = segs[:-1]
+    return f"{crate}/{root}", ("crate", *segs)
 
 
 def span_end(text: str, start: int) -> int:
@@ -195,9 +281,102 @@ def inline_mods(text: str) -> list[tuple[int, int]]:
     return [(m.start(), span_end(text, m.end() - 1)) for m in INLINE_MOD.finditer(text)]
 
 
+def attrs_before(text: str, pos: int) -> int:
+    """Where the outer attributes that end at a position start: the position itself when none
+    does."""
+    start = pos
+    while True:
+        j = start
+        while j > 0 and text[j - 1].isspace():
+            j -= 1
+        if j == 0 or text[j - 1] != "]":
+            return start
+        depth, k = 0, j - 1
+        while k >= 0:
+            if text[k] == "]":
+                depth += 1
+            elif text[k] == "[":
+                depth -= 1
+                if depth == 0:
+                    break
+            k -= 1
+        if k <= 0 or text[k - 1] != "#":
+            return start
+        start = k - 1
+
+
 def depth_at(mods: list[tuple[int, int]], pos: int) -> int:
     """How many inline modules of its file hold a position."""
     return sum(1 for a, b in mods if a <= pos < b)
+
+
+def declared(source: str, blanked: str | None = None) -> list[tuple[str, tuple[str, ...],
+                                                                 str | None]]:
+    """Each `mod name;` a file declares: its name, the inline modules that hold it, outermost
+    first, and the value of its `#[path]`. The declarations are found in the text with comments
+    and literal bodies blanked, and a `#[path]` is read at the same place in the text with only
+    the comments taken out, which has the same length."""
+    if not MOD_DECL_HINT.search(source):
+        return []
+    text = strip_comments(source, blank_literals=True) if blanked is None else blanked
+    inline = [(m.start(), span_end(text, m.end() - 1), m.group(1))
+              for m in INLINE_MOD.finditer(text)]
+    kept: str | None = None
+    out: list[tuple[str, tuple[str, ...], str | None]] = []
+    for m in MOD_DECL.finditer(text):
+        names = tuple(name for a, b, name in inline if a < m.start() < b)
+        head = attrs_before(text, m.start())
+        attr = None
+        if "path" in text[head:m.start(1)]:
+            kept = strip_comments(source) if kept is None else kept
+            values = PATH_ATTR.findall(kept[head:m.start(1)])
+            attr = values[-1] if values else None
+        out.append((m.group(1), names, attr))
+    return out
+
+
+def placements(tree: Mapping[str, str], crates: Iterable[str], roots: Iterable[str] = (),
+               blanked: Mapping[str, str] | None = None
+               ) -> dict[str, list[tuple[str, tuple[str, ...]]]]:
+    """The places of every file the module trees of the targets reach, by path: the root of each
+    target that reaches it, and its module there."""
+    known = list(crates)
+    blanked = blanked or {}
+    starts = set(roots)
+    for path in tree:
+        crate = owner(path, known)
+        if path.endswith(".rs") and TARGET_ROOT.match(path[len(crate) + 1:]):
+            starts.add(path)
+    found: dict[str, set[tuple[str, tuple[str, ...]]]] = {}
+    # The modules each file already is in a target: a file that would be in one of them again, or
+    # below one of them (a `#[path]` that leads back up its own tree), is not walked twice.
+    seen: dict[tuple[str, str], list[tuple[str, ...]]] = {}
+    decls: dict[str, list[tuple[str, tuple[str, ...], str | None]]] = {}
+    stack = [(root, root, ("crate",), True) for root in sorted(starts) if root in tree]
+    while stack:
+        path, unit, module, owns = stack.pop()
+        been = seen.setdefault((unit, path), [])
+        if any(module[:len(m)] == m for m in been):
+            continue
+        been.append(module)
+        found.setdefault(path, set()).add((unit, module))
+        if path not in decls:
+            decls[path] = declared(tree[path], blanked.get(path))
+        here = posixpath.dirname(path)
+        own = here if owns else posixpath.join(here, posixpath.basename(path)[:-len(".rs")])
+        for name, inline, attr in decls[path]:
+            if attr is not None:
+                base = posixpath.join(own, *inline) if inline else here
+                candidates = [(posixpath.normpath(posixpath.join(base, attr)), True)]
+            else:
+                base = posixpath.join(own, *inline)
+                candidates = [(posixpath.join(base, name + ".rs"), False),
+                              (posixpath.join(base, name, "mod.rs"), True)]
+            for candidate, child_owns in candidates:
+                if candidate in tree:
+                    stack.append((candidate, unit, module + inline + (name,), child_owns))
+                    break
+    return {path: sorted(places) for path, places in found.items()}
 
 
 def split_top(text: str) -> list[str]:
@@ -236,24 +415,43 @@ def expand_use(tree: str) -> list[list[str]]:
 class Module:
     """One file of the population, as the reach reads it."""
 
-    def __init__(self, rel: str, source: str) -> None:
-        self.module = module_path(rel)
+    def __init__(self, source: str) -> None:
         self.text = strip_comments(source, blank_literals=True)
         self.items = items_of(self.text)
         self.mods = inline_mods(self.text)
+
+
+class Place:
+    """A module of the population where one target puts it: the target's root, the module's path
+    from it, and the modules of the population placed in the same target."""
+
+    def __init__(self, path: str, mod: Module, unit: str, module: tuple[str, ...],
+                 modules: dict[tuple[str, ...], Module]) -> None:
+        self.path = path
+        self.mod = mod
+        self.unit = unit
+        self.module = module
+        self.modules = modules
+        n = len(module)
+        children = sorted({m[n] for m in modules if len(m) == n + 1 and m[:n] == module})
+        # A path in code that starts at a file module this one declares.
+        self.child_path = (re.compile(r"(?<![A-Za-z0-9_:.])((?:"
+                                      + "|".join(re.escape(c) for c in children)
+                                      + r")(?:::" + IDENT + ")+)") if children else None)
         self.imports: list[tuple[tuple[str, ...], str]] = []
 
 
-def resolve(segs: list[str], at: tuple[str, ...] | None, depth: int,
-            modules: dict[tuple[str, ...], Module]) -> tuple[tuple[str, ...], str] | None:
+def resolve(segs: list[str], at: tuple[str, ...], depth: int,
+            modules: Mapping[tuple[str, ...], Module]) -> tuple[tuple[str, ...], str] | None:
     """The module of the population and the item a path names from a file that is the module
     at, depth inline modules deep; None for a path that stays in its file or leaves the
     population."""
-    if at is None or not segs:
+    if not segs:
         return None
-    if segs[0] == "crate":
+    head = segs[0]
+    if head == "crate":
         base, rest = ("crate",), segs[1:]
-    elif segs[0] == "super":
+    elif head == "super":
         k = 0
         while k < len(segs) and segs[k] == "super":
             k += 1
@@ -263,6 +461,12 @@ def resolve(segs: list[str], at: tuple[str, ...] | None, depth: int,
         if up >= len(at):
             return None
         base, rest = at[:len(at) - up], segs[k:]
+    elif depth:
+        return None
+    elif head == "self":
+        base, rest = at, segs[1:]
+    elif at + (head,) in modules:
+        base, rest = at, segs
     else:
         return None
     for n in range(len(rest) - 1, -1, -1):
@@ -272,25 +476,26 @@ def resolve(segs: list[str], at: tuple[str, ...] | None, depth: int,
     return None
 
 
-def refs_in(mod: Module, a: int, b: int,
-            modules: dict[tuple[str, ...], Module]) -> list[tuple[tuple[str, ...], str]]:
-    """What the imports and paths of a span of a file take from other modules of the
-    population."""
+def refs_in(place: Place, a: int, b: int) -> list[tuple[tuple[str, ...], str]]:
+    """What the imports and paths of a span of a file take from other modules of the population
+    placed in its target."""
     out: list[tuple[tuple[str, ...], str]] = []
-    if mod.module is None:
-        return out
+    mod = place.mod
     part = mod.text[a:b]
     for m in USE_DECL.finditer(part):
         depth = depth_at(mod.mods, a + m.start())
         for segs in expand_use(m.group(1)):
-            hit = resolve(segs, mod.module, depth, modules)
+            hit = resolve(segs, place.module, depth, place.modules)
             if hit:
                 out.append(hit)
-    for m in PATH_EXPR.finditer(part):
-        hit = resolve(m.group(1).split("::"), mod.module, depth_at(mod.mods, a + m.start()),
-                      modules)
-        if hit:
-            out.append(hit)
+    for pattern in (PATH_EXPR, place.child_path):
+        if pattern is None:
+            continue
+        for m in pattern.finditer(part):
+            hit = resolve(m.group(1).split("::"), place.module,
+                          depth_at(mod.mods, a + m.start()), place.modules)
+            if hit:
+                out.append(hit)
     return out
 
 
@@ -304,7 +509,7 @@ def named(text: str, names: set[str]) -> set[str]:
 
 
 def taken(refs: list[tuple[tuple[str, ...], str]], text: str,
-          modules: dict[tuple[str, ...], Module]) -> list[tuple[tuple[str, ...], str]]:
+          modules: Mapping[tuple[str, ...], Module]) -> list[tuple[tuple[str, ...], str]]:
     """The references with each glob replaced by the items of its module the text refers to,
     and every name no item of its module carries dropped."""
     out: list[tuple[tuple[str, ...], str]] = []
@@ -317,39 +522,67 @@ def taken(refs: list[tuple[tuple[str, ...], str]], text: str,
     return out
 
 
-def crate_of(path: str) -> str:
-    return path[len("crates/"):].partition("/")[0]
+def known_crates(files: Iterable[str], crates: Iterable[str] | None) -> list[str]:
+    """The covered crates given, or for a population given alone, the directory below
+    `crates/` of each of its files."""
+    if crates is not None:
+        return sorted(crates)
+    return sorted({owner(path, ()) for path in files})
 
 
-def reach_of(files: dict[str, str]) -> dict[str, list[str]]:
-    """The sources each module of the population reaches, by path."""
-    crates: dict[str, dict[tuple[str, ...], Module]] = {}
-    mods: dict[str, Module] = {}
-    for path, source in files.items():
-        mod = Module(path[len("crates/"):].partition("/")[2], source)
-        mods[path] = mod
-        if mod.module is not None:
-            crates.setdefault(crate_of(path), {})[mod.module] = mod
-    for path, mod in mods.items():
-        modules = crates.get(crate_of(path), {})
-        mod.imports = taken(refs_in(mod, 0, len(mod.text), modules), mod.text, modules)
+def reach_of(files: dict[str, str], tree: Mapping[str, str] | None = None,
+             crates: Iterable[str] | None = None,
+             roots: Iterable[str] = ()) -> dict[str, list[str]]:
+    """The sources each module of the population reaches, by path. The tree is every file the
+    walk of the targets may read (the population when none is given), the crates are the
+    covered ones, and the roots are the target paths the manifests name."""
+    lookup: Mapping[str, str] = files if tree is None else tree
+    known = known_crates(files, crates)
+    mods = {path: Module(source) for path, source in files.items()}
+    walked = placements(lookup, known, roots, {path: mod.text for path, mod in mods.items()})
 
-    reach: dict[tuple[str, tuple[str, ...], str], set[str]] = {}
-    edges: dict[tuple[str, tuple[str, ...], str], set[tuple[str, tuple[str, ...], str]]] = {}
-    for crate, modules in crates.items():
-        for module, mod in modules.items():
-            imported = {item for _, item in mod.imports}
+    # A place the walk found comes before one read from a path, so a file placed by its path
+    # alone never takes the module of one a declaration placed.
+    units: dict[str, dict[tuple[str, ...], str]] = {}
+    spots: list[tuple[str, str, tuple[str, ...]]] = []
+    for walk in (True, False):
+        for path in sorted(files):
+            if walk:
+                found = walked.get(path, [])
+            else:
+                fallback = None if path in walked else derived_place(path, owner(path, known),
+                                                                     lookup)
+                found = [fallback] if fallback else []
+            for unit, module in found:
+                if units.setdefault(unit, {}).setdefault(module, path) == path:
+                    spots.append((path, unit, module))
+    modules_of = {unit: {module: mods[path] for module, path in held.items()}
+                  for unit, held in units.items()}
+    places: dict[str, list[Place]] = {}
+    for path, unit, module in spots:
+        place = Place(path, mods[path], unit, module, modules_of[unit])
+        place.imports = taken(refs_in(place, 0, len(place.mod.text)), place.mod.text,
+                              place.modules)
+        places.setdefault(path, []).append(place)
+
+    Key = tuple[str, tuple[str, ...], str]
+    reach: dict[Key, set[str]] = {}
+    edges: dict[Key, set[Key]] = {}
+    for held in places.values():
+        for place in held:
+            mod, unit = place.mod, place.unit
+            imported = {item for _, item in place.imports}
             for name, spans in mod.items.items():
-                key = (crate, module, name)
+                key = (unit, place.module, name)
                 text = "\n".join(mod.text[a:b] for a, b in spans)
                 reach[key] = set(direct(text))
-                out: set[tuple[str, tuple[str, ...], str]] = set()
+                out: set[Key] = set()
                 for a, b in spans:
-                    out.update((crate, m, i) for m, i in
-                               taken(refs_in(mod, a, b, modules), text, modules))
-                out.update((crate, module, n) for n in named(text, set(mod.items) - {name}))
+                    out.update((unit, m, i) for m, i in
+                               taken(refs_in(place, a, b), text, place.modules))
+                out.update((unit, place.module, n) for n in named(text, set(mod.items) - {name}))
                 refer = named(text, imported)
-                out.update((crate, m, i) for m, i in mod.imports if i in refer)
+                out.update((unit, m, i) for m, i in place.imports if i in refer)
                 out.discard(key)
                 edges[key] = out
     changed = True
@@ -366,8 +599,9 @@ def reach_of(files: dict[str, str]) -> dict[str, list[str]]:
     result: dict[str, list[str]] = {}
     for path, mod in mods.items():
         got = set(direct(mod.text))
-        for module, item in mod.imports:
-            got |= reach[(crate_of(path), module, item)]
+        for place in places.get(path, []):
+            for module, item in place.imports:
+                got |= reach[(place.unit, module, item)]
         result[path] = [source for source in SOURCES if source in got]
     return result
 
@@ -396,14 +630,17 @@ def parse_table(text: str) -> tuple[list[tuple[str, str, str, str]], list[str]]:
     return rows, bad
 
 
-def judge(files: dict[str, str], table_text: str) -> tuple[list[str], dict[str, int]]:
+def judge(files: dict[str, str], table_text: str, tree: Mapping[str, str] | None = None,
+          crates: Iterable[str] | None = None,
+          roots: Iterable[str] = ()) -> tuple[list[str], dict[str, int]]:
     """Every finding of a population (path to text) against the table's text, and the counts of
     what is placed. Raises LostSubject on a population or a table that reads as empty."""
     rows, found = parse_table(table_text)
     if not files or not rows:
         raise LostSubject(f"read {len(files)} test module(s) and {len(rows)} table row(s); the "
                           "gate lost its subject and must not pass over an empty population")
-    reach = reach_of(files)
+    known = known_crates(files, crates)
+    reach = reach_of(files, tree, known, roots)
     seen: dict[str, int] = {}
     for path, _, _, _ in rows:
         seen[path] = seen.get(path, 0) + 1
@@ -416,8 +653,8 @@ def judge(files: dict[str, str], table_text: str) -> tuple[list[str], dict[str, 
         if n > 1:
             found.append(f"`{path}` has {n} rows; give it one")
         if path not in reach:
-            found.append(f"`{path}` has a row but is not a tracked test module of "
-                         f"{', '.join(COVERED)}")
+            found.append(f"`{path}` has a row but is not a tracked test module of a crate "
+                         "under crates/")
     for path, kind, cell, reason in rows:
         if kind not in KINDS:
             found.append(f"`{path}`: kind `{kind}` is not one of {', '.join(KINDS)}")
@@ -439,6 +676,7 @@ def judge(files: dict[str, str], table_text: str) -> tuple[list[str], dict[str, 
             found.append(f"`{path}` reaches {', '.join(missing)}, which its row does not "
                          "declare")
     counts = {
+        "crates": len({owner(path, known) for path in reach}),
         "modules": len(reach),
         "unit": sum(1 for sources in reach.values() if not sources),
         "rows": len(rows),
@@ -448,16 +686,68 @@ def judge(files: dict[str, str], table_text: str) -> tuple[list[str], dict[str, 
     return found, counts
 
 
-def tracked_population(root: Path) -> dict[str, str]:
-    """Every tracked test module of the covered crates, by path, with its text."""
-    run = subprocess.run(["git", "-C", str(root), "ls-files", "--"]
-                         + [f"crates/{crate}" for crate in COVERED],
+def census_rows(reach: dict[str, list[str]], table_text: str,
+                crates: Iterable[str]) -> list[str]:
+    """A table row for each module that reaches a source and has none, by path: kind `system`
+    in an interoperation suite and `pending` elsewhere, the census as its reason."""
+    rows, _ = parse_table(table_text)
+    have = {row[0] for row in rows}
+    known = list(crates)
+    out: list[str] = []
+    for path, sources in sorted(reach.items()):
+        if sources and path not in have:
+            kind = "system" if owner(path, known) in SYSTEM_CRATES else "pending"
+            out.append("\t".join((path, kind, ",".join(sources), CENSUS_REASON)))
+    return out
+
+
+class TrackedTree(Mapping):
+    """The tracked `.rs` files below `crates/`, each read the first time it is asked for: the
+    walk of the targets reads the product files that declare modules, and no other."""
+
+    def __init__(self, root: Path, paths: Iterable[str]) -> None:
+        self.root = root
+        self.paths = sorted(paths)
+        self.known = set(self.paths)
+        self.texts: dict[str, str] = {}
+
+    def __getitem__(self, path: str) -> str:
+        if path not in self.known:
+            raise KeyError(path)
+        if path not in self.texts:
+            self.texts[path] = (self.root / path).read_text(encoding="utf-8")
+        return self.texts[path]
+
+    def __contains__(self, path: object) -> bool:
+        return path in self.known
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.paths)
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+
+def tracked(root: Path) -> tuple[dict[str, str], TrackedTree, list[str], list[str]]:
+    """Every tracked test module of the covered crates, by path, with its text; the tracked tree
+    the walk reads; the covered crates; and the target paths their manifests name."""
+    run = subprocess.run(["git", "-C", str(root), "ls-files", "--", "crates"],
                          capture_output=True, text=True, check=True)
+    paths = run.stdout.splitlines()
+    manifests = {path: (root / path).read_text(encoding="utf-8") for path in paths
+                 if path.endswith("/Cargo.toml")}
+    crates = covered_crates(manifests)
+    covered = set(crates)
+    tree = TrackedTree(root, [path for path in paths if path.endswith(".rs")])
     files: dict[str, str] = {}
-    for path in run.stdout.split():
-        if crate_of(path) in COVERED and is_test_path(path[len("crates/"):].partition("/")[2]):
-            files[path] = (root / path).read_text(encoding="utf-8")
-    return files
+    for path in tree:
+        crate = owner(path, crates)
+        if crate in covered and is_test_path(path[len(crate) + 1:]):
+            files[path] = tree[path]
+    roots = sorted({posixpath.normpath(posixpath.join(posixpath.dirname(manifest), target))
+                    for manifest, text in manifests.items()
+                    if posixpath.dirname(manifest) in covered for target in target_paths(text)})
+    return files, tree, crates, roots
 
 
 def check(root: Path = REPO_ROOT) -> int:
@@ -465,8 +755,9 @@ def check(root: Path = REPO_ROOT) -> int:
     if not table.is_file():
         print(f"deterministic-test-layer: FAIL -- {TABLE} is missing", file=sys.stderr)
         return 1
+    files, tree, crates, roots = tracked(root)
     try:
-        found, counts = judge(tracked_population(root), table.read_text(encoding="utf-8"))
+        found, counts = judge(files, table.read_text(encoding="utf-8"), tree, crates, roots)
     except LostSubject as exc:
         print(f"deterministic-test-layer: FAIL -- {exc}", file=sys.stderr)
         return 1
@@ -480,9 +771,26 @@ def check(root: Path = REPO_ROOT) -> int:
               file=sys.stderr)
         return 1
     print(f"deterministic-test-layer: ok -- {counts['modules']} test module(s) of "
-          f"{', '.join(COVERED)}: {counts['unit']} in the unit layer, {counts['rows']} "
+          f"{counts['crates']} crate(s): {counts['unit']} in the unit layer, {counts['rows']} "
           f"system-layer row(s) ({counts['pending']} pending a move to the simulated world, "
           f"{counts['system']} whose subject is the host)")
+    return 0
+
+
+def print_census(root: Path = REPO_ROOT) -> int:
+    """Print the census rows of the tree to stdout; the table itself is not written."""
+    files, tree, crates, roots = tracked(root)
+    if not files:
+        print("deterministic-test-layer: FAIL -- read no test module; the census lost its "
+              "subject", file=sys.stderr)
+        return 1
+    table = root / TABLE
+    text = table.read_text(encoding="utf-8") if table.is_file() else ""
+    lines = census_rows(reach_of(files, tree, crates, roots), text, crates)
+    for line in lines:
+        print(line)
+    print(f"deterministic-test-layer: {len(lines)} row(s) for module(s) that reach a source and "
+          f"have none in {TABLE}", file=sys.stderr)
     return 0
 
 
@@ -532,6 +840,60 @@ FIXTURES = {
 }
 
 
+# Other layouts: a test target with a module tree (`tests/it`), test targets that share a support
+# module, one that takes it from another crate by `#[path]`, and test files a library declares
+# under `src/`. The two files of `src/` that are not a test's are the walk's only.
+LAYOUTS = {
+    "crates/wz-integration-tests/tests/it/main.rs": ("mod files;\n\n"
+                                                     "#[path = \"../shared/net.rs\"]\nmod net;\n"),
+    "crates/wz-integration-tests/tests/it/files/mod.rs": "mod dial;\nmod hears;\nmod quiet;\n",
+    "crates/wz-integration-tests/tests/it/files/dial.rs": (
+        "use crate::net::bind;\n\npub(crate) fn helper() -> u16 {\n    bind()\n}\n\n"
+        "pub(crate) fn plain() -> u16 {\n    7\n}\n"),
+    "crates/wz-integration-tests/tests/it/files/hears.rs": ("use super::dial::helper;\n\n"
+                                                            "fn t() {\n    helper();\n}\n"),
+    "crates/wz-integration-tests/tests/it/files/quiet.rs": ("use super::dial::plain;\n\n"
+                                                            "fn t() {\n    plain();\n}\n"),
+    "crates/wz-integration-tests/tests/shared/net.rs": ("pub fn bind() -> u16 {\n"
+                                                        "    let _ = std::net::UdpSocket::bind;\n"
+                                                        "    0\n}\n"),
+    "crates/wz-integration-tests/tests/spawned.rs": ("mod common;\n\nuse common::spawn;\n\n"
+                                                     "fn t() {\n    spawn();\n}\n"),
+    "crates/wz-integration-tests/tests/pathed.rs": ("mod common;\n\n"
+                                                    "fn t() {\n    common::spawn();\n}\n"),
+    "crates/wz-integration-tests/tests/idle.rs": ("mod common;\n\n"
+                                                  "fn t() {\n    common::idle();\n}\n"),
+    "crates/wz-integration-tests/tests/common/mod.rs": ("pub fn spawn() {\n"
+                                                        "    std::thread::spawn(|| {});\n}\n\n"
+                                                        "pub fn idle() {}\n"),
+    "crates/wz-host-interop-tests/tests/zenohd.rs": (
+        "fn t() {\n    let _ = std::process::Command::new;\n}\n"),
+    "crates/wz-session-core/tests/tls.rs": (
+        "#[path = \"../../wz-tls-mbedtls/tests/common/mod.rs\"]\nmod common;\n\n"
+        "use common::{library, End};\n\nfn t() {\n    let _ = library();\n}\n"),
+    "crates/wz-tls-mbedtls/tests/common/mod.rs": ("pub fn library() -> u64 {\n"
+                                                  "    let _ = std::time::SystemTime::now();\n"
+                                                  "    0\n}\n\npub struct End;\n"),
+    "crates/wz-session-core/src/lib.rs": ("pub mod engine;\n\n#[cfg(test)]\nmod tests {\n"
+                                          "    mod wire;\n}\n"),
+    "crates/wz-session-core/src/engine.rs": ("pub fn run() {}\n\n#[cfg(test)]\nmod tests;\n\n"
+                                             "#[cfg(test)]\n#[path = \"engine_frame_tests.rs\"]\n"
+                                             "mod frame;\n"),
+    "crates/wz-session-core/src/engine/tests.rs": ("use std::time::Instant;\n\n"
+                                                   "pub(crate) fn stamp() -> u64 {\n"
+                                                   "    let _ = Instant::now();\n    0\n}\n\n"
+                                                   "mod sim;\n"),
+    "crates/wz-session-core/src/engine/tests/sim.rs": ("use super::stamp;\n\n"
+                                                       "fn t() {\n    stamp();\n}\n"),
+    "crates/wz-session-core/src/engine_frame_tests.rs": ("use super::tests::stamp;\n\n"
+                                                         "fn t() {\n    stamp();\n}\n"),
+    "crates/wz-session-core/src/tests/wire.rs": ("use super::super::engine::tests::stamp;\n\n"
+                                                 "fn t() {\n    stamp();\n}\n"),
+}
+LAYOUT_CRATES = ["crates/wz-host-interop-tests", "crates/wz-integration-tests",
+                 "crates/wz-session-core", "crates/wz-tls-mbedtls"]
+
+
 def selftest() -> int:
     failures: list[str] = []
 
@@ -541,7 +903,7 @@ def selftest() -> int:
         if not ok:
             failures.append(name)
 
-    crate = f"crates/{COVERED[0]}/"
+    crate = "crates/wz-capi-coop/"
     files = {crate + rel: text for rel, text in FIXTURES.items()}
     reach = {path[len(crate):]: sources for path, sources in reach_of(files).items()}
     expect("a module that names a needle reaches its source", reach["src/tests/clocked.rs"],
@@ -636,6 +998,92 @@ def selftest() -> int:
            [is_test_path(r) for r in ("src/tests.rs", "src/tests/x.rs", "tests/x.rs",
                                       "src/a_tests.rs", "src/engine.rs", "benches/b.rs")],
            [True, True, True, True, False, True])
+    layout = {path: text for path, text in LAYOUTS.items()
+              if is_test_path(path[len(owner(path, LAYOUT_CRATES)) + 1:])}
+    expect("a product file is not a test module", sorted(set(LAYOUTS) - set(layout)),
+           ["crates/wz-session-core/src/engine.rs", "crates/wz-session-core/src/lib.rs"])
+    placed = placements(LAYOUTS, LAYOUT_CRATES)
+    it, session = "crates/wz-integration-tests/tests/", "crates/wz-session-core/"
+    expect("a `#[path]` is read from the declaring file's directory",
+           placed[it + "shared/net.rs"], [(it + "it/main.rs", ("crate", "net"))])
+    expect("a support module two test targets declare has a place in each",
+           placed[it + "common/mod.rs"],
+           [(it + name, ("crate", "common")) for name in ("idle.rs", "pathed.rs", "spawned.rs")])
+    expect("a `#[path]` into another crate places the file in the declaring target",
+           placed["crates/wz-tls-mbedtls/tests/common/mod.rs"],
+           [(session + "tests/tls.rs", ("crate", "common"))])
+    expect("a `#[path]` of a file module is its declaration's module",
+           placed[session + "src/engine_frame_tests.rs"],
+           [(session + "src/lib.rs", ("crate", "engine", "frame"))])
+    expect("a declaration inside an inline module adds its name",
+           placed[session + "src/tests/wire.rs"],
+           [(session + "src/lib.rs", ("crate", "tests", "wire"))])
+    expect("a file that is not a root holds its children in the directory of its name",
+           placed[session + "src/engine/tests/sim.rs"],
+           [(session + "src/lib.rs", ("crate", "engine", "tests", "sim"))])
+    expect("a target path a manifest names is a root",
+           placements({"crates/x/check/entry.rs": "mod util;\n", "crates/x/check/util.rs": ""},
+                      ["crates/x"], ["crates/x/check/entry.rs"]).get("crates/x/check/util.rs"),
+           [("crates/x/check/entry.rs", ("crate", "util"))])
+    expect("a file no walk reaches is placed by its path",
+           [derived_place("crates/x/" + rel, "crates/x", {}) for rel in
+            ("tests/it/files/a.rs", "tests/it/main.rs", "src/a/tests.rs", "benches/b.rs",
+             "src/bin/tool/x/mod.rs")],
+           [("crates/x/tests/it/main.rs", ("crate", "files", "a")),
+            ("crates/x/tests/it/main.rs", ("crate",)),
+            ("crates/x/src/lib.rs", ("crate", "a", "tests")),
+            ("crates/x/benches/b.rs", ("crate",)),
+            ("crates/x/src/bin/tool/main.rs", ("crate", "x"))])
+
+    far = reach_of(layout, LAYOUTS, LAYOUT_CRATES)
+    expect("a module of a test target takes a `crate::` item a `#[path]` module holds",
+           far[it + "it/files/dial.rs"], ["socket"])
+    expect("a `super::` of a file under a test target's tree is its parent there",
+           far[it + "it/files/hears.rs"], ["socket"])
+    expect("CONTROL: an item of the same tree that reaches nothing brings nothing",
+           far[it + "it/files/quiet.rs"], [])
+    expect("CONTROL: a root that declares a module that reaches a source is no reach by itself",
+           far[it + "it/main.rs"], [])
+    expect("a `use` of a file module the target root declares takes its item",
+           far[it + "spawned.rs"], ["thread"])
+    expect("a path in code that starts at a declared file module takes its item",
+           far[it + "pathed.rs"], ["thread"])
+    expect("CONTROL: a declared file module's item that reaches nothing brings nothing",
+           far[it + "idle.rs"], [])
+    expect("an item of another crate's support module brings what it reaches",
+           far[session + "tests/tls.rs"], ["clock"])
+    expect("`super::` from a `#[path]` file is the module that declares it",
+           far[session + "src/engine_frame_tests.rs"], ["clock"])
+    expect("`super::super` from a file an inline module declares climbs past it",
+           far[session + "src/tests/wire.rs"], ["clock"])
+    expect("a child of a `tests.rs` takes from it by `super::`",
+           far[session + "src/engine/tests/sim.rs"], ["clock"])
+
+    census = census_rows(far, f"{header}\n{it}common/mod.rs\tsystem\tthread\tr\n",
+                         LAYOUT_CRATES)
+    expect("the census gives an interoperation suite kind system and another crate pending",
+           [line for line in census if line.split("\t")[0] in (
+               "crates/wz-host-interop-tests/tests/zenohd.rs", it + "spawned.rs",
+               session + "src/engine/tests.rs")],
+           ["crates/wz-host-interop-tests/tests/zenohd.rs\tsystem\tprocess\t" + CENSUS_REASON,
+            f"{it}spawned.rs\tsystem\tthread\t{CENSUS_REASON}",
+            f"{session}src/engine/tests.rs\tpending\tclock\t{CENSUS_REASON}"])
+    expect("CONTROL: a module with a row, or that reaches nothing, takes no census row",
+           [line for line in census
+            if line.split("\t")[0] in (it + "common/mod.rs", it + "it/files/quiet.rs")], [])
+    expect("the covered crates are the manifests below crates/ that declare a package",
+           covered_crates({"crates/Cargo.toml": "[package]\n", "crates/a/Cargo.toml": "[package]\n",
+                           "crates/a/sub/Cargo.toml": "[package]\nname = \"sub\"\n",
+                           "crates/v/Cargo.toml": "[workspace]\nmembers = []\n"}),
+           ["crates/a", "crates/a/sub"])
+    expect("a file belongs to the deepest crate that holds it",
+           [owner(p, ["crates/a", "crates/a/sub"]) for p in
+            ("crates/a/sub/tests/x.rs", "crates/a/tests/x.rs", "crates/b/tests/x.rs")],
+           ["crates/a/sub", "crates/a", "crates/b"])
+    expect("a manifest's target paths are its target tables' alone",
+           target_paths("[package]\nname = \"x\"\n\n[dependencies.y]\npath = \"../y\"\n\n"
+                        "[[test]]\nname = \"it\"\npath = \"tests/it/main.rs\"\n"),
+           ["tests/it/main.rs"])
     print(f"deterministic-test-layer selftest: "
           f"{'OK' if not failures else 'FAILED: ' + ', '.join(failures)}")
     return 1 if failures else 0
@@ -646,8 +1094,12 @@ def main() -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--check", action="store_true")
     group.add_argument("--selftest", action="store_true")
+    group.add_argument("--rows", action="store_true",
+                       help="print a row for each module that reaches a source and has none")
     args = parser.parse_args()
-    return selftest() if args.selftest else check()
+    if args.selftest:
+        return selftest()
+    return print_census() if args.rows else check()
 
 
 if __name__ == "__main__":
