@@ -2575,12 +2575,18 @@ mod tests {
             .collect()
     }
 
+    /// Whether a face's set is lent a row of `Final`s: a build that answers no query owes its
+    /// peers none (`Registry::pin_lent_query`), so a set's description has no line of them
+    /// (`described`) and their stage has no room. A test that marks a set as a face's holds it by
+    /// what the face's peer declares, which every build keeps.
+    const OWES_FINALS: bool = cfg!(feature = "queryable");
+
     /// The face's peer tables hold one `Final`, have no room for a second, and have room again
     /// once what is owed is taken: the rows the arena lent stay with the table. A build that
     /// answers no query describes no `Final` of a face's (`described`), whose stage then has no
     /// room.
     fn holds_one_final(face: &mut FaceTables) {
-        if !cfg!(feature = "queryable") {
+        if !OWES_FINALS {
             assert!(
                 !face.peer.finals.has_room(),
                 "no Final is owed where nothing answers a query"
@@ -2753,7 +2759,7 @@ mod tests {
         assert_eq!(listening.registry.held_at(5), Some(1));
         assert_eq!(
             declared(&mut listening, 5),
-            (true, true),
+            (true, OWES_FINALS),
             "the face that comes takes the lent set and the one face's spans"
         );
         assert_eq!(
@@ -2859,14 +2865,21 @@ mod tests {
             .expect("the open lent a set for the face");
         assert_eq!(free_lent(&held), 0);
         assert!(in_a_lent_set(&held, 5));
-        let accepted = face(&mut held.registry, 5);
-        accepted.peer.finals.owe(1, QosLevel::DEFAULT);
-        let lies_at: *const FaceTables = accepted;
+        declare_on(&mut held.registry, 5, 1, "demo/accepted/one");
+        assert_eq!(
+            subscribers_of(&held.registry, 5).0,
+            1,
+            "CONTROL: the face's peer holds what it declared"
+        );
+        let lies_at: *const FaceTables = face(&mut held.registry, 5);
         remove(&mut held.registry, 5);
         assert_eq!(free_lent(&held), 1, "the set went back");
         assert_eq!(held.registry.sets.len(), 2, "and stayed where it lies");
         assert_eq!(
-            held.registry.sets[1].peer.finals.owed(),
+            held.registry.sets[1]
+                .peer
+                .remote_subscribers
+                .declared_count(),
             0,
             "emptied for the next face"
         );
@@ -3056,11 +3069,13 @@ mod tests {
                 .add_face(id)
                 .expect("the open lent a set for the face");
             let accepted = face(&mut held.registry, id);
-            accepted.peer.finals.owe(1, QosLevel::DEFAULT);
-            assert!(
-                !accepted.peer.finals.has_room(),
-                "CONTROL: its one row is held"
-            );
+            if OWES_FINALS {
+                accepted.peer.finals.owe(1, QosLevel::DEFAULT);
+                assert!(
+                    !accepted.peer.finals.has_room(),
+                    "CONTROL: its one row is held"
+                );
+            }
         }
         assert_eq!(free_lent(&held), 0);
         remove(&mut held.registry, 5);
@@ -3077,7 +3092,11 @@ mod tests {
             "the arena lent nothing more"
         );
         for set in &held.registry.sets[1..] {
-            assert!(set.peer.finals.has_room(), "each row of each set is free");
+            assert_eq!(
+                set.peer.finals.has_room(),
+                OWES_FINALS,
+                "each row of each set is free"
+            );
             #[cfg(feature = "query")]
             assert!(set.gets.replies.has_room());
         }
@@ -4041,12 +4060,7 @@ mod tests {
         );
         #[cfg(feature = "connectivity")]
         assert_eq!(registry.keep_place(), None, "no place is free to keep");
-        registry
-            .held_mut(DIAL_FACE)
-            .expect("the dial role's face holds the first set")
-            .peer
-            .finals
-            .owe(1, QosLevel::DEFAULT);
+        declare_on(registry, DIAL_FACE, 1, "demo/dial/one");
         let dial = registry.held(DIAL_FACE);
         registry.remove_face(dial);
         registry.remove_accepted_faces();
@@ -4056,7 +4070,7 @@ mod tests {
             "the dial role's face stays"
         );
         assert_eq!(
-            registry.sets[0].peer.finals.owed(),
+            subscribers_of(registry, DIAL_FACE).0,
             1,
             "and its set was not given back"
         );
