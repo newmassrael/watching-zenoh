@@ -26,7 +26,10 @@ use core::ptr::{addr_of_mut, NonNull};
 #[cfg(any(not(wz_on_use), feature = "query", feature = "queryable"))]
 use wz_session_core::bounded::BoundedVec;
 use wz_session_core::bounded::ZeroEmpty;
-#[cfg(all(any(feature = "query", feature = "queryable"), not(wz_on_use)))]
+#[cfg(any(
+    all(any(feature = "query", feature = "queryable"), not(wz_on_use)),
+    all(wz_on_use, feature = "listen")
+))]
 use wz_session_core::caps;
 use wz_session_core::placed::Placed;
 #[cfg(wz_on_use)]
@@ -374,9 +377,15 @@ pub(crate) struct OwnState {
     /// a key is an allocation of its own, which points at its budget, so the budget lies where it
     /// never moves while a key of it lives.
     keys: MaybeUninit<KeyBudget>,
+    /// The flags of the count of the outbound slots a listening session's links share, each free
+    /// at zero (`TransportRows::bound_links`): the links' sources and their links reach them by
+    /// a handle, so they lie where they never move while a link lives.
+    #[cfg(feature = "listen")]
+    tx_slots: [crate::arena::LinkSlotFlag; caps::TX_POOL_SLOTS],
 }
 
-// SAFETY: the places are `ZeroEmpty`, and the key budget is a `MaybeUninit`, valid as any bytes.
+// SAFETY: the places are `ZeroEmpty`, the key budget is a `MaybeUninit`, valid as any bytes, and
+// a flag of the slots' count is free at zero (`CellFlag: ZeroEmpty`).
 #[cfg(wz_on_use)]
 unsafe impl ZeroEmpty for OwnState {}
 
@@ -415,6 +424,14 @@ impl OwnState {
         // SAFETY: the caller's contract: the state, and the budget in it, neither moves nor is
         // given back while a key, a table or a handle of the budget lives.
         unsafe { budget.keys() }
+    }
+
+    /// Where the flags of the count of the links' outbound slots in the state at `state` lie.
+    #[cfg(feature = "listen")]
+    pub(crate) fn tx_slots(state: NonNull<Self>) -> NonNull<crate::arena::LinkSlotFlag> {
+        // SAFETY: a field of the state `state` points at, projected with no reference made, so
+        // the place is not null.
+        unsafe { NonNull::new_unchecked(addr_of_mut!((*state.as_ptr()).tx_slots).cast()) }
     }
 
     /// Where the places of the state's own values in the state at `state` lie.

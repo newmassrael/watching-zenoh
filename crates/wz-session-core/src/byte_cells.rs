@@ -181,6 +181,19 @@ impl<F: CellFlag> Clone for LentByteCells<F> {
 
 impl<F: CellFlag> Copy for LentByteCells<F> {}
 
+// Two handles are equal when they name the same table: the same flags and bytes, cells of the same
+// length and as many. Not derived: a derive would ask `F: PartialEq`, and an atomic flag is not.
+impl<F: CellFlag> PartialEq for LentByteCells<F> {
+    fn eq(&self, other: &Self) -> bool {
+        self.taken == other.taken
+            && self.bytes == other.bytes
+            && self.size == other.size
+            && self.count == other.count
+    }
+}
+
+impl<F: CellFlag> Eq for LentByteCells<F> {}
+
 // SAFETY: a table of atomic flags is claimed by a read-modify-write of a flag and given back by an
 // ordered store of it, so threads that claim and release through copies of the handle keep one
 // account of which cell is lent; a cell's bytes are reached only through the one claim that took
@@ -205,7 +218,7 @@ impl<F: CellFlag> LentByteCells<F> {
     /// `taken` points at `count` flags, each `false`, and `bytes` at `count * size` initialised
     /// bytes; both are valid for reads and writes, used by nothing but this table, and stay so for
     /// as long as any copy of the table or any buffer it lends lives.
-    pub(crate) const unsafe fn over(
+    pub const unsafe fn over(
         taken: NonNull<F>,
         bytes: NonNull<u8>,
         size: usize,

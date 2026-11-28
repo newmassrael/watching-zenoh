@@ -1390,8 +1390,9 @@ pub struct TransportRows {
     #[cfg(not(wz_on_use))]
     rx_buffers: usize,
     /// The outbound slots of the pool those links share (`TX_POOL_SLOTS`, at most one for each
-    /// link). None where the tables take their memory on use, whose links hold their own.
-    #[cfg(not(wz_on_use))]
+    /// link): where the tables take their memory on use, each link holds its own slot and this
+    /// counts how many of them may hold a frame at once, so the bound is the same in both forms.
+    #[cfg(any(not(wz_on_use), feature = "listen"))]
     tx_slots: usize,
     /// The length of a link's receive buffer and of each of its slots.
     link_bytes: usize,
@@ -1428,6 +1429,11 @@ pub struct TransportRows {
 /// (`wz_runtime_coop::sync::LockKind::Flag`), which the handles placed in it are counted by.
 #[cfg(not(wz_on_use))]
 type LinkCellFlag = <SessionLock as wz_runtime_coop::sync::LockKind>::Flag;
+
+/// The flag of the count of the outbound slots a listening session's links share where the tables
+/// take their memory on use: the links' kind's (`TransportRows::bound_links`).
+#[cfg(all(wz_on_use, feature = "listen"))]
+pub(crate) type LinkSlotFlag = <crate::LinkCount as CountKind>::Flag;
 
 /// What the session's links take their buffers through: the source their kind names
 /// (`wz_runtime_coop::link_cells::CountKind::Buffers`), the tables the arena lends, or the heap
@@ -1480,7 +1486,7 @@ impl TransportRows {
         links: 0,
         #[cfg(not(wz_on_use))]
         rx_buffers: 0,
-        #[cfg(not(wz_on_use))]
+        #[cfg(any(not(wz_on_use), feature = "listen"))]
         tx_slots: 0,
         link_bytes: 0,
         reassembly_bytes: 0,
@@ -1556,6 +1562,30 @@ impl TransportRows {
             #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             handed: HandedTable::counted(self.link_bytes, self.handed_legs),
         })
+    }
+
+    /// The source of a listening session's links where the tables take their memory on use,
+    /// bounded by the count of the outbound slots they share where those are fewer than the links
+    /// (`TX_POOL_SLOTS`), the count's flags at `slots`: each link then sends from its own slot
+    /// only while it holds one of the count, as a link of the arena's pool sends from a slot of
+    /// it, so a publish finds every slot held where it would in the lent form.
+    ///
+    /// # Safety
+    /// `slots` points at `caps::TX_POOL_SLOTS` flags, each free, used by nothing else, which stay
+    /// where they are while the source, a copy of it or a link it bounds lives.
+    #[cfg(all(wz_on_use, feature = "listen"))]
+    pub(crate) unsafe fn bound_links(
+        &self,
+        links: LinkSource,
+        slots: NonNull<LinkSlotFlag>,
+    ) -> LinkSource {
+        if self.tx_slots >= self.links {
+            return links;
+        }
+        // SAFETY: the caller's contract, for `tx_slots` of the flags (`pooled_buffers` holds it to
+        // `TX_POOL_SLOTS`), cells of no bytes, at a place of no bytes.
+        let count = unsafe { LentByteCells::over(slots, NonNull::dangling(), 0, self.tx_slots) };
+        links.bounded(count, self.links)
     }
 
     /// The cells of the links' drivers, their gates, their actions and their halves, lent by
@@ -2066,7 +2096,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             links,
             #[cfg(not(wz_on_use))]
             rx_buffers: links,
-            #[cfg(not(wz_on_use))]
+            #[cfg(any(not(wz_on_use), feature = "listen"))]
             tx_slots: links,
             link_bytes,
             reassembly_bytes: 0,
@@ -2107,6 +2137,13 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
                 self.transport.rx_buffers = rx_buffers;
                 self.transport.tx_slots = tx_slots;
             }
+            Err(refused) => self.refuse(refused),
+        }
+        // Where the tables take their memory on use each link holds its buffers, and what is
+        // counted is the bound of the outbound slots the links share.
+        #[cfg(all(wz_on_use, feature = "listen"))]
+        match pooled_buffers(links, limits) {
+            Ok((_, tx_slots)) => self.transport.tx_slots = tx_slots,
             Err(refused) => self.refuse(refused),
         }
         #[cfg(wz_round)]
@@ -2623,16 +2660,11 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     }
 
     /// Whether the outbound slots the links share are fewer than the links (`TX_POOL_SLOTS`), so
-    /// that a link may find every slot held.
-    #[cfg(all(feature = "listen", not(wz_on_use)))]
+    /// that a link may find every slot held: a slot of the arena's pool, or, where the tables take
+    /// their memory on use, one of the count a link's own slot is sent from under.
+    #[cfg(feature = "listen")]
     pub fn tx_pool_short(&self) -> bool {
         self.transport.tx_slots < self.transport.links
-    }
-
-    /// Never, where the tables take their memory on use: each link holds slots of its own.
-    #[cfg(all(feature = "listen", wz_on_use))]
-    pub fn tx_pool_short(&self) -> bool {
-        false
     }
 
     /// How many rows each table of the engine's record of the session's declarations is lent.
@@ -3053,7 +3085,8 @@ const fn lent_under(
 
 /// Whether a session's links share a pool of receive buffers and one of outbound slots, as a build
 /// that listens lends them (`RX_POOL_BUFFERS`, `TX_POOL_SLOTS`), rather than each link holding a
-/// buffer and a slot of its own, as a link does where the tables take their memory on use.
+/// buffer and a slot of its own, as a link does where the tables take their memory on use; there
+/// the outbound slots still bound the links, as a count (`TransportRows::bound_links`).
 pub const LINKS_SHARE_POOLS: bool = cfg!(all(feature = "listen", not(wz_on_use)));
 
 /// The buffers a session's links read their batches into and encode their frames into, and the
@@ -3118,19 +3151,31 @@ const fn pooled_buffers(
     links: usize,
     limits: &SessionLimits,
 ) -> Result<(usize, usize), ArenaRefused> {
-    if LINKS_SHARE_POOLS {
-        let rx = tried!(lent::<{ caps::RX_POOL_BUFFERS }>(
-            ArenaLimit::RxPoolBuffers,
-            Quota::at_most(limits.rx_pool_buffers()),
-        ));
-        let tx = tried!(lent::<{ caps::TX_POOL_SLOTS }>(
-            ArenaLimit::TxPoolSlots,
-            Quota::at_most(limits.tx_pool_slots()),
-        ));
-        Ok((least(rx, links), least(tx, links)))
+    let rx = if LINKS_SHARE_POOLS {
+        least(
+            tried!(lent::<{ caps::RX_POOL_BUFFERS }>(
+                ArenaLimit::RxPoolBuffers,
+                Quota::at_most(limits.rx_pool_buffers()),
+            )),
+            links,
+        )
     } else {
-        Ok((links, links))
-    }
+        links
+    };
+    // The outbound slots bound a listening session's links in either form: lent as a pool, or,
+    // where the tables take their memory on use, a count each link's own slot is sent under.
+    let tx = if cfg!(feature = "listen") {
+        least(
+            tried!(lent::<{ caps::TX_POOL_SLOTS }>(
+                ArenaLimit::TxPoolSlots,
+                Quota::at_most(limits.tx_pool_slots()),
+            )),
+            links,
+        )
+    } else {
+        links
+    };
+    Ok((rx, tx))
 }
 
 /// The length of each link's receive buffer and of each of its slots: the batch `batch` a session

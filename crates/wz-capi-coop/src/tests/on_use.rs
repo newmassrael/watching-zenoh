@@ -436,8 +436,8 @@ fn an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table() {
 /// `LINK_TX_SLOTS` slots of it, as its tables would lend each link and as zenoh-pico's transport
 /// takes one buffer of each; a report of its memory reads that for each link it may hold, as no
 /// link shares a pool. Turned red by a transport lent tables on use, by a source of another size
-/// than the plan's batch (`TransportRows::counted`), or by a report that reads pools a session on
-/// use holds none of (`LINKS_SHARE_POOLS`).
+/// than the plan's batch (`TransportRows::counted`), or by a report that reads a receive pool a
+/// session on use holds none of (`LINKS_SHARE_POOLS`).
 #[test]
 fn an_on_use_sessions_links_take_their_batch_of_the_heap() {
     use crate::arena::{link_buffers, links_of, ArenaPlan, LINK_TX_SLOTS};
@@ -461,10 +461,68 @@ fn an_on_use_sessions_links_take_their_batch_of_the_heap() {
     let links = links_of(&config).expect("within the address space");
     let report = link_buffers(links, config.max_faces, config.batch_size, &config.limits)
         .expect("the plan's batch");
+    // A listening session's links share the outbound slots in either form: on use as a count
+    // each link's own slot is sent under (`TransportRows::bound_links`).
+    let transmit = if cfg!(feature = "listen") {
+        wz_session_core::caps::TX_POOL_SLOTS.min(links)
+    } else {
+        links
+    };
     assert_eq!(
         (report.receive, report.transmit, report.bytes),
-        (links, links, batch),
-        "a buffer and a slot of the batch for each link"
+        (links, transmit, batch),
+        "a buffer of the batch for each link, and the slots they share"
+    );
+}
+
+/// A listening session whose tables take their memory on use bounds its links by the outbound
+/// slots they share, as the lent form's pool does: with one slot for more links than one the plan
+/// reads the pool short, and the links' source, unbounded as counted (CONTROL), is bounded by a
+/// count of one over every link. Turned red by a plan that counts no slots on use
+/// (`pooled_buffers` holding the outbound slots to the receive pools' `LINKS_SHARE_POOLS`), by
+/// `tx_pool_short` answering never on use, or by a source the bound is not handed
+/// (`TransportRows::bound_links`).
+#[cfg(feature = "listen")]
+#[test]
+fn an_on_use_listeners_links_are_bounded_by_the_slots_they_share() {
+    use crate::arena::{links_of, ArenaPlan, LinkSlotFlag};
+    use wz_session_core::caps;
+
+    let mut limits = SessionLimits::defaults();
+    if limits.select_tx_pool_slots(1).is_err() {
+        // A build that keeps the build's value alone has no pool of one slot to try.
+        return;
+    }
+    let config = crate::CoopConfig {
+        whatami: wz_session_core::WhatAmI::Peer,
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        limits,
+        ..super::client_config()
+    };
+    let links = links_of(&config).expect("within the address space");
+    assert!(links > 1, "CONTROL: the listener holds more links than one");
+    let plan = ArenaPlan::of(&config, &config.limits).expect("the limits lay a plan out");
+    assert!(plan.tx_pool_short(), "one slot for more links than one");
+    let transport = plan
+        .transport()
+        .counted()
+        .expect("the allocator has the count");
+    assert_eq!(
+        transport.links.bound(),
+        None,
+        "CONTROL: counted, no bound yet"
+    );
+    let flags: [LinkSlotFlag; caps::TX_POOL_SLOTS] = core::array::from_fn(|_| Default::default());
+    // SAFETY: the flags are this test's, each free, reached by nothing else, and they outlive the
+    // source, which is read and dropped here.
+    let bounded = unsafe {
+        plan.transport()
+            .bound_links(transport.links, core::ptr::NonNull::from(&flags).cast())
+    };
+    assert_eq!(
+        bounded.bound(),
+        Some((1, links)),
+        "a count of one over every link"
     );
 }
 

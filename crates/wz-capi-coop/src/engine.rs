@@ -1078,6 +1078,18 @@ fn lend_session(
     let transport = plan.transport().lent_from(&mut lend);
     #[cfg(wz_on_use)]
     let transport = plan.transport().counted()?;
+    // The count of the outbound slots the links share lies in the state, which outlives every
+    // link (`Core::_state`, after the transport and the tasks).
+    #[cfg(all(wz_on_use, feature = "listen"))]
+    let transport = TransportTables {
+        // SAFETY: the state's flags are zero, so free; nothing else reaches them; and the state
+        // stands until after the last link the source bounds is dropped.
+        links: unsafe {
+            plan.transport()
+                .bound_links(transport.links, OwnState::tx_slots(state.as_ptr()))
+        },
+        ..transport
+    };
     // The key arena is the arena's where the open lends the registry from it, and the region's
     // otherwise, beside the registry whose tables keep their keys there.
     #[cfg(wz_lent)]

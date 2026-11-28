@@ -403,24 +403,81 @@ impl<F: CellFlag> TxStore for LinkTx<F> {
     }
 }
 
+/// A link's claim on the outbound slots its session's links share (`TX_POOL_SLOTS`): one slot
+/// at a time, taken for a grant and given back at its send or abort, or once a frame the stream
+/// took in part is written. The one account of the session's slots for every form of the link's
+/// memory: a slot of a pool lent from the arena holds the frame's bytes ([`PooledTx`]), and one
+/// of a count of no bytes bounds a link that encodes into a slot of its own (`HeapLinkTx`).
+pub struct PoolClaim<F: CellFlag = Cell<bool>> {
+    pool: LentByteCells<F>,
+    /// The most links the session holds at once, to tell whether the pool has a slot for each.
+    links: usize,
+    held: core::cell::RefCell<Option<ByteBuf<F>>>,
+}
+
+impl<F: CellFlag> PoolClaim<F> {
+    /// A link's claim on `pool`, which the session's at most `links` links share; none held.
+    pub fn over(pool: LentByteCells<F>, links: usize) -> Self {
+        Self {
+            pool,
+            links,
+            held: core::cell::RefCell::new(None),
+        }
+    }
+
+    /// Whether the link holds a slot of the pool now.
+    pub fn holds(&self) -> bool {
+        self.held.borrow().is_some()
+    }
+
+    /// The first byte of the slot held, null where none is.
+    fn held_base(&self) -> *mut u8 {
+        self.held
+            .borrow()
+            .as_ref()
+            .map_or(core::ptr::null_mut(), |buf| buf.raw().0)
+    }
+
+    /// Take a slot of the pool where the link holds none; whether it holds one now.
+    fn claim(&self) -> bool {
+        let mut held = self.held.borrow_mut();
+        if held.is_none() {
+            *held = self.pool.claim();
+        }
+        held.is_some()
+    }
+
+    /// Give the slot held back to the pool.
+    fn give_back(&self) {
+        *self.held.borrow_mut() = None;
+    }
+
+    /// Whether a grant would find a slot now.
+    fn claimable(&self) -> bool {
+        self.holds() || self.pool.in_use() < self.pool.capacity()
+    }
+
+    /// Whether the slot held may stay held: the pool has one for every link, or another is free.
+    fn spare(&self) -> bool {
+        self.pool.capacity() >= self.links || self.pool.in_use() < self.pool.capacity()
+    }
+}
+
 /// A link's outbound slot taken from its session's pool for a grant and given back at its send
 /// or abort, or once a frame the stream took in part is written: one slot at a time, as a link
 /// lent a buffer of its own lends one (`LINK_TX_SLOTS` of `wz-capi-coop`), so a link of a pool
 /// encodes and sends as it did. The link also holds its place among the session's links, which
 /// is what bounds how many links open.
 pub struct PooledTx<F: CellFlag = Cell<bool>> {
-    pool: LentByteCells<F>,
-    /// The table of the links' places, to tell whether the pool has a slot for every link.
-    links: LentByteCells<F>,
+    claim: PoolClaim<F>,
     /// This link's place, held for its life.
     _place: ByteBuf<F>,
-    held: core::cell::RefCell<Option<ByteBuf<F>>>,
 }
 
 impl<F: CellFlag> PooledTx<F> {
     /// Whether the link holds a slot of the pool now.
     pub fn holds(&self) -> bool {
-        self.held.borrow().is_some()
+        self.claim.holds()
     }
 }
 
@@ -430,34 +487,27 @@ impl<F: CellFlag> TxStore for PooledTx<F> {
     }
 
     fn slot_len(&self) -> usize {
-        self.pool.size()
+        self.claim.pool.size()
     }
 
     fn slot_base(&self, _slot: usize) -> *mut u8 {
-        self.held
-            .borrow()
-            .as_ref()
-            .map_or(core::ptr::null_mut(), |buf| buf.raw().0)
+        self.claim.held_base()
     }
 
     fn claim(&self, _slot: usize) -> bool {
-        let mut held = self.held.borrow_mut();
-        if held.is_none() {
-            *held = self.pool.claim();
-        }
-        held.is_some()
+        self.claim.claim()
     }
 
     fn give_back(&self, _slot: usize) {
-        *self.held.borrow_mut() = None;
+        self.claim.give_back();
     }
 
     fn claimable(&self) -> bool {
-        self.holds() || self.pool.in_use() < self.pool.capacity()
+        self.claim.claimable()
     }
 
     fn spare(&self) -> bool {
-        self.pool.capacity() >= self.links.capacity() || self.pool.in_use() < self.pool.capacity()
+        self.claim.spare()
     }
 }
 
@@ -528,10 +578,8 @@ impl<F: CellFlag> LinkTables<F> {
     pub fn claim(&self) -> Option<(LinkRx<F>, LinkTxStore<F>)> {
         let tx = match self.places {
             Some(places) => LinkTx::Pooled(PooledTx {
-                pool: self.tx,
-                links: places,
+                claim: PoolClaim::over(self.tx, places.capacity()),
                 _place: places.claim()?,
-                held: core::cell::RefCell::new(None),
             }),
             None => LinkTx::Own(SlottedTx::new(self.tx.claim()?, self.slot_len)),
         };
@@ -740,26 +788,231 @@ impl<F: CellFlag> BufferSource<F> for Option<LinkTables<F>> {
 /// asks: the batch the session advertises bounds every frame either way, so a link pays its batch
 /// and not the largest a stack could take. Unsized, as a stack holds it before a session lends it
 /// one, each link holds the stack's own shape ([`HeapTx::for_link`]).
+///
+/// A session whose links share fewer outbound slots than it holds links (`TX_POOL_SLOTS`), which
+/// only one that accepts links does (`session-unicast-accept`), bounds them by a count of its
+/// slots (`Self::bounded`): each link then holds one slot of its own and sends from it only while
+/// it holds one of the count, as a link of a lent pool sends from a slot of the pool
+/// ([`PoolClaim`]), so the bound is the session's whichever memory its links take.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct HeapBuffers {
+#[derive(Debug)]
+pub struct HeapBuffers<F: CellFlag = Cell<bool>> {
     /// The bytes of a link's receive buffer and of each of its slots, and how many slots it holds.
     sized: Option<(usize, usize)>,
+    /// The count of the session's outbound slots, of no bytes, and the most links it holds; none
+    /// where it has a slot for every link.
+    #[cfg(feature = "session-unicast-accept")]
+    bound: Option<(LentByteCells<F>, usize)>,
+    /// The form of the links' flags, which a source of a session that accepts no link holds
+    /// nothing of.
+    #[cfg(not(feature = "session-unicast-accept"))]
+    flag: core::marker::PhantomData<fn() -> F>,
 }
 
+// Not derived: a derive would ask `F: Copy` and `F: PartialEq`, and an atomic flag is neither;
+// the source holds a handle on the flags, which is.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl HeapBuffers {
-    /// Every link a receive buffer of `bytes` and `slots` slots of `bytes` to encode its frames
-    /// into, as a session's tables lend each link buffers of their length.
-    pub const fn sized(bytes: usize, slots: usize) -> Self {
-        Self {
-            sized: Some((bytes, slots)),
-        }
+impl<F: CellFlag> Clone for HeapBuffers<F> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-impl<F: CellFlag> BufferSource<F> for HeapBuffers {
+impl<F: CellFlag> Copy for HeapBuffers<F> {}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<F: CellFlag> Default for HeapBuffers<F> {
+    fn default() -> Self {
+        Self::of(None)
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<F: CellFlag> PartialEq for HeapBuffers<F> {
+    fn eq(&self, other: &Self) -> bool {
+        #[cfg(feature = "session-unicast-accept")]
+        if self.bound != other.bound {
+            return false;
+        }
+        self.sized == other.sized
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<F: CellFlag> Eq for HeapBuffers<F> {}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<F: CellFlag> HeapBuffers<F> {
+    /// Buffers of the shape `sized` states, or of the stack's own shape, bounded by nothing.
+    const fn of(sized: Option<(usize, usize)>) -> Self {
+        Self {
+            sized,
+            #[cfg(feature = "session-unicast-accept")]
+            bound: None,
+            #[cfg(not(feature = "session-unicast-accept"))]
+            flag: core::marker::PhantomData,
+        }
+    }
+
+    /// Every link a receive buffer of `bytes` and `slots` slots of `bytes` to encode its frames
+    /// into, as a session's tables lend each link buffers of their length.
+    pub const fn sized(bytes: usize, slots: usize) -> Self {
+        Self::of(Some((bytes, slots)))
+    }
+
+    /// These buffers, each link holding one slot, which it sends from only while it holds one of
+    /// `slots`, a table of no bytes the session's at most `links` links share.
+    #[cfg(feature = "session-unicast-accept")]
+    pub const fn bounded(self, slots: LentByteCells<F>, links: usize) -> Self {
+        Self {
+            sized: self.sized,
+            bound: Some((slots, links)),
+        }
+    }
+
+    /// The outbound slots the links share and the most links, where they are fewer.
+    #[cfg(feature = "session-unicast-accept")]
+    pub const fn bound(&self) -> Option<(usize, usize)> {
+        match self.bound {
+            Some((slots, links)) => Some((slots.capacity(), links)),
+            None => None,
+        }
+    }
+
+    /// The receive buffer's length, and the slots and their length, of a link that opens now:
+    /// the session's shape where it states one, the stack's ask otherwise.
+    fn shape(&self, rx: usize, tx_slots: usize, tx_len: usize) -> (usize, usize, usize) {
+        match self.sized {
+            Some((bytes, slots)) => (bytes, slots, bytes),
+            None => {
+                let (slots, slot_len) = HeapTx::link_shape(tx_slots, tx_len, rx);
+                (rx, slots, slot_len)
+            }
+        }
+    }
+}
+
+/// What a link of a session that accepts links and takes their memory of the heap encodes its
+/// frames into: slots of its own, or, where the session's links share fewer slots than they are
+/// (`HeapBuffers::bounded`), one slot of its own it sends from only while it holds one of the
+/// session's count ([`PoolClaim`]).
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "session-unicast-accept"
+))]
+pub enum HeapLinkTx<F: CellFlag = Cell<bool>> {
+    /// Slots of the link's own, none shared.
+    Own(HeapTx),
+    /// One slot of the link's own, under the session's count.
+    Bounded {
+        /// The slot the link encodes into.
+        slot: HeapTx,
+        /// The link's claim on the session's count.
+        claim: PoolClaim<F>,
+    },
+}
+
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "session-unicast-accept"
+))]
+impl<F: CellFlag> TxStore for HeapLinkTx<F> {
+    fn slots(&self) -> usize {
+        match self {
+            Self::Own(store) => store.slots(),
+            Self::Bounded { .. } => 1,
+        }
+    }
+
+    fn slot_len(&self) -> usize {
+        match self {
+            Self::Own(store) => store.slot_len(),
+            Self::Bounded { slot, .. } => slot.slot_len(),
+        }
+    }
+
+    fn slot_base(&self, slot_at: usize) -> *mut u8 {
+        match self {
+            Self::Own(store) => store.slot_base(slot_at),
+            Self::Bounded { slot, .. } => slot.slot_base(0),
+        }
+    }
+
+    fn claim(&self, slot_at: usize) -> bool {
+        match self {
+            Self::Own(store) => store.claim(slot_at),
+            Self::Bounded { claim, .. } => claim.claim(),
+        }
+    }
+
+    fn give_back(&self, slot_at: usize) {
+        match self {
+            Self::Own(store) => store.give_back(slot_at),
+            Self::Bounded { claim, .. } => claim.give_back(),
+        }
+    }
+
+    fn claimable(&self) -> bool {
+        match self {
+            Self::Own(store) => store.claimable(),
+            Self::Bounded { claim, .. } => claim.claimable(),
+        }
+    }
+
+    fn spare(&self) -> bool {
+        match self {
+            Self::Own(store) => store.spare(),
+            Self::Bounded { claim, .. } => claim.spare(),
+        }
+    }
+}
+
+/// A session that accepts links: each link's slots its own, or one under the session's count.
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "session-unicast-accept"
+))]
+impl<F: CellFlag> BufferSource<F> for HeapBuffers<F> {
+    type Rx = Vec<u8>;
+    type Tx = HeapLinkTx<F>;
+
+    #[inline(always)]
+    fn tables(&self) -> Option<&LinkTables<F>> {
+        None
+    }
+
+    #[inline(always)]
+    fn buffers(
+        &self,
+        rx: usize,
+        tx_slots: usize,
+        tx_len: usize,
+    ) -> Result<(Vec<u8>, HeapLinkTx<F>), LinkOpenError> {
+        let exhausted = LinkOpenError::Exhausted;
+        let (rx_len, slots, slot_len) = self.shape(rx, tx_slots, tx_len);
+        let rx = zeroed_bytes(rx_len).ok_or(exhausted)?;
+        let tx = match self.bound {
+            Some((count, links)) => HeapLinkTx::Bounded {
+                slot: HeapTx::try_new(1, slot_len).ok_or(exhausted)?,
+                claim: PoolClaim::over(count, links),
+            },
+            None => HeapLinkTx::Own(HeapTx::try_new(slots, slot_len).ok_or(exhausted)?),
+        };
+        Ok((rx, tx))
+    }
+}
+
+/// A session that accepts no link: each link's slots its own, as no other link shares them.
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    not(feature = "session-unicast-accept")
+))]
+impl<F: CellFlag> BufferSource<F> for HeapBuffers<F> {
     type Rx = Vec<u8>;
     type Tx = HeapTx;
 
@@ -775,15 +1028,11 @@ impl<F: CellFlag> BufferSource<F> for HeapBuffers {
         tx_slots: usize,
         tx_len: usize,
     ) -> Result<(Vec<u8>, HeapTx), LinkOpenError> {
-        match self.sized {
-            Some((bytes, slots)) => {
-                let exhausted = LinkOpenError::Exhausted;
-                let rx = zeroed_bytes(bytes).ok_or(exhausted)?;
-                let tx = HeapTx::try_new(slots, bytes).ok_or(exhausted)?;
-                Ok((rx, tx))
-            }
-            None => own_link_buffers(rx, tx_slots, tx_len),
-        }
+        let exhausted = LinkOpenError::Exhausted;
+        let (rx_len, slots, slot_len) = self.shape(rx, tx_slots, tx_len);
+        let rx = zeroed_bytes(rx_len).ok_or(exhausted)?;
+        let tx = HeapTx::try_new(slots, slot_len).ok_or(exhausted)?;
+        Ok((rx, tx))
     }
 }
 
@@ -1403,7 +1652,7 @@ mod tests {
         let heap = HeapBuffers::default();
         assert!(<HeapBuffers as BufferSource<Cell<bool>>>::tables(&heap).is_none());
         // The heap's links hold a buffer and slots of their own, typed so: no store of a table.
-        let (rx, tx): (Vec<u8>, HeapTx) =
+        let (rx, tx): (Vec<u8>, <HeapBuffers as BufferSource<Cell<bool>>>::Tx) =
             <HeapBuffers as BufferSource<Cell<bool>>>::buffers(&heap, 48, 0, 0)
                 .expect("the link's own");
         assert_eq!(rx.len(), 48);
@@ -1427,6 +1676,64 @@ mod tests {
             }),
             Err(crate::session_drive::LinkOpenError::Exhausted)
         ));
+    }
+
+    /// Links of the heap bounded by their session's count of outbound slots take one of the count
+    /// for a grant, as links of a lent pool take a slot of it: with one slot for three links, the
+    /// second link finds none while the first holds it, and may keep none past its call, and finds
+    /// it once it is back; each encodes into a slot of its own the whole time. The CONTROL is the
+    /// same source unbounded, whose links hold their slots apart. Turned red by a bound read by no
+    /// link (`HeapBuffers::buffers` making `HeapLinkTx::Own`), or one whose claim does not count.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "session-slot"),
+        feature = "session-unicast-accept"
+    ))]
+    #[test]
+    fn heap_links_bounded_by_their_sessions_slots_take_one_for_a_grant() {
+        let mut arena = arena_of(Arena::byte_cells_bytes(0, 1).expect("fits"));
+        let count = arena.lend_byte_cells(0, 1).expect("the count of one slot");
+        let bounded = HeapBuffers::sized(32, 2).bounded(count, 3);
+        assert_eq!(bounded.bound(), Some((1, 3)));
+        let open = || {
+            <HeapBuffers as BufferSource<Cell<bool>>>::buffers(&bounded, 48, 4, 64)
+                .expect("the link's own")
+                .1
+        };
+        let (first, second) = (TxLender::new(open()), TxLender::new(open()));
+        assert_eq!(
+            (first.slots(), first.slot_len()),
+            (1, 32),
+            "one slot of its own"
+        );
+        let held = first.acquire(2).expect("the count's one slot");
+        assert!(!first.spare(), "no other slot for the other links");
+        assert!(second.acquire(2).is_none(), "the count's slot is out");
+        first.release(held.slot);
+        assert!(
+            second.acquire(2).is_some(),
+            "the slot given back is the next link's"
+        );
+
+        let apart = HeapBuffers::sized(32, 2);
+        assert_eq!(apart.bound(), None);
+        let (one, other) = (
+            TxLender::new(
+                <HeapBuffers as BufferSource<Cell<bool>>>::buffers(&apart, 48, 4, 64)
+                    .expect("the link's own")
+                    .1,
+            ),
+            TxLender::new(
+                <HeapBuffers as BufferSource<Cell<bool>>>::buffers(&apart, 48, 4, 64)
+                    .expect("the link's own")
+                    .1,
+            ),
+        );
+        let _held = one.acquire(2).expect("CONTROL: a slot of its own");
+        assert!(
+            other.acquire(2).is_some(),
+            "CONTROL: unbounded, the links hold apart"
+        );
     }
 
     /// Tables whose flags are atomics lend a link storage that moves with the link to another
