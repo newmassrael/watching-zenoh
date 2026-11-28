@@ -1052,7 +1052,12 @@ impl Registry {
     }
 
     /// The pending gets of every face and, where the session answers its own gets, its own.
-    #[cfg(all(feature = "query", test, wz_lent))]
+    #[cfg(all(
+        feature = "query",
+        test,
+        wz_lent,
+        any(feature = "listen", feature = "group")
+    ))]
     pub(super) fn all_gets(&self) -> impl Iterator<Item = &Gets> {
         let gets = self.faces().map(|face| &face.gets);
         #[cfg(feature = "local-queryable")]
