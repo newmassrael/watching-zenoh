@@ -1738,7 +1738,47 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   source is not bounded); `an_on_use_sessions_links_take_their_batch_of_the_heap` reads the
   shared slots in a listening build.
 
+### 7.39 Integration j merged in, and the D12 client's budget set from its reading
+
+- `2437f25819` merges `origin/main` (`39fd76b09c`, integration j, which carries this lane at
+  `3d8b5368d9`) into the lane, not a rebase (`docs/c-abi-migration/int-j-merges.md` records
+  main's side). Two files needed a decision:
+  - `crates/wz-capi-coop/src/arena.rs`: main imports `RowCount` and `RowCounts` under
+    `wz_lent` (the registry's described row bytes, `registry_row_bytes`, `registry_bytes`); the
+    lane moved `TableLender` under `not(wz_on_use)` and added `HeapByteCells` under
+    `wz_on_use`. All three kept, each under its own cfg; `Arena`, `LendRefused` and
+    `ARENA_ALIGN` stay bare.
+  - `crates/wz-capi-coop/src/tests/on_use.rs`: main's port to the simulated world
+    (`70f473f0a7`: `opened`, `Sim::steps_until`, `StandIn::push`) is the form, and the lane's
+    changes since `3d8b5368d9` are written in it. The engine-and-rooms test and the link
+    admission test stay removed (an on-use open reserves no arena, 7.31); the plan, config-plan and
+    links' batch tests take the lane's assertions; the chains test and the listener's slot bound
+    test read the plan and the counted transport alone, no harness; the open test is the lane's
+    (one block, the state's, and no arena) opened by `Sim::open_made_in`. `EngineHold` stays
+    imported, `opened` returning it. The listener test main moved to `tests/on_use_listen.rs`
+    is one the lane did not change.
+- `26fa754c65`: `pico-client-coop-nostd`'s C1cs budget was 1,049,200 against a reading of
+  237,978. That figure is `pico-client-coop`'s budget of 2026-11-21 (the client built with
+  `std`), which `7d46216e63` gave the case when it added it, as a ceiling the form sat under
+  until its first reading set its own; the reading of 7.35 never replaced it. It is now
+  `budget_for(237,978)` = 242,800, the gate's own figure, with the reading in its comment. The
+  case's ceiling row stays locked at WIN and states that reading (0.72x zenoh-pico's 329,664,
+  read in the same run as the on-use case's row, whose toolchain string it shares).
+- Tests: none added. `tests::on_use` runs 10 tests under `tables-on-use` and 12 under
+  `listen,tables-on-use`, with the one of `tests::on_use_listen` that the same filter matches.
+  The budget's margin is 2 percent over a reading of `33bd90da25`; what main's merged-in work
+  adds to the D12 client is read by the first `--measure` of the merged tree.
+
 ## 8. What the main session runs
+
+- The merge of integration j and the D12 budget (`2437f25819`, `26fa754c65`), not built or run
+  by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --features
+  tables-on-use --lib tests::on_use` (10), `--features listen,tables-on-use --lib tests::on_use`
+  (13: 12 and `tests::on_use_listen`'s one), the hn26 set, and clippy of wz-capi-coop under
+  `tables-on-use`, `listen,tables-on-use` and the default set; `python3
+  scripts/lib/capability_cost_gate.py --selftest` and `--measure pico-client-coop-nostd
+  pico-client-coop-nostd-on-use`. Size: the merge moves what main moved; the budget moves no
+  byte.
 
 - The on-use listener's outbound slots (`2c9bb35b02`), not built or run by this lane. `cargo test
   --manifest-path crates/Cargo.toml -p wz-capi-coop --features listen,tables-on-use --lib
