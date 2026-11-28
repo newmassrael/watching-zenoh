@@ -1019,7 +1019,8 @@ CASES: tuple[Case, ...] = (
          # first reading's 246,600 ratcheted down by the on-use bodies taken back since.
          "os-host,link-udp,tables-on-use", 245_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, ON_USE_ROWS),
          exports=443, **NOSTD_RELEASE_FORM,
          note="pico-client-coop-nostd with its tables on use: each allocation of the form answers "
