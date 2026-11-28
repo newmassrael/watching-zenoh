@@ -3222,8 +3222,8 @@ impl SubscriberPeer<crate::bounded::OnUse> {
 mod on_use_alias_tests {
     use super::SubscriberPeer;
     use crate::bounded::OnUse;
-    use crate::limit_binding::Quota;
-    use crate::limits::MaxPeerKeyexprAliasesHeld;
+    use crate::limit_binding::{LimitSpec, Quota};
+    use crate::limits::{MaxPeerKeyexprAliases, MaxPeerKeyexprAliasesHeld};
 
     /// A side whose alias table holds no alias is counted to the quota it is held to, above the
     /// build's `MAX_PEER_KEYEXPR_ALIASES` (a group's face) or under it, so its first alias takes
@@ -3238,13 +3238,18 @@ mod on_use_alias_tests {
             build,
             "CONTROL: the build's rows before a quota"
         );
-        let Some(quota) = [build.saturating_mul(2), 1]
+        let others = [build.saturating_mul(2), 1];
+        if MaxPeerKeyexprAliases::DOMAIN.is_singleton() {
+            // A build that keeps the build's value alone refuses every other quota itself.
+            for rows in others.into_iter().filter(|rows| *rows != build) {
+                assert!(MaxPeerKeyexprAliasesHeld::select(Quota::at_most(rows)).is_err());
+            }
+            return;
+        }
+        let quota = others
             .into_iter()
             .find_map(|rows| MaxPeerKeyexprAliasesHeld::select(Quota::at_most(rows)).ok())
-        else {
-            // A domain of the build's value alone states no other quota.
-            return;
-        };
+            .expect("a domain of more than one value holds one of these quotas");
         side.limit_aliases_to(quota);
         assert_eq!(
             Some(side.alias_rows()),
