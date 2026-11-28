@@ -472,3 +472,74 @@ straddle, and a network that answers the same twice is not a function of the scr
 name drawn from the clock directly below `TMPDIR` is read as its order; a temporary path not
 below `TMPDIR` (a hard-coded `/tmp`) is not replaced; and state one run leaves in the tree is
 seen only as the difference it makes to the second.
+
+## 10. Python selftests: the layer rule
+
+Section 9 runs each selftest twice and sees what differed between two runs; this section holds
+what a selftest may reach at all, read from its code. A selftest is a function of its fixtures:
+it names none of the sources below, and a selftest that must is declared with its reason, as a
+Rust test module is (sections 4 and 5).
+
+- the wall clock: `time.sleep`, `time.time`, `time.monotonic`, `time.perf_counter` (and their
+  `_ns` forms), `datetime.now`, `datetime.utcnow`, `datetime.today`, `date.today`;
+- processes: what of `subprocess` starts one (`run`, `Popen`, `call`, `check_call`,
+  `check_output`, `getoutput`, `getstatusoutput`; its types and constants start none),
+  `os.system`, `os.popen`, `os.exec*`, `os.fork`, `os.spawn*`, `os.posix_spawn`;
+- the host's sockets: `socket.*`, `urllib.request`, `http.client`, `requests`;
+- threads of its own: `threading.Thread` and `Timer` (called or subclassed),
+  `multiprocessing`, `asyncio.run`, `asyncio.get_event_loop`, an `Executor` of
+  `concurrent.futures`;
+- the host's randomness: the functions of `random`, `random.Random()` built with no seed (one
+  the test seeds is its own), `secrets`, `os.urandom`, `uuid.uuid1`, `uuid.uuid4`.
+
+`scripts/lib/python_selftest_layer_gate.py`, `--check`, `--selftest` and `--rows`, Python 3.10
+at the lowest, standard library only, a read by `ast` with nothing run:
+
+- **Population**, derived: every tracked `.py` file below `scripts/` with a selftest entry: a
+  top-level function named `selftest` or `_selftest`; what the `--selftest` branch of `main` or
+  of the `__main__` block names (an `if` or a conditional expression whose test reads
+  `--selftest` or a `.selftest` flag, its `else` under a `not`; the value a table of modes keys
+  by `--selftest`); in a file named `test_*.py`, each top-level function named `test_*`.
+- **Reach**, derived: from the entries, a call whose dotted name, every import alias resolved
+  (`import subprocess as sp`, `from time import sleep`), is one of a source's. The read follows,
+  to a fixed point, what each unit it reaches names: a function or class of its own file, a
+  method by its name (of its own file or of a file it imports), and a function or class of a
+  module it imports from its own directory or from `scripts/lib` (`from m import f`, `import m`
+  then `m.f`, `from m import *`). A class reaches what its body and its dunder methods call; a
+  file reached runs its top level; a name a function binds itself hides its file's item of that
+  name. Each source a script reaches carries the trail from an entry to the call, and the finding
+  of a script with no row prints it.
+- **Table**: `docs/deterministic-tests/python-system-layer.tsv`, a header (`path`, `kind`,
+  `sources`, `reason`) and one row per system-layer script. `pending`: owed the split of its
+  judgement from its fact-gathering, so that the selftest hands the judgement fixtures behind a
+  seam; `system`: the host is its subject, such as a selftest that runs git or a shell script
+  over a fixture tree it made.
+- **Findings**: a script that reaches a source and has no row; a row for a path that is not a
+  tracked script with a selftest entry, or a second row; a kind, a source list or a reason that
+  does not read; a row that declares a source its script no longer reaches (stale) or leaves out
+  one it reaches; a tracked file that does not parse; a population of no script or a table read
+  as empty (the gate lost its subject). A line that does not read as a row is a finding, never
+  dropped.
+- **Ratchet**: the first table is `--rows` on the day it lands: every script that reached a
+  source, kind `pending`, the reason `census 2026-11-28: reached before the gate` until a review
+  says which are `system` and why. `--rows` prints the rows the table lacks (with no table, the
+  table's head first). A move behind a seam deletes a row; a row is added only for a script whose
+  subject is the host, which is the review's rule, as in section 5.
+- **Selftest**: a fixture tree of scripts, each holding one way to reach a source or one way not
+  to: a call named directly, a module alias, a name alias, a function imported from
+  `scripts/lib` by name, by module and by star, a method of the file and of an imported class, a
+  dunder method, a subclass of a thread class, the `--selftest` branch of `main`, a mode table
+  and the `__main__` block, an imported module's top level, a `test_*` function, an import from
+  the file's own directory, a generator built with no seed; and, held to reach nothing, the
+  CONTROL (a selftest that calls no source, its source in a comment and a string, the other
+  branch of `main` naming one), a nested function hiding the file's function of its name, an
+  imported function that reaches nothing, and a seeded generator. Against a table that declares
+  them it is green; each finding above is driven from it, and an empty population and a table of
+  no row are each refused.
+
+What the read does not see: a dynamic call (`getattr`, a function looked up in a table built at
+run time, `importlib`), `exec` and `eval`; a source bound to a plain name by assignment or handed
+on as a value and called under another name; a read of the environment; a write to the file
+system; the code of `main` outside its `--selftest` branch. A method is joined by its name alone,
+so a method of the same name on another type joins it too: the read errs to reaching, and a
+`pending` row it gives is the review's to confirm.
