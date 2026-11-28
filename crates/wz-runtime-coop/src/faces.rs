@@ -1970,14 +1970,44 @@ pub trait FacePlaces<F> {
 /// the first place, held for the table's life, and a place for each face taken beside it. Where
 /// the places lie is the table's one parameter ([`PlaceStore`]), chosen once a build: one place
 /// inline in the table where the build takes no face beside the dial role's ([`OneRow`]), so
-/// every bound and index of it is a constant; places reserved at the open past it
-/// ([`ReservedRows`]). The bodies are this table's, one source for either.
+/// every bound and index of it is a constant and no mark says whether it holds a face; places
+/// reserved at the open past it ([`ReservedRows`]), each marked held or free. The bodies are this
+/// table's, one source for either.
 pub struct FaceRows<S>(S);
 
-/// A place of a face table: a face or none, in storage the face is built in where it lies, so
-/// a face whose largest part is built in place ([`VacantPlace::fill`]) is moved by nothing, and
-/// the place's row of the dials, which holds a dial only while the face at the place dials. The
-/// first place of a table holds the dial role's face from the table's making to its drop.
+/// What a face table reads of one of its places ([`PlaceStore::Place`]): the face it holds, with
+/// the place's row of the dials, and whether a face is put in it or taken out of it. A place of a
+/// table that takes faces beside the dial role's is marked held or free ([`TablePlace`]); the one
+/// place of a table of the dial role's face alone holds that face for the table's life and has no
+/// mark ([`DialRolePlace`]).
+pub trait Place<F, D>: sealed::Sealed {
+    /// The face of the place at `at` of its table, while one holds it.
+    fn get_at(&self, at: usize) -> Option<&F>;
+
+    /// [`Self::get_at`], to change the face.
+    fn get_mut_at(&mut self, at: usize) -> Option<&mut F>;
+
+    /// [`Self::get_at`], with the place's row of the dials.
+    fn face_and_row_at(&self, at: usize) -> Option<(&F, &DialPlace<D>)>;
+
+    /// [`Self::face_and_row_at`], to change the face and its row.
+    fn face_and_row_mut_at(&mut self, at: usize) -> Option<(&mut F, &mut DialPlace<D>)>;
+
+    /// Whether the place holds a face.
+    fn holds(&self) -> bool;
+
+    /// The place, to put a face in or build one in where it lies, while it holds none.
+    fn vacant(&mut self) -> Option<VacantPlace<'_, F>>;
+
+    /// Drop the face the place holds, where it lies, and its dial: whether a face was there.
+    fn clear(&mut self) -> bool;
+}
+
+/// A place of a table that takes faces beside the dial role's: a face or none, in storage the face
+/// is built in where it lies, so a face whose largest part is built in place
+/// ([`VacantPlace::fill`]) is moved by nothing, and the place's row of the dials, which holds a dial
+/// only while the face at the place dials. The first place of such a table holds the dial role's
+/// face from the table's making to its drop.
 pub struct TablePlace<F, D> {
     held: bool,
     face: MaybeUninit<F>,
@@ -2032,14 +2062,18 @@ impl<F, D> TablePlace<F, D> {
         // SAFETY: as `get`.
         Some((unsafe { self.face.assume_init_mut() }, &mut self.row))
     }
+}
 
-    /// The face of the place at `at` of its table: the first place's is read with no look at
-    /// its mark, as it holds the dial role's face for the table's life.
+impl<F, D> sealed::Sealed for TablePlace<F, D> {}
+
+impl<F, D> Place<F, D> for TablePlace<F, D> {
+    // The first place's face is read with no look at its mark, as it holds the dial role's face
+    // for the table's life.
     #[inline(always)]
     fn get_at(&self, at: usize) -> Option<&F> {
         if at == 0 {
             debug_assert!(self.held, "the dial role's place holds its face");
-            // SAFETY: the first place is made holding its face (`FaceRows::with_dial`) and is
+            // SAFETY: the first place is made holding its face (`ReservedRows::with_dial`) and is
             // never emptied: it is never vacant, never freed, and every cut of a table's walk
             // keeps it (`FaceRows::vacant`, `FaceRows::free`, `PlaceStore::cut`).
             return Some(unsafe { self.face.assume_init_ref() });
@@ -2047,7 +2081,6 @@ impl<F, D> TablePlace<F, D> {
         self.get()
     }
 
-    /// [`Self::get_at`], to change the face.
     #[inline(always)]
     fn get_mut_at(&mut self, at: usize) -> Option<&mut F> {
         if at == 0 {
@@ -2058,7 +2091,6 @@ impl<F, D> TablePlace<F, D> {
         self.get_mut()
     }
 
-    /// [`Self::get_at`], with the place's row of the dials.
     #[inline(always)]
     fn face_and_row_at(&self, at: usize) -> Option<(&F, &DialPlace<D>)> {
         if at == 0 {
@@ -2067,7 +2099,6 @@ impl<F, D> TablePlace<F, D> {
         self.face_and_row()
     }
 
-    /// [`Self::face_and_row_at`], to change the face and its row.
     #[inline(always)]
     fn face_and_row_mut_at(&mut self, at: usize) -> Option<(&mut F, &mut DialPlace<D>)> {
         if at == 0 {
@@ -2078,7 +2109,20 @@ impl<F, D> TablePlace<F, D> {
         self.face_and_row_mut()
     }
 
-    /// Drop the face the place holds, where it lies, and its dial: whether a face was there.
+    fn holds(&self) -> bool {
+        self.held
+    }
+
+    fn vacant(&mut self) -> Option<VacantPlace<'_, F>> {
+        if self.held {
+            return None;
+        }
+        Some(VacantPlace {
+            held: &mut self.held,
+            face: &mut self.face,
+        })
+    }
+
     fn clear(&mut self) -> bool {
         // The next face at the place holds no dial.
         Dial::let_go_in(&mut self.row);
@@ -2095,6 +2139,55 @@ impl<F, D> TablePlace<F, D> {
 impl<F, D> Drop for TablePlace<F, D> {
     fn drop(&mut self) {
         self.clear();
+    }
+}
+
+/// The one place of a table whose build takes no face beside the dial role's: that face, held for
+/// the table's life, and its row of the dials. Nothing is put in it or taken out, so it keeps no
+/// mark, and its face is a value of its own, dropped with the place. The row is declared first, so
+/// its dial is let go of before the face, as a [`TablePlace`] lets go of its dial before its face.
+pub struct DialRolePlace<F, D> {
+    row: DialPlace<D>,
+    face: F,
+}
+
+impl<F, D> sealed::Sealed for DialRolePlace<F, D> {}
+
+// The place is its table's first and only one, so every place a walk reads it at names it.
+impl<F, D> Place<F, D> for DialRolePlace<F, D> {
+    #[inline(always)]
+    fn get_at(&self, _at: usize) -> Option<&F> {
+        Some(&self.face)
+    }
+
+    #[inline(always)]
+    fn get_mut_at(&mut self, _at: usize) -> Option<&mut F> {
+        Some(&mut self.face)
+    }
+
+    #[inline(always)]
+    fn face_and_row_at(&self, _at: usize) -> Option<(&F, &DialPlace<D>)> {
+        Some((&self.face, &self.row))
+    }
+
+    #[inline(always)]
+    fn face_and_row_mut_at(&mut self, _at: usize) -> Option<(&mut F, &mut DialPlace<D>)> {
+        Some((&mut self.face, &mut self.row))
+    }
+
+    #[inline(always)]
+    fn holds(&self) -> bool {
+        true
+    }
+
+    #[inline(always)]
+    fn vacant(&mut self) -> Option<VacantPlace<'_, F>> {
+        None
+    }
+
+    #[inline(always)]
+    fn clear(&mut self) -> bool {
+        false
     }
 }
 
@@ -2127,9 +2220,10 @@ impl<'a, F> VacantPlace<'a, F> {
     }
 }
 
-/// The storages of a face table are this module's alone: each keeps the first place whole.
+/// The storages of a face table and their places are this module's alone: each storage keeps the
+/// first place whole.
 mod sealed {
-    /// Implemented by [`super::OneRow`] and [`super::ReservedRows`] alone.
+    /// Implemented by [`super::OneRow`], [`super::ReservedRows`] and their places alone.
     pub trait Sealed {}
 }
 
@@ -2142,25 +2236,28 @@ pub trait PlaceStore: sealed::Sealed {
     /// The stack's dial each place's row of the dials holds.
     type Dial;
 
+    /// How each place is kept.
+    type Place: Place<Self::Face, Self::Dial>;
+
     /// Whether the places hold faces beside the dial role's ([`FacePlaces::TAKES`]).
     const TAKES: bool;
 
-    /// The places of a table whose first is `dial`, `places` places in all (one at least)
+    /// The places of a table whose first holds `dial`, `places` places in all (one at least)
     /// where the form keeps more than one.
-    fn with_dial(dial: TablePlace<Self::Face, Self::Dial>, places: usize) -> Self;
+    fn with_dial(dial: Self::Face, places: usize) -> Self;
 
     /// How many places the table has, held or free.
     fn places(&self) -> usize;
 
     /// The places up to the last one held, the dial role's first: never empty.
-    fn walked(&self) -> &[TablePlace<Self::Face, Self::Dial>];
+    fn walked(&self) -> &[Self::Place];
 
     /// [`Self::walked`], to change each place.
-    fn walked_mut(&mut self) -> &mut [TablePlace<Self::Face, Self::Dial>];
+    fn walked_mut(&mut self) -> &mut [Self::Place];
 
-    /// The place `at`, short of [`Self::places`], brought into the walk with the free places
-    /// before it.
-    fn reach(&mut self, at: usize) -> Option<&mut TablePlace<Self::Face, Self::Dial>>;
+    /// The place `at` past the dial role's, short of [`Self::places`], brought into the walk
+    /// with the free places before it.
+    fn reach(&mut self, at: usize) -> Option<&mut Self::Place>;
 
     /// End the walk after its first `len` places, one at least: the places cut off are dropped.
     fn cut(&mut self, len: usize);
@@ -2168,17 +2265,21 @@ pub trait PlaceStore: sealed::Sealed {
 
 /// The one place of a table whose build takes no face beside the dial role's, inline: its walk
 /// is that place, a constant, and no other place is reached.
-pub struct OneRow<F, D>([TablePlace<F, D>; 1]);
+pub struct OneRow<F, D>([DialRolePlace<F, D>; 1]);
 
 impl<F, D> sealed::Sealed for OneRow<F, D> {}
 
 impl<F, D> PlaceStore for OneRow<F, D> {
     type Face = F;
     type Dial = D;
+    type Place = DialRolePlace<F, D>;
     const TAKES: bool = false;
 
-    fn with_dial(dial: TablePlace<F, D>, _places: usize) -> Self {
-        Self([dial])
+    fn with_dial(dial: F, _places: usize) -> Self {
+        Self([DialRolePlace {
+            row: None,
+            face: dial,
+        }])
     }
 
     #[inline(always)]
@@ -2187,19 +2288,21 @@ impl<F, D> PlaceStore for OneRow<F, D> {
     }
 
     #[inline(always)]
-    fn walked(&self) -> &[TablePlace<F, D>] {
+    fn walked(&self) -> &[DialRolePlace<F, D>] {
         &self.0
     }
 
     #[inline(always)]
-    fn walked_mut(&mut self) -> &mut [TablePlace<F, D>] {
+    fn walked_mut(&mut self) -> &mut [DialRolePlace<F, D>] {
         &mut self.0
     }
 
-    fn reach(&mut self, at: usize) -> Option<&mut TablePlace<F, D>> {
-        self.0.get_mut(at)
+    #[inline(always)]
+    fn reach(&mut self, _at: usize) -> Option<&mut DialRolePlace<F, D>> {
+        None
     }
 
+    #[inline(always)]
     fn cut(&mut self, _len: usize) {}
 }
 
@@ -2218,12 +2321,13 @@ impl<F, D> sealed::Sealed for ReservedRows<F, D> {}
 impl<F, D> PlaceStore for ReservedRows<F, D> {
     type Face = F;
     type Dial = D;
+    type Place = TablePlace<F, D>;
     const TAKES: bool = true;
 
-    fn with_dial(dial: TablePlace<F, D>, places: usize) -> Self {
+    fn with_dial(dial: F, places: usize) -> Self {
         let places = places.max(1);
         let mut faces = Vec::with_capacity(places);
-        faces.push(dial);
+        faces.push(TablePlace::holding(dial));
         Self { faces, places }
     }
 
@@ -2264,7 +2368,7 @@ impl<S: PlaceStore> FacePlaces<S::Face> for FaceRows<S> {
     type Dial = S::Dial;
 
     fn with_dial(dial: S::Face, places: usize) -> Self {
-        Self(S::with_dial(TablePlace::holding(dial), places))
+        Self(S::with_dial(dial, places))
     }
 
     fn places(&self) -> usize {
@@ -2321,14 +2425,7 @@ impl<S: PlaceStore> FacePlaces<S::Face> for FaceRows<S> {
         if at == 0 {
             return None;
         }
-        let place = self.0.reach(at)?;
-        if place.held {
-            return None;
-        }
-        Some(VacantPlace {
-            held: &mut place.held,
-            face: &mut place.face,
-        })
+        self.0.reach(at)?.vacant()
     }
 
     fn free(&mut self, at: usize) -> bool {
@@ -2344,7 +2441,7 @@ impl<S: PlaceStore> FacePlaces<S::Face> for FaceRows<S> {
             .0
             .walked()
             .iter()
-            .rposition(|place| place.held)
+            .rposition(|place| place.holds())
             .map_or(1, |last| last.saturating_add(1));
         self.0.cut(held);
         freed
@@ -6873,6 +6970,26 @@ mod tests {
         assert_eq!(
             table.placed_mut().map(|(at, _)| at).collect::<Vec<_>>(),
             [0]
+        );
+    }
+
+    /// The one place of a table of the dial role's face alone is that face and its row of the
+    /// dials, with no mark of whether it holds a face: a build of that face alone pays nothing for
+    /// the places of other faces.
+    ///
+    /// # Control
+    ///
+    /// A table of one place kept as a place of many (`TablePlace`), with its mark, reds the size.
+    #[test]
+    fn a_table_of_one_face_keeps_no_mark_beside_its_face() {
+        assert_eq!(
+            core::mem::size_of::<FaceRows<OneRow<u64, u64>>>(),
+            core::mem::size_of::<DialPlace<u64>>() + core::mem::size_of::<u64>()
+        );
+        assert!(
+            core::mem::size_of::<TablePlace<u64, u64>>()
+                > core::mem::size_of::<FaceRows<OneRow<u64, u64>>>(),
+            "CONTROL: a place of many faces keeps a mark"
         );
     }
 
