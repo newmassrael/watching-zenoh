@@ -78,6 +78,7 @@
         "wz_session_core::lent_request": "codec",
         "wz_session_core::lent_response": "codec",
         "wz_session_core::session_actions": "transport",
+        "wz_session_core::transport_tx": "transport",
         "wz_session_core::drive": "transport",
         "wz_session_core::reassembly_dispatch": "transport",
         "wz_session_core::transport_timers": "transport",
