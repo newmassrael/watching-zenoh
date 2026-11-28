@@ -1764,6 +1764,9 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   `budget_for(237,978)` = 242,800, the gate's own figure, with the reading in its comment. The
   case's ceiling row stays locked at WIN and states that reading (0.72x zenoh-pico's 329,664,
   read in the same run as the on-use case's row, whose toolchain string it shares).
+- `31a66c68e9`: `pico-client-coop-nostd-on-use`'s budget ratchets down the same way, 246,600
+  (set from its first reading, 241,680) to `budget_for(240,432)` = 245,300, the reading of
+  `33bd90da25`; its note keeps the first reading. Its ceiling row is unchanged (locked at WIN).
 - Tests: none added. `tests::on_use` runs 10 tests under `tables-on-use` and 12 under
   `listen,tables-on-use`, with the one of `tests::on_use_listen` that the same filter matches.
   The budget's margin is 2 percent over a reading of `33bd90da25`; what main's merged-in work
