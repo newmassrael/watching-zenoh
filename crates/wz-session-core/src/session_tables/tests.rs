@@ -2146,6 +2146,57 @@ fn each_kind_of_get_is_held_to_its_own_bound_in_the_one_table() {
     any(&mut tables, GetKind::Query, 5).expect("the row the query gave back holds the next");
 }
 
+/// A snapshot asked of one face ends answered at that face's DeclFinal, its legs counted as the
+/// engine counts them: begun with the asker's own leg, one leg more for the face, held there under
+/// the id its Interest carries; the asker's end leaves the face's leg owed, and the one Final the
+/// face owes ends that leg and, with it, the snapshot, which the tables then owe as ended. The
+/// CONTROL is the snapshot after the asker's end: standing, with no end owed. Turned red by a
+/// snapshot's row that counts a leg no face holds, or a face's leg held owing more than its Final.
+#[cfg(feature = "liveliness-get")]
+#[test]
+fn a_snapshot_of_one_face_ends_with_its_askers_leg_and_the_faces_final() {
+    let mut tables = Tables::new();
+    tables.limit_to(&rows());
+    let snapshot = tables
+        .begin_get(
+            GetKind::Snapshot,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            u64::MAX,
+            1,
+        )
+        .expect("a snapshot's row")
+        .handle;
+    let interest_id: u64 = 9;
+    let mut face: crate::get_legs::GetLegs<PendingGetHandle> = Default::default();
+    assert!(tables.add_leg(snapshot), "the face's leg is counted");
+    assert!(
+        face.hold(crate::wire_id::interest_id_as_read(interest_id), snapshot),
+        "and held under its Interest's id"
+    );
+    assert_eq!(
+        tables.end_leg(snapshot),
+        Some(LegEnded::Owed(1)),
+        "the asker's own leg ends"
+    );
+    assert!(
+        !tables.owes_ended_get(),
+        "CONTROL: the snapshot stands for its face's Final"
+    );
+    let ended = face
+        .end_leg(crate::wire_id::interest_id_as_read(interest_id))
+        .expect("the face's one Final ends its leg");
+    assert_eq!(ended, snapshot);
+    assert!(face.is_empty());
+    assert_eq!(tables.end_leg(ended), Some(LegEnded::Over));
+    assert!(tables.owes_ended_get());
+    assert_eq!(
+        tables.next_ended_get(&mut 0),
+        Some((snapshot, GetEnd::Answered))
+    );
+}
+
 /// A build that asks for no liveliness snapshot holds queries alone: a snapshot finds no row
 /// whatever the table has free. The CONTROL is a query, held.
 #[cfg(not(feature = "liveliness-get"))]
