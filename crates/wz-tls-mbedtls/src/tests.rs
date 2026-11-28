@@ -277,3 +277,43 @@ fn the_host_build_holds_the_key_store_the_host_declares() {
         "the library was not compiled with the host's key store (WZ_TLS_HOST)"
     );
 }
+
+/// ES256 by the library's PSA Crypto against signatures `ring` made: a genuine one verifies, and a
+/// changed message, a changed signature, another key and a point off the curve verify nothing.
+#[cfg(feature = "es256")]
+mod es256 {
+    use super::library;
+    use crate::es256::{random_echo, PsaEs256};
+    use wz_command_seal::{Es256, Es256Signer, RingSigner};
+
+    #[test]
+    fn a_signature_ring_made_verifies_and_any_change_does_not() {
+        let _library = library();
+        let signer = RingSigner::generate().expect("a key");
+        let other = RingSigner::generate().expect("another key");
+        let message = b"the Sig_structure of a sealed command";
+        let signature = signer.sign(message).expect("signs");
+        let point = signer.point();
+        assert!(PsaEs256.verify(&point, message, &signature));
+
+        assert!(!PsaEs256.verify(&point, b"another message", &signature));
+        let mut flipped = signature;
+        flipped[10] ^= 0x01;
+        assert!(!PsaEs256.verify(&point, message, &flipped));
+        assert!(!PsaEs256.verify(&other.point(), message, &signature));
+        let mut off_curve = point;
+        off_curve[64] ^= 0x01;
+        assert!(!PsaEs256.verify(&off_curve, message, &signature));
+        // CONTROL: the genuine signature still verifies after the refusals, so a refusal left no
+        // key slot behind.
+        assert!(PsaEs256.verify(&point, message, &signature));
+    }
+
+    #[test]
+    fn an_echo_is_drawn_from_the_library_and_two_differ() {
+        let _library = library();
+        let first = random_echo().expect("an echo");
+        let second = random_echo().expect("an echo");
+        assert_ne!(first, second);
+    }
+}

@@ -239,7 +239,6 @@ mod udp {
     use wz_runtime_tokio::writer_queue::{datagram_outbound_channel, WriterHandle};
     use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, LinkSubject};
     use wz_session_core::reliability::Reliability;
-    use wz_session_core::tx_buf::TxBuf;
     use wz_session_core::tx_lease::TxLease;
 
     struct Link {
@@ -292,7 +291,10 @@ mod udp {
     fn send_lent(driver: &UdpWriteDriver, payload: &[u8]) {
         let mut lease =
             TxLease::acquire(driver, payload.len(), Priority::DEFAULT).expect("the link lends");
-        lease.append(payload).expect("the slot holds it");
+        lease
+            .frame_mut()
+            .append(payload)
+            .expect("the slot holds it");
         assert_eq!(
             lease.send(Reliability::BestEffort, Priority::DEFAULT),
             LinkSendOutcome::Sent
@@ -463,7 +465,6 @@ mod ws {
     use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, LinkSubject};
     use wz_session_core::qos::Priority;
     use wz_session_core::reliability::Reliability;
-    use wz_session_core::tx_buf::TxBuf;
     use wz_session_core::tx_lease::TxLease;
 
     const ENDS: [WsEnd; 2] = [WsEnd::Client, WsEnd::Server];
@@ -484,7 +485,10 @@ mod ws {
     fn send_lent(driver: &WsWriteDriver, payload: &[u8]) {
         let mut lease =
             TxLease::acquire(driver, payload.len(), Priority::DEFAULT).expect("the link lends");
-        lease.append(payload).expect("the slot holds it");
+        lease
+            .frame_mut()
+            .append(payload)
+            .expect("the slot holds it");
         assert_eq!(
             lease.send(Reliability::Reliable, Priority::DEFAULT),
             LinkSendOutcome::Sent

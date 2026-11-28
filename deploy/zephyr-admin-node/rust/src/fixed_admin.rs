@@ -33,7 +33,7 @@
 //! and buffer pools a TLS server's first flight needs are the image's to state
 //! (`overlays/qemu_admin_fixed_tls.conf` says why).
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 use core::net::IpAddr;
 
 use wz::runtime_zephyr::glue::{log, log_args, stack_usage, yield_us};
@@ -80,8 +80,10 @@ use crate::{resolve_limits, resolve_policy, BATCH_SIZE, IDLE_SLEEP_US, STACK_CHE
 pub const TLS_PORT: u16 = 7448;
 /// Sessions the node holds at most, accepted and dialled together.
 pub const SESSIONS: usize = 2;
-/// Sessions a peer opened to the node that it holds at once.
-const ACCEPTS: usize = 1;
+/// Sessions a peer opened to the node that it holds at once: any of its sessions may be one. A node
+/// commanded in band holds the commander's session while a passive intent (decision D10) waits for
+/// the session its peer opens, so with a table of one the peer's session would be closed at the door.
+const ACCEPTS: usize = SESSIONS;
 /// Connections that may queue on the port before the node takes them off it.
 const BACKLOG: u8 = 2;
 /// The runtime's task table: a pump task per session and no other task. A session holds its task's
@@ -119,6 +121,9 @@ const ADDRESS_WAIT_MS: u32 = 30_000;
 const LOCATOR_BYTES: usize = 62;
 /// The most commanders one verb lists.
 pub const MAX_COMMANDERS: usize = 4;
+/// The longest console line that says which accepted sessions are established: the prefix, and for
+/// each session a separator, the zid in at most 32 hex digits and ` not verified`.
+const ACCEPTED_LINE_BYTES: usize = 32 + ACCEPTS * (2 + 32 + 13);
 
 type Clock = ZephyrClock<TICK_HZ>;
 type Driver = <Stack as SlotStack>::Driver;
@@ -352,6 +357,58 @@ fn clock_ms() -> u64 {
     Clock::default().now_us() / 1000
 }
 
+/// The established sessions peers opened to the node: the zid each one's INIT claims, and whether
+/// the key of its link proved that zid. In the order the node holds them.
+type Accepted = [Option<(DirectoryZid, bool)>; ACCEPTS];
+
+/// The accepted sessions the console last said the node holds. A `static` and not a local of
+/// `run`, whose frame is under every call the node makes.
+struct AcceptedSaid(Cell<Accepted>);
+
+// SAFETY: the profile's rule: one cooperative loop on one thread reaches it.
+unsafe impl Sync for AcceptedSaid {}
+
+static ACCEPTED_SAID: AcceptedSaid = AcceptedSaid(Cell::new([None; ACCEPTS]));
+
+/// Say on the console which accepted sessions are established, each by the zid it claims and
+/// whether its key proved that zid, when that set changed since the last line. A lane reads the last
+/// such line as what the node holds: a session a peer opened under a claim its key does not prove is
+/// held as `not verified`, and a session that ended is gone from the line.
+#[inline(never)]
+fn say_accepted(node: &Node) {
+    let mut now: Accepted = [None; ACCEPTS];
+    let established = node
+        .accepted()
+        .filter(|session| session.actions().is_established());
+    for (row, session) in now.iter_mut().zip(established) {
+        let actions = session.actions();
+        *row = actions
+            .peer_zid_array()
+            .map(|zid| (zid, actions.peer_identity_verified()));
+    }
+    if now == ACCEPTED_SAID.0.get() {
+        return;
+    }
+    ACCEPTED_SAID.0.set(now);
+    let mut line: FixedText<ACCEPTED_LINE_BYTES> = FixedText::new();
+    line.push_str("zephyr-admin-node: accepted");
+    let mut separator = " ";
+    for (zid, verified) in now.iter().flatten() {
+        line.push_str(separator);
+        write_zenoh_hex(zid, &mut line);
+        line.push_str(if *verified {
+            " verified"
+        } else {
+            " not verified"
+        });
+        separator = ", ";
+    }
+    if separator == " " {
+        line.push_str(" none");
+    }
+    log_args(format_args!("{}", line.prefix()));
+}
+
 /// Build the observer in `APP`, where it stays, and register the node's own surface on it: the
 /// config-write subscriber and the admin queryable binding the in-band verbs. The reason, as the
 /// console line, when one is refused.
@@ -574,6 +631,7 @@ pub fn run() -> i32 {
                 log_args(format_args!("tls arena: peak {peak} of {size} bytes"));
             }
         }
+        say_accepted(running.node);
         let sessions = CONTROL.status.session_count();
         if sessions != reported {
             reported = sessions;

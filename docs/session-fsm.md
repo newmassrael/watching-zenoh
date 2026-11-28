@@ -182,6 +182,13 @@ Accepting.SentOpenAck
   |-- event: <immediate> ---------------------------> Established
 ```
 
+`sources/session/session_fsm_unicast.scxml` lowers `Accepting.SentOpenAck`, whose exit is
+immediate, into the admitted `recv(OpenSyn)` edge itself: that edge sends the OpenAck as its
+effect and targets `Established`. The effects run in the same order (the OpenAck, then
+`Established`'s entry), no event ever found the state current, and the machine keeps no eventless
+transition, so the accepting build's machine is of the class the runtime's reactive turn serves
+(`crates/wz-session-core/src/machine_class_tests.rs`).
+
 When `stateless_accept: cookie_hmac_sha256` is set on the link
 (§5.K), the `Accepting.AwaitingInitSyn → Accepting.SentInitAck`
 edge does **not** allocate an FSM instance — it computes the

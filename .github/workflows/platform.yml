@@ -83,6 +83,7 @@ on:
       - "crates/wz-capi-port/**"
       - "crates/wz-capi-coop/**"
       - "crates/wz-session-mcu/**"
+      - "crates/wz-command-seal/**"
       - "crates/wz-runtime-coop/**"
       - "crates/wz-runtime-posix/**"
       - "crates/wz-capi-pico/**"

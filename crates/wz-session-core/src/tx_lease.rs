@@ -5,23 +5,21 @@
 //!
 //! ARCHITECTURE section 9.1: the codec writes directly into a pool slot and the
 //! link sends that slot. [`BoxedLinkDriver::tx_slot_acquire`] is the link
-//! lending the slot; [`TxLease`] is the session holding it. The lease is a
-//! [`TxBuf`] over the slot's memory after the headroom the link reserved, so
-//! every outbound encoder that writes to a `TxBuf` writes into the link's own
-//! slot with no change, and [`TxLease::send`] gives the slot back to the link
-//! by ownership. A lease that is dropped unsent returns the slot through
+//! lending the slot; [`TxLease`] is the session holding it. The lease's frame
+//! ([`TxLease::frame_mut`]) is a [`TxBuf`] over the slot's memory after the
+//! headroom the link reserved, so every outbound encoder that writes to a
+//! `TxBuf` writes into the link's own slot with no change, and
+//! [`TxLease::send`] gives the slot back to the link by ownership. A lease that is dropped unsent returns the slot through
 //! [`BoxedLinkDriver::tx_slot_abort`], so no path out of the encoder leaks one.
 //!
 //! The lease holds a raw pointer, which makes it neither `Send` nor `Sync`:
 //! it lives for one synchronous encode-and-send under the conduit's lock and
-//! is never stored. A frame that stays open across calls is put down as a
-//! [`HeldSlot`], which is the slot's name and lengths without the pointer or the
-//! borrow, and picked up again with [`TxLease::resume`] on the driver that lent
-//! it, which asks the driver where the slot is. A holder that keeps the open
-//! frame under a lock of its own and knows from a record of its own that the
-//! slot is still lent (the session's batch, filled one message per call) puts it
-//! down as an [`OpenSlot`] instead, which keeps where the slot's memory is and is
-//! picked up again with [`TxLease::pick_up`] without a question to the driver.
+//! is never stored. A frame that stays open across calls (the session's batch,
+//! filled one message per call) is put down as an [`OpenSlot`] by a holder that
+//! keeps it under a lock of its own and knows from a record of its own that the
+//! slot is still lent: it keeps the frame's write state, takes the next message
+//! where the frame lies ([`OpenSlot::frame_mut`]), and is picked up again with
+//! [`TxLease::pick_up`] to be sent, without a question to the driver.
 //!
 //! The targets are spelled out in full: this page's text is merged with the
 //! outer doc on `pub mod tx_lease;` and the merged text resolves its relative
@@ -30,8 +28,8 @@
 //! [`TxBuf`]: crate::tx_buf::TxBuf
 //! [`TxLease`]: crate::tx_lease::TxLease
 //! [`TxLease::send`]: crate::tx_lease::TxLease::send
-//! [`TxLease::resume`]: crate::tx_lease::TxLease::resume
-//! [`HeldSlot`]: crate::tx_lease::HeldSlot
+//! [`TxLease::frame_mut`]: crate::tx_lease::TxLease::frame_mut
+//! [`OpenSlot::frame_mut`]: crate::tx_lease::OpenSlot::frame_mut
 //! [`OpenSlot`]: crate::tx_lease::OpenSlot
 //! [`TxLease::pick_up`]: crate::tx_lease::TxLease::pick_up
 //! [`BoxedLinkDriver::tx_slot_acquire`]: crate::link::BoxedLinkDriver::tx_slot_acquire
@@ -47,78 +45,163 @@ use crate::qos::Priority;
 use crate::reliability::Reliability;
 use crate::tx_buf::TxBuf;
 
-/// A lent outbound slot being filled.
+/// The write state of a frame in a lent slot: where the slot's memory is, where writes stop, the
+/// link's headroom and the bytes written after it. The one [`TxBuf`] of a lent frame, which the
+/// lease holds while the frame is written ([`TxLease`]) and the holder of an open frame between
+/// two calls ([`OpenSlot`]): a message that joins the open frame is written through it where the
+/// holder keeps it, and putting a frame down or picking it up moves it whole.
 ///
-/// `D` is the driver that lent it: a profile that names its driver at build time gets direct
-/// calls through the lease, and the default is the trait object the run-time profiles use.
-pub struct TxLease<'a, D: BoxedLinkDriver + ?Sized = dyn BoxedLinkDriver> {
-    driver: &'a D,
-    slot: TxSlot,
+/// It does not know whether the slot is still lent: each of its two holders does, the lease by
+/// being alive and the open slot by its holder's record, and lends it out only then. It is
+/// private to this module, so no cursor exists apart from a holder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameCursor {
     /// First byte of the slot (the headroom's first byte).
     base: *mut u8,
     /// Where writes stop: the slot's whole length, headroom included, or less once the frame is
-    /// held to a budget ([`TxLease::hold_to`]).
+    /// held to a budget ([`Self::hold_to`]).
     total: usize,
     /// Bytes at the front that belong to the link's framing.
     headroom: usize,
     /// Frame bytes written after the headroom.
     len: usize,
-    /// The slot has been handed to the link, or put down as a [`HeldSlot`];
+}
+
+impl FrameCursor {
+    /// How many frame bytes the slot can hold after its headroom.
+    fn capacity(&self) -> usize {
+        // The headroom is never past the slot: `TxLease::acquire` refuses one that is.
+        self.total.wrapping_sub(self.headroom)
+    }
+
+    /// See [`TxLease::hold_to`].
+    fn hold_to(&mut self, end: usize) {
+        let end = self.headroom.saturating_add(core::cmp::max(end, self.len));
+        if end < self.total {
+            self.total = end;
+        }
+    }
+
+    /// The bytes of the slot not written yet: `len` never passes the capacity.
+    fn room(&self) -> usize {
+        self.capacity().wrapping_sub(self.len)
+    }
+
+    /// Where the next byte goes, past the headroom: inside the slot, as `len` is.
+    fn write_at(&self) -> usize {
+        self.headroom.wrapping_add(self.len)
+    }
+}
+
+// Every access below reads or writes the slot's memory, which is the session's alone while the
+// slot is lent (`BoxedLinkDriver::tx_slot_acquire`'s contract: the slot is the session's until
+// it is sent or aborted), and a cursor is reached only through a holder that knows the slot is
+// still lent: a live lease, or an open slot whose holder vouches for it.
+impl TxBuf for FrameCursor {
+    type Error = CodecError;
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: `base` points at a slot of `total` bytes lent to the session alone (see
+        // above). `headroom + len <= total` holds by construction: `acquire` refuses
+        // `headroom > total` and no write passes `total`.
+        unsafe { slice::from_raw_parts(self.base.add(self.headroom), self.len) }
+    }
+
+    fn truncate(&mut self, len: usize) {
+        if len < self.len {
+            self.len = len;
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
+        if self.room() < bytes.len() {
+            return Err(CodecError::BufferOverflow);
+        }
+        // SAFETY: the destination `[headroom + len, headroom + len + n)` lies in the slot
+        // (checked above), the slot is the session's alone (see `as_slice`), and `bytes` is a
+        // borrowed slice of the caller's, which cannot overlap a slot the link granted
+        // exclusively.
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(self.write_at()), bytes.len());
+        }
+        // Within the room checked above.
+        self.len = self.len.wrapping_add(bytes.len());
+        Ok(())
+    }
+
+    /// One byte stored directly. The default goes through [`TxBuf::append`] with a
+    /// one-byte slice, which is a `memcpy` call for a length the compiler cannot see
+    /// is one; a frame's header is written a byte at a time, so that call was paid
+    /// several times per message.
+    fn append_byte(&mut self, byte: u8) -> Result<(), CodecError> {
+        if self.room() < 1 {
+            return Err(CodecError::BufferOverflow);
+        }
+        // SAFETY: the destination byte `headroom + len` lies in the slot (checked above) and
+        // the slot is the session's alone (see `as_slice`).
+        unsafe {
+            self.base.add(self.write_at()).write(byte);
+        }
+        self.len = self.len.wrapping_add(1);
+        Ok(())
+    }
+
+    /// The next `n` bytes of the slot as a window: the room is checked once, here.
+    fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
+        if self.room() < n {
+            return Err(CodecError::BufferOverflow);
+        }
+        // SAFETY: the window `[headroom + len, headroom + len + n)` lies in the slot (checked
+        // above), the slot is the session's alone (see `as_slice`), and the borrow of the
+        // window is the borrow of `self`, so nothing else touches the slot while it lives.
+        let window = unsafe { slice::from_raw_parts_mut(self.base.add(self.write_at()), n) };
+        self.len = self.len.wrapping_add(n);
+        Ok(Some(window))
+    }
+
+    /// The slot's room left, up to its budget ([`Self::hold_to`]), as one window.
+    fn reserve_rest(&mut self) -> Option<&mut [u8]> {
+        let n = self.room();
+        // SAFETY: the window `[headroom + len, headroom + capacity)` lies in the slot (`len`
+        // never passes the capacity), the slot is the session's alone (see `as_slice`), and the
+        // borrow of the window is the borrow of `self`, so nothing else touches the slot while
+        // it lives.
+        let window = unsafe { slice::from_raw_parts_mut(self.base.add(self.write_at()), n) };
+        self.len = self.capacity();
+        Some(window)
+    }
+}
+
+/// A lent outbound slot being filled.
+///
+/// `D` is the driver that lent it: a profile that names its driver at build time gets direct
+/// calls through the lease, and the default is the trait object the run-time profiles use. The
+/// frame is written through [`Self::frame_mut`].
+pub struct TxLease<'a, D: BoxedLinkDriver + ?Sized = dyn BoxedLinkDriver> {
+    driver: &'a D,
+    slot: TxSlot,
+    frame: FrameCursor,
+    /// The slot has been handed to the link, or put down as an [`OpenSlot`];
     /// either way dropping the lease must not abort it.
     sent: bool,
 }
 
-/// A lent slot with a frame still open in it, put down between two calls.
-///
-/// It is a [`TxLease`] without the borrow of its driver and without the pointer
-/// into the slot: the slot's name, the headroom the link asked for and the frame
-/// bytes written so far. That is what lets it be kept where a lease cannot be,
-/// in state the session reaches again on a later call (the batching window keeps
-/// one per open frame), and what makes it `Send`, which a raw pointer is not.
-///
-/// The slot is still LENT while this value exists, so it must end in exactly one
-/// of [`TxLease::resume`] on the driver that lent it, or [`Self::abort`] on that
-/// driver. It has no driver to give the slot back to on its own, so dropping it
-/// would keep the slot out of the link's pool for good; the type is `#[must_use]`
-/// for that reason, and the session's holder aborts what it still keeps when it
-/// is dropped itself.
-#[derive(Debug, PartialEq, Eq)]
-#[must_use = "a held slot is still lent: resume it or abort it on the driver that lent it"]
-pub struct HeldSlot {
-    slot: TxSlot,
-    headroom: usize,
-    len: usize,
-}
-
-impl HeldSlot {
-    /// Frame bytes the slot holds after its headroom.
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Nothing written: no frame is open in the slot.
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Give the slot back unsent, on `driver`, which must be the driver that
-    /// lent it.
-    pub fn abort<D: BoxedLinkDriver + ?Sized>(self, driver: &D) {
-        driver.tx_slot_abort(self.slot);
-    }
-}
-
 /// A lent slot with a frame open in it, put down between two calls by a holder that guards it
-/// with a lock: a [`HeldSlot`] that also keeps where the slot's memory is.
+/// with a lock: the slot's name and its frame's write state, without the borrow of its driver,
+/// so it can be kept where a lease cannot be.
 ///
-/// A batch is filled one message per call, and each call picked its frame up again with
-/// [`TxLease::resume`], which asks the driver where the slot's memory is. That memory does not
-/// move while the slot is lent ([`BoxedLinkDriver::tx_slot_storage`]: valid from the grant to the
-/// slot's send or abort), so a holder that knows the slot is still lent can keep the answer: it
-/// picks the frame up with [`TxLease::pick_up`] and asks nothing. Knowing it is the holder's
-/// part, which is why `pick_up` is `unsafe`.
+/// A batch is filled one message per call. The slot's memory does not move while the slot is
+/// lent ([`BoxedLinkDriver::tx_slot_storage`]: valid from the grant to the slot's send or abort),
+/// so a holder that knows the slot is still lent writes the next message where the frame lies
+/// ([`Self::frame_mut`]) and picks the frame up as a lease ([`TxLease::pick_up`]) only to send
+/// it, asking the driver nothing either way. Knowing it is the holder's part, which is why both
+/// are `unsafe`.
 ///
-/// The slot is still LENT while this value exists, as a held slot's is: it must end in
+/// The slot is still LENT while this value exists: it must end in
 /// [`TxLease::pick_up`] on the driver that lent it, or in [`Self::abort`] on that driver, or be
 /// let go by a holder that knows the slot was already given back (the link that lent it went,
 /// and gave back what it lent as it went).
@@ -126,19 +209,14 @@ impl HeldSlot {
 #[must_use = "an open slot is still lent: pick it up or abort it on the driver that lent it"]
 pub struct OpenSlot {
     slot: TxSlot,
-    /// First byte of the slot (the headroom's first byte).
-    base: *mut u8,
-    /// The slot's whole length, headroom included.
-    total: usize,
-    headroom: usize,
-    len: usize,
+    frame: FrameCursor,
 }
 
-// SAFETY: `base` names memory the link lent to the session alone, from the grant until the slot
-// is sent or aborted (`BoxedLinkDriver::tx_slot_storage`), and an `OpenSlot` is the only handle
-// to it while it exists: it is made by consuming the lease ([`TxLease::keep_open`]) and ends by
-// being consumed. Moving it to another thread moves the only access with it; nothing is shared,
-// so it is `Send` and not `Sync`.
+// SAFETY: the frame's memory is what the link lent to the session alone, from the grant until
+// the slot is sent or aborted (`BoxedLinkDriver::tx_slot_storage`), and an `OpenSlot` is the only
+// handle to it while it exists: it is made by consuming the lease ([`TxLease::keep_open`]) and
+// ends by being consumed. Moving it to another thread moves the only access with it; nothing is
+// shared, so it is `Send` and not `Sync`.
 unsafe impl Send for OpenSlot {}
 
 impl OpenSlot {
@@ -149,12 +227,37 @@ impl OpenSlot {
 
     /// Frame bytes the slot holds after its headroom.
     pub fn len(&self) -> usize {
-        self.len
+        self.frame.len
     }
 
     /// Nothing written: no frame is open in the slot.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.frame.len == 0
+    }
+
+    /// Keep only the first `len` frame bytes: a message written part way is rolled back. A
+    /// `len` at or past the frame's changes nothing. Reads and writes none of the slot's memory.
+    pub fn truncate(&mut self, len: usize) {
+        self.frame.truncate(len);
+    }
+
+    /// The frame bytes written so far.
+    ///
+    /// # Safety
+    ///
+    /// The slot has been neither sent nor aborted since it was lent, as for [`TxLease::pick_up`].
+    pub unsafe fn written(&self) -> &[u8] {
+        self.frame.as_slice()
+    }
+
+    /// The frame where it lies, to write the next message into, held to the budget its lease
+    /// was held to.
+    ///
+    /// # Safety
+    ///
+    /// The slot has been neither sent nor aborted since it was lent, as for [`TxLease::pick_up`].
+    pub unsafe fn frame_mut(&mut self) -> &mut (dyn TxBuf<Error = CodecError> + '_) {
+        &mut self.frame
     }
 
     /// Give the slot back unsent, on `driver`, which must be the driver that lent it.
@@ -183,67 +286,24 @@ impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
         Some(Self {
             driver,
             slot: grant.slot,
-            base,
-            total,
-            headroom: grant.headroom,
-            len: 0,
+            frame: FrameCursor {
+                base,
+                total,
+                headroom: grant.headroom,
+                len: 0,
+            },
             sent: false,
         })
     }
 
-    /// Pick a [`HeldSlot`] up again on `driver`, the driver that lent it, with
-    /// its frame as it was put down. The slot's memory is asked of the driver
-    /// again rather than remembered, because a pointer kept across calls is
-    /// exactly what a held slot does not carry.
-    ///
-    /// `None` when the driver no longer describes the slot as memory that holds
-    /// the frame (a null pointer, or a slot shorter than the headroom and the
-    /// bytes already written), which only a driver breaking the
-    /// [`BoxedLinkDriver::tx_slot_storage`] contract answers. The slot is then
-    /// given back, so even that costs the open frame and not the slot.
-    pub fn resume(driver: &'a D, held: HeldSlot) -> Option<Self> {
-        let (base, total) = driver.tx_slot_storage(held.slot);
-        let fits = held
-            .headroom
-            .checked_add(held.len)
-            .is_some_and(|end| end <= total);
-        if base.is_null() || !fits {
-            held.abort(driver);
-            return None;
-        }
-        Some(Self {
-            driver,
-            slot: held.slot,
-            base,
-            total,
-            headroom: held.headroom,
-            len: held.len,
-            sent: false,
-        })
-    }
-
-    /// Put the lease down without settling it: the slot stays lent and keeps
-    /// its frame, and the returned [`HeldSlot`] is how a later call finds it.
-    pub fn hold(mut self) -> HeldSlot {
-        self.sent = true;
-        HeldSlot {
-            slot: self.slot,
-            headroom: self.headroom,
-            len: self.len,
-        }
-    }
-
-    /// Put the lease down without settling it, keeping where the slot's memory is: the slot
-    /// stays lent and keeps its frame, and [`Self::pick_up`] takes it up again without asking the
-    /// driver anything.
+    /// Put the lease down without settling it, its frame's write state moved whole: the slot
+    /// stays lent and keeps its frame, and [`Self::pick_up`] takes it up again without asking
+    /// the driver anything.
     pub fn keep_open(mut self) -> OpenSlot {
         self.sent = true;
         OpenSlot {
             slot: self.slot,
-            base: self.base,
-            total: self.total,
-            headroom: self.headroom,
-            len: self.len,
+            frame: self.frame,
         }
     }
 
@@ -260,41 +320,49 @@ impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
         Self {
             driver,
             slot: open.slot,
-            base: open.base,
-            total: open.total,
-            headroom: open.headroom,
-            len: open.len,
+            frame: open.frame,
             sent: false,
         }
     }
 
+    /// The frame, to write into: the slot's memory past the headroom, held to the lease's budget
+    /// ([`Self::hold_to`]). Every write into a lent slot goes through it.
+    pub fn frame_mut(&mut self) -> &mut (dyn TxBuf<Error = CodecError> + '_) {
+        &mut self.frame
+    }
+
+    /// Frame bytes written after the headroom.
+    pub fn len(&self) -> usize {
+        self.frame.len
+    }
+
+    /// Nothing written yet.
+    pub fn is_empty(&self) -> bool {
+        self.frame.len == 0
+    }
+
+    /// The frame bytes written so far: what the link is handed.
+    pub fn as_slice(&self) -> &[u8] {
+        self.frame.as_slice()
+    }
+
+    /// Keep only the first `len` frame bytes. A `len` at or past the frame's changes nothing.
+    pub fn truncate(&mut self, len: usize) {
+        self.frame.truncate(len);
+    }
+
     /// How many frame bytes the slot can hold after its headroom.
     pub fn capacity(&self) -> usize {
-        // The headroom is never past the slot: `acquire` and `resume` refuse one that is.
-        self.total.wrapping_sub(self.headroom)
+        self.frame.capacity()
     }
 
     /// Hold the frame to `end` bytes: a write that would carry it past `end` is refused as one
     /// past the slot is, before a byte of it is copied. The budget is the lease's own room, so a
     /// sender needs no second buffer over the slot to check it. A slot shorter than `end` keeps
     /// its own end, and the bytes already written are never cut. A frame kept open
-    /// ([`Self::keep_open`]) keeps the hold; a held one ([`Self::hold`]) asks the driver for the
-    /// slot again when it resumes, and with it for the slot's whole length.
+    /// ([`Self::keep_open`]) keeps the hold.
     pub fn hold_to(&mut self, end: usize) {
-        let end = self.headroom.saturating_add(core::cmp::max(end, self.len));
-        if end < self.total {
-            self.total = end;
-        }
-    }
-
-    /// The bytes of the slot not written yet: `len` never passes the capacity.
-    fn room(&self) -> usize {
-        self.capacity().wrapping_sub(self.len)
-    }
-
-    /// Where the next byte goes, past the headroom: inside the slot, as `len` is.
-    fn write_at(&self) -> usize {
-        self.headroom.wrapping_add(self.len)
+        self.frame.hold_to(end);
     }
 
     /// Hand the written frame to the link and give it the slot. From here the
@@ -315,8 +383,13 @@ impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
         priority: Priority,
     ) -> LinkSendOutcome {
         self.sent = true;
-        self.driver
-            .tx_slot_send(self.slot, self.headroom, self.len, reliability, priority)
+        self.driver.tx_slot_send(
+            self.slot,
+            self.frame.headroom,
+            self.frame.len,
+            reliability,
+            priority,
+        )
     }
 
     /// Give the slot back unsent, once, for a caller that holds the lease by reference and is
@@ -327,88 +400,6 @@ impl<'a, D: BoxedLinkDriver + ?Sized> TxLease<'a, D> {
             self.sent = true;
             self.driver.tx_slot_abort(self.slot);
         }
-    }
-}
-
-impl<D: BoxedLinkDriver + ?Sized> TxBuf for TxLease<'_, D> {
-    type Error = CodecError;
-
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        // SAFETY: `base` points at a slot of `total` bytes the driver granted to
-        // this lease alone (`BoxedLinkDriver::tx_slot_acquire`'s contract: the
-        // slot is the session's until it is sent or aborted, and neither has
-        // happened while the lease is alive). `headroom + len <= total` holds by
-        // construction: `acquire` refuses `headroom > total` and `append` never
-        // writes past `total`.
-        unsafe { slice::from_raw_parts(self.base.add(self.headroom), self.len) }
-    }
-
-    fn truncate(&mut self, len: usize) {
-        if len < self.len {
-            self.len = len;
-        }
-    }
-
-    fn append(&mut self, bytes: &[u8]) -> Result<(), CodecError> {
-        if self.room() < bytes.len() {
-            return Err(CodecError::BufferOverflow);
-        }
-        // SAFETY: the destination `[headroom + len, headroom + len + n)` lies in
-        // the slot (checked above), the slot is this lease's alone (see
-        // `as_slice`), and `bytes` is a borrowed slice of the caller's, which
-        // cannot overlap a slot the link granted exclusively.
-        unsafe {
-            ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(self.write_at()), bytes.len());
-        }
-        // Within the room checked above.
-        self.len = self.len.wrapping_add(bytes.len());
-        Ok(())
-    }
-
-    /// One byte stored directly. The default goes through [`TxBuf::append`] with a
-    /// one-byte slice, which is a `memcpy` call for a length the compiler cannot see
-    /// is one; a frame's header is written a byte at a time, so that call was paid
-    /// several times per message.
-    fn append_byte(&mut self, byte: u8) -> Result<(), CodecError> {
-        if self.room() < 1 {
-            return Err(CodecError::BufferOverflow);
-        }
-        // SAFETY: the destination byte `headroom + len` lies in the slot (checked
-        // above) and the slot is this lease's alone (see `as_slice`).
-        unsafe {
-            self.base.add(self.write_at()).write(byte);
-        }
-        self.len = self.len.wrapping_add(1);
-        Ok(())
-    }
-
-    /// The next `n` bytes of the slot as a window: the room is checked once, here.
-    fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, CodecError> {
-        if self.room() < n {
-            return Err(CodecError::BufferOverflow);
-        }
-        // SAFETY: the window `[headroom + len, headroom + len + n)` lies in the slot (checked
-        // above), the slot is this lease's alone (see `as_slice`), and the borrow of the
-        // window is the borrow of `self`, so nothing else touches the slot while it lives.
-        let window = unsafe { slice::from_raw_parts_mut(self.base.add(self.write_at()), n) };
-        self.len = self.len.wrapping_add(n);
-        Ok(Some(window))
-    }
-
-    /// The slot's room left, up to its budget ([`Self::hold_to`]), as one window.
-    fn reserve_rest(&mut self) -> Option<&mut [u8]> {
-        let n = self.room();
-        // SAFETY: the window `[headroom + len, headroom + capacity)` lies in the slot (`len`
-        // never passes the capacity), the slot is this lease's alone (see `as_slice`), and the
-        // borrow of the window is the borrow of `self`, so nothing else touches the slot while
-        // it lives.
-        let window = unsafe { slice::from_raw_parts_mut(self.base.add(self.write_at()), n) };
-        self.len = self.capacity();
-        Some(window)
     }
 }
 
@@ -519,8 +510,8 @@ mod tests {
     fn a_frame_written_into_a_lease_is_what_the_link_is_handed() {
         let link = LendingLink::new();
         let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).expect("a slot is free");
-        lease.append(&[1, 2, 3]).unwrap();
-        lease.append_byte(4).unwrap();
+        lease.frame_mut().append(&[1, 2, 3]).unwrap();
+        lease.frame_mut().append_byte(4).unwrap();
         assert_eq!(lease.as_slice(), &[1, 2, 3, 4]);
         assert_eq!(
             lease.send(Reliability::Reliable, Priority::DEFAULT),
@@ -539,7 +530,7 @@ mod tests {
     fn the_links_headroom_is_never_written_by_the_frame() {
         let link = LendingLink::new();
         let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
-        lease.append(&[0xEE; 8]).unwrap();
+        lease.frame_mut().append(&[0xEE; 8]).unwrap();
         let slot = lease.slot;
         drop(lease);
         // The first HEADROOM bytes are the link's to write when it takes the
@@ -555,7 +546,7 @@ mod tests {
         let link = LendingLink::new();
         {
             let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
-            lease.append(&[9]).unwrap();
+            lease.frame_mut().append(&[9]).unwrap();
             assert_eq!(link.free(), SLOTS - 1);
         }
         assert_eq!(link.free(), SLOTS, "the dropped lease returned its slot");
@@ -582,10 +573,16 @@ mod tests {
         let link = LendingLink::new();
         let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
         assert_eq!(lease.capacity(), SLOT_LEN - HEADROOM);
-        lease.append(&[1; SLOT_LEN - HEADROOM - 1]).unwrap();
-        assert_eq!(lease.append(&[2, 2]), Err(CodecError::BufferOverflow));
+        lease
+            .frame_mut()
+            .append(&[1; SLOT_LEN - HEADROOM - 1])
+            .unwrap();
+        assert_eq!(
+            lease.frame_mut().append(&[2, 2]),
+            Err(CodecError::BufferOverflow)
+        );
         // The refusal wrote nothing, so a byte that does fit still lands.
-        lease.append_byte(3).unwrap();
+        lease.frame_mut().append_byte(3).unwrap();
         assert_eq!(lease.len(), SLOT_LEN - HEADROOM);
         assert_eq!(*lease.as_slice().last().unwrap(), 3);
     }
@@ -599,24 +596,30 @@ mod tests {
         let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
         lease.hold_to(5);
         assert_eq!(lease.capacity(), 5);
-        lease.append(&[1, 2, 3]).unwrap();
-        assert_eq!(lease.append(&[4, 4, 4]), Err(CodecError::BufferOverflow));
+        lease.frame_mut().append(&[1, 2, 3]).unwrap();
+        assert_eq!(
+            lease.frame_mut().append(&[4, 4, 4]),
+            Err(CodecError::BufferOverflow)
+        );
         assert_eq!(
             lease.as_slice(),
             &[1, 2, 3],
             "the refused write wrote nothing"
         );
-        lease.append_byte(4).unwrap();
+        lease.frame_mut().append_byte(4).unwrap();
         let open = lease.keep_open();
         // SAFETY: `link` lent the slot and nothing has sent or aborted it.
         let mut lease = unsafe { TxLease::pick_up(&link, open) };
-        lease.append_byte(5).unwrap();
+        lease.frame_mut().append_byte(5).unwrap();
         assert_eq!(
-            lease.append_byte(6),
+            lease.frame_mut().append_byte(6),
             Err(CodecError::BufferOverflow),
             "the hold came back with the open frame"
         );
-        assert!(matches!(lease.reserve(1), Err(CodecError::BufferOverflow)));
+        assert!(matches!(
+            lease.frame_mut().reserve(1),
+            Err(CodecError::BufferOverflow)
+        ));
         assert_eq!(lease.as_slice(), &[1, 2, 3, 4, 5]);
         lease.hold_to(2);
         assert_eq!(
@@ -634,8 +637,11 @@ mod tests {
             SLOT_LEN - HEADROOM,
             "a budget past the slot leaves the slot's end"
         );
-        lease.append(&[7; SLOT_LEN - HEADROOM]).unwrap();
-        assert_eq!(lease.append_byte(8), Err(CodecError::BufferOverflow));
+        lease.frame_mut().append(&[7; SLOT_LEN - HEADROOM]).unwrap();
+        assert_eq!(
+            lease.frame_mut().append_byte(8),
+            Err(CodecError::BufferOverflow)
+        );
     }
 
     /// The rest of a lease is the room up to its budget, one window from where the frame stands,
@@ -646,15 +652,21 @@ mod tests {
         let link = LendingLink::new();
         let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
         lease.hold_to(6);
-        lease.append(&[1, 2]).unwrap();
-        let window = lease.reserve_rest().expect("a slot hands its room out");
+        lease.frame_mut().append(&[1, 2]).unwrap();
+        let window = lease
+            .frame_mut()
+            .reserve_rest()
+            .expect("a slot hands its room out");
         assert_eq!(window.len(), 4, "to the budget, not the slot's end");
         window[0] = 3;
         window[1] = 4;
         assert_eq!(lease.len(), 6, "the window counts as written");
         lease.truncate(4);
         assert_eq!(lease.as_slice(), &[1, 2, 3, 4]);
-        assert_eq!(lease.append(&[5, 6, 7]), Err(CodecError::BufferOverflow));
+        assert_eq!(
+            lease.frame_mut().append(&[5, 6, 7]),
+            Err(CodecError::BufferOverflow)
+        );
         let _ = lease.send(Reliability::Reliable, Priority::DEFAULT);
         assert_eq!(
             link.sent.borrow()[0].1,
@@ -689,96 +701,20 @@ mod tests {
         assert_eq!(*link.aborts.borrow(), 1);
     }
 
-    /// A frame put down between two calls and picked up again keeps its bytes,
-    /// grows after them, and settles the slot once: no abort while it is held.
-    #[test]
-    fn a_held_frame_resumes_where_it_was_put_down_and_is_sent_once() {
-        let link = LendingLink::new();
-        let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
-        lease.append(&[1, 2]).unwrap();
-        let held = lease.hold();
-        assert_eq!(held.len(), 2);
-        assert_eq!(*link.aborts.borrow(), 0, "a held slot is not given back");
-        assert_eq!(link.free(), SLOTS - 1, "and stays lent");
-        let mut lease = TxLease::resume(&link, held).expect("the slot is still described");
-        assert_eq!(lease.as_slice(), &[1, 2]);
-        lease.append(&[3]).unwrap();
-        assert_eq!(
-            lease.send(Reliability::Reliable, Priority::DEFAULT),
-            LinkSendOutcome::Sent
-        );
-        assert_eq!(
-            *link.sent.borrow(),
-            alloc::vec![(HEADROOM, alloc::vec![1, 2, 3])]
-        );
-        assert_eq!((link.free(), *link.aborts.borrow()), (SLOTS, 0));
-    }
-
-    /// A held slot given up is aborted on its driver exactly once.
-    #[test]
-    fn a_held_slot_aborted_returns_to_the_pool() {
-        let link = LendingLink::new();
-        let held = TxLease::acquire(&link, 8, Priority::DEFAULT)
-            .unwrap()
-            .hold();
-        held.abort(&link);
-        assert_eq!((link.free(), *link.aborts.borrow()), (SLOTS, 1));
-        assert!(link.sent.borrow().is_empty());
-    }
-
-    /// A driver that no longer describes a held slot costs the open frame and
-    /// not the slot.
-    ///
-    /// The double is switched to answer "no memory" only AFTER the lease was
-    /// granted and held, so the one place that answer can be given is the
-    /// question `resume` asks. The test reads that it was asked (one query at
-    /// the grant, one more at the resume) and that the slot came back only
-    /// then: nothing was given back while the slot was held, so the abort is
-    /// the resume's refusal and not an earlier one of the fixture's.
-    #[test]
-    fn a_held_slot_the_driver_no_longer_describes_is_given_back() {
-        let mut link = LendingLink::new();
-        let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
-        lease.append(&[7]).unwrap();
-        let held = lease.hold();
-        assert_eq!(
-            (
-                link.storage_queries.load(Ordering::Relaxed),
-                *link.aborts.borrow()
-            ),
-            (1, 0),
-            "the grant asked for the slot's memory once and holding gave nothing back"
-        );
-        assert_eq!(link.free(), SLOTS - 1, "the held slot is still lent");
-        link.null_storage = true;
-        assert!(TxLease::resume(&link, held).is_none());
-        assert_eq!(
-            link.storage_queries.load(Ordering::Relaxed),
-            2,
-            "resume asked the driver for the slot's memory again"
-        );
-        assert_eq!(
-            (link.free(), *link.aborts.borrow()),
-            (SLOTS, 1),
-            "the slot the driver no longer describes was given back, once"
-        );
-        assert!(link.sent.borrow().is_empty(), "the open frame was not sent");
-    }
-
     /// A frame kept open between calls is picked up again with its bytes and grows after them,
     /// and no pick-up asks the driver where the slot is: the one question is the grant's. The
-    /// control is the held form, which asks again at every resume.
+    /// control is a second grant, which asks again.
     #[test]
     fn an_open_slot_is_picked_up_again_without_asking_the_driver() {
         let link = LendingLink::new();
         let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
-        lease.append(&[1]).unwrap();
+        lease.frame_mut().append(&[1]).unwrap();
         let mut open = lease.keep_open();
         assert_eq!((open.len(), open.is_empty()), (1, false));
         for byte in 2..=5u8 {
             // SAFETY: `link` lent the slot and nothing has sent or aborted it.
             let mut lease = unsafe { TxLease::pick_up(&link, open) };
-            lease.append_byte(byte).unwrap();
+            lease.frame_mut().append_byte(byte).unwrap();
             open = lease.keep_open();
         }
         assert_eq!(
@@ -805,16 +741,48 @@ mod tests {
         );
         assert_eq!((link.free(), *link.aborts.borrow()), (SLOTS, 0));
 
-        // CONTROL: the held form asks at every resume.
+        // CONTROL: the count is the driver's answers, and a grant asks.
+        drop(TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap());
+        assert_eq!(link.storage_queries.load(Ordering::Relaxed), 2);
+    }
+
+    /// A message written into an open frame where its holder keeps it lands after the frame's
+    /// bytes and within the budget the lease was held to, a write rolled back there is gone, and
+    /// the frame picked up and sent is what the link is handed: the slot is settled once, and
+    /// nothing asks the driver again. Turned red by an `OpenSlot::frame_mut` that writes from the
+    /// headroom or drops the hold, or a pick-up that loses what was written in place.
+    #[test]
+    fn a_frame_written_where_it_is_kept_open_is_what_the_link_is_handed() {
         let link = LendingLink::new();
-        let mut held = TxLease::acquire(&link, 8, Priority::DEFAULT)
-            .unwrap()
-            .hold();
-        for _ in 0..4 {
-            held = TxLease::resume(&link, held).unwrap().hold();
-        }
-        assert_eq!(link.storage_queries.load(Ordering::Relaxed), 5);
-        held.abort(&link);
+        let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
+        lease.hold_to(4);
+        lease.frame_mut().append(&[1]).unwrap();
+        let mut open = lease.keep_open();
+        // SAFETY (each block below): `link` lent the slot and nothing has sent or aborted it.
+        unsafe { open.frame_mut() }.append(&[2, 3]).unwrap();
+        assert_eq!(
+            unsafe { open.frame_mut() }.append(&[4, 4]),
+            Err(CodecError::BufferOverflow),
+            "the hold came along with the open frame"
+        );
+        assert_eq!(unsafe { open.written() }, &[1, 2, 3]);
+        open.truncate(2);
+        assert_eq!((open.len(), open.is_empty()), (2, false));
+        let lease = unsafe { TxLease::pick_up(&link, open) };
+        assert_eq!(
+            lease.send(Reliability::Reliable, Priority::DEFAULT),
+            LinkSendOutcome::Sent
+        );
+        assert_eq!(
+            *link.sent.borrow(),
+            alloc::vec![(HEADROOM, alloc::vec![1, 2])]
+        );
+        assert_eq!((link.free(), *link.aborts.borrow()), (SLOTS, 0));
+        assert_eq!(
+            link.storage_queries.load(Ordering::Relaxed),
+            1,
+            "the grant's question was the only one"
+        );
     }
 
     /// An open slot given up is aborted on its driver exactly once, and a lease picked up from

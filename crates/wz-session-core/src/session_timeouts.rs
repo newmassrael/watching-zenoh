@@ -114,8 +114,8 @@ impl SessionTimeouts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HandshakeDeadline {
     /// The state keyed for re-arm. Each role's handshake is one bound keyed to
-    /// its parent: the three `Accepting` children (`AwaitingInitSyn` /
-    /// `SentInitAck` / `SentOpenAck`) map to `Accepting`, and the two
+    /// its parent: the two `Accepting` children (`AwaitingInitSyn` /
+    /// `SentInitAck`) map to `Accepting`, and the two
     /// `Opening` children (`SentInitSyn` / `GotInitAck`) map to `Opening`, so
     /// the bound is armed once on entry and is NOT reset as the children
     /// advance. The per-phase keys (`LinkOpening` / `Closing`) re-arm on
@@ -156,7 +156,7 @@ pub fn handshake_deadline_for(
         // The accepting role's states and its deadline event exist in a build with
         // `session-unicast-accept` only (the session machine states that gate).
         #[cfg(feature = "session-unicast-accept")]
-        S::AwaitingInitSyn | S::SentInitAck | S::SentOpenAck => (
+        S::AwaitingInitSyn | S::SentInitAck => (
             S::Accepting,
             timeouts.accepting_inactivity_ms,
             E::AcceptingInactivityTimeout,
@@ -184,7 +184,7 @@ pub fn handshake_deadline_for(
 /// so the §2.5 deadline ownership has a single implementation:
 ///   - per-phase deadlines (LinkOpening / Closing) re-arm on entry to their
 ///     arming state;
-///   - the `Opening` children share the parent `Opening` key and the three
+///   - the `Opening` children share the parent `Opening` key and the two
 ///     `Accepting` children the parent `Accepting` key, so each role's
 ///     whole-handshake bound is armed once and not reset as they advance;
 ///   - a state with no host handshake deadline disarms the tracker.
@@ -339,12 +339,12 @@ mod tests {
     #[cfg(feature = "session-unicast-accept")]
     #[test]
     fn accepting_children_share_the_parent_arming_key() {
-        // The whole-handshake bound is armed once on accept entry: all
-        // three children carry the Accepting key + the same window, so the
+        // The whole-handshake bound is armed once on accept entry: both
+        // children carry the Accepting key + the same window, so the
         // drive loop's key comparison keeps the original armed-at stamp as
         // the children advance.
         let t = SessionTimeouts::spec_defaults();
-        for child in [S::AwaitingInitSyn, S::SentInitAck, S::SentOpenAck] {
+        for child in [S::AwaitingInitSyn, S::SentInitAck] {
             let hd = handshake_deadline_for(child, &t).expect("accept deadline");
             assert_eq!(hd.arming_key, S::Accepting);
             assert_eq!(hd.deadline_ms, 1_000);
@@ -392,15 +392,15 @@ mod tests {
             tr.poll(S::AwaitingInitSyn, 1_000),
             Some((2_001, E::AcceptingInactivityTimeout))
         );
-        // Children advance, now=1500/1800 — the whole-handshake bound keeps
-        // its original armed_at (1001), so the deadline stays 2001 (NOT
-        // re-armed to 2501/2801).
+        // The child advances and is polled again, now=1500/1800 — the
+        // whole-handshake bound keeps its original armed_at (1001), so the
+        // deadline stays 2001 (NOT re-armed to 2501/2801).
         assert_eq!(
             tr.poll(S::SentInitAck, 1_500),
             Some((2_001, E::AcceptingInactivityTimeout))
         );
         assert_eq!(
-            tr.poll(S::SentOpenAck, 1_800),
+            tr.poll(S::SentInitAck, 1_800),
             Some((2_001, E::AcceptingInactivityTimeout))
         );
     }

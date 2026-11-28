@@ -187,6 +187,15 @@
     Closed (silent drop, §2.7 anti-amplification). The init_syn / open_syn
     transitions are admission-gated by the dispatcher (see the header
     "Accept-side admission guards"), not by a native cond.
+
+    The OpenAck is the effect of the admitted OpenSyn's own transition, which
+    ends the accept in Established: `docs/session-fsm.md` section 2.2 gives
+    the state that sends it an immediate exit, so a state of its own would be
+    left in the same macrostep it is entered and would cost the machine its
+    only eventless transition. The order of effects is the same either way
+    (the OpenAck before Established's entry), and every step of the machine is
+    then taken by an event, which is the class a reactive turn serves
+    (`crates/wz-session-core/src/machine_class_tests.rs`).
   -->
   <state id="Accepting" initial="AwaitingInitSyn" sce:requires="session-unicast-accept">
     <state id="AwaitingInitSyn">
@@ -196,13 +205,9 @@
       <onentry>
         <sce:action name="send_init_ack_with_cookie" effect="duty"/>
       </onentry>
-      <transition event="open_syn.received" target="SentOpenAck"/>
-    </state>
-    <state id="SentOpenAck">
-      <onentry>
+      <transition event="open_syn.received" target="Established">
         <sce:action name="send_open_ack" effect="duty"/>
-      </onentry>
-      <transition target="Established"/>
+      </transition>
     </state>
     <transition event="accepting.inactivity_timeout" target="Closed"/>
     <transition event="framing.error" target="Closing">

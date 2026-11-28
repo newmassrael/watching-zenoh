@@ -123,6 +123,9 @@ members = [
     # into the PEM bytes both the tokio engine's rustls configs and the cooperative engine's Mbed
     # TLS channel take, so the refusal of an empty file is written once.
     "wz-tls-pem",
+    # A lifecycle command sealed by its commander's key (decision D17), so a node behind a router
+    # proves who commanded it: the COSE_Sign1 codec and its replay window, without an allocator.
+    "wz-command-seal",
     # The rules of the advanced publisher and subscriber that no runtime owns: the `@adv` key
     # grammar, the `_time` selector and (as they move) the cache, sequencing and recovery rules,
     # which the tokio runtime and the cooperative engine both host.

@@ -19,7 +19,7 @@
 //! - what it ASKED to be told, and what is staged back to it: its subscriber
 //!   interests ([`crate::caps::MAX_INBOUND_SUB_INTERESTS`]) and the staged
 //!   answers ([`crate::caps::MAX_PENDING_DECLARES`]), the interest answers of the
-//!   liveliness plane (`PeerTables::pending_declares`);
+//!   liveliness plane (`TokenAnswers`);
 //! - what its queries make us OWE it: the replies staged and the `Final`s that
 //!   follow ([`crate::reply_stage::ReplyStage`],
 //!   [`crate::caps::MAX_PENDING_REPLIES`]; [`crate::reply_stage::FinalStage`],
@@ -61,11 +61,9 @@ use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut};
 
 #[cfg(feature = "liveliness-token")]
-use crate::bounded::BoundedVec;
-#[cfg(feature = "liveliness-token")]
 use crate::caps;
 #[cfg(feature = "liveliness-token")]
-use crate::declare::local_token::DeclResponseItem;
+use crate::declare::local_token::{DeclResponseItem, TokenAnswers};
 
 /// The tables of one session's peer. See the module documentation.
 ///
@@ -91,13 +89,9 @@ pub struct PeerTables<P: Storage = Profile> {
     /// to a key it cannot resolve, the bounds of its queries and the shared memory of their values.
     pub queries: QueryPeer,
     /// The answers to the peer's liveliness interests, staged until the next
-    /// drain: [`caps::MAX_PENDING_DECLARES`] items, whole chains or none.
+    /// drain under their own bound, whole chains or none, and the chains refused.
     #[cfg(feature = "liveliness-token")]
-    pub pending_declares: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }, P>,
-    /// The liveliness interests whose answer chain `pending_declares` could not
-    /// take whole, and which were therefore staged not at all.
-    #[cfg(feature = "liveliness-token")]
-    pub token_interest_chains_refused: u32,
+    pub token_answers: TokenAnswers<P>,
 }
 
 impl<P: Storage> Default for PeerTables<P> {
@@ -134,9 +128,7 @@ impl<P: Storage> PeerTables<P> {
                 finals: _,
                 queries: _,
                 #[cfg(feature = "liveliness-token")]
-                    pending_declares: _,
-                #[cfg(feature = "liveliness-token")]
-                    token_interest_chains_refused: _,
+                    token_answers: _,
             } = tables;
         };
         // Each gated statement opens with the path `ptr::write(`, not with the `addr_of_mut!`
@@ -159,9 +151,7 @@ impl<P: Storage> PeerTables<P> {
             ptr::write(addr_of_mut!((*at).finals), FinalStage::default());
             ptr::write(addr_of_mut!((*at).queries), QueryPeer::new());
             #[cfg(feature = "liveliness-token")]
-            ptr::write(addr_of_mut!((*at).pending_declares), BoundedVec::default());
-            #[cfg(feature = "liveliness-token")]
-            ptr::write(addr_of_mut!((*at).token_interest_chains_refused), 0);
+            ptr::write(addr_of_mut!((*at).token_answers), TokenAnswers::default());
             &mut *at
         }
     }
@@ -180,9 +170,7 @@ impl PeerTables<Static> {
             finals: FinalStage::new_static(),
             queries: QueryPeer::new(),
             #[cfg(feature = "liveliness-token")]
-            pending_declares: BoundedVec::new_static(),
-            #[cfg(feature = "liveliness-token")]
-            token_interest_chains_refused: 0,
+            token_answers: TokenAnswers::new_static(),
         }
     }
 }
@@ -207,13 +195,17 @@ pub struct PeerRows {
 
 // SAFETY: every table of the region policy is `ZeroEmpty` (the peer's side, its remote
 // declarations, its tokens, the reply and final stages, the query side) and holds no value at all
-// zero bytes; the liveliness staging is a `LentSeq` of no rows and its refusal count is zero.
+// zero bytes; the liveliness staging is `ZeroEmpty` as the final stage is.
 unsafe impl ZeroEmpty for PeerTables<Region> {}
 
-/// The lines a region's description holds for one [`PeerTables`] of the region policy, at most:
-/// the side's staging and the liveliness staging; and the key arena handles of the side's aliases
-/// and interests and of the three tables of the peer's declarations.
+/// The lines a description holds for one [`PeerTables`] in its own lines ([`PeerTables::places`]),
+/// at most: the side's staging and the liveliness staging; and the key arena handles of the side's
+/// aliases and interests and of the three tables of the peer's declarations.
 pub const PEER_TABLE_LINES: usize = 5;
+
+/// The lines a plan lends one [`PeerTables`] of the lent policy, at most: its own lines and the
+/// reply and final stages' three ([`PeerTables::replies_places`], [`PeerTables::finals_place`]).
+pub const LENT_PEER_TABLE_LINES: usize = PEER_TABLE_LINES + 3;
 
 /// The rows of a [`PeerTables`] of the region policy every region lays out beside the tables: the
 /// stagings of the answers to the peer's interests, at the build's bound. What the peer writes by
@@ -223,21 +215,36 @@ pub const PEER_TABLE_LINES: usize = 5;
 pub struct PeerTableRows {
     subscribers: SubscriberPeerRows,
     #[cfg(feature = "liveliness-token")]
-    pending_declares: [MaybeUninit<DeclResponseItem>; caps::MAX_PENDING_DECLARES],
+    token_answers: [MaybeUninit<DeclResponseItem>; caps::MAX_PENDING_DECLARES],
 }
 
 // SAFETY: each field is rows of `MaybeUninit` (`ZeroEmpty`), holding no value until placed.
 unsafe impl ZeroEmpty for PeerTableRows {}
 
-impl PeerTables<Region> {
-    /// The description of tables of the region policy at `at` in a region and their rows, a
-    /// [`PeerTableRows`], at `rows`: a line for each staging of an interest's answers the build
-    /// keeps and the tables' handles to the region's key arena. What
-    /// [`place_region`](crate::key_arena::place_region) reads to make zeroed tables a peer's; the
-    /// bounds are stated after ([`Self::limit_to`]), zero bounds refusing everything until then.
+impl PeerRows {
+    /// The counts the lines of the tables' description are lent ([`PeerTables::lend_rows`]).
+    pub const fn counts(&self) -> crate::bounded::RowCounts {
+        crate::bounded::RowCounts::NONE
+            .with(
+                crate::bounded::RowCount::PendingDeclares,
+                self.pending_declares,
+            )
+            .with(crate::bounded::RowCount::Replies, self.replies)
+            .with(crate::bounded::RowCount::ReplyBytes, self.reply_bytes)
+            .with(crate::bounded::RowCount::Finals, self.finals)
+    }
+}
+
+impl<P: crate::bounded::LaidOut> PeerTables<P> {
+    /// The description of tables at `at` and, in a region, their rows, a [`PeerTableRows`], at
+    /// `rows`: a line for each staging of an interest's answers the build keeps, each lent the
+    /// answers staged for a face's peer by a plan (`RowCount::PendingDeclares`), and the tables'
+    /// handles to the key arena. What [`place_region`](crate::key_arena::place_region) reads to
+    /// make zeroed tables a peer's; the bounds are stated after ([`Self::limit_to`]), zero bounds
+    /// refusing everything until then.
     pub const fn places(at: usize, rows: usize) -> RegionLines<PEER_TABLE_LINES> {
         let lines = RegionLines::EMPTY.with(
-            &SubscriberPeer::<Region>::places(
+            &SubscriberPeer::<P>::places(
                 at.wrapping_add(core::mem::offset_of!(Self, subscribers)),
                 rows.wrapping_add(core::mem::offset_of!(PeerTableRows, subscribers)),
             ),
@@ -245,41 +252,50 @@ impl PeerTables<Region> {
         );
         #[cfg(feature = "storage-profile")]
         let lines = lines
-            .keys_at(RemoteSubscriberPeer::<Region>::key_line(
+            .keys_at(RemoteSubscriberPeer::<P>::key_line(
                 at.wrapping_add(core::mem::offset_of!(Self, remote_subscribers)),
             ))
-            .keys_at(RemoteQueryablePeer::<Region>::key_line(
+            .keys_at(RemoteQueryablePeer::<P>::key_line(
                 at.wrapping_add(core::mem::offset_of!(Self, remote_queryables)),
             ))
-            .keys_at(PeerTokens::<Region>::key_line(
+            .keys_at(PeerTokens::<P>::key_line(
                 at.wrapping_add(core::mem::offset_of!(Self, tokens)),
             ));
         #[cfg(feature = "liveliness-token")]
-        let lines = lines.seq(crate::bounded::SeqPlace::of_room::<
-            DeclResponseItem,
-            { caps::MAX_PENDING_DECLARES },
-        >(
-            at.wrapping_add(core::mem::offset_of!(Self, pending_declares)),
-            rows.wrapping_add(core::mem::offset_of!(PeerTableRows, pending_declares)),
-        ));
+        let lines = lines.seq(
+            TokenAnswers::<P>::place(
+                at.wrapping_add(core::mem::offset_of!(Self, token_answers)),
+                rows.wrapping_add(core::mem::offset_of!(PeerTableRows, token_answers)),
+            )
+            .counted(crate::bounded::RowCount::PendingDeclares),
+        );
         lines
     }
 
-    /// The lines that place the reply stage's rows and bytes, the tables at `at` in a region and
-    /// a [`ReplyStageRows`](crate::reply_stage::ReplyStageRows) at `rows`: for a region whose peer's queries are answered into this
-    /// stage.
+    /// The lines that place the reply stage's rows and bytes, the tables at `at` and, in a
+    /// region, a [`ReplyStageRows`](crate::reply_stage::ReplyStageRows) at `rows`: for a region
+    /// whose peer's queries are answered into this stage, and for every plan.
     pub const fn replies_places(at: usize, rows: usize) -> [crate::bounded::SeqPlace; 2] {
-        ReplyStage::<Region>::places(at.wrapping_add(core::mem::offset_of!(Self, replies)), rows)
+        ReplyStage::<P>::places(at.wrapping_add(core::mem::offset_of!(Self, replies)), rows)
     }
 
-    /// The line that places the final stage's rows, the tables at `at` in a region and a
-    /// [`FinalStageRows`](crate::reply_stage::FinalStageRows) at `rows`: for a region whose peer's queries are owed their Finals here.
+    /// The line that places the final stage's rows, the tables at `at` and, in a region, a
+    /// [`FinalStageRows`](crate::reply_stage::FinalStageRows) at `rows`: for a region whose peer's
+    /// queries are owed their Finals here, and for every plan.
     pub const fn finals_place(at: usize, rows: usize) -> crate::bounded::SeqPlace {
-        FinalStage::<Region>::place(at.wrapping_add(core::mem::offset_of!(Self, finals)), rows)
+        FinalStage::<P>::place(at.wrapping_add(core::mem::offset_of!(Self, finals)), rows)
     }
 }
 
 impl PeerTables<Lent> {
+    /// The description of tables of the lent policy, the region's of the same tables and stages:
+    /// the lines [`Self::lend_rows`] lends and [`Self::arena_bytes`] counts, from the tables'
+    /// start.
+    const LINES: RegionLines<LENT_PEER_TABLE_LINES> = RegionLines::EMPTY
+        .with(&Self::places(0, 0), 0)
+        .seqs(&Self::replies_places(0, 0))
+        .seq(Self::finals_place(0, 0));
+
     /// Empty tables, for a peer that has said nothing yet, the rows of each table `rows` states
     /// lent from `arena`, the keys of every row kept in `keys`, the session's key arena, and the
     /// rows the peer writes by its own choice in `pools`, the session's, held to `limits` as
@@ -300,10 +316,11 @@ impl PeerTables<Lent> {
     /// Lend tables of no rows ([`PeerTables::init_in`]) the rows `rows` states from `arena`,
     /// where they lie, hand them `keys` to keep their rows' keys in and `pools` to keep what the
     /// peer writes in, and hold them to `limits`: what [`Self::lent`] makes, without the tables
-    /// being a value of their own. Each table is lent in the order `lent` lends them, so the
-    /// arena is laid out as its plan ([`Self::arena_bytes`]) counts it. Refused as `lent` is;
-    /// the tables stay whole, those lent before the refusal holding their rows, which go back with
-    /// the arena.
+    /// being a value of their own. The stagings are lent by the tables' description, in its order
+    /// (the side's, the liveliness plane's, the reply and the final stages'), then the row the side
+    /// composes keys in, which a region keeps inline; the arena is laid out as its plan
+    /// ([`Self::arena_bytes`]) counts it. Refused as `lent` is; the tables stay whole, those lent
+    /// before the refusal holding their rows, which go back with the arena.
     pub fn lend_rows(
         &mut self,
         arena: &mut Arena,
@@ -314,13 +331,20 @@ impl PeerTables<Lent> {
     ) -> Result<(), LendRefused> {
         self.keep_keys_in(LentKeys::from(keys));
         self.keep_rows_in(pools);
-        self.subscribers.lend_rows(arena, rows.pending_declares)?;
-        self.replies = ReplyStage::lent(arena, rows.replies, rows.reply_bytes)?;
-        self.finals = FinalStage::lent(arena, rows.finals)?;
-        #[cfg(feature = "liveliness-token")]
-        {
-            self.pending_declares = arena.lend(rows.pending_declares)?;
+        let mut lend = crate::bounded::TableLender::new(arena);
+        // SAFETY: the description is this type's: each line names a staging of these tables, which
+        // holds no value (tables of no rows, `init_in`), and states the bytes of its rows
+        // (`SeqPlace::of`); the tables are reached by nothing else during the call.
+        unsafe {
+            crate::bounded::lend_seqs(
+                core::ptr::NonNull::from(&mut *self).cast::<u8>(),
+                Self::LINES.seq_lines(),
+                &rows.counts(),
+                &mut lend,
+            );
         }
+        lend.finish()?;
+        self.subscribers.lend_compose_row(arena)?;
         self.limit_to(limits);
         Ok(())
     }
@@ -363,33 +387,16 @@ impl PeerTables<Lent> {
         let _ = pools;
     }
 
-    /// The bytes of an arena [`Self::lent`] takes for `rows`: each table's spans. `None` past the
-    /// address space.
+    /// The bytes of an arena [`Self::lent`] takes for `rows`: its description's lines summed and
+    /// the side's row to compose keys in. `None` past the address space.
     pub const fn arena_bytes(rows: PeerRows) -> Option<usize> {
-        // A build without `liveliness-token` stages no answer of the liveliness plane.
-        #[cfg(feature = "liveliness-token")]
-        let tokens = Arena::table_bytes::<DeclResponseItem>(rows.pending_declares);
-        #[cfg(not(feature = "liveliness-token"))]
-        let tokens = Some(0);
-        let spans = [
-            SubscriberPeer::<Lent>::arena_bytes(rows.pending_declares),
-            ReplyStage::<Lent>::arena_bytes(rows.replies, rows.reply_bytes),
-            FinalStage::<Lent>::arena_bytes(rows.finals),
-            tokens,
-        ];
-        let mut sum = 0usize;
-        let mut rest: &[Option<usize>] = &spans;
-        while let [span, tail @ ..] = rest {
-            sum = match span {
-                Some(span) => match sum.checked_add(*span) {
-                    Some(sum) => sum,
-                    None => return None,
-                },
-                None => return None,
-            };
-            rest = tail;
+        match (
+            crate::bounded::seq_bytes(Self::LINES.seq_lines(), &rows.counts()),
+            SubscriberPeer::<Lent>::compose_bytes(),
+        ) {
+            (Some(lines), Some(compose)) => lines.checked_add(compose),
+            _ => None,
         }
-        Some(sum)
     }
 }
 
@@ -399,10 +406,10 @@ impl PeerTables<crate::bounded::OnUse> {
     /// under the build's bound, none taking memory until its first row; the keys of every row
     /// counted against `keys`, the session's key budget; held to `limits` as
     /// [`PeerTables::limit_to`] holds them. What the peer writes by its own choice (its aliases,
-    /// its declarations, its interests) is inline in the tables at its bounds, as on the region
-    /// policy, so there is no pool to hand them. Nothing is taken, so nothing is refused here: a
-    /// row past a table's count, or one the allocator or the budget has no room for, is refused
-    /// when the peer asks for it.
+    /// its declarations, their repeats, its interests) takes its rows at its first value too, each
+    /// a row of its kind of the session's bounds that `keys` holds, so there is no pool to hand
+    /// them. Nothing is taken, so nothing is refused here: a row past a table's count, or one the
+    /// allocator or the budget has no room for, is refused when the peer asks for it.
     pub fn counted(
         keys: crate::on_use::BudgetKeys,
         rows: PeerRows,
@@ -428,9 +435,7 @@ impl PeerTables<crate::bounded::OnUse> {
         self.replies = ReplyStage::counted(rows.replies, rows.reply_bytes);
         self.finals = FinalStage::counted(rows.finals);
         #[cfg(feature = "liveliness-token")]
-        {
-            self.pending_declares = BoundedVec::counted(rows.pending_declares);
-        }
+        self.token_answers.count_rows(rows.pending_declares);
         self.limit_to(limits);
     }
 }
@@ -914,6 +919,9 @@ impl<P: Storage> PeerTables<P> {
         self.remote_subscribers.limit_to(remote_decls);
         self.remote_queryables.limit_to(remote_decls);
         self.tokens.limit_to(remote_decls);
+        #[cfg(feature = "liveliness-token")]
+        self.token_answers
+            .limit_to(limits.max_pending_declares_held());
         let keys = limits.max_keyexpr_bytes_held();
         self.subscribers.limit_keys_to(keys);
         self.remote_subscribers.limit_keys_to(keys);
@@ -950,7 +958,7 @@ impl<P: Storage> PeerTables<P> {
         self.replies.clear();
         self.finals.clear();
         #[cfg(feature = "liveliness-token")]
-        self.pending_declares.clear();
+        self.token_answers.clear();
     }
 }
 
@@ -1389,6 +1397,53 @@ mod lent_tests {
         drop(tables);
     }
 
+    /// A peer's lent tables lie where their description counts them: each staging and stage at
+    /// the offset the plan's count of the lines before it says, none meeting, each holding its
+    /// count, the reply stage's bytes a line of rows of one byte; the lines summed and the side's
+    /// row to compose keys in are what `arena_bytes` counts. Turned red by a line of another count
+    /// (the reply bytes lent the replies' rows), or by a stage left out of the description.
+    #[test]
+    fn lent_peer_tables_lie_where_their_description_counts_them() {
+        use crate::bounded::RowCount;
+        let rows = rows(2);
+        let keys = keys(64);
+        let mut memory = arena(1 << 16);
+        let tables = PeerTables::<Lent>::lent(
+            &mut memory,
+            keys,
+            rows,
+            &mut pools(1, keys),
+            &SessionLimits::defaults(),
+        )
+        .expect("the arena has the rows");
+        let lines = PeerTables::<Lent>::LINES;
+        assert_eq!(
+            lines.seq_lines().len(),
+            usize::from(cfg!(all(
+                feature = "declare-subscriber",
+                feature = "interest-answer"
+            ))) + usize::from(cfg!(feature = "liveliness-token"))
+                + 3,
+            "each staging the build keeps, the reply stage's two columns and the Finals"
+        );
+        assert!(lines
+            .seq_lines()
+            .iter()
+            .any(|line| line.count == RowCount::ReplyBytes && line.stride == 1));
+        // SAFETY: the lines are the lent tables' own description, read and not written.
+        let laid = unsafe {
+            crate::bounded::assert_lent_as_described(
+                NonNull::from(&tables).cast::<u8>(),
+                core::mem::size_of::<PeerTables<Lent>>(),
+                lines.seq_lines(),
+                &rows.counts(),
+            )
+        };
+        let compose = SubscriberPeer::<Lent>::compose_bytes().expect("small");
+        assert_eq!(Some(laid + compose), PeerTables::<Lent>::arena_bytes(rows));
+        assert_eq!(memory.high_water(), laid + compose);
+    }
+
     /// Tables written where they lie and lent their rows there are the tables `lent` makes by
     /// value: the same bytes of the arena, one row of each table that bounds them, the quotas.
     #[test]
@@ -1437,14 +1492,9 @@ mod lent_tests {
             assert!(!tables.finals.has_room(), "one row of Finals");
             #[cfg(feature = "liveliness-token")]
             {
-                assert!(tables
-                    .pending_declares
-                    .push(DeclResponseItem::Final { interest_id: 1 })
-                    .is_ok());
-                assert!(tables
-                    .pending_declares
-                    .push(DeclResponseItem::Final { interest_id: 2 })
-                    .is_err());
+                let none = crate::declare::local_token::LocalTokenRegistry::new();
+                assert!(tables.token_answers.stage(&none, None, 1).is_ok());
+                assert!(tables.token_answers.stage(&none, None, 2).is_err());
             }
         }
         // SAFETY: `init_in` wrote the whole tables into `place`, and they are dropped once.
@@ -1614,14 +1664,14 @@ mod lent_tests {
     #[test]
     fn a_lent_peer_holds_a_liveliness_answer() {
         let mut tables = lent(rows(1));
-        assert!(tables
-            .pending_declares
-            .push(DeclResponseItem::Final { interest_id: 1 })
-            .is_ok());
-        assert!(tables
-            .pending_declares
-            .push(DeclResponseItem::Final { interest_id: 2 })
-            .is_err());
+        let none = crate::declare::local_token::LocalTokenRegistry::new();
+        assert!(tables.token_answers.stage(&none, None, 1).is_ok());
+        assert!(tables.token_answers.stage(&none, None, 2).is_err());
+        assert_eq!(
+            tables.token_answers.refusals(),
+            1,
+            "the chain the lent row could not take is counted"
+        );
     }
 
     /// An interest the peer asks keeps its key in the key arena the tables were handed, though
@@ -2282,19 +2332,14 @@ mod on_use_tests {
 
         #[cfg(feature = "liveliness-token")]
         {
+            let none = crate::declare::local_token::LocalTokenRegistry::new();
             assert!(
-                !tables.pending_declares.holds_rows(),
+                !tables.token_answers.holds_rows(),
                 "nothing is taken before the first answer"
             );
-            assert!(tables
-                .pending_declares
-                .push(DeclResponseItem::Final { interest_id: 1 })
-                .is_ok());
-            assert!(tables.pending_declares.holds_rows());
-            assert!(tables
-                .pending_declares
-                .push(DeclResponseItem::Final { interest_id: 2 })
-                .is_err());
+            assert!(tables.token_answers.stage(&none, None, 1).is_ok());
+            assert!(tables.token_answers.holds_rows());
+            assert!(tables.token_answers.stage(&none, None, 2).is_err());
         }
     }
 
@@ -2346,6 +2391,103 @@ mod on_use_tests {
             budget.counts().used,
             0,
             "a forgotten peer gives every key's bytes back"
+        );
+    }
+
+    /// A peer's repeat of a subscriber keyexpr it declared is kept as an alias, whose rows are
+    /// taken at the first alias: where the allocator has none, the repeat is refused whole and
+    /// counted before its key is made, so no id stands that the application was not told of.
+    /// Turned red by a repeat bound before its alias's rows are taken (it would stand, its alias
+    /// lost), or by one whose key is made first (the budget would count a refused key).
+    #[cfg(all(feature = "codec-declare", feature = "declare-subscriber"))]
+    #[test]
+    fn an_on_use_subscriber_repeat_with_no_alias_row_is_refused_whole() {
+        use crate::transport_profile::owned::DeclareOwnedVariant;
+        use wz_session_core_test_support as fx;
+
+        let budget = budget(256);
+        let mut tables = counted(rows(1), budget);
+        let mut table = crate::declare::subscriber::RemoteSubscriberTable::<
+            crate::decl_sink::BoxedDeclSink,
+            crate::decl_sink::BoxedUndeclSink,
+        >::default();
+        let none: hashbrown::HashMap<u64, std::string::String> = hashbrown::HashMap::new();
+        let declare = |id| {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(fx::decl_subscriber(
+                id,
+                0,
+                Some("demo/sub/x"),
+            ))
+        };
+        let (first, repeat) = (declare(1), declare(2));
+        table.dispatch_declare(&mut tables.remote_subscribers, &first, &none);
+        assert_eq!(tables.remote_subscribers.declared_count(), 1);
+        crate::test_heap::refused(|| {
+            table.dispatch_declare(&mut tables.remote_subscribers, &repeat, &none);
+        });
+        assert_eq!(
+            tables.remote_subscribers.declared_count(),
+            1,
+            "the repeat is not bound"
+        );
+        assert_eq!(
+            tables.remote_subscribers.refusals(),
+            1,
+            "it is counted as refused"
+        );
+        assert_eq!(budget.counts().refused, 0, "its key was never made");
+        table.dispatch_declare(&mut tables.remote_subscribers, &repeat, &none);
+        assert_eq!(
+            tables.remote_subscribers.declared_count(),
+            2,
+            "CONTROL: with the allocator's rows the repeat is bound"
+        );
+    }
+
+    /// The queryable side of the repeat above: a repeat whose alias finds no row is refused whole
+    /// and counted before its key is made. Turned red as that test is.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn an_on_use_queryable_repeat_with_no_alias_row_is_refused_whole() {
+        use crate::transport_profile::owned::DeclareOwnedVariant;
+        use wz_session_core_test_support as fx;
+
+        let budget = budget(256);
+        let mut tables = counted(rows(1), budget);
+        let mut table = crate::declare::queryable::RemoteQueryableTable::<
+            crate::decl_sink::BoxedDeclSink,
+            crate::decl_sink::BoxedUndeclSink,
+        >::default();
+        let none: hashbrown::HashMap<u64, std::string::String> = hashbrown::HashMap::new();
+        let declare = |id| {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(fx::decl_queryable(
+                id,
+                0,
+                Some("demo/q/x"),
+            ))
+        };
+        let (first, repeat) = (declare(1), declare(2));
+        table.dispatch_declare(&mut tables.remote_queryables, &first, &none);
+        assert_eq!(tables.remote_queryables.declared_count(), 1);
+        crate::test_heap::refused(|| {
+            table.dispatch_declare(&mut tables.remote_queryables, &repeat, &none);
+        });
+        assert_eq!(
+            tables.remote_queryables.declared_count(),
+            1,
+            "the repeat is not bound"
+        );
+        assert_eq!(
+            tables.remote_queryables.refusals(),
+            1,
+            "it is counted as refused"
+        );
+        assert_eq!(budget.counts().refused, 0, "its key was never made");
+        table.dispatch_declare(&mut tables.remote_queryables, &repeat, &none);
+        assert_eq!(
+            tables.remote_queryables.declared_count(),
+            2,
+            "CONTROL: with the allocator's rows the repeat is bound"
         );
     }
 }

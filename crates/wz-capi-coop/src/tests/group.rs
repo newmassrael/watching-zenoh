@@ -557,9 +557,10 @@ fn every_row_past_the_dial_roles_rests_from_its_making_the_groups_among_them() {
 /// where its walk reaches them: a member's marked rows are its groups' places, the dial role's row
 /// none of them, and two members learn each other through their reads, the marks standing after
 /// them. Turned red by an open that marks no row (`DirectFaces::hold_group` not called after the
-/// join) or another row than the group's place, or by a mark past the bound of the rows a walk
-/// reaches (`DirectFaces::walked`), where a read would find no row to step and the members would
-/// never meet.
+/// join, or, where the tables take their memory on use, called on a row the join did not make,
+/// `DirectFaces::made_at` left out of `CoopEngine::open_links`) or another row than the group's
+/// place, or by a mark past the bound of the rows a walk reaches (`DirectFaces::walked`), where a
+/// read would find no row to step and the members would never meet.
 #[test]
 fn each_groups_row_is_marked_at_its_join_and_walked_by_the_groups_read() {
     let network = Arc::new(Network::default());
@@ -981,7 +982,7 @@ mod watched {
 mod alive {
     use std::sync::{Arc, Mutex};
 
-    use wz_capi_port::{LivelinessSink, SessionDrive, SessionEngine, SubId, WireKey};
+    use wz_capi_port::{EntityRow, LivelinessSink, SessionDrive, SessionEngine, WireKey};
     use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 
     use super::{
@@ -993,7 +994,7 @@ mod alive {
     type Heard = Arc<Mutex<Vec<(LivelinessSampleKind, String)>>>;
 
     /// Subscribe to the tokens on `keyexpr` of `engine`, with `history`.
-    fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (SubId, Heard) {
+    fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (EntityRow, Heard) {
         let heard: Heard = Arc::default();
         let into = heard.clone();
         let sink = LivelinessSink::shared(move |sample: LivelinessSample<'_>| {

@@ -962,6 +962,17 @@ pub(crate) use impl_boxed_element;
 /// pointer of the correct type, or null.
 #[inline]
 pub(crate) unsafe fn handle_ref<'a, S, T>(ptr: *const S) -> Option<&'a T> {
+    handle_at::<S, T>(ptr).map(|handle| &*handle)
+}
+
+/// The object behind a loaned/owned value's handle slot as the pointer its place was filled at,
+/// for a door that reads past the object into its place (an entity's engine, which its place's
+/// lender holds); `None` if the pointer or handle is null.
+///
+/// # Safety
+/// As [`handle_ref`].
+#[inline]
+pub(crate) unsafe fn handle_at<S, T>(ptr: *const S) -> Option<*const T> {
     if ptr.is_null() {
         return None;
     }
@@ -970,7 +981,7 @@ pub(crate) unsafe fn handle_ref<'a, S, T>(ptr: *const S) -> Option<&'a T> {
     if handle.is_null() {
         return None;
     }
-    Some(&*(handle as *const T))
+    Some(handle as *const T)
 }
 
 #[cfg(test)]

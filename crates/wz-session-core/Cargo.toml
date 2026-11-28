@@ -745,6 +745,14 @@ scouting-static = []
 # per-capability-feature one.
 scouting-active = ["dep:sce-rust-runtime"]
 
+# What a scouting window keeps of a datagram it does not take as a Hello, a behaviour zenoh-pico's
+# scout does not have: each is classified (`scout_initiator::classify_ignored_scout_rx`: our own
+# Scout looped back, another node's Scout, a Hello with no locator, an unknown MID, bytes that do
+# not decode), counted by verdict, logged at the verdict's severity, and listed by the heap record.
+# Without it a window counts what it did not take in one count, as zenoh-pico's scout names one
+# error, and classifies nothing. The tokio engine's runtime selects it with its window.
+scout-rx-verdicts = []
+
 # R311il — unicast session FSM (docs/session-fsm.md §2.1/§2.2/§2.4/§2.5/
 # §2.7). Gates the SCE-generated `session_fsm_unicast` statechart module
 # (build.rs codegens sources/session/session_fsm_unicast.scxml with
@@ -887,6 +895,14 @@ lifecycle-contract = []
 # on AP), and the lifecycle verbs require it. The fixed-memory profile turns it on
 # once it has D9's channel; until then it cannot host the verbs.
 secure-channel = []
+# sealed-commands -- a lifecycle query may carry a command sealed by its commander's key in its
+# attachment (decision D17 of docs/session-lifecycle-intent.md, docs/command-seal.md): the node
+# verifies it with `wz-command-seal` and judges the commander the key proves, whatever link the
+# query came over (`sealed_command`). The command travels in the query's attachment, so the node
+# reads a query's attachment (`query-attachment`); a build that read none would judge every sealed
+# command as the link's commander. Without it the crate is not linked and a query that carries an
+# attachment is refused by name, never judged as the link's commander.
+sealed-commands = ["dep:wz-command-seal", "query-attachment"]
 
 # session-extauth — the Z_EXT_AUTH establishment extension (catalog
 # §5.4 session, zenoh init.rs:156 / open.rs:121 `zextzbuf!(0x3, false)`).
@@ -1557,6 +1573,10 @@ hashbrown = { version = "0.15", default-features = false, features = ["default-h
 # The log facade the diagnostics are handed to (`diag`), only where the `log` feature is on: the
 # statechart runtime names it only under its own `log` feature, which that feature asks for.
 log = { version = "0.4", optional = true }
+# A sealed lifecycle command's codec, its freshness and its verification (`sealed-commands`). Its
+# ES256 is a port each profile fills with the signature code it links, so no signature library
+# comes with it.
+wz-command-seal = { path = "../wz-command-seal", default-features = false, optional = true }
 # R311ei — HMAC-SHA256 anti-amplification cookie primitive (the
 # signing_key module). default-features = false keeps the RustCrypto
 # stack no_std so the Accepting-side cookie path cross-compiles to the

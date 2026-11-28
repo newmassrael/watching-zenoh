@@ -4311,6 +4311,10 @@ mod arena_key_tests {
     /// it is open and nothing once it is closed, and a key dropped after the close lets go of the
     /// engine all the same. Turned red by a drop that keeps the text's hold, or by a close that
     /// leaves the session reached.
+    ///
+    /// The session is reached through the process's table of engines, which the engine keeps
+    /// only in a build with a reader of it (`wz_engine_rows`, stated by `build.rs`): a build
+    /// without it reads the holds alone.
     #[test]
     fn a_declared_key_names_its_session_until_the_close_and_lets_its_engine_go() {
         use crate::session::EngineHold;
@@ -4329,9 +4333,12 @@ mod arena_key_tests {
             "the drop gave it back"
         );
         let key = DeclaredKeyexpr::declare(&engine, "demo/counts/a", None).expect("declared");
+        #[cfg(wz_engine_rows)]
         let named = EngineHold::downgrade(&engine);
+        #[cfg(wz_engine_rows)]
         assert!(named.upgrade().is_some(), "open, the session is reached");
         close(session);
+        #[cfg(wz_engine_rows)]
         assert!(
             named.upgrade().is_none(),
             "closed, it is reached by nothing"

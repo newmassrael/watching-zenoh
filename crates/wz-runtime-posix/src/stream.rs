@@ -378,10 +378,20 @@ impl StreamSocket for PosixTcpSocket {
     type Link<
         B: wz_runtime_coop::link_storage::RxStore + 'static,
         X: wz_runtime_coop::link_storage::TxStore + 'static,
+        W: wz_runtime_coop::session_drive::InputWaiter,
     >
-        = wz_runtime_coop::stream_link::StreamDriver<Self, B, X>
+        = wz_runtime_coop::stream_link::StreamDriver<
+        Self,
+        B,
+        X,
+        wz_runtime_coop::stream_link::LengthPrefix,
+        W,
+    >
     where
         Self: 'static;
+
+    // Every stream of this type is a descriptor it opened, which `input_wait` names.
+    const NAMES_INPUT_WAIT: bool = true;
 
     fn ends(&self) -> StreamEnds<'_> {
         StreamEnds::Ip {
@@ -728,6 +738,30 @@ mod tests {
             assert!(waits < 1_000, "the stream never filled");
         };
         assert!(took_us >= 40_000, "the wait took its time: {took_us} us");
+    }
+
+    wz_runtime_coop::with_heap_link_seams! {
+        /// A link a stack whose owner waits for every link makes over a TCP stream names that
+        /// stream's wait to its owner though nothing was set on it: every stream of this type
+        /// names one. Turned red by `NAMES_INPUT_WAIT` left out for this socket, whose link then
+        /// names no wait until `wait_by_owner` is called.
+        #[cfg(feature = "alloc")]
+        #[test]
+        fn a_stream_link_its_owner_waits_for_names_the_streams_wait_unasked() {
+            use wz_runtime_coop::link_storage::HeapTx;
+            use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitedByOwner};
+            use wz_runtime_coop::stream_link::link_over;
+
+            let (near, _far) = pair();
+            let named = crate::net::wait_on(near.fd);
+            assert!(named.is_some(), "CONTROL: an opened stream names its descriptor");
+            let link = link_over::<_, _, _, WaitedByOwner>(
+                near,
+                std::vec![0u8; 4096],
+                HeapTx::new(2, 2048),
+            );
+            assert_eq!(link.input_wait(), named);
+        }
     }
 
     /// Set the socket buffer `option` (`SO_SNDBUF`, `SO_RCVBUF`) of `fd` to `bytes`.

@@ -232,9 +232,13 @@ FINDINGS_BUDGET = 0
 #: of the store alone: moving the source tree cannot move it.
 #: 72 -> 69 and 10 -> 9 (R4502): the root-less HAT and example tokens of the item 736
 #: repair (see FINDINGS_BUDGET).
-ROOTLESS_LINE_BUDGET = 69
+#: 69 -> 66 and 17 -> 16 (the half-rooted HAT repair): the router hat's line citations a later
+#: round gave half a root (a hat directory and a line, no crate path) in `declare-interest`,
+#: `session-matching` and `routing-router` are given their roots at the pin, or dropped where
+#: R2337 had already withdrawn the clause they served.
+ROOTLESS_LINE_BUDGET = 66
 ROOTLESS_BARE_BUDGET = 9
-ROOTLESS_STALE_LINE_BUDGET = 17
+ROOTLESS_STALE_LINE_BUDGET = 16
 #: THE RESIDUE IS A TABLE, ONE ROW PER SEGMENT (open debt 799, the source gate's
 #: item, which this store axis shares). A single sum cannot say whether a
 #: change WROTE a root-less token or merely EXPOSED existing ones: a rooted
@@ -274,7 +278,9 @@ def rootless_undeclared_budget() -> int:
 #: new citation raises it whatever the others were set to.
 #: 174 -> 170 (R4502): the same four tokens, one of them the routing-peer token
 #: that rooting the HAT directory would otherwise have exposed into the residue.
-ROOTLESS_TOTAL_BUDGET = 170
+#: 170 -> 167 (the half-rooted HAT repair): the same repair, and `query-timeout`'s line citation
+#: of the query dispatcher rooted with it.
+ROOTLESS_TOTAL_BUDGET = 167
 
 
 def live_reasons(root: pathlib.Path | None = None) -> dict[str, str]:

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use wz_capi_port::{
-    FilterId, FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine, SubId,
+    EntityRow, FilterId, FilterPlane, MatchingSink, Refusal, SessionDrive, SessionEngine,
     SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
@@ -74,7 +74,7 @@ fn declare_subscriber(
     engine: &Engine,
     key: &str,
     dropped: &Arc<AtomicUsize>,
-) -> Result<SubId, Refusal> {
+) -> Result<EntityRow, Refusal> {
     engine
         .declare_subscriber_on_wire(
             key,
@@ -83,6 +83,48 @@ fn declare_subscriber(
             None,
             subscriber_sink(dropped),
         )
+        .map(|declared| declared.id)
+}
+
+/// A queryable's callback that counts its drop in `dropped`, declared on `key` for the peers'
+/// queries alone.
+#[cfg(feature = "queryable")]
+fn declare_queryable(
+    engine: &Engine,
+    key: &str,
+    dropped: &Arc<AtomicUsize>,
+) -> Result<EntityRow, Refusal> {
+    use wz_capi_port::{QueryHolder, QueryableSink};
+    use wz_session_core::query_sink::{QueryView, ReplyOut};
+
+    let guard = Dropped(dropped.clone());
+    let sink = QueryableSink::shared(
+        move |_query: &dyn QueryView, _out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
+            let _held = &guard;
+        },
+    );
+    engine
+        .declare_queryable_on_wire(key, WireKey::literal(), false, Locality::Remote, None, sink)
+        .map(|declared| declared.id)
+}
+
+/// A liveliness subscriber whose callback counts its drop in `dropped`, declared on `key` with no
+/// history.
+#[cfg(feature = "liveliness")]
+fn declare_liveliness_subscriber(
+    engine: &Engine,
+    key: &str,
+    dropped: &Arc<AtomicUsize>,
+) -> Result<EntityRow, Refusal> {
+    use wz_capi_port::LivelinessSink;
+    use wz_session_core::declare::liveliness_sample::LivelinessSample;
+
+    let guard = Dropped(dropped.clone());
+    let sink = LivelinessSink::shared(move |_sample: LivelinessSample<'_>| {
+        let _held = &guard;
+    });
+    engine
+        .declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink)
         .map(|declared| declared.id)
 }
 
@@ -247,10 +289,7 @@ fn the_plan_lends_each_declaration_table_its_limit() {
         "a liveliness subscriber is one row, the session core's"
     );
     // A build of the region's form holds the session's one table set in its region.
-    assert_eq!(
-        count("session tables"),
-        cfg!(feature = "runtime-plan").then_some(1)
-    );
+    assert_eq!(count("session tables"), cfg!(wz_lent).then_some(1));
     assert_eq!(plan.tables().keyexprs, 6);
     assert_eq!(plan.tables().key_listeners, key_listeners);
     assert_eq!(
@@ -485,45 +524,96 @@ fn a_subscriber_that_finds_no_id_left_is_refused_and_lets_its_sink_go() {
     assert_eq!(dropped.load(Ordering::SeqCst), 1, "its sink is held");
 }
 
-/// A subscriber's declaration answers the id the tables numbered its row by, and that id names
-/// the row: undeclared by it, the row and its sink are let go of, and a table of one takes the
-/// next subscriber in the row given back. Turned red by an id read anywhere but off the row the
-/// tables put the subscriber in.
-#[test]
-fn a_subscriber_is_answered_the_id_its_row_was_numbered_by() {
-    let limits = lowered(|l| l.select_max_subscriptions(Quota::at_most(1)));
+/// One kind of the session's own declarations with a callback, as the tests of its id and of the
+/// order of its refusals declare it: the limit of its table, its declaration with a sink that
+/// counts its drop, and its undeclaration by the row the declaration answered.
+struct CalledKind {
+    limit: fn(&mut SessionLimits, Quota) -> Result<(), OutsideLimitDomain>,
+    declare: fn(&Engine, &str, &Arc<AtomicUsize>) -> Result<EntityRow, Refusal>,
+    undeclare: fn(&Engine, EntityRow),
+}
+
+/// The subscriber, as [`CalledKind`].
+const SUBSCRIBER: CalledKind = CalledKind {
+    limit: SessionLimits::select_max_subscriptions,
+    declare: declare_subscriber,
+    undeclare: <Engine as SessionEngine>::undeclare_subscriber,
+};
+
+/// The queryable, as [`CalledKind`].
+#[cfg(feature = "queryable")]
+const QUERYABLE: CalledKind = CalledKind {
+    limit: SessionLimits::select_max_queryables,
+    declare: declare_queryable,
+    undeclare: <Engine as SessionEngine>::undeclare_queryable,
+};
+
+/// The liveliness subscriber, as [`CalledKind`]: undeclared as a subscriber, its row naming its
+/// own table.
+#[cfg(feature = "liveliness")]
+const LIVELINESS_SUBSCRIBER: CalledKind = CalledKind {
+    limit: SessionLimits::select_max_liveliness_subscriptions,
+    declare: declare_liveliness_subscriber,
+    undeclare: <Engine as SessionEngine>::undeclare_subscriber,
+};
+
+/// A declaration of `kind` answers its row, whose id is the one the tables numbered it by, and
+/// that row names it: undeclared by it, the row and its sink are let go of and the row names no
+/// id, and a table of one takes the next declaration in the row given back, under an id of its
+/// own. The first declaration's row, of an earlier generation of that slot, then names nothing:
+/// undeclared by it again, the second stands. `keys` are the two declarations' keys.
+fn answers_the_id_its_row_was_numbered_by(kind: &CalledKind, keys: [&str; 2]) {
+    let limits = lowered(|l| (kind.limit)(l, Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let dropped = Arc::new(AtomicUsize::new(0));
     engine.entity_ids_from(Some(7));
-    let first = declare_subscriber(&engine, "demo/i/1", &dropped).expect("a row is free");
-    assert!(first >= 7, "numbered by the ids handed out from 7 on");
-    engine.undeclare_subscriber(first);
+    let first = (kind.declare)(&engine, keys[0], &dropped).expect("a row is free");
+    let first_id = engine.entity_id_of(first).expect("the row stands");
+    assert!(first_id >= 7, "numbered by the ids handed out from 7 on");
+    (kind.undeclare)(&engine, first);
     assert_eq!(
         dropped.load(Ordering::SeqCst),
         1,
-        "the undeclaration found the row by the id the declaration answered"
+        "the undeclaration found the row the declaration answered"
     );
-    let second =
-        declare_subscriber(&engine, "demo/i/2", &dropped).expect("the row given back is free");
-    assert!(second > first, "the next subscriber takes an id of its own");
-    assert_eq!(dropped.load(Ordering::SeqCst), 1, "its sink is held");
+    assert_eq!(engine.entity_id_of(first), None, "the row went with it");
+    let second = (kind.declare)(&engine, keys[1], &dropped).expect("the row given back is free");
+    assert_ne!(
+        second, first,
+        "the slot given back is taken at a later generation"
+    );
+    let second_id = engine.entity_id_of(second).expect("the row stands");
+    assert!(
+        second_id > first_id,
+        "the next declaration takes an id of its own"
+    );
+    (kind.undeclare)(&engine, first);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "a row of an earlier generation names nothing: the second's sink is held"
+    );
+    assert_eq!(
+        engine.entity_id_of(second),
+        Some(second_id),
+        "and it stands"
+    );
 }
 
-/// The tables answer a declaration's refusals in one order, room first: a subscriber that finds
-/// its table full is refused as a full table whether or not an id is left, and one that finds a
-/// row free and no id left is refused for the id; each one's sink goes with its refusal. Turned
-/// red by an id asked for ahead of the tables, which answers a full table as one out of ids.
-#[test]
-fn a_full_subscribers_table_is_answered_before_an_id_is_asked_for() {
-    let limits = lowered(|l| l.select_max_subscriptions(Quota::at_most(1)));
+/// The tables answer a declaration of `kind` its refusals in one order, room first: one that
+/// finds its table full is refused as a full table whether or not an id is left, and one that
+/// finds a row free and no id left is refused for the id; each one's sink goes with its refusal.
+/// `keys` are the declared one's key and the refused one's.
+fn answers_a_full_table_before_an_id_is_asked_for(kind: &CalledKind, keys: [&str; 2]) {
+    let limits = lowered(|l| (kind.limit)(l, Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let dropped = Arc::new(AtomicUsize::new(0));
-    let first = declare_subscriber(&engine, "demo/o/1", &dropped).expect("a row is free");
+    let first = (kind.declare)(&engine, keys[0], &dropped).expect("a row is free");
     engine.entity_ids_from(None);
     assert_eq!(
-        declare_subscriber(&engine, "demo/o/2", &dropped),
+        (kind.declare)(&engine, keys[1], &dropped),
         Err(Refusal::TableFull)
     );
     assert_eq!(
@@ -531,20 +621,75 @@ fn a_full_subscribers_table_is_answered_before_an_id_is_asked_for() {
         1,
         "the sink refused for the room is let go of"
     );
-    engine.undeclare_subscriber(first);
+    (kind.undeclare)(&engine, first);
     assert_eq!(
         dropped.load(Ordering::SeqCst),
         2,
         "CONTROL: the undeclaration gave the row back"
     );
     assert_eq!(
-        declare_subscriber(&engine, "demo/o/2", &dropped),
+        (kind.declare)(&engine, keys[1], &dropped),
         Err(Refusal::NoEntityId)
     );
     assert_eq!(
         dropped.load(Ordering::SeqCst),
         3,
         "the sink refused for the id is let go of"
+    );
+}
+
+/// A subscriber's declaration answers the id the tables numbered its row by
+/// ([`answers_the_id_its_row_was_numbered_by`]). Turned red by an id read anywhere but off the
+/// row the tables put the subscriber in.
+#[test]
+fn a_subscriber_is_answered_the_id_its_row_was_numbered_by() {
+    answers_the_id_its_row_was_numbered_by(&SUBSCRIBER, ["demo/i/1", "demo/i/2"]);
+}
+
+/// A subscriber that finds its table full is refused as a full table whether or not an id is left
+/// ([`answers_a_full_table_before_an_id_is_asked_for`]). Turned red by an id asked for ahead of
+/// the tables, which answers a full table as one out of ids.
+#[test]
+fn a_full_subscribers_table_is_answered_before_an_id_is_asked_for() {
+    answers_a_full_table_before_an_id_is_asked_for(&SUBSCRIBER, ["demo/o/1", "demo/o/2"]);
+}
+
+/// A queryable's declaration answers the id the tables numbered its row by
+/// ([`answers_the_id_its_row_was_numbered_by`]). Turned red by an id read anywhere but off the
+/// row the tables put the queryable in.
+#[cfg(feature = "queryable")]
+#[test]
+fn a_queryable_is_answered_the_id_its_row_was_numbered_by() {
+    answers_the_id_its_row_was_numbered_by(&QUERYABLE, ["demo/qi/1", "demo/qi/2"]);
+}
+
+/// A queryable that finds its table full is refused as a full table whether or not an id is left
+/// ([`answers_a_full_table_before_an_id_is_asked_for`]). Turned red by an id asked for ahead of
+/// the tables (`declare_queryable_on_wire` reading `next_entity_id` first).
+#[cfg(feature = "queryable")]
+#[test]
+fn a_full_queryables_table_is_answered_before_an_id_is_asked_for() {
+    answers_a_full_table_before_an_id_is_asked_for(&QUERYABLE, ["demo/qo/1", "demo/qo/2"]);
+}
+
+/// A liveliness subscriber's declaration answers the id the tables numbered its row by, which its
+/// Interest carries ([`answers_the_id_its_row_was_numbered_by`]). Turned red by an id read
+/// anywhere but off the row the tables put the subscriber in.
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_liveliness_subscriber_is_answered_the_id_its_row_was_numbered_by() {
+    answers_the_id_its_row_was_numbered_by(&LIVELINESS_SUBSCRIBER, ["demo/li/1", "demo/li/2"]);
+}
+
+/// A liveliness subscriber that finds its table full is refused as a full table whether or not an
+/// id is left ([`answers_a_full_table_before_an_id_is_asked_for`]). Turned red by an id asked for
+/// ahead of the tables (`declare_liveliness_subscriber_on_wire` reading `next_entity_id` first).
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_full_liveliness_subscribers_table_is_answered_before_an_id_is_asked_for() {
+    answers_a_full_table_before_an_id_is_asked_for(
+        &LIVELINESS_SUBSCRIBER,
+        ["demo/lo/1", "demo/lo/2"],
     );
 }
 
@@ -595,43 +740,12 @@ fn a_matching_listener_past_its_table_is_refused_and_asks_nothing() {
 #[cfg(feature = "queryable")]
 #[test]
 fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
-    use wz_capi_port::{QueryHolder, QueryableSink};
-    use wz_session_core::query_sink::{QueryView, ReplyOut};
-
-    /// Counts its own drop: a callback the engine let go of.
-    struct LetGo(Arc<AtomicUsize>);
-    impl Drop for LetGo {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
     let limits = lowered(|l| l.select_max_queryables(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let let_go = Arc::new(AtomicUsize::new(0));
-    let sink = |let_go: &Arc<AtomicUsize>| -> QueryableSink {
-        let guard = LetGo(let_go.clone());
-        QueryableSink::shared(
-            move |_query: &dyn QueryView, _out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
-                let _held = &guard;
-            },
-        )
-    };
-    let declare = |key: &str| {
-        engine
-            .declare_queryable_on_wire(
-                key,
-                WireKey::literal(),
-                false,
-                Locality::Remote,
-                None,
-                sink(&let_go),
-            )
-            .map(|declared| declared.id)
-    };
     let before = router.seen(|s| s.declares);
-    let first = declare("demo/qbl/1").expect("a row is free");
+    let first = declare_queryable(&engine, "demo/qbl/1", &let_go).expect("a row is free");
     until(&engine, "the router to see the queryable", || {
         router.seen(|s| s.declares) > before
     });
@@ -642,7 +756,10 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
         0,
         "the declared one's callback is held"
     );
-    assert_eq!(declare("demo/qbl/2"), Err(Refusal::TableFull));
+    assert_eq!(
+        declare_queryable(&engine, "demo/qbl/2", &let_go),
+        Err(Refusal::TableFull)
+    );
     settle(&engine);
     assert_eq!(
         let_go.load(Ordering::SeqCst),
@@ -652,7 +769,10 @@ fn a_queryable_past_its_table_is_refused_and_sends_nothing() {
     assert_eq!(router.seen(|s| s.declares), seen, "nothing was sent");
 
     engine.undeclare_queryable(first);
-    assert!(declare("demo/qbl/2").is_ok(), "the row given back takes it");
+    assert!(
+        declare_queryable(&engine, "demo/qbl/2", &let_go).is_ok(),
+        "the row given back takes it"
+    );
 }
 
 /// The tokens' table at its limit refuses one more, sending nothing.
@@ -692,31 +812,21 @@ fn a_token_past_its_table_is_refused_and_sends_nothing() {
 #[cfg(feature = "liveliness")]
 #[test]
 fn a_liveliness_subscriber_past_its_table_is_refused_and_asks_nothing() {
-    use wz_capi_port::LivelinessSink;
-    use wz_session_core::declare::liveliness_sample::LivelinessSample;
-
     let limits = lowered(|l| l.select_max_liveliness_subscriptions(Quota::at_most(1)));
     let router = Router::start(CatchAll::None);
     let engine = open_under(&router, limits);
     let dropped = Arc::new(AtomicUsize::new(0));
-    let sink = |dropped: &Arc<AtomicUsize>| {
-        let guard = Dropped(dropped.clone());
-        LivelinessSink::shared(move |_sample: LivelinessSample<'_>| {
-            let _held = &guard;
-        })
-    };
-    let declare = |key: &str| {
-        engine
-            .declare_liveliness_subscriber_on_wire(key, WireKey::literal(), false, sink(&dropped))
-            .map(|declared| declared.id)
-    };
-    let first = declare("demo/ls/1").expect("a row is free");
+    let first =
+        declare_liveliness_subscriber(&engine, "demo/ls/1", &dropped).expect("a row is free");
     until(&engine, "the router to see the Interest", || {
         router.seen(|s| s.interests) >= 1
     });
     let asked = router.seen(|s| s.interests);
 
-    assert_eq!(declare("demo/ls/2"), Err(Refusal::TableFull));
+    assert_eq!(
+        declare_liveliness_subscriber(&engine, "demo/ls/2", &dropped),
+        Err(Refusal::TableFull)
+    );
     settle(&engine);
     assert_eq!(
         dropped.load(Ordering::SeqCst),
@@ -726,7 +836,52 @@ fn a_liveliness_subscriber_past_its_table_is_refused_and_asks_nothing() {
     assert_eq!(router.seen(|s| s.interests), asked, "nothing was asked");
 
     engine.undeclare_subscriber(first);
-    assert!(declare("demo/ls/2").is_ok(), "the row given back takes it");
+    assert!(
+        declare_liveliness_subscriber(&engine, "demo/ls/2", &dropped).is_ok(),
+        "the row given back takes it"
+    );
+}
+
+/// A subscriber and a liveliness subscriber hold the first row of their own tables, whose handles'
+/// bits are the same (the CONTROL); each one's row names its own table alone. A queryable's
+/// undeclaration given either row lets nothing go; the liveliness subscriber, undeclared as a
+/// subscriber, lets its own sink go and leaves the subscriber standing. Turned red by a row that
+/// leaves out its table, or an undeclaration that reads a row of another table as its own.
+#[cfg(feature = "liveliness")]
+#[test]
+fn a_liveliness_subscribers_row_reaches_its_own_table_alone() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_under(&router, SessionLimits::defaults());
+    let plain = Arc::new(AtomicUsize::new(0));
+    let live = Arc::new(AtomicUsize::new(0));
+    let subscriber = declare_subscriber(&engine, "demo/r/s", &plain).expect("a row is free");
+    let liveliness =
+        declare_liveliness_subscriber(&engine, "demo/r/l", &live).expect("a row is free");
+    assert_eq!(
+        subscriber.bits() as u32,
+        liveliness.bits() as u32,
+        "CONTROL: the two tables' first rows hold the same handle's bits"
+    );
+    assert_ne!(subscriber, liveliness, "the rows name their tables");
+    let dropped = || (plain.load(Ordering::SeqCst), live.load(Ordering::SeqCst));
+    #[cfg(feature = "queryable")]
+    {
+        engine.undeclare_queryable(subscriber);
+        engine.undeclare_queryable(liveliness);
+        assert_eq!(dropped(), (0, 0), "no queryable's row is named");
+    }
+    engine.undeclare_subscriber(liveliness);
+    assert_eq!(
+        dropped(),
+        (0, 1),
+        "the liveliness subscriber's own row went"
+    );
+    assert!(
+        engine.entity_id_of(subscriber).is_some(),
+        "the subscriber stands"
+    );
+    engine.undeclare_subscriber(subscriber);
+    assert_eq!(dropped(), (1, 1), "CONTROL: the subscriber's row names it");
 }
 
 /// A key longer than a row holds (`MAX_KEYEXPR_BYTES`) is refused, before an id is taken, its

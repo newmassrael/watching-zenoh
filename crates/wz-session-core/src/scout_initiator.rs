@@ -44,13 +44,13 @@
 //! Two of the four verdicts are wz-specific, and both are DELIBERATE
 //! divergences rather than gaps:
 //!
-//! * [`ScoutRxIgnored::SelfEcho`](crate::scout_initiator::ScoutRxIgnored::SelfEcho)
+//! * `ScoutRxIgnored::SelfEcho`
 //!   — wz's scouting socket sets
 //!   `set_multicast_loop_v4(true)` on purpose, so its own Scout comes back to
 //!   it. Nothing in `vendor/zenoh-pico` sets that option, so pico never
 //!   observes its own question and has no arm for it. Reporting it at pico's
 //!   ERROR severity would fire once per cycle on a datagram wz asked for.
-//! * [`ScoutRxIgnored::ForeignScout`](crate::scout_initiator::ScoutRxIgnored::ForeignScout)
+//! * `ScoutRxIgnored::ForeignScout`
 //!   — pico's `default:` arm cannot tell
 //!   another node's Scout from a MID it does not know, because it does not
 //!   compare the zid. wz can, and a second node scouting the same group is
@@ -58,7 +58,13 @@
 //!
 //! Both are still RECORDED. The severity a host logs them at is the host's
 //! business; whether they happened is this crate's.
+//!
+//! The verdicts are a behaviour zenoh-pico's scout does not have, and are
+//! compiled with `scout-rx-verdicts`; without it a window counts what it did
+//! not take in one count, as zenoh-pico names one error, and this module holds
+//! the window's rule alone (`hello_advances_window`).
 
+#[cfg(feature = "scout-rx-verdicts")]
 use crate::scouting_message::{parse_scouting, ScoutingFrame};
 
 /// Why a datagram observed during a scouting window advanced nothing.
@@ -67,6 +73,7 @@ use crate::scouting_message::{parse_scouting, ScoutingFrame};
 /// function's own tests, which construct one datagram per variant. A verdict no
 /// input can produce is a verdict no test can fail on, so it would not be
 /// carried here.
+#[cfg(feature = "scout-rx-verdicts")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScoutRxIgnored {
     /// The bytes did not decode in the scouting namespace, or carried the
@@ -157,6 +164,7 @@ pub fn hello_advances_window(exit_on_first: bool, locator_count: usize) -> bool 
 /// The two are told apart by the locator count and nothing else, so this stays
 /// a pure function of the bytes: the mode is not a parameter because a
 /// locator-less Hello only ever REACHES here from the arm that declines it.
+#[cfg(feature = "scout-rx-verdicts")]
 pub fn classify_ignored_scout_rx(zid: &[u8], datagram: &[u8]) -> ScoutRxIgnored {
     match parse_scouting(datagram) {
         Err(_) => ScoutRxIgnored::Undecodable,
@@ -178,7 +186,7 @@ pub fn classify_ignored_scout_rx(zid: &[u8], datagram: &[u8]) -> ScoutRxIgnored 
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "scout-rx-verdicts"))]
 mod tests {
     use super::*;
     use alloc::vec;
@@ -346,14 +354,19 @@ mod tests {
             ScoutRxIgnored::Undecodable,
         );
     }
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::*;
 
     /// R2610 — the rule itself, as its truth table. Three of the four inputs
     /// must ADVANCE: upstream declines a locator-less Hello only in the arm
     /// that would otherwise stop searching, and records it in the arm that is
     /// only collecting (`vendor/zenoh-pico/src/session/scout.c` @
     /// `if ((locator_count == 0) && exit_on_first) {`). A predicate that read
-    /// the locator count alone would pass every test above and silently drop a
-    /// survey's locator-less peers, which is a record upstream keeps.
+    /// the locator count alone would pass every verdict test and silently drop
+    /// a survey's locator-less peers, which is a record upstream keeps.
     #[test]
     fn only_an_exit_on_first_cycle_declines_a_locator_less_hello() {
         assert!(!hello_advances_window(true, 0));

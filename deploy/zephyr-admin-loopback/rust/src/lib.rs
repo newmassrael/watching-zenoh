@@ -39,6 +39,7 @@ use wz_runtime_coop::{ClockSource, CoopLocalSet};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::lifecycle_monitor::{Asker, Channel};
 use wz_session_core::lifecycle_node::{lifecycle_verdict, Command, Commander, Verdict};
 use wz_session_core::lifecycle_wire::{RefusedReason, StatusVerdict};
 use wz_session_core::limits::SessionLimits;
@@ -661,7 +662,11 @@ impl NodeApp for Witness {
         let listed_status = lifecycle_verdict(
             node,
             Command::Status { peer },
-            Commander::Verified(&observed),
+            Asker {
+                commander: Commander::Verified(&observed),
+                channel: Channel::Query,
+                key: None,
+            },
             &mut out,
         );
         if !matches!(listed_status, Verdict::Status(StatusVerdict::Status { .. })) {
@@ -673,7 +678,11 @@ impl NodeApp for Witness {
         let listed_close = lifecycle_verdict(
             node,
             Command::Close { peer },
-            Commander::Verified(&observed),
+            Asker {
+                commander: Commander::Verified(&observed),
+                channel: Channel::Query,
+                key: None,
+            },
             &mut out,
         );
         if !matches!(listed_close, Verdict::Close(_)) || is_answered_close(&listed_close) {
@@ -686,7 +695,11 @@ impl NodeApp for Witness {
         let unlisted = lifecycle_verdict(
             node,
             Command::Status { peer },
-            Commander::Verified(&stranger),
+            Asker {
+                commander: Commander::Verified(&stranger),
+                channel: Channel::Query,
+                key: None,
+            },
             &mut out,
         );
         if unlisted != Verdict::Status(StatusVerdict::Refused(RefusedReason::StatusNotPermitted)) {

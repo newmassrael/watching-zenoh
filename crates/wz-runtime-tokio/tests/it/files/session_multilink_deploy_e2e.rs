@@ -382,7 +382,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
         // dropping A's references to its LinkState closes the socket, so B's loop
         // sees the link die and del_links it (failover): B survives on link 2.
         a1_task.abort();
-        a1_actions.link.transport_available.close();
+        a1_actions.link.tx.transport_available.close();
         a1_actions.del_link(&a1_actions.link);
         drop(a1_actions);
         assert!(

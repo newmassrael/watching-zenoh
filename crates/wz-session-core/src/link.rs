@@ -1500,6 +1500,17 @@ impl core::fmt::Display for LocatorTooLong {
 }
 
 impl LinkEndpoints {
+    /// The longest locator a pair holds, which a pair held in the link itself states and a pair
+    /// of `String`s, holding any, does not: what a link's admission asks of its IP ends where it
+    /// is made, so that no link of the build stands with an end its pair would refuse. A face's
+    /// row holds an IP end as its address and bounds none.
+    #[cfg(not(feature = "session-slot"))]
+    pub const BOUND: Option<usize> = None;
+
+    /// See the `String` form of this constant.
+    #[cfg(feature = "session-slot")]
+    pub const BOUND: Option<usize> = Some(crate::caps::MAX_LOCATOR_LEN);
+
     /// Build a pair from two already-rendered locator strings.
     #[cfg(not(feature = "session-slot"))]
     pub fn new(src: impl Into<String>, dst: impl Into<String>) -> Self {
@@ -1625,8 +1636,8 @@ impl<'a> LinkEnds<'a> {
 }
 
 /// `<scheme>/<address><suffix>` of one end of a link of `kind`: the one writer of a link's
-/// locator.
-fn write_locator<W: TextOut + ?Sized>(kind: LinkKind, end: LinkEnd<'_>, out: &mut W) {
+/// locator, for the ends a driver lends and for the ends a face's row keeps of them.
+pub fn write_locator<W: TextOut + ?Sized>(kind: LinkKind, end: LinkEnd<'_>, out: &mut W) {
     out.push_str(kind.scheme());
     out.push_str("/");
     match end {
@@ -2985,6 +2996,23 @@ mod tests {
         let past = "t".repeat(crate::caps::MAX_LOCATOR_LEN + 1);
         let kept = LinkEndpoints::try_new(&past, "udp/10.0.0.1:7447").expect("never refused");
         assert_eq!(kept.src, past);
+    }
+
+    /// A pair states the bound it holds a locator to exactly when it holds one: the build's
+    /// `MAX_LOCATOR_LEN` under `session-slot`, none for a pair of `String`s, which keeps a
+    /// locator past that bound. Turned red by a bound stated for a pair that holds any locator,
+    /// which would have a link refused that no reader of its ends refuses.
+    #[test]
+    fn a_pair_states_its_bound_exactly_when_it_holds_one() {
+        let past = "t".repeat(crate::caps::MAX_LOCATOR_LEN + 1);
+        assert_eq!(
+            LinkEndpoints::try_new(&past, "udp/10.0.0.1:7447").is_ok(),
+            LinkEndpoints::BOUND.is_none()
+        );
+        assert_eq!(
+            LinkEndpoints::BOUND,
+            cfg!(feature = "session-slot").then_some(crate::caps::MAX_LOCATOR_LEN)
+        );
     }
 
     /// A droppable ask meets the mark before anything else and lowers nothing; a lane with room

@@ -15,16 +15,14 @@
 use core::mem::{offset_of, size_of, MaybeUninit};
 use core::ptr::{self, addr_of_mut, NonNull};
 
-use wz_session_core::bounded::{LendRefused, Region, RegionLines, SeqPlace, ZeroEmpty};
+use wz_session_core::bounded::{LendRefused, RegionLines, ZeroEmpty};
 use wz_session_core::limits::SessionLimits;
-use wz_session_core::peer_tables::{PeerTableRows, PeerTables, PEER_TABLE_LINES};
-#[cfg(feature = "query")]
-use wz_session_core::reply_sink::ConsolidatingSink;
-use wz_session_core::session_tables::{SessionRows, SessionTables, TableRows, SESSION_TABLE_LINES};
-use wz_session_core::slot_observer::{ObserverRegionRows, SLOT_OBSERVER_LINES};
-#[cfg(feature = "query")]
-use wz_session_core::slot_observer::{RequesterRegionRows, REQUESTER_LINES};
+use wz_session_core::session_tables::{SessionRows, TableRows};
+use wz_session_core::slot_observer::ObserverRegionRows;
 
+#[cfg(feature = "local-queryable")]
+use super::described::GetRows;
+use super::described::{FaceTableRows, RegistryRowsAt, FACE_TABLE_LINES, REGISTRY_LINES};
 #[cfg(any(
     feature = "remote-declaration-watch",
     feature = "declarations-synced-event"
@@ -32,70 +30,17 @@ use wz_session_core::slot_observer::{RequesterRegionRows, REQUESTER_LINES};
 use super::DeclWatches;
 #[cfg(feature = "local-queryable")]
 use super::Gets;
-use super::{App, CoopSinks, FaceTables, Registry, FACE_SETS};
+use super::{CoopSinks, FaceTables, Registry, FACE_SETS};
 use crate::engine::{CoopRows, RoundDelivery};
-#[cfg(feature = "query")]
-use crate::engine::{LegHold, LegSink};
 use crate::region::RegionField;
-
-/// The requesters' rows of one face, or of the session's own gets.
-#[cfg(feature = "query")]
-type GetRows = RequesterRegionRows<ConsolidatingSink<LegSink, LegHold>, LegSink>;
-
-/// The lines a face's requesters take in a region's description: none in a build that asks nothing.
-#[cfg(feature = "query")]
-const GET_LINES: usize = REQUESTER_LINES;
-#[cfg(not(feature = "query"))]
-const GET_LINES: usize = 0;
-
-/// The rows of one set of face tables: its peer's stagings, the Finals owed to its peer's queries,
-/// and its pending gets.
-struct FaceTableRows {
-    peer: PeerTableRows,
-    /// The Finals owed to the peer's queries; the replies to them are staged outside the session's
-    /// lock (the engine's `answer`), so the peer's reply stage is laid out no rows.
-    #[cfg(feature = "queryable")]
-    finals: wz_session_core::reply_stage::FinalStageRows,
-    #[cfg(feature = "query")]
-    gets: GetRows,
-}
 
 // SAFETY: each field is rows of `MaybeUninit` (`ZeroEmpty`), holding no value until placed.
 unsafe impl ZeroEmpty for FaceTableRows {}
 
-/// The lines one set of face tables takes in a region's description, at most.
-const FACE_TABLE_LINES: usize = PEER_TABLE_LINES + 1 + GET_LINES;
-
-impl FaceTables {
-    /// The description of a set at `at` in a region and its [`FaceTableRows`] at `rows`: its
-    /// peer's tables', its Finals' and its gets' lines.
-    const fn places(at: usize, rows: usize) -> RegionLines<FACE_TABLE_LINES> {
-        let peer = at.wrapping_add(offset_of!(FaceTables, peer));
-        let lines = RegionLines::EMPTY.with(
-            &PeerTables::<Region>::places(peer, rows.wrapping_add(offset_of!(FaceTableRows, peer))),
-            0,
-        );
-        #[cfg(feature = "queryable")]
-        let lines = lines.seq(PeerTables::<Region>::finals_place(
-            peer,
-            rows.wrapping_add(offset_of!(FaceTableRows, finals)),
-        ));
-        #[cfg(feature = "query")]
-        let lines = lines.with(
-            &super::Gets::places(
-                at.wrapping_add(offset_of!(FaceTables, gets)),
-                rows.wrapping_add(offset_of!(FaceTableRows, gets)),
-            ),
-            0,
-        );
-        lines
-    }
-}
-
 /// The rows of the registry: the application's watchers' and tables', the one set's and its
 /// tables', and the session's own gets'.
 struct RegistryRows {
-    app: ObserverRegionRows<CoopSinks, 0>,
+    app: ObserverRegionRows<CoopSinks>,
     tables: SessionRows<CoopRows>,
     /// The sets, written field by field where they lie before the region is placed, then counted
     /// by the registry's table of them.
@@ -117,37 +62,30 @@ pub(crate) struct RegistryRegion {
 // SAFETY: a `MaybeUninit`, valid as any bytes and dropped by nothing, and the rows (`ZeroEmpty`).
 unsafe impl ZeroEmpty for RegistryRegion {}
 
-/// The lines of a [`RegistryRegion`]'s description, at most: the application's, its tables', the
-/// sets' table, each set's, and the session's own gets'.
-pub(crate) const REGISTRY_REGION_LINES: usize =
-    SLOT_OBSERVER_LINES + SESSION_TABLE_LINES + 1 + FACE_SETS * FACE_TABLE_LINES + GET_LINES;
+/// The lines of a [`RegistryRegion`]'s description, at most: the registry's own, and each set's.
+pub(crate) const REGISTRY_REGION_LINES: usize = REGISTRY_LINES + FACE_SETS * FACE_TABLE_LINES;
 
 impl RegistryRegion {
-    /// The description of a registry region at `at` in a region: the lines that place each of the
-    /// registry's tables over its rows and hand each its handle to the region's key arena.
+    /// The description of a registry region at `at` in a region: the registry's own description
+    /// over the rows laid out beside it, and each set's over its rows, the lines that place each of
+    /// the registry's tables over its rows and hand each its handle to the region's key arena.
     pub(crate) const fn places(at: usize) -> RegionLines<REGISTRY_REGION_LINES> {
-        let registry = at.wrapping_add(offset_of!(Self, registry));
         let rows = at.wrapping_add(offset_of!(Self, rows));
-        let app = registry.wrapping_add(offset_of!(Registry, app));
         let sets = rows.wrapping_add(offset_of!(RegistryRows, sets));
         let set_rows = rows.wrapping_add(offset_of!(RegistryRows, set_rows));
-        let mut lines = RegionLines::EMPTY
-            .with(
-                &App::places::<0>(app, rows.wrapping_add(offset_of!(RegistryRows, app))),
-                0,
-            )
-            .with(
-                &SessionTables::<CoopRows, Region>::places(
-                    app.wrapping_add(offset_of!(App, tables)),
-                    rows.wrapping_add(offset_of!(RegistryRows, tables)),
-                ),
-                0,
-            )
-            .seq(SeqPlace::of::<FaceTables>(
-                registry.wrapping_add(offset_of!(Registry, sets)),
-                sets,
-                FACE_SETS,
-            ));
+        let mut lines = RegionLines::EMPTY.with(
+            &Registry::places(
+                at.wrapping_add(offset_of!(Self, registry)),
+                RegistryRowsAt {
+                    app: rows.wrapping_add(offset_of!(RegistryRows, app)),
+                    tables: rows.wrapping_add(offset_of!(RegistryRows, tables)),
+                    sets,
+                    #[cfg(feature = "local-queryable")]
+                    local: rows.wrapping_add(offset_of!(RegistryRows, local)),
+                },
+            ),
+            0,
+        );
         let mut set = 0;
         while set < FACE_SETS {
             lines = lines.with(
@@ -159,14 +97,6 @@ impl RegistryRegion {
             );
             set = set.wrapping_add(1);
         }
-        #[cfg(feature = "local-queryable")]
-        let lines = lines.with(
-            &Gets::places(
-                registry.wrapping_add(offset_of!(Registry, local)),
-                rows.wrapping_add(offset_of!(RegistryRows, local)),
-            ),
-            0,
-        );
         lines
     }
 

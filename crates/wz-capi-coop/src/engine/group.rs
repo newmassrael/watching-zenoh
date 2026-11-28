@@ -248,16 +248,19 @@ impl MemberRows {
         self.iter().count()
     }
 
-    /// Note `listener` of `plane` told the member of `key` stands: whether it is to be told,
-    /// `false` for a member of no known role (no row reports it) and one it was told already.
+    /// Note `listener` of `plane` told the member of `key` stands: the member it is to be told,
+    /// none for a member of no known role (no row reports it) and one it was told already.
     #[cfg(feature = "connectivity")]
-    fn came(&mut self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        self.rows
-            .iter_mut()
-            .find(|row| {
-                row.stands() && row.member.whatami.is_some() && member_key(&row.member) == *key
-            })
-            .is_some_and(|row| row.told.set(plane, listener))
+    fn came(
+        &mut self,
+        plane: ToldPlane,
+        listener: usize,
+        key: &ToldKey,
+    ) -> Option<MulticastMember> {
+        let row = self.rows.iter_mut().find(|row| {
+            row.stands() && row.member.whatami.is_some() && member_key(&row.member) == *key
+        })?;
+        row.told.set(plane, listener).then_some(row.member)
     }
 
     /// Whether the tomb of the member of `key` owes `listener` of `plane` its departure.
@@ -269,16 +272,21 @@ impl MemberRows {
         .is_some()
     }
 
-    /// Note `listener` of `plane` told the member of `key` went: whether a tomb owed it that.
+    /// Note `listener` of `plane` told the member of `key` went: the member its tomb holds, when
+    /// the tomb owed it that.
     #[cfg(feature = "connectivity")]
-    fn went(&mut self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        let Some(at) = self.position(|row| {
+    fn went(
+        &mut self,
+        plane: ToldPlane,
+        listener: usize,
+        key: &ToldKey,
+    ) -> Option<MulticastMember> {
+        let at = self.position(|row| {
             row.gone && member_key(&row.member) == *key && row.told.has(plane, listener)
-        }) else {
-            return false;
-        };
+        })?;
+        let member = self.rows.get(at)?.member;
         self.forget_at(at, plane, listener);
-        true
+        Some(member)
     }
 
     /// The first member whose departure `listener` of `plane` is owed.
@@ -901,6 +909,11 @@ impl<W: LinkWaits> GroupFace<W> {
     {
         let (mut face, parts) = Self::made(joining, waits);
         // The round's room for a record of the group's batch gates what the group is handed.
+        // Nothing is handed either while a message of the session holds the group's conduits: this
+        // task runs inside that message's wait for room, and a reply its dispatch stages then could
+        // take no sequence number until the message lets them go, so the input stays in the socket.
+        let (stage, room) = (face.tx.clone(), parts.input_gate);
+        let input_gate = GroupInputGate::new(move || !stage.sending() && room.takes());
         let seed = MulticastSessionSeed::<SessionLink, GROUP_MEMBERS>::new(
             parts.config,
             parts.link,
@@ -911,7 +924,7 @@ impl<W: LinkWaits> GroupFace<W> {
         .with_join_ask(face.join_ask.clone())
         .with_tx_stage(face.tx.clone())
         .with_due(face.due.clone())
-        .with_input_gate(parts.input_gate);
+        .with_input_gate(input_gate);
         #[cfg(feature = "transport-stats")]
         let seed = seed.with_stats(Rc::clone(&face.stats));
         #[cfg(feature = "resource-snapshot")]
@@ -1559,10 +1572,25 @@ impl<W: LinkWaits> GroupFace<W> {
     }
 
     /// Note `listener` of `plane` told the member of `key` stands (`SessionEngine::tell_came`):
-    /// whether it is to be told; a group whose session ended holds none that stands.
+    /// its row, read as `member_row` reads it, when it is to be told; a group whose session ended
+    /// holds none that stands.
     #[cfg(feature = "connectivity")]
-    pub(super) fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        !self.has_ended() && self.shared.members.borrow_mut().came(plane, listener, key)
+    pub(super) fn tell_came(
+        &self,
+        plane: ToldPlane,
+        listener: usize,
+        key: &ToldKey,
+    ) -> Option<FaceLinkRow> {
+        if self.has_ended() {
+            return None;
+        }
+        let member = self
+            .shared
+            .members
+            .borrow_mut()
+            .came(plane, listener, key)?;
+        let label = &self.shared.events.label;
+        FaceLinkRow::of_group_member(&member, &label.group, &label.endpoint, label.is_shm)
     }
 
     /// Whether `listener` of `plane` is still to be told the member of `key` went.
@@ -1572,10 +1600,22 @@ impl<W: LinkWaits> GroupFace<W> {
     }
 
     /// Note `listener` of `plane` told the member of `key` went (`SessionEngine::tell_went`):
-    /// whether a tomb of the group owed it that.
+    /// its row, read from its tomb as `member_row` reads a member that stands, when a tomb of the
+    /// group owed it that.
     #[cfg(feature = "connectivity")]
-    pub(super) fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        self.shared.members.borrow_mut().went(plane, listener, key)
+    pub(super) fn tell_went(
+        &self,
+        plane: ToldPlane,
+        listener: usize,
+        key: &ToldKey,
+    ) -> Option<FaceLinkRow> {
+        let member = self
+            .shared
+            .members
+            .borrow_mut()
+            .went(plane, listener, key)?;
+        let label = &self.shared.events.label;
+        FaceLinkRow::of_group_member(&member, &label.group, &label.endpoint, label.is_shm)
     }
 
     /// The row of the first member whose departure `listener` of `plane` is owed, read from its
@@ -2739,8 +2779,12 @@ mod told_tests {
         assert!(rows.push(member(1)));
         assert!(rows.push(member(2)));
         let key = member_key(&member(1));
-        assert!(rows.came(PLANE, 0, &key));
-        assert!(!rows.came(PLANE, 0, &key), "told once");
+        assert_eq!(
+            rows.came(PLANE, 0, &key),
+            Some(member(1)),
+            "the member to tell"
+        );
+        assert!(rows.came(PLANE, 0, &key).is_none(), "told once");
 
         assert_eq!(rows.remove(&member(2).peer), Some(member(2)));
         assert_eq!(
@@ -2754,12 +2798,16 @@ mod told_tests {
         assert!(rows.owes(PLANE, 0, &key));
         assert!(!rows.owes(PLANE, 1, &key), "only to the listener told it");
         assert!(
-            !rows.came(PLANE, 1, &key),
+            rows.came(PLANE, 1, &key).is_none(),
             "a tomb is told to no one as standing"
         );
         assert_eq!(rows.first_gone(PLANE, 0), Some(member(1)));
-        assert!(rows.went(PLANE, 0, &key));
-        assert!(!rows.went(PLANE, 0, &key), "told once");
+        assert_eq!(
+            rows.went(PLANE, 0, &key),
+            Some(member(1)),
+            "the departure is of the member its tomb holds"
+        );
+        assert!(rows.went(PLANE, 0, &key).is_none(), "told once");
         assert_eq!(rows.rows.len(), 0, "the tomb owed to no one is let go of");
     }
 
@@ -2776,7 +2824,7 @@ mod told_tests {
             assert!(rows.push(member(u8::try_from(first).expect("a few members"))));
         }
         let key = member_key(&member(0));
-        assert!(rows.came(PLANE, 0, &key));
+        assert!(rows.came(PLANE, 0, &key).is_some());
         assert!(rows.remove(&member(0).peer).is_some());
         assert!(rows.push(member(200)), "the tomb's row is taken");
         assert!(!rows.owes(PLANE, 0, &key), "the tomb was given up");
@@ -2796,7 +2844,7 @@ mod told_tests {
         assert!(ended.push(member(3)));
         assert!(ended.push(member(4)));
         let key = member_key(&member(3));
-        assert!(ended.came(ToldPlane::Links, 2, &key));
+        assert!(ended.came(ToldPlane::Links, 2, &key).is_some());
         let mut joined = MemberRows::new();
         joined.keep_tombs_of(&ended);
         assert_eq!(joined.rows.len(), 1, "only the member a listener was told");

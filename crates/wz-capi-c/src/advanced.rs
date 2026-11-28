@@ -820,7 +820,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
                 // that holds no clock, on the real library). The gravestone written above is
                 // what the caller is left holding.
                 let Ok(composite) = AdvancedPublisherOn::declare_on(
-                    Arc::new(crate::advanced_plane::CPlane::new(&state.shared)),
+                    crate::advanced_plane::CPlane::new(&state.shared),
                     ke,
                     opts,
                     zid,
@@ -839,7 +839,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             SessionHandle::Node(node) => {
                 let key = ke.clone();
                 let Ok(composite) = AdvancedPublisherOn::declare_on(
-                    Arc::new(crate::advanced_plane::NodePlane::new(node)),
+                    crate::advanced_plane::NodePlane::new(node),
                     ke,
                     opts,
                     *node.zid(),

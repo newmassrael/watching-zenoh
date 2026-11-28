@@ -43,9 +43,9 @@ use crate::os::Mutex;
 use crate::peers::PeerIdentity;
 use crate::told::{ToldKey, ToldLedger, ToldPlane};
 use crate::{
-    BatchStep, Declared, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, HoldRefused,
-    KeyHold, LinksNotHonoured, LivelinessSink, MatchId, MatchingSink, QblId, QueryableSink,
-    Refusal, ReplyCallback, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
+    BatchStep, Declared, EntityRow, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId,
+    HoldRefused, KeyHold, LinksNotHonoured, LivelinessSink, MatchId, MatchingSink, QueryableSink,
+    Refusal, ReplyCallback, SubscriberSink, Tick, TickerId, WireKey,
 };
 
 /// Why [`SessionEngine::redeclare`] told no peer anything.
@@ -239,27 +239,26 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     }
 
     /// Note that `listener` of `plane`, whose history is being replayed, is told the row of `key`
-    /// came ([`crate::told`]): whether it is to be told. `false` when the row does not stand,
-    /// having come and gone before the listener was told it, or when the listener was told it
-    /// already. An engine that keeps no told bits answers `true`, every event told as it comes.
-    fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        let Some(ledger) = self.told_ledger() else {
-            return true;
-        };
+    /// came ([`crate::told`]): the row it is to be told, as the engine holds it, which the
+    /// listener's event is written from. `None` when the row does not stand, having come and gone
+    /// before the listener was told it, or when the listener was told it already. An engine that
+    /// keeps no told bits tells the row that stands.
+    fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> Option<FaceLinkRow> {
         // Read before the ledger is held: the rows are the engine's, under its own lock.
         let stands = crate::told::standing_row(self, key);
-        ledger.lock().tell_came(plane, listener, key, stands)
+        match self.told_ledger() {
+            Some(ledger) => ledger.lock().tell_came(plane, listener, key, stands),
+            None => stands,
+        }
     }
 
     /// Note that `listener` of `plane`, whose history is being replayed, is told the row of `key`
-    /// left: whether it is to be told, which it is only when it was told the row came. The
-    /// tombstone of a row that went is let go of once no listener is left to tell. An engine that
-    /// keeps no told bits answers `true`.
-    fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        match self.told_ledger() {
-            Some(ledger) => ledger.lock().tell_went(plane, listener, key),
-            None => true,
-        }
+    /// left: the row as it was told it came, which the listener's event is written from; `None`
+    /// when it was never told the row came. The tombstone of a row that went is let go of once no
+    /// listener is left to tell. An engine that keeps no told bits keeps no row that went, and
+    /// tells none: every engine that reports faces keeps them.
+    fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> Option<FaceLinkRow> {
+        self.told_ledger()?.lock().tell_went(plane, listener, key)
     }
 
     /// The first row `listener` of `plane` was told came that no longer stands: a tombstone it is
@@ -434,10 +433,10 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// id it can put on the wire, rather than an id a live declaration may still hold being
     /// handed out again; a full table, a key the session cannot hold, or a closed session.
     ///
-    /// Declared, it answers its id with its key as the engine keeps it ([`Declared::key`]): its
-    /// text where the engine's record of the subscription holds it, and the declaration the
-    /// record holds that the key begins with, when it holds one; valid until the subscriber is
-    /// retracted. A liveliness subscriber's declaration answers the same.
+    /// Declared, it answers its row ([`EntityRow`]) with its key as the engine keeps it
+    /// ([`Declared::key`]): its text where the engine's record of the subscription holds it, and
+    /// the declaration the record holds that the key begins with, when it holds one; valid until
+    /// the subscriber is retracted. A liveliness subscriber's declaration answers the same.
     fn declare_subscriber_on_wire(
         &self,
         keyexpr: &str,
@@ -445,16 +444,29 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<Declared<SubId>, Refusal>;
+    ) -> Result<Declared<EntityRow>, Refusal>;
 
-    /// Retract subscriber `id`, a liveliness subscriber's too. Returns once the callback the
-    /// declaration was given has been let go of, its drop run, as zenoh-pico's undeclare waits for
-    /// the callbacks in flight (`_z_sync_group_wait`), unless this thread delivers for this engine
-    /// now ([`crate::EngineDeliveries::delivers_here`]: inside any callback of this session), which
+    /// Retract the subscriber `row` names, a liveliness subscriber too, whose row names its own
+    /// table. Returns once the callback the declaration was given has been let go of, its drop
+    /// run, as zenoh-pico's undeclare waits for the callbacks in flight (`_z_sync_group_wait`),
+    /// unless this thread delivers for this engine now
+    /// ([`crate::EngineDeliveries::delivers_here`]: inside any callback of this session), which
     /// returns at once and leaves the callback to the call that ends last. From inside a callback of
     /// another session it waits. The engine keeps this, so every ABI over it means the same.
-    /// Retracting one already retracted does nothing.
-    fn undeclare_subscriber(&self, id: SubId);
+    /// Retracting one already retracted, or naming the row of another kind, does nothing.
+    fn undeclare_subscriber(&self, row: EntityRow);
+
+    /// The id the wire names the entity `row` names by, read off the engine's record of it: what
+    /// zenoh-pico's `z_subscriber_id` and `z_queryable_id` answer, and an advanced subscriber's
+    /// identity. `None` for an entity retracted, and for one of a closed session, which zenoh-pico
+    /// answers as the null id. The provided answer is an engine's that names its entities by
+    /// their ids ([`EntityRow::by_id`]).
+    fn entity_id_of(&self, row: EntityRow) -> Option<EntityId> {
+        if self.is_closed() {
+            return None;
+        }
+        row.as_id()
+    }
 
     /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: the hold, which
     /// names its mapping id and its row. Refused when the session has no id left to give
@@ -646,7 +658,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     ///
     /// The record of the queryable keeps `keyexpr` and holds the declarations `wire` and
     /// `retraction` name until the queryable is retracted: the entity keeps no copy of its key and
-    /// lends it from the record, as the declaration answers it with the id ([`Declared::key`]).
+    /// lends it from the record, as the declaration answers it with the row ([`Declared::key`]).
     fn declare_queryable_on_wire(
         &self,
         keyexpr: &str,
@@ -655,15 +667,15 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<Declared<QblId>, Refusal> {
+    ) -> Result<Declared<EntityRow>, Refusal> {
         let _ = (keyexpr, wire, complete, allowed_origin, retraction, sink);
         Err(Refusal::NotBuilt)
     }
 
-    /// Retract queryable `id`. Retracting one already retracted, or one never declared, does
-    /// nothing.
-    fn undeclare_queryable(&self, id: QblId) {
-        let _ = id;
+    /// Retract the queryable `row` names. Retracting one already retracted, one never declared,
+    /// or naming the row of another kind, does nothing.
+    fn undeclare_queryable(&self, row: EntityRow) {
+        let _ = row;
     }
 
     /// Answer the kept query `id` ([`crate::QueryHolder::keep_query`]) now, with what `answer`
@@ -686,8 +698,8 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// per peer the engine reaches, each ended by its peer's DeclFinal, `timeout_ms` (`0` is the
     /// platform default, never none) or the loss of its link. Its replies are token
     /// declarations, with the token's key as the reply's. `leg` and `fan` are as
-    /// [`Self::get_on_wire`]'s: `leg` mints each leg's [`ReplyCallback`], whose drop is that
-    /// leg's end, and `fan` is told of each leg as it is issued. The number of legs issued, `0`
+    /// [`Self::get_on_wire`]'s: `leg` mints the [`ReplyCallback`] the legs hand their replies
+    /// to, dropped once every leg it served ended, and `fan` is told of each leg as it is issued. The number of legs issued, `0`
     /// for a get that reached nobody; refused as [`Self::get_on_wire`] is, and with
     /// [`Refusal::NotBuilt`] by an engine with no liveliness get in this build, which is the
     /// provided answer.
@@ -716,21 +728,22 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         keyexpr: &str,
         wire: WireKey,
         retraction: Option<RetractionKey>,
-    ) -> Result<TokenId, Refusal> {
+    ) -> Result<EntityRow, Refusal> {
         let _ = (keyexpr, wire, retraction);
         Err(Refusal::NotBuilt)
     }
 
-    /// Retract token `id`, which tells the peers' liveliness subscribers it is gone. Retracting
-    /// one already retracted, or one never declared, does nothing.
-    fn undeclare_liveliness_token(&self, id: TokenId) {
-        let _ = id;
+    /// Retract the token `row` names, which tells the peers' liveliness subscribers it is gone.
+    /// Retracting one already retracted, one never declared, or naming the row of another kind,
+    /// does nothing.
+    fn undeclare_liveliness_token(&self, row: EntityRow) {
+        let _ = row;
     }
 
     /// Subscribe to the liveliness tokens the peers hold on `keyexpr`, asking for them as `wire`
     /// names it, through the callback `sink`; with `history`, the tokens already alive are
     /// delivered first. It is a subscriber like any other to retract
-    /// ([`Self::undeclare_subscriber`]): the ids are one space. Refused as
+    /// ([`Self::undeclare_subscriber`]), by the row it answers. Refused as
     /// [`Self::declare_subscriber_on_wire`] is, and with [`Refusal::NotBuilt`] by an engine with
     /// no liveliness in this build, which is the provided answer.
     fn declare_liveliness_subscriber_on_wire(
@@ -739,15 +752,16 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Result<Declared<SubId>, Refusal> {
+    ) -> Result<Declared<EntityRow>, Refusal> {
         let _ = (keyexpr, wire, history, sink);
         Err(Refusal::NotBuilt)
     }
 
     /// Ask a query on `keyexpr` (named on the wire as `wire`) with `opts`: one leg per peer the
     /// engine reaches, and one to the session's own queryables where `opts` admits them. `leg`
-    /// mints each leg's [`ReplyCallback`], whose drop is that leg's end, so a get is over when
-    /// the last callback it minted is dropped. `fan`, when the get can be cancelled, has the engine
+    /// mints the [`ReplyCallback`] the legs hand their replies to, once for the get or once for
+    /// each leg as the engine holds them; a callback is dropped once every leg it served ended, so
+    /// a get is over when the last callback it minted is dropped. `fan`, when the get can be cancelled, has the engine
     /// attached as what ends the legs it tags with the fan's key ([`CancellableFan::attach`]), and
     /// a fan cancelled while the legs are issued stops the issuing.
     ///
@@ -812,7 +826,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<Declared<SubId>, Refusal> {
+    ) -> Result<Declared<EntityRow>, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
         self.declare_subscriber_on_wire(keyexpr, wire, allowed_origin, retraction, sink)
     }
@@ -827,7 +841,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         reach: DeclarationReach,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<Declared<QblId>, Refusal> {
+    ) -> Result<Declared<EntityRow>, Refusal> {
         let DeclarationReach {
             allowed_origin,
             links,
@@ -844,7 +858,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         wire: WireKey,
         links: LinkRestriction,
         retraction: Option<RetractionKey>,
-    ) -> Result<TokenId, Refusal> {
+    ) -> Result<EntityRow, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
         self.declare_liveliness_token_on_wire(keyexpr, wire, retraction)
     }
@@ -858,7 +872,7 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
         history: bool,
         links: LinkRestriction,
         sink: LivelinessSink,
-    ) -> Result<Declared<SubId>, Refusal> {
+    ) -> Result<Declared<EntityRow>, Refusal> {
         LinksNotHonoured::unless_unrestricted(links)?;
         self.declare_liveliness_subscriber_on_wire(keyexpr, wire, history, sink)
     }

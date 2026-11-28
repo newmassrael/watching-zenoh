@@ -589,7 +589,8 @@ struct InterestSide<P: Storage = Profile> {
     /// At most `MAX_INBOUND_SUB_INTERESTS` rows, in the policy's sequence of a peer's rows
     /// (`Storage::Pooled`): on the lent policy each row lies in a pool every face of the session
     /// shares (`InterestRows`), so a face holds the interests its peer asked and not the most it
-    /// could.
+    /// could; on the on-use one the rows are taken at the first interest, each a row of the
+    /// session's `SESSION_MAX_INBOUND_SUB_INTERESTS` its key budget holds.
     #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
     rows: InterestTable<P>,
     /// R311y530 — the staged interest-response chain, drained by
@@ -3124,8 +3125,8 @@ impl SubscriberPeer<crate::bounded::Static> {
     }
 }
 
-/// The rows of a [`SubscriberPeer`] of the region policy, which a region lays out beside it: the
-/// staging of the answers to the peer's interests, at the build's bound. The peer's aliases and
+/// The rows of a [`SubscriberPeer`] of a policy a description places, which a region lays out
+/// beside it: the staging of the answers to the peer's interests, at the build's bound. The peer's aliases and
 /// interests are inline in the side, at their bounds, as the region policy keeps a peer's rows.
 pub struct SubscriberPeerRows {
     #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
@@ -3135,8 +3136,8 @@ pub struct SubscriberPeerRows {
 // SAFETY: the staging's rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
 unsafe impl crate::bounded::ZeroEmpty for SubscriberPeerRows {}
 
-/// The lines a region's description holds for one [`SubscriberPeer`] of the region policy, at
-/// most: its staging's rows; and its two handles to the key arena, its aliases' and its interests'.
+/// The lines a description holds for one [`SubscriberPeer`], at most: its staging's rows; and its
+/// two handles to the key arena, its aliases' and its interests'.
 pub const SUBSCRIBER_PEER_LINES: usize = 2;
 
 // SAFETY: of the region policy, at all zero bytes: the aliases are a `FixedIdMap` and the interests
@@ -3149,10 +3150,10 @@ pub const SUBSCRIBER_PEER_LINES: usize = 2;
 // `ComposeInline` (`ZeroEmpty`). Nothing drops a value, every sequence holding none.
 unsafe impl crate::bounded::ZeroEmpty for SubscriberPeer<crate::bounded::Region> {}
 
-impl SubscriberPeer<crate::bounded::Region> {
-    /// The description of a side of the region policy at `at` in a region and its
-    /// [`SubscriberPeerRows`] at `rows`: the line of its staging's rows and its handles to the
-    /// region's key arena, those the build keeps.
+impl<Q: crate::bounded::LaidOut> SubscriberPeer<Q> {
+    /// The description of a side at `at` and, in a region, its [`SubscriberPeerRows`] at `rows`:
+    /// the line of its staging's rows, which a plan lends the answers staged for a face's peer
+    /// (`RowCount::PendingDeclares`), and its handles to the key arena, those the build keeps.
     pub const fn places(
         at: usize,
         rows: usize,
@@ -3161,15 +3162,19 @@ impl SubscriberPeer<crate::bounded::Region> {
         #[cfg(feature = "storage-profile")]
         let lines = lines.keys_at(at.wrapping_add(core::mem::offset_of!(Self, naming.keys)));
         #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
-        let lines = lines
-            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, interests.keys)))
-            .seq(crate::bounded::SeqPlace::of_room::<
-                SubInterestReply,
-                { caps::MAX_PENDING_DECLARES },
-            >(
-                at.wrapping_add(core::mem::offset_of!(Self, interests.staged)),
-                rows.wrapping_add(core::mem::offset_of!(SubscriberPeerRows, staged)),
-            ));
+        let lines =
+            lines
+                .keys_at(at.wrapping_add(core::mem::offset_of!(Self, interests.keys)))
+                .seq(
+                    crate::bounded::SeqPlace::of_room::<
+                        SubInterestReply,
+                        { caps::MAX_PENDING_DECLARES },
+                    >(
+                        at.wrapping_add(core::mem::offset_of!(Self, interests.staged)),
+                        rows.wrapping_add(core::mem::offset_of!(SubscriberPeerRows, staged)),
+                    )
+                    .counted(crate::bounded::RowCount::PendingDeclares),
+                );
         #[cfg(not(feature = "storage-profile"))]
         let _ = at;
         #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
@@ -3190,6 +3195,14 @@ impl SubscriberPeer<crate::bounded::OnUse> {
         side
     }
 
+    /// The rows the peer's alias table is counted to, which its first alias takes: the quota it is
+    /// held to ([`Self::limit_aliases_to`]) when it was stated with no alias held, the build's
+    /// `MAX_PEER_KEYEXPR_ALIASES` before.
+    #[cfg(feature = "storage-profile")]
+    pub fn alias_rows(&self) -> usize {
+        self.naming.aliases.capacity()
+    }
+
     /// Count an empty side's staging (`staged` rows) where it lies: what [`Self::counted`]
     /// makes, without the side being a value of its own.
     #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
@@ -3204,79 +3217,72 @@ impl SubscriberPeer<crate::bounded::OnUse> {
     }
 }
 
+/// The alias table of a peer's side on use.
+#[cfg(all(test, feature = "alloc", feature = "storage-profile"))]
+mod on_use_alias_tests {
+    use super::SubscriberPeer;
+    use crate::bounded::OnUse;
+    use crate::limit_binding::Quota;
+    use crate::limits::MaxPeerKeyexprAliasesHeld;
+
+    /// A side whose alias table holds no alias is counted to the quota it is held to, above the
+    /// build's `MAX_PEER_KEYEXPR_ALIASES` (a group's face) or under it, so its first alias takes
+    /// that many rows. Turned red by a `limit_aliases_to` that stores the quota alone
+    /// (`PeerIds::recount` left out), whose table keeps the build's rows.
+    #[test]
+    fn an_on_use_alias_table_is_counted_to_its_quota() {
+        let mut side = SubscriberPeer::<OnUse>::counted(0);
+        let build = crate::caps::MAX_PEER_KEYEXPR_ALIASES;
+        assert_eq!(
+            side.alias_rows(),
+            build,
+            "CONTROL: the build's rows before a quota"
+        );
+        let Some(quota) = [build.saturating_mul(2), 1]
+            .into_iter()
+            .find_map(|rows| MaxPeerKeyexprAliasesHeld::select(Quota::at_most(rows)).ok())
+        else {
+            // A domain of the build's value alone states no other quota.
+            return;
+        };
+        side.limit_aliases_to(quota);
+        assert_eq!(
+            Some(side.alias_rows()),
+            quota.get().most(),
+            "the table is counted to its quota"
+        );
+    }
+}
+
 impl SubscriberPeer<Lent> {
-    /// An empty side whose staging (`staged` rows) is lent from `arena`. Refused when it is over
-    /// the build's capacity or the arena has not the room. The alias table and the interest table
-    /// keep their rows in the session's pools they are handed (`keep_alias_rows_in`,
-    /// `keep_interest_rows_in`) and their keys in the key arena it is handed (`keep_keys_in`), and
-    /// refuse what the peer asks before.
-    pub fn lent(arena: &mut Arena, staged: usize) -> Result<Self, LendRefused> {
-        let mut side = Self::default();
-        side.lend_rows(arena, staged)?;
-        Ok(side)
-    }
-
-    /// Lend an empty side its staging (`staged` rows) and the row it composes keys in from
-    /// `arena`, where it lies: what [`Self::lent`] makes, without the side being a value of its
-    /// own. Refused as `lent` is.
-    ///
-    /// The key arena and the rows of interests the side was handed stay its own: lending its
-    /// staging before or after it was handed them keeps the interests' keys and rows in them.
-    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
-    pub fn lend_rows(&mut self, arena: &mut Arena, staged: usize) -> Result<(), LendRefused> {
-        self.interests.staged = arena.lend(staged)?;
-        self.lend_compose_row(arena)
-    }
-
-    /// Lend an empty side the row it composes keys in: a build that answers no Interest keeps no
-    /// interest of the peer, and stages nothing back to it.
-    #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
-    pub fn lend_rows(&mut self, arena: &mut Arena, _staged: usize) -> Result<(), LendRefused> {
-        self.lend_compose_row(arena)
-    }
-
-    /// Lend the side the row it composes keys in ([`ComposeRow`](crate::wireexpr_resolve::ComposeRow)).
+    /// Lend an empty side the row it composes keys in
+    /// ([`ComposeRow`](crate::wireexpr_resolve::ComposeRow)) from `arena`, where it lies: a row
+    /// the region keeps inline, so no line of the side's description ([`SubscriberPeer::places`])
+    /// and lent beside them. Its staging is lent by that description, and its aliases and
+    /// interests keep their rows in the session's pools they are handed (`keep_alias_rows_in`,
+    /// `keep_interest_rows_in`) and their keys in the key arena it is handed (`keep_keys_in`).
     #[cfg(feature = "storage-profile")]
-    fn lend_compose_row(&mut self, arena: &mut Arena) -> Result<(), LendRefused> {
+    pub fn lend_compose_row(&mut self, arena: &mut Arena) -> Result<(), LendRefused> {
         self.compose = crate::wireexpr_resolve::ComposeRow::lent(arena)?;
         Ok(())
     }
 
     /// Nothing to lend: a build with no storage profile resolves no key of the peer's.
     #[cfg(not(feature = "storage-profile"))]
-    fn lend_compose_row(&mut self, arena: &mut Arena) -> Result<(), LendRefused> {
+    pub fn lend_compose_row(&mut self, arena: &mut Arena) -> Result<(), LendRefused> {
         let _ = arena;
         Ok(())
     }
 
-    /// The bytes of an arena [`Self::lent`] takes. `None` past the address space.
-    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
-    pub const fn arena_bytes(staged: usize) -> Option<usize> {
-        match (
-            InterestSide::<Lent>::arena_bytes(staged),
-            Self::compose_bytes(),
-        ) {
-            (Some(staging), Some(compose)) => staging.checked_add(compose),
-            _ => None,
-        }
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes: its row to compose keys in alone, in a build
-    /// that answers no Interest.
-    #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
-    pub const fn arena_bytes(_staged: usize) -> Option<usize> {
-        Self::compose_bytes()
-    }
-
-    /// The bytes of the row the side composes keys in.
+    /// The bytes of an arena [`Self::lend_compose_row`] takes. `None` past the address space.
     #[cfg(feature = "storage-profile")]
-    const fn compose_bytes() -> Option<usize> {
+    pub const fn compose_bytes() -> Option<usize> {
         crate::wireexpr_resolve::ComposeRow::arena_bytes()
     }
 
     /// No row: a build with no storage profile composes no key.
     #[cfg(not(feature = "storage-profile"))]
-    const fn compose_bytes() -> Option<usize> {
+    pub const fn compose_bytes() -> Option<usize> {
         Some(0)
     }
 
@@ -3619,10 +3625,39 @@ impl<P: Storage> SubscriberPeer<P> {
     /// session's tables resolved: a `DeclKexpr` for a NEW id that would leave more aliases than
     /// `quota` admits is refused and counted as a full table refuses it
     /// ([`Self::alias_refusals`]), and the aliases already held are kept, as a lowered soft
-    /// limit keeps what it holds.
+    /// limit keeps what it holds. A table that holds no alias and whose rows are counted when it is
+    /// made is counted to `quota` too ([`PeerIds::recount`]), so a quota above the build's
+    /// (a group's face, which holds every member's) has the rows to hold it, and to the rows it
+    /// was made with for a quota of no most ([`PeerIds::recount_as_made`]), so a place a group's
+    /// face held is counted as a peer's again for its next face whatever the quota bounds.
     #[cfg(feature = "storage-profile")]
     pub fn limit_aliases_to(&mut self, quota: crate::limits::MaxPeerKeyexprAliasesHeld) {
         self.naming.alias_quota = quota;
+        let aliases = &mut self.naming.aliases;
+        match quota.get().most() {
+            Some(rows) => PeerIds::<KeyText<P>, P::Keys>::recount(aliases, rows),
+            None => PeerIds::<KeyText<P>, P::Keys>::recount_as_made(aliases),
+        };
+    }
+
+    /// Hold the peer's alias table to admit at least the most `quota` states: its quota raised to
+    /// `quota` where it admits fewer, and a table whose rows are counted when it is made counted
+    /// up to it where it is counted fewer and holds no alias ([`PeerIds::recount`]). A quota that
+    /// admits as many is kept, and so is a count of as many rows: a table counted when made holds
+    /// no more ids than its count, whatever its quota admits, so both are asked. A quota of no most
+    /// is no bound to hold the table to.
+    #[cfg(feature = "storage-profile")]
+    pub fn hold_aliases_at_least(&mut self, quota: crate::limits::MaxPeerKeyexprAliasesHeld) {
+        let Some(rows) = quota.get().most() else {
+            return;
+        };
+        if !self.naming.alias_quota.get().admits(rows) {
+            self.naming.alias_quota = quota;
+        }
+        let counted = PeerIds::<KeyText<P>, P::Keys>::counted_rows(&self.naming.aliases);
+        if counted.is_some_and(|held| held < rows) {
+            PeerIds::<KeyText<P>, P::Keys>::recount(&mut self.naming.aliases, rows);
+        }
     }
 
     /// Hold the peer's alias table to the `MAX_KEYEXPR_BYTES` the creator of the session's
@@ -4040,15 +4075,6 @@ impl<P: Storage> Default for InterestSide<P> {
             key_quota: crate::limit_binding::Limited::build_default(),
             keys: Default::default(),
         }
-    }
-}
-
-#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
-impl InterestSide<Lent> {
-    /// The bytes of an arena [`SubscriberPeer::lend_rows`] takes: the staging's. `None` past the
-    /// address space.
-    const fn arena_bytes(staged: usize) -> Option<usize> {
-        Arena::table_bytes::<SubInterestReply>(staged)
     }
 }
 

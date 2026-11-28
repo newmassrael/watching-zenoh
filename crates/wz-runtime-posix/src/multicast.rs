@@ -350,6 +350,38 @@ impl Plan {
         })
     }
 
+    /// A plan of `group` that pins no interface and joins no other group: what a scouting window
+    /// reads the group by, which no locator's keys shape.
+    #[cfg(feature = "scout-group-socket")]
+    fn unpinned(group: IpAddr) -> Self {
+        match group {
+            IpAddr::V4(group) => Self::V4 {
+                group,
+                iface: None,
+                joins: Vec::new(),
+            },
+            IpAddr::V6(group) => Self::V6 {
+                group,
+                iface: None,
+                joins: Vec::new(),
+            },
+        }
+    }
+
+    /// A plan of `group` pinned to the interface that holds `local`, named by that address, as an
+    /// `#iface=` address literal pins it; a group of the other family is refused, as such a literal
+    /// is, since an IPv4 address names no interface an IPv6 group can leave by.
+    fn pinned_v4(group: IpAddr, local: Ipv4Addr) -> Result<Self, PlanError> {
+        match group {
+            IpAddr::V4(group) => Ok(Self::V4 {
+                group,
+                iface: Some(local),
+                joins: Vec::new(),
+            }),
+            IpAddr::V6(_) => Err(PlanError::IfaceFamily),
+        }
+    }
+
     /// The interface an UNPINNED IPv4 multicast link joins and sends on: the first non-loopback
     /// IPv4 address of `candidates`, as upstream's link fills its local address from the
     /// unicast addresses of the multicast interfaces and joins and sends on it. An interface the
@@ -646,18 +678,70 @@ pub fn bind_joined<S: MulticastSocket>(
         }
         RxBind::Group => plan,
     };
-    let socket =
-        S::bind_shared(plan.rx_bind_addr(port, rx_bind)).map_err(MulticastError::Socket)?;
-    let configured = socket
+    joined_on(&plan, port, rx_bind, cfg.loopback, hops).map_err(MulticastError::Socket)
+}
+
+/// The joined socket of `plan` on `port`: bound as `rx_bind` says, non-blocking, its egress
+/// pinned when the plan has one, every group of the plan joined, the loopback policy and the hop
+/// limit applied.
+fn joined_on<S: MulticastSocket>(
+    plan: &Plan,
+    port: u16,
+    rx_bind: RxBind,
+    loopback: Loopback,
+    hops: Option<u8>,
+) -> Result<Bound<S>, S::Error> {
+    let socket = S::bind_shared(plan.rx_bind_addr(port, rx_bind))?;
+    socket
         .make_nonblocking()
         .and_then(|()| plan.pin_egress(&socket))
         .and_then(|()| plan.join_groups(&socket, rx_bind.skips_a_refused_v4_join()))
-        .and_then(|()| Plan::loop_back(&socket, cfg.loopback))
+        .and_then(|()| Plan::loop_back(&socket, loopback))
         .and_then(|()| match hops {
             Some(hops) => socket.set_multicast_hops(hops),
             None => Ok(()),
-        });
-    configured.map_err(MulticastError::Socket)?;
+        })?;
+    Ok(Bound {
+        socket,
+        peer: plan.peer(port),
+    })
+}
+
+/// The socket a scouting window reads `group` on `port` by: bound on the group itself where the
+/// platform lets a socket bind one, joined on the system's choice of interface, a refused IPv4
+/// membership passed over, and every option the system's. A window states no locator key, so none
+/// is read: [`bind_joined`] with a config that names nothing and [`RxBind::Group`], without the
+/// resolution of keys it would never be given.
+#[cfg(feature = "scout-group-socket")]
+pub fn bind_scout_group<S: MulticastSocket>(
+    group: IpAddr,
+    port: u16,
+) -> Result<Bound<S>, S::Error> {
+    joined_on(
+        &Plan::unpinned(group),
+        port,
+        RxBind::Group,
+        Loopback::OsDefault,
+        None,
+    )
+}
+
+/// The socket a scouting window asks `group` on `port` from by the interface that holds
+/// `local`: bound to `local` on a port the system picks, leaving by that interface, non-blocking,
+/// and every other option the system's. It is [`bind_sender`] of a sender pinned by `#iface=`
+/// written as `local`, with the address handed over as the address it is, so no text of it is
+/// written or read. A group of the other family is refused before a socket exists.
+pub fn bind_scout_asker<S: MulticastSocket>(
+    group: IpAddr,
+    port: u16,
+    local: Ipv4Addr,
+) -> Result<Bound<S>, MulticastError<S::Error>> {
+    let plan = Plan::pinned_v4(group, local)?;
+    let socket = S::bind(SocketAddr::from((local, 0))).map_err(MulticastError::Socket)?;
+    socket
+        .make_nonblocking()
+        .and_then(|()| plan.pin_egress(&socket))
+        .map_err(MulticastError::Socket)?;
     Ok(Bound {
         socket,
         peer: plan.peer(port),
@@ -769,6 +853,14 @@ impl<S: MulticastSocket> HostGroupTransport<S> {
     /// one of its own that reads a datagram up to the largest UDP payload whole. A datagram longer
     /// than the buffer is cut by the stack, which the session reads as a bad frame.
     pub fn new(read: S, write: S, group: SocketAddr, rx: Option<ByteBuf>) -> Self {
+        let rx = GroupRx::lent_or_own(rx, || alloc::vec![0; UDP_RX_CAPACITY]);
+        Self::with_rx(read, write, group, rx)
+    }
+
+    /// [`Self::new`] receiving into `rx`, made by the joiner: the buffer its session lent, or one
+    /// of the transport's own of the length the session sized, which a joiner takes before it
+    /// binds, so a buffer the heap refuses refuses the join with no socket made.
+    pub fn with_rx(read: S, write: S, group: SocketAddr, rx: GroupRx<Vec<u8>>) -> Self {
         let own = write.local();
         // Dropped in the kernel where it takes a filter, so the reader is never woken by them; the
         // receive still drops what reaches it.
@@ -777,12 +869,7 @@ impl<S: MulticastSocket> HostGroupTransport<S> {
         Self {
             write: Some(write),
             group,
-            receive: Some(HostGroupReceive::of(
-                Some(read),
-                own,
-                group,
-                GroupRx::lent_or_own(rx, || alloc::vec![0; UDP_RX_CAPACITY]),
-            )),
+            receive: Some(HostGroupReceive::of(Some(read), own, group, rx)),
         }
     }
 
@@ -1400,6 +1487,89 @@ mod tests {
         // SAFETY: a plain system call on the socket's own descriptor.
         let flags = unsafe { libc::fcntl(sender.socket.fd(), libc::F_GETFL) };
         assert_ne!(flags & libc::O_NONBLOCK, 0, "a sender does not block");
+    }
+
+    /// A scouting window's asker binds the address it is handed, leaves by it, writes to the
+    /// group, does not block and keeps the system's loopback and hop limit, as the sender pinned by
+    /// that address written as `#iface=` does; a group of the other family is refused before a
+    /// socket exists, as that literal is. Turned red by an asker bound to the wildcard, one that
+    /// leaves by the system's interface, or one made for an IPv6 group.
+    #[test]
+    fn a_scouting_asker_is_bound_to_its_address_and_leaves_by_it() {
+        let asker =
+            bind_scout_asker::<PosixUdpSocket>(IpAddr::V4(GROUP), 7446, Ipv4Addr::LOCALHOST)
+                .expect("an asker on the loopback");
+        assert_eq!(asker.peer, SocketAddr::from((GROUP, 7446)));
+        assert_eq!(asker.socket.local().ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_ne!(asker.socket.local().port(), 0);
+        let egress = option(
+            &asker.socket,
+            libc::IPPROTO_IP,
+            libc::IP_MULTICAST_IF,
+            libc::in_addr { s_addr: 0 },
+        );
+        assert_eq!(
+            Ipv4Addr::from(egress.s_addr.to_ne_bytes()),
+            Ipv4Addr::LOCALHOST
+        );
+        let pinned = bind_sender::<PosixUdpSocket>(
+            IpAddr::V4(GROUP),
+            7446,
+            &SocketConfig {
+                iface: Some("127.0.0.1"),
+                ..SocketConfig::default()
+            },
+            false,
+        )
+        .expect("the sender the asker stands for");
+        for (level, name) in [
+            (libc::IPPROTO_IP, libc::IP_MULTICAST_TTL),
+            (libc::IPPROTO_IP, libc::IP_MULTICAST_LOOP),
+        ] {
+            assert_eq!(
+                option(&asker.socket, level, name, -1),
+                option(&pinned.socket, level, name, -1),
+                "option {name}"
+            );
+        }
+        // SAFETY: a plain system call on the socket's own descriptor.
+        let flags = unsafe { libc::fcntl(asker.socket.fd(), libc::F_GETFL) };
+        assert_ne!(flags & libc::O_NONBLOCK, 0, "an asker does not block");
+        assert!(matches!(
+            bind_scout_asker::<PosixUdpSocket>(
+                IpAddr::V6(Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0x1)),
+                7446,
+                Ipv4Addr::LOCALHOST
+            ),
+            Err(MulticastError::Plan(PlanError::IfaceFamily))
+        ));
+    }
+
+    /// A scouting window's group plan is the plan of a locator that states no key: no interface,
+    /// no other group, of the group's family. Turned red by a plan that pins or joins anything.
+    #[cfg(feature = "scout-group-socket")]
+    #[test]
+    fn a_scouting_group_plan_is_a_plan_of_no_key() {
+        for group in [
+            IpAddr::V4(GROUP),
+            IpAddr::V6(Ipv6Addr::new(0xff05, 0, 0, 0, 0, 0, 0, 0x231)),
+        ] {
+            assert_eq!(
+                Plan::unpinned(group),
+                Plan::resolve(group, &SocketConfig::default(), JoinsRead::Yes)
+                    .expect("no key refuses nothing"),
+                "{group:?}"
+            );
+        }
+    }
+
+    /// A scouting window's ask plan is the IPv4 plan pinned to the address it asks by.
+    #[test]
+    fn a_scouting_ask_plan_is_pinned_to_its_address() {
+        assert_eq!(
+            Plan::pinned_v4(IpAddr::V4(GROUP), Ipv4Addr::LOCALHOST),
+            Ok(v4_plan(Some(Ipv4Addr::LOCALHOST)))
+        );
     }
 
     /// A link's sender leaves by the interface of the address it binds, `#bind=` here, whatever

@@ -20,8 +20,8 @@ use wz_session_core::wire_id::RequestId;
 
 use crate::Refusal;
 
-/// A C-level queryable id, keying what an engine holds for one C declaration: the entity id the
-/// queryable is declared under, of the width [`crate::SubId`] has for the same reason.
+/// The entity id a queryable is declared under on the wire, of the width [`crate::SubId`] has for
+/// the same reason; what an ABI's object of the queryable keeps is its row ([`crate::EntityRow`]).
 pub type QblId = wz_session_core::wire_id::EntityId;
 
 /// A query a C program keeps past its handler, as the engine that keeps it names it

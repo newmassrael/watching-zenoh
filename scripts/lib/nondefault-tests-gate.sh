@@ -717,6 +717,10 @@ files::decl_watch_doors::"
     # engine with a Rust API hands the port and a C library never does (`shared-sinks`): the call
     # through each arm and the hold let go with the sink (`shared_sink_tests::`).
     "wz-capi-port|hook|shared-sinks|shared_sink_tests::"
+    # A key that keeps an object of the ABI's alive past its declaration (`key-anchors`), which the
+    # advanced subscriber's host and the Rust API make and a build without them never does: the
+    # rest lent from what the key keeps, and the anchor that outlives the key (`tests::a_kept_`).
+    "wz-capi-port|hook|key-anchors|tests::a_kept_"
     # The port's `os` made of the host's own calls (`os-sys`, `wz-host-sync`), which a host library
     # without `std` runs its read task and holds its locks on: a test build with `std` compiles the
     # module beside `std`'s for its own tests (`os::sys::tests::`), a spawned thread's identity and
@@ -934,6 +938,11 @@ tests::group_congested::replies_past_the_reply_limit_are_the_transports_drops"
     "wz-capi-coop|hook|app-transport,group|engine::member_key_tests::"
     "wz-capi-coop|hook|app-transport,group|tests::arena::a_session_that_joins_groups_is_lent_a_receive_buffer_for_each"
     "wz-session-core|hook|alloc|round::tests::a_given_back_group_buffer_is_kept_while_a_record_reads_in_it"
+    # Decision D17: a sealed lifecycle command judged at both profiles' in-band entry points,
+    # through a link that proved only a router no grant names (the heap queries and the fixed
+    # node's verbs), and the verifier's echo after a start.
+    "wz-session-core|hook|sealed-commands,session-unicast,session-close-ingress,secure-channel|lifecycle_query::tests::sealed::"
+    "wz-session-mcu|hook|sealed-commands,alloc,adminspace-fixed,session-slot,lifecycle-close|admin_fixed::sealed_tests::"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::arena::a_groups_face_counts_every_members_aliases_in_the_pool"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|engine::registry::tests::a_groups_face_holds_its_members_aliases_until_its_set_is_given_back"
     # The tests of a group in the form whose read steps each face's link session itself
@@ -1016,10 +1025,31 @@ tests::direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg"
     # measured on a build host yet.
     "wz-capi-coop|hook|tables-on-use|on_use"
     "wz-capi-coop|hook|liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use|on_use"
-    # A build that names both `tables-on-use` and `runtime-plan`, as `--all-features` does, is the
-    # form laid out at the open (`runtime-plan` wins, `src/lib.rs`): the one test of that build,
-    # which reads its row policy and its moment. Not measured on a build host yet.
+    # A build that names both `tables-on-use` and `runtime-plan` takes its tables' memory on use,
+    # their counts laid out from its config (the crate's build script, `TablePolicy`), whatever
+    # faces it takes beside its dial role's: the test of that build that reads its row policy and its
+    # moment, and the on-use tests over the plan laid out from the config. Not measured on a build
+    # host yet.
     "wz-capi-coop|hook|runtime-plan,tables-on-use|form_precedence_tests::"
+    "wz-capi-coop|hook|runtime-plan,tables-on-use|on_use"
+    # The same on-use tests in a session that takes faces beside its dial role's (`listen`, which
+    # turns `runtime-plan` on), with the liveliness that owes a departed face's tokens: the
+    # registry's faces added, removed and given back with their sets counted as each first comes,
+    # the tokens of the faces that went owed as a relation that bounds the faces admitted, the
+    # plan that lays out no row of the faces' sets, their index or the tokens owed, and each face's
+    # read slot made at its place's first face (`once_rows`). Not measured on a build host yet.
+    "wz-capi-coop|hook|liveliness,listen,tables-on-use|on_use"
+    # The same where the session's links ask its admission (`link-admission`, which turns
+    # `listen` on): the admission held in an allocation of its own, apart from the arena, which the
+    # crate's all-features build compiles and no other on-use leg does. Not measured on a build
+    # host yet.
+    "wz-capi-coop|hook|link-admission,tables-on-use|on_use"
+    # The same tables on use in the form that keeps the round (`WZ_COOP_VALUE_LOCKS=off`, rows
+    # below): the one build of a session that listens and keeps the publishes a held session
+    # dropped for its other faces, whose table is then its own, counted at the open and taken as
+    # publishes are kept, with no row of the arena. No other leg compiles that table on use; the
+    # plan's tests read it (`tests::arena::`). Scope `lane`: not measured on a build host yet.
+    "wz-capi-coop|lane|@env:WZ_COOP_VALUE_LOCKS=off,listen,tables-on-use|tests::arena::"
     # The crate's whole suite in the build form the C library ships: a domain of
     # `declaration-sync-pacing` without `on`, where a link is told the session's declarations in
     # one lap when it comes up and the engine holds no code of paced turns
@@ -1395,16 +1425,6 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
     # end it cannot reach; an acceptor whose full handshake table leaves the next connection on the
     # port, and lets go of a handshake that runs out of time. The slot row above with the feature.
     "wz-runtime-coop|hook|alloc,reassembly,session-slot,session-unicast,ws|ws_link::slot::"
-    # The heap profile's udp ports in the form the cooperative C engine builds them
-    # (`udp-port-lent-only`, the selector its `listen` names): a port keeps only the rows and the
-    # read slots its session lent and makes none of its own, and links lent no rows or no slots
-    # refuse a `udp/` listener as exhausted. A row of its own because the selector compiles out the
-    # heap form's port tests, which the first row of this crate runs. The filter is the stem of
-    # the two tests only it reaches (2):
-    #   udp_link::tests::a_lent_only_port_keeps_what_its_session_lent_and_nothing_of_its_own
-    #   ip_stack::tests::a_lent_only_port_opens_over_the_rows_and_slots_its_session_lent_alone
-    # NOT YET MEASURED.
-    "wz-runtime-coop|hook|alloc,session-unicast,udp-listen,udp-port-lent-only|a_lent_only_port"
     # The links over a transport the program supplies (`app_link::`): a dial, a listener and its
     # accepted streams and sources, a datagram that goes whole or not at all, a group joined, read
     # by member and left, and a group's room answered from the table, inside the loop and out.

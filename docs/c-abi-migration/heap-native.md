@@ -22,7 +22,20 @@ guards (section 9) are designed here and not written yet, because a switch that 
 not declared; section 11 reads what N3c has to give a home to, and why it is the next step and not
 a part of N3b, and 11.1 reads why the zenoh-pico preset's own library is the form laid out from
 its config (`runtime-plan`), which the on-use form does not reach yet, so the switch waits for
-that form's first step (11.2). Nothing here was built or
+that form's first step (11.2). Then R1 began (11.1): the policy of the session's tables is named
+once, by the engine crate's build script, as the cfg of its name (`wz_lent`, `wz_on_use`), so every
+item reads the policy apart from where its counts come from (`runtime-plan`) (R1, step 0); and
+`tables-on-use` takes the tables on use in a build laid out from its config too, but where the
+session takes faces beside its dial role's (R1a). The preset's own library takes such faces
+(`peer`, `multicast-transport`), so it is the lent form until R1b, and the switch waits for R1b
+(11.2). R1b began with the session core: a peer's tokens split off on `OnUse` as on `Lent`
+(`PeerTokens::split_off`, 7.10); what the rest of R1b has to decide first, the bound of the owed
+table where no pool bounds the tokens, is read in 11.1 (R1b, 3); then the owed tokens as a relation of tokens keyed by face
+and id, its bound kept by the faces' admission (7.11), which left the on-use split reached by no
+form, so it was dropped; and then R1b's switch: the listening and grouped forms' registry counted
+(its table of sets, its index of held sets, the sets of the faces that come), and
+`tables-on-use` naming `OnUse` whatever faces the session takes (7.12). 11.3 lays out the commit
+of the switch and its size case. Nothing here was built or
 measured by this lane: a byte figure is either **read** from the size ledger's explain document or
 from `nm -S` of the case's library named below, or an **estimate** read off the code; a count of
 instructions is a reading of the code, not a run. Line references are to the tree this lane
@@ -135,8 +148,8 @@ cooperative engine links one in every form (`extern crate alloc`), and needs no 
 | `Text<N>` | `heapless::String<N>` | a working text is on the stack, as on `Lent` |
 | `Key`, `Keys` | `HeapKey`: one allocation holding the count of its holders, its length, the budget it is counted against and its bytes; `BudgetKeys`: the handle a table holds on the session's `KeyBudget` (the bytes its keys may take together, `KEY_ARENA_BYTES`, and the bound on a key's length, `MAX_KEYEXPR_BYTES`), a key counted as the block the key arena would give it (`key_arena::block_bytes`) | a key is never cut short; a key past the bound is `TooLong`, one past the budget or refused by the allocator `NoRoom`, nothing taken, as today; a clone is one more holder and never fails |
 | `KeyLen`, `Offset` | `caps::KeyLen`, `u32` | as `Lent` |
-| `Ids<V, N>` | `FixedIdMap<V, N>` | a scan of a few rows, inline in the state (3.4) |
-| `Pooled<T, N>` | `BoundedVec<T, N, Static>` | as `Region` |
+| `Ids<V, N>` | `CountedIdMap<V, N>` (7.15): `N` rows, or the count its owner states while it holds none (`PeerIds::recount`), taken at its first id; lent its owner's `BudgetKeys`, a NEW id takes a row of its kind from the session's `KeyBudget` too | a peer that never writes takes nothing, and the session's peers hold what they write to `SESSION_MAX_*` together, as the lent pools hold them (3.4) |
+| `Pooled<T, N>` | `CountedSeq<T, N>` (`row_pool.rs`, 7.16): `N` rows taken at its first value; lent its owner's `BudgetKeys`, a value takes a row of its kind from the session's `KeyBudget` too, and each value taken out gives it back | a peer's interests and repeats are held to `SESSION_MAX_*` together across the faces, as the ids are (`Ids` above) and as the lent pools hold them |
 | `Epoch`, `HeapForm` | `()`, `Infallible` | the AP side's forms are not compiled in |
 | `Compose` | `ComposeInline` | as `Region` |
 
@@ -277,11 +290,21 @@ session takes its row at its open, as every policy's does.
 | **N3b (landed, `ffde81a72e`, `b83c368fbd`, `3da7536dde`)** | the session core's other tables a face and the application hold, counted on `OnUse`, each a constructor as N3a's from the limits the open resolved: `PeerTables::counted` and `count_rows` (the in-place form, as `lend_rows`), `SubscriberPeer::counted`, `ReplyStage::counted`, `FinalStage::counted`, `Requesters::counted` (`ReplyRegistry`, `LivelinessGetRegistry`), `SlotObserverOf::counted` over `CountedTables` (the watcher lists, `LocalTokenRegistry`); `LentRoom` and `PeerTokens` need none (on `OnUse` the composing room is inline, `ComposeInline`, and a peer's tokens a `FixedIdMap` whose keys `keep_keys_in` hands). `ReplyStage::stage_parts` makes both its columns' rooms before it writes either, and the query dispatch asks `FinalStaging::make_room` before a query runs, on a first-use policy (each arm folds away on every other) | `peer_tables.rs`, `slot_observer.rs`, `pubsub.rs`, `reply_stage.rs`, `reply.rs`, `decl_sink.rs`, `declare/{subscriber,queryable,liveliness,liveliness_get,local_token}.rs`, `query.rs`, `query/{in_place,pinned}.rs` | 0 (no case names them; the two room arms fold away on the D12 policies) | 0 | 0 |
 | N3c | the cooperative engine on `OnUse` under `tables-on-use`: `RowPolicy = OnUse`, the registry made by value (a third form beside `RegistryRegion` and the arena's), the open with no plan, no region and no lender (3.1), the session's `KeyBudget` in the boxed engine state (3.2); the moment assertion of N1 reads `AtFirstUse` in that form | `crates/wz-capi-coop` (`lib.rs`, `engine.rs` `lend_session` and `assemble`, `engine/registry.rs`, `registry/placed.rs`; `arena.rs` and `region.rs` not compiled in the form) | -4,500 to -8,200 (3.1, 3.2, 3.3, 3.5) | 0 to -6 (3.2); +3 at worst (3.5) | section 5 |
 | **N3c, step 3a (landed on the lane: `f104d31bc8`, `81cebf0f4c`, `b0afa53110`)** | the engine and the faces' rooms of an on-use session each in an allocation of its own, the engine's claimed before anything is reserved and keeping the arena's memory by a count (11, 3a) | `crates/wz-runtime-coop/src/kept.rs` (`SharedClaim`), `crates/wz-capi-coop` (`engine.rs` `assemble`, `engine_of`, `lay_out_open`; `engine/state_places.rs` `OwnPlaced`; `arena.rs`) | the on-use case +100 to +300 (the claim and the rooms' block, until 3d); D12 0 | 0 | the on-use arena smaller by the engine's and the rooms' bytes, the same bytes from the allocator |
-| N3d (11, 3c) | link memory on the heap arm alone (3.6), its source a type the engine names, not a feature | `crates/wz-runtime-coop` (`link_cells.rs` `heap_head`, `kept.rs`, `link_storage.rs`) | -1,000 to -2,000 | 0 to -30 | section 5 |
+| N3d (11, 3c; step (a) landed on the lane: `a5a7f0c8bf`, `23ff61faf7`, `46c8fd37e8`) | link memory on the heap arm alone (3.6), its source a type the engine names, not a feature; (a): the cells by `CountKind::Cells`, `OnHeap` and `LinksOnHeap` on use (7.18); (b) the buffers by `CountKind::Buffers`, `HeapBuffers` sized to the batch on use (`99cc01afed`, `ff65049f24`; 7.19, 7.20); (c) the ports (`5c5f545604`; 7.22), the groups (`339c959c64`; 7.23) and the kept publishes (`1d5b2e25d0`, `a405ec1189`; 7.25) | `crates/wz-runtime-coop` (`link_cells.rs` `heap_head`, `kept.rs`, `link_storage.rs`) | -1,000 to -2,000 | 0 to -30 | section 5 |
 | N3e | a key held apart from every row (an object outside the lock: `KeyRef::hold_apart`, `KeysLocked::adopt`, `SampleView::keyexpr_held`) as a `HeapKey` clone taken and let go of under the lock, read by its text outside it | `key_arena.rs` beside `on_use.rs`, `sink.rs`, the engine's object paths | -200 to +200 | 0 | 0 |
 | N4 | the doors: 3.7 | `crates/wz-capi-pico` (`process_pool.rs`, `object_slot.rs`, `bytes.rs`) | -2,000 to -3,000 | 0; the put's to be read | -0 to -8 KiB a pair |
-| R1 to R4 | the zenoh-pico preset's own library (`peer`, `multicast-transport`, so `runtime-plan`) on use: the precedence of the two forms turned, the registry, keys and state of the form laid out from its config made as the client form's (R1), the admission and the direct faces' slots per face (R2), the listening and grouped stacks' memory (R3), its arena out (R4) (11.1) | `crates/wz-capi-coop` (`lib.rs`, `engine.rs`, `engine/registry/counted.rs`, `engine/state_places.rs`, `engine/direct.rs`), `crates/wz-runtime-coop` (the stacks' ports and groups) | the preset's library, read once N5 resolves it so | 0 | section 5 |
-| N5, after R1 (11.2) | the switch and its guards (section 9): the `table-memory` axis, the zenoh-pico defconfig's `on-use`, the release profiles' `at-open`, the size cases of both forms (section 10) and C1nh's second reading | `deploy/wz-config.toml` and what it generates, `configs/zenoh-pico_defconfig`, `configs/profiles/host-peer-ext.conf`, `host-peer.conf`, `scripts/lib/capability_cost_gate.py`, `deploy/size_ledger.json`, `deploy/pico_host_ceiling.json`, `scripts/run-ci.sh` (C1nh) | 0 for the release form; the on-use case reads N3 and N4's figures | 0 | 0 |
+| **R1, step 0 (landed on the lane: `6b6041bf09`)** | the policy of the session's tables stated once, by `build.rs` (`TablePolicy`), as the cfg of its name (`wz_lent`, `wz_on_use`): an item that differs by the policy reads its name, one that differs by where the counts come from reads `runtime-plan` (7.9) | `crates/wz-capi-coop` (`build.rs`, `lib.rs`, `arena.rs`, `engine.rs`, `engine/{registry,registry/held,state_places,query,decl_watch}.rs`, `round.rs`, the tests) | 0 (every predicate is the one it replaced) | 0 | 0 |
+| **R1a (landed on the lane: `01cf14693c`)** | `tables-on-use` names `OnUse` in a build laid out from its config too, but where the session takes faces beside its dial role's (`listen`, `group`); its registry, keys, state and plain tables are the client form's, their counts the config's (7.9) | `crates/wz-capi-coop` (`build.rs`, `lib.rs`, `tests/on_use.rs`), `scripts/lib/nondefault-tests-gate.sh` | no case builds the planned on-use form yet (`config-policy` beside `wz-capi-coop/tables-on-use`); D12 0 | 0 | as N3c's client form |
+| **R1b, step 1 (landed on the lane: `1063768725`; dropped by `12e8da2c40`)** | the owed tokens' split on `OnUse`: `FixedIdMap::split_off` moves a fixed table's rows whole and keeps its refusals; `PeerTokens::<OnUse>::split_off` hands a face's tokens over as a table of their own, their keys still counted against the session's budget, and `None` for a table of no token (11.1, R1b, 3; 7.10). The relation of step 2 moves tokens, not tables, so both splits and their tests were dropped | `crates/wz-session-core` (`id_map.rs`, `declare/liveliness_subscriber.rs`) | 0 | 0 | 0 |
+| **R1b, step 2 (landed on the lane: `8988bd43f3`, `3963ecf41d`)** | the tokens of the faces that went owed on `OnUse` as a relation of tokens keyed by face and id (`OwedTokens`, `FaceToken`), its bound kept by the faces' admission (`admits_face`); the engine names both forms by one type (`engine/registry/owed.rs`, `Owed`) (7.11) | `crates/wz-session-core` (`declare/liveliness_subscriber.rs`, `slot_observer.rs`), `crates/wz-capi-coop` (`engine/registry.rs`, `registry/{owed,adding}.rs`) | 0 (the lent arm is the code it replaced) | 0 | 0 |
+| **R1b, step 3 (landed on the lane: `d269055bd4`)** | the listening and grouped forms' registry on `OnUse`: `Registry::counted` generic over `Holders` and over the plan's `GetTables` and `FacePeers`, `ManyHolders` of `RowPolicy` with `Holders::counted`, `SpareSets`' on-use form (a set built at a place's first face, counted in its row), the rooms' places at `MAX_FACE_SETS` in the state, the plan's rows of the held index and the owed tokens the lent form's alone; `build.rs` names `OnUse` whatever faces the session takes (7.12) | `crates/wz-capi-coop` (`build.rs`, `lib.rs`, `arena.rs`, `engine.rs`, `engine/registry.rs`, `registry/{counted,held,adding}.rs`, `tests/{arena,on_use}.rs`), `scripts/lib/nondefault-tests-gate.sh` | 0 for every D12 case (no D12 build names `tables-on-use`); no case builds the listening on-use form until N5 | 0 | the on-use listening session: its sets' rows from the allocator at the open instead of the arena |
+| **R2 (landed on the lane: `c4105747a2`, `657b23623c`)** | the admission in an allocation of its own (`OwnPlaced`, as the rooms are) and each read slot of a face past the dial role's made at its place's first face (`OnceRows`, `DirectFaces::made_at`), a refusal answered as a face past `max_faces`; the plan lays out neither, and `SessionArena::arena_mut` is the D12 forms' and the tests' again (7.13) | `crates/wz-capi-coop` (`arena.rs`, `engine.rs`, `engine/direct.rs`, `engine/direct/once_rows.rs` (new), `engine/faces_added.rs`, `engine/state_places.rs` (a test's name), the tests), `scripts/lib/nondefault-tests-gate.sh` | 0 for every D12 case (each predicate added reads `not(wz_on_use)` over the code it guarded) | 0 for D12; on use a walk of the faces reads one pointer a row | the on-use listening session: a face's slot, its Router among it, from the allocator at its place's first face; the admission at the open |
+| **R2, the rooms (landed on the lane: `e5ee0e0d5a`)** | the places of the faces' rooms on use as the faces' read slots are (`OnceRows`, moved to `engine`): rows counted to the plan's sets at the open, each face's place made at its first hold of a wait and kept; `FACE_SETS` the region form's alone (7.14) | `crates/wz-capi-coop` (`engine.rs`, `engine/once_rows.rs` (moved), `engine/direct.rs`, `engine/registry.rs`, `engine/state_places.rs`, `tests/{congestion,on_use}.rs`) | 0 for every D12 case | 0 | the on-use session: its rooms' places one row a set and one place a face it held, in place of `MAX_FACE_SETS` places in its state |
+| **R3's residues (landed on the lane: `17511020b8`, `92347c4f82`, `f59630b1bd`)** | the session's bounds of what its peers write held on use by the key budget (`KeyBudget::holding_peer_rows_to`, `take_peer_row`), a peer's ids a `CountedIdMap` taking its rows at its first id and a row of its kind from the budget for each NEW id, and a group's aliases counted to `GROUP_FACE_ALIASES` (`PeerIds::recount`) (7.15) | `crates/wz-session-core` (`on_use.rs`, `id_map.rs`, `bounded.rs`, `pubsub.rs`), `crates/wz-capi-coop` (`engine/state_places.rs`, `engine/registry/counted.rs`) | 0 for every D12 case; on use each face's set smaller by its peer's inline id rows | 0 | the on-use session: a peer's id rows from the allocator at its first write of each kind |
+| **R3's residues, the sequences (landed on the lane: `225c3f0b0e`)** | a peer's interests and repeats on use a `CountedSeq` (`Storage::Pooled`), each value a row of its kind of the session's key budget, so `SESSION_MAX_INBOUND_SUB_INTERESTS` and the repeats' share of `SESSION_MAX_REMOTE_DECLS` bind across faces; `RowList::take_rows`, so a repeat whose alias finds no memory is refused before its key is made or its id bound (7.16) | `crates/wz-session-core` (`row_pool.rs`, `bounded.rs`, `id_map.rs`, `declare/{subscriber,queryable}.rs`, `pubsub.rs`, `peer_tables.rs`) | 0 for every D12 case (`Lent` and `Region` keep their `Pooled`; `take_rows` answers `true` on them, a constant the check folds to); on use each face's set smaller by its inline interest and repeat rows | 0 | the on-use session: a peer's interest and repeat rows from the allocator at its first of each |
+| **R3, 3b: the runtime (landed on the lane: `a0a99b28b6`, `26217c7d5b`)** | the on-use session's runtime and local set of the allocator in the form the D12 forms place in the arena (`CoopRuntime::try_formed`, `try_taskless`; `RuntimeTables::made`); its plan lays out the count the arena is kept by alone (`ArenaPlan::lay_keep`), no runtime span; `OpenHolds::runtime`, `OpenPlaces::runtime`, `SessionLent::runtime`, `RuntimeTables::{runtime, placed_bytes, of_shape}`, `SessionArena::{runtime_place, kept_span}` are the D12 forms' alone (7.17) | `crates/wz-runtime-coop` (`executor.rs`, `runtime_impl.rs`, `table_tests.rs`), `crates/wz-capi-coop` (`arena.rs`, `engine.rs`, the tests of `arena`, `direct_runtime`, `on_use`, `runtime_tables`) | 0 for every D12 case (each predicate added reads `not(wz_on_use)` over the code it guarded); on use: `CoopRuntime::placed` and its span's reckoning (`PlacedParts`) leave the form, one heap maker of the build's form and `CoopLocalSet::try_new` come in | 0 | the on-use session: the runtime's state, task table and timer entries from the allocator at the open in place of the arena's span |
+| R3 and R4 | the zenoh-pico preset's own library (`peer`, `multicast-transport`, so `runtime-plan`) on use: the listening and grouped forms' holders, sets and owed tokens on use and `build.rs`'s `!takes_faces` dropped (R1b, landed), the admission and the direct faces' slots per face (R2, landed), the listening and grouped stacks' memory (R3), its arena out (R4) (11.1) | `crates/wz-capi-coop` (`lib.rs`, `engine.rs`, `engine/registry/counted.rs`, `engine/state_places.rs`, `engine/direct.rs`), `crates/wz-runtime-coop` (the stacks' ports and groups) | the preset's library, read once N5 resolves it so | 0 | section 5 |
+| N5, after R2 to R4 (11.2, 11.3) | the switch and its guards (section 9): the `table-memory` axis, the zenoh-pico defconfig's `on-use`, the release profiles' `at-open`, the size cases of both forms (section 10) and C1nh's second reading | `deploy/wz-config.toml` and what it generates, `configs/zenoh-pico_defconfig`, `configs/profiles/host-peer-ext.conf`, `host-peer.conf`, `scripts/lib/capability_cost_gate.py`, `deploy/size_ledger.json`, `deploy/pico_host_ceiling.json`, `scripts/run-ci.sh` (C1nh) | 0 for the release form; the on-use case reads N3 and N4's figures | 0 | 0 |
 
 N3c to N4 together (N3 of the first reading, split by where the code lies): **about -7,500 to
 -13,200** in the on-use case (section 10), against a gap of 32,525 (the case at 203,025)
@@ -615,9 +638,1012 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   body it had. The D12 cases' bytes are not expected to move: C1cs's reading of them is the check,
   and a move there is a finding.
 
+### 7.9 R1, step 0 and R1a
+
+- Step 0 (`6b6041bf09`) renames terms: `crates/wz-capi-coop/build.rs` states the policy
+  (`TablePolicy`) and emits `wz_lent` or `wz_on_use`; every item that read `runtime-plan` for a
+  table the open lends from its arena reads `wz_lent`, every item spelled `tables-on-use` beside
+  `not(runtime-plan)` reads `wz_on_use`, and the items of the config's plan (`OpenFrom::Config`,
+  `PlanFrom::Config`, `OpenPlan`, the listed rows, `ArenaRegion::lay_out_on`, the opens by config,
+  `resolve_policy`) keep `runtime-plan`. Under step 0's policy (`runtime-plan` chooses `Lent`)
+  each predicate is the one it replaced: no test is added and none moves.
+- R1a (`01cf14693c`): `table_policy` names `OnUse` wherever `tables-on-use` is named but where
+  `listen` or `group` is. Tests:
+  `form_precedence_tests::a_build_of_both_forms_takes_its_tables_memory_on_use`, in a build of
+  `runtime-plan,tables-on-use` (red if `table_policy` lets `runtime-plan` choose `Lent` again);
+  `form_precedence_tests::a_build_of_both_that_takes_faces_lends_its_tables_at_the_open`, in a build
+  of both beside `listen` or `group`, `--all-features` among them (red if `OnUse` is named while
+  the faces' sets are lent); and
+  `tests::on_use::an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts`, in both
+  on-use forms (red if a row of a counted table is put by `feature = "runtime-plan"` rather than by
+  `wz_lent`, `ArenaPlan::put_entities` the first of them; its CONTROL rows, the endpoints' texts and
+  the links' receive buffers, are laid out). Every other on-use test runs in the planned form too:
+  the tests open by config whatever the build (`Engine::open`).
+  `tests::arena::a_build_that_puts_nothing_in_the_round_lays_out_none_of_it` reads the lent form
+  alone, its CONTROL (the Router's lend) a lent row.
+- The gate: `scripts/lib/nondefault-tests-gate.sh` gains the leg `runtime-plan,tables-on-use|on_use`.
+- D12: no D12 build names `tables-on-use`, so no predicate of one moves; `--all-features` stays the
+  lent form (it names `listen` and `group`). C1cs's readings are not expected to move.
+- Not tested: the C library in the planned on-use form (`config-policy` beside
+  `wz-capi-coop/tables-on-use`), which no case builds yet.
+
+### 7.10 R1b, step 1
+
+- `id_map::tests::a_split_off_fixed_table_takes_its_rows_whole`: two ids bound in a table of two,
+  a third refused and counted (the CONTROL), the split holding both in the order bound with no
+  refusal, the table it came from holding none, its refusal kept, and binding again. Red if
+  `FixedIdMap::split_off` leaves the rows behind (`core::mem::take` of the rows dropped) or hands
+  the count of refusals to the table split off.
+- `declare::liveliness_subscriber::tests::an_on_use_peers_tokens_split_off_whole_and_stay_counted`
+  (`storage-profile`): a table of no token splits off nothing (the CONTROL); two tokens taken
+  against a key budget split off whole, in the order declared, the budget's count unmoved; the
+  table they came from takes a third token against the same budget; the table split off retracts
+  the lowest id first (`take_lost`); dropping both gives every key's bytes back. Red if
+  `PeerTokens::<OnUse>::split_off` leaves the tokens behind, drops their keys, or hands the new
+  table another budget than the one its keys are counted against.
+- D12: both are items no D12 build reaches (`FixedIdMap::split_off` is called by the on-use split
+  alone, which no engine form calls yet). C1cs's readings are not expected to move.
+- Dropped (`12e8da2c40`): the relation of 7.11 moves a face's tokens one row each, so no form
+  splits an on-use table; `PeerTokens::<OnUse>::split_off`, `FixedIdMap::split_off` and the two
+  tests above went, and the lent split (`PeerTokens::<Lent>::split_off`) is the one left.
+
+### 7.11 R1b, step 2: the owed relation
+
+- The decision: on `OnUse` the tokens of the faces that went are a relation whose rows are
+  tokens keyed by face and id (`FaceToken`, `OwedTokens`,
+  `crates/wz-session-core/src/declare/liveliness_subscriber.rs`), not a table of whole
+  `PeerTokens` tables. It is the relational form `peer-rows.md` section 5.4 and step R3 give every
+  peer declaration (the holding and the owing face a column over the face table), and it keeps no
+  table of tables. R3 generalises it: the row is `(face, id, key)`, and a face's own token table
+  becomes the rows of the same relation whose face holds them, owing being a face column that
+  names a face that went.
+- The bound: a row for each token the faces other than the dial role's may hold together
+  (`FacePeers::sets() - 1` faces at the per-face `MAX_REMOTE_DECLS` the session resolved,
+  `engine/registry/owed.rs` `Owed::counted`), taken whole when the first such face is admitted.
+  No pool bounds the faces' tokens on `OnUse`, so the bound is kept by the admission: a face is
+  admitted only while the rows left hold the tokens of every face held that may go and of the new
+  one (`OwedTokens::admits_face`, asked by `RegistryOf::add_face` before it builds anything); a
+  refusal is answered as a face past `max_faces` is (`FacesFull`). So `owed + held * per_face <=
+  rows` holds at every step (a face that goes moves at most `per_face` tokens and frees its
+  `per_face`; a retraction only shrinks `owed`), `owe` always finds its rows, and no
+  retraction is dropped. The residue: while retractions wait for room in the round, a face the
+  lent form would admit can be refused; without a pool that is the price of never losing one.
+- The lent form keeps its table of split tables, their rows in the session's token pool, which
+  bounds what the faces hold and owe together: D12's code, bytes and order do not move. R3 makes
+  it the pool's relation with the same face column.
+- The engine names both forms by one type (`Owed`, `crates/wz-capi-coop/src/engine/registry/owed.rs`),
+  so the registry's retraction, take and clear are one code over both
+  (`RegistryOf::retract_owed`, `take_lost_token`, `remove_accepted_faces`); the observer
+  retracts either through `LostTokens` (`SlotObserverOf::flush_tokens_on_link_loss_while`).
+- Tests: `declare::liveliness_subscriber::tests::the_tokens_of_faces_that_went_are_owed_as_one_relation_of_tokens`
+  (`storage-profile`): the admission of two faces of two tokens each and the refusal of a third
+  (the CONTROL), a face's tokens moved whole in ascending id after an earlier face's with their
+  keys still counted, the admission refused while those tokens hold the rows, a table that does
+  not fit moving none, and the retraction in the relation's order by `take_lost` and by a flush
+  that stops where `room` says no. Red if `admits_face` reads `held` for `held + 1`, if
+  `owe` leaves a token behind or moves part of a table that does not fit, if the rows come back
+  in another order, or if a key is let go of before its row. The lent arm is held by the
+  registry's `a_face_that_goes_owing_retractions_gives_its_set_back_at_once` and its neighbours,
+  unchanged. The engine's on-use arm compiles only where `listen` or `group` stands beside
+  `tables-on-use`, which `table_policy` does not name `OnUse` yet: its first build is R1b's
+  switch (`build.rs`, 11.1 R1b 7).
+- D12: the lent arm is the code it replaced, moved into `Owed`; C1cs's readings are not expected
+  to move. `PeerTokens::<OnUse>::split_off` (7.10) is called by no engine form now: the relation
+  moves tokens, not tables.
+
+### 7.12 R1b, step 3: the listening and grouped registry on use, and the switch
+
+- What it does (`d269055bd4`): `RegistryOf::counted` (`engine/registry/counted.rs`) is generic
+  over `Holders` and takes the plan's `GetTables` and `FacePeers`, as `Registry::new` does: its
+  table of sets is counted to `FacePeers::sets` and takes every set's row at its first push; a
+  session that dials nothing writes its dial face a set of no rows first; the dial face's set is
+  counted at the open (`count_set`, out of line as `lend_set` is); where faces are added, the
+  rest are built as each place's first face comes (`SpareSets::counted`, its `build` the same
+  `count_set`), and `Owed::counted`, the aliases' quota and the spares are the struct's fields
+  as on `Lent`. `ManyHolders` is of `RowPolicy`, with `Holders::counted`, which takes its rows
+  at the open. `FACE_SETS`, the places of the faces' rooms the state keeps, was `MAX_FACE_SETS`
+  where the build takes faces, about a thousand places at the open whatever the config; 7.14
+  makes each face's place on use and keeps `FACE_SETS` the region form's. The
+  plan's rows of the held index and of the owed tokens (`ArenaPart::HeldFaces`, `OwedTokens`,
+  `FACE_ROWS`, `OWED_ROWS`, `HELD_SET_BYTES`) are the lent form's alone.
+  `SessionArena::arena_mut` is compiled on use where the open still lends the arena the direct
+  faces' slots or the admission's place (R2 moves both). `build.rs` names `OnUse` wherever
+  `tables-on-use` is, so `--all-features` builds this form.
+- The admission (`Core::_admission`) keeps one owner on use: placed in the arena by the open, a
+  field of `Core` after the transport, the session's state and the tasks, which hold every lease
+  of it, and before `_state` and `arena`; nothing to change before R2 takes it out of the arena.
+- Tests (`engine::registry::counted::tests`, each `listen` or `group`):
+  `an_on_use_face_builds_its_set_at_its_places_first_face_and_gives_it_back`: the dial face's set
+  alone built at the open (the CONTROL), a face's set built at its place's first face, its peer's
+  subscriber held and its key counted, the set left where it lies for the next face, a face past
+  every place refused; red if `SpareSets::build` does not count the set's rows, if every set is
+  built at the open, or if a set given back is built again elsewhere.
+  `an_on_use_session_that_dials_nothing_keeps_a_rowless_set_for_its_dial_face`: a set of no rows
+  first, the face that comes at the next place, counted; red if `counted` counts the dial face's
+  set where `FacePeers::dial` is false, or builds it none.
+  `an_on_use_registry_owes_the_tokens_of_faces_that_went_and_admits_faces_while_they_fit`
+  (`liveliness`, `MAX_REMOTE_DECLS` stated at two): two faces admitted with nothing owed (the
+  CONTROL), four tokens owed as four rows with their keys counted, a third face refused while
+  they hold the rows, the retraction in the faces' order and each face's ascending id, every key
+  given back, and the face admitted again; red if `add_face` does not ask `Owed::admits_face`,
+  if tokens are dropped as their face goes, or if the order moves.
+  `an_on_use_registry_holds_the_plans_rows_and_has_taken_none` now takes the plan's `GetTables`
+  and `FacePeers` and asserts one set. `tests::on_use::an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts`
+  names "held faces" and "owed tokens" too. `form_precedence_tests` keeps the on-use test alone,
+  now whatever faces the build takes (red if `table_policy` keeps `!takes_faces`).
+  The lent form's plan tests of those rows read `wz_lent` (`tests::arena`,
+  `the_tokens_owed_apart_are_bounded_by_the_sessions_token_pool` and two assertions).
+- The gate: `scripts/lib/nondefault-tests-gate.sh` gains `liveliness,listen,tables-on-use|on_use`.
+- Residues, each a later step's: on `OnUse` a peer's aliases are inline at
+  `MAX_PEER_KEYEXPR_ALIASES`, so a group's face held to its members' aliases
+  (`hold_member_aliases`, `multicast-declarations`) holds no more than that bound, where on
+  `Lent` the session's pool holds them (R3's relation of a peer's declarations); the session's
+  `SESSION_MAX_REMOTE_DECLS` is not held across faces on `OnUse` (7.11) (both repaid for a peer's ids by 7.15); the admission, the direct
+  faces' slots, the transport's tables and the kept publishes are still lent from the arena
+  (R2, landed: 7.13; R3, R4).
+- D12: no D12 build names `tables-on-use`, so no predicate of one moves but the plan's
+  `FACE_ROWS` (the same value on `Lent`) and `SpareSets::build`'s refusal, now `FacesFull`
+  where the caller mapped it before. C1cs's readings are not expected to move.
+
+
+### 7.13 R2: the admission and the faces' read slots on use
+
+- What it does (`657b23623c`): where the tables take their memory on use, the admission the
+  links ask (`Core::_admission`, `link-admission`) lies in an allocation of its own the open
+  reserves and fills (`OwnPlaced`, as the rooms are), and the read slot, send place and Router of
+  each face past the dial role's (`DirectFace`) is made at its place's first face, in an
+  allocation of its own, and kept where it lies for the session's life and the next face of its
+  place, as the place's set of tables is (7.12). The rows are a counted table of write-once
+  pointers (`engine/direct/once_rows.rs`, `OnceRows`), taken whole at the open from the plan's
+  count (`sets - 1`); a row's face is published once by a compare-exchange and never moved or let
+  go of while the table stands, so the read walks the rows with no lock, as it walked the lent
+  table, and a reader that sees a row made reads a face that stays (`OnceRows: Sync` asks
+  `T: Send + Sync`, as `OnceLock` does). The face is made under the session's lock at both
+  places a face is given a row: an attach (`CoopEngine::attach_face`, before anything is
+  dialled; a refusal is `Refusal::FacesFull`, the registry's set given back) and a port's
+  connection (`CoopEngine::accept_links`, after `Core::take_face`; a refusal closes the link
+  unread, the face removed). The Router is made over the session's chain buffers the open kept
+  for it (`Core::face_chains`, `Core::face_router`). The walk's bound counts rows, a row of no
+  face skipped (`DirectFaces::taken_walked`, `hold_face`). The plan lays out neither
+  (`ADMISSION_ROWS`, `DIRECT_FACE_ROWS`, `lay_admission`, `lay_direct_faces`,
+  `OpenHolds::admission`, `direct_face` are the D12 forms'), and `SessionArena::arena_mut` is
+  compiled outside the on-use form and in the tests alone again.
+- Why not lazily per face and given back when the face goes: the read walks the rows with no
+  lock, so a face given back while a read holds it would need a reclamation scheme (epochs or
+  hazard pointers) the receive would pay on every walk; a face kept for its place is the set's
+  rule (7.12) and bounds the memory by the faces the session ever held at once.
+- The census of the non-default tests (C1cn): the all-features build is the on-use form since
+  R1b's switch, so every test compiled only there is in its population and claimed only by a leg
+  of `tables-on-use` whose filter, `on_use`, its path names. One was not:
+  `engine::state_places::tests::an_own_vacant_allocation_holds_nothing_until_it_is_filled` (3a),
+  now `an_on_use_vacant_allocation_holds_nothing_until_it_is_filled` (`c4105747a2`; its record
+  in `sz-open.md` renamed with it). The new tests carry `on_use` in their names, and the
+  admission's test, compiled with `link-admission` alone, has a leg of its own
+  (`link-admission,tables-on-use|on_use`). The public surface census
+  (`feature_public_surface_census.py`) reads `#[cfg(feature = ...)]` sites on public items in the
+  source, not a build: no public item changed its gate, so it does not move.
+- Tests:
+  - `engine::direct::once_rows::tests` (`listen`, on use), three:
+    `an_on_use_rows_value_is_made_at_its_first_use_and_kept_there` (red if `counted` makes its
+    rows' values, if `made` makes a second value for a made row, or if `OnceRow`'s drop skips a
+    made value or drops an empty row's); `an_on_use_row_made_twice_at_once_keeps_the_first_value_published`
+    (the inner make reached from the outer one's write; red if `made` stores over a published
+    value, a plain store in place of the exchange, or the losing value is kept or dropped twice);
+    `an_on_use_table_of_no_row_holds_none` (red if `counted` pushes past `rows`).
+  - `tests::on_use::an_on_use_face_takes_its_read_slot_at_its_places_first_face` (`listen`, not
+    `wz_round`): no slot at the open (the CONTROL), one once a face is attached, which comes up.
+    Red if the open makes every row's face, or if `attach_face` leaves `made_at` out (the face
+    then has no slot a read turns and never comes up).
+  - `tests::on_use::an_on_use_sessions_link_admission_lies_apart_from_its_arena`
+    (`link-admission`). Red if the open places the admission in the arena (`Arena::place`).
+  - `tests::arena::each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own`
+    reads no row of the faces' slots on use and keeps its D12 reading; the shares of the chain
+    buffers are the same in both forms. `tests::face_routers` makes every row's face first on use
+    (`CoopEngine::make_every_face`), as each row's first face would, and `direct_faces` counts
+    the table's rows, made or not, so `tests::listen`'s walk tests read the same counts in both
+    forms.
+- Not tested: an attach or a connection refused because the allocator has no room for the face,
+  or the open for the rows or the admission; only a refusing allocator reaches them.
+- D12: `TakenFaces` is the lent table, `taken_in`, `lay_direct_faces` and `lay_admission` the
+  code they were, the two walks' lent arms the lines they were; C1cs's readings are not expected
+  to move.
+
+### 7.14 R2, the rooms' places on use
+
+- What it does (`e5ee0e0d5a`): 7.12 put the places of the faces' rooms (`LinkRooms`, what a
+  droppable publish that finds the session held asks each face for) in the on-use session's own
+  state at `MAX_FACE_SETS`, `1 + MAX_FACES + GROUP_FACES`, about a thousand places taken at the
+  open whatever the config. They are now the faces' read slots' form (7.13): a table of
+  write-once rows counted at the open to the plan's sets (`RoomPlaces` is
+  `OnceRows<Option<RoomPlace>>`), each face's place made at its first hold of a wait
+  (`LinkRooms::hold`, through `RoomTable::taken` and `OnceRows::made_mut`) and kept for the
+  session's life and the next face of its place. `OnceRows` moved from `engine::direct` to
+  `engine` (every on-use build has rooms), and gained the forms a table under a lock of its own
+  asks: `made_mut` and `row_mut`, with the table held alone, so no exchange. `StatePlaces`
+  keeps no rooms' field on use, and `FACE_SETS` is the region form's alone again, at 1 (`listen`
+  and `group` each name `runtime-plan`, so no region build takes faces).
+- Why not the face's own owner: a face's place is read by the publish that finds the session
+  held under the rooms' lock alone, at every place in turn, the dial role's and a group's among
+  them; the rooms are the one layer that holds those facts for every face, as section 5 asks.
+- Why at the first hold and not at the face's admission: a place no face made reads as a place
+  no face holds, which the table already answers for (a face whose link gives no wait never holds
+  one). A place the allocator has no room for leaves its face naming no wait: no publish asks it
+  for room, `skips` sends it every publish, and `dropped_on` names every face, each the answer
+  the table gives a face of no wait; nothing else is refused or lost.
+- D12: `RoomPlaces` is the lent table, `RoomTable::over` the push of a free place for every row
+  that `LinkRooms::init_at` made, and `taken`, `held`, `place` and `free_all` the slice calls
+  each call site made; C1cs's readings are not expected to move.
+- Tests:
+  - `engine::once_rows::tests::an_on_use_row_held_alone_is_made_at_its_first_make_and_changed_in_place`
+    (every on-use build): red if `made_mut` makes a second value for a made row or none, or if
+    `row_mut` reads a row not made as past the rows. `an_on_use_table_of_no_row_holds_none` now
+    asks `row_mut` and `made_mut` too and runs without `listen`; the other two keep `listen`.
+  - `tests::congestion::an_on_use_rooms_place_is_made_at_its_faces_first_hold`: four rows and
+    no place at the making (the CONTROL), one place once a face holds a wait, still one when it is
+    let go of and its place held again, none past the table, and the place made is the one a
+    publish asks (`tx-held-wait`). Red if `RoomTable::over` makes every row's place, if
+    `RoomTable::held` makes one, or if `RoomTable::taken` reads through `row_mut`.
+  - `tests::on_use::an_on_use_session_with_one_face_holds_one_room_place`: a session with its one
+    face up holds one place. Red if the open makes every row's place, or if a face that comes up
+    makes none.
+  - `engine::state_places::tests::the_rooms_places_take_the_regions_sets_at_most` is the region
+    and lent forms' alone.
+- Not tested: a hold the allocator refuses; only a refusing allocator reaches it.
+
+### 7.15 R3's residues: the session's bounds of what its peers write, and a group's aliases
+
+- What it does (`17511020b8`, `92347c4f82`, `f59630b1bd`): on `Lent` the rows a peer writes by
+  its own choice lie in pools the session's faces share, so `SESSION_MAX_PEER_KEYEXPR_ALIASES`
+  and `SESSION_MAX_REMOTE_DECLS` bind across faces; on `OnUse` each face's table was a
+  `FixedIdMap` at the build's bound, inline, which held neither, and could not hold a group's
+  face to `GROUP_FACE_ALIASES` above `MAX_PEER_KEYEXPR_ALIASES` (7.12's residues).
+  - `KeyBudget` is the one value every table of an on-use session reaches (through
+    `BudgetKeys`, its `Storage::Keys`, lent to every `PeerIds::lend`): it now keeps, beside the
+    key bytes, the rows of each `PeerSlot` kind the session's peers hold together and the
+    session's bound of each (`holding_peer_rows_to`, from `SessionLimits`: the aliases'
+    `SESSION_MAX_PEER_KEYEXPR_ALIASES`, the declarations' and their repeats'
+    `SESSION_MAX_REMOTE_DECLS`, the interests' `SESSION_MAX_INBOUND_SUB_INTERESTS`, as
+    `PeerPoolRows` sizes the lent pools). `take_peer_row` refuses past the bound, taking
+    nothing; `give_peer_rows` gives back. `OwnState::place` writes the budget so held.
+  - `OnUse::Ids` is `CountedIdMap<V, N>` (`id_map.rs`): a `FirstUse` column of `(id, value)`
+    rows counted to `N`, taken at the first id, a scan as `FixedIdMap`'s. It answers `IdMap`
+    only lent its owner's handle (`CountedIds`, so no path binds past the budget); a NEW id takes
+    a row of the slot's kind from the budget after the table's own count and quota admit it, and
+    gives it back if the allocator refuses the column; `unbind`, `reset` and `PeerIds::release`
+    (which every owner calls before it drops a table or changes its keys, as a pooled table's
+    owner does) give the rows back. A handle of no budget holds the table to its own count alone.
+  - `PeerIds::recount` (a provided method, `false` for every other backing): a counted table
+    that holds no id takes a new count, its rows given back. `SubscriberPeer::limit_aliases_to`
+    recounts the alias table to its quota, so `PeerTables::limit_to` counts it to the config's
+    `MAX_PEER_KEYEXPR_ALIASES`, `hold_member_aliases` to `GROUP_FACE_ALIASES` (the set is fresh)
+    and a set given back (`let_go`, `remove_accepted_faces`, after `forget_peer` reset the
+    aliases) to a peer's again.
+- Not covered by these three commits, closed by 7.16: the interests and the repeats of a peer's
+  declarations were `Storage::Pooled`, inline at the build's bound on `OnUse`, and reached
+  through `PeerSeq`, not `PeerIds`, so `SESSION_MAX_INBOUND_SUB_INTERESTS` and the repeats'
+  share of `SESSION_MAX_REMOTE_DECLS` were per face there.
+- D12: `Lent` and `Region` keep their `Ids`; `PeerIds::recount` answers `false` on them, so
+  `limit_aliases_to` stores the quota alone, as before. C1cs's readings are not expected to move.
+- Size, on use: a peer's table is a `CountedIdMap` head (about 24 bytes) in place of
+  `N` inline rows (`MAX_PEER_KEYEXPR_ALIASES` rows of an alias, `MAX_REMOTE_DECLS` of each
+  declaration kind), so every face's set shrinks by those rows, and they are taken from the
+  allocator at the peer's first write of each kind; `KeyBudget` grows by seven counts.
+- Tests:
+  - `on_use::tests::a_budget_holds_the_rows_its_peers_write_together_to_the_sessions_bounds`:
+    red if a kind is counted against another's count or bound, if a refused row is counted, or
+    if a row given back stays held.
+  - `id_map::tests::an_on_use_table_holds_its_faces_ids_to_the_sessions_bound_together`: two
+    faces' tables held to a session bound of two together, a replaced id needing no row, an
+    unbind and a release giving rows back. Red if `bind_within` asks no row of the budget, or if
+    `unbind`, `reset` or `release` give none back, or if the table takes rows when made.
+  - `id_map::tests::an_on_use_table_is_recounted_only_while_it_holds_no_id`: red if a table that
+    holds ids is recounted, or if a recount keeps the rows taken.
+  - `pubsub::on_use_alias_tests::an_on_use_alias_table_is_counted_to_its_quota`: red if
+    `limit_aliases_to` stores the quota alone.
+  - `engine::state_places::tests::an_on_use_state_holds_the_sessions_key_budget_and_its_places`
+    now takes the session's `SESSION_MAX_REMOTE_DECLS` of tokens and is refused the next: red if
+    `OwnState::place` leaves `holding_peer_rows_to` out.
+  - `engine::registry::counted::tests::an_on_use_groups_face_counts_its_aliases_to_every_members`
+    (`multicast-declarations`): red if the group's face keeps a peer's rows, or if a set given
+    back keeps the group's count.
+
+### 7.16 R3's residues, the sequences: a peer's interests and repeats held per session
+
+- What it does (`225c3f0b0e`): `OnUse::Pooled` is `CountedSeq<T, N>` (`row_pool.rs`), the
+  sequence form of 7.15's `CountedIdMap`: a `FirstUse` column counted to `N`, taken at its
+  first value, that answers `RowList` only lent its owner's handle (`CountedSeqMut`, so no path
+  writes past the budget). A pushed value takes a row of the slot's kind from the session's
+  `KeyBudget` after the column's own count admits it, and gives it back if the allocator refuses
+  the column; `remove_first`, `retain` (by the count it dropped), `clear` and
+  `PeerSeq::release` give rows back. A handle of no budget holds the sequence to its own count
+  alone. The budget already held the bounds of both kinds (`holding_peer_rows_to`: the interests'
+  `SESSION_MAX_INBOUND_SUB_INTERESTS`, each repeat kind's `SESSION_MAX_REMOTE_DECLS`), and
+  `OwnState::place` already wrote it so: the engine needs no change.
+- A refusal the inline form never met: a peer's repeat is bound in its declarations' table and
+  recorded as an alias, and the alias's push could not fail inline. On use the alias column takes
+  its memory at the first alias, so the allocator can refuse it. A repeat bound with its alias
+  lost would stand in the table under an id the application was never told of, and its withdrawal
+  would report that id. `RowList::take_rows` (provided, `true` for a table whose rows were laid
+  out when it was made) takes a first-use column's memory before its first value;
+  `apply_declared` of the subscriber and the queryable side asks it of the aliases (`LentAliases::take_rows`)
+  before the repeat's key is made or its id bound, and refuses the repeat as a declaration the
+  table has no room for (`count_refused`). The budget cannot refuse the alias's row: every alias
+  is an id its kind's table holds, and both kinds have the same session bound, so the repeats a
+  session holds stay under the declarations it holds. The ids of a peer's tables keep their count
+  (no recount: no quota of either kind is above the build's).
+- D12: `Lent` and `Region` keep their `Pooled`; `take_rows` is the provided `true` there, so
+  the check folds away and the order of `told_as` before the key, which reads the table only, is
+  the one change on those paths. C1cs's readings are not expected to move.
+- Size, on use: a face's set no longer holds `MAX_INBOUND_SUB_INTERESTS` interest rows (each
+  an `InboundSubInterest`, its key a `HeapKey`) nor `MAX_REMOTE_DECLS` alias rows of each repeat kind (16 bytes each)
+  inline; it holds a `CountedSeq` head (16 bytes) of each, and the rows come from the allocator
+  at the peer's first interest or repeat.
+- Tests:
+  - `row_pool::tests::an_on_use_sequence_holds_its_faces_rows_to_the_sessions_bound_together`:
+    two faces' sequences held to a session bound of two interests together. Red if `push` asks
+    no row of the budget, if `remove_first`, `retain` or `release` give none back, or if a
+    sequence takes its rows when made.
+  - `row_pool::tests::an_on_use_sequence_the_allocator_refuses_takes_nothing`: red if
+    `CountedSeqMut::take_rows` is the provided `true`, or if a push the allocator refused keeps
+    its row of the budget.
+  - `row_pool::tests::an_inline_sequence_and_a_pooled_one_answer_alike` runs the on-use
+    sequence beside the inline and the pooled ones: red if `CountedSeqMut` answers `RowList`
+    otherwise than they do.
+  - `peer_tables::on_use_tests::an_on_use_subscriber_repeat_with_no_alias_row_is_refused_whole`
+    and `..._queryable_repeat_...`: a repeat dispatched with every allocation refused is not
+    bound, is counted, and its key was never made (the budget counts no refused key). Red if the
+    `take_rows` check is left out (the key's refusal would be counted by the budget) or moved
+    after the bind (the repeat would stand).
+
+### 7.17 R3, 3b: an on-use session's runtime of the allocator
+
+- What it does (`a0a99b28b6`, `26217c7d5b`): the runtime has had a heap maker of each form but
+  the taskless one; `CoopRuntime::try_taskless` (over `ExecutorState::try_taskless`, a table of
+  no cell laid as one cell that holds none, as the placed one is) is the fourth, and
+  `CoopRuntime::try_formed` the heap's twin of `placed`: the maker of the form named, then the
+  local set (`CoopLocalSet::try_new`). It is always inlined, and the engine names its form by
+  constants of the build (`RuntimeTables::form`), so a build links the one maker of its form.
+- The engine's on-use form makes its runtime by `RuntimeTables::made` at the point the D12 forms
+  place theirs, refused as the heap's (`heap_refused` of the tables' `reserved_bytes`).
+  `lay_out_open` lays out no runtime span there (`ArenaPlan::lay_runtime` is the D12 forms'),
+  and lays out the count the arena is kept by alone (`ArenaPlan::lay_keep`), which the engine
+  still takes (`SessionArena::keep`, 3a) for what of the arena it holds until 3d. Every item
+  that carried the span (`OpenHolds::runtime`, `OpenPlaces::runtime`, `SessionLent::runtime`,
+  `RuntimeTables::{runtime, placed_bytes, of_shape}`, `SessionArena::{runtime_place,
+  kept_span}`, the `RuntimePlace` imports) reads `not(wz_on_use)`; `open_holds` takes the span's
+  bytes only there (a parameter under the same predicate).
+- D12: unchanged; each predicate added reads `not(wz_on_use)` over the code it guards.
+- Size, on use: `CoopRuntime::placed`, `PlacedParts::of` and the placed constructors of the
+  task store, the timer table and the local set's owner leave the form; one heap maker and
+  `CoopLocalSet::try_new` come in. The arena is smaller by the runtime's span; the allocator
+  gives the same bytes at the open, in three allocations (the state, the cells, the set's owner)
+  and the timer entries' where the build has timers.
+- Tests:
+  - `table_tests::a_runtime_made_of_the_heap_by_its_form_holds_that_forms_table`: red if
+    `try_formed` makes the taskless form with the rows' cells (the spawn would be taken), or the
+    form of one task with none (the CONTROL spawn would be refused).
+  - `table_tests::a_runtime_the_heap_has_no_room_for_is_not_made` asks `try_taskless` and
+    `try_formed` too: red if either ends the process on a refused allocation.
+  - `tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime`
+    (renamed from `..._for_the_engine_or_the_rooms`, 7.8): red if `lay_out_open` lays the
+    runtime's span in the on-use form, or leaves the arena's count out with it.
+  - `tests::runtime_tables` (`wz_round`) and `tests::direct_runtime` (the direct read) make
+    their runtime by `RuntimeTables::made` in an on-use build, so each on-use leg holds the made
+    runtime to the cells the D12 form's placed one holds.
+
+### 7.18 R3, 3c, step (a): a link's cells made through its kind's source
+
+- What it does (`a5a7f0c8bf`, `23ff61faf7`, `46c8fd37e8`): where a link's parts are made is the
+  handle's kind's to say, `CountKind::Cells`, a `CellSource` (`crates/wz-runtime-coop/src/link_cells.rs`):
+  `Option<LentByteCells<F>>` for the kinds a session may lend a table to (a table while one is
+  lent, refused past its cells; the heap while none is), `HeapCells` for `OnHeap<N>`, a kind
+  counted as `N` counts whose every cell is the heap's. `CellRc::{in_cells_of, claim_of,
+  halves_in_of}` take the source by reference and reach the cell through `head_of`, which calls
+  the out-of-line `head_in` for a source that lends (`CellSource::LENDS`) and `heap_head` alone
+  for one that does not, so a build whose kind is `OnHeap` instantiates neither `head_in` nor
+  `table_head` and makes no `Owner::Table`. `try_on_heap` and the two entropy holders and the
+  ports' book, which were placed through `None`, name `HeapCells`; the one task's conveniences
+  (`in_cells`, `claim`, `halves`, `halves_in`) keep their `Option<&LentByteCells>`, the source
+  of the kinds that lend.
+- The stacks (`ip_stack`, `app_link`, `serial_link`, `unixpipe_link`, `ws_link`, `either_links`)
+  and the transport (`TransportState::{gate,actions,halves}_cells`, `LinkCalls::gate`) hold
+  `N::Cells`, and `SessionLinks::lend_cells` hands the source itself, so a heap kind's stack is
+  never lent a table: the type has none to take. The kind reaches the stacks by the type every
+  program already names (`counted_by::<wz_capi_coop::LinkCount>()`), and the runtime by its lock
+  kind: `sync::LinksOnHeap<K>` is `K` in every item but `LinkCount`, which is
+  `OnHeap<K::LinkCount>`. A feature of `wz-runtime-coop` could not say it (3c above).
+- The engine (`46c8fd37e8`): on `wz_on_use` `LinkCount` is `OnHeap` of the form's kind and
+  `SessionLock` is `LinksOnHeap<FormLock>` (`form.rs`; `FormLock` is `LockForm::SessionLock`, which
+  the direct read's assertion of a lock of each value's own now reads). `lay_out_open` lays out
+  no table of cells, `OpenHolds::cells`, `TransportTables::cells`, `TransportRows::cells_from`,
+  `OpenRegion::cell_bytes`, `cells_of`, `link_cells` and `LinkHalves` are the D12 forms' alone, and
+  the open hands the stack and the transport `HeapCells`. `ArenaPlan::holding_cells` stays the
+  plan's public word in every form.
+- D12: the kinds and their sources are the ones they were (`Option<LentByteCells>` is what each
+  stack held), `lend_cells` is called with the arena's `Option` once instead of behind an
+  `if let`, and `try_on_heap` calls `heap_head` directly rather than `head_in(None)`.
+- Size, on use: `table_head`, `head_in`, the table arm of every cell's maker and the lend of four
+  tables of cells leave the form; the arena is smaller by the four tables (a flag and a cell for
+  each link of each); each link's parts are three or four blocks of the allocator at its open.
+  Receive Ir: none (cells are made at a link's open, not per batch).
+- Tests:
+  - `link_cells::tests::each_source_makes_its_cells_where_it_says`: red if `head_of` calls the
+    heap's maker for a source that lends (a full lent table would hand back a heap cell), or a
+    source of no table claims none.
+  - `link_cells::tests::a_handle_whose_cells_are_the_heaps_counts_as_its_kind_does`: red if
+    `OnHeap` counts apart from the kind it wraps (two handles counted otherwise, the value let go
+    early) or its source makes no cell.
+  - `ip_stack::tests::links_whose_cells_are_the_heaps_open_each_link_on_the_heap`: red if a stack
+    of a heap kind refuses a link for want of a cell, or its sink and pump are not one cell.
+  - `sync::tests::a_kind_whose_links_cells_are_the_heaps_is_its_kind_in_all_else`: red if an item
+    of `LinksOnHeap` is not the wrapped kind's.
+  - `tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime`
+    asserts no table of cells too; `tests::on_use::an_on_use_sessions_link_parts_lie_on_the_heap`:
+    red if the on-use open lends its transport a table of cells.
+  - On use, `tests::arena::a_links_halves_lie_in_its_cell_across_a_redial` and
+    `arena::tests::the_cells_of_each_kind_held_are_lent_past_the_kinds_with_none` are not compiled:
+    the form lends no cell.
+
+### 7.19 R3, 3c: the ports' slots and the groups' buffers lent apart, and the reds of hn9 and hn10
+
+- What it does (`99cc01afed`): `LinkTables` holds the links' receive and outbound tables and
+  their places and nothing else; the slots a session's udp ports read into and the buffers its
+  groups receive into reach the stack by seams of their own, `SessionLinks::lend_port_rows(rows,
+  slots)` and `SessionLinks::lend_group_rx` (a default that ignores them; `IpLinks` and
+  `AppLinks` keep them, the stacks that wrap one forward them). `TransportTables` gains
+  `group_rx` and `port_slots`, lent after the links' tables in the order the plan lays them out
+  (`TransportRows::group_rx_from`, `port_slots_from`). Why first: a source of the heap (7.20)
+  holds no table, and a build whose udp ports are lent-only (`udp-port-lent-only`, which
+  `wz-capi-coop/udp-listen` names) must still reach its ports' slots, so they could no longer
+  ride inside the links' tables.
+- The reds of hn9, three tests this lane added that had not run green before (earlier legs did
+  not compile):
+  - `1e47d9d865`: an on-use session that dials nothing counts its dial set to no row
+    (`count_set`), since an on-use table's default is counted to the build's `N` and a set
+    pushed rowless kept finals' room. The code was wrong; `counted.rs`'s test is unchanged.
+  - `7e09c2c4ed`: `hold_member_aliases` returned early when the quota already admitted
+    `GROUP_FACE_ALIASES`, but an on-use `CountedIdMap` holds no more ids than its count,
+    whatever its quota admits. `SubscriberPeer::hold_aliases_at_least` raises the quota and the
+    count each where it falls short (`PeerIds::counted_rows` says the count). D12 unchanged.
+  - `e335e9a48d`: the router stand-in is a udp peer, whose driver answers no room wait, so no
+    face holds a room and no room place is made; the test's claim was wrong and is now
+    `an_on_use_session_makes_no_room_place_its_faces_do_not_hold`, `made == 0`.
+- The reds of hn10 (leg `app-transport,group,multicast-declarations,liveliness,tables-on-use
+  --lib`, which runs the whole on-use suite):
+  - `461f658b2a`: `limit_aliases_to` counted an alias table anew only for a quota with a most,
+    so where the peer quota bounds nothing a group face's place kept `GROUP_FACE_ALIASES` rows for
+    its next face. A quota of no most now counts the table back to the rows it was made with
+    (`PeerIds::recount_as_made`, `CountedIdMap`'s `N`; nothing for a table with no count). The
+    code was wrong; `counted.rs`'s `an_on_use_groups_face_counts_its_aliases_to_every_members`
+    is unchanged and `id_map`'s `an_on_use_table_is_recounted_only_while_it_holds_no_id` reads
+    the count as made (red if it is anything but `N`, or if a fixed table claims one).
+  - `dbac74a3ed`: `the_pools_hold_the_fewer_of_the_sessions_limit_and_what_its_faces_could`
+    read the row of the declarations' pools, which the plan lays out only where the arena lends
+    the pools (`wz_lent`); on use they are counted. The test's premise was the lent form's: it
+    reads the row under `wz_lent` and asserts its absence under `wz_on_use`.
+- Tests of `99cc01afed`: `ip_stack`'s `a_port_reads_into_the_slots_its_session_lent` and its
+  lent-only test (rows with no slots refused, rows and slots open), the group buffers' tests of
+  `ip_stack` and `app_link` (each group one buffer of what was lent), and `tests::arena`'s port
+  and group tests, which lend the slots and the buffers after the links' tables. Removed:
+  `link_storage`'s `the_group_receive_table_is_the_one_the_tables_were_lent`, whose table no
+  longer exists.
+
+### 7.20 R3, 3c, step (b): a link's buffers taken through its kind's source
+
+- What it does (`ff65049f24`): where a link's buffers come from is the handle's kind's to say, as
+  its cells are (7.18): `CountKind::Buffers`, a `BufferSource`
+  (`crates/wz-runtime-coop/src/link_storage.rs`) with the types a link receives into and encodes
+  into (`RxOf<N>`, `TxOf<N>`). `Option<LinkTables<F>>` is the source of the kinds a session may
+  lend tables to (a claim of the tables while some are lent, refused past them; the link's own
+  while none are), over `RxBuffer`/`TxBuffer` as before. `HeapBuffers` is `OnHeap`'s: every
+  link a `Vec<u8>` and a `HeapTx` of its own, so a heap kind's drivers name no store of a
+  table and the enums' table arms, `LinkTables::claim`, `PooledRx` and `PooledTx` have no
+  instance in the form. `HeapBuffers::sized(bytes, slots)` is the session's shape: each link a
+  receive buffer of `bytes` and `slots` slots of it whatever the stack asks, as a session's tables
+  lend each link buffers of their own length; unsized (the default, what a stack holds before a
+  session lends it), the stack's own shape (`HeapTx::for_link`).
+- The stacks (`ip_stack`, `app_link`, `serial_link`, `unixpipe_link`, `ws_link`,
+  `either_links`) hold `N::Buffers` and take each link's through it;
+  `SessionLinks::lend_buffers` hands the source itself. `heap_link_buffers` is private to
+  `link_storage`, behind the lent source.
+- The engine: `TransportTables::links` is the kind's source (`LinkSource`), so the open hands
+  `links.lend_buffers(lent.transport.links)` in every form. Where the tables take their memory on
+  use it is `HeapBuffers::sized(link_bytes, LINK_TX_SLOTS)`: each link a buffer and one slot of
+  the session's batch, made as it opens and given back with it, as zenoh-pico's transport holds
+  one buffer of each. The plan lays out none of the links' rows (`link receive`, `link transmit`,
+  `link places`), `TransportRows::{rx_buffers, tx_slots}` and `links_from` are the D12 forms'
+  alone, `tx_pool_short` is `false` (no link waits on another's slot), and `LINKS_SHARE_POOLS`
+  is `false`, so the report an ABI reads (`link_buffers`) counts a buffer and a slot for each
+  link. `ArenaPlan::link_bytes` says the batch in every form.
+- Why sized and not the stack's shape: a stream link's own shape is `STREAM_RX_CAPACITY` and
+  `SESSION_TX_SLOTS` slots of it, several times what the plan's batch and `LINK_TX_SLOTS` lend
+  each link today; the heap form would have grown each link's memory.
+- D12: the kinds' source is `Option<LinkTables>`, the stacks held `Option<LinkTables>` before,
+  and `lend_buffers` is called with `Some` of the arena's tables; the drivers' types are the same.
+- Residues: on use no pool bounds the links that open (no places): the faces a session holds are
+  bounded by its counted face tables, the admission and the runtime's cells, as they are for a
+  link's cells since (a). The pools' limits (`RX_POOL_BUFFERS`, `TX_POOL_SLOTS`) bound nothing on
+  use and are not refused there. The listening tests of `tests::arena` that read the links' rows
+  read other lent rows too (`peer tables`) and are the lent form's; no leg runs them on use.
+- Size, on use: the arena smaller by the links' tables (the batch and a flag for each receive
+  buffer and slot, the places); each link's buffers are two blocks of the allocator at its open,
+  the same bytes. The table arms of every link's buffers leave the form's text. Receive Ir: on use
+  a link reads into a `Vec` with no enum to match and no pool to claim from, so not more; D12's
+  receive path is unchanged (the same `RxBuffer`, reached through an `#[inline(always)]` source).
+- Tests:
+  - `link_storage::tests::each_buffer_source_opens_a_link_where_it_says`: red if a lent source
+    allocates past its tables, or the heap's claims a table, or hands buffers of another length
+    than its size says (sized `(32, 1)`: a 32-byte buffer and one 32-byte slot whatever is asked).
+  - `ip_stack::tests::links_whose_cells_are_the_heaps_open_each_link_on_the_heap`: red if a heap
+    kind's stack opens a link otherwise than its sources say; unsized, a datagram link reads into
+    `UDP_RX_CAPACITY`, sized by its session into 512.
+  - `tests::on_use::an_on_use_sessions_links_take_their_batch_of_the_heap` (new): red if the
+    on-use transport is lent tables, or a source of another size than the plan's batch, or the
+    report reads pools; `an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts`
+    asserts no link row (its CONTROL is the endpoints' texts alone now).
+  - `tests::arena::the_links_batch_is_held_to_the_snapshots` reads `link_bytes` in every form and
+    the row where the arena lays it out; the port and group tests lend the links' tables only
+    where they are laid out; `the_link_buffers_a_report_reads_are_the_plans_rows`,
+    `the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan` and
+    `a_link_reads_into_the_buffer_its_sessions_arena_lent` are the D12 forms' alone.
+
+### 7.21 R3, 3c: an on-use listener's links held to its faces, and the reds of hn12
+
+- The bound (`de6a30cf2f`, a test alone): on use no table of buffers refuses a link any more
+  (7.20), so the links a listening session holds are bounded where a face is admitted, not where
+  a link's buffers are taken. Each accept path asks `Core::takes_a_face` first
+  (`crates/wz-capi-coop/src/engine/faces_added.rs:91`), which refuses a link past
+  `accept_pending` handshakes or past `Core::faces_full` (`:97` to `:102`, the face table
+  holding the dial role's and `max_faces` places); behind it `RegistryOf::add_face`
+  (`engine/registry/adding.rs:157` to `:161`) refuses a face when the index of held faces,
+  counted at the open to the plan's sets (`Holders::counted`), has no free row. The stack's
+  accept takes the link's heap buffers before the engine asks; a link refused is dropped in the
+  same accept, so at most one link past the faces holds buffers, and only for that call. No new
+  limit was needed.
+- Test: `tests::on_use::an_on_use_listener_closes_a_link_past_its_faces_unread` (`listen`; the
+  listener stepped on the test's thread by `step_once`, raw connections, two handshakes admitted
+  so only the faces' count refuses): with `max_faces` 1 the second connection is closed unread and
+  the first kept; CONTROL, with `max_faces` 2 both are kept. Red only when neither `faces_full`
+  nor `add_face`'s index refuses: the two hold the same count in two layers, either alone keeps
+  it green.
+- The reds of hn12, both left by `ff65049f24`'s gating of the links' tables to the D12 forms:
+  - `3689670ef3`: `arena.rs`'s `LinkCellFlag` and its `SessionLock` import are read on use only
+    by the udp ports' rows and slots, so they read `any(not(wz_on_use), feature = "udp-listen")`.
+  - `ce7e699b2c`: `engine.rs` imports `LentByteCells` for a build that listens and reads each
+    face itself; on use its one reader in the library, `Core::face_chains`, spelled the full path,
+    which left the import unused. The field names the import.
+
+### 7.22 R3, 3c (c): a udp port's memory through its kind's source
+
+- `5c5f545604`: the ports' memory is the links' kind's (`CountKind::Ports`,
+  `crates/wz-runtime-coop/src/link_cells.rs`), a `PortSource` (`udp_link.rs`):
+  `Option<LentPorts<F>>` for `OneTask`, `Atomic` and `OneFace` (the rows and the slots a session
+  lent, `None` giving no port), `HeapPorts` for `OnHeap` (rows `PortRows<OnUse, Vec<u8>>` counted
+  to the session's peers and datagrams and taken at the first of each, each port a read buffer of
+  the session's batch and the spare buffers it held datagrams in). A source is read once into the
+  stack's book (`shared_book`), which keeps the rows and what makes each port's reads
+  (`PortSource::Reads`: the slot table, or the bytes of a read buffer); a port opened takes its
+  reads there (`UdpPort::in_book`). `PortRx`, `Held`, `BookRows` and `with_rows!` became one
+  type each source names (`PortStore`: `LentRx` and `LentHeld`, `OwnRx` and `Vec<u8>`), so a form
+  compiles one walk of the rows and one read, chosen by type. The port, a peer's share and the book
+  take the source beside the count kind (`UdpPort<S, N, P>`, `PortPeer<S, N, P>`,
+  `SharedBook<N, P>`), `P` read off the links' kind because `OnHeap<N>` counts what its links
+  share as `N` does. `SessionLinks::lend_port_rows(rows, slots)` became `lend_ports(N::Ports)`;
+  links given nothing open no `udp/` port (`IpLinks::open_listener`, asked before the socket is
+  bound). `udp-port-lent-only`, its feature set `heap-lent-ports` and its gate leg went: the lent
+  form's instances are the D12 build's alone, as the selector made them (S1 of `feat-peer.md`),
+  and the heap's the on-use build's.
+- The heap form answers a refusal as a value: `PortRows::take` makes both tables' room before it
+  writes either, so a peer is never taken without its first datagram; `OwnRx::keep` reserves
+  before it copies and `give_back` before it keeps a spare buffer; a datagram refused memory is
+  dropped and counted as an overflow.
+- The plan (`crates/wz-capi-coop/src/arena.rs`): the counts are kept in both forms
+  (`TransportRows::port_rx`, `port_peers`); D12 lays out and lends the rows and the slots
+  (`TransportRows::ports_from`), on use none is laid out and the source is
+  `HeapPorts::sized(links, UDP_PORT_SLOTS, batch)` (`TransportRows::ports_sized`); the engine
+  hands either to its links with `lend_ports` (`engine.rs`). `LinkCellFlag`, the `SessionLock`
+  import and the `Lent` import are back to their D12 cfgs (`not(wz_on_use)`, `wz_lent`), which
+  `3689670ef3` had widened for the ports' rows on use.
+- Tests, wz-runtime-coop (`alloc,session-unicast,udp-listen`, and the heap set). `udp_link`:
+  `a_port_holds_each_datagram_in_a_buffer_a_read_gave_back` (the heap form),
+  `a_book_the_heap_has_no_room_for_is_refused_and_named`,
+  `a_port_counted_across_threads_is_shared_by_handles_that_cross_threads` (both sources),
+  `a_port_over_lent_slots_drops_a_datagram_it_has_no_slot_for`,
+  `a_peers_row_counts_what_waits_for_it` (rows on use),
+  `a_port_over_lent_memory_sorts_a_peers_datagrams_without_the_heap`,
+  `ports_share_their_rows_and_take_no_peer_past_them` (both sources), and three new:
+  `a_source_no_session_sized_or_lent_gives_no_port` (red if `HeapPorts::book` gives rows for an
+  unsized source), `heap_rows_take_their_counts_at_the_first_peer_and_no_more` (red if
+  `PortRows::counted` takes memory with the book or the rows grow past their counts),
+  `a_datagram_the_heap_has_no_room_for_is_dropped_and_counted` (red if `OwnRx::keep` copies
+  without `try_reserve_exact`, which ends the process). `ip_stack`: the `udp_listener` module
+  over a lent port (`udp_link::leaked_ports`), `a_port_reads_into_the_slots_its_session_lent`
+  with the refused case of links lent nothing, and
+  `an_on_use_stack_listens_on_udp_over_the_ports_its_session_sized_alone` (new; red if
+  `open_listener` makes a book of its own). The two lent-only tests went with the feature.
+  wz-capi-coop `tests::arena`: the D12 tests read `ports_from` and are `not(wz_on_use)`;
+  `an_on_use_listening_session_sizes_its_ports_and_lays_out_none` (new, `udp-listen` with
+  `tables-on-use`; red if the plan lays a port row out on use or sizes the source to other
+  counts).
+
+### 7.23 R3, 3c (c): a group's receive buffer through its kind's source
+
+- `339c959c64`: read first, each joiner's own buffer when its session lends none: the host's
+  (`HostGroupTransport`, `wz-runtime-posix`) `UDP_RX_CAPACITY` (65,535 bytes), `app_link`'s
+  `DATAGRAM_MAX`, `raweth_group`'s `MAX_ETH_FRAME_SIZE`, where the arena lends each group the
+  plan's group batch. Not lending on use would have each group take the widest datagram's buffer,
+  so the on-use source hands the joiner the batch instead. The source is the links' kind's
+  (`CountKind::Groups`, a `GroupSource` in `group_transport.rs`): `Option<LentByteCells>` for
+  the kinds that lend (a claim of the table, a group past it `Exhausted` before the joiner is
+  asked, `None` the transport's own as before), `HeapGroups::sized(batch)` for `OnHeap`.
+  `SessionLinks::lend_group_rx(table)` became `lend_groups(N::Groups)`; a joiner is handed a
+  `GroupBuffer` (`Lent`, `Sized(bytes)`, `Unsized`) in place of `Option<ByteBuf>`, and makes
+  its buffer by `GroupRx::given` (`GroupRx::of_heap` for a `Vec`), which answers a heap's refusal
+  as a value: the join is `Exhausted` before a socket is bound or the program asked
+  (`HostGroups::join` in capi-coop over `HostGroupTransport::with_rx`, `AppGroupTransport`,
+  `RawEthGroup::new` now `Option`). `HostGroupTransport::new` keeps its `Option<ByteBuf>` form
+  for hosts outside a session. The stacks' `counted_by` reset the source with the kind and assert
+  none was lent before.
+- The plan: the group count and batch are kept in both forms (`TransportRows::group_rx`); D12
+  lays out and lends the buffers (`group_rx_from`), on use none is laid out and the source is
+  `HeapGroups::sized(batch)` (`groups_sized`); the engine hands it with `lend_groups`.
+- Tests: `group_transport::a_group_buffer_is_the_one_its_session_gave` (red if a `Sized` buffer is
+  made at the widest length, or an own buffer the maker refused is held) and
+  `a_heap_source_hands_each_group_its_sized_length` (red if `HeapGroups` hands no length);
+  `ip_stack::on_use_links_hand_each_group_the_length_its_session_sized` (red if `open_group`
+  hands the joiner no length on use); the lent paths' tests (`heap_links_lent_group_buffers_...`,
+  `app_link::links_lent_group_buffers_give_each_group_one`, the lent-buffer tests of `app_link`,
+  `raweth_group` and capi-coop `host_group`) read the new seam unchanged in what they assert.
+  capi-coop `tests::arena`: the D12 test of the groups' table is `not(wz_on_use)`, and
+  `an_on_use_session_sizes_its_groups_buffers_and_lays_out_none` (new, `group` with
+  `tables-on-use`; red if the plan lays a group buffer out on use or sizes another length).
+
+### 7.24 The reds of hn14
+
+- `78aef50565`: `PortSource::book` names what it gives by a type, `BookParts<S, R, Reads>`
+  (`crates/wz-runtime-coop/src/udp_link.rs`), the book's rows and what makes each port's reads,
+  which clippy's `type_complexity` refused spelled inline.
+- `3d6b72f7c5`: `ip_stack::tests::udp_listener::a_stack_listens_on_udp_where_it_carries_datagrams`
+  lends its links a port's row and slot (`udp_link::leaked_ports(1, 1, 64)`) before it opens the
+  listener: since `5c5f545604` links given no port memory open no `udp/` port, so the test bound
+  nothing. What it asserts is unchanged.
+- `6015e9551a`: `LINK_ROWS`, `GROUP_RX_ROWS` and `PORT_RX_ROWS` (`crates/wz-capi-coop/src/arena.rs`)
+  count no row on use, where the plan lays none of them out, so `ARENA_ROWS` is the rows an on-use
+  plan holds (`tests::arena::a_plan_with_every_row_holds_exactly_arena_rows`).
+- `1d7bac1532`: the `tests::arena` tests that read a link's rows read the count every form keeps
+  (`ArenaPlan::links`) through `link_places`, which asserts the row of places in D12 alone, and
+  `link_receive_buffers` (the pool's row in D12, one for each link on use);
+  `a_listener_lays_out_the_gets_of_each_face_it_admits` reads the tables' rows under `wz_lent` and
+  their counts in every form;
+  `the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials` compares the arenas'
+  bytes only where the arena lays a face's tables out; the CONTROL of
+  `a_session_that_sends_each_face_its_own_leg_reserves_no_handed_places` and the plan of
+  `a_face_past_max_faces_is_not_attached` read `link_receive_buffers`.
+
+### 7.25 R3, 3c (c): the kept publishes through their table's storage, and the on-use arena tests
+
+- `1d5b2e25d0`: `HandedLegs<WORDS, P: LegStorage = Lent>` and `HandedLeg<WORDS, P>`
+  (`crates/wz-runtime-coop/src/handed.rs`) take the storage of their rows, which names where the
+  places lie (`LegStorage::Places`, `Place`, `claim`, `give_back`): `Lent` the places a session
+  lent (`Option<LentByteCells>`, a `ByteBuf` each, given back as it drops), `OnUse` its own
+  (`OwnPlaces`: each place a buffer of the batch, taken by `zeroed_bytes` when a publish finds
+  every place taken before held, at most the count, kept spare once its publish is sent).
+  `HandedLegs::counted(place_bytes, legs)` makes the on-use table, its rows
+  `BoundedVec::counted(legs)` taken at the first publish kept. The heap's refusal is a value: a
+  place the heap refuses is a publish not kept, before any row is taken; a place claimed for a
+  publish not kept (longer than a place, or no row) is given back; `clear` gives every place back.
+  The own form is `not(session-slot)`, as the runtime's other heap forms are. The parameter is the
+  storage policy itself, not a source of the links' kind: the kept publishes are the session's
+  state, not a link's, so capi-coop names `HandedLegs<FACE_SLOT_WORDS, crate::StatePolicy>`, the
+  policy `build.rs` states once.
+- `a405ec1189`: the plan counts `handed_legs` in both forms and lays the three handed rows out in
+  D12 alone (`HANDED_ROWS`, `not(wz_on_use)`); `TransportRows::lent_from` makes
+  `HandedTable::counted(link_bytes, handed_legs)` on use. The engine's uses (`hand_off`,
+  `send_handed_now`, the close's `mem::take`, the drop's `clear`) read the table's methods only
+  and are unchanged.
+- Tests, wz-runtime-coop `handed`: `a_kept_publish_reads_back_whole_and_its_place_comes_back` runs
+  its body (`reads_back_whole`) over the lent table, and three new:
+  `a_publish_kept_in_its_own_place_reads_back_whole_and_its_place_comes_back` (the same body over
+  the own table), `an_own_table_takes_its_rows_at_its_first_publish_and_no_place_past_its_count`
+  (red if `counted` takes rows when made, `claim` takes a place past `count`, or `give_back` lets
+  a place go), `a_place_the_heap_refuses_keeps_nothing_and_takes_no_row` (red if a place is made by
+  a path that ends the process when the heap refuses it, or the rows are taken before the place).
+  wz-capi-coop `tests::arena`: `a_listening_session_reserves_places_for_the_publishes_it_keeps` is
+  `not(wz_on_use)`; `an_on_use_session_counts_the_publishes_it_keeps_and_lays_out_none` (new,
+  `listen` in the round's form on use; red if the plan lays a handed row out on use, or the table
+  keeps other than `HANDED_LEG_BYTES / batch` publishes of a batch each).
+- The on-use leg of `tests::arena` read whole (`749284f74f`): every test the on-use legs compile
+  was read for a row the on-use plan lays none of out (the links', the groups', the ports', the
+  direct faces', the admission's, the handed publishes', and, in a test of a build that takes
+  faces, the rows `wz_lent` alone lays out). One more read such rows unguarded:
+  `the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum` reads the client's receive
+  buffers through `link_receive_buffers`, and the peer's pools and its reservation against the
+  build's in D12 alone; on use the arena holds neither the links' nor the faces' rows, and the
+  counts it asserts in every form are what the preset bounds. The rest already read each such row
+  under the cfg that lays it out.
+- `4ea1507eb9`: no leg compiled the round's form (`WZ_COOP_VALUE_LOCKS=off`) with `tables-on-use`,
+  the one build that makes the own table; a `lane` row of `scripts/lib/nondefault-tests-gate.sh`
+  runs `tests::arena::` there (`listen,tables-on-use`). The rest of that form (`StatePolicy` of
+  `OnUse` under `wz_round`) is compiled there for the first time too.
+
+### 7.26 The reds of hn15
+
+- The pico peer's arena test on use
+  (`tests::arena::the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum`,
+  `udp-listen,tables-on-use` and `listen,tables-on-use`): fixed by `749284f74f` (7.25).
+- `e480c04fd2`: `arena::tests::each_kinds_places_take_its_own_rows_and_part` (`tables-on-use`)
+  gave rows to every kind of entity, though a plan holds places for the build's kinds alone
+  (`ENTITY_PLACE_ROWS`): it fit on the slack of rows the on-use plan no longer counts
+  (`6015e9551a`), and `put` refused the rest (`TooLarge`). It gives rows to the kinds the
+  build's limits count (`entity_rows`), and asserts a kind of no row is laid out nothing.
+- `52368494dd`: `ArenaPlan::links` is a listening build's (`feature = "listen"`), and
+  `1d7bac1532`'s `link_places` called it in a build that only dials (the crate's defaults and
+  `group-host`, E0599). A build that only dials counts its links by its transmit rows
+  (`laid_link_places`), as before; a listening build reads the count, and in D12 asserts the row.
+
+### 7.27 3d, step 1: the endpoints' texts through the state's policy
+
+- `5b46c5a67b`: `EndpointTexts<P: Storage = Lent>` (`crates/wz-runtime-coop/src/faces.rs`) takes the
+  storage of the session's own state, which the transport names (`TransportFaces::Policy`,
+  `transport/state.rs`; the engine's `crate::StatePolicy`, now stated for every build, since the
+  transport reads it in each). `EndpointTexts::<OnUse>::counted(dials, listens)` counts each role's
+  table to the endpoints the config names, held to `ENDPOINT_TEXT_ROWS`, and takes no memory before
+  the role's first text; `write` answers `Full` where no row is free and `NoMemory { bytes }` where
+  a free row's memory the allocator refused, which the open answers as
+  `ArenaRefused::NoMemory` (`open_source.rs` `unwritten`). The plan lays the endpoint row out in
+  D12 alone (`ENDPOINT_ROWS`, the put in `lay_out`); `TransportRows::lent_from` makes the counted
+  texts on use. Every reader (`DialEndpoint::text`, the transport's dials and ports, the zid's
+  derivation) is generic over the policy or names the engine's.
+- Tests: wz-runtime-coop `faces`
+  `on_use_texts_take_their_rows_at_the_first_written_and_no_more` (new; red if the rows are taken
+  when the texts are made or by the other role's text, a text is written past the count, or a
+  refused text takes the rows). wz-capi-coop `open_source::tests` run over the rows of the build's
+  policy (`session_rows`: lent in D12, counted on use), so the on-use legs run the six of them on
+  the counted rows. `tests::on_use::an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts`
+  asserts no endpoint row on use (red if the plan lays one out), its CONTROL now the reassembly
+  buffers. The heap's refusal (`NoMemory`) has no test: no allocator of the tests refuses a table
+  of at most `ENDPOINT_TEXT_ROWS` texts.
+- What the on-use arena still lays out after this step: the reassembly flags and buffers, the
+  links' cells where the plan holds them (none on use), the ABI's handle, entity places and
+  lodgings, the advanced cache's ring, and the count the engine keeps the arena by. The next steps
+  of 3d take them in that order; the arena leaves with the last.
+
 ## 8. What the main session runs
 
+- 3d, step 1, the endpoints' texts (`5b46c5a67b`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast --lib
+  faces` (one more), `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --lib
+  open_source` and `--features tables-on-use --lib open_source` (counts unchanged),
+  `--features tables-on-use --lib tests::on_use` and `--features listen,tables-on-use --lib
+  tests::arena` (counts unchanged). Clippy of wz-runtime-coop (`--features alloc,session-unicast`)
+  and of wz-capi-coop in its default set, `--features tables-on-use`, `--features
+  udp-listen,tables-on-use` and `--features group-host`. Size: D12 a few bytes more in
+  `EndpointTexts::write` (one read of the free rows before the push); the on-use client smaller by
+  the endpoint row's lay-out and lend, larger by the counted table's first-row take (`FirstUse`'s
+  out-of-line body, already linked). Receive Ir: unchanged (the texts are read at a dial and an
+  accept, never on the receive).
+
+- The reds of hn15 (`e480c04fd2`, `52368494dd`; `749284f74f` for the pico peer's test), not built
+  or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --features
+  tables-on-use --lib` (the one failure green, count unchanged), `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop` (compiles), and `cargo clippy --manifest-path crates/Cargo.toml
+  -p wz-capi-coop --features group-host --all-targets -- -D warnings`. Size: none (tests).
+
+- R3, 3c (c), the kept publishes and the on-use arena tests (`1d5b2e25d0`, `a405ec1189`,
+  `749284f74f`, `4ea1507eb9`), not built or run by this lane. `cargo test --manifest-path
+  crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast --lib handed` (three more);
+  wz-capi-coop `--features listen --lib tests::arena` unchanged in count, `--features
+  udp-listen,tables-on-use --lib tests::arena` unchanged in count (the pico peer's test green), and
+  with `WZ_COOP_VALUE_LOCKS=off` in the environment `--features listen --lib tests::arena`
+  unchanged and `--features listen,tables-on-use --lib tests::arena` one more and one fewer.
+  Clippy of wz-runtime-coop (its sets `heap` and `slot`), and of wz-capi-coop with `--features
+  listen`, `--features udp-listen,tables-on-use` and, with `WZ_COOP_VALUE_LOCKS=off`, `--features
+  listen` and `--features listen,tables-on-use`. Size: D12 a few bytes either way (the lent
+  table's calls go through a trait of static calls; `clear` gives each place back in turn); the
+  zenoh-pico preset cases unchanged (their `threads` builds have the host's value locks, so no
+  round and no handed table); an on-use build of the round with faces smaller by the three handed
+  rows of its arena. Receive Ir: unchanged (the table is the send's, read by a publish that found
+  the session held).
+
+- The reds of hn14 (`78aef50565`, `3d6b72f7c5`, `6015e9551a`, `1d7bac1532`), not built or run by
+  this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-coop --features
+  alloc,session-unicast,udp-listen --lib ip_stack` and `cargo test --manifest-path crates/Cargo.toml
+  -p wz-capi-coop --features udp-listen,tables-on-use --lib tests::arena` green, the counts
+  unchanged; clippy of wz-runtime-coop with `--features alloc,session-unicast,udp-listen` and of
+  wz-capi-coop with `--features udp-listen`, `--features udp-listen,tables-on-use` and `--features
+  threads,udp-listen,tables-on-use`, and the non-default features gate of the two crates. Size:
+  none in D12; an on-use plan's table of rows shorter by the rows it no longer counts. Receive Ir:
+  unchanged.
+
+- R3, 3c (c), the groups (`339c959c64`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast --lib
+  group_transport` (two more), `... --lib ip_stack` (one more), `--features app-link,host-lock --lib
+  app_link::` and `--features raweth,reassembly,keyexpr-wildcard-double --lib raweth_group::`
+  unchanged in count; `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-posix --lib
+  multicast` unchanged; wz-capi-coop `--features group --lib tests::arena` unchanged, `--features
+  group,tables-on-use --lib tests::arena` one more and one fewer, `--features group-host --lib
+  host_group` unchanged. Clippy of wz-runtime-coop (its sets `heap`, `slot`), wz-runtime-posix
+  (the defaults and `host-multicast`), and wz-capi-coop with `--features group`, `--features
+  group,tables-on-use`, `--features app-transport,group,multicast-declarations,liveliness,tables-on-use`
+  and `--features group-host`; the Windows build of wz-runtime-posix is untouched (its group test
+  calls `HostGroupTransport::new`, kept). Size: D12 a few bytes either way (the joiner's own arm
+  takes a length; the stack's claim is one call); an on-use build with groups smaller by the
+  groups' buffers of its arena. Receive Ir: unchanged (the group's read is the same over a buffer
+  of any origin).
+
+- R3, 3c (c), the ports (`5c5f545604`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast,udp-listen
+  --lib udp_link` (three more, none fewer: the lent-only test of `udp_link` ran only under the
+  removed selector) and `... --lib ip_stack` (one more); the crate's first gate row (every feature
+  but the slot selector) the same. wz-capi-coop: `--features udp-listen --lib tests::arena`
+  unchanged in count, `--features udp-listen,tables-on-use --lib tests::arena` one more and two
+  fewer (the D12 tests of the ports' rows are `not(wz_on_use)`). Clippy of wz-runtime-coop with
+  its sets `heap` and `slot`, and of wz-capi-coop with `--features udp-listen`, `--features
+  udp-listen,tables-on-use` and `--features threads,udp-listen,tables-on-use`. Size: D12
+  unchanged to a few bytes (the lent form alone, by type as by the selector; the slot table moved
+  into the book); the client cases unchanged (no port); a listening on-use build smaller by the
+  ports' rows and slots of its arena. Receive Ir: unchanged (the client reads no port; a port's
+  read keeps one arm).
+
+- The listener's bound and the reds of hn12 (`de6a30cf2f`, `3689670ef3`, `ce7e699b2c`), not
+  built or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
+  --features liveliness,listen,tables-on-use --lib on_use` and `--features
+  link-admission,tables-on-use --lib on_use`, one more each; `--features tables-on-use --lib
+  on_use` unchanged in count. `cargo clippy --manifest-path crates/Cargo.toml -p wz-capi-coop
+  --all-targets -- -D warnings` with `--features tables-on-use`, `--features
+  threads,tables-on-use`, `--features liveliness,listen,tables-on-use`, `--features
+  app-transport,group,multicast-declarations,liveliness,tables-on-use` and `--features
+  udp-listen,tables-on-use` (where the flag is still read). Size: none.
+
+- R3, 3c (b) and the seam before it (`99cc01afed`, `ff65049f24`), and the reds' fixes
+  (`1e47d9d865`, `7e09c2c4ed`, `e335e9a48d`, `461f658b2a`, `dbac74a3ed`), not built or run by
+  this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-coop --features
+  alloc,session-unicast --lib link_storage` and `... --lib ip_stack`; `cargo test
+  --manifest-path crates/Cargo.toml -p wz-session-core --lib id_map`; wz-capi-coop:
+  `--features app-transport,group,multicast-declarations,liveliness,tables-on-use --lib` (the
+  whole on-use suite, one more test), `--features tables-on-use --lib on_use` one more,
+  `--features udp-listen --lib tests::arena` and `--features group --lib tests::arena` unchanged
+  in count; clippy of wz-runtime-coop with its feature sets and of wz-capi-coop with the on-use
+  legs and the defaults. Size: D12 unchanged; the on-use case smaller by the links' tables' rows
+  and their table arms.
+
+- R3, 3c (a) (`a5a7f0c8bf`, `23ff61faf7`, `46c8fd37e8`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast --lib
+  link_cells` two more than before, `... --lib ip_stack` one more, `... --lib sync::tests` one
+  more; `cargo clippy --manifest-path crates/Cargo.toml -p wz-runtime-coop --all-targets -- -D
+  warnings` with the crate's feature sets (heap, heap-lent-ports, slot). wz-capi-coop:
+  `--features tables-on-use --lib on_use` one more, `--features tables-on-use --lib tests::arena`
+  one fewer, the defaults' `--lib tests::arena` and `--lib arena::tests` unchanged; clippy of
+  wz-capi-coop with the legs of 3b's bullet below, and `--features threads,tables-on-use` (the
+  form of several threads over `LinksOnHeap<ManyThreads>`). Size: D12 unchanged or a few bytes
+  smaller; the on-use case smaller by the cell tables' code and rows.
+
+- R3, 3b (`a0a99b28b6`, `26217c7d5b`), not built or run by this lane. `cargo test --manifest-path
+  crates/Cargo.toml -p wz-runtime-coop --lib table_tests` one more than before; `cargo clippy
+  --manifest-path crates/Cargo.toml -p wz-runtime-coop --all-targets -- -D warnings`. The on-use
+  legs of wz-capi-coop, each count unchanged (one test renamed): `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features tables-on-use --lib on_use`, `--features
+  liveliness,listen,tables-on-use --lib on_use`, `--features link-admission,tables-on-use --lib
+  on_use`, `--features runtime-plan,tables-on-use --lib on_use`; `--features tables-on-use --lib
+  tests::runtime_tables` and `--features liveliness,listen,tables-on-use --lib tests::direct_runtime`
+  (whichever of the two the leg's read compiles); the D12 forms' `--lib tests::runtime_tables`,
+  `--lib tests::direct_runtime` and `--lib arena::tests` with the crate's defaults. `cargo clippy
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --all-targets -- -D warnings` with the
+  crate's defaults, `--all-features`, `--features tables-on-use`, `--features
+  liveliness,listen,tables-on-use`, `--features link-admission,tables-on-use`, `--features
+  runtime-plan,tables-on-use` and `--features app-transport,group,multicast-declarations,liveliness,tables-on-use`
+  (the opening form, `RuntimeForm::Opening`); `cargo build --manifest-path crates/Cargo.toml -p
+  wz-capi-pico --no-default-features --features os-host,link-udp,wz-capi-coop/tables-on-use`.
+  Size: C1cs's D12 readings unchanged; the on-use case should not grow (the placed runtime's
+  makers leave, one heap maker comes in).
+
+- R3's residues, the sequences (`225c3f0b0e`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-session-core --lib row_pool::tests` two more than
+  before (the crate's defaults have `alloc`); `--features declare-subscriber --lib
+  peer_tables::on_use_tests` two more (one needs `codec-declare` alone, one `declare-subscriber`);
+  the crate's whole suite with `--features declare-subscriber,declare-queryable,liveliness-get`
+  (every on-use test of `pubsub`, `peer_tables` and `slot_observer` now runs a `CountedSeq`).
+  `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --all-targets -- -D warnings`,
+  the same with `--no-default-features` (no `alloc`: no `CountedSeq`, `take_rows` provided alone)
+  and with `--all-features`. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
+  --features liveliness,listen,tables-on-use --lib on_use` and `--features tables-on-use --lib
+  on_use`, their counts unchanged (the engine's tables change shape, not their tests).
+
+- R3's residues (`17511020b8`, `92347c4f82`, `f59630b1bd`), not built or run by this lane.
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib on_use::tests` one
+  more; `--lib id_map::tests` two more; `--lib pubsub::on_use_alias_tests` 1; the crate's whole
+  suite (every on-use test of `peer_tables`, `slot_observer`, `session_tables` and
+  `liveliness_subscriber` now runs a `CountedIdMap`). `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features app-transport,group,multicast-declarations,liveliness,tables-on-use --lib on_use`
+  one more (`engine::registry::counted`); the R2 legs as listed below, their counts as there.
+  `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --all-targets -- -D warnings`,
+  the same with `--no-default-features` (no `alloc`: no `CountedIdMap`, `recount` provided
+  alone), and wz-capi-coop's legs below.
+
+- R2, the rooms (`e5ee0e0d5a`), not built or run by this lane. `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features liveliness,listen,tables-on-use --lib on_use` 21
+  (18 before: one of `engine::once_rows`, one of `tests::congestion`, one of `tests::on_use`);
+  `--features link-admission,tables-on-use --lib on_use` three more than before; `--features
+  tables-on-use --lib on_use` four more (`engine::once_rows` now runs two there); `cargo test
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --lib tests::congestion` with the crate's
+  defaults (the D12 form, unchanged) and with `--all-features` (one more). `cargo clippy
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --all-targets -- -D warnings` with the legs
+  R2 lists below, and `--no-default-features --features std,tables-on-use` (no `tx-held-wait`:
+  `RoomTable::place` is then compiled only where the round and faces are).
+
+- R2 (`c4105747a2`, `657b23623c`), not built or run by this lane. The renamed test of
+  `engine::state_places` now matches `on_use`, so every on-use leg runs one test more than
+  before. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --features
+  liveliness,listen,tables-on-use --lib on_use` 18 (13 before: the renamed test, the three of
+  `once_rows` and the attach's slot test added); the new leg `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features link-admission,tables-on-use --lib on_use` (the
+  listening leg's tests less those that need `liveliness`, the owed tokens' of
+  `engine::registry::counted` among them, plus the admission's); `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --all-features --lib tests::face_routers` and the same with
+  `--lib tests::listen` (the on-use form of both, their counts unchanged); the D12 legs as before.
+  `cargo clippy --manifest-path crates/Cargo.toml -p wz-capi-coop --all-targets -- -D warnings`
+  with `--all-features`, with `--features liveliness,listen,tables-on-use`, `--features
+  link-admission,tables-on-use`, `--features link-admission,udp-listen,tables-on-use`, `--features
+  tables-on-use` and the crate's defaults, and `WZ_COOP_VALUE_LOCKS=off` with `--features
+  query,queryable,link-admission,tables-on-use` (the round's on-use form: an admission, no direct
+  faces). `bash scripts/lib/nondefault-tests-gate.sh --census` for `wz-capi-coop`.
+
+- R1b, step 3 (`d269055bd4`) and the drop of the on-use split (`12e8da2c40`), not built or run
+  by this lane. The on-use listening form: `cargo test --manifest-path crates/Cargo.toml -p
+  wz-capi-coop --features liveliness,listen,tables-on-use --lib on_use` 13 (four of
+  `engine::registry::counted`, seven of `tests::on_use`, one of `engine::state_places`, the
+  precedence test); the on-use client legs as before (`--features tables-on-use --lib on_use`,
+  the second leg's features, `--features runtime-plan,tables-on-use`), each one count the same;
+  `cargo clippy --manifest-path crates/Cargo.toml -p wz-capi-coop --all-features --all-targets --
+  -D warnings` (now the on-use form), the same with `--features liveliness,listen,tables-on-use`,
+  with `--features app-transport,group,multicast-declarations,liveliness,tables-on-use` and with
+  `--features link-admission,udp-listen,tables-on-use`; `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --all-features --lib
+  engine::registry` now runs the on-use form's four of `engine::registry::counted` and none of the
+  lent `engine::registry::tests`; the lent form, unchanged, is read by `--features
+  app-transport,group,listen,liveliness,multicast-declarations,query,queryable --lib
+  engine::registry` and the crate's legs that name `listen` or `group` without
+  `tables-on-use`; `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --features
+  codec-declare --lib liveliness_subscriber` and `--lib id_map` (two tests fewer) and `cargo
+  clippy --manifest-path crates/Cargo.toml -p wz-session-core --all-targets -- -D warnings`, the
+  same with `--no-default-features`. The non-default tests' census (C1cn) and the public surface
+  census of `wz-capi-coop` read the `--all-features` build, which changes form here.
+
+- R1b, step 2 (`8988bd43f3`, `3963ecf41d`), not built or run by this lane: `cargo test
+  --manifest-path crates/Cargo.toml -p wz-session-core --features codec-declare --lib
+  the_tokens_of_faces_that_went_are_owed_as_one_relation_of_tokens` 1; `cargo clippy
+  --manifest-path crates/Cargo.toml -p wz-session-core --all-targets -- -D warnings` and the same
+  with `--no-default-features` (no `alloc`: the relation is not compiled); the lent arm of
+  `Owed`: `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --all-features --lib
+  engine::registry` (the count of before) and `cargo clippy --manifest-path crates/Cargo.toml -p
+  wz-capi-coop --all-features --all-targets -- -D warnings`, the same with the crate's default
+  features and with `--features tables-on-use` (`Owed` is not compiled there, and
+  `flush_tokens_on_link_loss_while` now takes any `LostTokens`).
+
+- R1b, step 1 (`1063768725`), not built or run by this lane: `cargo test --manifest-path
+  crates/Cargo.toml -p wz-session-core --lib a_split_off_fixed_table_takes_its_rows_whole` 1,
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --features codec-declare --lib
+  an_on_use_peers_tokens_split_off_whole_and_stay_counted` 1 (the module's tests need
+  `codec-declare`, which no default names; the gate's wide `wz-session-core` leg names it, so the
+  census finds the test claimed; a run of 0 is no pass), and `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core
+  --all-targets -- -D warnings`, the same with `--no-default-features` (no `alloc`: the on-use
+  split is not compiled).
+
 Nothing of N1, N2, N3a, N3b or N3c's first two steps was built or run by this lane.
+
+- The rooms' one owner (`7f05e7df93`, the fix of 3a's two reds), R1 step 0 (`6b6041bf09`) and
+  R1a (`01cf14693c`), not built or run by this lane. 3a's list below again, which stopped at those
+  reds, with the counts of now: `cargo test -p wz-capi-coop --features tables-on-use --lib on_use`
+  9, the same with `--features liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use`
+  10, and the new leg `cargo test -p wz-capi-coop --features runtime-plan,tables-on-use --lib on_use`
+  9; `--features runtime-plan,tables-on-use --lib form_precedence_tests` 1 (the on-use one) and
+  `--features listen,tables-on-use --lib form_precedence_tests` 1 (the lent one); `cargo clippy -p
+  wz-capi-coop --all-targets -- -D warnings` with `--features tables-on-use`, the second leg's
+  features, `--features runtime-plan,tables-on-use` and `--all-features`, and
+  `WZ_COOP_VALUE_LOCKS=off` with `--features query,queryable,tables-on-use` and with
+  `--features query,queryable,runtime-plan,tables-on-use`; `cargo build -p wz-capi-pico
+  --no-default-features --features os-host,link-udp,wz-capi-coop/tables-on-use`, and the planned
+  on-use library with `os-host,link-udp,config-policy,wz-capi-coop/tables-on-use`. The D12 suites
+  of both crates and C1cs's three readings, unchanged: step 0 moves no predicate of a D12 build.
 
 - N3c, step 3a (7.8; `f104d31bc8`, `81cebf0f4c`, `b0afa53110`, `44d25ac4b9` on the lane), not
   built or run by this lane either. `cargo test -p wz-runtime-coop --lib
@@ -913,7 +1939,8 @@ The order that builds at each step:
      body of the open's lay-out leaves yet: the arena still lends the transport's tables, the
      ABI's places and the runtime's span, and the form's code grows by the claim (one maker and one
      drop, instantiated for the engine alone) until 3d.
-   - 3b, the runtime: the heap makers the runtime has (`CoopRuntime::try_reserved`,
+   - 3b, the runtime (written, 7.17: `CoopRuntime::try_formed` and `try_taskless`, the on-use
+     plan's count laid alone by `ArenaPlan::lay_keep`): the heap makers the runtime has (`CoopRuntime::try_reserved`,
      `try_reserved_for_one`, `try_opening`, `crates/wz-runtime-coop/src/runtime_impl.rs`), and a
      fourth for the form the one-link read runs on (`RuntimeForm::Taskless`), which has none: an
      `ExecutorState::try_taskless` over a `TaskStore` of no cell, as `taskless_in` is over a
@@ -933,13 +1960,46 @@ The order that builds at each step:
      its first fragment; the endpoints' texts by value. Each stack's `lend_buffers` and
      `lend_cells` (`ip_stack.rs`, `app_link.rs`, `serial_link/links.rs`, `unixpipe_link.rs`,
      `ws_link/links.rs`, `either_links.rs`, `session_drive.rs`) reads the source.
+     Written, step (a) (7.18): the cells' source is the handle's kind's (`CountKind::Cells`), so
+     it reaches every stack by the type the programs already hand them (`LinkCount`), and the
+     runtime by its lock kind (`LinksOnHeap`). Written, step (b) (7.20): the buffers' source is
+     the kind's too (`CountKind::Buffers`), the heap's sized by the session to its batch and
+     `LINK_TX_SLOTS`, after the ports' slots and the groups' buffers were lent apart (7.19); the
+     ports, groups and kept publishes (c) are next.
+     Read for (c), not written yet. The ports: `udp-port-lent-only` is a feature of
+     `wz-runtime-coop` that `wz-capi-coop/udp-listen` names, so a build that unifies it with
+     `tables-on-use` compiles no port of the heap's memory, and the on-use plan still lays out and
+     lends the ports' rows and slots (`TransportRows::port_slots_from`, `PortRows::over`). The
+     form: `CountKind::Ports`, a `PortSource` (`udp_link.rs`) with the storage of the book's rows
+     and what a port reads into; `Option<LentPorts<F>>` (the rows and the slots a session lent,
+     `None` refusing the listener) for the kinds that lend, `HeapPorts::sized(peers, slots,
+     bytes)` for `OnHeap`, its rows `PortRows<OnUse, _>` counted to the session's links and
+     `UDP_PORT_SLOTS`, its reads the port's own buffer and spares (today's `PortRx::Own`).
+     `PortRx`, `Held` and `BookRows` become one type each source names (a `PortStore` trait),
+     `with_rows!` goes, `UdpPort`, `PortPeer` and `SharedBook` take the source as a parameter
+     beside the count kind (`N::Shared` counts the port, but `OnHeap<N>::Shared` is `N::Shared`,
+     so the source is read off the links' kind), `SessionLinks::lend_port_rows(rows, slots)`
+     becomes `lend_ports(N::Ports)` (a source of rows with no slots is no longer a value), and the
+     feature, its feature set (`heap-lent-ports`), its gate leg
+     (`scripts/lib/nondefault-tests-gate.sh`) and its tests go. A port no session sized is
+     refused, as a lent kind's port lent nothing is: every port's memory is bounded by a session's
+     statement. Written for the ports (7.22), as read, the lent form's and the heap's each
+     compiled for the kinds that name it. The groups: on use the plan lays out a receive buffer for each group it counts and
+     lends them; not lending leaves each joiner to make its own (`GroupRx::lent_or_own`), whose
+     length each joiner (`host_group`, `app_link`) must be read for before the plan drops the
+     rows, so the on-use source hands the joiner the plan's group batch. Written for the groups
+     (7.23): the joiners' own lengths read, the source the kind's (`HeapGroups` on use). Written for
+     the kept publishes (7.25): `HandedLegs` takes the storage of its table (`LegStorage`), the
+     session's state's (`StatePolicy`), counted on use to `handed_legs` with no row laid out.
 4. N4 (3.7): the doors' objects from the allocator, counted against their kinds, so the places the
    ABI holds in the arena today (the handle's, the entities', the lodgings) are the ABI's own.
 5. 3d, the arena: with every tenant housed, the on-use form reserves no arena. `SessionArena`,
    `TableLender` and the lend bodies of `arena.rs` (`TransportRows::lent_from`,
    `PlaceRows::lent_from`, `SessionRows::lent_from`) are not compiled in it; the counts the plan
    reads off the limits (`ArenaPlan::count`, `tables`, `peers`, `gets`, `session`) stay, the
-   on-use constructors' only input. The size case reads group A's figure here.
+   on-use constructors' only input. The size case reads group A's figure here. Written, step 1
+   (7.27): the endpoints' texts by the state's policy, counted on use; the reassembly chains, the
+   ABI's places, the cache's ring and the arena's count are next.
 6. The zenoh-pico preset's own library on use (11.1, R1 to R4), and N5 once R1 builds (11.2).
 
 The pushes of the tables step 2's second half counts, and of the tables beside them in the same
@@ -957,7 +2017,7 @@ planes, each with what a refusal reaches (read at the step's own commits):
 | `RoundRows`, records and callbacks | the first write of a record, in each of the five offers | `Round::take_rows` is `false`: `refuse_unplaced` counts it (`unplaced`, and `dropped` or `held_over`) and ends its call | yes, added; before, a debug build stopped and a release build lost the record uncounted |
 | `RoundRows`, callbacks | a later call joining a record | the rows were taken by the record's first write; past the count, `refuse` and the call settled | yes |
 | `RoundRows`, keys | `Table::place_key` | `None`: counted unplaced | yes |
-| the engine's pending legs (`Rows<PendingGet>`) | `SessionState::note_pending` | the leg is unregistered, which says its end, and counted (`unheld`) | yes; on `OnUse` the first row is asked after the Request went out, so that get ends with no reply |
+| the engine's pending legs (`Rows<PendingGet>`) | none: the table is gone (`arch-l3-rows.md` H7a), a leg being its entry in its face's table alone | nothing to refuse | yes; the window it left on `OnUse`, a first row asked after the Request went out, went with it |
 | `GetPlane::held` (a `VecDeque`, every policy) | `GetPlane::keep_held`, `push_back` | the infallible push: the allocator's refusal ends the process | **no**: outside this step's tables, an owned reply's path; a debt of its own |
 | `LocalAsking::asked` (`Static`) | `QueryPlane::arrive`, `arrive_own` | no allocator: `arrive` hands a call past the list to the round; `arrive_own` reads the room first under the session's lock | yes |
 | the round's captured calls (`Static`) | `Round::offer_sample_ref` under a capture | no allocator: past the session's subscribers the call is ended uncounted, and a debug build stops | by the table's bound |
@@ -1010,37 +2070,93 @@ What the runtime-plan form lends from its arena that the client form does not, t
 
 The steps, each a build of its own, the D12 forms' bytes and behaviour unchanged:
 
-- R1, the precedence and the registry. In a build of both features the form is the on-use one
-  laid out from its config: `RowPolicy` and `StatePolicy` are `OnUse` wherever
-  `tables-on-use` is named (`crates/wz-capi-coop/src/lib.rs`), the moment assertion reads
-  `AtFirstUse` there, and `form_precedence_tests` holds the opposite of what it holds today (red
-  if a build of both names `Lent` or `AtOpen`). The registry, the key budget and the state's
-  places move together, as N3c's first two steps moved them for the client form, because
-  `RowPolicy` types them all: `Registry::counted` takes the listening form's holders and makes
-  a set at each attach, and `state_places` compiles in the form; the arena still lends the
-  transport's tables, the admission's place, the direct faces' slots and the ABI's places. Every
-  item spelled `all(feature = "tables-on-use", not(feature = "runtime-plan"))` is read again:
-  what holds for both on-use forms takes `feature = "tables-on-use"` alone, and what is the client
-  form's own (the region's rows, `OpenFrom::Region`) keeps the negation. Every test that reads
-  where a value lies (`tests::arena::a_sessions_planes_lie_in_its_own_arena` reads the plane in
-  the arena under `runtime-plan`) reads the form's cfg. From R1 `--all-features` builds this form,
-  so pre-push gate 7's clippy and the census of the non-default tests (C1cn) read it, and a graph
-  that unifies `peer`, `listen` or `group` with `tables-on-use` takes every session's memory
-  on use: the C library stays the one graph that names the feature (9.1), and the resolver's guard
-  (9.2, 2) is what keeps the release out of it.
-- R2, the admission's value and the direct faces' slots taken per face (the table's fifth and
-  sixth rows); a face refused for want of memory at its attach is answered as one past
-  `max_faces` is.
+- R1, the policy named apart from where the counts come from, in three steps, each a build of its
+  own:
+  - step 0 (landed on the lane, `6b6041bf09`): the policy is stated once, by
+    `crates/wz-capi-coop/build.rs` (`TablePolicy`), as the cfg of its name; every item spelled
+    `all(feature = "tables-on-use", not(feature = "runtime-plan"))` reads `wz_on_use`, every item
+    that read `runtime-plan` for a table its open lends reads `wz_lent`, and the config's plan keeps
+    `runtime-plan` (7.9). The form is no longer chosen at each item but once, by the policy's type
+    (`RowPolicy`, `StatePolicy`) and the cfg of its name: where the counts come from and when the
+    memory is taken are two facts any build may name both of;
+  - R1a (landed on the lane, `01cf14693c`): `tables-on-use` names `OnUse` in a build of both
+    features whose session takes no face beside its dial role's, and the moment assertion reads
+    `AtFirstUse` there: the registry, the key budget, the state's places, the plain tables and
+    the round's are the client form's (`Registry::counted`, `OwnState`, `PlacedTables::counted`,
+    `RoundRows::counted`), counted from the config's plan, which lays out none of their rows. That
+    is `config-policy`'s library on use (`crates/wz-capi-pico/Cargo.toml`, `config-policy` names
+    `wz-capi-coop?/runtime-plan`), not yet the preset's;
+  - R1b (landed on the lane: `8988bd43f3`, `3963ecf41d`, `12e8da2c40`, `d269055bd4`; 7.11, 7.12):
+    the listening and grouped forms, whose faces come and go. What it moved, read at R1a's tree
+    (item 4 took the field at the bound in the state, 7.12):
+    1. `engine/registry/held.rs` `ManyHolders` (`BoundedVec<FaceId, MAX_FACE_SETS, Lent>`) on
+       `RowPolicy`, with a `Holders::counted(sets)` beside `lent`;
+    2. `engine/registry/adding.rs` `SpareSets` of the on-use policy: no arena split and no
+       pools; a set made at a place's first face by `FaceTables::rowless_in` and `count_rows`, in
+       the row of the sets' table (`BoundedVec::<FaceTables, MAX_FACE_SETS, OnUse>::counted`, whose
+       rows are taken whole with the dial face's set, so an attach takes nothing but its tables'
+       first rows); `Registry::counted` (`engine/registry/counted.rs`) generic over `Holders`, over
+       the plan's `GetTables` and `FacePeers`, a dial-less session's first set unpeered as
+       `Registry::new` makes it;
+    3. the owed tokens: `PeerTokens::split_off` exists for `Lent` over the pools alone
+       (`crates/wz-session-core/src/declare/liveliness_subscriber.rs`). On `OnUse` a face's tokens
+       are an inline `FixedIdMap` (`Storage::Ids`), so owing them apart moves the whole table, a
+       decision of R1b's: an `OnUse` `split_off` that takes the table and leaves an empty one with
+       the quotas and the keys' handle (each owed row then one peer's tokens at the build's bound,
+       taken at the first face owed), or the set kept apart, its place held as a tomb's is
+       (`KEPT`), until its tokens are retracted, which keeps the owed table out of the form.
+       Decided and written (7.10): the split, as on `Lent`; a tomb would hold a place, and so a
+       face, for as long as a retraction waits for room. What is not decided yet is the owed
+       table's count on `OnUse`. On `Lent` it is a row for each row of the session's token pool
+       (`FacePeers::owed_tokens`, `crates/wz-capi-coop/src/arena.rs:1220`), sound because a face
+       owes apart only while its tokens hold a row of the pool, so the faces owing at once are
+       never more, and `owe_tokens_of` asserts the push is kept
+       (`crates/wz-capi-coop/src/engine/registry.rs:2136`). On `OnUse` no pool bounds the tokens
+       of all faces together, each face's table is held to its own `MAX_REMOTE_DECLS` alone, so
+       a face that comes and goes while the round has no room can owe more tables than that count,
+       and the push can be refused; and `FirstUse` takes every row of the count at the first face
+       owed, each row a whole `PeerTokens<OnUse>` (an inline table of `MAX_REMOTE_DECLS` rows).
+       The textbook answer keeps the lent form's argument: a count of the tokens the faces hold
+       together, held by the registry as the pool's rows hold it on `Lent` (a token refused past
+       it as a full table refuses it), which bounds the faces owing at once again; or an owed
+       table of tokens rather than of tables (a row a token, its face's order kept), counted to
+       that same count, which also takes the memory of the tokens owed and no more. Decided and
+       written (7.11): the relation of tokens, keyed by face and id, its bound kept by the faces'
+       admission rather than by a count of the tokens kept beside the tables;
+    4. the rooms' places: `StatePlaces::room_places` holds `FACE_SETS` (one) places; a listening
+       session holds one for each set (`plan.peers().sets()`), at most `MAX_FACE_SETS`: the field
+       at that bound in the state, or a counted table of them;
+    5. the plan's rows of the index of held sets and of the owed tokens (`ArenaPart::HeldFaces`,
+       `ArenaPart::OwedTokens`, `OWED_ROWS`, `HELD_SET_BYTES`, the `Lent` import of `arena.rs`)
+       read `wz_lent` beside `listen` and `group`, so the on-use listening plan lays out none;
+    6. the registry's tests (`engine/registry.rs` `mod tests`, `all(test, wz_lent)`) stay the lent
+       form's, and their on-use twins (a face added and removed, a set built at a place's first
+       face, the tokens owed) are written over `Registry::counted`;
+    7. `build.rs`: `table_policy` drops `!takes_faces`, and `form_precedence_tests` keeps its
+       on-use test alone. From then `--all-features` builds this form, so pre-push gate 7's clippy
+       and the census of the non-default tests (C1cn) read it, and a graph that unifies `peer`,
+       `listen` or `group` with `tables-on-use` takes every session's memory on use: the C library
+       stays the one graph that names the feature (9.1), and the resolver's guard (9.2, 2) is what
+       keeps the release out of it.
+  What the arena still lends after R1b: the transport's tables, the admission's place, the direct
+  faces' slots, the kept publishes and the ABI's places (R2 to R4, N4).
+
+- R2 (landed on the lane, `657b23623c`; 7.13), the admission's value and the direct faces' slots
+  taken per face (the table's fifth and sixth rows); a face refused for want of memory at its
+  attach is answered as one past `max_faces` is.
 - R3, the links' memory of the listening and grouped stacks: 3c's sources for a port's rows, a
   group's receive buffers and the kept publishes, and the runtime's `try_opening` (3b).
 - R4, the arena of the form leaves with 3d.
 
-### 11.2 The switch after R1
+### 11.2 The switch after R1b
 
-N5 (section 9) declares `on-use` once R1 builds: from then the preset's library, built with
+N5 (section 9) declares `on-use` once R1b builds (R1b landed on the lane, `d269055bd4`; the main
+session orders R2 to R4 before N5): from then the preset's library, built with
 `tables-on-use`, takes its tables' memory at their first rows, which is what the option states,
 while R2 to R4 change where the rest of its memory comes from and not when its tables take theirs.
-Until R1 the option would name a form the preset's library does not build (11.1). What N5 writes
+Until R1b the option would name a form the preset's library does not build: R1a reaches a library
+laid out from its config that takes no face beside its dial role's, and the preset's names `peer`
+and `multicast-transport` (11.1). What N5 writes
 is section 9's: the axis and its two options in `deploy/wz-config.toml`, `wz-capi-pico`'s
 feature `tables-on-use = ["wz-capi-coop?/tables-on-use"]` (the census of public features and
 the prose names read a new feature name, as every new one), the release profiles' `at-open`
@@ -1049,7 +2165,8 @@ the zenoh-pico defconfig), the resolver's features and the reference's leaving t
 (`wz_config.py` `engine_features`, `pico_reference`), C1nh's refusal of a release form that
 resolved to on-use and its second reading (9.2), and the generated files, which the main session
 regenerates (`wz_config.py --emit`). The guards of 9.2 stand as written but for the first: from
-R1 the build-time assertion reads `AtFirstUse` in a build of both features too.
+R1a the build-time assertion reads `AtFirstUse` in a build of both features whose session takes no
+other face, and from R1b in every build of both.
 
 The size case of the client's on-use form (`pico-client-coop-nostd-on-use`, 10.2) needs no axis,
 but it needs the pico crate's own feature: `case_build` names a case's features through the C
@@ -1066,3 +2183,45 @@ link memory's lent arm (3c, 1,000 to 2,000) and the doors' pools (N4, 2,000 to 3
 to 13,200 together (section 4), between a quarter and two fifths of the gap. The lane alone does
 not close it, and no figure here is measured: the case of 10.2, read at each of 3d, 3c and N4, is
 what says how much of that range is real.
+
+### 11.3 The size case and N5 as one commit, prepared
+
+What the commit holds once R1b builds, in the order the gates read it; the first `--measure` and
+every budget and ceiling row it fixes are the main session's:
+
+1. `crates/wz-capi-pico/Cargo.toml`: `tables-on-use = ["wz-capi-coop?/tables-on-use"]` with its
+   note (a form, not a capability: off in every build that names nothing, on where the axis of 9.1
+   resolves `on-use`); the census of public features (`feature_public_surface_census.py`) and the
+   prose names read the new name, as every new feature.
+2. `scripts/lib/capability_cost_gate.py`, beside `pico-client-coop-nostd` (its `Case` at this tree's
+   line 930): `Case("pico-client-coop-nostd-on-use", "wz-capi-pico", "libwz_capi_pico.so",
+   "os-host,link-udp,tables-on-use", <the measured budget>, forbid=<pico-client-coop-nostd's>,
+   require=<its> + (ON_USE_ROWS,), exports=443, **NOSTD_RELEASE_FORM, note=...)`, the client of the
+   zenoh-pico preset in the form that preset ships, divided by the same reference (10.2). Its
+   patterns: `ON_USE_ROWS = r"wz_session_core::on_use::take_rows"` (`#[inline(never)]`,
+   `crates/wz-session-core/src/on_use.rs`), REQUIRED of the on-use case and FORBIDDEN in every D12
+   pico case; and a body of the D12 open's lay-out, REQUIRED of `pico-client-coop-nostd` and
+   FORBIDDEN in the on-use case. Neither `StateRegion::place` nor `RegistryRegion::bind` is out of
+   line, so which body survives LTO in the D12 library is read off its `nm` first, and that one is
+   the witness. `HEAP_ABORT` stays forbidden in the on-use case: each allocation of the form answers
+   a refusal as a value (`SharedClaim::try_new`, `OwnBlock::take`, `OwnPlaced::written`,
+   `FirstUse`'s `take_rows`, `HeapKey`'s), and `handle_alloc_error` linked there is a finding.
+3. `deploy/size_ledger.json`: the case joins `cases`, `base_case` stays `pico-client-coop-nostd`, so
+   `--per-feature` steps from the D12 client to the on-use one by `tables-on-use` alone;
+   `size_ledger_gate.py`'s selftest set (`{"pico-client-coop-nostd", "pico-peer-coop",
+   "pico-api-coop-nostd"}`, line 3381) gains it; `deploy/pico_host_ceiling.json` gains its row from
+   the first reading.
+4. N5 as 11.2 lists it. A case of the preset's own library as it is (its features resolved from
+   `configs/zenoh-pico_defconfig`, as `pico-api-coop-nostd` reads the host-peer profile's by
+   `features_from`) changes form with N5, so it is read in the same commit: its budget and row move
+   by the main session's first reading of it, and section 4's figures are what that reading checks.
+   The crate's default build (`pico-default`) names no `tables-on-use` and keeps its form.
+5. The first `--measure`: `--check` fails a case with no budget, so the commit carries the budget
+   the main session measured. What it is read against: section 4 (the on-use client +100 to +300
+   until 3d, group A's about -6,300 at 3d, 3c's -1,000 to -2,000, N4's -2,000 to -3,000) and C1nh's
+   second reading (9.2, 3).
+
+The client case alone needs no axis and builds at R1a's tree (`os-host,link-udp` takes no face
+beside its dial role's): landed before N5, as 11.2's last paragraph lays out, it is read at each of
+3b to 3d and N4; landed with N5, it is the commit above. Either way its features and patterns are
+the same.

@@ -3,8 +3,9 @@
 
 //! The one statement of which builds keep the session's round of deliveries (`src/round.rs`) and
 //! the work form that steps the faces as tasks of one set, as the cfg `wz_round` every use reads,
-//! and of which give each value a session lends its links a lock of its own, as the cfg
-//! `wz_value_locks` the engine's form reads (`src/form.rs`, `LockForm::SessionLock`).
+//! of which give each value a session lends its links a lock of its own, as the cfg
+//! `wz_value_locks` the engine's form reads (`src/form.rs`, `LockForm::SessionLock`), and of
+//! which storage policy the session's tables take ([`TablePolicy`]), as the cfg of its name.
 //!
 //! The read that hands each record out as it is read (`direct`), the faces a session listening
 //! takes and the groups it joins among them, hands out every sample, token, query, reply and
@@ -26,15 +27,38 @@
 //! read task beside the program's calls sends from another thread (`threads`); else one place for
 //! every face, the session's lock on the one thread of the form, as the cfg `wz_one_send_place`
 //! reads it (`src/engine/direct.rs`). A build whose only face is the dial role's has neither.
+//!
+//! And of whether the build keeps the process's table of engines (`engine-rows`), through which
+//! an `EngineHandle` reaches an engine, as the metadata key `engine_rows` of
+//! `links = "wz_capi_coop"` (`1` kept, `0` not): a dependent reads it as
+//! `DEP_WZ_CAPI_COOP_ENGINE_ROWS`. A feature of the dependent cannot say it, since Cargo unifies
+//! this crate's features across the graph and any crate in it can turn the table on.
+//!
+//! It also states whether the session core answers a peer's Interest, as the cfg
+//! `wz_interest_answer` the engine's half of that answer reads. This crate's `interest-answer`
+//! asks the core for it, but Cargo unifies the core's features across the graph, so another crate
+//! can turn the core's on while this crate's stays off; the core's build script says what it built
+//! (`links = "wz_session_core"`), handed to this direct dependent as
+//! `DEP_WZ_SESSION_CORE_INTEREST_ANSWER`.
 
 /// The environment word that withholds the value locks a host lock would give ([`withheld`]).
 const VALUE_LOCKS: &str = "WZ_COOP_VALUE_LOCKS";
+
+/// The session core's statement of whether it answers a peer's Interest (`1` it does).
+const INTEREST_ANSWER: &str = "DEP_WZ_SESSION_CORE_INTEREST_ANSWER";
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(wz_round)");
     println!("cargo:rustc-check-cfg=cfg(wz_value_locks)");
     println!("cargo:rustc-check-cfg=cfg(wz_face_places)");
     println!("cargo:rustc-check-cfg=cfg(wz_one_send_place)");
+    println!("cargo:rustc-check-cfg=cfg(wz_lent)");
+    println!("cargo:rustc-check-cfg=cfg(wz_on_use)");
+    match table_policy() {
+        TablePolicy::Region => {}
+        TablePolicy::Lent => println!("cargo:rustc-cfg=wz_lent"),
+        TablePolicy::OnUse => println!("cargo:rustc-cfg=wz_on_use"),
+    }
     println!("cargo:rerun-if-env-changed={VALUE_LOCKS}");
     // Read whatever the target, so a word the script refuses is refused on every build.
     let withheld = withheld();
@@ -56,6 +80,45 @@ fn main() {
         } else {
             println!("cargo:rustc-cfg=wz_one_send_place");
         }
+    }
+    println!(
+        "cargo:engine_rows={}",
+        u8::from(set("CARGO_FEATURE_ENGINE_ROWS"))
+    );
+    println!("cargo:rustc-check-cfg=cfg(wz_interest_answer)");
+    println!("cargo:rerun-if-env-changed={INTEREST_ANSWER}");
+    if std::env::var(INTEREST_ANSWER).is_ok_and(|answers| answers == "1") {
+        println!("cargo:rustc-cfg=wz_interest_answer");
+    }
+}
+
+/// The storage policy of the session's tables (`wz_session_core::bounded::Storage`), chosen by two
+/// facts the features state apart: where the tables' counts come from, the region the build lays
+/// out or the config the open lays its plan out from (`runtime-plan`), and when the tables take
+/// their memory, at the open or at each table's first row (`tables-on-use`). `src/lib.rs` names
+/// the policy's type by the cfg of its name, and every item that differs by the policy reads that
+/// cfg, so where the counts come from and when the memory is taken are read apart.
+enum TablePolicy {
+    /// Placed in the region the build lays out, at the open (`Region`): neither feature.
+    Region,
+    /// Lent from the arena the open lays out from its config, at the open (`Lent`, `wz_lent`).
+    Lent,
+    /// Taken from the allocator at each table's first row (`OnUse`, `wz_on_use`).
+    OnUse,
+}
+
+/// The policy this build's features choose. `tables-on-use` takes the tables on use whichever way
+/// their counts come, the build's region or the config, and whatever faces the session takes: the
+/// sets of the faces beside its dial role's (`listen`, `group`) are counted with the dial face's
+/// and built as each face first comes. Both turn `runtime-plan` on, so a build that names neither
+/// is the region's.
+fn table_policy() -> TablePolicy {
+    let planned = set("CARGO_FEATURE_RUNTIME_PLAN");
+    let on_use = set("CARGO_FEATURE_TABLES_ON_USE");
+    match (planned, on_use) {
+        (_, true) => TablePolicy::OnUse,
+        (true, false) => TablePolicy::Lent,
+        (false, false) => TablePolicy::Region,
     }
 }
 

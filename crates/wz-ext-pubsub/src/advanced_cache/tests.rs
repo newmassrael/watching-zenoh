@@ -254,6 +254,7 @@ fn answer_from_ring_filters_and_replies() {
         &mut out,
         0,
         RepliesConfig::default(),
+        wz_session_core::time_range::core_float,
     );
     assert_eq!(
         out.keyed,
@@ -271,13 +272,21 @@ fn answer_from_ring_filters_and_replies() {
         &mut out,
         0,
         RepliesConfig::default(),
+        wz_session_core::time_range::core_float,
     );
     assert_eq!(out.keyed, vec![("demo/k".to_string(), vec![2])]);
 
     // No params → all three, each carrying its source_info (zid, eid, sn)
     // so a recovery subscriber can re-key / reorder the retransmissions.
     let mut out = Rec::default();
-    answer_from_ring(&ring, &query(None), &mut out, 0, RepliesConfig::default());
+    answer_from_ring(
+        &ring,
+        &query(None),
+        &mut out,
+        0,
+        RepliesConfig::default(),
+        wz_session_core::time_range::core_float,
+    );
     assert_eq!(out.keyed.len(), 3);
     assert_eq!(
         out.sourced,
@@ -329,7 +338,14 @@ fn cached_delete_replays_on_the_del_arm() {
     }
 
     let mut out = Rec::default();
-    answer_from_ring(&ring, &query(None), &mut out, 0, RepliesConfig::default());
+    answer_from_ring(
+        &ring,
+        &query(None),
+        &mut out,
+        0,
+        RepliesConfig::default(),
+        wz_session_core::time_range::core_float,
+    );
 
     assert_eq!(
         out.arms,
@@ -359,6 +375,7 @@ fn cached_delete_replays_on_the_del_arm() {
         &mut out,
         0,
         RepliesConfig::default(),
+        wz_session_core::time_range::core_float,
     );
     assert_eq!(
         out.arms,
@@ -375,6 +392,7 @@ fn cached_delete_replays_on_the_del_arm() {
         &mut out,
         0,
         RepliesConfig::default(),
+        wz_session_core::time_range::core_float,
     );
     assert_eq!(out.arms, vec!["del", "put"], "_max counts the Del");
 }
@@ -437,7 +455,14 @@ fn recovery_reply_carries_encoding_and_attachment() {
     ));
 
     let mut out = Rec::default();
-    answer_from_ring(&ring, &query(None), &mut out, 0, RepliesConfig::default());
+    answer_from_ring(
+        &ring,
+        &query(None),
+        &mut out,
+        0,
+        RepliesConfig::default(),
+        wz_session_core::time_range::core_float,
+    );
 
     assert_eq!(out.arms, vec!["put", "put", "del"], "ring order preserved");
     assert_eq!(
@@ -553,6 +578,7 @@ fn answer_from_ring_applies_time_filter() {
         &mut out,
         now,
         RepliesConfig::default(),
+        wz_session_core::time_range::core_float,
     );
     // threshold = 70s -> the 80s (payload 1) + 100s (payload 2) samples;
     // the 60s (payload 0) sample is dropped.
@@ -564,6 +590,53 @@ fn answer_from_ring_applies_time_filter() {
         ],
         "the _time filter drops the out-of-range sample"
     );
+}
+
+/// The numbers of a `_time` selector are read by the reader the handler was given: one that
+/// reads every number as a minute moves the window's start, and one that refuses them leaves the
+/// query with no time filter. Turned red by an answer that reads with core's reader whatever it
+/// was handed.
+#[test]
+fn answer_from_ring_reads_the_time_with_the_reader_named() {
+    fn a_minute(_text: &str) -> Result<f64, wz_session_core::time_range::FloatError> {
+        Ok(60.0)
+    }
+    fn refuses(_text: &str) -> Result<f64, wz_session_core::time_range::FloatError> {
+        Err(wz_session_core::time_range::FloatError::Invalid)
+    }
+    let now = 100u64 << 32;
+    let mut ring = VecDeque::new();
+    for (i, secs) in [30u64, 60, 100].into_iter().enumerate() {
+        ring.push_back(CachedSample::new(
+            "demo/k",
+            vec![i as u8],
+            Some(SourceInfo::new(&[0x07], 9, i as u32)),
+            TimestampHint::new(secs << 32, &[1]).unwrap(),
+            SampleKind::Put,
+        ));
+    }
+    let payloads = |read: wz_session_core::time_range::FloatRead| {
+        let mut out = Rec::default();
+        answer_from_ring(
+            &ring,
+            &query(Some(b"_time=[now(-30s)..]")),
+            &mut out,
+            now,
+            RepliesConfig::default(),
+            read,
+        );
+        out.keyed
+            .into_iter()
+            .map(|(_, p)| p[0])
+            .collect::<Vec<u8>>()
+    };
+    assert_eq!(payloads(wz_session_core::time_range::core_float), vec![2]);
+    assert_eq!(
+        payloads(a_minute),
+        vec![1, 2],
+        "the window starts a minute back"
+    );
+    assert_eq!(payloads(refuses), vec![0, 1, 2], "no window at all");
 }
 
 /// The handler a store gives out reads "now" from the function it was given, once per query,
@@ -668,7 +741,14 @@ fn the_cache_replies_on_its_own_qos_not_the_querys() {
             asked,
             &mut replies,
         );
-        answer_from_ring(&ring, &view, &mut responder, 0, configured);
+        answer_from_ring(
+            &ring,
+            &view,
+            &mut responder,
+            0,
+            configured,
+            wz_session_core::time_range::core_float,
+        );
         // The anti-vacuity leg, staged through the SAME responder.
         responder
             .send_reply(b"not-from-the-cache")
@@ -710,7 +790,14 @@ fn the_cache_replies_on_its_own_qos_not_the_querys() {
             asked,
             &mut replies,
         );
-        answer_from_ring(&ring, &view, &mut responder, 0, custom);
+        answer_from_ring(
+            &ring,
+            &view,
+            &mut responder,
+            0,
+            custom,
+            wz_session_core::time_range::core_float,
+        );
     }
     for reply in replies.iter() {
         // With the reply kinds this build has, `Reply` may be the only one, and the pattern then
@@ -864,6 +951,34 @@ fn a_record_is_its_header_and_its_parts_padded_to_eight() {
     assert_eq!(record(&[b'9'; 15]), Some(168));
     assert_eq!(10 * 152 + ring::RING_HEAD_BYTES, 1552);
     assert_eq!(10 * 168 + ring::RING_HEAD_BYTES, 1712);
+}
+
+/// A sample made on the heap and pushed into a cache in the ring is copied into a record, as a
+/// put's is, and the ring's depth bounds it. Turned red by a push that reaches the heap's form for
+/// a store in the ring, or leaves the sample out.
+#[test]
+fn a_sample_pushed_into_a_cache_in_the_ring_is_kept_as_a_record() {
+    let ring = test_ring::HeapRing::new(1024);
+    let store = ring_store(&ring, 2);
+    for sn in 0..3u32 {
+        store.cache_sample(CachedSample::new(
+            "demo/k",
+            vec![sn as u8],
+            Some(SourceInfo::new(&[0x07], 9, sn)),
+            TimestampHint::new(u64::from(sn) << 32, &[1]).unwrap(),
+            SampleKind::Put,
+        ));
+    }
+    assert_eq!(store.len(), 2, "the oldest went for the third");
+    let mut replies = Rec::default();
+    store.query_handler(|| 0)(&query(None), &mut replies);
+    assert_eq!(
+        replies.keyed,
+        vec![
+            ("demo/k".to_string(), vec![1]),
+            ("demo/k".to_string(), vec![2])
+        ]
+    );
 }
 
 /// A cache in the ring answers as one on the heap does: its newest samples of its depth, oldest

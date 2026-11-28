@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::CancellableFan;
 use wz_capi_port::{
-    BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, HeldSlab,
+    BatchStep, EntityRow, FanoutError, FilterId, FilterPlane, FilteredPut, HeldQueryId, HeldSlab,
     LivelinessSink, MatchId, MatchingSink, PeerIdentity, QblId, QueryableSink, Refusal,
     ReplyCallback, SessionEngine, StatementNotHonoured, SubId, SubscriberSink, Tick, TickerId,
     TokenId, WireKey,
@@ -390,7 +390,7 @@ impl SessionEngine for RouterState {
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
+    ) -> Result<wz_capi_port::Declared<EntityRow>, Refusal> {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         let deliveries = self.engine.deliveries;
@@ -418,12 +418,16 @@ impl SessionEngine for RouterState {
                     key,
                 },
             );
-        Ok(wz_capi_port::Declared { id, key: lent })
+        Ok(wz_capi_port::Declared { id, key: lent }.by_id())
     }
 
     // Returns once the callback has been let go of after its last call, unless this thread
-    // delivers for the node now (`SinkRelease::wait`).
-    fn undeclare_subscriber(&self, id: SubId) {
+    // delivers for the node now (`SinkRelease::wait`). The node names its entities by their ids,
+    // which the rows it answers are.
+    fn undeclare_subscriber(&self, row: EntityRow) {
+        let Some(id) = row.as_id() else {
+            return;
+        };
         let gone = self
             .engine
             .subscriptions
@@ -590,7 +594,7 @@ impl SessionEngine for RouterState {
         allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<wz_capi_port::Declared<QblId>, Refusal> {
+    ) -> Result<wz_capi_port::Declared<EntityRow>, Refusal> {
         // The id first, so a session with none left hosts nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         // The node's queries are held through the node itself, which the one sink is called with.
@@ -616,10 +620,13 @@ impl SessionEngine for RouterState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, Hosted { host, key });
-        Ok(wz_capi_port::Declared { id, key: lent })
+        Ok(wz_capi_port::Declared { id, key: lent }.by_id())
     }
 
-    fn undeclare_queryable(&self, id: QblId) {
+    fn undeclare_queryable(&self, row: EntityRow) {
+        let Some(id) = row.as_id() else {
+            return;
+        };
         let hosted = self
             .engine
             .queryables
@@ -658,7 +665,7 @@ impl SessionEngine for RouterState {
         keyexpr: &str,
         _wire: WireKey,
         _retraction: Option<RetractionKey>,
-    ) -> Result<TokenId, Refusal> {
+    ) -> Result<EntityRow, Refusal> {
         // The id first, so a session with none left declares nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         let host = self.declare_token(keyexpr);
@@ -667,10 +674,13 @@ impl SessionEngine for RouterState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id, host);
-        Ok(id)
+        Ok(EntityRow::by_id(id))
     }
 
-    fn undeclare_liveliness_token(&self, id: TokenId) {
+    fn undeclare_liveliness_token(&self, row: EntityRow) {
+        let Some(id) = row.as_id() else {
+            return;
+        };
         let host = self
             .engine
             .tokens
@@ -688,7 +698,7 @@ impl SessionEngine for RouterState {
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
+    ) -> Result<wz_capi_port::Declared<EntityRow>, Refusal> {
         // The id first, so a session with none left subscribes nothing.
         let id = self.engine.entity_id().ok_or(Refusal::NoEntityId)?;
         let deliveries = self.engine.deliveries;
@@ -717,7 +727,7 @@ impl SessionEngine for RouterState {
                     key,
                 },
             );
-        Ok(wz_capi_port::Declared { id, key: lent })
+        Ok(wz_capi_port::Declared { id, key: lent }.by_id())
     }
 
     fn get_on_wire(

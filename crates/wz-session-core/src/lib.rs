@@ -818,6 +818,11 @@ pub mod plane_lock;
 /// registered in, as the session's state ends them. Unconditional: its rows are a bounded table.
 pub mod pending_get;
 
+/// The legs of the gets pending on one face: which of its peer's answers names which get of the
+/// session's tables, and how a Response of that peer is read. Unconditional: its rows are a
+/// bounded table.
+pub mod get_legs;
+
 /// The session's round of deliveries: what the session hands its callbacks under its lock, held
 /// until the lock is let go and handed to them after it, with the calls it owes and the kinds of
 /// record it keeps named by the engine. Its rows are shared with the deliveries across threads,
@@ -2237,6 +2242,12 @@ pub mod session_timeouts;
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod session_actions;
 
+/// What one transport transmits with, held apart from the session around it so that a transport
+/// that is not a unicast session holds the same state: the conduits, the frame numbers and what
+/// its emit counts.
+#[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+pub mod transport_tx;
+
 // The sends a sender's owner defers while it holds a lock of its own, kept in order: a unicast
 // session's and a multicast group producer's. A plain comment, not an outer doc: the module
 // documents itself with `//!`. The heap profile's, as the block-first hand-off is: a deferred
@@ -2296,9 +2307,8 @@ pub mod unicast_rx;
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod transport_place;
 
-/// The unicast transport of a session that holds one face as one value: its link's life, its
-/// receive and its timers, handed the link's reports, its datagrams and the time. Gated like
-/// [`unicast_rx`].
+/// The unicast transport of the session over one link as one value: its receive and its timers,
+/// handed the link's datagrams and the time. Gated like [`unicast_rx`].
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod unicast_transport;
 
@@ -2316,6 +2326,16 @@ pub mod lifecycle_wire;
 // tier select.
 #[cfg(feature = "storage-profile")]
 pub mod lifecycle_node;
+
+// The reference monitor every lifecycle verb of both profiles is judged by (decision D16): one
+// function over the request, a policy that is data, and the record of every decision. Gated with
+// the contract it judges for.
+#[cfg(feature = "storage-profile")]
+pub mod lifecycle_monitor;
+// Decision D17: a lifecycle query that carries a sealed command, read the same way at the in-band
+// entry point of either profile. The verification itself is `sealed-commands`.
+#[cfg(feature = "storage-profile")]
+pub mod sealed_command;
 
 // The lifecycle reset's table of generations (decision D6): the rule is the SCE algorithm
 // `sources/algorithms/take_generation.scxml`, and each profile states the table's bound.

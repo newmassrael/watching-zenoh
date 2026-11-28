@@ -1180,6 +1180,71 @@ decides it, not the lane. Nothing is changed for it. The tests stay ignored wher
 own sockets no multicast route, and run where one is given (Layer M); `a_quiet_read` is read on
 such a host before it is taken as held.
 
+### 7.14 Merge of integration j: main's typed sink, carried life and on-use tables over the table
+
+Main (integration j, `39fd76b09c`) was merged into the lane with its own changes kept whole and
+the lane's structure kept where the two met. What each meeting came to:
+
+- **Link cells** (`wz-runtime-coop` `link_cells.rs`, `sync.rs`, `transport/state.rs`). R4's
+  `ActionsCell` and `part_in_of` stay (a link's halves beside its actions, no pair cell);
+  `part_in_of` takes main's `&S: CellSource<N::Flag>` and makes its cell with `head_of`, as
+  `in_cells_of` and `claim_of` do. Main's heap kind of the links' cells (`LinksOnHeap<K>`)
+  places the halves as its kind does (`type Halves = K::Halves`). The transport's state keeps
+  main's cell fields, counted by the stack's kind, and the lane's `place_actions`, which writes
+  the `ActionsCell` in place; nothing places halves apart.
+- **The registry's held set** (`engine/registry`). R6's one `HeldPlaces` stays, now read through
+  main's description walk: its line is a sequence of the marks past the dial role's counted
+  `RowCount::HeldSets`, empty in a build of that face alone, with one count for it
+  (`HeldPlaces::rows_of(sets) = sets - 1`) read by the registry's counts, the plan and the tests.
+  `RowCount::HeldSets`'s documentation now says a row for each set past the dial role's.
+  `owed::admits_face` reads the marks past the dial role's. The bodies of `counted.rs`,
+  `described.rs` and `placed.rs`, and the faces' trait (`lose_face`), are main's.
+- **The engine and its groups** (`engine.rs`, `engine/group.rs`). Main's generic sink (`D`) runs
+  through the lane's link cells (`ActionsCell<LinkRuntime<C, D>, CoopTime<C>>`); `read_groups`
+  takes no arguments, and the announcements of a subscriber and a queryable to the groups go
+  through the lane's `announce_*_to_groups`. A group's members are told through main's face-row
+  form; a round's group seed wraps its input gate in main's `GroupInputGate`.
+- **The faces' table** (`engine/direct.rs`). The lane's one table of rows (`FaceSlots`, the dial
+  role's first), `Held` in place of main's `HeldSend` chain, `hold_faces` and the group rows
+  stepped in the read's walk stay; main's typed sink is carried through them (`Held<'a, C, D>`,
+  `HeldFaces<C, D>`, `FaceTx<'a, C, D>`, `KernelCount<C, D>`, each face's wire
+  `Wire<C, SinkOf<L>>`), and main's carried life (`DirectLinkIo`, `link_life::carry`), its
+  refusal kept with no text (`WalkRefusal`) and its dial named by the life's row are taken
+  whole.
+- **The table where the tables take their memory on use.** Main made the faces past the dial
+  role's on use (`OnceRows`, each at its place's first face) beside an inline dial role's face;
+  the lane has no inline dial face where the session takes faces. The two meet as one table:
+  where `listen` or `group` is built and the tables take their memory on use, `FaceSlots` is
+  `OnceRows<DirectFace>` over every place, its row `0`, the dial role's, made at the open
+  (`DirectFaces::counted`, so `dial()` reads that row with no bound looked at), every other row
+  made at its place's first face (`DirectFaces::made_at`, called by a port's take and an attach
+  as main does) or at its group's join (`CoopEngine::open_links` makes the row before it marks
+  it the group's; a join the allocator has no room for refuses the open as memory it cannot be
+  given). The arena lays no row of the table in that form (`DIRECT_FACE_ROWS`), as main's
+  no-arena rule asks. The walks that name a row by its place read it with the row's index, not
+  by counting the faces made (`DirectFaces::walked_at`: the quiet run, a publish's legs, the
+  groups' rows), so a row not made yet keeps the places after it where they are. The Router of a
+  face made on use (`Core::face_router`) moved beside the table, since a group's row asks it in a
+  build without `listen`; `OnceRows`' shared reads and its make are built for `group` as for
+  `listen`.
+
+**Held by** the tests already standing over each part, run in the on-use form too:
+`tests::on_use::an_on_use_face_takes_its_read_slot_at_its_places_first_face` (no row past the
+dial role's made at the open, one by an attach: red if `DirectFaces::counted` makes every row's
+face), `tests::face_routers` (each row's own Router, every row made first by
+`make_every_face`), `tests::direct_receive::the_dial_roles_row_lies_where_the_faces_table_does`
+(the dial role's row is in the engine exactly where no place lies past it),
+`tests::group::each_groups_row_is_marked_at_its_join_and_walked_by_the_groups_read` (with
+`tables-on-use`: red if the join makes no row, when `hold_group` finds none to mark) and
+`tests::group::every_row_past_the_dial_roles_rests_from_its_making_the_groups_among_them` (a row
+not made rests, as a made one does from its making), and `once_rows`' own tests.
+
+**Expected.** The zenoh-pico preset's cases (no `listen`, no `group`) compile the inline one-row
+table as before; main's typed sink takes the link's table out of their send and receive paths,
+which is main's gain and not moved here. The on-use builds that take faces lend no row from the
+arena and make the dial role's face at the open in an allocation of its own; their walks read the
+table's rows through one load of each row's pointer, as main's taken faces did.
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)

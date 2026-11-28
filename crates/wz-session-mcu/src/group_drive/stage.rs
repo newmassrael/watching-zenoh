@@ -757,6 +757,14 @@ impl GroupTxStage {
         outcome
     }
 
+    /// Whether a push of the session's, or a flush of the batch window, holds the conduits now. A
+    /// message pushed meanwhile could take its sequence number only once they are let go, so the
+    /// holder of the group's session reads no input while this answers `true`, and what its
+    /// dispatch would answer waits in the socket.
+    pub fn sending(&self) -> bool {
+        self.inner.conduits.try_borrow_mut().is_err()
+    }
+
     /// Count a message whose push answered `outcome` into the counters attached (`attach_stats`),
     /// one network message of `tally`'s class, when it entered the stage: put on its lane, or
     /// kept while the conduits are held.
@@ -1489,6 +1497,14 @@ impl<T: GroupTransport> GroupLink<T> {
     }
 }
 
+impl<T: GroupTransport> GroupLink<T> {
+    /// Offer `datagram` to the socket now: what the socket made of it, or `None` where nothing
+    /// may be written now (`SendNow`).
+    pub(super) fn send_now(&self, datagram: &[u8]) -> Option<GroupSend> {
+        SendNow::send_now(&*self.0, datagram)
+    }
+}
+
 impl<T: GroupTransport> SendNow for LinkCell<T> {
     fn send_now(&self, datagram: &[u8]) -> Option<GroupSend> {
         if !self.open.get() {
@@ -2164,6 +2180,22 @@ mod tests {
         );
     }
 
+    /// The stage says it is sending for exactly as long as a push holds its conduits, which is
+    /// what keeps the group's session from reading inside that push's wait.
+    #[test]
+    fn the_stage_is_sending_while_a_push_holds_its_conduits() {
+        let stage = GroupTxStage::new(&params());
+        assert!(
+            !stage.sending(),
+            "nothing holds the conduits of a new stage"
+        );
+        {
+            let _held = stage.inner.conduits.borrow_mut();
+            assert!(stage.sending(), "a push holds them");
+        }
+        assert!(!stage.sending(), "let go once the push is done");
+    }
+
     /// A message lent for the call is put on its lane as an owned one is; one pushed while another
     /// push holds the conduits is kept encoded and framed behind it once they are let go, with no
     /// drop counted.
@@ -2195,6 +2227,47 @@ mod tests {
         let kept = stage.take().expect("the kept one is framed behind it");
         assert!(first.bytes.ends_with(b"first") && kept.bytes.ends_with(b"first"));
         assert_eq!((first.sn, kept.sn), (0, 1));
+    }
+
+    /// A put whose congestion control is `Block`, pushed while another push holds the conduits, is
+    /// not lost: it is kept, framed behind the holder's message once the conduits are let go, and
+    /// counts no drop. Turned red by a refusal of a blocking message that finds the conduits held.
+    #[test]
+    fn a_blocking_put_pushed_while_the_conduits_are_held_arrives() {
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::sample::QosLevel;
+        let params = params();
+        let stage = GroupTxStage::new(&params);
+        let nothing = || {};
+        let host = FullHost::new(&nothing);
+        let push =
+            wz_session_core::lent_push::literal_put("demo/block", b"blocking").expect("a put");
+        let body = |sink: &mut wz_session_core::tx_buf::TxSink<'_>| push.encode(sink);
+        let blocking = MulticastTxEncoded {
+            framing: MulticastTxFraming::OwnBand {
+                qos: QosLevel::from_parts(Priority::DEFAULT, CongestionControl::Block, false),
+                reliable: true,
+            },
+            size: 64,
+            body: &body,
+            tally: MulticastTxTally::new(Priority::DEFAULT, NetworkStatsClass::unread()),
+        };
+        {
+            let _held = stage.inner.conduits.borrow_mut();
+            assert_eq!(stage.push_encoded(&blocking, &host), PushOutcome::Pushed);
+            assert!(
+                stage.take().is_none(),
+                "nothing is framed while they are held"
+            );
+        }
+        stage.push_deferred();
+        assert_eq!(
+            stage.drops(multicast_tx_encoded_conduit(&blocking, &params)),
+            0
+        );
+        let datagram = stage.take().expect("the blocking put arrives");
+        assert!(datagram.bytes.ends_with(b"blocking"));
+        assert_eq!(datagram.sn, 0);
     }
 
     #[test]

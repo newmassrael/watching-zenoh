@@ -76,7 +76,7 @@ pub(crate) enum Kind {
     ))]
     DeclWatch = 18,
     /// A transport events listener, held while its session's hub can reach it
-    /// (`crate::connectivity::TransportPlace`).
+    /// (`crate::connectivity::ListenerPlace`).
     #[cfg(feature = "connectivity")]
     TransportEventsListener = 19,
     /// An advanced publisher (`crate::advanced::AdvPubState`). Its number follows those the
@@ -87,7 +87,7 @@ pub(crate) enum Kind {
     #[cfg(feature = "advanced")]
     AdvancedSubscriber = 21,
     /// A link events listener, held while its session's hub can reach it
-    /// (`crate::connectivity::LinkPlace`).
+    /// (`crate::connectivity::ListenerPlace`, as a transport events listener's).
     #[cfg(feature = "connectivity")]
     LinkEventsListener = 22,
 }
@@ -329,7 +329,7 @@ unsafe fn give_back_lent_place(place: NonNull<u8>, lender_at: usize) {
 /// `object` is the object of a place [`Slot::take_entity`] lent for a `T` and filled, read through
 /// the pointer the place was filled at, and the place stands for `'a`.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) unsafe fn lent_engine<'a, T>(object: *const T) -> &'a crate::session::EngineHold {
+unsafe fn lent_engine<'a, T>(object: *const T) -> &'a crate::session::EngineHold {
     // SAFETY: the caller's: the object is the start of an `InSession<T>` (`repr(C)`, its value
     // first), whose lender the take wrote `LENDER_AT` bytes in, where it stays until the place goes
     // back.
@@ -340,6 +340,49 @@ pub(crate) unsafe fn lent_engine<'a, T>(object: *const T) -> &'a crate::session:
             .cast::<core::mem::ManuallyDrop<Lender>>()
     };
     &lender.engine
+}
+
+/// An entity's object that reaches the engine of the session it was declared on
+/// ([`entity_engine`]): on the cooperative engine through the one count its place's lender keeps,
+/// so the object keeps none beside it; on the tokio engine, whose places are its pools' and hold
+/// none, through the count the object keeps.
+pub(crate) trait SessionEntity {
+    /// What the entity's place was taken for: the object itself, or the [`Answering`] the object
+    /// begins.
+    #[cfg(not(feature = "engine-tokio"))]
+    type Placed;
+
+    /// The count of the engine the object keeps on the tokio engine.
+    #[cfg(feature = "engine-tokio")]
+    fn kept_engine(&self) -> &crate::session::EngineHold;
+}
+
+/// The engine of the session the entity whose object is at `object` was declared on: the one
+/// every door of the entity reads, its undeclaration included.
+///
+/// # Safety
+/// `object` is a live object [`Slot::take_entity`] placed and filled for a `T::Placed` (the
+/// object first), read through the pointer the place was filled at, and the place stands for
+/// `'a`.
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) unsafe fn entity_engine<'a, T: SessionEntity>(
+    object: *const T,
+) -> &'a crate::session::EngineHold {
+    // SAFETY: the caller's: the object begins a filled `T::Placed` its session's arena lent.
+    unsafe { lent_engine(object.cast::<T::Placed>()) }
+}
+
+/// The engine of the session the entity whose object is at `object` was declared on, the count
+/// the object keeps on the tokio engine.
+///
+/// # Safety
+/// `object` is a live object, which stands for `'a`.
+#[cfg(feature = "engine-tokio")]
+pub(crate) unsafe fn entity_engine<'a, T: SessionEntity + 'a>(
+    object: *const T,
+) -> &'a crate::session::EngineHold {
+    // SAFETY: the caller's.
+    unsafe { (*object).kept_engine() }
 }
 
 /// The entity kind of the engine's arena an object of `kind` is placed as, and the layout of its
@@ -402,7 +445,7 @@ const fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::all
         #[cfg(feature = "connectivity")]
         Kind::TransportEventsListener => Some((
             EntityKind::TransportEventsListener,
-            InSession::<crate::connectivity::TransportPlace>::LAYOUT,
+            InSession::<crate::connectivity::ListenerPlace>::LAYOUT,
         )),
         #[cfg(feature = "advanced")]
         Kind::AdvancedPublisher => Some((
@@ -417,7 +460,7 @@ const fn entity_place(kind: Kind) -> Option<(wz_capi_port::EntityKind, core::all
         #[cfg(feature = "connectivity")]
         Kind::LinkEventsListener => Some((
             EntityKind::LinkEventsListener,
-            InSession::<crate::connectivity::LinkPlace>::LAYOUT,
+            InSession::<crate::connectivity::ListenerPlace>::LAYOUT,
         )),
         _ => None,
     }
@@ -578,7 +621,7 @@ impl<T, K> Answering<T, K> {
     /// # Safety
     /// `at` is valid for writes of a `Self`, aligned for it and holds none; `write` leaves a valid
     /// `T` and `write_kept` a valid `K` in the place each is handed.
-    #[cfg(any(feature = "query", feature = "connectivity"))]
+    #[cfg(any(feature = "query", feature = "connectivity", feature = "advanced"))]
     pub(crate) unsafe fn write_at(
         at: *mut Self,
         write: impl FnOnce(NonNull<T>),

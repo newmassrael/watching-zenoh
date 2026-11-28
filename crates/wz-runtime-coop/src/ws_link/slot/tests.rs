@@ -59,8 +59,9 @@ impl StreamSocket for Conn {
     type Link<
         B: crate::link_storage::RxStore + 'static,
         X: crate::link_storage::TxStore + 'static,
+        W: crate::session_drive::InputWaiter,
     >
-        = StreamDriver<Self, B, X>
+        = StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
     where
         Self: 'static;
 

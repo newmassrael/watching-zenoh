@@ -501,7 +501,6 @@ mod tests {
     // leaked pool of one on `static-link-storage`, so these tests run on both.
     use wz_link_lwip::test_bind::session_rx as bind_session_rx;
     use wz_session_core::link::LinkEndsText;
-    use wz_session_core::tx_buf::TxBuf;
     use wz_session_core::tx_lease::TxLease;
 
     /// A driver whose peer is its own socket, so what it sends loops back.
@@ -535,7 +534,7 @@ mod tests {
         let mut lease =
             TxLease::acquire(&driver, frame.len(), Priority::DEFAULT).expect("the slot is lent");
         std::assert!(lease.capacity() >= frame.len());
-        lease.append(frame).expect("fits the slot");
+        lease.frame_mut().append(frame).expect("fits the slot");
         std::assert_eq!(
             lease.send(Reliability::Reliable, Priority::DEFAULT),
             LinkSendOutcome::Sent
@@ -570,7 +569,7 @@ mod tests {
             asked > b"short".len(),
             "CONTROL: the ask is larger than the write"
         );
-        lease.append(b"short").expect("fits");
+        lease.frame_mut().append(b"short").expect("fits");
         std::assert_eq!(
             lease.send(Reliability::Reliable, Priority::DEFAULT),
             LinkSendOutcome::Sent
@@ -588,7 +587,7 @@ mod tests {
         for _ in 0..3 {
             let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT)
                 .expect("the slot came back after each abandoned lend");
-            lease.append(b"never sent").expect("fits");
+            lease.frame_mut().append(b"never sent").expect("fits");
             drop(lease);
         }
         std::assert!(delivered(&link, &driver).is_empty());

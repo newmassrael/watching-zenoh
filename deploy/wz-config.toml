@@ -1035,6 +1035,37 @@ abis = ["core", "pico"]
 implies = []
 help = "The node clock an advanced publisher stamps from: a hybrid logical clock under the clock-quality-stamping policy, whose trusted-only refuses a sample while the clock is not trusted. Off, a sample takes the system clock's time, ordered by the session's last time given, as zenoh-pico's publisher stamps with z_timestamp_new, and trusted-only refuses none."
 
+# A scouting window's socket joined to the scouting group, beside its ask sockets. On in a build
+# that names nothing and off in the zenoh-pico preset: zenoh-pico's scout opens a unicast link per
+# interface and reads on those alone, failing with none
+# (`vendor/zenoh-pico/src/session/scout.c` @
+# `return _z_scout_links_size(&scout->_links) > 0 ? _Z_RES_OK : _Z_ERR_TRANSPORT_OPEN_FAILED;`).
+# A behaviour of the window, not a door, so it implies nothing: a default-on switch that selected
+# `scout` would turn the plane back on in a build that turned it off. Without `scout` there is no
+# window to add the socket to. The tokio engine scouts on the group whatever is named.
+[[capability]]
+id = "scout-group-socket"
+kconfig = "WZ_CAP_SCOUT_GROUP_SOCKET"
+os_needs = ["multicast"]
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "A scouting window also reads on a socket joined to the scouting group, and asks on it when no interface can be asked on (wz-own). Off, a window has its per-interface ask sockets alone, as zenoh-pico's scout does: a Hello sent to the group rather than to the asker is not heard, and a host that lists no interface finds nobody."
+
+# A scouting window's verdict on each datagram it does not take as a Hello. On in a build that names
+# nothing and off in the zenoh-pico preset: zenoh-pico's scout answers one error code for what it
+# does not take (`vendor/zenoh-pico/src/session/scout.c` @ `ret = _Z_ERR_MESSAGE_UNEXPECTED;`) and
+# logs one line. A behaviour of the window, not a door, so it implies nothing, as
+# `scout-group-socket`. The tokio engine classifies whatever is named.
+[[capability]]
+id = "scout-rx-verdicts"
+kconfig = "WZ_CAP_SCOUT_RX_VERDICTS"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "A scouting window classifies each datagram it does not take as a Hello (its own Scout looped back, another node's Scout, a Hello with no locator, an unknown message, bytes that do not decode), counts it by verdict and logs it at the verdict's severity (wz-own). Off, a window counts what it did not take in one count, as zenoh-pico's scout names one error; a datagram not taken is dropped either way."
+
 # A clock the application registers (the observation plane's time, a clock with a quality): a
 # hardware clock or a time
 # master the device has, which the node reads in place of the system clock. wz's own door, with no
@@ -4484,6 +4515,27 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the transports a listener was told: zenoh-pico calls its connectivity listeners from the task that saw the transport come or go, so it loses no event and keeps none, and zenoh tells them under one lock."
 
 [[limit]]
+id = "MAX_SCOUT_INTERFACES"
+kconfig = "WZ_LIMIT_MAX_SCOUT_INTERFACES"
+kind = "bound"
+driven = "local"
+default = 10
+storage = "capacity"
+scope = "runtime"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The interfaces a scouting window asks on, one socket each, held in rows of
+the window's own beside the scouting group's socket. An interface past them
+is left out of the window and counted, and the window asks on the others.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds the interfaces a zenoh scout asks on: it asks on every interface that can carry multicast. zenoh-pico holds its scout's links in a vector of Z_MAX_NUM_SCOUT_INTERFACES, a constant of its configuration header and no build switch (10, and 0 with scouting off), and leaves out an interface past it with a warning (`vendor/zenoh-pico/src/session/scout.c` @ `_Z_WARN(\"Scouting link limit reached, ignoring interface: %s\", iface_name);`); the default is that constant."
+
+[[limit]]
 id = "MAX_STATIC_CONNECT"
 kconfig = "WZ_LIMIT_MAX_STATIC_CONNECT"
 kind = "bound"
@@ -6794,7 +6846,7 @@ first and drop markers of a Fragment are used when the peer states 1 too.
 [[protocol_fact]]
 id = "batch-compression"
 pico = "no"
-lacks = ["crates/wz-capi-pico/Cargo.toml @ compression"]
+lacks = ["crates/wz-capi-pico/Cargo.toml @ transport-compression", "crates/wz-capi-pico/Cargo.toml @ session-extcompression"]
 help = '''
 Whether a session offers and accepts batch compression. The pico ABI never
 compiles the compression handshake: its crate takes the session model without
@@ -6833,7 +6885,7 @@ states it with the router-node capability instead.
 id = "tcp-link"
 pico = "yes"
 c = "yes"
-holds = ["crates/wz-capi-core/Cargo.toml @ transport-link-tcp", "crates/wz-runtime-posix/src/links.rs @ pub type PosixLinks = wz_runtime_coop::ip_stack::IpLinks<PosixUdpSocket, PosixTcpDial>;", "crates/wz-runtime-zephyr/src/links.rs @ pub type ZephyrIpLinks = wz_runtime_coop::ip_stack::IpLinks<ZephyrUdpSocket, ZephyrTcpDial>;"]
+holds = ["crates/wz-capi-core/Cargo.toml @ transport-link-tcp", "crates/wz-runtime-posix/src/links.rs @ wz_runtime_coop::ip_stack::IpLinks<PosixUdpSocket, PosixTcpDial,", "crates/wz-runtime-zephyr/src/links.rs @ wz_runtime_coop::ip_stack::IpLinks<ZephyrUdpSocket, ZephyrTcpDial,"]
 help = '''
 Whether a session runs over the tcp link, a link that does not keep message
 boundaries. Every engine and platform the ABIs build for has it: the tokio

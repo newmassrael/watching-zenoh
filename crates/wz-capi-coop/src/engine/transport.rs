@@ -25,7 +25,7 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> TransportFaces for Face<C
     type Clock = C;
     type Lock = SessionLock;
     type Links = L;
-    type Session = LinkSession<C>;
+    type Session = LinkSession<C, SinkOf<L>>;
     type Wire = FaceLink<C, L>;
     type Face = Self;
     // One table of the faces in every build, its places where the build keeps them: one place
@@ -42,6 +42,7 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> TransportFaces for Face<C
     // (`super::direct`).
     #[cfg(not(wz_round))]
     type Router = ();
+    type Policy = crate::StatePolicy;
 }
 
 /// What the session tells the groups it joined of its entities (`group`): this engine's, since

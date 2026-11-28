@@ -4288,7 +4288,7 @@ pub static RUNTIME_LIMITS: [LimitEntry<RuntimeLimits>; RUNTIME_LIMIT_COUNT] = [
 /// snapshot holds it and a document that states it is refused by name. The build's value is
 /// the storage itself, except for those in [`PROCESS_OPEN_COUNTS`], whose build value is the
 /// most the process reserves.
-pub static CAPACITY_LIMITS: [&str; 43] = [
+pub static CAPACITY_LIMITS: [&str; 44] = [
     "MATCH_MEMO_FIXED_SLOTS",
     "MATCH_MEMO_KEY_BYTES",
     "HELD_SESSIONS",
@@ -4329,6 +4329,7 @@ pub static CAPACITY_LIMITS: [&str; 43] = [
     "MAX_CONNECTIVITY_REPLAY_EVENTS",
     "MAX_FACE_WATCH_ROWS",
     "MAX_CONNECTIVITY_TOLD_ROWS",
+    "MAX_SCOUT_INTERFACES",
     "MAX_PEER_NODES",
     "HANDSHAKE_COOKIE_BYTES",
     "EVENT_RECORD_ARGS",

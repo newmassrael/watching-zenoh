@@ -128,6 +128,8 @@ default = [
     "link-admission",
     "accept-cookie",
     "face-send-places",
+    "scout-group-socket",
+    "scout-rx-verdicts",
 ]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
@@ -155,6 +157,7 @@ engine-tokio = [
     "wz-host-sync/std",
     "wz-capi-port/std",
     "wz-ext-pubsub?/std",
+    "wz-ext-pubsub?/cache-heap",
     "wz-node-time?/std",
 ]
 # `os-zephyr`: the library in a Zephyr image, without `std`: the cooperative engine over Zephyr's
@@ -747,6 +750,23 @@ advanced-source-retention = [
 # nothing, and the library links neither the clock nor its standing. The tokio engine holds the
 # clock with `advanced` whatever is named; `clock-source` brings its own.
 advanced-node-clock = ["wz-capi-core?/advanced-node-clock", "wz-node-time?/time-hlc"]
+# `scout-group-socket`: a scouting window's socket joined to the scouting group beside its ask
+# sockets, which zenoh-pico's scout does not open (it reads on a link per interface alone): it hears
+# a Hello sent to the group rather than to the asker, and asks itself when no interface could be
+# asked on. On in a build that names nothing and off in the zenoh-pico preset, where a window has
+# its ask sockets alone and a host that lists no interface finds nobody, as zenoh-pico's scout
+# fails with no link. A behaviour of the window's sockets (`wz-capi-coop`'s feature of the same
+# name, over `wz-runtime-posix`'s); the tokio engine scouts on the group whatever is named. A
+# build without `scout` has no window, so the forwards are weak.
+scout-group-socket = ["wz-capi-core?/scout-group-socket", "wz-capi-coop?/scout-group-socket"]
+# `scout-rx-verdicts`: a scouting window's verdict on each datagram it does not take as a Hello
+# (its own Scout looped back, another node's Scout, a Hello with no locator, an unknown MID, bytes
+# that do not decode), counted by verdict and logged at the verdict's severity, which zenoh-pico's
+# scout does not name (one error code, one line). On in a build that names nothing and off in the
+# zenoh-pico preset, where a window counts them in one count and classifies none. A behaviour of
+# the window (`wz-session-core`'s feature, through `wz-capi-coop`'s); the tokio engine
+# classifies whatever is named.
+scout-rx-verdicts = ["wz-capi-core?/scout-rx-verdicts", "wz-capi-coop?/scout-rx-verdicts"]
 # The peer's behaviours that zenoh-pico's peer does not have, each on in a build that names nothing
 # and off in the zenoh-pico preset (deploy/wz-config.toml), as the send's above.
 #

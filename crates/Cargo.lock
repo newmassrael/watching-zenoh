@@ -4084,6 +4084,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-command-seal"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ring",
+ "sha2",
+]
+
+[[package]]
 name = "wz-conformance-build"
 version = "0.1.0"
 dependencies = [
@@ -4271,6 +4280,7 @@ dependencies = [
  "wz-capture",
  "wz-codecs",
  "wz-codegen-build",
+ "wz-command-seal",
  "wz-mesh-client",
  "wz-packet-fixtures",
  "wz-runtime-tokio",
@@ -4495,6 +4505,7 @@ dependencies = [
  "tokio-serial",
  "tokio-tungstenite",
  "tokio-vsock",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "walkdir",
@@ -4507,6 +4518,7 @@ dependencies = [
  "wz-codecs",
  "wz-codecs-test-support",
  "wz-codegen-build",
+ "wz-command-seal",
  "wz-ext-pubsub",
  "wz-host-net",
  "wz-node-time",
@@ -4583,6 +4595,7 @@ dependencies = [
  "sha3",
  "wz-codecs",
  "wz-codecs-test-support",
+ "wz-command-seal",
  "wz-runtime-core",
  "wz-session-core",
  "wz-session-core-test-support",
@@ -4697,6 +4710,7 @@ dependencies = [
  "rustls",
  "wz-capi-coop",
  "wz-capi-port",
+ "wz-command-seal",
  "wz-runtime-coop",
  "wz-runtime-posix",
  "wz-session-core",

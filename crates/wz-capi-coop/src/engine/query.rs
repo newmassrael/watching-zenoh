@@ -43,16 +43,15 @@
 //! the session's: a router that asked on a link since lost will never read the answer, and a new
 //! router never asked.
 
-use core::ptr::NonNull;
-
 #[allow(unused_imports)]
 use crate::prelude::*;
 
 use wz_capi_port::os::{self, ThreadId};
 use wz_capi_port::sync::Lock;
-use wz_capi_port::{HeldQueryId, KeyAnchor, QblId, QueryHolder, QueryableSink, Refusal};
+use wz_capi_port::{HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal};
 
 use super::CoopLinks;
+use super::DynSink;
 use super::LinkActions;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::named_key::NamedKey;
@@ -68,7 +67,6 @@ use wz_session_core::sample::QosLevel;
 use wz_session_core::sample::{EncodingHint, SourceInfo};
 
 use crate::calls::CoopCalls;
-use crate::form::Latch;
 
 use super::{key_on_link, CoopEngine};
 
@@ -80,28 +78,9 @@ use super::{key_on_link, CoopEngine};
 /// (P11): a call is begun on the row's latch as a query arrives, under the session's lock, and
 /// ended once the query was handed to the callback, or dropped unhanded, with no lock held; an
 /// undeclared row is let go of by whoever ends its last call.
-pub(crate) struct QueryableRow {
-    /// What the ABI's key kept alive (an object of the ABI's), let go of with the row, with no
-    /// lock of the session held: the declarations the key and the retraction name are the tables'
-    /// row's to hold.
-    _anchor: KeyAnchor,
-    /// The program's callback, called where the row lies through a shared borrow, with the holder
-    /// of the face each query came in on; a refused declaration lets it go with the row.
-    sink: QueryableSink,
-    /// How many calls of the callback are owed, and whether the queryable was undeclared.
-    latch: Latch,
-}
+pub(crate) type QueryableRow = super::LatchedRow<QueryableSink>;
 
 impl QueryableRow {
-    /// A queryable keeping `anchor`, answering through `sink`.
-    pub(crate) fn new(anchor: KeyAnchor, sink: QueryableSink) -> Self {
-        Self {
-            _anchor: anchor,
-            sink,
-            latch: Latch::new(),
-        }
-    }
-
     /// Hand `query` to the callback, its replies made through `responder` and its holds taken
     /// through `holder`, unless the queryable was undeclared since the call was begun: the one
     /// place a query is handed to a queryable's callback.
@@ -114,11 +93,11 @@ impl QueryableRow {
 
     /// Declare queryable `id`, the id its row in the tables holds, on `key`, answering for the
     /// whole of it when `complete`, over `actions`: whether the link took it.
-    pub(super) fn declare<C: ClockSource + 'static>(
+    pub(super) fn declare<C: ClockSource + 'static, D: ?Sized + DynSink>(
         id: QblId,
         key: NamedKey<'_>,
         complete: bool,
-        actions: &LinkActions<C>,
+        actions: &LinkActions<C, D>,
     ) -> bool {
         actions
             .send_declare_queryable(id, key_on_link(actions, key), complete)
@@ -128,10 +107,10 @@ impl QueryableRow {
     /// Retract queryable `id` over `actions`, naming its key as `names` says (the declaration's
     /// id and the rest of the key) when its declaration asked to. Read off the row before it is
     /// undeclared, as a subscriber's is.
-    pub(super) fn retract<C: ClockSource + 'static>(
+    pub(super) fn retract<C: ClockSource + 'static, D: ?Sized + DynSink>(
         id: QblId,
         names: Option<(wz_session_core::wire_id::ExprId, &str)>,
-        actions: &LinkActions<C>,
+        actions: &LinkActions<C, D>,
     ) {
         match names {
             Some((mapping, suffix)) => {
@@ -142,42 +121,13 @@ impl QueryableRow {
     }
 }
 
-/// A call of a queryable's callback, begun on its row's latch: where the row lies.
-pub(crate) struct QueryableRowCall(NonNull<QueryableRow>);
-
-impl RowCallback for QueryableRow {
-    type Call = QueryableRowCall;
-
-    const READS_ROW_IN_PLACE: bool = true;
-
-    fn begin(&self) -> Option<QueryableRowCall> {
-        self.latch
-            .begin()
-            .then(|| QueryableRowCall(NonNull::from(self)))
-    }
-
-    unsafe fn end(call: QueryableRowCall) -> bool {
-        // SAFETY: the caller's: the row has not moved since the call began and is still in its
-        // table, which keeps it until its last call ended.
-        unsafe { call.0.as_ref() }.latch.end()
-    }
-
-    fn retire(&self) -> bool {
-        self.latch.retire()
-    }
-
-    fn drained(&self) -> bool {
-        self.latch.drained()
-    }
-}
-
 /// A call of a queryable's callback the session began under its lock as a query arrived: where its
 /// row lies, and nothing else, since the row whose last call it ends is found by its latch. Neither
 /// copied nor dropped unended: each is ended once ([`Self::end`]), or its row would keep its slot
 /// for good.
 #[must_use = "a call is ended, or its row is never let go of"]
 pub(crate) struct QueryableCall {
-    call: QueryableRowCall,
+    call: super::RowCall<QueryableSink>,
 }
 
 // SAFETY: a call reaches its row through a shared borrow alone, and of the row it reads only what
@@ -312,7 +262,7 @@ pub(super) type QueryPlane = wz_session_core::query_plane::QueryPlane<CoopCalls>
 
 // The rows a form that lays its state out at the open lends the Finals and refusals; the on-use
 // form counts them in its own tables and names neither.
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 pub(crate) use wz_session_core::query_plane::{FinalHold, RefusedFinal};
 pub(super) use wz_session_core::query_plane::{FinalHolds, HeldFinals, RefusedFinals};
 
@@ -431,13 +381,16 @@ pub(super) fn leaked_plane(rows: usize) -> Box<QueryPlane> {
     let mut place = Box::<QueryPlane>::new_uninit();
     // SAFETY: the box's place is valid for writes of the plane, which stays there.
     unsafe {
-        QueryPlane::init_at(NonNull::from(&mut *place).cast::<QueryPlane>(), holds);
+        QueryPlane::init_at(
+            core::ptr::NonNull::from(&mut *place).cast::<QueryPlane>(),
+            holds,
+        );
         place.assume_init()
     }
 }
 
 /// The Finals of at most `rows` queries, in rows lent from an arena the test leaks.
-#[cfg(all(test, feature = "runtime-plan"))]
+#[cfg(all(test, wz_lent))]
 fn leaked_holds(rows: usize) -> FinalHolds<crate::StatePolicy> {
     use wz_session_core::bounded::Arena;
     let held = Arena::table_bytes::<FinalHold>(rows).expect("rows the address space holds");
@@ -456,7 +409,7 @@ fn leaked_holds(rows: usize) -> FinalHolds<crate::StatePolicy> {
 }
 
 /// The Finals of at most `rows` queries, counted, taking their rows at the first query held.
-#[cfg(all(test, feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(all(test, wz_on_use))]
 fn leaked_holds(rows: usize) -> FinalHolds<crate::StatePolicy> {
     use wz_session_core::bounded::BoundedVec;
     FinalHolds::over(BoundedVec::counted(rows), BoundedVec::counted(rows))
@@ -603,6 +556,7 @@ mod round_tests {
     use super::*;
     use crate::round::AnswersQueries;
     use alloc::sync::Arc;
+    use core::ptr::NonNull;
     use wz_capi_port::WireKey;
 
     /// What the test's engine stand-in was asked to answer: each query's key, its parameters and

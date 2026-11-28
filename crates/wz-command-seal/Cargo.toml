@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-command-seal — a lifecycle command sealed by its commander (decision D17 of
+# docs/session-lifecycle-intent.md): a COSE_Sign1 the commanded node verifies end to end, so a
+# router that carries it holds no authority over it. The format is docs/command-seal.md.
+#
+# `no_std` and no allocator: a fixed-memory node opens a sealed command on its stack. ES256 is a
+# port (`Es256`), so a node verifies with the primitives its own TLS library already links;
+# SHA-256 is `sha2`, which every profile already links for the zid of a key. `ring` is the
+# host's ES256 and its signer, on by default as a host crate's capabilities are, and a
+# fixed-memory build turns it off (`default-features = false`).
+
+[package]
+name = "wz-command-seal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "A lifecycle command sealed by its commander's key (COSE_Sign1, ES256): the commander proved end to end, whatever carried it."
+
+[lib]
+name = "wz_command_seal"
+path = "src/lib.rs"
+
+[features]
+default = ["ring"]
+# The host's ES256: a verifier and a signer over `ring`, the one the TLS links of the tokio
+# runtime already link, so the graph gains no crate.
+ring = ["dep:ring"]
+
+[dependencies]
+# The same crate and version the zid of a link's key is hashed with (`wz-session-core`), without
+# `std`.
+sha2 = { version = "0.10", default-features = false }
+ring = { version = "0.17", optional = true }
+
+[dev-dependencies]
+# The PEM of the pinned test key, read as `scripts/lib/wz_node.py` reads one; the example reads
+# a signing key's PEM with it too.
+base64 = "0.22"
+
+[[example]]
+name = "seal_command"
+required-features = ["ring"]
+
+[lints]
+workspace = true

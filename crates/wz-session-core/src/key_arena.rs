@@ -64,7 +64,9 @@ use core::ptr::NonNull;
 #[cfg(debug_assertions)]
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept, RegionLines, ZeroEmpty};
+use crate::bounded::{
+    Arena, KeyBacking, KeyMaker, KeyUnkept, RegionLines, RowCounts, TableLender, ZeroEmpty,
+};
 
 /// The bytes of a block's header: its length and how many keys hold it (or, free, the next free
 /// block), each a `u32`.
@@ -753,11 +755,42 @@ pub unsafe fn place_region<const MAX: usize>(
 ) {
     // SAFETY: the caller's contract for the seq lines.
     unsafe { crate::bounded::place_seqs(region, lines.seq_lines()) };
-    for at in lines.key_lines() {
-        let held = region.as_ptr().wrapping_add(*at).cast::<LentKeys>();
-        // SAFETY: the caller's contract: a `LentKeys` lies at `at` in the region, aligned, and holds
-        // no key a table made; it is written through the raw pointer, so no reference to the table
-        // that holds it is made.
+    // SAFETY: the caller's contract for the key lines.
+    unsafe { join_keys(region, keys, lines.key_lines()) };
+}
+
+/// Lend each table `lines` describes, at `base`, its rows by `lend` as `counts` states, and join it
+/// to the key arena `keys`: [`place_region`]'s walk of the same description where a plan lends the
+/// rows from an arena ([`lend_seqs`]) rather than a region keeping them.
+///
+/// # Safety
+/// `lines` describes what lies at `base` and its seq lines are as [`lend_seqs`] requires; each of
+/// its key lines is the offset from `base` of the [`LentKeys`] of a table that holds no key,
+/// aligned for it; `keys` is the space of an arena that outlives every table so joined.
+///
+/// [`lend_seqs`]: crate::bounded::lend_seqs
+pub unsafe fn lend_region<const MAX: usize>(
+    base: NonNull<u8>,
+    keys: KeySpace,
+    lines: &RegionLines<MAX>,
+    counts: &RowCounts,
+    lend: &mut TableLender<'_>,
+) {
+    // SAFETY: the caller's contract for the seq lines.
+    unsafe { crate::bounded::lend_seqs(base, lines.seq_lines(), counts, lend) };
+    // SAFETY: the caller's contract for the key lines.
+    unsafe { join_keys(base, keys, lines.key_lines()) };
+}
+
+/// Hand each table whose key handle lies at one of `at` from `base` the key arena `keys`.
+///
+/// # Safety
+/// A [`LentKeys`] lies at each offset, aligned, and holds no key a table made.
+unsafe fn join_keys(base: NonNull<u8>, keys: KeySpace, at: &[usize]) {
+    for at in at {
+        let held = base.as_ptr().wrapping_add(*at).cast::<LentKeys>();
+        // SAFETY: the caller's contract; the handle is written through the raw pointer, so no
+        // reference to the table that holds it is made.
         unsafe { held.write(LentKeys::from(keys)) };
     }
 }

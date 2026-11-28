@@ -1181,3 +1181,41 @@ fn a_state_lock_its_holder_panicked_in_is_refused_with_the_state_message() {
         Some(STATE_POISONED)
     );
 }
+
+/// A program's closure is called through the one form a lent callback takes, as often as a sample
+/// is handed on, and let go of once, with the callback. Turned red by a boxed form that calls
+/// another closure, or drops the closure early or twice.
+#[test]
+fn a_boxed_closure_is_called_through_the_lent_form_and_dropped_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Dropped(std::sync::Arc<AtomicUsize>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let dropped = std::sync::Arc::new(AtomicUsize::new(0));
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let guard = Dropped(std::sync::Arc::clone(&dropped));
+    let counted = std::sync::Arc::clone(&calls);
+    let mut on_sample = OnSample::boxed(Box::new(move |_: Delivery<'_>| {
+        let _kept = &guard;
+        counted.fetch_add(1, Ordering::SeqCst);
+    }));
+    let mut sample = Sample::new_del(std::string::String::from("demo/k"));
+    on_sample.call(Delivery::Held(&mut sample));
+    on_sample.call(Delivery::Held(&mut sample));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        0,
+        "the callback holds the closure"
+    );
+    drop(on_sample);
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "let go of once, with the callback"
+    );
+}

@@ -3524,6 +3524,10 @@ struct QueryJob {
     record: Arc<HeldRecord>,
     /// The face that asked, which is sent the replies.
     inbound: FaceId,
+    /// The zid the key of the asking face's link proved, or `None` when it proved none (a link
+    /// nothing protects, or the node's own session): what the queryable is told of who asks
+    /// (decision D12), so that a lifecycle verb asked in band is judged by its commander.
+    requester: Option<[u8; 16]>,
     reliable: bool,
 }
 
@@ -4789,6 +4793,7 @@ impl RouterForwarder {
             keyexpr,
             record,
             inbound,
+            requester,
             reliable,
         } = job;
         let relative = if record.namespaced {
@@ -4832,9 +4837,16 @@ impl RouterForwarder {
                 &mut replies,
             );
             let previous = HOSTED_QUERY.with(|current| current.replace(Some(record.clone())));
+            // The queryable is shown who asks as the link proved it, as the slot profile's
+            // dispatch shows it.
+            let proven = wz_session_core::query_sink::ProvenQuery {
+                inner: view,
+                peer: requester,
+                encoding: None,
+            };
             // A handler that is already running on this thread (it asks a query its own
             // pattern answers) is not called again: it would wait for itself.
-            let _ = handler.call(|h| h(view, &mut responder));
+            let _ = handler.call(|h| h(&proven, &mut responder));
             HOSTED_QUERY.with(|current| *current.borrow_mut() = previous);
         }
         // The handler has returned: its hold is let go, and the branch ends with the last.
@@ -12709,6 +12721,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let mut dispatched = 0;
         // The whole query, which each job carries: its call shows it under the key it names.
         let whole = &view;
+        // Who asks, as the key of the asking face's link proved it (decision D12); the node's own
+        // session proves nobody.
+        let requester = self
+            .tables
+            .faces
+            .get(&inbound)
+            .and_then(|face| face.runtime.actions.verified_peer_zid());
         for (namespaced, handler) in &matched {
             let view = if *namespaced {
                 match &relative_view {
@@ -12739,6 +12758,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 keyexpr: keyexpr.to_owned(),
                 record,
                 inbound,
+                requester,
                 reliable,
             }));
         }

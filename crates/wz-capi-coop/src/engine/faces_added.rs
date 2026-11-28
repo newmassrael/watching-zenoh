@@ -6,7 +6,7 @@
 //! session that only dials holds its dial role's face alone, and its text has none of this.
 
 use super::*;
-use wz_runtime_coop::faces::Dial;
+use wz_runtime_coop::faces::{Dial, DialNamed};
 // The work form's engine names these for every build; a read that steps each face where it lies
 // names them here.
 #[cfg(not(wz_round))]
@@ -166,6 +166,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 Refusal::FacesFull,
             )));
         };
+        // Where the tables take their memory on use, the face's read slot is made at its place's
+        // first face, before anything is dialled: one the allocator has no room for is refused as
+        // a face past `max_faces` is.
+        #[cfg(all(wz_on_use, not(wz_round)))]
+        if self
+            .direct
+            .made_at(held.at(), || core.face_router())
+            .is_none()
+        {
+            core.session.registry.remove_face(held);
+            return Err(OpenError::Unreachable(EndpointRefusal::new(
+                endpoint,
+                Refusal::FacesFull,
+            )));
+        }
         // The dial is begun here and asked at each step, as the dial role's is: the session is
         // held here, and a connection is not waited for while it is.
         let begun = match core.transport.begin_dial(endpoint) {
@@ -182,7 +197,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if core.push_face(held, Link::Idle, 1) {
             core.transport
                 .links
-                .put_dial(at, Dial::begun(DialEndpoint::Named(named), begun));
+                .put_dial(at, Dial::named(DialNamed::apart(named), begun));
             // The read turns the face from its next turn on, which asks the dial where it lies.
             #[cfg(not(wz_round))]
             self.direct.hold_face(at, true);

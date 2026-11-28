@@ -272,30 +272,33 @@ impl WindowsUdpSocket {
         )
     }
 
-    /// Wait up to `timeout_ms` milliseconds for any of `sockets` to have a datagram: one
-    /// `WSAPoll` over them. `WSAPoll` refuses an empty set at once, so with none the thread sleeps
-    /// the time instead, as a POSIX `poll` of no descriptor does.
+    /// This socket as an entry of a set waited on for a datagram ([`Self::wait_readable_among`]).
     #[cfg(feature = "host-multicast")]
-    pub(crate) fn wait_readable_any(sockets: &[&Self], timeout_ms: c_int) {
-        if sockets.is_empty() {
+    pub(crate) fn readable_entry(&self) -> ws::WSAPOLLFD {
+        ws::WSAPOLLFD {
+            fd: self.socket,
+            events: ws::POLLRDNORM,
+            revents: 0,
+        }
+    }
+
+    /// Wait up to `timeout_ms` milliseconds for any socket of `set` to have a datagram: one
+    /// `WSAPoll` over the set, made once by the caller with the sockets it watches. `WSAPoll`
+    /// refuses an empty set at once, so with none the thread sleeps the time instead, as a POSIX
+    /// `poll` of no descriptor does.
+    #[cfg(feature = "host-multicast")]
+    pub(crate) fn wait_readable_among(set: &mut [ws::WSAPOLLFD], timeout_ms: c_int) {
+        if set.is_empty() {
             // SAFETY: a plain system call with a value argument.
             unsafe {
                 windows_sys::Win32::System::Threading::Sleep(u32::try_from(timeout_ms).unwrap_or(0))
             };
             return;
         }
-        let mut fds: alloc::vec::Vec<ws::WSAPOLLFD> = sockets
-            .iter()
-            .map(|socket| ws::WSAPOLLFD {
-                fd: socket.socket,
-                events: ws::POLLRDNORM,
-                revents: 0,
-            })
-            .collect();
-        // SAFETY: `fds` is live for the call and its length is the count passed; every socket is
+        // SAFETY: `set` is live for the call and its length is the count passed; every socket is
         // one the caller holds open for the call, and the timeout bounds the wait. A failed wait
         // returns early, and the read that follows reports the error.
-        unsafe { ws::WSAPoll(fds.as_mut_ptr(), fds.len() as u32, timeout_ms) };
+        unsafe { ws::WSAPoll(set.as_mut_ptr(), set.len() as u32, timeout_ms) };
     }
 
     /// The port the system bound this socket to.

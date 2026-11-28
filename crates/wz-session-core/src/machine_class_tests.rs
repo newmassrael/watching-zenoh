@@ -62,21 +62,46 @@ fn a_reassembly_slot_machine_is_of_the_reactive_class() {
     );
 }
 
-#[cfg(not(feature = "session-unicast-accept"))]
+/// The session machine is of the class whether the build accepts or only opens: the acceptor's
+/// OpenAck is the effect of the OpenSyn's own transition into Established, not the entry of a
+/// state left by an eventless step. The runtime's own reading of its tables agrees, which is what
+/// its policy's `REACTIVE_TURN` starts from. Turned red, in a build with `session-unicast-accept`,
+/// by an accepting state the source leaves without an event.
 #[test]
-fn a_session_machine_that_only_opens_is_of_the_reactive_class() {
+fn the_session_machine_is_of_the_reactive_class() {
     assert_eq!(outside_the_class(&SESSION_FSM_UNICAST_TABLES), None);
+    assert!(SESSION_FSM_UNICAST_TABLES.reactive_class());
 }
 
-// The acceptor's step from SentOpenAck to Established is eventless, so a build that accepts runs
-// its session machine on the general turn.
+/// The acceptor's OpenSyn ends the accept in Established in the one turn its event is taken, the
+/// OpenAck sent on the way, with no state between the two for a turn to stop in. Turned red by a
+/// transition of that event to any target but Established, or by one that carries no effect (the
+/// OpenAck would then be sent by no step of the machine).
 #[cfg(feature = "session-unicast-accept")]
 #[test]
-fn a_session_machine_that_accepts_leaves_the_class_by_its_eventless_step() {
+fn the_acceptors_open_syn_takes_it_to_established_sending_the_open_ack() {
+    use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastState as S};
+    let tables = &SESSION_FSM_UNICAST_TABLES;
+    let [taken] = tables.candidates_of(S::ID_SentInitAck, E::ID_OpenSynReceived) else {
+        panic!("SentInitAck takes the OpenSyn by one transition");
+    };
+    let taken = taken.transition();
     assert_eq!(
-        outside_the_class(&SESSION_FSM_UNICAST_TABLES),
-        Some("an eventless transition")
+        tables.targets(taken),
+        &[sce_rust_runtime::Target::state(S::ID_Established)]
     );
+    assert!(tables.transition(taken).has_content());
+}
+
+/// The scouting machine a peer build links beside the session's is of the class too, so every
+/// machine of such a build hands the runtime's one turn the same answer and the general turn's
+/// macrostep completion has no caller there. Turned red by an eventless or raising step in the
+/// scouting source.
+#[cfg(feature = "scouting-active")]
+#[test]
+fn the_scouting_machine_is_of_the_reactive_class() {
+    assert_eq!(outside_the_class(&crate::scouting::SCOUTING_TABLES), None);
+    assert!(crate::scouting::SCOUTING_TABLES.reactive_class());
 }
 
 #[test]

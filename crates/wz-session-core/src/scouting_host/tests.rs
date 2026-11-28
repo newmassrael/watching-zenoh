@@ -209,3 +209,43 @@ fn a_table_made_in_place_is_the_new_one() {
     let new = alloc::boxed::Box::new(HelloTable::new());
     assert_eq!(alloc::format!("{made:?}"), alloc::format!("{new:?}"));
 }
+
+/// Without the verdicts a window keeps one count of what it did not take, read as the total.
+/// Turned red by a count that loses a datagram.
+#[cfg(not(feature = "scout-rx-verdicts"))]
+#[test]
+fn without_verdicts_a_window_counts_what_it_did_not_take_in_one_count() {
+    let mut counts = IgnoredCounts::default();
+    counts.count_one();
+    counts.count_one();
+    assert_eq!(counts.total(), 2);
+}
+
+/// With the verdicts each datagram not taken is counted under its own, and the total is their sum.
+/// Turned red by a verdict counted under another, or left out of the total.
+#[cfg(feature = "scout-rx-verdicts")]
+#[test]
+fn with_verdicts_each_datagram_is_counted_under_its_own() {
+    let mut counts = IgnoredCounts::default();
+    for why in [
+        ScoutRxIgnored::Undecodable,
+        ScoutRxIgnored::SelfEcho,
+        ScoutRxIgnored::ForeignScout,
+        ScoutRxIgnored::UnknownMid { mid: 0x1E },
+        ScoutRxIgnored::LocatorlessHello,
+        ScoutRxIgnored::SelfEcho,
+    ] {
+        counts.count(&why);
+    }
+    assert_eq!(
+        (
+            counts.undecodable,
+            counts.self_echo,
+            counts.foreign_scout,
+            counts.unknown_mid,
+            counts.locatorless_hello
+        ),
+        (1, 2, 1, 1, 1)
+    );
+    assert_eq!(counts.total(), 6);
+}

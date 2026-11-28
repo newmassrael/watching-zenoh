@@ -31,19 +31,18 @@ use core::cell::RefCell;
 use core::ffi::c_int;
 use core::fmt::Debug;
 
-use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::group_locator::GroupLocator;
 
 use crate::group_transport::GroupTransport;
 use crate::ip_stack::{heap_link, HeapLink};
-use crate::link_cells::{CellRc, CountKind, OneTask};
-use crate::link_storage::{heap_link_buffers, LinkTables, RxBuffer, RxStore, TxBuffer, TxStore};
+use crate::link_cells::{CellRc, CellSource, CountKind, OneTask};
+use crate::link_storage::{BufferSource, RxOf, RxStore, TxOf, TxStore};
 use crate::session_drive::{
-    LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionDatagramLink,
-    SessionLinks, UnixpipeLocator, WaitOn,
+    LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SessionLinks, UnixpipeLocator,
+    WaitOn,
 };
 use crate::stream_link::{
-    link_over, stream_ends_fit, StreamDriver, StreamEnds, StreamSocket, STREAM_RX_CAPACITY,
+    link_over_in, stream_ends_fit, StreamDriver, StreamEnds, StreamSocket, STREAM_RX_CAPACITY,
 };
 
 /// The mode a link's FIFOs are created with when its locator names none: owner only.
@@ -161,8 +160,8 @@ pub struct PipeStream<F: Fifo> {
 impl<F: Fifo> StreamSocket for PipeStream<F> {
     type Error = F::Error;
 
-    type Link<B: RxStore + 'static, X: TxStore + 'static>
-        = StreamDriver<Self, B, X>
+    type Link<B: RxStore + 'static, X: TxStore + 'static, W: crate::session_drive::InputWaiter>
+        = StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
     where
         Self: 'static;
 
@@ -282,14 +281,14 @@ impl Reading {
 }
 
 /// The link over a pair of FIFOs, as a stack of the heap profile holds it.
-type PipeDriver<F, B> = StreamDriver<PipeStream<F>, RxBuffer<B>, TxBuffer<B>>;
+type PipeDriver<F, N> = StreamDriver<PipeStream<F>, RxOf<N>, TxOf<N>>;
 
 /// What every unixpipe link of a [`UnixpipeLinks`] is given besides its FIFOs: the session's
 /// tables and cells when it lent them, the slots its frames are encoded into, and whether its
 /// owner waits.
 struct PipeShape<N: CountKind> {
-    lent: Option<LinkTables<N::Flag>>,
-    cells: Option<LentByteCells<N::Flag>>,
+    lent: N::Buffers,
+    cells: N::Cells,
     owner_waits: bool,
     tx_slots: usize,
     tx_capacity: usize,
@@ -307,8 +306,8 @@ impl<N: CountKind> Copy for PipeShape<N> {}
 impl<N: CountKind> Default for PipeShape<N> {
     fn default() -> Self {
         Self {
-            lent: None,
-            cells: None,
+            lent: Default::default(),
+            cells: Default::default(),
             owner_waits: false,
             tx_slots: 0,
             tx_capacity: 0,
@@ -324,19 +323,18 @@ impl<N: CountKind> PipeShape<N> {
         &self,
         pipe: PipeStream<F>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
-        let (rx, tx) = heap_link_buffers(
-            self.lent.as_ref(),
-            STREAM_RX_CAPACITY,
-            self.tx_slots,
-            self.tx_capacity,
-        )?;
-        heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&pipe))?.open(|place| {
-            let link = place.write(link_over(pipe, rx, tx));
+        let (rx, tx) = self
+            .lent
+            .buffers(STREAM_RX_CAPACITY, self.tx_slots, self.tx_capacity)?;
+        let link = heap_link::<_, N>(&self.cells, stream_ends_fit(&pipe))?.made(|place| {
+            let link =
+                link_over_in::<_, _, _, crate::session_drive::WaitsInLoop>(place, pipe, rx, tx);
             if self.owner_waits {
                 link.wait_by_owner();
             }
             link
-        })
+        })?;
+        Ok(OpenedLink::behind_tables(link))
     }
 }
 
@@ -675,15 +673,15 @@ impl<S, O: FifoOpen, N: CountKind> UnixpipeLinks<S, O, N> {
     /// lends them its cells.
     pub fn counted_by<M: CountKind, T>(self, links: T) -> UnixpipeLinks<T, O, M> {
         debug_assert!(
-            self.shape.cells.is_none() && self.shape.lent.is_none(),
+            self.shape.cells.table().is_none() && self.shape.lent.tables().is_none(),
             "cells and buffers are lent after the links are made"
         );
         UnixpipeLinks {
             links,
             opener: self.opener,
             shape: PipeShape {
-                lent: None,
-                cells: None,
+                lent: Default::default(),
+                cells: Default::default(),
                 owner_waits: self.shape.owner_waits,
                 tx_slots: self.shape.tx_slots,
                 tx_capacity: self.shape.tx_capacity,
@@ -750,31 +748,31 @@ where
         }
     }
 
-    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
-        self.shape.lent = Some(tables);
+    fn lend_buffers(&mut self, tables: N::Buffers) {
+        self.shape.lent = tables;
         self.links.lend_buffers(tables);
     }
 
     // A stack that places its links on the heap has the unixpipe links placed there too.
     const LINK_CELL_BYTES: usize = match S::LINK_CELL_BYTES {
         0 => 0,
-        links => crate::link_cells::larger_cell(
-            links,
-            CellRc::<PipeDriver<O::Fifo, N::Flag>>::cell_bytes(),
-        ),
+        links => {
+            crate::link_cells::larger_cell(links, CellRc::<PipeDriver<O::Fifo, N>>::cell_bytes())
+        }
     };
 
-    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
-        self.shape.cells = Some(cells);
+    fn lend_cells(&mut self, cells: N::Cells) {
+        self.shape.cells = cells;
         self.links.lend_cells(cells);
     }
 
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(
-        &mut self,
-        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-    ) -> Result<(), usize> {
-        self.links.lend_port_rows(rows)
+    fn lend_ports(&mut self, ports: N::Ports) -> Result<(), usize> {
+        self.links.lend_ports(ports)
+    }
+
+    fn lend_groups(&mut self, groups: N::Groups) {
+        self.links.lend_groups(groups);
     }
 
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
@@ -810,10 +808,6 @@ where
         group: &GroupLocator,
     ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         self.links.open_group(endpoint, group)
-    }
-
-    fn share_pump(pump: HeapLink<N>) -> Option<CellRc<dyn SessionDatagramLink, N>> {
-        S::share_pump(pump)
     }
 }
 

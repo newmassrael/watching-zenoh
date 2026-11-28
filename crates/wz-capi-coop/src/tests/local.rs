@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use wz_capi_port::{
-    FanoutError, FilterPlane, FilteredPut, SessionEngine, SubId, SubscriberSink, WireKey,
+    EntityRow, FanoutError, FilterPlane, FilteredPut, SessionEngine, SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
 use wz_session_core::locality::Locality;
@@ -27,7 +27,7 @@ type Handed = Arc<Mutex<Vec<(usize, Vec<u8>)>>>;
 type InnerPut = Arc<Mutex<Option<Result<usize, FanoutError>>>>;
 
 /// A subscriber that counts what it is handed.
-fn subscribe(engine: &Engine, key: &str, origin: Locality) -> (SubId, Arc<AtomicUsize>) {
+fn subscribe(engine: &Engine, key: &str, origin: Locality) -> (EntityRow, Arc<AtomicUsize>) {
     let count = Arc::new(AtomicUsize::new(0));
     let into = count.clone();
     let id = engine
@@ -115,6 +115,11 @@ fn retracting_a_matching_listener_leaves_the_subscriber_of_its_number() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let (subscriber, count) = subscribe(&engine, "demo/l/same", Locality::SessionLocal);
+    let number = u64::from(
+        engine
+            .entity_id_of(subscriber)
+            .expect("the subscriber stands"),
+    );
     let same = loop {
         let listener = engine
             .declare_matching_listener(
@@ -124,11 +129,8 @@ fn retracting_a_matching_listener_leaves_the_subscriber_of_its_number() {
                 false,
             )
             .expect("a session with rows left declares");
-        assert!(
-            listener <= u64::from(subscriber),
-            "the listeners count up from 1"
-        );
-        if listener == u64::from(subscriber) {
+        assert!(listener <= number, "the listeners count up from 1");
+        if listener == number {
             break listener;
         }
     };
@@ -473,7 +475,7 @@ fn a_callback_that_undeclares_its_own_subscriber_does_not_wait_for_itself() {
     let engine = open(&router);
     let dropped = Arc::new(AtomicUsize::new(0));
     let calls = Arc::new(AtomicUsize::new(0));
-    let own: Arc<Mutex<Option<SubId>>> = Arc::default();
+    let own: Arc<Mutex<Option<EntityRow>>> = Arc::default();
     let guard = Dropped(dropped.clone());
     let session = EngineHold::downgrade(&engine);
     let id = engine
@@ -635,7 +637,7 @@ fn a_subscriber_declared_inside_a_callback_is_handed_the_next_sample_and_not_tha
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
     let (first, late) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
-    let declared: Arc<Mutex<Option<SubId>>> = Arc::default();
+    let declared: Arc<Mutex<Option<EntityRow>>> = Arc::default();
     let session = EngineHold::downgrade(&engine);
     engine
         .declare_subscriber_on_wire("demo/snap/**", WireKey::literal(), Locality::Any, None, {
@@ -706,7 +708,7 @@ fn a_subscriber_undeclared_inside_a_callback_is_handed_that_sample_and_keeps_its
         Arc::new(AtomicUsize::new(0)),
     );
     let dropped = Arc::new(AtomicUsize::new(0));
-    let undeclared: Arc<Mutex<Option<SubId>>> = Arc::default();
+    let undeclared: Arc<Mutex<Option<EntityRow>>> = Arc::default();
     let session = EngineHold::downgrade(&engine);
     engine
         .declare_subscriber_on_wire("demo/slot/**", WireKey::literal(), Locality::Any, None, {

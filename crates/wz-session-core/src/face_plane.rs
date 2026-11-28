@@ -315,7 +315,7 @@ impl<T: FaceReports> FaceReports for crate::placed::Placed<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::face::RowText;
+    use crate::face::{LentEnd, RowEnds};
     use alloc::vec::Vec;
     // The host's mutex: a plane shared behind an `Arc` is reached from any thread, as an engine's is.
     use crate::plane_lock::StdLocks;
@@ -337,8 +337,11 @@ mod tests {
             is_shm: false,
             link: 0,
             links: 1,
-            src: RowText::of("tcp/127.0.0.1:1"),
-            dst: RowText::of("tcp/127.0.0.1:2"),
+            ends: RowEnds::Lent {
+                kind: crate::link::LinkKind::Tcp,
+                src: LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 1))),
+                dst: LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 2))),
+            },
             kind: None,
             mtu: 0,
             group_endpoint: None,

@@ -1217,6 +1217,622 @@ pub fn response_final<'a>(
     }
 }
 
+/// The final of the replies to a query, as the arguments of its writer ([`response_final`]): the
+/// one writer a link and a group write it with, not generic, so it is compiled once whoever sends
+/// it.
+#[cfg(feature = "codec-response-final")]
+#[derive(Clone, Copy)]
+pub struct ResponseFinalOf {
+    /// The query it ends.
+    pub request_id: crate::wire_id::RequestId,
+    /// The query's QoS, which its `ext_qos` carries unless it is the default.
+    pub qos: QosLevel,
+}
+
+#[cfg(feature = "codec-response-final")]
+impl crate::tx_buf::WireWrite for ResponseFinalOf {
+    // Out of line: a sender that hands it on through a closure of its own calls this body and
+    // does not carry a copy of it.
+    #[inline(never)]
+    fn write_wire(&self, sink: &mut crate::tx_buf::TxSink<'_>) -> Result<(), CodecError> {
+        response_final(self.request_id, self.qos).encode(sink)
+    }
+}
+
+// ── One writer of every declaration ─────────────────────────────────────────
+
+/// A declaration written from its parts, as the arguments of the writer of this module that
+/// makes it: every declaration a session with no allocator or a lend-only session
+/// (`tx-lend-only`) sends its link, and every one a group sends, where an owned `DeclareOwned`
+/// would be built only to be encoded and dropped. Its writer (its `WireWrite`) is one body, not
+/// generic, so the encoder of each kind is compiled once into it whoever sends the declaration.
+///
+/// Each kind is here where a sender of it is: a link's under its own declaration plane, and a
+/// group's (`session-multicast` with a heap) under the plane the group declares it by.
+#[cfg(all(
+    feature = "codec-declare",
+    any(
+        all(feature = "session-multicast", feature = "alloc"),
+        all(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            any(
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "liveliness-token"
+            )
+        )
+    )
+))]
+#[derive(Clone, Copy)]
+pub enum LentDeclaration<'a> {
+    /// The close of an interest's answer.
+    #[cfg(all(
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        any(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            all(feature = "session-multicast", feature = "alloc")
+        )
+    ))]
+    FinalReply {
+        /// The interest it closes.
+        interest_id: u64,
+    },
+    /// A subscriber declared in answer to an interest.
+    #[cfg(all(
+        feature = "declare-subscriber",
+        any(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            all(feature = "session-multicast", feature = "alloc")
+        )
+    ))]
+    SubscriberReply {
+        /// The interest it answers.
+        interest_id: u64,
+        /// The subscriber's id.
+        subscriber_id: u64,
+        /// The subscriber's key, literal.
+        keyexpr: &'a str,
+    },
+    /// A queryable declared in answer to an interest.
+    #[cfg(all(
+        feature = "declare-queryable",
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        feature = "alloc",
+        any(feature = "tx-lend-only", feature = "session-multicast")
+    ))]
+    QueryableReply {
+        /// The interest it answers.
+        interest_id: u64,
+        /// The queryable's id.
+        queryable_id: u64,
+        /// The queryable's key, literal.
+        keyexpr: &'a str,
+        /// Whether the queryable is complete.
+        complete: bool,
+    },
+    /// A keyexpr a group declared, sent to a member that asked for the keyexprs held now.
+    #[cfg(all(
+        any(feature = "liveliness-token", feature = "declare-subscriber"),
+        all(feature = "session-multicast", feature = "alloc")
+    ))]
+    KeyexprReply {
+        /// The interest it answers.
+        interest_id: u64,
+        /// The id the keyexpr was declared as.
+        mapping_id: core::num::NonZero<crate::wire_id::ExprId>,
+        /// The keyexpr, literal.
+        keyexpr: &'a str,
+    },
+    /// The answer to an interest in liveliness tokens for one held token, written as the token
+    /// responder's borrowed reply ([`token_reply_declaration`]): its envelope carries no
+    /// `ext_qos`.
+    #[cfg(all(
+        feature = "liveliness-token",
+        any(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            all(feature = "session-multicast", feature = "alloc")
+        )
+    ))]
+    TokenReply {
+        /// The held token's id.
+        token_id: u64,
+        /// The held token's key, literal.
+        keyexpr: &'a str,
+        /// The interest it answers.
+        interest_id: u64,
+    },
+    /// A subscriber declared on `mapping_id` and `suffix`.
+    #[cfg(all(
+        feature = "declare-subscriber",
+        any(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            all(feature = "session-multicast", feature = "alloc")
+        )
+    ))]
+    Subscriber {
+        /// The subscriber's id.
+        id: u64,
+        /// The keyexpr id its key is declared on, 0 for none.
+        mapping_id: crate::wire_id::ExprId,
+        /// The key's suffix, if it has one.
+        suffix: Option<&'a str>,
+    },
+    /// A queryable declared on `mapping_id` and `suffix`.
+    #[cfg(all(
+        feature = "declare-queryable",
+        any(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            all(feature = "session-multicast", feature = "alloc")
+        )
+    ))]
+    Queryable {
+        /// The queryable's id.
+        id: u64,
+        /// The keyexpr id its key is declared on, 0 for none.
+        mapping_id: crate::wire_id::ExprId,
+        /// The key's suffix, if it has one.
+        suffix: Option<&'a str>,
+        /// Whether the queryable is complete.
+        complete: bool,
+    },
+    /// A liveliness token declared on `mapping_id` and `suffix`.
+    #[cfg(any(
+        all(
+            feature = "declare-token",
+            any(not(feature = "alloc"), feature = "tx-lend-only")
+        ),
+        all(
+            feature = "liveliness-token",
+            all(feature = "session-multicast", feature = "alloc")
+        )
+    ))]
+    Token {
+        /// The token's id.
+        id: u64,
+        /// The keyexpr id its key is declared on, 0 for none.
+        mapping_id: crate::wire_id::ExprId,
+        /// The key's suffix, if it has one.
+        suffix: Option<&'a str>,
+    },
+    /// A keyexpr declared as `mapping_id`.
+    #[cfg(any(
+        all(
+            feature = "declare-keyexpr",
+            any(not(feature = "alloc"), feature = "tx-lend-only")
+        ),
+        all(feature = "session-multicast", feature = "alloc")
+    ))]
+    Keyexpr {
+        /// The id the keyexpr is declared as.
+        mapping_id: core::num::NonZero<crate::wire_id::ExprId>,
+        /// The keyexpr, literal.
+        suffix: &'a str,
+    },
+    /// The undeclaration of the keyexpr declared as `mapping_id`.
+    #[cfg(any(
+        all(
+            feature = "declare-keyexpr",
+            feature = "declare-undeclare",
+            any(not(feature = "alloc"), feature = "tx-lend-only")
+        ),
+        all(feature = "session-multicast", feature = "alloc")
+    ))]
+    UndeclareKeyexpr {
+        /// The id the keyexpr was declared as.
+        mapping_id: crate::wire_id::ExprId,
+    },
+    /// The retraction of a subscriber, naming its key when `key` holds it.
+    #[cfg(all(
+        feature = "declare-subscriber",
+        any(
+            all(feature = "tx-lend-only", feature = "declare-undeclare"),
+            all(feature = "session-multicast", feature = "alloc")
+        )
+    ))]
+    UndeclareSubscriber {
+        /// The id it was declared by.
+        id: u64,
+        /// The `ext_keyexpr` body of the key it was declared on, if it is named.
+        key: Option<&'a NamedKeyexpr>,
+    },
+    /// The retraction of a queryable, naming its key when `key` holds it.
+    #[cfg(all(
+        feature = "declare-queryable",
+        any(
+            all(feature = "tx-lend-only", feature = "declare-undeclare"),
+            all(feature = "session-multicast", feature = "alloc")
+        )
+    ))]
+    UndeclareQueryable {
+        /// The id it was declared by.
+        id: u64,
+        /// The `ext_keyexpr` body of the key it was declared on, if it is named.
+        key: Option<&'a NamedKeyexpr>,
+    },
+    /// The retraction of a liveliness token, naming its key when `key` holds it.
+    #[cfg(any(
+        all(
+            feature = "tx-lend-only",
+            feature = "declare-token",
+            feature = "declare-undeclare"
+        ),
+        all(
+            feature = "liveliness-token",
+            all(feature = "session-multicast", feature = "alloc")
+        )
+    ))]
+    UndeclareToken {
+        /// The id it was declared by.
+        id: u64,
+        /// The `ext_keyexpr` body of the key it was declared on, if it is named.
+        key: Option<&'a NamedKeyexpr>,
+    },
+}
+
+#[cfg(all(
+    feature = "codec-declare",
+    any(
+        all(feature = "session-multicast", feature = "alloc"),
+        all(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            any(
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "liveliness-token"
+            )
+        )
+    )
+))]
+impl LentDeclaration<'_> {
+    /// The declaration's own `ext_qos`, which its frame is read off: the declare QoS every
+    /// `Declare` envelope carries, and the default for the token reply, whose envelope carries
+    /// none.
+    pub fn qos(&self) -> QosLevel {
+        #[cfg(feature = "liveliness-token")]
+        if let Self::TokenReply { .. } = self {
+            return QosLevel::DEFAULT;
+        }
+        QOS_DECLARE
+    }
+
+    /// The bytes the declaration encodes to: what a send asks its link to lend for it, since a
+    /// `Declare` has no size constant. Its own frame, so the `Declare` it counts is on the stack
+    /// only while it counts. A declaration that cannot be composed counts as zero: its writer
+    /// then refuses it with the same error.
+    ///
+    /// Where the writer writes through a transmit buffer a count can stand in for (a heap with
+    /// lent slots) it is counted by the one writer run into a count, so each kind's encoder is
+    /// compiled once. Where it does not, by the codec's measure of the kind: a build with no heap,
+    /// and a heap build with no lent slot, whose writer's sink is a vector that a count is not.
+    #[inline(never)]
+    pub fn encoded_len(&self) -> usize {
+        #[cfg(not(all(feature = "alloc", feature = "transport-tx-lend")))]
+        {
+            self.compose(CountDeclaration)
+        }
+        #[cfg(all(feature = "alloc", feature = "transport-tx-lend"))]
+        {
+            crate::tx_buf::encoded_len(self)
+        }
+    }
+
+    /// Hand the declaration, borrowing the text the arguments borrow, to `with`: each kind as a
+    /// declaration of that kind alone ([`DeclarationOf`]), so the writer holds the encoders of
+    /// the kinds this enum has in the build and no other. `LengthOutOfRange` for a keyexpr past
+    /// the protocol's `u16` length, which is not sent.
+    fn compose<W: DeclarationWith>(&self, with: W) -> W::Out {
+        match *self {
+            #[cfg(all(
+                any(feature = "liveliness-token", feature = "declare-subscriber"),
+                any(
+                    any(not(feature = "alloc"), feature = "tx-lend-only"),
+                    all(feature = "session-multicast", feature = "alloc")
+                )
+            ))]
+            Self::FinalReply { interest_id } => {
+                with.declaration(Ok(final_reply_declaration(interest_id)))
+            }
+            #[cfg(all(
+                feature = "declare-subscriber",
+                any(
+                    any(not(feature = "alloc"), feature = "tx-lend-only"),
+                    all(feature = "session-multicast", feature = "alloc")
+                )
+            ))]
+            Self::SubscriberReply {
+                interest_id,
+                subscriber_id,
+                keyexpr,
+            } => with.declaration(subscriber_reply_declaration(
+                interest_id,
+                subscriber_id,
+                keyexpr,
+            )),
+            #[cfg(all(
+                feature = "declare-queryable",
+                any(feature = "liveliness-token", feature = "declare-subscriber"),
+                feature = "alloc",
+                any(feature = "tx-lend-only", feature = "session-multicast")
+            ))]
+            Self::QueryableReply {
+                interest_id,
+                queryable_id,
+                keyexpr,
+                complete,
+            } => with.declaration(queryable_reply_declaration(
+                interest_id,
+                queryable_id,
+                keyexpr,
+                crate::queryable_info::QueryableInfo::local(complete),
+            )),
+            #[cfg(all(
+                any(feature = "liveliness-token", feature = "declare-subscriber"),
+                all(feature = "session-multicast", feature = "alloc")
+            ))]
+            Self::KeyexprReply {
+                interest_id,
+                mapping_id,
+                keyexpr,
+            } => with.declaration(kexpr_reply_declaration(interest_id, mapping_id, keyexpr)),
+            #[cfg(all(
+                feature = "liveliness-token",
+                any(
+                    any(not(feature = "alloc"), feature = "tx-lend-only"),
+                    all(feature = "session-multicast", feature = "alloc")
+                )
+            ))]
+            Self::TokenReply {
+                token_id,
+                keyexpr,
+                interest_id,
+            } => with.declaration(token_reply_declaration(token_id, keyexpr, interest_id)),
+            #[cfg(all(
+                feature = "declare-subscriber",
+                any(
+                    any(not(feature = "alloc"), feature = "tx-lend-only"),
+                    all(feature = "session-multicast", feature = "alloc")
+                )
+            ))]
+            Self::Subscriber {
+                id,
+                mapping_id,
+                suffix,
+            } => with.declaration(subscriber_declaration(id, mapping_id, suffix)),
+            #[cfg(all(
+                feature = "declare-queryable",
+                any(
+                    any(not(feature = "alloc"), feature = "tx-lend-only"),
+                    all(feature = "session-multicast", feature = "alloc")
+                )
+            ))]
+            Self::Queryable {
+                id,
+                mapping_id,
+                suffix,
+                complete,
+            } => with.declaration(queryable_declaration(
+                id,
+                mapping_id,
+                suffix,
+                crate::queryable_info::QueryableInfo::local(complete),
+            )),
+            #[cfg(any(
+                all(
+                    feature = "declare-token",
+                    any(not(feature = "alloc"), feature = "tx-lend-only")
+                ),
+                all(
+                    feature = "liveliness-token",
+                    all(feature = "session-multicast", feature = "alloc")
+                )
+            ))]
+            Self::Token {
+                id,
+                mapping_id,
+                suffix,
+            } => with.declaration(token_declaration(id, mapping_id, suffix)),
+            #[cfg(any(
+                all(
+                    feature = "declare-keyexpr",
+                    any(not(feature = "alloc"), feature = "tx-lend-only")
+                ),
+                all(feature = "session-multicast", feature = "alloc")
+            ))]
+            Self::Keyexpr { mapping_id, suffix } => {
+                with.declaration(kexpr_declaration(mapping_id, suffix))
+            }
+            #[cfg(any(
+                all(
+                    feature = "declare-keyexpr",
+                    feature = "declare-undeclare",
+                    any(not(feature = "alloc"), feature = "tx-lend-only")
+                ),
+                all(feature = "session-multicast", feature = "alloc")
+            ))]
+            Self::UndeclareKeyexpr { mapping_id } => {
+                with.declaration(Ok(undeclare_kexpr_declaration(mapping_id)))
+            }
+            #[cfg(all(
+                feature = "declare-subscriber",
+                any(
+                    all(feature = "tx-lend-only", feature = "declare-undeclare"),
+                    all(feature = "session-multicast", feature = "alloc")
+                )
+            ))]
+            Self::UndeclareSubscriber { id, key } => {
+                with.declaration(Ok(undeclare_subscriber_declaration(id, key)))
+            }
+            #[cfg(all(
+                feature = "declare-queryable",
+                any(
+                    all(feature = "tx-lend-only", feature = "declare-undeclare"),
+                    all(feature = "session-multicast", feature = "alloc")
+                )
+            ))]
+            Self::UndeclareQueryable { id, key } => {
+                with.declaration(Ok(undeclare_queryable_declaration(id, key)))
+            }
+            #[cfg(any(
+                all(
+                    feature = "tx-lend-only",
+                    feature = "declare-token",
+                    feature = "declare-undeclare"
+                ),
+                all(
+                    feature = "liveliness-token",
+                    all(feature = "session-multicast", feature = "alloc")
+                )
+            ))]
+            Self::UndeclareToken { id, key } => {
+                with.declaration(Ok(undeclare_token_declaration(id, key)))
+            }
+        }
+    }
+}
+
+// The writer of every declaration a link or a group sends from its parts is this one body.
+#[cfg(all(
+    feature = "codec-declare",
+    any(
+        all(feature = "session-multicast", feature = "alloc"),
+        all(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            any(
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "liveliness-token"
+            )
+        )
+    )
+))]
+impl crate::tx_buf::WireWrite for LentDeclaration<'_> {
+    // Out of line: a sender that hands it on through a closure of its own calls this body and
+    // does not carry a copy of it.
+    #[inline(never)]
+    fn write_wire(&self, sink: &mut crate::tx_buf::TxSink<'_>) -> Result<(), CodecError> {
+        self.compose(WriteDeclaration(sink))
+    }
+}
+
+/// What [`LentDeclaration::compose`] does with the declaration it composes, whose type is the
+/// kind's own.
+#[cfg(all(
+    feature = "codec-declare",
+    any(
+        all(feature = "session-multicast", feature = "alloc"),
+        all(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            any(
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "liveliness-token"
+            )
+        )
+    )
+))]
+trait DeclarationWith {
+    type Out;
+    fn declaration<S: DeclareSource>(self, declaration: Result<S, CodecError>) -> Self::Out;
+}
+
+/// The bytes a declaration encodes to, zero for one that cannot be composed: the count of a build
+/// whose writer does not write through a count (no heap, or a heap with no lent slot, where the
+/// writer's sink is a vector), which counts by the codec's measure.
+#[cfg(all(
+    not(all(feature = "alloc", feature = "transport-tx-lend")),
+    feature = "codec-declare",
+    any(
+        all(feature = "session-multicast", feature = "alloc"),
+        all(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            any(
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "liveliness-token"
+            )
+        )
+    )
+))]
+struct CountDeclaration;
+
+#[cfg(all(
+    not(all(feature = "alloc", feature = "transport-tx-lend")),
+    feature = "codec-declare",
+    any(
+        all(feature = "session-multicast", feature = "alloc"),
+        all(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            any(
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "liveliness-token"
+            )
+        )
+    )
+))]
+impl DeclarationWith for CountDeclaration {
+    type Out = usize;
+    fn declaration<S: DeclareSource>(self, declaration: Result<S, CodecError>) -> usize {
+        declaration.map_or(0, |declaration| {
+            wz_codecs::declare::DeclareWire::measure(&declaration).len()
+        })
+    }
+}
+
+/// A declaration written into the transmit sink.
+#[cfg(all(
+    feature = "codec-declare",
+    any(
+        all(feature = "session-multicast", feature = "alloc"),
+        all(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            any(
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "liveliness-token"
+            )
+        )
+    )
+))]
+struct WriteDeclaration<'s, 'b>(&'s mut crate::tx_buf::TxSink<'b>);
+
+#[cfg(all(
+    feature = "codec-declare",
+    any(
+        all(feature = "session-multicast", feature = "alloc"),
+        all(
+            any(not(feature = "alloc"), feature = "tx-lend-only"),
+            any(
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "liveliness-token"
+            )
+        )
+    )
+))]
+impl DeclarationWith for WriteDeclaration<'_, '_> {
+    type Out = Result<(), CodecError>;
+    fn declaration<S: DeclareSource>(self, declaration: Result<S, CodecError>) -> Self::Out {
+        wz_codecs::declare::DeclareWire::encode_source(&declaration?, self.0)
+    }
+}
+
 /// Every writer against the builder it mirrors: the same bytes for every input the
 /// builder takes, decoded back to the record the builder made, and the refusals.
 /// Each comparison is also pinned to a non-empty, non-trivial subject (the matrix
@@ -1224,6 +1840,7 @@ pub fn response_final<'a>(
 /// would be caught by the first row that differs and not pass an empty loop.
 #[cfg(all(
     test,
+    feature = "alloc",
     feature = "codec-declare",
     feature = "declare-final",
     feature = "codec-response-final"
@@ -2068,6 +2685,108 @@ mod tests {
             response_final(1, levels[0]).encode_to_vec(),
             response_final(1, levels[1]).encode_to_vec()
         );
+    }
+
+    /// A message written by one of the writers a link and a group both send with, into a vector.
+    #[cfg(feature = "alloc")]
+    fn written_by(writer: &dyn crate::tx_buf::WireWrite) -> Result<Vec<u8>, CodecError> {
+        let mut bytes = Vec::new();
+        writer.write_body(&mut crate::tx_buf::TxSink::new(&mut bytes))?;
+        Ok(bytes)
+    }
+
+    /// The one writer of a query's final, which a link and a group both send it with, writes the
+    /// borrowed final's bytes for each QoS and is counted as long as it is. Turned red by a writer
+    /// that writes another request id or QoS than it is handed.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_one_writer_of_a_final_writes_the_borrowed_finals_bytes() {
+        use crate::qos::{CongestionControl, Priority};
+        let levels = [
+            QosLevel::DEFAULT,
+            QosLevel::from_parts(Priority::DataHigh, CongestionControl::Drop, true),
+        ];
+        for request_id in [0u32, 7, 1 << 28, u32::MAX] {
+            for qos in levels {
+                let writer = ResponseFinalOf { request_id, qos };
+                let bytes = written_by(&writer).expect("written");
+                assert_eq!(
+                    bytes,
+                    response_final(request_id, qos).encode_to_vec(),
+                    "{request_id} {qos:?}"
+                );
+                // Counted by the writer where its sink is a transmit buffer a count stands in for.
+                #[cfg(feature = "transport-tx-lend")]
+                assert_eq!(crate::tx_buf::encoded_len(&writer), bytes.len());
+            }
+        }
+    }
+
+    /// The one writer of the declarations a link and a group send writes each kind as the
+    /// declaration of that kind alone, counts it as long as it is, and reads the declare QoS off
+    /// every kind but the token reply, whose envelope carries none; a key past the protocol's
+    /// bound is refused and counted as nothing. Turned red by an arm that writes another kind's
+    /// declaration or other arguments, or a QoS its envelope does not carry.
+    #[cfg(all(
+        feature = "alloc",
+        feature = "declare-subscriber",
+        any(feature = "session-multicast", feature = "tx-lend-only")
+    ))]
+    #[test]
+    fn the_one_writer_of_a_declaration_writes_its_kind_alone() {
+        use crate::tx_buf::WireWrite;
+        let cases = [
+            (
+                LentDeclaration::FinalReply { interest_id: 42 },
+                one_kind(&final_reply_declaration(42)).0,
+            ),
+            (
+                LentDeclaration::SubscriberReply {
+                    interest_id: 1 << 40,
+                    subscriber_id: 9,
+                    keyexpr: "demo/s",
+                },
+                one_kind(&subscriber_reply_declaration(1 << 40, 9, "demo/s").unwrap()).0,
+            ),
+            (
+                LentDeclaration::Subscriber {
+                    id: 300,
+                    mapping_id: 5,
+                    suffix: Some("demo/s"),
+                },
+                one_kind(&subscriber_declaration(300, 5, Some("demo/s")).unwrap()).0,
+            ),
+        ];
+        for (declaration, expected) in &cases {
+            let bytes = written_by(declaration).expect("written");
+            assert_eq!(&bytes, expected);
+            assert_eq!(declaration.encoded_len(), bytes.len());
+            assert_eq!(declaration.qos(), QOS_DECLARE);
+        }
+        #[cfg(feature = "liveliness-token")]
+        {
+            let reply = LentDeclaration::TokenReply {
+                token_id: 3,
+                keyexpr: "demo/t",
+                interest_id: 42,
+            };
+            assert_eq!(
+                written_by(&reply).expect("written"),
+                one_kind(&token_reply_declaration(3, "demo/t", 42).unwrap()).0
+            );
+            assert_eq!(reply.qos(), QosLevel::DEFAULT);
+        }
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let refused = LentDeclaration::SubscriberReply {
+            interest_id: 1,
+            subscriber_id: 2,
+            keyexpr: &past,
+        };
+        assert_eq!(refused.encoded_len(), 0);
+        let mut sink = Vec::new();
+        assert!(refused
+            .write_wire(&mut crate::tx_buf::TxSink::new(&mut sink))
+            .is_err());
     }
 
     /// What is written decodes to the message it describes, field by field, and

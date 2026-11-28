@@ -274,7 +274,7 @@ not declared, since a pico build of `peer` without it has no form to compile.
 | step | change | bytes, expected | receive Ir of `pico-client-coop-nostd` (about 3,066) | held by |
 |---|---|---|---|---|
 | **S1 (this branch)** | a udp port of the C engine keeps only what its session lent: `wz-runtime-coop`'s selector `udp-port-lent-only`, named by `wz-capi-coop`'s `listen`, compiles the port's rows and read buffers in their lent form alone; the heap form (`BookRows::Own`, `PortRx::Own`, `Held::Own`, `UdpPort::in_book`) is not compiled beside it, and links lent no rows or no slots refuse a `udp/` listener as exhausted | `pico-peer-coop` and `pico-api-coop-nostd` (and every step after `peer` of the API chain) -3,000 to -5,000, driver area: the second arm of every walk of the rows (the drop glues of a port and of a peer's share, 2,313 and 1,016; the read and sort, 3,354; the take and the look for a peer, 1,375 and 462), `PortRows<Heap>::enqueue` (336), the vectors' growth (3 x 99); the client case 0 | none: the client case compiles no port; a port's receive loses an arm and gains no call | `udp_link::a_lent_only_port_keeps_what_its_session_lent_and_nothing_of_its_own`, `ip_stack::a_lent_only_port_opens_over_the_rows_and_slots_its_session_lent_alone` |
-| S2 (with `udp-listen` on) | one UDP link driver for a dialled socket and a port's peer: the driver is a copy per socket type (`UdpDriver<PosixUdpSocket>` and `UdpDriver<PortPeer<..>>`, about 3,600 bytes the second), and outside `recv_with` the two do the same | -1,500 to -2,500; client 0 | none: built only with `udp-listen`; a match on the socket kind, no call | the driver's tests over both sockets |
+| S2 (with `udp-listen` on; landed, `peer-proportion.md` section 9.2) | one UDP link driver for a dialled socket and a port's peer: the driver is a copy per socket type (`UdpDriver<PosixUdpSocket>` and `UdpDriver<PortPeer<..>>`, about 3,600 bytes the second), and outside `recv_with` the two do the same | -1,500 to -2,500; client 0 | none: built only with `udp-listen`; a match on the socket kind, no call | the driver's tests over both sockets |
 | S3 (W5's off form) | a listening session laid out in the region the build fixes (the face count a build constant, as zenoh-pico's), so neither the plan nor the lent row policy is compiled | -10,000 to -18,000; client 0 | none | the region's tests with faces |
 | S4 | the residual of each held operation's frame (about 200 bytes an operation after `arch-mono` M1); measured on the explain report first | -1,000 to -2,500 | none: no operation is the read | `direct::held_operation_tests` |
 | S5 | the read and turn of each face, the supervisor and the publish's leg split by owner with the explain report of the two cases, then designed | to be measured | to be held to none | |
@@ -282,6 +282,15 @@ not declared, since a pico build of `peer` without it has no form to compile.
 S1 removes a form the C library had beside its one reachable form, so it stands whatever W3 comes
 to: with `udp/` listening out of the pico preset the step still holds every build that listens on
 `udp/`.
+
+Later the form is chosen by the links' kind and not by a selector (`heap-native.md` 7.22):
+`udp-port-lent-only` and its feature set went, and a port's memory is `CountKind::Ports`, the rows
+and slots a session lent for the D12 kinds and the heap's for `OnHeap`. S1's bytes stand: the D12
+library instantiates the lent form alone, by type, which C1cs's `nm -C` reading of section 6 checks
+(no `PortRows<..OnUse..>` body in the peer library). S1's two tests went with the selector; their
+cases are held by `udp_link::a_source_no_session_sized_or_lent_gives_no_port` and
+`ip_stack::a_port_reads_into_the_slots_its_session_lent`. The row above and section 6's lines that
+name the selector are this step's history.
 
 ## 6. Verification (the main session's)
 

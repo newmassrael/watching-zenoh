@@ -16,7 +16,8 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
-use wz_session_core::lifecycle_node::Commander;
+use wz_session_core::lifecycle_monitor::{Grant, Monitor, NoRecord, Policy};
+use wz_session_core::lifecycle_node::Verb;
 use wz_session_core::lifecycle_wire::{OpenMode, OpenOutcome};
 
 pub use wz_session_core::lifecycle_contract::{
@@ -77,9 +78,19 @@ impl Recording {
     }
 }
 
-impl NodeOpening for Recording {
-    fn permitted(&self, _commander: Commander<'_>) -> bool {
+/// The node's write permit, as the case states it: a grant to anyone, so every transport's
+/// commander is judged alike.
+impl Policy for Recording {
+    fn grants_anyone(&self, _verb: Verb) -> bool {
         self.permitted
+    }
+
+    fn each_grant(&self, _verb: Verb, _visit: &mut dyn FnMut(Grant<'_>) -> bool) {}
+}
+
+impl NodeOpening for Recording {
+    fn monitor(&self) -> Monitor<'_> {
+        Monitor::new(self, &NoRecord)
     }
 
     fn open(&self, zid: &[u8; CREDENTIAL_ZID_BYTES], mode: OpenMode) -> OpenOutcome {
@@ -136,12 +147,20 @@ mod tests {
         conforms(|case, opener| {
             let mut out = FixedText::<192>::new();
             match case.binding {
-                Binding::Bound => open_verdict(opener, case.peer_text, case.mode, Commander::Pipe)
-                    .write_json(&mut out),
-                Binding::Unbound => {
-                    open_verdict(&NoOpening, case.peer_text, case.mode, Commander::Pipe)
-                        .write_json(&mut out)
-                }
+                Binding::Bound => open_verdict(
+                    opener,
+                    case.peer_text,
+                    case.mode,
+                    wz_session_core::lifecycle_monitor::Asker::PIPE,
+                )
+                .write_json(&mut out),
+                Binding::Unbound => open_verdict(
+                    &NoOpening,
+                    case.peer_text,
+                    case.mode,
+                    wz_session_core::lifecycle_monitor::Asker::PIPE,
+                )
+                .write_json(&mut out),
             }
             Some(out.prefix().to_string())
         });

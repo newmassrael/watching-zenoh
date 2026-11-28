@@ -1290,25 +1290,14 @@ fn uninstall<
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(all(
-        feature = "runtime-plan",
-        any(feature = "query", feature = "queryable")
-    ))]
+    #[cfg(all(wz_lent, any(feature = "query", feature = "queryable")))]
     use crate::arena::{AllocatorMemory, SessionArena};
     #[cfg(any(feature = "query", feature = "queryable", not(wz_round)))]
     use wz_session_core::decl_sink::BorrowedDecl;
-    #[cfg(all(
-        feature = "runtime-plan",
-        any(feature = "query", feature = "queryable")
-    ))]
-    use wz_session_core::slot_observer::ObserverRows;
 
     use super::super::registry::CoopSinks;
 
-    #[cfg(all(
-        feature = "runtime-plan",
-        any(feature = "query", feature = "queryable")
-    ))]
+    #[cfg(all(wz_lent, any(feature = "query", feature = "queryable")))]
     use super::super::registry::App;
 
     /// The application's tables as this engine binds them, in the heap profile's storage: its
@@ -1645,10 +1634,7 @@ mod tests {
     /// The observers go into and out of the application tables a session's arena lent, which the
     /// session's registry holds, as they do into the heap profile's. Only where the open lends the
     /// tables from its arena (`runtime-plan`); a build that places them reads its region's.
-    #[cfg(all(
-        feature = "runtime-plan",
-        any(feature = "query", feature = "queryable")
-    ))]
+    #[cfg(all(wz_lent, any(feature = "query", feature = "queryable")))]
     #[test]
     fn the_observers_come_and_go_in_the_application_tables_an_arena_lent() {
         let mut arena =
@@ -1660,7 +1646,7 @@ mod tests {
         let mut app = App::lent(
             arena.arena_mut(),
             keys,
-            ObserverRows::default(),
+            Default::default(),
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows");

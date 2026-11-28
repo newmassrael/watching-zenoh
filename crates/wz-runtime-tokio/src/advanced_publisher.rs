@@ -96,7 +96,9 @@ where
     type Publisher = Publisher<R, T>;
     type Queryable = Queryable<R, T>;
     type Token = LivelinessToken<R, T>;
-    type Beacon = ();
+    /// The session again: a runtime session sends the beacon on its literal key, with no
+    /// publisher of its own.
+    type Beacon = Self;
     type Timer = PeriodicTask;
 
     fn node_hlc(&self) -> &NodeHlc {
@@ -149,13 +151,13 @@ where
     }
 
     /// A runtime session sends the beacon on its literal key with no publisher
-    /// of its own; there is nothing to declare.
+    /// of its own; nothing is declared, and the beacon is the session.
     fn declare_beacon(
         &self,
         _keyexpr: &str,
         _sporadic: bool,
-    ) -> Result<(), AdvancedPublisherError> {
-        Ok(())
+    ) -> Result<Self, AdvancedPublisherError> {
+        Ok(Self::new(&self.session))
     }
 
     fn start_beacon_timer(
@@ -195,22 +197,19 @@ where
         }
     }
 
+    fn send_beacon(beacon: &Self, keyexpr: &str, payload: &[u8], sporadic: bool) {
+        beacon.publish_beacon(keyexpr, payload, sporadic);
+    }
+
     #[cfg(feature = "ext-pubsub-sample-miss-detection")]
-    fn publish_beacon(&self, _beacon: Option<&()>, keyexpr: &str, payload: &[u8], sporadic: bool) {
+    fn publish_beacon(&self, keyexpr: &str, payload: &[u8], sporadic: bool) {
         let _ = self
             .session
             .publish(keyexpr, payload, heartbeat_publish_options(sporadic));
     }
 
     #[cfg(not(feature = "ext-pubsub-sample-miss-detection"))]
-    fn publish_beacon(
-        &self,
-        _beacon: Option<&()>,
-        _keyexpr: &str,
-        _payload: &[u8],
-        _sporadic: bool,
-    ) {
-    }
+    fn publish_beacon(&self, _keyexpr: &str, _payload: &[u8], _sporadic: bool) {}
 
     fn retained_key(&self, _publisher: &Publisher<R, T>) -> Option<Retained> {
         None
@@ -267,13 +266,8 @@ where
         keyexpr: impl Into<String>,
         options: AdvancedPublisherOptions,
     ) -> Result<Self, AdvancedPublisherError> {
-        AdvancedPublisherOn::declare_on(
-            Arc::new(SessionPlane::new(session)),
-            keyexpr,
-            options,
-            session.zid(),
-        )
-        .map(Self)
+        AdvancedPublisherOn::declare_on(SessionPlane::new(session), keyexpr, options, session.zid())
+            .map(Self)
     }
 
     /// [`AdvancedPublisherOn::put_shm_with`] for a chunk this runtime mapped: the same

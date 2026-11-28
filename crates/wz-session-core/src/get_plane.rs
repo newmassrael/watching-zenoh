@@ -9,28 +9,31 @@
 //! session's own queryables and for every reply where the read hands each record out as it is read
 //! ([`PlaneCalls::Captures`]); to the session's round of deliveries ([`crate::round`])
 //! otherwise. An engine that captures every reply it hands a get keeps no round for them
-//! ([`EveryReplyCaptured`]). What the entry's consolidation held to its end waits in the rows
-//! it was held in, due ([`LegHold`]), and what the entry gave up whole in the plane's held table;
-//! the leg's end is said when the entry is dropped (its Final, its deadline, its cancellation, the
-//! loss of its link) by a guard the sink owns, with the request id of the timeout that ended it
-//! when one did. The deliveries hand them out with no lock held, the end once the round has handed
-//! every reply held before it and the held table every reply held, as the drop of the leg's
-//! callback, which is how a program learns its get is over.
+//! ([`EveryReplyCaptured`]).
 //!
-//! The ends wait in a table of the plane's ([`EndedLegs`]), a row for each get the session's
-//! tables of pending gets can hold. A leg ends when its row in those tables goes, and the
-//! deliveries that follow every step take every end out, so the ends waiting never outnumber the
-//! rows; a leg the session ends itself (cancelled, or never sent) drops its callback where it ends
-//! it and leaves no end waiting ([`GetPlane::forget_end`]). An end is written where nothing can be
-//! answered (the drop of its leg's entry), so the row it is written in is asked for where a
-//! refusal is answered: at the leg's open ([`GetPlane::open_leg`]), which a session refuses as a
-//! get with no row.
+//! A get is one row of the plane's ([`LegRows`]): its callback, minted at its first leg and
+//! shared by every leg after it ([`AskedGet`]), and the count of what stands of it, its legs'
+//! entries and its asker while it issues them. The get consolidates as one: what the entries of
+//! its legs hold back is held in the plane's rows under the get's row, shared by every leg
+//! ([`LegHold`]).
+//! A leg's end (its Final, its deadline, the loss of its link) is said when its entry is dropped,
+//! by a guard the sink owns; the get's end is said by whichever of its legs and its asker stands
+//! last, with the request id of the timeout that ended that leg when one did, as zenoh flushes a
+//! query at its last Final (`zenoh/src/api/session.rs` @ `if query.nb_final == 0 {`). The
+//! deliveries hand it out with no lock held, once the round has handed every reply held before
+//! it: what the get held back, the timeout, and then the drop of its callback, which is how a
+//! program learns its get is over.
 //!
-//! A leg's callback lies in a row of the plane's ([`LegRows`]), held by count: by the leg's entry,
-//! then by its end, by each record of the round that owes it a reply, and by a thread that
-//! captured it. Each is a copy of the row's place ([`LegId`]), so no holder shares the callback by
-//! allocation, and the last count given back hands the callback out of the row, to be dropped where
-//! no lock is held.
+//! The ends wait in a table of the plane's ([`EndedLegs`]), one for each get. An end is written
+//! where nothing can be answered (the drop of the last leg's entry), so the row it is written in is
+//! set aside where a refusal is answered: at the get's first leg, which a session refuses as a get
+//! with no row. A get the session ends itself (cancelled) lets go of what it held and leaves no end
+//! waiting ([`GetPlane::forget_end`]).
+//!
+//! The get's row is held by count: by its asker while it issues the legs, by each leg's entry, by
+//! its end, by each record of the round that owes it a reply, and by a thread that captured it. Each
+//! is a copy of the row's place ([`LegId`]), so no holder shares the callback by allocation, and the
+//! last count given back hands the callback out of the row, to be dropped where no lock is held.
 //!
 //! The plane's tables are of the policy its engine names ([`RoundCalls::TablePolicy`]): rows the
 //! session's arena lent or its region placed, or rows each table takes at its first value.
@@ -43,10 +46,9 @@
 //! [`GetPlane::forget_end`]: crate::get_plane::GetPlane::forget_end
 //! [`LegRows`]: crate::get_plane::LegRows
 //! [`LegId`]: crate::get_plane::LegId
-//! [`GetPlane::open_leg`]: crate::get_plane::GetPlane::open_leg
+//! [`AskedGet`]: crate::get_plane::AskedGet
 //! [`RoundCalls::TablePolicy`]: crate::round::RoundCalls::TablePolicy
 
-use alloc::collections::VecDeque;
 use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::Ordering;
 // The split `round` uses: the host profile has the native atomics, the `no_std` profile gets the
@@ -59,7 +61,6 @@ use portable_atomic::AtomicU32;
 use crate::bounded::{BoundedVec, Storage, Taken};
 use crate::placed::PlacedRef;
 use crate::plane_lock::{LockFamily, Pending, Queued};
-use crate::reply::InboundReply;
 use crate::reply_hold::{HeldReplies, HeldReply, HoldRefused, ReplyHold};
 use crate::reply_sink::{ReplySink, ReplyView};
 use crate::round::{LegHolders, PlaneCalls, Round};
@@ -73,6 +74,9 @@ use crate::wire_id::RequestId;
 /// answer reaches ([`GetPlane::capture`]), and the locks of the plane's queues ([`Queued`]) are
 /// the planes' ([`PlaneCalls`]).
 pub trait GetCalls: PlaneCalls<Leg = LegId> {
+    /// What names the fan a get was asked under, which a cancellation ends every leg of.
+    type Fan: Copy + PartialEq;
+
     /// Hand `reply` to `callback`.
     fn call(callback: &Self::ReplyCallback, reply: &dyn ReplyView);
 
@@ -81,36 +85,30 @@ pub trait GetCalls: PlaneCalls<Leg = LegId> {
     fn holds_a_session() -> bool;
 }
 
-/// The end of one leg: the leg, the request id of the timeout that ended it, which its callback is
-/// handed after every reply held before it (none for a leg that did not time out), and the row of
-/// its callback, of which the end holds a count past the entry that owned it: whoever takes the end
-/// out gives that count back ([`LegHolders::release`]), with no lock held.
+/// The end of one get: the request id of the timeout that ended the leg that stood last, which its
+/// callback is handed after every reply held before it (none for a get that did not time out), and
+/// the row of its callback, of which the end holds a count past the leg or the asker that stood last:
+/// whoever takes the end out gives that count back ([`LegHolders::release`]), with no lock held.
 pub struct Ended {
-    leg: u64,
     timed_out: Option<RequestId>,
     row: LegId,
 }
 
 impl Ended {
-    /// The leg that ended.
-    pub fn leg(&self) -> u64 {
-        self.leg
-    }
-
-    /// The request id of the timeout that ended the leg, if one did.
+    /// The request id of the timeout that ended the get, if one did.
     pub fn timed_out(&self) -> Option<RequestId> {
         self.timed_out
     }
 
-    /// The row of the leg's callback, of which the end holds a count.
+    /// The row of the get's callback, of which the end holds a count.
     pub fn row(&self) -> LegId {
         self.row
     }
 }
 
-/// The place of a leg's row in the plane's rows ([`LegRows`]). Copied only by a holder of a count
-/// of the row, and the row is not given to another leg before its last count is given back, so
-/// the place names this leg's row for as long as any copy of it is used.
+/// The place of a get's row in the plane's rows ([`LegRows`]), which each of its legs names. Copied
+/// only by a holder of a count of the row, and the row is not given to another get before its last
+/// count is given back, so the place names this get's row for as long as any copy of it is used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LegId(u32);
 
@@ -125,14 +123,19 @@ impl LegId {
     }
 }
 
-/// A leg's callback in its row, whether the replies it is handed show their timestamps
-/// (`entity-timestamp-opt-in`), and how many hold it. The count is changed under the plane's lock
-/// alone, and is a word of its own so that a caller that read the row's place under that lock can
-/// call the callback after it with no write to the bytes it reads.
+/// A get's callback in its row, whether the replies it is handed show their timestamps
+/// (`entity-timestamp-opt-in`), the fan it was asked under, and how many hold it: the get as its
+/// asker holds it, of which each leg's entry in its face's table is the wire's part. The count
+/// is changed under the plane's lock alone, and is a word of its own so that a caller that read the
+/// row's place under that lock can call the callback after it with no write to the bytes it reads.
 pub struct LegRow<C: GetCalls> {
     callback: C::ReplyCallback,
     shows_timestamp: bool,
+    fan: Option<C::Fan>,
     holders: AtomicU32,
+    /// What stands of the get: its legs whose entries are held, and its asker while it issues
+    /// them. Changed under the plane's lock alone, a word of its own as the count is.
+    standing: AtomicU32,
 }
 
 impl<C: GetCalls> LegRow<C> {
@@ -146,8 +149,8 @@ impl<C: GetCalls> LegRow<C> {
     }
 }
 
-/// The rows of the legs' callbacks, a row for each get the session's tables of pending gets hold at
-/// once, of the plane's policy; a row is reused once its last count is given back.
+/// The rows of the gets' callbacks, a row for each get whose legs or asker hold it, of the plane's
+/// policy; a row is reused once its last count is given back.
 pub struct LegRows<C: GetCalls> {
     rows: BoundedVec<Option<LegRow<C>>, { usize::MAX }, C::TablePolicy>,
 }
@@ -167,12 +170,14 @@ impl<C: GetCalls> LegRows<C> {
         Self { rows }
     }
 
-    /// Keep the callback `mint` makes, shown timestamps when `shows_timestamp`, in a free row,
-    /// held once: its place, or `None`, with nothing minted, when every row is held.
+    /// Keep the callback `mint` makes, shown timestamps when `shows_timestamp`, of a get asked
+    /// under `fan`, in a free row, held and standing twice, for the get's first leg and its asker:
+    /// its place, or `None`, with nothing minted, when every row is held.
     fn open(
         &mut self,
         mint: &mut dyn FnMut() -> C::ReplyCallback,
         shows_timestamp: bool,
+        fan: Option<C::Fan>,
     ) -> Option<LegId> {
         let at = match self.rows.iter().position(Option::is_none) {
             Some(at) => at,
@@ -186,7 +191,9 @@ impl<C: GetCalls> LegRows<C> {
         *slot = Some(LegRow {
             callback: mint(),
             shows_timestamp,
-            holders: AtomicU32::new(1),
+            fan,
+            holders: AtomicU32::new(2),
+            standing: AtomicU32::new(2),
         });
         Some(id)
     }
@@ -205,6 +212,32 @@ impl<C: GetCalls> LegRows<C> {
         true
     }
 
+    /// One more leg of the get in `leg`'s row, which holds a count of it and stands: `false` when
+    /// it names none.
+    fn join(&self, leg: LegId) -> bool {
+        let Some(row) = self.row(leg) else {
+            return false;
+        };
+        row.holders.fetch_add(1, Ordering::Relaxed);
+        row.standing.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    /// A leg or the asker of the get in `leg`'s row no longer stands: `true` when it stood last,
+    /// whose count of the row then passes to the get's end; otherwise its count is given back
+    /// here, which is never the last, as what still stands holds one.
+    fn leave(&self, leg: LegId) -> bool {
+        let Some(row) = self.row(leg) else {
+            return false;
+        };
+        if row.standing.fetch_sub(1, Ordering::Relaxed) == 1 {
+            return true;
+        }
+        let held = row.holders.fetch_sub(1, Ordering::Relaxed);
+        debug_assert!(held > 1, "what still stands of a get holds its row");
+        false
+    }
+
     /// Give back one count of `leg`'s row: the callback, taken out of the row, when it was the
     /// last count, for the caller to drop with no lock held.
     fn release(&mut self, leg: LegId) -> Option<C::ReplyCallback> {
@@ -217,45 +250,65 @@ impl<C: GetCalls> LegRows<C> {
     }
 }
 
-/// The legs whose entries went and whose callbacks are still to be dropped, a row for each get the
-/// session's tables of pending gets hold (see the module), of the policy `P`.
+/// The ends of the gets whose last leg or asker went, each to be handed out, and a row set aside for
+/// the end of each get still standing (see the module), of the policy `P`: the table bounds the gets
+/// the session holds at once.
 pub struct EndedLegs<P: Storage> {
     legs: BoundedVec<Ended, { usize::MAX }, P>,
+    /// The gets standing whose ends are still to be written, each with a free row set aside.
+    owed: usize,
 }
 
 impl<P: Storage> EndedLegs<P> {
     /// A table over `legs`: rows an arena lent or a region placed, or a count of them the table
-    /// takes at the first leg's open.
+    /// takes at the first get's open.
     pub fn over(legs: BoundedVec<Ended, { usize::MAX }, P>) -> Self {
-        Self { legs }
+        Self { legs, owed: 0 }
     }
 
-    /// Room for one more end, its rows taken now where the policy takes a table's rows at its
-    /// first value: what a leg's open asks, where a refusal is answered ([`GetPlane::open_leg`]).
-    fn make_room(&mut self) -> bool {
-        self.legs.make_room()
+    /// Set a row aside for the end of one more get, the table's rows taken now where the policy
+    /// takes them at its first value: what a get's first leg asks, where a refusal is answered
+    /// ([`GetPlane::open_leg`]). `false` when every row is written or set aside already.
+    fn set_aside(&mut self) -> bool {
+        // Only a policy that takes a table's rows at its first value has a room to make; on every
+        // other the rows are there already.
+        if matches!(P::TAKEN, Taken::AtFirstUse) && !self.legs.make_room() {
+            return false;
+        }
+        if self.legs.free_slots() <= self.owed {
+            return false;
+        }
+        // Below the table's free rows, which a `usize` counts, so the count never saturates.
+        self.owed = self.owed.saturating_add(1);
+        true
     }
 
-    /// A leg ended: its callback is to be dropped. Its row is there: its leg's open had the table
-    /// take its rows, which it keeps, and the ends waiting, each holding one of the legs' rows,
-    /// never outnumber the table's rows, which are at least as many ([`GetPlane::init_at`]).
+    /// Give back the row set aside for a get whose first leg was not held after all.
+    fn give_back(&mut self) {
+        self.owed = self.owed.saturating_sub(1);
+    }
+
+    /// A get ended: its count of its row is to be given back. Its row is there: its first leg set
+    /// one aside, which no other end or get took since.
     fn note(&mut self, ended: Ended) {
+        self.owed = self.owed.saturating_sub(1);
         let kept = self.legs.push(ended);
         debug_assert!(
             kept.is_ok(),
-            "an end finds the row its leg had the table take at its open"
+            "an end finds the row its get's first leg set aside"
         );
     }
 
-    /// The end of a leg whose callback is still to be dropped, if any.
+    /// The end of a get whose count of its row is still to be given back, if any.
     fn take(&mut self) -> Option<Ended> {
         self.legs.pop()
     }
 
-    /// Leg `leg`'s end was decided where it ended: its end, taken out for that caller to let go
-    /// of with no lock held, and nothing left to do for it here.
-    fn forget(&mut self, leg: u64) -> Option<Ended> {
-        let at = self.legs.iter().position(|ended| ended.leg == leg)?;
+    /// The get in row `row` was ended by the session itself: its end, if its last leg or its asker
+    /// wrote one, taken out for that caller to let go of with no lock held, and nothing left to do
+    /// for it here.
+    fn forget(&mut self, row: LegId) -> Option<Ended> {
+        let at = self.legs.iter().position(|ended| ended.row == row)?;
         Some(self.legs.remove(at))
     }
 }
@@ -295,16 +348,13 @@ impl<C: GetCalls> Capturing<C> {
 /// What the get plane shares between the session's state, the registry's reply sinks and the
 /// deliveries.
 pub struct GetPlane<C: GetCalls> {
-    /// The legs that ended, handed out after the replies queued before them.
+    /// The gets that ended, handed out after the replies queued before them.
     ended: Queued<C::Queues, EndedLegs<C::TablePolicy>>,
-    /// The replies the entries of legs held to their ends, each with its leg, in the order they
-    /// gave them up: handed to the leg's callback before its end, and before its timeout.
-    held: Queued<C::Queues, VecDeque<(u64, InboundReply)>>,
-    /// The replies the gets that consolidate hold to their Finals, each tagged with its leg
+    /// The replies the gets that consolidate hold to their ends, each tagged with its get's row
     /// ([`LegHold`]): rows of the plane's policy, shared by every get of the session and reached
     /// only from the sinks, under the session's lock.
-    replies: <C::Locks as LockFamily>::Lock<HeldReplies<u64, C::TablePolicy>>,
-    /// The legs' callbacks, each held by count (see the module).
+    replies: <C::Locks as LockFamily>::Lock<HeldReplies<LegId, C::TablePolicy>>,
+    /// The gets' callbacks, each held by count (see the module).
     legs: <C::Locks as LockFamily>::Lock<LegRows<C>>,
     /// Whether a thread that holds the session's lock takes the callback the reply it hands the
     /// sinks reaches ([`Self::capture`]), where the plane keeps a capture.
@@ -313,9 +363,8 @@ pub struct GetPlane<C: GetCalls> {
 
 impl<C: GetCalls> GetPlane<C> {
     /// A plane with nothing ended, its ends waiting in `ended`, the replies its gets hold in
-    /// `replies` and its legs' callbacks in `legs`, made in `at` with its locks. `ended` holds at
-    /// least as many rows as `legs`: each end waiting holds one of the legs' rows, so an end always
-    /// finds a row of its own.
+    /// `replies` and its gets' callbacks in `legs`, made in `at` with its locks. `ended` bounds the
+    /// gets held at once, a row set aside for each at its first leg.
     ///
     /// # Safety
     /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
@@ -323,7 +372,7 @@ impl<C: GetCalls> GetPlane<C> {
     pub unsafe fn init_at(
         at: NonNull<Self>,
         ended: EndedLegs<C::TablePolicy>,
-        replies: HeldReplies<u64, C::TablePolicy>,
+        replies: HeldReplies<LegId, C::TablePolicy>,
         legs: LegRows<C>,
     ) {
         const {
@@ -332,19 +381,12 @@ impl<C: GetCalls> GetPlane<C> {
                 "a leg's callback is called where its row lies, the rows' lock let go of"
             )
         };
-        debug_assert!(
-            ended.legs.free_slots() >= legs.rows.free_slots(),
-            "a row for the end of every leg the legs' rows hold"
-        );
         let at = at.as_ptr();
         // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
         // so each field is too, and each is written once.
         unsafe {
             Queued::init_at(NonNull::new_unchecked(addr_of_mut!((*at).ended)), |queue| {
                 queue.write(ended)
-            });
-            Queued::init_at(NonNull::new_unchecked(addr_of_mut!((*at).held)), |queue| {
-                queue.write(VecDeque::new())
             });
             C::Locks::init_at(
                 NonNull::new_unchecked(addr_of_mut!((*at).replies)),
@@ -404,24 +446,51 @@ impl<C: GetCalls> GetPlane<C> {
         })
     }
 
-    /// Keep the callback `mint` makes in a row of the plane's, held once, for the leg's entry:
-    /// its place, or `None`, with nothing minted, when every row is held or a table the leg needs
-    /// cannot take its rows, which a session refuses as a table of pending gets with no row. Asked
-    /// under the session's lock, so the callback is minted there as it was before it had a row.
-    pub fn open_leg(
+    /// Keep the callback `mint` makes, of a get asked under `fan`, in a row of the plane's, held
+    /// and standing for its first leg's entry and for its asker, a row of the ends set aside for the
+    /// get: its place, or `None`, with nothing minted, when every row is held or set aside or a table
+    /// the get needs cannot take its rows, which a session refuses as a table of pending gets with
+    /// no row. Asked under the session's lock, so the callback is minted there as it was before it
+    /// had a row.
+    fn open_leg(
         &self,
         mint: &mut dyn FnMut() -> C::ReplyCallback,
         shows_timestamp: bool,
+        fan: Option<C::Fan>,
     ) -> Option<LegId> {
-        // The leg's end is written by the drop of its entry, which can answer no refusal, so the
-        // ends take their rows here, before the leg is kept. Only a policy that takes a table's
-        // rows at its first value has a room to make; on every other the rows are there already.
-        if matches!(<C::TablePolicy as Storage>::TAKEN, Taken::AtFirstUse)
-            && !self.ended.with(EndedLegs::make_room)
-        {
+        // The get's end is written by whatever of it stands last, the drop of a leg's entry among
+        // them, which can answer no refusal, so its row is set aside here, before the get is kept.
+        if !self.ended.with(EndedLegs::set_aside) {
             return None;
         }
-        C::Locks::with(&self.legs, |legs| legs.open(mint, shows_timestamp))
+        let row = C::Locks::with(&self.legs, |legs| legs.open(mint, shows_timestamp, fan));
+        if row.is_none() {
+            self.ended.with(EndedLegs::give_back);
+        }
+        row
+    }
+
+    /// One more leg of the get in row `row`, holding a count of it and standing: `false` when
+    /// `row` names none.
+    fn join_leg(&self, row: LegId) -> bool {
+        C::Locks::with(&self.legs, |legs| legs.join(row))
+    }
+
+    /// A leg or the asker of the get in row `row` no longer stands; when it stood last the get
+    /// ended, its end written with its count of the row and `timed_out`, the timeout that ended
+    /// that leg if one did, into the row its first leg set aside.
+    fn stand_down(&self, row: LegId, timed_out: Option<RequestId>) {
+        if C::Locks::with(&self.legs, |legs| legs.leave(row)) {
+            self.ended.with(|ends| ends.note(Ended { timed_out, row }));
+        }
+    }
+
+    /// Whether the row `leg` names is the row of a get asked under `fan`: what a cancellation of
+    /// the fan asks of each pending entry's sink to find the legs it ends ([`LegSink::row`]).
+    pub fn in_fan(&self, leg: LegId, fan: C::Fan) -> bool {
+        C::Locks::with(&self.legs, |legs| {
+            legs.row(leg).is_some_and(|row| row.fan == Some(fan))
+        })
     }
 
     /// Let go of every end, every held reply and every leg's row before the arena that lent them
@@ -429,63 +498,41 @@ impl<C: GetCalls> GetPlane<C> {
     /// records held and its entries are gone. A callback still in a row is dropped here.
     pub fn let_go(&self) {
         while let Some(ended) = self.take_end() {
-            self.forget_due(ended.leg);
+            self.forget_due(ended.row);
             drop(self.release_row(ended.row));
         }
-        drop(self.take_all_held());
         drop(C::Locks::with(&self.legs, core::mem::take));
         self.ended
             .with(|ends| *ends = EndedLegs::over(BoundedVec::default()));
     }
 
-    /// Whether a leg's end waits to be handed out, read without the lock.
+    /// Whether a get's end waits to be handed out, read without the lock.
     pub fn ends_pending(&self) -> bool {
         self.ended.is_pending()
     }
 
-    /// The end of a leg whose callback is still to be dropped, taken out, if any.
+    /// The end of a get whose count of its row is still to be given back, taken out, if any.
     pub fn take_end(&self) -> Option<Ended> {
         self.ended.with(EndedLegs::take)
     }
 
-    /// Leg `leg`'s end, decided where it ended (cancelled, or never sent): taken out for that
-    /// caller to let go of with no lock held, and left for no delivery.
-    pub fn forget_end(&self, leg: u64) -> Option<Ended> {
-        self.ended.with(|ends| ends.forget(leg))
+    /// The end of the get in row `row`, decided by the session itself (cancelled), if its last leg
+    /// or its asker wrote one: taken out for that caller to let go of with no lock held, and left
+    /// for no delivery.
+    pub fn forget_end(&self, row: LegId) -> Option<Ended> {
+        self.ended.with(|ends| ends.forget(row))
     }
 
-    /// Keep `reply`, held to its end, for leg `leg`, after what it holds already.
-    fn keep_held(&self, leg: u64, reply: InboundReply) {
-        self.held.with(|held| held.push_back((leg, reply)));
+    /// The next reply the get in row `row` held back over its legs, taken out of its row for the
+    /// caller to hand to the get's callback with no lock held, at the get's end ([`LegHold`]);
+    /// `None` once there is none.
+    pub fn take_due(&self, row: LegId) -> Option<HeldReply<LegId, C::TablePolicy>> {
+        C::Locks::with(&self.replies, |replies| replies.take(row))
     }
 
-    /// The first reply leg `leg`'s entry held to its end, taken out; `None` once there is
-    /// nothing. Read without the lock while nothing is held.
-    pub fn take_held(&self, leg: u64) -> Option<InboundReply> {
-        if !self.held.is_pending() {
-            return None;
-        }
-        self.held.with(|held| {
-            let at = held.iter().position(|(of, _)| *of == leg)?;
-            held.remove(at).map(|(_, held)| held)
-        })
-    }
-
-    /// Everything held for every leg, taken out: the session is closed.
-    pub fn take_all_held(&self) -> VecDeque<(u64, InboundReply)> {
-        self.held.with(core::mem::take)
-    }
-
-    /// The next reply leg `leg`'s consolidation made due at its end, taken out of its row for the
-    /// caller to hand to the leg's callback with no lock held ([`LegHold`]); `None` once there is
-    /// none.
-    pub fn take_due(&self, leg: u64) -> Option<HeldReply<u64, C::TablePolicy>> {
-        C::Locks::with(&self.replies, |replies| replies.take(leg))
-    }
-
-    /// Let go of every reply leg `leg` holds, due or not: a leg ended with nothing handed.
-    pub fn forget_due(&self, leg: u64) {
-        C::Locks::with(&self.replies, |replies| replies.forget(leg));
+    /// Let go of every reply the get in row `row` holds back: a get ended with nothing handed.
+    pub fn forget_due(&self, row: LegId) {
+        C::Locks::with(&self.replies, |replies| replies.forget(row));
     }
 
     /// [`LegHolders::hold`], which the plane's own capture takes too.
@@ -529,24 +576,67 @@ where
     }
 }
 
+/// A get as its asker holds it while it issues the get's legs: its callback, minted into a row of
+/// the plane's at the first leg ([`Self::leg`]), which every leg after it joins, so every leg of
+/// the get hands its replies to the one callback and holds back into the one consolidation. The
+/// asker holds a count of the row and stands from the first leg until it is dropped, so a leg that
+/// ends while the next is issued never ends the get, nor lets its row be another get's, before the
+/// get has issued every leg; dropped last, it writes the get's end. Dropped with no lock held.
+pub struct AskedGet<'p, C: GetCalls> {
+    plane: &'p GetPlane<C>,
+    /// The get's row, once its first leg opened it, of which the asker holds a count.
+    row: Option<LegId>,
+}
+
+impl<'p, C: GetCalls> AskedGet<'p, C> {
+    /// A get of `plane`'s with no leg yet.
+    pub fn new(plane: &'p GetPlane<C>) -> Self {
+        Self { plane, row: None }
+    }
+
+    /// The row of the get's callback, with a count of it for one more leg's entry, whose sink takes
+    /// that count over ([`LegSink::new`]) and stands for the leg until the entry is dropped. At the
+    /// first leg the row is opened, the callback `mint` makes in it, showing timestamps when
+    /// `shows_timestamp`, of a get asked under `fan`, the asker standing in it too, and a row of
+    /// the ends set aside for the get's end; a later leg mints nothing. `None`, with nothing
+    /// minted or held, when the rows or the ends have no room for the get, which a session refuses
+    /// as a table of pending gets with no row. Asked under the session's lock.
+    pub fn leg(
+        &mut self,
+        mint: &mut dyn FnMut() -> C::ReplyCallback,
+        shows_timestamp: bool,
+        fan: Option<C::Fan>,
+    ) -> Option<LegId> {
+        if let Some(row) = self.row {
+            return self.plane.join_leg(row).then_some(row);
+        }
+        let row = self.plane.open_leg(mint, shows_timestamp, fan)?;
+        self.row = Some(row);
+        Some(row)
+    }
+}
+
+impl<C: GetCalls> Drop for AskedGet<'_, C> {
+    fn drop(&mut self) {
+        if let Some(row) = self.row {
+            self.plane.stand_down(row, None);
+        }
+    }
+}
+
 /// The end of a leg, said once: when the pending entry that owns it is dropped, with the timeout
-/// that ended it, which the entry's sink was told of before its drop.
+/// that ended it, which the entry's sink was told of before its drop. The leg no longer stands; when
+/// it stood last the get's end is written.
 struct LegEnd<C: GetCalls> {
-    leg: u64,
     timed_out: Option<RequestId>,
-    /// The entry's count of the leg's row, which the end holds from the entry's drop on.
+    /// The entry's count of the get's row, given back as the leg ends or passed to the get's end.
     row: LegId,
     plane: PlacedRef<GetPlane<C>>,
 }
 
 impl<C: GetCalls> Drop for LegEnd<C> {
     fn drop(&mut self) {
-        let ended = Ended {
-            leg: self.leg,
-            timed_out: self.timed_out,
-            row: self.row,
-        };
-        self.plane.ended.with(|ends| ends.note(ended));
+        self.plane.stand_down(self.row, self.timed_out);
     }
 }
 
@@ -583,44 +673,46 @@ impl<C: GetCalls> UncapturedReplies<C> for EveryReplyCaptured {
     }
 }
 
-/// The sink of leg `leg`'s pending entry, holding a count of the row of the leg's callback. A
-/// reply the session's own queryables made while the plane captures is the thread's that made it,
-/// which hands it to the callback once it lets go of the session ([`GetPlane::capture`]); any
-/// other is handed to `U`, the session's round of deliveries ([`Round::offer_reply`]) unless
-/// the engine captures every reply ([`EveryReplyCaptured`]).
-/// What the entry's consolidation held to its end waits in the plane's held table
-/// ([`GetPlane::take_held`]), and the timeout of a leg that timed out in the leg's end
-/// ([`Ended`]). The sink's drop is the leg's end: the Final says nothing more, as the registry
-/// drops the entry once its Finals are in. The end holds the entry's count of the row past the
-/// entry ([`Ended`]), so the entry's drop, under the session's lock, never lets the callback go.
+/// The sink of a leg's pending entry, holding a count of the row of its get's callback. A reply
+/// the session's own queryables made while the plane captures is the thread's that made it, which
+/// hands it to the callback once it lets go of the session ([`GetPlane::capture`]); any other is
+/// handed to `U`, the session's round of deliveries ([`Round::offer_reply`]) unless the engine
+/// captures every reply ([`EveryReplyCaptured`]). The sink's drop is the leg's end: the
+/// Final says nothing more, as the registry drops the entry once its Finals are in, and the leg no
+/// longer stands; the timeout of a leg that timed out goes with it, to the get's end when the leg
+/// stood last ([`Ended`]). The entry's count of the row is given back there, or passed to the
+/// get's end, so the entry's drop, under the session's lock, never lets the callback go.
 pub struct LegSink<C: GetCalls, U: UncapturedReplies<C> = PlacedRef<Round<C>>> {
-    leg: u64,
     uncaptured: U,
     end: LegEnd<C>,
 }
 
 impl<C: GetCalls, U: UncapturedReplies<C>> LegSink<C, U> {
-    /// The sink of leg `leg`, handing what it is handed to the callback in `row`, of which it
-    /// takes over the count [`GetPlane::open_leg`] took, and the replies no thread captured to
+    /// The sink of a leg of the get in `row`, handing what it is handed to the get's callback, of
+    /// which it takes over the count [`AskedGet::leg`] took, and the replies no thread captured to
     /// `uncaptured`.
     ///
     /// # Safety
     /// The sink is handed its replies by the holder of the session's lock alone, as
     /// [`UncapturedReplies::offer`] asks of its caller: the engine registers it in the session's
     /// tables of pending gets, which it reaches under that lock. The owners of the plane and of
-    /// what `uncaptured` hands replies to outlive the sink, whose drop writes its end into the
-    /// plane, as [`crate::placed::Placed::share`] asks of every handle.
-    pub unsafe fn new(leg: u64, row: LegId, plane: PlacedRef<GetPlane<C>>, uncaptured: U) -> Self {
+    /// what `uncaptured` hands replies to outlive the sink, whose drop writes into the plane, as
+    /// [`crate::placed::Placed::share`] asks of every handle.
+    pub unsafe fn new(row: LegId, plane: PlacedRef<GetPlane<C>>, uncaptured: U) -> Self {
         Self {
-            leg,
             uncaptured,
             end: LegEnd {
-                leg,
                 timed_out: None,
                 row,
                 plane,
             },
         }
+    }
+
+    /// The row of the get's callback, of which the sink holds a count: what names the get the leg
+    /// belongs to ([`GetPlane::in_fan`]).
+    pub fn row(&self) -> LegId {
+        self.end.row
     }
 }
 
@@ -639,69 +731,49 @@ impl<C: GetCalls, U: UncapturedReplies<C>> ReplySink for LegSink<C, U> {
     fn on_timeout(&mut self, rid: RequestId) {
         self.end.timed_out = Some(rid);
     }
-
-    fn on_reply_owned(&mut self, reply: InboundReply) {
-        self.end.plane.keep_held(self.leg, reply);
-    }
 }
 
-/// What a consolidating get holds of its replies until its Final: rows of the session's
-/// ([`GetPlane::take_due`]), tagged with the leg, so a held reply is copied into the session's
-/// memory and takes none of its own. A full table refuses the reply, as a fixed room does, and
-/// counts it. At the get's end (its Final, or its deadline) the replies it held are DUE: they stay
-/// in their rows and are handed to the leg's callback from there once the session's lock is let go,
-/// before the leg's end, so none of them is copied into the round of deliveries, which has no place
-/// for a part that lies in a row. A leg that ends with replies held and none due (cancelled, or its
-/// face gone) lets them go.
+/// What a consolidating get holds of its replies until its end: rows of the session's
+/// ([`GetPlane::take_due`]), tagged with the get's row, so every leg of the get holds back into one
+/// consolidation, as zenoh holds a query's replies over every Final
+/// (`zenoh/src/api/session.rs` @ `if query.nb_final == 0 {`), and a held reply is copied into
+/// the session's memory and takes none of its own. A full table refuses the reply, as a fixed
+/// room does, and counts it. A leg's Final or deadline makes nothing due by itself: what the get
+/// holds stays in its rows until its end ([`Ended`]), when it is handed to the get's callback from
+/// there with no lock held, so none of it is copied into the round of deliveries, which has no
+/// place for a part that lies in a row.
+/// A get the session ends itself (cancelled) lets go of it ([`GetPlane::forget_due`]).
 pub struct LegHold<C: GetCalls> {
-    leg: u64,
+    row: LegId,
     plane: PlacedRef<GetPlane<C>>,
-    /// Whether the get's end made what it holds due.
-    due: bool,
 }
 
 impl<C: GetCalls> LegHold<C> {
-    /// The hold of leg `leg` in `plane`'s rows, whose owner outlives the hold, whose drop lets go
-    /// of what it still holds there ([`crate::placed::Placed::share`]).
-    pub fn new(leg: u64, plane: PlacedRef<GetPlane<C>>) -> Self {
-        Self {
-            leg,
-            plane,
-            due: false,
-        }
+    /// The hold of a leg of the get in `row`, in `plane`'s rows, whose owner outlives the hold
+    /// ([`crate::placed::Placed::share`]).
+    pub fn new(row: LegId, plane: PlacedRef<GetPlane<C>>) -> Self {
+        Self { row, plane }
     }
 }
 
 impl<C: GetCalls> ReplyHold for LegHold<C> {
     fn displaces(&self, reply: &dyn ReplyView) -> bool {
         C::Locks::with(&self.plane.replies, |replies| {
-            replies.of(self.leg).displaces(reply)
+            replies.of(self.row).displaces(reply)
         })
     }
 
     fn hold(&mut self, reply: &dyn ReplyView, whole: bool) -> Result<(), HoldRefused> {
-        let leg = self.leg;
+        let row = self.row;
         C::Locks::with(&self.plane.replies, |replies| {
-            replies.of(leg).hold(reply, whole)
+            replies.of(row).hold(reply, whole)
         })
     }
 
-    /// The get ended: what it holds is due, and stays in its rows for the leg's callback to be
-    /// handed it with no lock held ([`GetPlane::take_due`]). Nothing is handed to `each`, which
-    /// would hold it in the round of deliveries.
-    fn drain(&mut self, _each: &mut dyn FnMut(&dyn ReplyView)) {
-        self.due = true;
-    }
-}
-
-impl<C: GetCalls> Drop for LegHold<C> {
-    fn drop(&mut self) {
-        // What is due waits for the leg's end; what the get held with none due goes with it.
-        if !self.due {
-            let leg = self.leg;
-            C::Locks::with(&self.plane.replies, |replies| replies.forget(leg));
-        }
-    }
+    /// A leg's Final or deadline: the get's held replies stay in its rows for its end, which hands
+    /// them to its callback with no lock held ([`GetPlane::take_due`]). Nothing is handed to `each`,
+    /// which would hold it in the round of deliveries.
+    fn drain(&mut self, _each: &mut dyn FnMut(&dyn ReplyView)) {}
 }
 
 #[cfg(test)]

@@ -12811,6 +12811,19 @@ layer_c1own_own_space_witnesses() {
 #                                                      not pass by deleting the
 #                                                      helper)
 #
+# The PER-SESSION SLOT subsets 19-22, the same lesson on the fixed-memory profile. Every
+# arm above builds the heap's forms or no session at all, and the feature sets the slot
+# profile is clippied in (`[package.metadata.wz-docs]`, Layers C1bf and gate 7) are its
+# LARGEST, every other feature beside it. A slot build of a few planes is what a small
+# image takes, and three faults lived only there: a declaration type whose one variant
+# left borrowed nothing (`liveliness-token` alone, an unused lifetime, a hard error), the
+# chain verdicts compiled with no reader where no session reads a frame, and test
+# fixtures no table of the build calls. CLIPPY arms, dead code being a warning.
+#   19. slot + liveliness-token, no session        (the verdicts' build)
+#   20. slot + session-unicast + liveliness-token  (the declaration type's build)
+#   21. 19 at every target                         (the test fixtures' build)
+#   22. a small slot node: tokens, a publish, a get and its replies
+#
 # R2275 (item 615): a LIST, for the same two reasons Layer C3 was rewritten into
 # one. Every subset here is `--quiet`, so the lane exited 0 having printed
 # nothing — SILENT at every observation the archived logs hold and in both jobs
@@ -12840,6 +12853,10 @@ layer_c1h_arbitrary_subset_matrix() {
         "clippy -p wz-session-core --no-default-features --features codec-init-body,session-unicast-open"
         "clippy -p wz-session-core --no-default-features --features alloc,codec-frame,codec-push,codec-declare,codec-request,codec-response,codec-response-final,codec-init-body,codec-open-body,codec-close,codec-keep-alive,codec-fragment,reassembly,codec-linkstate"
         "clippy -p wz-session-core --no-default-features --features alloc,codec-frame,codec-push,codec-declare,codec-request,codec-response,codec-response-final,codec-init-body,codec-open-body,codec-close,codec-keep-alive,codec-fragment,reassembly,codec-linkstate,session-unicast"
+        "clippy -p wz-session-core --no-default-features --features session-slot,liveliness-token --lib"
+        "clippy -p wz-session-core --no-default-features --features session-slot,session-unicast,liveliness-token --lib"
+        "clippy -p wz-session-core --no-default-features --features session-slot,liveliness-token --all-targets"
+        "clippy -p wz-session-core --no-default-features --features session-slot,session-unicast,liveliness-token,codec-push,rx-push,codec-response,codec-response-final,rx-response,codec-request --lib"
     )
     local subset ran=0 rc
     for subset in "${subsets[@]}"; do
@@ -14417,13 +14434,13 @@ layer_c1m_session_lwip() {
     # (`memory::tests::a_frame_written_into_a_lent_slot_reaches_the_peer_and_the_slots_are_bounded`)
     # runs in every leg without `session-slot`; it landed without moving this guard.
     # 23 -> 24 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu default" 24 \
+    _runci_guarded_test "C1m mcu default" 26 \
         cargo test -p wz-session-mcu --quiet || return 1
     # 23 -> 24, printed: the merge of main at `0e24b2486` (Round 4581) into the limits rounds
     # prints one more here, which neither tree printed before it.
     # 24 -> 25, printed: the in-memory link's lent-slot test (`7ec73acff`), as in the default leg.
     # 25 -> 26 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu unicast app layer" 26 \
+    _runci_guarded_test "C1m mcu unicast app layer" 28 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -14444,7 +14461,7 @@ layer_c1m_session_lwip() {
     # (`dial::parse_tests::the_ipv6_reader_reads_what_core_reads`, which `dial` compiles).
     # 62 -> 58, printed on 20ee0c0a1: the five dial reader tests moved to the runtime (322866c0f), one more lib test since.
     # 58 -> 60 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu adminspace-write" 60 \
+    _runci_guarded_test "C1m mcu adminspace-write" 63 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     # 27 -> 29, printed: hosted run 44895098050 on `c72460b30` printed 29 (the +2 above was counted
     # from the source and missed two).
@@ -14467,7 +14484,7 @@ layer_c1m_session_lwip() {
         connect_manager --quiet || return 1
     # 26 -> 27, counted on 20ee0c0a1: 24 passed beside the three admin_status tests the int-fix lane repays.
     # 27 -> 28 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu adminspace-core" 28 \
+    _runci_guarded_test "C1m mcu adminspace-core" 30 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
     # 57 -> 58: one more test in the lib (hosted C1m ran 59 and one is ignored); re-derived on
     # the build host.
@@ -14481,7 +14498,7 @@ layer_c1m_session_lwip() {
     # 73 -> 74, counted from the source: the same IPv6 reader test as the adminspace-write leg.
     # 74 -> 70, counted on 20ee0c0a1: 67 passed beside the same three admin_status tests.
     # 70 -> 73 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
-    _runci_guarded_test "C1m mcu adminspace read+write" 73 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 76 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -15097,7 +15114,7 @@ layer_c1m_session_lwip() {
     # that does not block gives no read that waits, and a host stream link lends its buffer to its
     # owner's read.
     # 27 -> 24, printed on 20ee0c0a1: the iovec gathering and its tests left with send_parts (94a2820a6).
-    _runci_guarded_test "C1m posix tcp seam" 24 \
+    _runci_guarded_test "C1m posix tcp seam" 26 \
         cargo test -p wz-runtime-posix --lib stream:: --quiet || return 1
     # The host's multicast seam (`wz_runtime_posix::group`): the receivers of one host share the group's
     # port, a group that is not one is not joined, a member sends from a port of its own with the hop
@@ -23700,7 +23717,7 @@ layer_z_zenohd_interop() {
     # run 44165924219 was the first to reach the leg since). Additive: the flag
     # it reads, `--stats-filters`, is absent from every other leg's argv. Both
     # restatements carry it.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,transport-stats,zenoh-config --quiet) || return 1
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,transport-stats,zenoh-config,session-close-ingress --quiet) || return 1
     # R311y442 review (REVIEWER 3, finding 3) added a clippy of the demo's
     # `advanced` arm right here, closing the `-D warnings` hole R311y433 closed
     # for transport-lowlatency and session-extcompression. R311y443-review
@@ -23953,7 +23970,9 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     # RELAYED Put's `T` flag, and without the feature `NodeHlc::is_stamping` is
     # false unconditionally so both documents answer `bare`. Both restatements
     # carry it. `routing-routes` likewise, for the reason at the opening build.
-    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,transport-stats,zenoh-config --quiet) || return 1
+    # D17 adds `session-close-ingress`: the heap peer hosts the lifecycle queries whose sealed
+    # commands the leg after Zcmd sends through zenohd. Both restatements carry it.
+    (cd crates && cargo build -p wz-ap-demo --features ws,unixsock,tls,quic,quic-datagram,udp-reliable,routing-router,routing-routes,router-hat-router,router-connect-reconcile,router-multicast-faces,routing-token-tables,namespace,transport-qos,time-hlc,transport-lowlatency,session-extcompression,session-extshm,transport-link-unixpipe,vsock,advanced,group,locator-iface,routing-peer,routing-interest-pending-gc,transport-multilink,transport-stats,zenoh-config,session-close-ingress --quiet) || return 1
     # R311y435 — wz COMPOSED lowlatency x compression cross-impl: the measurement
     # R311y434 explicitly did NOT claim ("no leg dials zenohd with both modes,
     # because the demo cannot stage both offers"). The offer-SET widening of
@@ -24840,6 +24859,19 @@ ZENOHD_STATS=1 ZENOHD_ALLOW_CLONE=1 scripts/build-zenohd.sh)" || return 1
     wz_test_args wz-integration-tests wz_declared_commander_zenohd_interop
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zcmd 9 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_CAPI_C_LIFECYCLE_LIB="$cmd_capi_target/debug/libwz_capi_c.so" \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        -- --ignored --quiet --test-threads=1 || decl_rc=1; }
+    # Decision D17 (docs/session-lifecycle-intent.md section 5b): a command sealed by its
+    # commander's key, carried through a stock zenohd whose own key no grant names, is decided for
+    # that commander. Four legs on the declared node of the fixed profile (a listed commander
+    # permitted, a replay refused, an unlisted key refused, the echo after a restart) and three on
+    # the heap peer (the demo built above carries `session-close-ingress`).
+    wz_test_args wz-integration-tests wz_sealed_commander_zenohd_interop zenohd_lane_fixed_
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zseal 4 env WZ_ZENOHD_BIN="$zenohd" \
+        cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
+        -- --ignored --quiet --test-threads=1 || decl_rc=1; }
+    wz_test_args wz-integration-tests wz_sealed_commander_zenohd_interop zenohd_lane_heap_
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zseal 3 env WZ_ZENOHD_BIN="$zenohd" \
         cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     rm -rf "$decl_pkg"
@@ -25779,14 +25811,16 @@ layer_e6_peer_mesh() {
     wz_test_args wz-integration-tests wz_peer_adminspace_config_write
     (cd crates && cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --quiet) || return 1
-    # The session lifecycle QUERIES, over the wire between real nodes: a GET closes
-    # the session with a named peer and is answered with a verdict (and that peer's
-    # face really goes DOWN), a second GET lists the node's verbs, and a node that
-    # hosts the queries without `--session-close-permit` answers `refused` with a
-    # reason. Rides the SAME E6 binary (built above with `session-close-ingress`).
-    # Two tests, so the count guard reddens on a dropped `#[ignore]` (0 selected).
+    # The session lifecycle QUERIES, over the wire between real nodes (decision D16): a
+    # commander the node's declaration grants (`--node-declaration`), proved by the key of
+    # its mutual TLS link, closes the session with a named peer and is answered with a
+    # verdict (and that peer's face really goes DOWN), and a key the declaration does not
+    # list is refused; over plain TCP no commander is proved and the same GET is refused;
+    # a node that grants nothing answers `refused` with a reason. Rides the SAME E6 binary
+    # (built above with `session-close-ingress`). Three tests, so the count guard reddens
+    # on a dropped `#[ignore]` (0 selected).
     wz_test_args wz-integration-tests wz_peer_session_lifecycle_query
-    _runci_guarded_test "E6 session lifecycle query" 2 \
+    _runci_guarded_test "E6 session lifecycle query" 3 \
         cargo test -p wz-integration-tests \
         "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 --quiet || return 1
     # R311y272 — the CROSS-IMPL half of the config write, on the SAME binary, and the
@@ -29660,6 +29694,28 @@ layer_qza_zephyr_admin_node_vs_zenohd() {
         -nic "user,model=lan9118,mac=$mac,hostfwd=udp:127.0.0.1:$_QA_FWD_PORT-10.0.2.15:7447" \
         -kernel "$elf" || fail=1
     rm -rf "$(dirname "$build_dir")"
+    # D18 (docs/session-lifecycle-intent.md section 5b): the fixed profile's passive hold on the
+    # image that ships it. The same scenario the host witness runs (Layer Z, Zcmd) runs against the
+    # admin image built with a tls listener and a commander list the leg makes (a P-256 key whose zid
+    # the image lists for open, close and status), the verbs asked in band through a stock zenohd the
+    # commander's key dials the image with.
+    local pw
+    pw="$(mktemp -d)"
+    bash scripts/zephyr-passive-witness.sh keys "$pw/keys" || fail=1
+    if [[ "$fail" -eq 0 ]] && _qz_west_build Qza deploy/zephyr-admin-node mps2/an385 "$pw/zbuild" \
+        qza-passive-west-build.log \
+        -- -DEXTRA_CONF_FILE="overlays/qemu_admin_fixed_tls.conf;$pw/keys/commanders.conf"; then
+        wz_test_args wz-integration-tests wz_declared_commander_zenohd_target_matrix zenohd_zephyr_image_
+        _runci_guarded_test Qza 1 env WZ_ZENOHD_BIN="${WZ_ZENOHD_BIN:-$WZ_ARTIFACTS/target/zenohd/zenohd}" \
+            WZ_ZEPHYR_PASSIVE_QEMU_ELF="$pw/zbuild/zephyr/zephyr.elf" \
+            WZ_ZEPHYR_PASSIVE_COMMANDER_CERT="$pw/keys/commander.pem" \
+            WZ_ZEPHYR_PASSIVE_COMMANDER_KEY="$pw/keys/commander.key" \
+            cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" -- --ignored --quiet --test-threads=1 \
+            || fail=1
+    else
+        fail=1
+    fi
+    rm -rf "$pw"
     return "$fail"
 }
 

@@ -19,8 +19,10 @@
 //! this binary cannot move a number.
 //!
 //! Compiles with the declaration family and the `ResponseFinal` codec on, the
-//! features the writers it counts are gated on.
+//! features the writers it counts are gated on, and with `alloc`, which the owned
+//! builders, the control, are gated on: without them there is nothing to compare.
 #![cfg(all(
+    feature = "alloc",
     feature = "codec-declare",
     feature = "declare-final",
     feature = "codec-response-final"

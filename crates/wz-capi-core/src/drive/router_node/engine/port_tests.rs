@@ -362,7 +362,7 @@ fn a_node_with_no_entity_id_left_refuses_a_queryable_and_a_token() {
         "only the token that took the last id is alive"
     );
 
-    engine.undeclare_liveliness_token(u32::MAX);
+    engine.undeclare_liveliness_token(EntityRow::by_id(u32::MAX));
     assert!(
         router.liveliness.alive("wz/port/spent/**").is_empty(),
         "the last id retracts the token that holds it"
@@ -415,7 +415,7 @@ fn a_token_and_a_liveliness_subscription_through_the_port_tell_each_other() {
     let (engine, other) = (router.as_engine(), peer.as_engine());
 
     type Seen = Arc<Mutex<Vec<(LivelinessSampleKind, String)>>>;
-    let watch = |engine: &Arc<dyn SessionEngine>, history: bool| -> (Seen, SubId) {
+    let watch = |engine: &Arc<dyn SessionEngine>, history: bool| -> (Seen, EntityRow) {
         let seen: Seen = Arc::default();
         let sink = Arc::clone(&seen);
         let id = engine
@@ -1242,7 +1242,7 @@ mod shared_memory {
     /// memory rather than as bytes.
     type Got = Arc<Mutex<Vec<(Vec<u8>, bool)>>>;
 
-    fn subscribe(engine: &Arc<dyn SessionEngine>) -> (Got, SubId) {
+    fn subscribe(engine: &Arc<dyn SessionEngine>) -> (Got, EntityRow) {
         let got: Got = Arc::default();
         let sink = Arc::clone(&got);
         let id = engine.declare_subscriber_on_wire(
@@ -1339,7 +1339,7 @@ mod shared_memory {
 
     /// What a queryable was asked with: each query's value, and whether it was handed as a chunk
     /// of shared memory rather than as bytes.
-    fn answer(engine: &Arc<dyn SessionEngine>) -> (Got, QblId) {
+    fn answer(engine: &Arc<dyn SessionEngine>) -> (Got, EntityRow) {
         let got: Got = Arc::default();
         let sink = Arc::clone(&got);
         let id = engine
@@ -1699,7 +1699,7 @@ struct Holding {
 
 /// A subscriber of `node` on `key` whose call holds until `holding.go` is set, five seconds at
 /// most, so a wait that should not happen ends rather than hangs.
-fn subscribe_holding(node: &Arc<RouterState>, key: &str, holding: &Arc<Holding>) -> SubId {
+fn subscribe_holding(node: &Arc<RouterState>, key: &str, holding: &Arc<Holding>) -> EntityRow {
     use wz_capi_port::EngineDeliveries;
     use wz_session_core::sink::SampleView;
 
@@ -1861,13 +1861,13 @@ fn the_node_lends_a_subscriptions_key_as_its_own_literal_until_it_is_retracted()
     let text = unsafe { core::slice::from_raw_parts(view.start, view.len) };
     assert_eq!(text, b"wz/port/lent/**");
     assert_eq!(view.own, None, "the node declares no key");
-    let kept = |id: SubId| {
+    let kept = |row: EntityRow| {
         router
             .engine
             .subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&id)
+            .get(&row.as_id()?)
             .map(|subscribed| (subscribed.key.as_ptr(), subscribed.key.len()))
     };
     assert_eq!(
@@ -1909,13 +1909,13 @@ fn the_node_lends_a_queryables_key_as_its_own_literal_until_it_is_retracted() {
     let text = unsafe { core::slice::from_raw_parts(view.start, view.len) };
     assert_eq!(text, b"wz/port/lent/qbl/**");
     assert_eq!(view.own, None, "the node declares no key");
-    let kept = |id: QblId| {
+    let kept = |row: EntityRow| {
         router
             .engine
             .queryables
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&id)
+            .get(&row.as_id()?)
             .map(|hosted| (hosted.key.as_ptr(), hosted.key.len()))
     };
     assert_eq!(

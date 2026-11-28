@@ -773,7 +773,7 @@ adminspace-core = ["wz/adminspace-core"]
 # answered with a verdict, and a GET that lists the verbs the node has. Forwards the
 # facade's `session-close-ingress` (the seam; `wz-session-core::lifecycle_query` is
 # the answerer) and compiles the demo's `--session-lifecycle` /
-# `--session-close-permit` host. Implies `routing-peer`: the sessions it closes are
+# `--node-declaration` host. Implies `routing-peer`: the sessions it closes are
 # the ones a mesh forwarder holds, and the directory is read off its face table.
 # It builds only beside `tls` or `quic` (decision D2 of
 # docs/session-lifecycle-intent.md: the verbs are taken over a secure channel)

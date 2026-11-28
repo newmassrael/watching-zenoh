@@ -190,13 +190,13 @@ fn count_rx_network_message<R: SessionRuntime, T: TimeSource>(
     let class = actions.stats_keys_of(class, || {
         crate::network_message::stats_keyexpr(msg, |_id| None)
     });
-    actions.stats.inc_rx_network(&class);
+    actions.tx.stats.inc_rx_network(&class);
     // R2825 — the registry: the payload observed, and the message counted
     // on the link that received it, under the message's own band.
     let priority = crate::network_message::network_message_priority(msg);
     let rx = crate::stats_registry::StatsDirection::Rx;
     actions.observe_payload(rx, priority, &class);
-    actions.count_network_message(rx, &actions.link, priority, &class);
+    actions.count_network_message(rx, &actions.link.tx, priority, &class);
 }
 
 /// [`count_rx_network_message`] for a record the in-place walk lent, by its class read off the
@@ -212,10 +212,10 @@ fn count_rx_record<R: SessionRuntime, T: TimeSource>(
     record: &crate::network_message::RecordClass<'_>,
 ) {
     let class = actions.stats_keys_of(record.class, || record.keyexpr());
-    actions.stats.inc_rx_network(&class);
+    actions.tx.stats.inc_rx_network(&class);
     let rx = crate::stats_registry::StatsDirection::Rx;
     actions.observe_payload(rx, record.priority, &class);
-    actions.count_network_message(rx, &actions.link, record.priority, &class);
+    actions.count_network_message(rx, &actions.link.tx, record.priority, &class);
 }
 
 /// [`count_rx_network_messages`] for a frame read on the plain-Put lane, whose records are not
@@ -243,10 +243,10 @@ fn count_rx_plain_puts<R: SessionRuntime, T: TimeSource>(
         let class = actions.stats_keys_of(class, || {
             crate::network_message::stats_keyexpr_of_key(put.id, suffix, &|_id| None)
         });
-        actions.stats.inc_rx_network(&class);
+        actions.tx.stats.inc_rx_network(&class);
         let priority = crate::declare_ext_qos::qos_of_raw(put.qos.map(u64::from)).priority();
         actions.observe_payload(rx, priority, &class);
-        actions.count_network_message(rx, &actions.link, priority, &class);
+        actions.count_network_message(rx, &actions.link.tx, priority, &class);
     }
 }
 
@@ -263,10 +263,12 @@ fn count_rx_plain_puts<R: SessionRuntime, T: TimeSource>(
 fn note_rx_transport_message<R: SessionRuntime, T: TimeSource>(actions: &SessionLinkActions<R, T>) {
     #[cfg(feature = "transport-stats")]
     {
-        actions.stats.inc_rx_transport_message();
-        actions.record_on_link(&actions.link, |metrics, slot| {
-            metrics.inc_transport_message(crate::stats_registry::StatsDirection::Rx, slot, 1)
-        });
+        actions.tx.stats.inc_rx_transport_message();
+        actions
+            .tx
+            .record_on_link(&actions.link.tx, |metrics, slot| {
+                metrics.inc_transport_message(crate::stats_registry::StatsDirection::Rx, slot, 1)
+            });
     }
     // The low 32 bits of the microsecond clock: the meter reads spans modulo 2^32.
     #[cfg(feature = "resource-snapshot")]
@@ -298,6 +300,7 @@ pub fn note_rx_dropped<R: SessionRuntime, T: TimeSource>(
 ) {
     #[cfg(feature = "transport-stats")]
     actions
+        .tx
         .stats
         .inc_rx_drop(crate::stats::StatDrop::Transport, datagrams, 0);
     #[cfg(not(feature = "transport-stats"))]
@@ -329,14 +332,16 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
             // kind funnels through.
             #[cfg(feature = "transport-stats")]
             {
-                actions.stats.inc_rx(rx.bytes.len());
+                actions.tx.stats.inc_rx(rx.bytes.len());
                 // R2825 — the same bytes on this link's registry cell. The
                 // transport-message count is NOT here: a unit carries as many
                 // as the peer batched, and `dispatch_unit` counts each.
                 let bytes = rx.bytes.len() as u64;
-                actions.record_on_link(&actions.link, |metrics, slot| {
-                    metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
-                });
+                actions
+                    .tx
+                    .record_on_link(&actions.link.tx, |metrics, slot| {
+                        metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
+                    });
             }
             // transport-compression — un-wrap the OUTERMOST wire layer FIRST
             // (zenoh decompresses the batch before any transport-message
@@ -1699,8 +1704,8 @@ fn replay_held_answer<R: SessionRuntime, T: TimeSource>(
 }
 
 /// The establishment message the machine's `state` reads next, or `None` outside the
-/// establishment. `SentOpenAck` is not one: the machine leaves it for `Established` in the same
-/// step that enters it, so no message ever finds it current.
+/// establishment. The acceptor's OpenAck is sent on the OpenSyn's own step into `Established`,
+/// so no state of the establishment awaits nothing.
 #[cfg(all(
     any(
         feature = "alloc",
@@ -2692,11 +2697,13 @@ fn account_bytes_in_place<R: SessionRuntime, T: TimeSource>(
 ) {
     #[cfg(feature = "transport-stats")]
     {
-        actions.stats.inc_rx(unit.len());
+        actions.tx.stats.inc_rx(unit.len());
         let bytes = unit.len() as u64;
-        actions.record_on_link(&actions.link, |metrics, slot| {
-            metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
-        });
+        actions
+            .tx
+            .record_on_link(&actions.link.tx, |metrics, slot| {
+                metrics.inc_bytes(crate::stats_registry::StatsDirection::Rx, slot, bytes)
+            });
     }
     #[cfg(not(feature = "transport-stats"))]
     let _ = (unit, actions);
@@ -3645,30 +3652,6 @@ pub fn check_out_of_band<R: SessionRuntime, T: TimeSource>(
 /// second copy of `"session.close"` here is precisely the defect class that
 /// open-debt item 777 records: a string agreed between two places by hand stays
 /// agreed only until one of them is edited.
-/// R2713 (`session-close-ingress` residual (a)) — who may close a session over
-/// the rail.
-///
-/// A PORT rather than a call into the §5.16 policy kernel, and the direction is
-/// forced rather than chosen: `wz-access-control` DEPENDS ON this crate (it
-/// reads `keyexpr_includes` and `link::LinkSubject` from here), so a
-/// call the other way is a cycle. Dependency inversion is the only shape that
-/// leaves the gate where both profiles build it — which is the property this
-/// atom asserts about every other piece of the close machinery, and a gate that
-/// existed only in the AP runtime would withdraw it.
-///
-/// It is judged on the KEYEXPR because that is where the grammar puts the
-/// target (`@/<zid>/<whatami>/session/<verb>/<peer-zid>`): "may close session X
-/// only" is a statement about a key, which is exactly why the target was not
-/// put in the payload. An AP host binds this to its §5.16 policy; an MCU host
-/// binds a static one. Neither answer is reachable from here, and that is the
-/// point.
-///
-/// ⚠ This does NOT replace the §5.16 ingress chain, which sees the face — the
-/// subject zid, the link and the certificate name — and still runs upstream of
-/// the switchboard on an AP host. It is the gate that cannot be FORGOTTEN: the
-/// chain is wired by the host into the drive loop's stages, and a host that
-/// never wires it leaves a destructive verb answered by a node no policy ever
-/// consulted.
 /// R2718 — the lifecycle grammar, PARSED:
 /// `@/<zid>/<whatami>/session/<verb>/<peer-zid>`.
 ///
@@ -3760,77 +3743,6 @@ impl<'a> LifecycleKey<'a> {
     }
 }
 
-#[cfg(feature = "session-close-ingress")]
-pub trait SessionLifecycleAuthority {
-    /// Whether the close command this key carries may run.
-    ///
-    /// R2718 — takes the PARSED key, not the raw `&str` it used to. An
-    /// authority's whole job is to answer about a target, and handing it a
-    /// string obliged every binder to re-derive the grammar to find one.
-    fn admits_close(&self, key: &LifecycleKey<'_>) -> bool;
-
-    /// R2720 — whether the OPEN command this key carries may run.
-    ///
-    /// ⛔ DEFAULTED TO `false`, which is the only safe default and not a
-    /// convenience: an authority written before this verb existed answered
-    /// about closing and was never asked about opening, so reading its silence
-    /// as consent would grant a capability nobody considered. Refusing is what
-    /// its silence actually means.
-    ///
-    /// A SECOND METHOD rather than a `verb` parameter, because the two
-    /// questions have different answers for the same target: "this peer's
-    /// session may be torn down" and "this node may dial that peer" are not
-    /// one permission, and a single predicate would make them impossible to
-    /// separate in a policy.
-    fn admits_open(&self, _key: &LifecycleKey<'_>) -> bool {
-        false
-    }
-
-    /// Decision D6 — whether the RESET command this key carries may run: close
-    /// the sessions with the peer once for the key's generation, leaving the
-    /// peer in the node's intent so its machine connects again.
-    ///
-    /// Defaulted to `false` for the reason [`Self::admits_open`] is: an
-    /// authority written before the verb existed was never asked about it. A
-    /// third method rather than a reading of `admits_close`, because "this
-    /// session may be torn down for good" and "this session may be cycled"
-    /// are two permissions a policy can mean to grant apart.
-    fn admits_reset(&self, _key: &LifecycleKey<'_>) -> bool {
-        false
-    }
-
-    /// Decision D6 — whether the STATUS of the session this key names may be
-    /// read: the sessions this node has with the peer and what its machines are
-    /// doing for it.
-    ///
-    /// A read, and still refused by default for the reason [`Self::admits_open`]
-    /// is: an authority written before the query existed never said who may learn
-    /// which peers this node holds. A fourth method because reading a peer's state
-    /// and changing it are permissions a policy can mean to grant apart.
-    fn admits_status(&self, _key: &LifecycleKey<'_>) -> bool {
-        false
-    }
-}
-
-#[cfg(feature = "session-close-ingress")]
-impl<A: SessionLifecycleAuthority + ?Sized> SessionLifecycleAuthority for &A {
-    fn admits_close(&self, key: &LifecycleKey<'_>) -> bool {
-        (**self).admits_close(key)
-    }
-
-    fn admits_open(&self, key: &LifecycleKey<'_>) -> bool {
-        (**self).admits_open(key)
-    }
-
-    fn admits_reset(&self, key: &LifecycleKey<'_>) -> bool {
-        (**self).admits_reset(key)
-    }
-
-    fn admits_status(&self, key: &LifecycleKey<'_>) -> bool {
-        (**self).admits_status(key)
-    }
-}
-
 /// R2720 — who can CREATE a session, for the node-scoped half of the grammar.
 ///
 /// ⛔ A SEPARATE PORT FROM THE AUTHORITY AND FROM THE SESSION, and the split is
@@ -3869,38 +3781,34 @@ impl<O: SessionOpener + ?Sized> SessionOpener for &O {
 #[cfg(feature = "session-close-ingress")]
 pub struct SessionLifecycleInjector<'a, R: SessionRuntime, T: TimeSource> {
     actions: &'a SessionLinkActions<R, T>,
-    authority: &'a dyn SessionLifecycleAuthority,
+    monitor: crate::lifecycle_monitor::Monitor<'a>,
     opener: Option<&'a dyn SessionOpener>,
 }
 
 #[cfg(feature = "session-close-ingress")]
 impl<'a, R: SessionRuntime, T: TimeSource> SessionLifecycleInjector<'a, R, T> {
     /// Borrow the session's shared bundle as the lifetime-ingress port, the
-    /// authority that says whether an arriving command may run, and the opener
-    /// this node can create sessions through.
+    /// node's reference monitor (decision D16), which decides whether an
+    /// arriving command may run and records the decision, and the opener this
+    /// node can create sessions through.
     ///
-    /// The authority is a CONSTRUCTOR parameter, not a setter and not an
+    /// The monitor is a CONSTRUCTOR parameter, not a setter and not an
     /// `Option`: a host that wires this ingress cannot reach the verb without
-    /// having answered who may use it. That is the same move the §5.16 kernel
-    /// made when it took `Option<&Zid>` by parameter — "moves the question to
-    /// the one place that owns policy, and makes it unskippable at a call
-    /// site" — one layer out.
+    /// having stated who may use it, and a policy that states nobody refuses
+    /// everyone.
     ///
-    /// R2720 — `opener` IS an `Option`, and the difference from the authority
-    /// is not inconsistency. An authority is a DECISION every profile must
-    /// make, so leaving it out would be fail-open. An opener is a CAPABILITY a
-    /// profile may genuinely not have — a one-session MCU drive has no session
-    /// manager to bind — and a host with none says `None` here rather than
-    /// binding a pretend one. It is still a parameter, so the answer is stated
-    /// at every call site rather than defaulted into.
+    /// `opener` IS an `Option`, because an opener is a CAPABILITY a profile
+    /// may genuinely not have (a one-session MCU drive has no session manager
+    /// to bind) while a policy is a decision every profile makes. A host with
+    /// no opener binds no open verb, and the monitor refuses it as not bound.
     pub fn new(
         actions: &'a SessionLinkActions<R, T>,
-        authority: &'a dyn SessionLifecycleAuthority,
+        monitor: crate::lifecycle_monitor::Monitor<'a>,
         opener: Option<&'a dyn SessionOpener>,
     ) -> Self {
         Self {
             actions,
-            authority,
+            monitor,
             opener,
         }
     }
@@ -3945,7 +3853,8 @@ impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInject
     }
 
     /// A name the session machine reads as `SessionClose`, on a keyexpr the
-    /// authority admits, becomes a close request. Every other name is ignored,
+    /// node's monitor permits to the peer this session proved, becomes a close
+    /// request. Every other name is ignored,
     /// exactly as `Engine::raise_external_by_name` graceful-ignores a name
     /// outside the document's enum.
     ///
@@ -3974,54 +3883,68 @@ impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInject
             );
             return false;
         };
-        // Decisions D2 and D9 of `docs/session-lifecycle-intent.md`: a
-        // lifecycle verb runs only for a peer whose zid a key it proved INSIDE
-        // A SECURE CHANNEL names. The command arrived on THIS session, so its
-        // peer is the commander, and the authority below decides on that
-        // peer's zid; an unproved zid is a claim anyone could make, so judging
-        // it would be judging nothing. Refused before the authority is asked,
-        // for both verbs, and said, for the reason the misregistration arm
-        // above is said: from outside a refusal looks like nothing happening.
-        if !self.actions.peer_identity_verified() {
-            crate::diag_warn!(
-                "SessionLifecycleInjector: a lifecycle command arrived from a peer \
-                 whose zid no secure channel proved; refusing. Lifecycle verbs \
-                 need a TLS or QUIC link whose peer certificate's key hashes to \
-                 the peer's zid (docs/session-lifecycle-intent.md, D1 and D9)."
-            );
-            return false;
-        }
-        if event == Some(E::SessionClose) {
-            if !self.authority.admits_close(&key) {
+        // Decision D16: the reference monitor decides the command. The command
+        // arrived on THIS session, so its commander is the peer whose zid this
+        // session's link PROVED (decisions D1, D2 and D9), and nobody shown when
+        // the link proved none: a zid the peer only claims is a claim anyone
+        // could make, and judging it would be judging nothing. The verb is the
+        // node's when it is bound: a close always, an open only on a host that
+        // bound an opener.
+        use crate::lifecycle_monitor::{Channel, Decision, Object, Refusal, Request};
+        use crate::lifecycle_node::{Commander, Verb};
+        let closing = event == Some(E::SessionClose);
+        let proven = self.actions.verified_peer_zid();
+        let request = Request {
+            subject: Commander::of_requester(proven.as_ref()),
+            verb: if closing { Verb::Close } else { Verb::Open },
+            object: Object {
+                peer: key.peer_zid,
+                generation: None,
+                key: Some(keyexpr),
+            },
+            channel: Channel::Push,
+        };
+        let bound = closing || self.opener.is_some();
+        match self.monitor.decide(bound, &request) {
+            Decision::Permit(_) => {}
+            // Said, for the reason the misregistration arm above is said: from
+            // outside a refusal looks like nothing happening.
+            Decision::Deny(Refusal::Unproven) => {
+                crate::diag_warn!(
+                    "SessionLifecycleInjector: a lifecycle command arrived from a peer \
+                     whose zid no secure channel proved; refusing. Lifecycle verbs \
+                     need a TLS or QUIC link whose peer certificate's key hashes to \
+                     the peer's zid (docs/session-lifecycle-intent.md, D1 and D9)."
+                );
                 return false;
             }
+            // A profile with no session manager cannot answer an open, and a
+            // node that did nothing would look like one that refused it on
+            // policy: the distinction an operator needs.
+            Decision::Deny(Refusal::NotBound) => {
+                crate::diag_warn!(
+                    "SessionLifecycleInjector: an open command arrived and this host bound \
+                     no opener, so nothing can create a session here; refusing. A profile \
+                     that drives one session with its role fixed at construction has no \
+                     session manager to bind."
+                );
+                return false;
+            }
+            Decision::Deny(_) => return false,
+        }
+        if closing {
             self.actions.request_close();
             return true;
         }
-        // R2720 — THE OPEN HALF, and it goes to a DIFFERENT collaborator. The
-        // session this injector holds is not the one the command is about:
-        // `outbound.start` on THIS machine would be a no-op, because that
-        // trigger sits only on the transition out of Init. The verb means
-        // "bring up a session to the peer this key names", which is the node's
-        // work and not this session's.
-        let Some(opener) = self.opener else {
-            // ⛔ SAID, not silent. A profile with no session manager cannot
-            // answer this verb, and a node that simply did nothing would be
-            // indistinguishable from one that refused it on policy — the
-            // distinction an operator needs and the observable this port
-            // cannot carry.
-            crate::diag_warn!(
-                "SessionLifecycleInjector: an open command arrived and this host bound \
-                 no opener, so nothing can create a session here; refusing. A profile \
-                 that drives one session with its role fixed at construction has no \
-                 session manager to bind."
-            );
-            return false;
-        };
-        if !self.authority.admits_open(&key) {
-            return false;
+        // The open goes to a DIFFERENT collaborator. The session this injector
+        // holds is not the one the command is about: `outbound.start` on THIS
+        // machine would be a no-op, because that trigger sits only on the
+        // transition out of Init. The verb means "bring up a session to the peer
+        // this key names", which is the node's work and not this session's.
+        match self.opener {
+            Some(opener) => opener.request_open(&key),
+            None => false,
         }
-        opener.request_open(&key)
     }
 }
 
@@ -4215,7 +4138,7 @@ pub(crate) fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
         // finished a write, and that is when the line spoke (its data frames never mark the
         // tick, `emit_on_link`). Folded in as a stamp on the session's clock: the driver answers
         // an elapsed time, so the two clocks need no common epoch.
-        let driver = actions.link.link_driver();
+        let driver = actions.link.tx.link_driver();
         let written = if BoxedLinkDriver::reports_wire_writes(driver) {
             BoxedLinkDriver::ms_since_wire_write(driver).map(|ago| now.saturating_sub(ago))
         } else {
@@ -4282,7 +4205,7 @@ pub(crate) fn judge_keepalive<R: SessionRuntime, T: TimeSource>(
     deadlines: KeepaliveDeadlines,
 ) -> crate::lease::KeepAliveCheckOutcome {
     use crate::lease::KeepAliveCheckOutcome as K;
-    if !actions.link.transport_available.is_open() || deadlines.earliest().is_none() {
+    if !actions.link.tx.transport_available.is_open() || deadlines.earliest().is_none() {
         return K::Inactive;
     }
     let due = |deadline: Option<u64>| deadline.is_some_and(|at| now_ms >= at);
@@ -4291,7 +4214,7 @@ pub(crate) fn judge_keepalive<R: SessionRuntime, T: TimeSource>(
     // compare-and-swap of its stamp, so the tokio pacer beside the loop cannot answer it twice.
     let tick_ended = due(deadlines.link) && actions.link.end_keepalive_tick(deadlines.tick, now_ms);
     if tick_ended {
-        let spoke = &actions.link.spoke;
+        let spoke = &actions.link.tx.spoke;
         // zenoh-pico's order (`src/transport/unicast/lease.c`): a keepalive only for a tick
         // the line was silent in, and the flag cleared after it, so the keepalive's own mark
         // does not count as speech in the next tick.
