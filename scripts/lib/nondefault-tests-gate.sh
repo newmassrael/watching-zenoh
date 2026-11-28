@@ -845,6 +845,14 @@ files::decl_watch_doors::"
     # and a put is one leg that reaches every face
     # (`tests::one_thread::listen::a_put_of_a_listener_of_one_thread_reaches_every_face_it_took`).
     "wz-capi-coop|hook|-default,std,key-matching-listener,connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,transport-stats|"
+    # A scout window's two capabilities zenoh-pico's scout does not have (`scout::tests::`): the
+    # group socket asking where no other member can (`scout-group-socket`), and each datagram the
+    # window does not take counted under its own verdict (`scout-rx-verdicts`). The two rows
+    # above scout without them, so the one-count arm runs there.
+    "wz-capi-coop|hook|scout,scout-group-socket,scout-rx-verdicts|scout::tests::"
+    # The window's verdicts in the core (`scouting_host::`), in the four features that build the
+    # module; the core's other legs read the one count.
+    "wz-session-core|hook|scouting-active,codec-scout,codec-hello,scout-rx-verdicts|scouting_host::"
     # The declaration watch in the same form: a round of one thread tells a catch-up a declaration a
     # round with the links held, which the watch's tests prove only where they run in it.
     "wz-capi-coop|hook|-default,std,liveliness,query,queryable,remote-declaration-watch|"
@@ -2478,6 +2486,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|advanced_subs
     # lanes, and the most urgent lane written first. `transport-multicast` builds the module and
     # `codec-push` the items; the row above is the slot profile, where none of this is built.
     "wz-session-mcu|hook|codec-push,transport-multicast|group_drive::"
+    # And with `multicast-send-hold`: the datagram the socket has no room for is held for the
+    # next step, where the row above drops it and says so (`group_drive::driver::tests::`).
+    "wz-session-mcu|hook|codec-push,transport-multicast,multicast-send-hold|group_drive::"
     # And with `transport-stats`: what the pump receives and what it and the stage send are counted
     # into the counters the holder attached, as the socket takes or hands in each datagram. The
     # stage's replies join it (`group_drive::stage::tests`): a reply handed or written as its parts
