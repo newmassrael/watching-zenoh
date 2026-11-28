@@ -853,6 +853,320 @@ the count or leaves an ended one on it).
   `session_tables::tests::a_walk_retires_each_get_its_pick_names_once_and_marks_it_first` (red
   if the walk reads a get twice, leaves one unmarked, or refuses one a call of which runs).
 
+**The switch, landed** (`refactor(capi-coop): Hold each get as a row of the session's tables`).
+`GetPresence` is `Present` under `query`; a get, a query's or a liveliness snapshot's, is a row of
+the tables (`ReplyRow`, `LatchedRow<ReplyCallback, GetShown, ()>`), its calls `GetCall`s begun on
+the row's latch. `get_plane.rs`, `LegHolders`, `Round::calls_legs_of`, `PlaneCalls::Captures`,
+the engine's plane, its `EndedLegs`, `LegRows` and `HeldReplies<LegId>`, the registry's `Dues`,
+`DueRow`, `write_gets` and `sweep_due_gets`, and the arena's parts of them go.
+
+- A face's `Gets` is two `GetLegs<PendingGetHandle>`: its queries' under their request ids and
+  its snapshots' under their Interest ids (`snapshot_leg`). It answers the observer's fan as a
+  session that asks nothing does but for `claims`, which keeps a pending snapshot's token from
+  the liveliness subscribers.
+- The engine hands every reply, token and Final its faces read, in both forms: the fan is
+  followed by a walk of the event in its order (`RegistryOf::take_answers_of`), which ends a
+  ResponseFinal's leg and a DeclFinal's snapshot leg (`end_get_leg`, `end_snapshot_leg`) and,
+  in the round's form, admits each Response and each claimed token to its row and offers the
+  round the call admission began (`offer_lent_reply`, `offer_token`, `offer_reply`). The
+  direct form hands Responses and tokens before the fan as it did (`replies`, `pinned`).
+- A snapshot's row has mode `None` and gate `ReplyAcceptance::Any`, as its old table had no key
+  gate, so it keeps no key in the key arena; its timeout is the row's, swept with the queries'.
+  Its DeclFinal stages no prune: the engine keeps no cache of the Interests it asked. The token's
+  key is resolved by `claim_answering_token` and `claim_answering_token_view`
+  (`declare/liveliness_get.rs`), which the registry's `claim_token` methods now call too.
+- The plan lends the tables a row of `pending_gets` for every query and snapshot the limits
+  admit and a row of `held_replies` for every held reply (`ArenaPlan::tables`, 0 and 0
+  before); a face's legs are laid out by `face_leg_bytes` (lent), `Gets::places` over
+  `GetRows` (region) and `Gets::counted` (on use).
+
+Tests: `get::tests::a_get_ended_by_its_answer_hands_the_calls_begun_before_its_row_was_retired`
+(red if a call reads the latch's retirement as the end of the delivery),
+`a_reply_racing_a_cancellation_never_reaches_the_callback_after_it` (red if `GetCall::hand` does
+not read the cancellation, or `ReplyRow::cancel` does not mark it),
+`tests::get::a_get_cancelled_before_its_answer_is_handed_nothing_after_the_cancel` (red if a
+cancellation keeps the row or the legs, so the reply read later reaches its callback),
+`tests::round::a_replys_record_holds_its_call_until_its_delivery_ends_it` and
+`a_reply_is_read_where_it_lies_and_one_lying_elsewhere_is_refused` (red if the round ends a
+record's call before its delivery, never ends it, or keeps a refused reply's call running),
+`tests::arena::the_tables_hold_a_row_for_each_get_and_each_held_reply` (red if the tables get
+no row of a snapshot, or a part of a get's own is laid out again), and `tests::get`,
+`tests::local_query` and `tests::snapshot` unchanged. The registry's test of the index of the
+deadlines goes with the index; the watermark is held by the session tables' tests.
+
+Expected: the api case down by the plane's bodies, its locks and capture, a key and a deadline a
+leg, `Dues`' leaves and the per-get rows apart from the tables; the client and peer cases 0
+(`query` not built). Receive: down by the plane's five lock sections per reply. Nothing was
+built or run; still owed: a test of the direct read whose delivery hands out a get ended by its
+Final (red if `note_ended_gets` after `dispatch_reply` is removed), and
+`crates/wz-capi-pico/link/run-text.ld` regenerated (`scripts/pico-compare.sh run-text`): its
+seven lines naming `get_plane` were taken out, and the legs' functions are not yet listed.
+
+**The switch, built in every form** (`fix(capi-coop): Build the switch of the gets in every
+form`, `test(capi-coop): Hand out a get its Final ends in the read of the Final`). The switch as
+landed did not compile `wz-capi-coop` in any build that asks queries:
+
+- `engine/get.rs` named `RowCallback` through `session_tables`, whose import of it is private;
+  it is named from `row_callback`, which makes it public, as the other rows' modules name it.
+  The `begin` and `retire` the tests of `get.rs` found missing on `LatchedRow<S, A, K>` were
+  that trait out of scope, not a bound lost with the anchor parameter.
+- `make_get_call` lay in `replies.rs`, which the direct form alone builds, while the hand-out of
+  the ended gets and the local queryable's reply call it in both forms. It lies beside
+  `end_get_call` in `engine.rs`; the tests' count of the replies the read handed itself
+  (`pinned_replies`) moves to the read's two callers (`hand_reply`, `hand_token`), so it counts
+  those alone, as before the switch, and not the ended gets' hand-out or the local replies.
+- `PlacedTables` holds the queryables' Finals alone since the get plane left it, so its import
+  is gated on `queryable`, as the struct is; the registry's `let mut`, which the index of the
+  deadlines needed, goes with that index.
+
+Test: `tests::direct_receive::a_get_its_final_ends_is_handed_out_by_the_read_that_read_the_final`
+(direct form: a `Latest` get holds its reply to its end, and the read that dispatched its Final
+hands out the reply and the end; red if `note_ended_gets` after `dispatch_reply` in `direct.rs`
+is removed, which leaves both to a later read's sweep). Expected size and Ir: unchanged by the
+fix, which moves one body and changes no path. Still owed: `crates/wz-capi-pico/link/run-text.ld`
+regenerated once the lane is green.
+
+**The switch, green in every form** (`fix(capi-coop): Name the engine's calls only where a plane
+reads them`, `fix(capi-coop): Let a retired get's key go under the session's lock`,
+`fix(session-core): Bound the gets' table by its queries and snapshots`, `fix(capi-coop): Count
+the rows the arena lays out for the gets`). The switch built, but four of its facts were left
+where the get plane had put them:
+
+- The engine's calls (`calls`), the state's policy (`StatePolicy`) and the planes' lock
+  (`CoopLocks`) were compiled under `query` for the get plane, which no longer names them; a
+  build that asks queries and keeps no round (`query` alone, `tables-on-use`, `runtime-plan`)
+  compiled them unused. They follow the round and the queryables' plane, the two that read them,
+  as does the subscriber and token call each reads (`SubscriberCall::hand`,
+  `LivelinessCall::same_row`). The on-use registry is made as it is returned.
+- A get's row holds its gate, a key of the session's key arena, which the session's lock guards.
+  The hand-out of the ended gets, a cancellation and the close each dropped the retired row after
+  the lock, so the key arena's check of its owner's lock failed in every test that ends a get
+  that way. The row is split under the lock, as the walk of the drained rows splits it
+  (`release_drained_get` then `into_callback`): the key goes there and the callback, the one
+  part to drop with no lock held, leaves (`Removal::map`, `cancel_next_get` now hands back
+  `Removal<ReplyRow>`).
+- A liveliness snapshot is a row of the gets' table, as a query is, and the plan lends that table
+  `MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS` rows (24 by default), while the table's
+  bound was `MAX_PENDING_QUERIES` (16): every open of a `liveliness-get` build of the arena form
+  was refused (`OverCeiling { rows: 24, ceiling: 16 }`). The bound is the sum
+  (`session_tables::PENDING_GET_ROWS`), in the lent, the region and the on-use tables alike.
+- The plan's count of its rows (`ARENA_ROWS`) still counted four rows of the gets and a row of
+  their plane; the plan lays out one, the faces' legs, and no plane of the gets.
+
+Tests: `slot_map::tests::a_removal_keeps_what_its_part_keeps_of_a_taken_row` (red if
+`Removal::map` runs its part on a pinned row or answers a taken one as pinned);
+`session_tables::tests::the_gets_table_holds_a_row_for_each_query_and_snapshot_pending` (red if
+`PendingGets` is bound by `MAX_PENDING_QUERIES` alone in a `liveliness-get` build). The tests the
+reds named hold the rest: the five tests of a get ended by its Final, a cancellation or its fan
+(red if a retired row is dropped whole after the lock), the opens of `tests::arena` and
+`tests.rs` under `liveliness-get` (red at the old bound) and
+`a_plan_with_every_row_holds_exactly_arena_rows` (red at the old `GET_ROWS` or `PLANE_ROWS`).
+
+Expected size and Ir: the receive is unchanged (none of the four is on a Push's path). A build of
+`liveliness-get` in the region form holds `MAX_PENDING_LIVELINESS_GETS` more rows of the gets'
+table, which the snapshots' rows need; a build without it is unchanged. The pico-compare preset
+asks no snapshot, so its cases do not move.
+
+**A face's legs bound by their kind** (`fix(session-core): Bound a face's legs by the kind of get
+they name`). A face's table of its snapshots' legs (`Gets::snapshots`) was a `GetLegs` bound by
+`MAX_PENDING_QUERIES` and lent `MAX_PENDING_LIVELINESS_GETS` rows: a build whose snapshots
+outnumber its queries was refused at its open, and a region laid out the queries' rows for the
+snapshots. `GetLegs` and `GetLegsRows` take their bound `N` (`MAX_PENDING_QUERIES` by
+default), and the snapshots' table names `MAX_PENDING_LIVELINESS_GETS` (`SNAPSHOT_LEGS` in the
+registry). Test: `get_legs::tests::a_table_of_legs_is_bound_by_its_kind_of_get` (red if the table
+is bound by `MAX_PENDING_QUERIES` whatever `N`, which lends the row past `N` and lays out
+`MAX_PENDING_QUERIES` rows). Expected size: a region-form build of `liveliness-get` lays out
+`MAX_PENDING_QUERIES - MAX_PENDING_LIVELINESS_GETS` fewer leg rows per face (8 by default); no
+code path changes, so no Ir moves.
+
+**The switch's reds after its bound** (four commits). Read against the reds of the build that
+landed the bound above:
+
+- `fix(capi-coop): Name the state's holds only where a plane lies in it`. No get plane is laid
+  out, so a build of `query` alone has no plane in its state, and `state_holds` was dead code
+  there (`plane_places` already named `queryable` and `connectivity` alone). It is built where
+  `plane_places` is. Held by the clippy legs of `query` and `query,tables-on-use`.
+- `fix(session-core): Hold each kind of get to its own bound in one table`. The gets' table held
+  `MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS` rows as one count, so a `liveliness-get`
+  build whose session stated `MAX_PENDING_QUERIES` 1 held a second query in a snapshot's row:
+  the region form lays a face's legs out at the build's bound and states no quota of its own
+  (`get_legs`), so nothing refused it. `TableRows` states `pending_queries` and
+  `pending_snapshots` apart (`pending_gets()` their sum, the table's rows), a get's row names its
+  `GetKind`, and the tables hold each kind to its own bound (`GetBounds`, kept inverted as the
+  planes' filter bounds are, so zero bytes bind nothing until the open's `limit_to`); a build
+  without `liveliness-get` keeps no kind in the row and holds queries alone.
+  `has_room_for_get` is the one read of that fact, which `begin_get` and a caller about to make
+  a callback both ask. Tests: `session_tables::tests::each_kind_of_get_is_held_to_its_own_bound_in_the_one_table`
+  (red if the table is bound by its rows alone), `a_build_without_snapshots_holds_no_snapshot`,
+  `the_gets_table_holds_a_row_for_each_query_and_snapshot_pending` (now stated by kind) and
+  `tests::arena::the_tables_hold_a_row_for_each_get_and_each_held_reply` (the plan's rows by kind).
+- `fix(capi-coop): Refuse a get past its table whole under its first hold`. A query past its bound
+  was refused by `begin_get` after its callback was made, so the get was refused but a leg was
+  minted. The issue now asks `has_room_for_get` in its first hold, before the own queryables'
+  Final row and before any callback, and refuses the get whole (`Refusal::TableFull`), as
+  zenoh-pico refuses a query it cannot register before it sends anything. Held by
+  `tests::get::a_get_past_its_table_is_refused_and_sends_nothing` in the region form (red if the
+  check is left to `begin_get`: one leg minted).
+- `fix(capi-coop): End a get's asker leg in the hold of its last leg`. The asker's own leg on the
+  row (which keeps the get standing while its legs are issued) was ended after the issue in a hold
+  of its own, one more take of the session than the walk. It now ends in the hold of the get's last
+  leg: the links' walk where it issues the last leg or finds no face left, when no group and no own
+  queryable is asked after; the groups' walk where it finds no group left, when the own queryables
+  are not asked; the own queryables' leg in its hold; a snapshot's walk where it finds no face
+  left. `end_asker` ends only an asker an issue cut short left standing (a fan cancelled between
+  two legs). Tests: `tests::get::a_get_of_one_peer_holds_the_session_once_for_its_links` (one
+  hold, one more with `group`; red if the asker ends in a hold of its own) and
+  `tests::snapshot::a_snapshot_of_one_peer_ends_its_askers_leg_in_the_walks_last_hold` (three
+  holds: the open check, the face's leg, the walk's end).
+
+Expected size and Ir: the pico-compare preset asks no snapshot, so its row keeps no kind and its
+check of a query's room is the table's `is_full`, read once more in the issue's first hold; the
+issue loses the hold `end_asker` took after it (a lock pair and a call), so the api case of a get
+is about level in text and lower in Ir. The
+receive is unchanged (no change is on a Push's path). A `liveliness-get` build counts the rows of
+a kind on each get's begin (at most `PENDING_GET_ROWS`).
+
+**The two reds read by their panic lines** (two commits). Both were a get's end never seen,
+each for a cause of its own:
+
+- `fix(capi-coop): Hand out a get its link's loss ended with the session`. The test session
+  dials nothing again, so the loss of its one link ends the session in the same step: the step
+  ends the face's legs on their rows (`end_legs_of`), notes the end, and marks the session
+  closed. The delivery after the step reached the tables through `live`, which refuses a closed
+  session, so the end waited for the program's close, which the test never makes. The loss of a
+  link that also ended the session is still that link's loss, as the retractions of its tokens
+  are (handed past the end, `hand_lost_tokens`): the hand-out now reaches the session through
+  `unreleased`, the session's lock until the program's close has let go of what it holds
+  (`Core::released`), after which the close has cancelled every get itself and nothing is handed
+  out. Both forms take this one path: the direct read delivers after the turn that ended the
+  session, the round's read after the step that did. Tests:
+  `tests::get::a_get_ends_with_its_link` (red if the hand-out goes back to `live`; its CONTROL
+  now states that the loss ended the session) and
+  `tests::get::a_get_ends_with_its_link_where_the_session_dials_again` (the loss of a session
+  that goes on, the session open after it).
+- `test(capi-coop): Count one callback for the listener's get of two legs`. The test counted two
+  callbacks dropped for a get of two legs, as each leg minted one until H7b; since H7b
+  (`refactor(session-core): Mint a get's callback once for all its legs`, ahead of the switch,
+  which keeps it) the get mints one, so the count never reached two in any form. This is the
+  red bisected to the lane before the switch, not a fact of the switch. The test waits for the
+  one drop.
+- `test(capi-coop): Ask the listener's two clients on a key each`. The same test, once its count
+  was right, asserted both clients' answers on the one key `demo/g/a`. Since H7c1
+  (`fix(session-core): Consolidate and end a get once over all its legs`) a get consolidates over
+  every leg, and a get that names no consolidation resolves to `Latest` (zenoh's `Auto`), one
+  reply a key, so two answers on one key leave one, as zenoh hands them. The engine is right and
+  the test asked the wrong thing: each client now answers on a key of its own under
+  `demo/g/*`, and the test asserts both answers with their keys. Red if either leg's reply is
+  lost or a leg mints a callback of its own; the consolidation over the legs is held by
+  `tests::local_query::a_latest_get_of_two_legs_hands_one_reply_of_a_key_over_both`.
+
+Expected size and Ir: the hand-out takes the lock it took (`live`'s check of the closed word goes,
+`released` is read under the lock instead), so a get's end costs about the same; no Push path
+changes, and the pico-compare cases do not move.
+
+**A get's end noted in every dispatch's hold** (`fix(capi-coop): Note a get its Final ends in
+every dispatch's hold`). The direct form noted a get its Final ended (`note_ended_gets`) after a
+lent ResponseFinal's dispatch, after a lost link and after the look's sweep, but not after the
+planes' dispatch of a face's other records, where a snapshot's DeclFinal ends its leg
+(`Registry::take_answers_of`, `end_snapshot_leg`). The snapshot then ended on its row while the
+engine's word of ended gets stayed unset, so the read's delivery handed nothing out, and the end
+waited for the next look at the face that notes (`life_turn`), which a face that brings nothing
+more makes only when its life or the snapshot's deadline comes due: past the five seconds a test
+reads for, so the tests read it as never. It was taken for the red of `tests::snapshot` in the
+direct form; that red is the stand-in's, below, and this note stands on its own. Every planes' dispatch of
+the direct read now goes through `CoopEngine::dispatch_records`, which notes in the hold it
+dispatches under: the declaration's (`hand_lent_declare`), the frame's (`FramePayload`, whose
+owned records may carry a Final or a DeclFinal) and the rest's. Of the three only the first is
+reached by a Final in a build of this crate: its receive lends every record (`rx-in-place`,
+`rx-lent-control`), so a frame carries no owned record, and the arms ahead of the rest's take
+every lent Final (the reply arm a ResponseFinal, the declaration arm a DeclFinal). The other two
+note so that the fact holds by the one path, not by what the receive happens to hand them; no
+receive of this crate brings them a Final, so no test reaches them with one. Test:
+`tests::snapshot::a_snapshot_its_final_ends_is_handed_out_by_the_read_that_read_the_final` (after
+every read no ended get is owed; red if `note_ended_gets` leaves `dispatch_records`), with the
+four snapshot tests of the red as its wider net.
+
+Expected size and Ir: a Push, a plain-put frame and a reply take none of these arms, so the
+receive of samples does not move. A record of the other arms (a declaration, an interest, an empty
+frame) reads the tables' count of ended gets once more in a build of `query`; the pico-compare
+cases move by those few instructions where they read such a record.
+
+**The stand-in answers a snapshot whatever the build under test answers** (`test(capi-coop):
+Answer a tokens Interest from the stand-in in any build`). The red of `tests::snapshot` in
+`query,liveliness-get` and `query,liveliness-get,tables-on-use` was not the engine's. Read end to
+end, the snapshot's leg is held under `snapshot_leg` of the interest id the link mints at its
+issue, the id the Interest carries; the peer's DeclFinal echoes that id
+(`snapshot_final_view`), and `end_snapshot_leg` looks it up through the same `snapshot_leg`; the
+face's leg owes one Final (`GetLegs::hold`); the row begins with the asker's leg, counts the
+face's (`add_leg`), the walk's last hold ends the asker's and the DeclFinal the face's, the last
+setting `GetEnd::Answered` for a snapshot as for a query. What never came is the DeclFinal: the
+router stand-in is a session core built with the features of the build under test, and since
+`interest-answer` took the token answers under it (`feat(session-core): Answer a peer's Interest
+only under interest-answer`) a stand-in of a build without it stages no answer to any tokens
+Interest. The snapshot tests then pass only in a build that answers (`group` brings
+`interest-answer`), and a deadline, a cancel and a lost link end a snapshot in every build, which
+is the pattern the red showed. A router answers a tokens Interest whatever its asker is built
+with, so the stand-in now does so itself where its session core does not
+(`answer_token_interests`, `all(liveliness, not(interest-answer))`): it stages the answer with
+the session core's own `TokenAnswers` over the tokens it holds and its peer's key aliases, after
+the dispatch of each event, and sends each token declaration and the DeclFinal on its link. A
+build with `interest-answer` keeps the observer's own answer and compiles none of it, so no
+Interest is answered twice (the session core's `interest-answer` follows the crate's in every
+feature set read with `cargo tree`). A history subscriber of a `liveliness` build without
+`interest-answer` is answered by the same path. Tests: the four snapshot tests of the red, now
+answered in the builds they failed in; and
+`session_tables::tests::a_snapshot_of_one_face_ends_with_its_askers_leg_and_the_faces_final`
+in the session core, which drives a snapshot's row through its begin, one face's leg held under
+its Interest's id, the asker's end and the face's one Final, and asserts it ends answered (red if
+`add_leg` counts no leg, or a face's leg owes a second Final). Expected size and Ir: the change is
+in the test crate's stand-in and a session-core unit test; no library text moves and the
+pico-compare cases do not move.
+
+### 6.8 The lane merged over integration j
+
+Main landed integration j (`39fd76b09c`), which carries this lane at `673db8c8f7` with
+peer-prop's description walk, heap-native's policy cfgs (`wz_lent`, `wz_on_use`), base-td's
+typed links and the fixes in `int-j-merges.md`. The switch and the fixes after it were merged over
+it (a merge, not a rebase). Each conflict keeps what the switch does in main's structure:
+
+- The faces' legs are described, not lent by a call of their own. peer-prop lends a set by one
+  walk of its description (`FaceTables::places`, `described.rs`), so `Gets::lent`,
+  `Gets::arena_bytes` and `face_leg_bytes` go and the legs take lines in that walk:
+  `GetLegs::places` is generic over the laid-out policy (`LaidOut`) and names the count its
+  line is lent (`RowCount::Queries` for a face's queries, `RowCount::LivelinessGets` for its
+  snapshots), so a region places and a plan lends the same line. `GetRows`, `GET_LINES` and
+  `Gets::places` move from `placed.rs` to `described.rs`, where main keeps the set's
+  description; `placed.rs` is main's. A leg states no quota, so `FaceTables::lend` holds the
+  gets to no limit and takes none (`Gets::limit_to` never existed after the switch; main's
+  `registry.local.limit_to` goes). The plan's part of a face's gets is main's
+  `set_get_bytes`, the set's lines of the gets' counts.
+- `TableRows`: main's `counts` states `RowCount::PendingGets` as the switch's
+  `pending_gets()` (queries and snapshots), and `SessionRows` keeps `PENDING_GET_ROWS` rows
+  of the generic policy `P` main gave it. `SessionTables::lent` and `arena_bytes` are main's
+  walk; the gets' bounds are set by `limit_to` after it, as the switch's `limit_to` does.
+- The cfgs the switch narrowed (`StatePolicy`, `calls`, the state's places and rows, the arena's
+  `GET_ROWS` and `PLANE_ROWS`) are written in main's policy cfgs: `runtime-plan` as `wz_lent`,
+  `tables-on-use` without `runtime-plan` as `wz_on_use`. `StatePolicy` is main's
+  `not(wz_on_use)` in every build, as main reads it for the publishes and the endpoints' texts
+  too; `FACE_ROWS` is main's.
+- `adding.rs`: main's `FacesFull` refusal with the switch's `build_to`, which rebuilds no index of
+  deadlines.
+- `direct.rs`: base-td carries a link's effects through `link_life::carry`
+  (`DirectLinkIo`); the switch's note of the gets a lost face ended moves into
+  `DirectLinkIo::lose`, after `lose_face_link`.
+- `tests.rs`: both sides added the stand-in's answer to a tokens Interest. Main's
+  (`answer_token_interests` over a `TokenAnswers` of its own, before the dispatch) is kept and the
+  switch's second call goes, so each Interest is answered once.
+- `get_plane.rs`: main rooted two citations in it; the switch removed the file, which stays
+  removed.
+- `registry.rs` test of the plan's parts: the set's gets are compared with the bytes of the legs'
+  tables (`GetLegs::arena_bytes` of each kind) where main compared them with `Requesters`'.
+  `get_legs/tests.rs` asserts the region's line is counted (`RowCount::Queries`), red if
+  `GetLegs::places` drops its count and a plan lends the build's bound.
+
+Expected size and Ir: the region's and the plan's lines of a face's legs are the ones the switch
+laid out, now read through one description; no receive body moves.
+
 ## 7. The receive
 
 None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message

@@ -146,6 +146,30 @@ fn an_unpin_of_a_live_row_hands_nothing_back() {
     assert_eq!(map.remove(h), Some(Removal::Taken(5)));
 }
 
+/// A removal's `map` keeps what its part keeps of a row handed back, and leaves a pinned row's
+/// removal as it is, the part never run. Turned red by a `map` that runs the part on no row, or
+/// answers a taken row as pinned.
+#[test]
+fn a_removal_keeps_what_its_part_keeps_of_a_taken_row() {
+    let mut map = Map::<2>::new();
+    let taken = map.insert(5).unwrap();
+    let pinned = map.insert(6).unwrap();
+    let _held = map.pin(pinned).unwrap();
+    assert_eq!(
+        map.remove(taken).map(|removal| removal.map(|row| row * 2)),
+        Some(Removal::Taken(10))
+    );
+    let ran = Cell::new(false);
+    assert_eq!(
+        map.remove(pinned).map(|removal| removal.map(|row| {
+            ran.set(true);
+            row
+        })),
+        Some(Removal::AfterCalls)
+    );
+    assert!(!ran.get(), "a pinned row's part is never run");
+}
+
 #[test]
 fn a_removed_row_is_not_pinned() {
     let mut map = Map::<2>::new();

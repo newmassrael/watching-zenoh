@@ -157,8 +157,6 @@ use wz_runtime_coop::udp_link::HeapPorts;
 use wz_runtime_coop::udp_link::{LentPorts, PortPeerRow, PortRows, QueuedDatagram};
 #[cfg(not(wz_on_use))]
 use wz_runtime_coop::RuntimePlace;
-#[cfg(all(feature = "query", wz_lent))]
-use wz_session_core::bounded::Lent;
 #[cfg(not(wz_on_use))]
 use wz_session_core::bounded::TableLender;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
@@ -205,8 +203,6 @@ use crate::round::CALLBACK_BYTES;
 #[cfg(wz_round)]
 use crate::round::{RoundRowCounts, RECORD_BYTES};
 use crate::CoopConfig;
-#[cfg(all(feature = "query", wz_lent))]
-use wz_session_core::reply_hold::HeldReply;
 
 /// `?` where a const fn reads a result: the value of an `Ok`, or the `Err` handed back as it is.
 macro_rules! tried {
@@ -296,9 +292,6 @@ pub enum ArenaPart {
     HandedLegs,
     DeclarationWatchers,
     PendingGets,
-    EndedLegs,
-    LegCallbacks,
-    HeldReplies,
     FaceTables,
     HeldFaces,
     PeerTables,
@@ -356,7 +349,6 @@ pub enum ArenaPart {
     RuntimeState,
     EngineState,
     QueryPlaneState,
-    GetPlaneState,
     FacePlaneState,
     LinkAdmissionState,
 }
@@ -408,9 +400,6 @@ impl ArenaPart {
             Self::HandedLegs => ("handed legs", "HANDED_LEG_BYTES"),
             Self::DeclarationWatchers => ("declaration watchers", "MAX_DECL_OBSERVERS"),
             Self::PendingGets => ("pending gets", GETS),
-            Self::EndedLegs => ("ended legs", GETS),
-            Self::LegCallbacks => ("leg callbacks", GETS),
-            Self::HeldReplies => ("held replies", "MAX_PENDING_REPLIES"),
             Self::FaceTables => ("face tables", "MAX_FACES + 1"),
             Self::HeldFaces => ("held faces", "MAX_FACES + 1"),
             Self::PeerTables => ("peer tables", "MAX_PENDING_DECLARES + MAX_PENDING_FINALS"),
@@ -502,7 +491,6 @@ impl ArenaPart {
             Self::RuntimeState => ("runtime state", "MAX_TASKS + MAX_TIMERS"),
             Self::EngineState => ("engine state", ""),
             Self::QueryPlaneState => ("query plane", ""),
-            Self::GetPlaneState => ("get plane", ""),
             Self::FacePlaneState => ("face plane", ""),
             Self::LinkAdmissionState => ("link admission", ""),
         }
@@ -561,11 +549,11 @@ const HANDED_ROWS: usize = 3 * cfg!(all(
 /// The application's tables apart from the session's one table set: the declaration watchers,
 /// where the arena lends them (`runtime-plan`).
 const OBSERVER_ROWS: usize = cfg!(wz_lent) as usize;
-/// The pending gets, the ends of the legs, the legs' callbacks and the replies the gets that
-/// consolidate hold, of a build that asks (`query`), where the arena lends them (`wz_lent`):
-/// one that asks nothing holds no table of gets, and a region holds them otherwise
-/// (`crate::engine::StatePlaces`).
-const GET_ROWS: usize = 4 * cfg!(all(feature = "query", wz_lent)) as usize;
+/// The faces' tables of the legs of the pending gets, of a build that asks (`query`), where the
+/// arena lends them (`wz_lent`): one that asks nothing holds no table of legs, and a region
+/// holds them otherwise. A get, its callback and the replies it holds back are rows of the
+/// session's tables (`ENTITY_ROWS`).
+const GET_ROWS: usize = cfg!(all(feature = "query", wz_lent)) as usize;
 /// The faces' sets where the arena lends them (`wz_lent`), and the index of the held ones where
 /// the build takes faces beside its dial role's (`TAKES_FACES`): a session of that face alone knows
 /// it holds the first set, and one whose tables take their memory on use counts both.
@@ -663,12 +651,10 @@ const FINAL_ROWS: usize = 2 * cfg!(all(feature = "queryable", wz_lent)) as usize
 const RUNTIME_ROWS: usize = 2 * !cfg!(wz_on_use) as usize;
 /// The place the session's engine lies in ([`ArenaPlan::holding_engine`]).
 const ENGINE_STATE_ROWS: usize = 1;
-/// The planes the session's queryables, gets and watchers of its faces share, each where its
-/// feature is ([`ArenaPlan::lay_planes`]), where the arena holds them (`runtime-plan`).
+/// The planes the session's queryables and watchers of its faces share, each where its feature is
+/// ([`ArenaPlan::lay_planes`]), where the arena holds them (`wz_lent`).
 const PLANE_ROWS: usize = cfg!(wz_lent) as usize
-    * (cfg!(feature = "queryable") as usize
-        + cfg!(feature = "query") as usize
-        + cfg!(feature = "connectivity") as usize);
+    * (cfg!(feature = "queryable") as usize + cfg!(feature = "connectivity") as usize);
 /// The admission the links of a session that listens ask while their handshakes run
 /// (`ArenaPlan::lay_admission`, `link-admission`): a build without it lays none out, nor does a
 /// session whose tables take their memory on use, whose admission lies in an allocation of its own.
@@ -1206,18 +1192,6 @@ pub struct GetTables {
     pub rows: RequesterRows,
     /// How many tables.
     pub tables: usize,
-}
-
-impl GetTables {
-    /// How many gets every table together holds pending at once: the rows of the tables of the
-    /// ends of the legs and of their callbacks (`crate::engine`'s `EndedLegs` and `LegRows`).
-    /// `None` past the address space.
-    pub const fn legs(&self) -> Option<usize> {
-        match self.rows.queries.checked_add(self.rows.liveliness_gets) {
-            Some(each) => each.checked_mul(self.tables),
-            None => None,
-        }
-    }
 }
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
@@ -2388,37 +2362,15 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             let get_bytes = self.sized(set_get_bytes(self.session.gets.rows));
             self.put(ArenaPart::PendingGets, self.session.gets.tables, get_bytes);
         }
-        // The ends of the legs and the rows of their callbacks, a row of each for each get every
-        // table holds (`GetTables::legs`). A build of the region's form holds them in its region,
-        // at the build's bound (`crate::engine::StatePlaces`).
-        #[cfg(all(feature = "query", wz_lent))]
-        {
-            let legs = self.sized(self.session.gets.legs());
-            self.put(
-                ArenaPart::EndedLegs,
-                legs,
-                core::mem::size_of::<crate::engine::Ended>(),
-            );
-            self.put(
-                ArenaPart::LegCallbacks,
-                legs,
-                core::mem::size_of::<Option<crate::engine::LegRow>>(),
-            );
-        }
-        // The replies the gets that consolidate hold to their Finals: a row for each reply, in one
-        // table shared by every get, each tagged with its get's row (`engine::get::LegHold`).
-        // The limit is held either way, so a config over the build's is refused under its name.
+        // The replies the gets that consolidate hold to their ends: a row for each reply, in one
+        // table of the session's tables shared by every get, each tagged with its get's handle,
+        // laid out with the tables (`Self::tables`). The limit is held either way, so a config
+        // over the build's is refused under its name.
         #[cfg(feature = "query")]
         {
             self.session.held_replies = self.lent_to::<{ caps::MAX_PENDING_REPLIES }>(
                 ArenaLimit::MaxPendingReplies,
                 limits.max_pending_replies(),
-            );
-            #[cfg(wz_lent)]
-            self.put(
-                ArenaPart::HeldReplies,
-                self.session.held_replies,
-                core::mem::size_of::<HeldReply<crate::engine::LegId, Lent>>(),
             );
         }
         // A row of tables, each what one face's peer is owed: a face takes one whole. What the
@@ -2645,6 +2597,15 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// others.
     pub const fn tables(&self) -> TableRows {
         let rows = &self.session.entities;
+        // Each get the ABI holds pending, a query's or a liveliness snapshot's, is a row of the
+        // tables' gets, each kind held to its own count there, and the replies the gets hold back
+        // rows of the tables' held replies.
+        let pending_queries = rows.of_kind(EntityKind::PendingGet);
+        let pending_snapshots = rows.of_kind(EntityKind::PendingLivelinessGet);
+        #[cfg(feature = "query")]
+        let held_replies = self.session.held_replies;
+        #[cfg(not(feature = "query"))]
+        let held_replies = 0;
         TableRows {
             keyexprs: rows.keyexprs,
             subscribers: rows.of_kind(EntityKind::Subscriber),
@@ -2655,8 +2616,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             queriers: rows.of_kind(EntityKind::Querier),
             matching_listeners: rows.of_kind(EntityKind::MatchingListener),
             key_listeners: rows.key_listeners(),
-            pending_gets: 0,
-            held_replies: 0,
+            pending_queries,
+            pending_snapshots,
+            held_replies,
         }
     }
 
@@ -2974,8 +2936,6 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // (`crate::engine::StatePlaces`).
         #[cfg(all(feature = "queryable", wz_lent))]
         self.put(ArenaPart::QueryPlaneState, 1, planes.queries);
-        #[cfg(all(feature = "query", wz_lent))]
-        self.put(ArenaPart::GetPlaneState, 1, planes.gets);
         #[cfg(all(feature = "connectivity", wz_lent))]
         self.put(ArenaPart::FacePlaneState, 1, planes.faces);
         let _ = planes;

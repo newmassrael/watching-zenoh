@@ -1758,7 +1758,8 @@ pub enum RowCount {
     WriteFilters,
     /// `MAX_MATCHING_LISTENERS`.
     MatchingListeners,
-    /// `MAX_PENDING_QUERIES`.
+    /// The pending gets' one table: `MAX_PENDING_QUERIES` and, with `liveliness-get`,
+    /// `MAX_PENDING_LIVELINESS_GETS`, every get of either kind a row of it.
     PendingGets,
     /// `MAX_PENDING_REPLIES`: the replies the consolidating gets hold back.
     HeldReplies,

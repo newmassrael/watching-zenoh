@@ -171,16 +171,11 @@ impl RegistryOf<ManyHolders> {
     }
 
     /// Build the set of every place up to `at` that has none, in place order: a place a tomb kept
-    /// before any face took it is passed on the way. The index of the gets' deadlines is rebuilt
-    /// over the sets when any was built, a refused one among them.
+    /// before any face took it is passed on the way.
     fn build_to(&mut self, at: usize) -> Result<(), FacesFull> {
-        let before = self.sets.len();
         let mut built = Ok(());
         while built.is_ok() && self.sets.len() <= at {
             built = self.spares.build(&mut self.sets);
-        }
-        if self.sets.len() != before {
-            self.reindex_dues();
         }
         built
     }

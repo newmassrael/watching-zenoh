@@ -42,7 +42,7 @@ use wz_session_core::bounded::BoundedVec;
 use wz_session_core::bounded::Static;
 #[cfg(wz_lent)]
 use wz_session_core::bounded::{Arena, LendRefused, RowCount, TableLender};
-#[cfg(not(wz_round))]
+#[cfg(any(feature = "query", not(wz_round)))]
 use wz_session_core::driver_loop::InPlaceRecord;
 
 use crate::RowPolicy;
@@ -61,8 +61,6 @@ use wz_session_core::peer_tables::PeerTables;
 use wz_session_core::peer_tables::{PeerRows, SHARES_ROWS};
 #[cfg(not(wz_round))]
 use wz_session_core::pubsub::LentPush;
-#[cfg(feature = "query")]
-use wz_session_core::reply_sink::ConsolidatingSink;
 #[cfg(feature = "queryable")]
 use wz_session_core::reply_stage::FinalStage;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
@@ -75,25 +73,25 @@ use wz_session_core::slot_observer::NoRequesters;
 use wz_session_core::slot_observer::NoSink;
 #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 use wz_session_core::slot_observer::OtherPeers;
-#[cfg(feature = "query")]
-use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf, TakenAhead};
 
 #[cfg(wz_lent)]
 use super::CoopTables;
 #[cfg(feature = "query")]
-use super::{LegHold, LegId, LegSink};
+use super::GetCall;
 use super::{RoundDelivery, SubscriberRow};
 use crate::arena::MAX_FACE_SETS;
 #[cfg(wz_lent)]
 use crate::arena::{FacePeers, GetTables};
+#[cfg(feature = "query")]
+use wz_session_core::get_legs::GetLegs;
+#[cfg(feature = "query")]
+use wz_session_core::session_tables::PendingGetHandle;
 #[cfg(wz_lent)]
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::MatchingSink;
 use wz_session_core::pending_get::SessionFaces;
-#[cfg(feature = "query")]
-use wz_session_core::pending_get::{DueIndex, DueRow, LegTables};
 use wz_session_core::session_tables::{PeerDeclarations, Plane};
 
 #[allow(unused_imports)]
@@ -116,11 +114,129 @@ pub(super) type FaceId = u64;
 /// beneath it.
 pub(super) const DIAL_FACE: FaceId = 1 << 62;
 
-/// The session's own pending gets on one face: a query's sink consolidates what its leg is
-/// handed. The rows are lent from the session's arena at its open, one table for each face the
-/// session may hold at once (`crate::arena::GetTables`).
+/// The session's own gets as one face holds them: the legs its peer answers, each naming its
+/// get's row in the session's tables, and the read of that peer's Responses (`GetLegs`); with
+/// `liveliness-get`, the legs of its snapshots, answered under the Interest each asked. What a
+/// get is (its gate, consolidation, deadline, callback and the Finals it is owed) is its row's;
+/// the engine hands every reply and Final of the face to these legs itself, in both forms, so the
+/// observer's fan carries none. The rows are lent from the session's arena at its open, one set
+/// for each face the session may hold at once (`crate::arena::GetTables`).
 #[cfg(feature = "query")]
-pub(super) type Gets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, RowPolicy>;
+#[derive(Default)]
+pub(super) struct Gets {
+    /// The legs of the session's queries on the face, under their request ids.
+    pub(super) legs: GetLegs<PendingGetHandle, RowPolicy>,
+    /// The legs of the session's liveliness snapshots on the face, under their Interest ids.
+    #[cfg(feature = "liveliness-get")]
+    pub(super) snapshots: GetLegs<PendingGetHandle, RowPolicy, SNAPSHOT_LEGS>,
+}
+
+/// The most legs of the session's liveliness snapshots one face holds: a snapshot has at most one
+/// leg on a face, so no more than the session holds pending.
+#[cfg(feature = "liveliness-get")]
+const SNAPSHOT_LEGS: usize = wz_session_core::caps::MAX_PENDING_LIVELINESS_GETS;
+
+#[cfg(feature = "query")]
+impl Gets {
+    /// Forget every leg of `get`, which its row retired: no Final it is still owed is waited on.
+    pub(super) fn forget(&mut self, get: PendingGetHandle) {
+        self.legs.forget(get);
+        #[cfg(feature = "liveliness-get")]
+        self.snapshots.forget(get);
+    }
+
+    /// The face went: every leg ends, each get handed to `ended` once for each leg it had here,
+    /// for the caller to end that leg on the get's row.
+    pub(super) fn end_every_leg(&mut self, mut ended: impl FnMut(PendingGetHandle)) {
+        self.legs.end_every_leg(&mut ended);
+        #[cfg(feature = "liveliness-get")]
+        self.snapshots.end_every_leg(&mut ended);
+    }
+
+    /// Hold no leg, keeping the rows: the set of a face that went, given back for the next once
+    /// its legs were ended on their gets' rows (`RegistryOf::end_legs_of`).
+    pub(super) fn clear(&mut self) {
+        self.end_every_leg(|_| {});
+    }
+}
+
+/// Admit `reply` to the get `get` names under its standing, gate and consolidation
+/// (`SessionTables::admit_reply`): the call begun on its row for a reply let through, to make once
+/// the session is let go of; none for one held back or dropped.
+#[cfg(feature = "query")]
+fn admit_to(
+    tables: &mut super::CoopTables,
+    get: PendingGetHandle,
+    reply: &dyn wz_session_core::reply_sink::ReplyView,
+) -> Option<GetCall> {
+    match tables.admit_reply(get, reply) {
+        wz_session_core::session_tables::ReplyAdmitted::Passed(call) => call.map(GetCall::new),
+        wz_session_core::session_tables::ReplyAdmitted::Held
+        | wz_session_core::session_tables::ReplyAdmitted::Dropped => None,
+    }
+}
+
+/// The legs on one face of the session's gets made by value, each table taking its rows at its
+/// first leg.
+#[cfg(all(feature = "query", wz_on_use))]
+impl Gets {
+    /// No leg held, the queries' legs at most `rows.queries` and, with `liveliness-get`, the
+    /// snapshots' at most `rows.liveliness_gets`. A leg keeps no key and states no quota (its
+    /// get's row does), so `keys` and `limits` hold nothing of it.
+    pub(super) fn counted(
+        _keys: wz_session_core::on_use::BudgetKeys,
+        rows: wz_session_core::slot_observer::RequesterRows,
+        _limits: &SessionLimits,
+    ) -> Self {
+        Self {
+            legs: GetLegs::counted(rows.queries),
+            #[cfg(feature = "liveliness-get")]
+            snapshots: GetLegs::counted(rows.liveliness_gets),
+        }
+    }
+}
+
+/// The interest id of a snapshot's leg as its face's legs key it: the id the Interest carries on
+/// the wire.
+#[cfg(feature = "liveliness-get")]
+pub(super) const fn snapshot_leg(interest_id: u64) -> wz_session_core::wire_id::RequestId {
+    wz_session_core::wire_id::interest_id_as_read(interest_id)
+}
+
+/// A face's legs to the observer's fan: the engine hands every reply, token and Final its faces
+/// read to their legs and the gets' rows itself, in both forms (`RegistryOf::dispatch_event_to`),
+/// so the fan hands them none; it only keeps a token that answers a pending snapshot from the
+/// liveliness subscribers.
+#[cfg(feature = "query")]
+impl wz_session_core::slot_observer::RequesterTables for Gets {
+    #[cfg(feature = "liveliness-get")]
+    fn claims(&self, interest_id: u64) -> bool {
+        self.snapshots.get_of(snapshot_leg(interest_id)).is_some()
+    }
+
+    fn dispatch_iteration_event<
+        T: wz_session_core::bounded::Storage,
+        O: wz_session_core::bounded::Storage,
+    >(
+        &mut self,
+        _event: IterationEvent<'_, '_>,
+        _peer_table: wz_session_core::wireexpr_resolve::MappingSpaces<'_, T, O>,
+    ) {
+    }
+
+    fn dispatch_finals_of(&mut self, _event: IterationEvent<'_, '_>) {}
+
+    // A snapshot's end stages no prune: the engine declares again from its own entries, and keeps
+    // no cache of the Interests it asked.
+    #[cfg(feature = "liveliness-get")]
+    fn has_finalized(&self) -> bool {
+        false
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn drain_prunes<S: LivelinessGetPrune>(&mut self, _sink: &S) {}
+}
+
 /// A session that asks no query has no pending get on any face: its requester side is none, and
 /// the observer's fan and drains keep no path for gets.
 #[cfg(not(feature = "query"))]
@@ -147,12 +263,6 @@ pub(super) type PeerRoom = wz_session_core::pubsub::LentRoom<RowPolicy>;
 pub(super) struct FaceTables {
     pub(super) peer: Peer,
     pub(super) gets: Gets,
-    /// The set's row of the index of the earliest deadline of the session's gets
-    /// (`RegistryOf::dues`): the index keeps a leaf for each set built, free or held, so its rows
-    /// are lent with the sets; a set built as a face first takes its place joins it by a rebuild
-    /// (`RegistryOf::reindex_dues`), and none leaves it as faces go.
-    #[cfg(feature = "query")]
-    due: DueRow,
     /// The face's link was lost and the tokens its peer declared are still to be retracted to the
     /// liveliness subscribers: they stay in `peer` until each `Delete` is taken, by the round of
     /// deliveries (`Registry::retract_owed`) or by a read that hands each itself
@@ -177,8 +287,6 @@ impl FaceTables {
             let Self {
                 peer: _,
                 gets: _,
-                #[cfg(feature = "query")]
-                    due: _,
                 #[cfg(feature = "liveliness")]
                     retracting: _,
             } = set;
@@ -186,8 +294,6 @@ impl FaceTables {
         // SAFETY: the caller's contract; each field is written once through a pointer to it.
         unsafe {
             ptr::write(addr_of_mut!((*at).gets), Gets::default());
-            #[cfg(feature = "query")]
-            ptr::write(addr_of_mut!((*at).due), DueRow::NEVER);
             #[cfg(feature = "liveliness")]
             ptr::write(addr_of_mut!((*at).retracting), false);
         }
@@ -589,10 +695,6 @@ pub(super) struct RegistryOf<H: Holders> {
     /// The session's own gets pending on its own queryables ([`LOCAL_FACE`]).
     #[cfg(feature = "local-queryable")]
     pub(super) local: Gets,
-    /// The row of the session's own gets in the index of the gets' deadlines, its leaf the one
-    /// after the sets' (`Self::dues`).
-    #[cfg(feature = "local-queryable")]
-    local_due: DueRow,
     /// The program's watches of what the peers declare, which the application layer's observers
     /// hold events for while a link's frame is dispatched (`decl_watch`).
     #[cfg(any(
@@ -643,18 +745,17 @@ impl<H: Holders> SessionFaces for RegistryOf<H> {
         // Its peer can send no Final now: every get asked of it ends, each entry's drop saying its
         // leg's end, and the face's tables keep their rows for the link that comes up next.
         #[cfg(feature = "query")]
-        if let Some(gets) = self.gets_mut(face) {
-            gets.clear();
-        }
+        self.end_legs_of(face);
         // Its peer's tokens are retracted as the round of deliveries takes each, the rest owed.
         #[cfg(feature = "liveliness")]
         self.lose_tokens(face);
     }
 
     fn next_get_deadline_ms(&mut self) -> Option<u64> {
+        // The tables keep the earliest deadline of a standing get as gets come and go.
         #[cfg(feature = "query")]
         {
-            self.dues().earliest()
+            self.app.tables.next_get_deadline()
         }
         #[cfg(not(feature = "query"))]
         {
@@ -665,84 +766,6 @@ impl<H: Holders> SessionFaces for RegistryOf<H> {
     #[cfg(all(feature = "liveliness", wz_round))]
     fn retract_owed(&mut self, room: &mut dyn FnMut() -> bool) -> bool {
         RegistryOf::retract_owed(self, room)
-    }
-}
-
-/// The index of the earliest deadline of the session's gets over the rows the sets and the
-/// session's own gets keep: a leaf for each set, in the order of the sets, then the session's own
-/// gets'. Each table keeps its earliest deadline as its entries come and go, so a leaf's table is
-/// read with no walk of its entries.
-#[cfg(feature = "query")]
-struct Dues<'a> {
-    sets: &'a mut [FaceTables],
-    #[cfg(feature = "local-queryable")]
-    local: (&'a mut DueRow, &'a mut Gets),
-}
-
-#[cfg(feature = "query")]
-impl Dues<'_> {
-    /// The gets of leaf `leaf`, to write.
-    fn gets_mut(&mut self, leaf: usize) -> Option<&mut Gets> {
-        let sets = self.sets.len();
-        if leaf < sets {
-            return self.sets.get_mut(leaf).map(|set| &mut set.gets);
-        }
-        #[cfg(feature = "local-queryable")]
-        if leaf == sets {
-            return Some(&mut *self.local.1);
-        }
-        None
-    }
-}
-
-#[cfg(feature = "query")]
-impl DueIndex for Dues<'_> {
-    fn leaves(&self) -> usize {
-        self.sets
-            .len()
-            .wrapping_add(usize::from(cfg!(feature = "local-queryable")))
-    }
-
-    fn row(&self, at: usize) -> Option<&DueRow> {
-        let sets = self.sets.len();
-        if at < sets {
-            return self.sets.get(at).map(|set| &set.due);
-        }
-        #[cfg(feature = "local-queryable")]
-        if at == sets {
-            return Some(&*self.local.0);
-        }
-        None
-    }
-
-    fn row_mut(&mut self, at: usize) -> Option<&mut DueRow> {
-        let sets = self.sets.len();
-        if at < sets {
-            return self.sets.get_mut(at).map(|set| &mut set.due);
-        }
-        #[cfg(feature = "local-queryable")]
-        if at == sets {
-            return Some(&mut *self.local.0);
-        }
-        None
-    }
-
-    fn due(&self, leaf: usize) -> u64 {
-        let sets = self.sets.len();
-        let gets = if leaf < sets {
-            self.sets.get(leaf).map(|set| &set.gets)
-        } else {
-            #[cfg(feature = "local-queryable")]
-            {
-                (leaf == sets).then_some(&*self.local.1)
-            }
-            #[cfg(not(feature = "local-queryable"))]
-            {
-                None
-            }
-        };
-        gets.and_then(LegTables::next_deadline_ms)
-            .unwrap_or(u64::MAX)
     }
 }
 
@@ -843,8 +866,6 @@ impl<H: Holders> RegistryOf<H> {
             spares,
             #[cfg(feature = "local-queryable")]
             local: Gets::default(),
-            #[cfg(feature = "local-queryable")]
-            local_due: DueRow::NEVER,
             #[cfg(any(
                 feature = "remote-declaration-watch",
                 feature = "declarations-synced-event"
@@ -884,8 +905,6 @@ impl<H: Holders> RegistryOf<H> {
         lend.finish()?;
         registry.app.tables.limit_to(&rows);
         registry.app.limit_to(limits);
-        #[cfg(feature = "local-queryable")]
-        registry.local.limit_to(limits);
         registry.holders.hold_sets(peers.sets())?;
         // A session that dials nothing lent its dial face no set: that face holds one of no rows,
         // first, and every lent set is for the faces to come. Otherwise the first lent set is the
@@ -915,23 +934,7 @@ impl<H: Holders> RegistryOf<H> {
                 limits,
             )?;
         }
-        registry.index_dues();
         Ok(registry)
-    }
-
-    /// Index the gets of every set and the session's own as an open finds them, none holding a
-    /// deadline: what a registry is made with, whichever form holds it.
-    fn index_dues(&mut self) {
-        #[cfg(feature = "query")]
-        self.dues().reset();
-    }
-
-    /// Index the gets of every set and the session's own again, each leaf keyed by the deadline its
-    /// table holds: what a set built after the open owes the index, whose leaves are the sets built.
-    #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
-    fn reindex_dues(&mut self) {
-        #[cfg(feature = "query")]
-        self.dues().rebuild();
     }
 
     /// The count [`Self::peers_declare`]'s answers are good for: one taken while this read the
@@ -1064,7 +1067,7 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// The pending gets of every face and, where the session answers its own gets, its own.
-    #[cfg(all(feature = "query", any(feature = "liveliness-get", all(test, wz_lent))))]
+    #[cfg(all(feature = "query", test, wz_lent))]
     pub(super) fn all_gets(&self) -> impl Iterator<Item = &Gets> {
         let gets = self.faces().map(|face| &face.gets);
         #[cfg(feature = "local-queryable")]
@@ -1086,42 +1089,30 @@ impl<H: Holders> RegistryOf<H> {
         gets
     }
 
-    /// End the first leg pending on any face, or on the session's own queryables, whose entry's
-    /// sink `pick` names: the entry is dropped where it lies, which says the leg's end. The row of
-    /// the leg's get, for the caller to let go of what the get held with no lock held; `None` when
-    /// no entry is named. A leg is its entry alone, so a cancellation finds it here and nowhere
-    /// else.
+    /// Forget the legs of `get` on every face the session holds and on its own queryables: its
+    /// row was retired (handed out, cancelled, or closed with the session), so no reply or Final
+    /// of a leg of it finds it again.
     #[cfg(feature = "query")]
-    pub(super) fn end_first_leg(
-        &mut self,
-        mut pick: impl FnMut(&LegSink) -> bool,
-    ) -> Option<LegId> {
-        let mut ended = None;
+    pub(super) fn forget_get(&mut self, get: PendingGetHandle) {
         for gets in self.all_gets_mut() {
-            let mut named = |sink: &LegSink| {
-                let hit = pick(sink);
-                if hit {
-                    ended = Some(sink.row());
-                }
-                hit
-            };
-            if gets.replies.unregister_first(|sink| named(sink.inner())) {
-                break;
-            }
-            #[cfg(feature = "liveliness-get")]
-            if gets.liveliness_gets.unregister_first(named) {
-                break;
-            }
+            gets.forget(get);
         }
-        ended
     }
 
-    /// End every get pending on any face and on the session's own queryables, each entry's drop
-    /// saying its leg's end: what the session's close and its last handle do.
+    /// The face `id` names was lost and its peer sends no Final now: each leg it held ends on its
+    /// get's row (`SessionTables::end_leg`), the last leg of a get ending it answered, which the
+    /// delivery after the hold hands out.
     #[cfg(feature = "query")]
-    pub(super) fn end_every_get(&mut self) {
-        for gets in self.all_gets_mut() {
-            gets.clear();
+    fn end_legs_of(&mut self, id: FaceId) {
+        let Some(at) = self.held_at(id) else {
+            return;
+        };
+        let Self { sets, app, .. } = self;
+        if let Some(set) = sets.get_mut(at) {
+            set.gets.end_every_leg(|get| {
+                // A get already ended or retired has no leg to end: nothing to say.
+                let _ = app.tables.end_leg(get);
+            });
         }
     }
 
@@ -1134,81 +1125,6 @@ impl<H: Holders> RegistryOf<H> {
             return Some(&mut self.local);
         }
         self.face_mut(id).map(|face| &mut face.gets)
-    }
-
-    /// The index of the earliest deadline of the session's gets, over the rows the sets and the
-    /// session's own gets keep.
-    #[cfg(feature = "query")]
-    fn dues(&mut self) -> Dues<'_> {
-        let Self {
-            sets,
-            #[cfg(feature = "local-queryable")]
-            local,
-            #[cfg(feature = "local-queryable")]
-            local_due,
-            ..
-        } = self;
-        Dues {
-            sets,
-            #[cfg(feature = "local-queryable")]
-            local: (local_due, local),
-        }
-    }
-
-    /// The leaf of the index of the gets' deadlines that the gets of face `id` are, or the
-    /// session's own for [`LOCAL_FACE`], while the session holds them.
-    #[cfg(feature = "query")]
-    fn gets_leaf(&self, id: FaceId) -> Option<usize> {
-        #[cfg(feature = "local-queryable")]
-        if id == LOCAL_FACE {
-            return Some(self.sets.len());
-        }
-        self.held_at(id)
-    }
-
-    /// Write the pending gets of face `id`, or the session's own for [`LOCAL_FACE`], by `write`,
-    /// while the session holds them: a deadline `write` adds lowers their leaf of the index of the
-    /// gets' deadlines at once, so no get is due before the index says. Every get is held through
-    /// here; an end needs no telling, as it only moves a table's deadline later.
-    #[cfg(feature = "query")]
-    pub(super) fn write_gets<R>(
-        &mut self,
-        id: FaceId,
-        write: impl FnOnce(&mut Gets) -> R,
-    ) -> Option<R> {
-        let leaf = self.gets_leaf(id)?;
-        if leaf < self.sets.len() {
-            // As every hand-out of a face's tables to write is counted (`Self::face_mut`).
-            self.writing();
-        }
-        let mut dues = self.dues();
-        let wrote = write(dues.gets_mut(leaf)?);
-        dues.lower(leaf);
-        Some(wrote)
-    }
-
-    /// End the gets whose deadline passed by `now_ms`, each with its timeout: the index names the
-    /// tables one is due in, so a table without one is not visited. A table swept holds no
-    /// deadline at or before `now_ms` and is not named again, so each is swept once at most.
-    #[cfg(feature = "query")]
-    pub(super) fn sweep_due_gets(&mut self, now_ms: u64) {
-        let mut dues = self.dues();
-        for _ in 0..dues.leaves() {
-            let Some(leaf) = dues.due_by(now_ms) else {
-                break;
-            };
-            let Some(gets) = dues.gets_mut(leaf) else {
-                break;
-            };
-            if now_ms >= gets.replies.due_ms() {
-                gets.replies.sweep_timed_out(now_ms);
-            }
-            // Its terminated ids are staged for a reconnect cache, which the caller drains.
-            #[cfg(feature = "liveliness-get")]
-            if now_ms >= gets.liveliness_gets.due_ms() {
-                gets.liveliness_gets.sweep_timed_out(now_ms);
-            }
-        }
     }
 
     /// How many places the open holds for the faces' sets, each set built when a face first takes
@@ -1464,6 +1380,10 @@ impl<H: Holders> RegistryOf<H> {
                 ),
             }
         }
+        // The fan hands the face's legs nothing (`RequesterTables for Gets`): what they take of the
+        // event follows it, in its order.
+        #[cfg(feature = "query")]
+        self.take_answers_of(face, event);
         #[cfg(feature = "declarations-synced-event")]
         if !was_final && self.declarations_final(face) {
             #[cfg(wz_round)]
@@ -1655,17 +1575,178 @@ impl<H: Holders> RegistryOf<H> {
     /// what follows the dispatch is put off to the end of the run of such records
     /// ([`Self::settle`]). A face the session no longer holds hears nothing.
     #[cfg(feature = "query")]
-    pub(super) fn dispatch_reply(
+    pub(super) fn dispatch_reply(&mut self, face: HeldFace, record: &InPlaceRecord<'_, '_>) {
+        self.take_lent_answer(face, record);
+        // A Response is counted where it is lent (`Self::lend_reply`).
+        #[cfg(all(test, feature = "std"))]
+        if record.response().is_none() {
+            self.replies_alone += 1;
+        }
+    }
+
+    /// What a face's legs and the gets' rows take of `event`, a record or a frame of face `face`,
+    /// after the observer's fan, in the frame's order (`RequesterTables for Gets`): each
+    /// ResponseFinal ends its leg at the last its face owes, and then that leg of its get's row,
+    /// each DeclFinal a snapshot's alike; in a build that keeps a round, each Response and each
+    /// alive token answering a pending snapshot is admitted to its get's row and offered to the
+    /// round with the call admission began. The read that hands each record out as it reads it
+    /// hands the Responses and tokens to their gets itself (`replies`, `pinned`), so in its build
+    /// this takes the Finals alone. A face the session no longer holds hears nothing.
+    #[cfg(feature = "query")]
+    fn take_answers_of(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
+        match event {
+            IterationEvent::InPlace(ref record) => self.take_lent_answer(face, record),
+            IterationEvent::Poll(
+                wz_session_core::driver_loop::DriverLoopOutcome::FramePayload { messages, .. },
+            ) => {
+                for message in
+                    wz_session_core::driver_loop::owned_records(messages).unwrap_or_default()
+                {
+                    self.take_owned_answer(face, message);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// [`Self::take_answers_of`] for one record lent where its frame lies.
+    #[cfg(feature = "query")]
+    fn take_lent_answer(&mut self, face: HeldFace, record: &InPlaceRecord<'_, '_>) {
+        #[cfg(wz_round)]
+        self.offer_lent_reply(face, record);
+        if let Some(response_final) = record.response_final() {
+            self.end_get_leg(face, response_final.request_id);
+        }
+        #[cfg(feature = "liveliness-get")]
+        if let Some(declare) = record.declare() {
+            if let Some(interest_id) =
+                wz_session_core::declare::liveliness_get::snapshot_final_view(declare)
+            {
+                self.end_snapshot_leg(face, interest_id);
+            }
+            #[cfg(wz_round)]
+            {
+                let mut room = wz_session_core::wireexpr_resolve::KeyexprRow::new_static();
+                if let Some(interest_id) = self.claim_lent_token(face, record, &mut room) {
+                    let key = wz_session_core::wireexpr_resolve::KeyexprOut::as_str(&room);
+                    self.offer_token(face, interest_id, key);
+                }
+            }
+        }
+    }
+
+    /// [`Self::take_answers_of`] for one record of a frame the copying receive decoded.
+    #[cfg(feature = "query")]
+    fn take_owned_answer(
         &mut self,
         face: HeldFace,
-        record: &wz_session_core::driver_loop::InPlaceRecord<'_, '_>,
+        message: &wz_session_core::network_message::NetworkMessage,
     ) {
-        if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
-            app.dispatch_reply(&face.peer, &mut face.gets.replies, record);
+        use wz_session_core::network_message::NetworkMessage;
+        match message {
+            #[cfg(wz_round)]
+            NetworkMessage::Response(response) => {
+                if let Some(reply) = self.take_reply(face, response) {
+                    let call = self.admit_reply(face, &reply);
+                    self.offer_reply(call, &reply);
+                }
+            }
+            NetworkMessage::ResponseFinal(response_final) => {
+                self.end_get_leg(face, response_final.request_id);
+            }
+            #[cfg(feature = "liveliness-get")]
+            NetworkMessage::Declare(declare) => {
+                if let Some(interest_id) =
+                    wz_session_core::declare::liveliness_get::snapshot_final(declare)
+                {
+                    self.end_snapshot_leg(face, interest_id);
+                }
+                #[cfg(wz_round)]
+                {
+                    let mut room = wz_session_core::wireexpr_resolve::KeyexprRow::new_static();
+                    if let Some(interest_id) = self.claim_token(face, declare, &mut room) {
+                        let key = wz_session_core::wireexpr_resolve::KeyexprOut::as_str(&room);
+                        self.offer_token(face, interest_id, key);
+                    }
+                }
+            }
+            _ => {}
         }
-        #[cfg(all(test, feature = "std"))]
-        {
-            self.replies_alone += 1;
+    }
+
+    /// A Final of the leg `rid` names on face `face` came: the leg ends at the last its face
+    /// owes, and then that leg of its get's row, the last leg ending the get answered, which the
+    /// delivery after the hold hands out.
+    #[cfg(feature = "query")]
+    fn end_get_leg(&mut self, face: HeldFace, rid: wz_session_core::wire_id::RequestId) {
+        if let Some(Split { app, face, .. }) = self.split_unwritten(self.place(face)) {
+            if let Some(get) = face.gets.legs.end_leg(rid) {
+                // A get already ended or retired has no leg left to end: nothing to say.
+                let _ = app.tables.end_leg(get);
+            }
+        }
+    }
+
+    /// The DeclFinal of the snapshot `interest_id` names on face `face` came: its leg there ends,
+    /// as a query's leg ends at its Final ([`Self::end_get_leg`]).
+    #[cfg(feature = "liveliness-get")]
+    fn end_snapshot_leg(&mut self, face: HeldFace, interest_id: u64) {
+        if let Some(Split { app, face, .. }) = self.split_unwritten(self.place(face)) {
+            if let Some(get) = face.gets.snapshots.end_leg(snapshot_leg(interest_id)) {
+                // A snapshot already ended or retired has no leg left to end: nothing to say.
+                let _ = app.tables.end_leg(get);
+            }
+        }
+    }
+
+    /// The reply of the Response `record` of face `face` lends, read as the read that hands each
+    /// record out reads it (`Self::lend_reply`, or its owned projection), admitted to the get its
+    /// leg names and offered to the round with the call admission began. A record that is no
+    /// Response offers nothing.
+    #[cfg(all(feature = "query", wz_round))]
+    fn offer_lent_reply(&mut self, face: HeldFace, record: &InPlaceRecord<'_, '_>) {
+        let mut room = wz_session_core::reply::ReplyRoom::default();
+        let read = self.lend_reply(face, record, &mut room);
+        match read {
+            Ok(Some(reply)) => {
+                // SAFETY: what the reply borrows (the frame, `room`, the face's peer) is neither
+                // written nor let go of while it is admitted and offered: the admission writes the
+                // tables' row of the get and the face's legs alone.
+                let reply = unsafe { super::reply_past_the_read(reply, record) };
+                let call = self.admit_reply(face, &reply);
+                self.offer_reply(call, &reply);
+            }
+            Ok(None) => {}
+            Err(wz_session_core::driver_loop::OwedToProjection) => {
+                if let Some(reply) = self.project_reply(face, record) {
+                    let call = self.admit_reply(face, &reply);
+                    self.offer_reply(call, &reply);
+                }
+            }
+        }
+    }
+
+    /// The alive token at `keyexpr` answering the snapshot `interest_id` names on face `face`,
+    /// admitted to the snapshot's row and offered to the round with the call admission began.
+    #[cfg(all(feature = "liveliness-get", wz_round))]
+    fn offer_token(&mut self, face: HeldFace, interest_id: u64, keyexpr: &str) {
+        let reply = wz_session_core::declare::liveliness_get::token_reply(interest_id, keyexpr);
+        let call = self.admit_token(face, interest_id, &reply);
+        self.offer_reply(call, &reply);
+    }
+
+    /// Hold `reply` in the round for the call admission began, under the session's lock: the round
+    /// hands it to the get's callback as it is emptied, and ends the call then, or at once when it
+    /// refuses the reply.
+    #[cfg(all(feature = "query", wz_round))]
+    fn offer_reply(
+        &self,
+        call: Option<GetCall>,
+        reply: &dyn wz_session_core::reply_sink::ReplyView,
+    ) {
+        if let Some(call) = call {
+            // SAFETY: the registry is reached under the session's lock alone.
+            unsafe { self.delivery.round.offer_reply(call, reply) };
         }
     }
 
@@ -1751,7 +1832,7 @@ impl<H: Holders> RegistryOf<H> {
     /// (`wz_session_core::reply::lend_response`), for a read that hands it to the get it
     /// answers with the session let go of (`replies`). A record that is no Response, and a face
     /// the session no longer holds, lend nothing.
-    #[cfg(all(feature = "query", not(wz_round)))]
+    #[cfg(feature = "query")]
     pub(super) fn lend_reply<'s, 'a: 's, 'f>(
         &'s mut self,
         face: HeldFace,
@@ -1783,7 +1864,7 @@ impl<H: Holders> RegistryOf<H> {
     /// The owned projection of the Response of face `face` that `record` lends, which the lent
     /// form does not represent (`OwedToProjection`): the reply the copying receive delivers
     /// for it. A face the session no longer holds projects nothing.
-    #[cfg(all(feature = "query", not(wz_round)))]
+    #[cfg(feature = "query")]
     pub(super) fn project_reply(
         &mut self,
         face: HeldFace,
@@ -1798,7 +1879,7 @@ impl<H: Holders> RegistryOf<H> {
             .mapping_spaces_over(own)
             .from_sender(record.sender());
         face.gets
-            .replies
+            .legs
             .receive_mut()
             .project_response(response, spaces)
     }
@@ -1807,7 +1888,7 @@ impl<H: Holders> RegistryOf<H> {
     /// delivered as (`ReplyReceive::take_response`), for a read that hands it to the get it
     /// answers with the session let go of (`replies`), the frame's other planes told the rest of
     /// it after (`Planes::BesideSubscribers`). A face the session no longer holds takes nothing.
-    #[cfg(all(feature = "query", not(wz_round)))]
+    #[cfg(feature = "query")]
     pub(super) fn take_reply(
         &mut self,
         face: HeldFace,
@@ -1816,25 +1897,44 @@ impl<H: Holders> RegistryOf<H> {
         let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
         let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
         let spaces = face.peer.subscribers.mapping_spaces_over(own);
-        face.gets
-            .replies
-            .receive_mut()
-            .take_response(response, spaces)
+        face.gets.legs.receive_mut().take_response(response, spaces)
     }
 
-    /// Hand `reply`, read by [`Self::lend_reply`] or projected by [`Self::project_reply`], to
-    /// the pending get of face `face` it answers: the one entry its id names, found in the row the
-    /// id carries as the face's dispatch finds it (`ReplyRegistry::reply_to_one`), since every id
-    /// this engine puts in a face's table names one entry. A face the session no longer holds hands
-    /// it to none.
-    #[cfg(all(feature = "query", not(wz_round)))]
-    pub(super) fn fire_reply(
+    /// Admit `reply`, read by [`Self::lend_reply`] or projected by [`Self::project_reply`], to
+    /// the get its leg on face `face` names (`GetLegs::reply_to`: the face's key gate, then one
+    /// look at the row the id carries), under the get's standing, gate and consolidation
+    /// (`SessionTables::admit_reply`): the call begun on the get's row for a reply let through,
+    /// to make once the session is let go of. A reply held back, dropped, or of a face the session
+    /// no longer holds begins none.
+    #[cfg(feature = "query")]
+    pub(super) fn admit_reply(
         &mut self,
         face: HeldFace,
         reply: &dyn wz_session_core::reply_sink::ReplyView,
-    ) {
-        if let Some(Split { face, .. }) = self.split_unwritten(self.place(face)) {
-            face.gets.replies.reply_to_one(reply);
+    ) -> Option<GetCall> {
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let get = face.gets.legs.reply_to(reply)?;
+        admit_to(&mut app.tables, get, reply)
+    }
+
+    /// Admit `reply`, made by one of the session's own queryables, to the get its leg on the
+    /// session's own queryables names, as [`Self::admit_reply`] admits a peer's.
+    #[cfg(feature = "local-queryable")]
+    pub(super) fn admit_local_reply(
+        &mut self,
+        reply: &dyn wz_session_core::reply_sink::ReplyView,
+    ) -> Option<GetCall> {
+        let get = self.local.legs.reply_to(reply)?;
+        admit_to(&mut self.app.tables, get, reply)
+    }
+
+    /// The session's own queryables owe the leg `rid` names no more: it ends, and with it that leg
+    /// of its get's row, the last ending the get answered.
+    #[cfg(feature = "local-queryable")]
+    pub(super) fn end_local_leg(&mut self, rid: wz_session_core::wire_id::RequestId) {
+        if let Some(get) = self.local.legs.end_leg(rid) {
+            // A get already ended or retired has no leg left to end: nothing to say.
+            let _ = self.app.tables.end_leg(get);
         }
     }
 
@@ -1843,7 +1943,7 @@ impl<H: Holders> RegistryOf<H> {
     /// answers (`LivelinessGetRegistry::claim_token`), for a read that hands it to the get with
     /// the session let go of (`replies`). A declaration that answers no pending get, and a face
     /// the session no longer holds, claim nothing.
-    #[cfg(all(feature = "liveliness-get", not(wz_round)))]
+    #[cfg(feature = "liveliness-get")]
     pub(super) fn claim_token(
         &mut self,
         face: HeldFace,
@@ -1853,12 +1953,20 @@ impl<H: Holders> RegistryOf<H> {
         let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
         let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
         let spaces = face.peer.subscribers.mapping_spaces_over(own);
-        face.gets.liveliness_gets.claim_token(declare, spaces, room)
+        // The engine reads no count of keys past the room; the claim needs one to write to.
+        let mut oversize = 0;
+        wz_session_core::declare::liveliness_get::claim_answering_token(
+            declare,
+            |id| face.gets.snapshots.get_of(snapshot_leg(id)).is_some(),
+            spaces,
+            room,
+            &mut oversize,
+        )
     }
 
     /// [`Self::claim_token`] for the Declare `record` lends where its frame lies. A record that is
     /// no Declare claims nothing.
-    #[cfg(all(feature = "liveliness-get", not(wz_round)))]
+    #[cfg(feature = "liveliness-get")]
     pub(super) fn claim_lent_token(
         &mut self,
         face: HeldFace,
@@ -1873,9 +1981,15 @@ impl<H: Holders> RegistryOf<H> {
             .subscribers
             .mapping_spaces_over(own)
             .from_sender(record.sender());
-        face.gets
-            .liveliness_gets
-            .claim_token_view(declare, spaces, room)
+        // The engine reads no count of keys past the room; the claim needs one to write to.
+        let mut oversize = 0;
+        wz_session_core::declare::liveliness_get::claim_answering_token_view(
+            declare,
+            |id| face.gets.snapshots.get_of(snapshot_leg(id)).is_some(),
+            spaces,
+            room,
+            &mut oversize,
+        )
     }
 
     /// The query the Request `record` of face `face` lends, read for a walk that hands it to each
@@ -1925,16 +2039,20 @@ impl<H: Holders> RegistryOf<H> {
             .pin_request(request, spaces, room, &mut face.peer.finals)
     }
 
-    /// Hand the alive token at `keyexpr` to the pending liveliness get `interest_id` of face
-    /// `face` (`Self::claim_token`), as the face's dispatch hands it. A face the session no longer
-    /// holds hands it to none.
-    #[cfg(all(feature = "liveliness-get", not(wz_round)))]
-    pub(super) fn fire_token(&mut self, face: HeldFace, interest_id: u64, keyexpr: &str) {
-        if let Some(Split { face, .. }) = self.split_unwritten(self.place(face)) {
-            face.gets
-                .liveliness_gets
-                .dispatch_reply_borrowed(interest_id, keyexpr);
-        }
+    /// Admit `reply`, the alive token claimed for the snapshot `interest_id` names on face `face`
+    /// (`Self::claim_token`), to that snapshot's row, as [`Self::admit_reply`] admits a peer's
+    /// reply: the call begun for it, to make once the session is let go of, or to offer the round.
+    /// A face the session no longer holds, and a snapshot no leg of it names, begin none.
+    #[cfg(feature = "liveliness-get")]
+    pub(super) fn admit_token(
+        &mut self,
+        face: HeldFace,
+        interest_id: u64,
+        reply: &dyn wz_session_core::reply_sink::ReplyView,
+    ) -> Option<GetCall> {
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let get = face.gets.snapshots.get_of(snapshot_leg(interest_id))?;
+        admit_to(&mut app.tables, get, reply)
     }
 
     /// How often a face's tables were looked up since the open: what a lent Push's count of its
@@ -2133,7 +2251,7 @@ impl<H: Holders> RegistryOf<H> {
         #[cfg(feature = "liveliness-get")]
         if declare
             .interest_id
-            .is_some_and(|id| face.gets.liveliness_gets.has_pending(id))
+            .is_some_and(|id| face.gets.snapshots.get_of(snapshot_leg(id)).is_some())
         {
             return false;
         }
@@ -2163,7 +2281,7 @@ impl<H: Holders> RegistryOf<H> {
         #[cfg(feature = "liveliness-get")]
         if declare
             .interest_id
-            .is_some_and(|id| face.gets.liveliness_gets.has_pending(id))
+            .is_some_and(|id| face.gets.snapshots.get_of(snapshot_leg(id)).is_some())
         {
             return false;
         }
@@ -2293,7 +2411,7 @@ fn lend_set(
         rows: at.saturating_add(1),
         ceiling: at,
     })?;
-    set.lend(arena, keys, gets, peer, limits)
+    set.lend(arena, keys, gets, peer)
 }
 
 /// The engine is generic over its links, so the crate that names them drops the registry, and a
@@ -3102,7 +3220,7 @@ mod tests {
         for set in &held.registry.sets[1..] {
             assert!(set.peer.finals.has_room(), "each row of each set is free");
             #[cfg(feature = "query")]
-            assert!(set.gets.replies.has_room());
+            assert!(set.gets.legs.has_room());
         }
         assert_eq!(
             face_ids(&held.registry),
@@ -3305,10 +3423,19 @@ mod tests {
         );
         #[cfg(feature = "query")]
         let set_gets = {
+            let legs = GetLegs::<PendingGetHandle, RowPolicy>::arena_bytes(gets.queries);
+            #[cfg(feature = "liveliness-get")]
+            let legs = legs
+                .zip(
+                    GetLegs::<PendingGetHandle, RowPolicy, SNAPSHOT_LEGS>::arena_bytes(
+                        gets.liveliness_gets,
+                    ),
+                )
+                .and_then(|(queries, snapshots)| queries.checked_add(snapshots));
             assert_eq!(
                 set_get_bytes(gets),
-                Gets::arena_bytes(gets),
-                "a face's gets are the set's lines of the gets' counts"
+                legs,
+                "a face's gets are the set's lines of its legs' counts"
             );
             set_get_bytes(gets).expect("small")
         };
@@ -3978,41 +4105,6 @@ mod tests {
             assert_eq!(held.registry.all_gets_mut().count(), walked);
         }
     }
-    /// The index of the gets' deadlines keeps a leaf for each set built, held or free, and one for
-    /// the session's own gets after them: a face's gets are its set's leaf, a face not held has
-    /// none and is not written, and a registry made with no get pending answers no deadline.
-    /// Turned red by an index made a leaf short or over, by a set built as a face came that the
-    /// index was not rebuilt over, or by a face's gets found at another set's leaf.
-    #[cfg(feature = "query")]
-    #[test]
-    fn the_index_of_the_gets_deadlines_keeps_a_leaf_for_each_set() {
-        let mut held = held(4);
-        held.registry
-            .add_face(5)
-            .expect("the open lent a set for the face");
-        let own = usize::from(cfg!(feature = "local-queryable"));
-        assert_eq!(
-            held.registry.dues().leaves(),
-            2 + own,
-            "two sets built of four places"
-        );
-        assert_eq!(held.registry.gets_leaf(DIAL_FACE), Some(0));
-        let added = held.registry.gets_leaf(5);
-        assert_eq!(added, held.registry.held_at(5));
-        assert_eq!(added, Some(1));
-        assert_eq!(held.registry.gets_leaf(9), None, "a face not held");
-        #[cfg(feature = "local-queryable")]
-        assert_eq!(held.registry.gets_leaf(LOCAL_FACE), Some(2));
-        let mut written = false;
-        assert_eq!(held.registry.write_gets(9, |_| written = true), None);
-        assert!(!written, "the gets of a face not held were written");
-        assert_eq!(
-            SessionFaces::next_get_deadline_ms(&mut held.registry),
-            None,
-            "CONTROL: no get is pending"
-        );
-    }
-
     /// A session of its dial role's face alone holds that face in the first set and no other, and
     /// keeps no index of held sets: a face that is not the dial role's finds no set, no call counts
     /// another face, and neither removing the dial role's face nor every accepted face empties its

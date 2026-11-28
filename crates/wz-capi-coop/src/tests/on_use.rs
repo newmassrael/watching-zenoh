@@ -518,7 +518,7 @@ fn an_on_use_open_asks_its_memory_for_its_state_alone() {
     assert_eq!(engine.arena_bytes(), 0, "no arena is reserved");
     let first = BLOCK.first.load(Ordering::SeqCst) as *const u8;
     assert!(!first.is_null(), "the block was given");
-    #[cfg(any(feature = "queryable", feature = "query", feature = "connectivity"))]
+    #[cfg(any(feature = "queryable", feature = "connectivity"))]
     {
         assert!(engine.state_holds(first), "the block is the state");
         for at in engine.plane_places() {

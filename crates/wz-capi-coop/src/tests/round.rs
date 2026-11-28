@@ -24,13 +24,10 @@ use wz_session_core::row_callback::RowCallback;
 use wz_session_core::sample::{QosLevel, Sample, SampleKind, SourceInfo};
 use wz_session_core::sink::{BorrowedSample, SampleView};
 
+#[cfg(feature = "query")]
+use crate::engine::{GetCall, GetShown, ReplyRow};
 use crate::engine::{SubscriberCall, SubscriberRow};
 use crate::round::{ReadRoom, Round, RoundCounts, RoundGate};
-#[cfg(feature = "query")]
-use {
-    crate::engine::LegId,
-    core::sync::atomic::{AtomicUsize, Ordering},
-};
 
 /// The QoS byte of a sample sent at the data priority whose congestion control holds its sender.
 const BLOCK: u8 = 0x05 | 0x08;
@@ -1236,67 +1233,30 @@ fn a_token_named_by_a_held_key_is_read_where_its_block_lies() {
 #[cfg(feature = "query")]
 type Answers = Arc<Mutex<Vec<(u32, String, Vec<u8>, usize)>>>;
 
-/// One leg's callback, held as the session's plane holds a leg's: called through its holder, with
-/// the counts the round's records take of its row and give back.
+/// A get's row whose callback notes each reply it is handed, leaked: the round's records read it
+/// where it lies for as long as the round stands, which is past the test's frame.
 #[cfg(feature = "query")]
-struct OneLeg {
-    callback: wz_capi_port::ReplyCallback,
-    held: AtomicUsize,
-    released: AtomicUsize,
-}
-
-#[cfg(feature = "query")]
-impl wz_session_core::round::LegHolders<crate::calls::CoopCalls> for OneLeg {
-    fn hold(&self, leg: LegId) -> bool {
-        assert_eq!(leg, LegId::FIRST, "the test's one leg");
-        self.held.fetch_add(1, Ordering::SeqCst);
-        true
-    }
-
-    fn call(&self, _leg: LegId, reply: &dyn wz_session_core::reply_sink::ReplyView) {
-        self.callback.call(reply);
-    }
-
-    fn release(&self, _leg: LegId) -> Option<wz_capi_port::ReplyCallback> {
-        self.released.fetch_add(1, Ordering::SeqCst);
-        None
-    }
-}
-
-/// A leg whose callback notes each reply it is handed.
-#[cfg(feature = "query")]
-fn answering(answers: &Answers) -> Arc<OneLeg> {
+fn answering(answers: &Answers) -> &'static ReplyRow {
     use wz_session_core::reply_sink::ReplyView;
     let answers = answers.clone();
-    Arc::new(OneLeg {
-        callback: wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
-            answers.lock().unwrap().push((
-                reply.rid(),
-                reply.keyexpr().to_owned(),
-                reply.payload().to_vec(),
-                reply.payload().as_ptr() as usize,
-            ));
-        }),
-        held: AtomicUsize::new(0),
-        released: AtomicUsize::new(0),
-    })
+    let callback = wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
+        answers.lock().unwrap().push((
+            reply.rid(),
+            reply.keyexpr().to_owned(),
+            reply.payload().to_vec(),
+            reply.payload().as_ptr() as usize,
+        ));
+    });
+    alloc::boxed::Box::leak(alloc::boxed::Box::new(ReplyRow::for_get(
+        callback,
+        GetShown::new(true, None),
+    )))
 }
 
-/// The round `round` owns, told that `legs` holds the callbacks of the legs its replies are for.
+/// A call begun on `row`, as the tables begin one for a reply they let through.
 #[cfg(feature = "query")]
-fn holding_legs(
-    round: &'static mut Placed<Round>,
-    legs: &Arc<OneLeg>,
-) -> &'static mut Placed<Round> {
-    // The round reaches the legs for as long as it stands, which is past the test's frame: a
-    // count of them is left to it for good.
-    let leaked: &'static Arc<OneLeg> =
-        alloc::boxed::Box::leak(alloc::boxed::Box::new(Arc::clone(legs)));
-    let held: core::ptr::NonNull<dyn wz_session_core::round::LegHolders<crate::calls::CoopCalls>> =
-        core::ptr::NonNull::from(&**leaked);
-    // SAFETY: the legs are leaked, so they stand for as long as the round reaches them.
-    unsafe { round.get_mut().calls_legs_of(held) };
-    round
+fn call_of(row: &ReplyRow) -> GetCall {
+    GetCall::new(row.begin().expect("a standing get begins a call"))
 }
 
 /// A reply whose parts lie in a datagram a link lends, its key resolved elsewhere.
@@ -1328,26 +1288,27 @@ impl wz_session_core::reply_sink::ReplyView for Lying<'_> {
     }
 }
 
-/// A reply of a datagram a link lends is handed to its leg's callback where its payload lies, and
+/// A reply of a datagram a link lends is handed to its get's callback where its payload lies, and
 /// one whose payload lies nowhere the round reads it is refused, counted as held over (a reply
-/// holds its sender) and apart, and takes no count of its leg's row; the round is idle only once
-/// the held one is handed, which is what a leg's end waits for. Turned red by a round that copies
-/// a reply, or refuses one after taking its leg's count.
+/// holds its sender) and apart, its call ended at once; the round is idle only once the held one
+/// is handed, which is what a get's end waits for. Turned red by a round that copies a reply, or
+/// refuses one and keeps its call running.
 #[cfg(feature = "query")]
 #[test]
 fn a_reply_is_read_where_it_lies_and_one_lying_elsewhere_is_refused() {
     let answers: Answers = Arc::default();
-    let legs = answering(&answers);
-    let round = holding_legs(crate::round::leaked_placed(4), &legs);
+    let held = answering(&answers);
+    let refused = answering(&answers);
+    let round = crate::round::leaked_placed(4);
     let datagram = *b"answer";
     // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
     unsafe { round.set_lending(Some(&datagram[..])) };
-    unsafe { round.offer_reply(LegId::FIRST, &Lying { payload: &datagram }) };
+    unsafe { round.offer_reply(call_of(held), &Lying { payload: &datagram }) };
     unsafe { round.set_lending(None) };
     let elsewhere = b"elsewhere".to_vec();
     unsafe {
         round.offer_reply(
-            LegId::FIRST,
+            call_of(refused),
             &Lying {
                 payload: &elsewhere,
             },
@@ -1362,10 +1323,9 @@ fn a_reply_is_read_where_it_lies_and_one_lying_elsewhere_is_refused() {
         },
         "the reply lying elsewhere found no place"
     );
-    assert_eq!(
-        legs.held.load(Ordering::SeqCst),
-        1,
-        "the refused reply took no count"
+    assert!(
+        refused.retire(),
+        "the refused reply's call was ended at once, so no call of its get runs"
     );
     assert!(!round.is_idle(), "a reply is held");
     unsafe { round.seal() };
@@ -1385,46 +1345,35 @@ fn a_reply_is_read_where_it_lies_and_one_lying_elsewhere_is_refused() {
     );
 }
 
-/// A reply's record holds one count of its leg's row from its offer until its call is ended, which
-/// the delivery that hands it out gives back; a reply the round refuses takes no count, and a round
-/// never told of the legs holds no reply. Turned red by a record that holds no count while it waits
-/// for its delivery, or one whose count is never given back.
+/// A reply's record holds the call begun on its get's row from its offer until the delivery that
+/// hands it out ends it, so a get retired meanwhile is let go of by that end and not before; a
+/// reply the round refuses ends its call at once. Turned red by a record that ends its call before
+/// its delivery, one whose call is never ended, or a refusal that keeps the call running.
 #[cfg(feature = "query")]
 #[test]
-fn a_replys_record_holds_its_legs_row_until_its_call_is_ended() {
+fn a_replys_record_holds_its_call_until_its_delivery_ends_it() {
     let answers: Answers = Arc::default();
-    let legs = answering(&answers);
-    let told = holding_legs(crate::round::leaked_placed(4), &legs);
+    let row = answering(&answers);
+    let told = crate::round::leaked_placed(4);
     let datagram = *b"r";
-    let counts = |legs: &OneLeg| {
-        (
-            legs.held.load(Ordering::SeqCst),
-            legs.released.load(Ordering::SeqCst),
-        )
-    };
     // SAFETY (each call): this thread is the round's one writer, and the datagram outlives it.
     unsafe { told.set_lending(Some(&datagram[..])) };
-    unsafe { told.offer_reply(LegId::FIRST, &Lying { payload: &datagram }) };
-    assert_eq!(counts(&legs), (1, 0), "the record holds the leg's row");
+    unsafe { told.offer_reply(call_of(row), &Lying { payload: &datagram }) };
     unsafe { told.seal() };
-    unsafe { told.offer_reply(LegId::FIRST, &Lying { payload: &datagram }) };
-    assert_eq!(counts(&legs), (1, 0), "a reply refused takes no count");
+    let refused = answering(&answers);
+    unsafe { told.offer_reply(call_of(refused), &Lying { payload: &datagram }) };
+    assert!(refused.retire(), "a reply refused ends its call at once");
     unsafe { told.set_lending(None) };
+    assert!(
+        !row.retire(),
+        "the record's call runs, so the retired get is not let go of yet"
+    );
+    assert!(!row.drained());
     assert!(told.deliver());
     assert_eq!(answers.lock().unwrap().len(), 1);
-    assert_eq!(
-        counts(&legs),
-        (1, 1),
-        "its call ended, the record gave its count back"
-    );
-
-    let told_none = round(4);
-    unsafe { told_none.set_lending(Some(&datagram[..])) };
-    unsafe { told_none.offer_reply(LegId::FIRST, &Lying { payload: &datagram }) };
-    unsafe { told_none.set_lending(None) };
     assert!(
-        told_none.is_idle(),
-        "a round told of no legs holds no reply"
+        row.drained(),
+        "its call ended by the delivery, the retired get is let go of"
     );
 }
 
@@ -1467,10 +1416,10 @@ fn a_reply_named_by_a_held_key_is_read_where_its_block_lies() {
     let keys = key_space();
     let answers: Answers = Arc::default();
     let legs = answering(&answers);
-    let round = holding_legs(round_reading(keys), &legs);
+    let round = round_reading(keys);
     let row = keys.key("demo/answer/held").expect("room");
     // SAFETY (each call): this thread is the round's one writer.
-    unsafe { round.offer_reply(LegId::FIRST, &HeldReply { key: &row }) };
+    unsafe { round.offer_reply(call_of(legs), &HeldReply { key: &row }) };
     drop(row);
     assert!(keys.counts().used > 0, "the round holds the reply's block");
     unsafe { round.seal() };
