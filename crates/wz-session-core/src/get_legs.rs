@@ -77,17 +77,24 @@ unsafe impl<H, const N: usize> crate::bounded::ZeroEmpty for GetLegsRows<H, N> {
 /// rows. A leg keeps no key, so the table holds no handle to the region's key arena.
 pub const GET_LEGS_LINES: usize = 1;
 
-impl<H, const N: usize> GetLegs<H, crate::bounded::Region, N> {
-    /// The description of a table of the region policy at `at` in a region and its
-    /// [`GetLegsRows`] at `rows`: the line of its legs' rows. The table is written as
-    /// [`Default`] makes one before the region is placed, since the receive's key gate is not
-    /// zero bytes. The table states no quota of its own (see the module), so nothing holds it to
-    /// the session's limits after.
-    pub const fn places(at: usize, rows: usize) -> crate::bounded::RegionLines<GET_LEGS_LINES> {
-        crate::bounded::RegionLines::EMPTY.seq(crate::bounded::SeqPlace::of_room::<GetLeg<H>, N>(
-            at.wrapping_add(core::mem::offset_of!(Self, legs)),
-            rows.wrapping_add(core::mem::offset_of!(GetLegsRows<H, N>, legs)),
-        ))
+impl<H, P: crate::bounded::LaidOut, const N: usize> GetLegs<H, P, N> {
+    /// The description of a table at `at` and, in a region, its [`GetLegsRows`] at `rows`: the
+    /// line of its legs' rows, lent by a plan the rows `count` states (the count of its kind of
+    /// get on one face), at most `N`. The table is written as [`Default`] makes one before it is
+    /// placed or lent, since the receive's key gate is not zero bytes. The table states no quota of
+    /// its own (see the module), so nothing holds it to the session's limits after.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+        count: crate::bounded::RowCount,
+    ) -> crate::bounded::RegionLines<GET_LEGS_LINES> {
+        crate::bounded::RegionLines::EMPTY.seq(
+            crate::bounded::SeqPlace::of_room::<GetLeg<H>, N>(
+                at.wrapping_add(core::mem::offset_of!(Self, legs)),
+                rows.wrapping_add(core::mem::offset_of!(GetLegsRows<H, N>, legs)),
+            )
+            .counted(count),
+        )
     }
 }
 

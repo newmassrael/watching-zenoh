@@ -129,31 +129,32 @@ mod lodging;
 // session whose tables take their memory on use holds a state of its own instead.
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub mod region;
-// The tables take their memory on use in a session whose shape the build fixes. Features add, so a
-// build may name `tables-on-use` beside `runtime-plan` (`listen` and `group` turn it on, and
-// `--all-features` names both): the session laid out at the open from its config wins, its faces'
-// tables kept in the pools that arena lends, and the build is the `runtime-plan` form whole. Each
-// item of the on-use form reads the feature beside `not(feature = "runtime-plan")`, and its twin
-// the negation of both, so no item of the on-use form is compiled into that build
-// (`form_precedence_tests`).
+// Two facts of a build choose the session's tables: where their counts come from (the build's
+// region, or the config the open lays its plan out from, `runtime-plan`) and when they take their
+// memory (at the open, or at each table's first row, `tables-on-use`). The policy that answers both
+// is stated once, by the build script (`build.rs`, `TablePolicy`), as the cfg of its name: `wz_lent`
+// where the open lends the tables from the arena it lays out from its config, `wz_on_use` where they
+// take their memory on use, and neither where the region the build lays out places them. Every item
+// that differs by the policy reads its name, and every item that differs by where the counts come
+// from reads `runtime-plan`, so the two are read apart.
 /// The storage policy of the session's registry, named once so every table of it and the rows each
-/// is given agree on it: lent from the arena where the open lays the arena out from its config
-/// (`runtime-plan`), placed in the region the build lays out otherwise (`region`), and taken from
-/// the allocator at each table's first row where the tables take their memory on use
-/// (`tables-on-use` without `runtime-plan`).
-#[cfg(feature = "runtime-plan")]
+/// is given agree on it: lent from the arena where the open lays the arena out from its config and
+/// lends its tables from it (`wz_lent`), placed in the region the build lays out where the build
+/// fixes the session's shape (`region`), and taken from the allocator at each table's first row
+/// where the tables take their memory on use (`wz_on_use`).
+#[cfg(wz_lent)]
 pub(crate) type RowPolicy = wz_session_core::bounded::Lent;
-/// See the form of a build with `runtime-plan`.
+/// See the form of a build whose open lends its tables.
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(crate) type RowPolicy = wz_session_core::bounded::Region;
-/// See the form of a build with `runtime-plan`.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+/// See the form of a build whose open lends its tables.
+#[cfg(wz_on_use)]
 pub(crate) type RowPolicy = wz_session_core::bounded::OnUse;
 // The session takes the memory of its tables when it opens and none after (docs/upstream-parity.md,
 // D12): the moment this engine lays its tables out at, which every form above but the on-use one
 // answers. A policy that takes its memory at another moment is a form of its own, chosen with the
 // moment, so no form builds whose policy disagrees with its moment.
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 const _: () = assert!(
     matches!(
         <RowPolicy as wz_session_core::bounded::Storage>::TAKEN,
@@ -161,7 +162,7 @@ const _: () = assert!(
     ),
     "the session's tables take their memory at its open"
 );
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 const _: () = assert!(
     matches!(
         <RowPolicy as wz_session_core::bounded::Storage>::TAKEN,
@@ -169,41 +170,42 @@ const _: () = assert!(
     ),
     "the session's tables take their memory at their first row"
 );
-// The precedence of the two forms above, held by name in the build that names both.
+// The policy of a build that names both features, held by name: where the counts come from and
+// when the memory is taken are two facts, and the second is `tables-on-use`'s (`build.rs`).
 #[cfg(all(test, feature = "tables-on-use", feature = "runtime-plan"))]
 mod form_precedence_tests {
     use core::any::TypeId;
 
-    use wz_session_core::bounded::{Lent, Storage, Taken};
+    use wz_session_core::bounded::{Storage, Taken};
 
     use crate::RowPolicy;
 
-    /// A build with `tables-on-use` and `runtime-plan` lends its tables from the arena its open
-    /// lays out (`Lent`), whose memory is taken at the open. Turned red by naming `OnUse` (or
-    /// any policy but `Lent`) as the `RowPolicy` of a build with both features, as a
-    /// `RowPolicy` read under `tables-on-use` alone would.
+    /// A build with `tables-on-use` and `runtime-plan` takes its tables' memory on use, their
+    /// counts laid out from its config, whatever faces its session takes beside its dial role's
+    /// (`listen`, `group`, which `--all-features` names): its policy is `OnUse`, whose memory is
+    /// taken at each table's first row. Turned red by a build script that lets `runtime-plan`
+    /// choose the policy (`TablePolicy::Lent` for a build of both in `build.rs`), or that keeps a
+    /// session which takes faces lent, either of which names `Lent`, taken at the open.
     #[test]
-    fn a_build_of_both_forms_lays_its_tables_out_at_the_open() {
-        assert_eq!(TypeId::of::<RowPolicy>(), TypeId::of::<Lent>());
-        assert_eq!(<RowPolicy as Storage>::TAKEN, Taken::AtOpen);
+    fn a_build_of_both_forms_takes_its_tables_memory_on_use() {
+        assert_eq!(
+            TypeId::of::<RowPolicy>(),
+            TypeId::of::<wz_session_core::bounded::OnUse>()
+        );
+        assert_eq!(<RowPolicy as Storage>::TAKEN, Taken::AtFirstUse);
     }
 }
 /// The storage policy of the tables the session core's queries' plane and round keep for the
 /// engine (the Finals its queryables hold and the requests they refused, the round's records,
-/// callbacks and keys): lent, where the open lends them from its arena or the region places them,
-/// whichever policy the registry's tables are of; and taken at each table's first row where the
-/// tables take their memory on use. A get's rows are the registry's, of its policy (`RowPolicy`).
-#[cfg(all(
-    any(wz_round, feature = "queryable"),
-    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-))]
+/// callbacks and keys, the publishes it keeps for its other faces) and of the texts of its
+/// endpoints (`wz_runtime_coop::transport::TransportFaces::Policy`): lent, where the open lends
+/// them from its arena or the region places them, whichever policy the registry's tables are of;
+/// and taken at each table's first row where the tables take their memory on use. A get's rows
+/// are the registry's, of its policy (`RowPolicy`).
+#[cfg(not(wz_on_use))]
 pub(crate) type StatePolicy = wz_session_core::bounded::Lent;
-/// See the form of a build without `tables-on-use`.
-#[cfg(all(
-    any(wz_round, feature = "queryable"),
-    feature = "tables-on-use",
-    not(feature = "runtime-plan")
-))]
+/// See the form of a build whose tables take their memory at the open.
+#[cfg(wz_on_use)]
 pub(crate) type StatePolicy = wz_session_core::bounded::OnUse;
 // How the engine's calls stand to its threads, and the locks that choice decides.
 mod form;
@@ -214,11 +216,19 @@ mod form;
 /// of its own; one face's where several threads drive the session's faces, each face's link
 /// handles moved between threads with the face whole. The terms are the form's
 /// (`wz_value_locks`, the build script's), whose lock kind counts a link's parts so.
-#[cfg(all(feature = "threads", wz_value_locks))]
+#[cfg(all(feature = "threads", wz_value_locks, not(wz_on_use)))]
 pub type LinkCount = wz_runtime_coop::link_cells::OneFace;
 /// How the handles on the parts of one link of the engine's sessions are counted: one task's.
-#[cfg(not(all(feature = "threads", wz_value_locks)))]
+#[cfg(all(not(all(feature = "threads", wz_value_locks)), not(wz_on_use)))]
 pub type LinkCount = wz_runtime_coop::link_cells::OneTask;
+/// How the handles on the parts of one link of the engine's sessions are counted where the tables
+/// take their memory on use: one face's, each part made on the heap as its link opens, so no stack
+/// and no transport of the session names a table of cells.
+#[cfg(all(feature = "threads", wz_value_locks, wz_on_use))]
+pub type LinkCount = wz_runtime_coop::link_cells::OnHeap<wz_runtime_coop::link_cells::OneFace>;
+/// One task's, each part made on the heap as its link opens.
+#[cfg(all(not(all(feature = "threads", wz_value_locks)), wz_on_use))]
+pub type LinkCount = wz_runtime_coop::link_cells::OnHeap<wz_runtime_coop::link_cells::OneTask>;
 #[cfg(feature = "group-host")]
 pub mod host_group;
 // What an open reads its session's config from, and how the endpoints' texts reach its rows.

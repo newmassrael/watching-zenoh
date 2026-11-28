@@ -30,7 +30,6 @@ use core::ffi::c_int;
 use core::mem::ManuallyDrop;
 use core::ops::Deref;
 
-use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkEnds, LinkKind, LinkRoom, LinkSendOutcome, LinkSubject,
@@ -47,9 +46,9 @@ use wz_session_core::serial_link::{
 use super::{SerialDevice, SerialOpen};
 use crate::group_transport::GroupTransport;
 use crate::ip_stack::HeapLink;
-use crate::link_cells::{CellRc, CountKind, OneTask};
+use crate::link_cells::{CellRc, CellSource, CountKind, OneTask};
 use crate::link_storage::{
-    heap_link_buffers, LinkTables, RxBuffer, RxStore, TxBuffer, TxLender, TxStore,
+    BufferSource, RxBuffer, RxOf, RxStore, TxBuffer, TxLender, TxOf, TxStore,
 };
 use crate::session_drive::{
     LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SerialLine, SerialLocator,
@@ -583,12 +582,7 @@ impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static, M: C
 
 /// A serial link of a stack whose sessions count its handles as `N` does: its buffers are of
 /// tables flagged as `N` flags the cells it is placed in.
-type SerialDriverOf<D, N> = SerialDriver<
-    D,
-    RxBuffer<<N as CountKind>::Flag>,
-    TxBuffer<<N as CountKind>::Flag>,
-    <N as CountKind>::Shared,
->;
+type SerialDriverOf<D, N> = SerialDriver<D, RxOf<N>, TxOf<N>, <N as CountKind>::Shared>;
 
 /// The handle a stack's sessions hold a serial link by: on the cell it is made in, counted as they
 /// count their handles.
@@ -691,22 +685,12 @@ impl<D, M: CountKind> Drop for LineLease<D, M> {
     }
 }
 
-/// `link`, its handshake made, as the session shell holds a link.
-fn opened<D: SerialDevice + 'static, N: CountKind>(
-    link: SerialCellOf<D, N>,
-) -> OpenedLink<HeapLink<N>, N> {
-    OpenedLink {
-        sink: link.clone().into_sink(),
-        pump: link.into_link(),
-    }
-}
-
 /// What every serial link of a [`SerialLinks`] is given besides its line: the session's tables
 /// and cells when it lent them, the slots its frames are encoded into, and whether its owner
 /// waits.
 struct SerialShape<N: CountKind> {
-    lent: Option<LinkTables<N::Flag>>,
-    cells: Option<LentByteCells<N::Flag>>,
+    lent: N::Buffers,
+    cells: N::Cells,
     owner_waits: bool,
     tx_slots: usize,
     tx_capacity: usize,
@@ -724,8 +708,8 @@ impl<N: CountKind> Copy for SerialShape<N> {}
 impl<N: CountKind> Default for SerialShape<N> {
     fn default() -> Self {
         Self {
-            lent: None,
-            cells: None,
+            lent: Default::default(),
+            cells: Default::default(),
             owner_waits: false,
             tx_slots: 0,
             tx_capacity: 0,
@@ -742,14 +726,11 @@ impl<N: CountKind> SerialShape<N> {
         line: LineLease<D, N::Shared>,
         at: SerialLocator,
     ) -> Result<SerialCellOf<D, N>, LinkOpenError> {
-        let (rx, tx) = heap_link_buffers(
-            self.lent.as_ref(),
-            SERIAL_MAX_COBS_BUF,
-            self.tx_slots,
-            self.tx_capacity,
-        )?;
+        let (rx, tx) = self
+            .lent
+            .buffers(SERIAL_MAX_COBS_BUF, self.tx_slots, self.tx_capacity)?;
         let owner_waits = self.owner_waits;
-        CellRc::<_, N>::claim_of(self.cells.as_ref())
+        CellRc::<_, N>::claim_of(&self.cells)
             .ok_or(LinkOpenError::Exhausted)?
             .made(|place| {
                 let link = place.write(SerialDriver::over(line, at, rx, tx));
@@ -776,7 +757,7 @@ where
     fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
         let answer = self.link.as_ref()?.dial_step(self.opener.now_us())?;
         let link = self.link.take()?;
-        Some(answer.map(|()| opened(link)))
+        Some(answer.map(|()| OpenedLink::behind_tables(link)))
     }
 }
 
@@ -898,7 +879,11 @@ where
         };
         match step {
             Ok(false) => Ok(None),
-            Ok(true) => Ok(self.waiting.borrow_mut().take().map(opened)),
+            Ok(true) => Ok(self
+                .waiting
+                .borrow_mut()
+                .take()
+                .map(OpenedLink::behind_tables)),
             // A line that failed is let go, kept or not, and opened again by the next call.
             Err(_) => {
                 self.waiting.borrow_mut().take();
@@ -948,15 +933,15 @@ impl<S, O: SerialOpen, N: CountKind> SerialLinks<S, O, N> {
     /// lends them its cells.
     pub fn counted_by<M: CountKind, T>(self, links: T) -> SerialLinks<T, O, M> {
         debug_assert!(
-            self.shape.cells.is_none() && self.shape.lent.is_none(),
+            self.shape.cells.table().is_none() && self.shape.lent.tables().is_none(),
             "cells and buffers are lent after the links are made"
         );
         SerialLinks {
             links,
             opener: self.opener,
             shape: SerialShape {
-                lent: None,
-                cells: None,
+                lent: Default::default(),
+                cells: Default::default(),
                 owner_waits: self.shape.owner_waits,
                 tx_slots: self.shape.tx_slots,
                 tx_capacity: self.shape.tx_capacity,
@@ -1044,8 +1029,8 @@ where
         }
     }
 
-    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
-        self.shape.lent = Some(tables);
+    fn lend_buffers(&mut self, tables: N::Buffers) {
+        self.shape.lent = tables;
         self.links.lend_buffers(tables);
     }
 
@@ -1058,17 +1043,18 @@ where
         ),
     };
 
-    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
-        self.shape.cells = Some(cells);
+    fn lend_cells(&mut self, cells: N::Cells) {
+        self.shape.cells = cells;
         self.links.lend_cells(cells);
     }
 
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(
-        &mut self,
-        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-    ) -> Result<(), usize> {
-        self.links.lend_port_rows(rows)
+    fn lend_ports(&mut self, ports: N::Ports) -> Result<(), usize> {
+        self.links.lend_ports(ports)
+    }
+
+    fn lend_groups(&mut self, groups: N::Groups) {
+        self.links.lend_groups(groups);
     }
 
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
@@ -1112,10 +1098,6 @@ where
         group: &GroupLocator,
     ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         self.links.open_group(endpoint, group)
-    }
-
-    fn share_pump(pump: HeapLink<N>) -> Option<CellRc<dyn SessionDatagramLink, N>> {
-        S::share_pump(pump)
     }
 }
 

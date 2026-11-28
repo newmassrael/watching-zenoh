@@ -13,16 +13,14 @@
 
 use alloc::boxed::Box;
 
-use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::group_locator::GroupLocator;
-use wz_session_core::link::{LostCause, RxFrame};
+use wz_session_core::link::{BoxedLinkDriver, LostCause, RxFrame};
 
 use crate::group_transport::GroupTransport;
 use crate::link_cells::{CellRc, CountKind};
-use crate::link_storage::LinkTables;
 use crate::session_drive::{
-    LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
-    SessionDatagramLink, SessionLinks, StackWake, WaitOn,
+    Dialled, DynLink, DynSink, LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator,
+    OpenedLink, PendingDial, SessionDatagramLink, SessionLinks, SharedPump, StackWake, WaitOn,
 };
 
 /// One of two network stacks, the one a session opens over: every link it opens is that stack's.
@@ -41,12 +39,17 @@ pub enum EitherPump<P, Q> {
     Right(Q),
 }
 
-/// A dial of [`EitherLinks`] under way: the dial of the stack that began it.
-pub enum EitherDial<D, E> {
+/// A dial of [`EitherLinks`] under way: the dial of the stack that began it, or `M`, a dial whose
+/// link was made by the time it was begun.
+pub enum EitherDial<D, E, M> {
     /// A dial the first stack began.
     Left(D),
     /// A dial the second stack began.
     Right(E),
+    /// A dial answered already: its link is sent through as either stack's is, behind the table,
+    /// so it is held as made and not handed back to the stack that made it, whose own sinks may
+    /// be of a type of their own.
+    Made(M),
 }
 
 /// The waits of [`EitherLinks`]: the chosen stack's, which every handle its links name is one of.
@@ -59,23 +62,27 @@ pub enum EitherWaits<V, W> {
 }
 
 /// A listener of [`EitherLinks`]: the chosen stack's, each link it yields marked as that stack's.
-enum EitherListener<P, Q, N: CountKind> {
+enum EitherListener<P: SharedPump<N>, Q: SharedPump<N>, N: CountKind> {
     Left(Box<dyn LinkListener<P, N>>),
     Right(Box<dyn LinkListener<Q, N>>),
 }
 
-/// `opened`, a link of the first stack.
-fn left_link<P, Q, N: CountKind>(opened: OpenedLink<P, N>) -> OpenedLink<EitherPump<P, Q>, N> {
+/// `opened`, a link of the first stack, sent through behind the table as either stack's is.
+fn left_link<P: SharedPump<N>, Q: SharedPump<N>, N: CountKind>(
+    opened: OpenedLink<P, N>,
+) -> OpenedLink<EitherPump<P, Q>, N> {
     OpenedLink {
-        sink: opened.sink,
+        sink: <P::Sink as DynSink>::into_dyn_sink(opened.sink),
         pump: EitherPump::Left(opened.pump),
     }
 }
 
-/// `opened`, a link of the second stack.
-fn right_link<P, Q, N: CountKind>(opened: OpenedLink<Q, N>) -> OpenedLink<EitherPump<P, Q>, N> {
+/// `opened`, a link of the second stack, sent through behind the table as either stack's is.
+fn right_link<P: SharedPump<N>, Q: SharedPump<N>, N: CountKind>(
+    opened: OpenedLink<Q, N>,
+) -> OpenedLink<EitherPump<P, Q>, N> {
     OpenedLink {
-        sink: opened.sink,
+        sink: <Q::Sink as DynSink>::into_dyn_sink(opened.sink),
         pump: EitherPump::Right(opened.pump),
     }
 }
@@ -132,6 +139,10 @@ impl<P: SessionDatagramLink, Q: SessionDatagramLink> SessionDatagramLink for Eit
         on_side!(EitherPump, self, link => link.owes_write())
     }
 
+    fn owes_write_if_free(&self) -> Option<bool> {
+        on_side!(EitherPump, self, link => link.owes_write_if_free())
+    }
+
     #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self) {
         on_side!(EitherPump, self, link => link.write_owed_now())
@@ -162,27 +173,44 @@ impl<P: SessionDatagramLink, Q: SessionDatagramLink> SessionDatagramLink for Eit
     }
 }
 
-impl<P, Q, N: CountKind, D: PendingDial<P, N>, E: PendingDial<Q, N>>
-    PendingDial<EitherPump<P, Q>, N> for EitherDial<D, E>
+/// A link of either stack is shared as its own stack shares it, and read and sent through behind
+/// the tables of its traits: the two stacks' links are of two types.
+impl<P: SharedPump<N>, Q: SharedPump<N>, N: CountKind> SharedPump<N> for EitherPump<P, Q> {
+    type Link = dyn SessionDatagramLink;
+    type Sink = dyn BoxedLinkDriver;
+
+    fn share(self) -> Option<CellRc<dyn SessionDatagramLink, N>> {
+        match self {
+            EitherPump::Left(pump) => pump.share().map(<P::Link as DynLink>::into_dyn),
+            EitherPump::Right(pump) => pump.share().map(<Q::Link as DynLink>::into_dyn),
+        }
+    }
+}
+
+impl<P, Q, N, D, E> PendingDial<EitherPump<P, Q>, N>
+    for EitherDial<D, E, Dialled<EitherPump<P, Q>, N>>
+where
+    P: SharedPump<N>,
+    Q: SharedPump<N>,
+    N: CountKind,
+    D: PendingDial<P, N>,
+    E: PendingDial<Q, N>,
 {
     fn poll(&mut self) -> Option<Result<OpenedLink<EitherPump<P, Q>, N>, LinkOpenError>> {
         match self {
             Self::Left(dial) => dial.poll().map(|made| made.map(left_link)),
             Self::Right(dial) => dial.poll().map(|made| made.map(right_link)),
+            Self::Made(dial) => dial.poll(),
         }
     }
 }
 
-/// A link made at once is a dial of the stack that made it.
-impl<P, Q, N: CountKind, D: From<OpenedLink<P, N>>, E: From<OpenedLink<Q, N>>>
-    From<OpenedLink<EitherPump<P, Q>, N>> for EitherDial<D, E>
+/// A link made at once is a dial answered already.
+impl<D, E, P: SharedPump<N>, N: CountKind> From<OpenedLink<P, N>>
+    for EitherDial<D, E, Dialled<P, N>>
 {
-    fn from(opened: OpenedLink<EitherPump<P, Q>, N>) -> Self {
-        let OpenedLink { sink, pump } = opened;
-        match pump {
-            EitherPump::Left(pump) => Self::Left(D::from(OpenedLink { sink, pump })),
-            EitherPump::Right(pump) => Self::Right(E::from(OpenedLink { sink, pump })),
-        }
+    fn from(opened: OpenedLink<P, N>) -> Self {
+        Self::Made(Dialled::new(opened))
     }
 }
 
@@ -204,7 +232,9 @@ impl<V: LinkWaits, W: LinkWaits> LinkWaits for EitherWaits<V, W> {
     }
 }
 
-impl<P, Q, N: CountKind> LinkListener<EitherPump<P, Q>, N> for EitherListener<P, Q, N> {
+impl<P: SharedPump<N>, Q: SharedPump<N>, N: CountKind> LinkListener<EitherPump<P, Q>, N>
+    for EitherListener<P, Q, N>
+{
     fn local(&self) -> Locator {
         on_side!(EitherListener, self, listener => listener.local())
     }
@@ -229,7 +259,7 @@ impl<P, Q, N: CountKind> LinkListener<EitherPump<P, Q>, N> for EitherListener<P,
 impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for EitherLinks<A, B> {
     type Pump = EitherPump<A::Pump, B::Pump>;
 
-    type Dial = EitherDial<A::Dial, B::Dial>;
+    type Dial = EitherDial<A::Dial, B::Dial, Dialled<Self::Pump, N>>;
 
     // A constant of the type and not of the value: a reader of IPv6 text is linked when either
     // stack may open to an IPv6 end, and the chosen stack refuses a family it does not carry.
@@ -275,7 +305,7 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
         }
     }
 
-    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
+    fn lend_buffers(&mut self, tables: N::Buffers) {
         on_side!(EitherLinks, self, links => links.lend_buffers(tables))
     }
 
@@ -283,16 +313,17 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
         on_side!(EitherLinks, self, links => links.link_cell_bytes())
     }
 
-    fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
+    fn lend_cells(&mut self, cells: N::Cells) {
         on_side!(EitherLinks, self, links => links.lend_cells(cells))
     }
 
     #[cfg(feature = "udp-listen")]
-    fn lend_port_rows(
-        &mut self,
-        rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
-    ) -> Result<(), usize> {
-        on_side!(EitherLinks, self, links => links.lend_port_rows(rows))
+    fn lend_ports(&mut self, ports: N::Ports) -> Result<(), usize> {
+        on_side!(EitherLinks, self, links => links.lend_ports(ports))
+    }
+
+    fn lend_groups(&mut self, groups: N::Groups) {
+        on_side!(EitherLinks, self, links => links.lend_groups(groups))
     }
 
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
@@ -319,15 +350,6 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
         group: &GroupLocator,
     ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         on_side!(EitherLinks, self, links => links.open_group(endpoint, group))
-    }
-
-    // Each side shares its pump as its own stack does, so a stack whose pump is already a shared
-    // handle hands that handle back and its link stays behind one pointer.
-    fn share_pump(pump: Self::Pump) -> Option<CellRc<dyn SessionDatagramLink, N>> {
-        match pump {
-            EitherPump::Left(pump) => A::share_pump(pump),
-            EitherPump::Right(pump) => B::share_pump(pump),
-        }
     }
 }
 
@@ -372,6 +394,13 @@ mod tests {
             usize::from(self.0)
         }
     }
+    impl<N: CountKind> crate::session_drive::SharedPump<N> for Tagged {
+        type Link = Self;
+        type Sink = dyn BoxedLinkDriver;
+        fn share(self) -> Option<CellRc<Self, N>> {
+            CellRc::try_on_heap(self)
+        }
+    }
 
     /// What a link dropped is asked of the side that holds it, and of the link a shared handle
     /// names. Turned red by a pump or a handle that answers it itself (the trait's provided form)
@@ -388,7 +417,9 @@ mod tests {
         assert_eq!(shared.take_rx_dropped(), usize::from(LEFT));
     }
 
-    fn opened<P>(pump: P) -> OpenedLink<P> {
+    fn opened<P: crate::session_drive::SharedPump<Sink = dyn BoxedLinkDriver>>(
+        pump: P,
+    ) -> OpenedLink<P> {
         OpenedLink {
             sink: heap_sink(Null).expect("the heap has room"),
             pump,
@@ -435,9 +466,6 @@ mod tests {
             }
         }
         const LINK_CELL_BYTES: usize = 64;
-        fn share_pump(pump: SharedPump) -> Option<SharedPump> {
-            Some(pump)
-        }
     }
 
     /// The second stack: its pumps are values its stack shares by the provided form; it refuses
@@ -485,6 +513,27 @@ mod tests {
 
     fn right() -> Both {
         EitherLinks::Right(Owned)
+    }
+
+    /// Either of two open stacks is an open set, so what is generic over one hands the sink of a
+    /// link it dials on as the driver's trait, the type a session of the heap profile's default
+    /// handle sends through. Turned red, by not compiling, by an either whose sink names a type of
+    /// its own, or by a bound on the open set that its users cannot read back.
+    #[test]
+    fn a_dial_over_an_open_set_hands_on_the_drivers_trait() {
+        fn sink_of<L: crate::session_drive::OpenSetLinks>(
+            links: &L,
+        ) -> Result<CellRc<dyn BoxedLinkDriver>, LinkOpenError> {
+            links
+                .open_initiator(Locator::udp(AT))
+                .map(|opened| opened.sink)
+        }
+        assert!(sink_of(&left()).is_ok(), "the first stack dials udp/");
+        assert_eq!(
+            sink_of(&right()).err(),
+            Some(LinkOpenError::Refused),
+            "the second stack refuses every dial"
+        );
     }
 
     #[test]
@@ -536,18 +585,22 @@ mod tests {
         ));
     }
 
+    /// A link made at once is a dial answered already, which answers its link once, whichever
+    /// stack made it. Turned red by a dial that hands the link to a side's own dial, or answers it
+    /// twice.
     #[test]
-    fn a_link_made_at_once_is_a_dial_of_its_own_stack() {
+    fn a_link_made_at_once_is_a_dial_answered_already() {
         let mut dial: <Both as SessionLinks>::Dial =
             EitherDial::from(opened(EitherPump::<SharedPump, Tagged>::Right(Tagged(
                 RIGHT,
             ))));
-        assert!(matches!(dial, EitherDial::Right(_)));
+        assert!(matches!(dial, EitherDial::Made(_)));
         let made = dial
             .poll()
             .expect("the dial answers")
             .expect("with its link");
         assert!(matches!(made.pump, EitherPump::Right(Tagged(RIGHT))));
+        assert!(dial.poll().is_none(), "a dial answers once");
     }
 
     #[test]
@@ -559,11 +612,12 @@ mod tests {
             panic!("the first stack's link");
         };
         let before = CellRc::as_ptr(inner);
-        let shared = Both::share_pump(made.pump).expect("the heap has room");
+        let shared = crate::session_drive::SharedPump::share(made.pump).expect("the heap has room");
         // The first stack hands its handle back: the same link, behind no second pointer.
         assert!(core::ptr::addr_eq(CellRc::as_ptr(&shared), before));
         assert!(shared.holds_input());
-        let other = Both::share_pump(EitherPump::Right(Tagged(RIGHT))).expect("the heap has room");
+        let right: EitherPump<SharedPump, Tagged> = EitherPump::Right(Tagged(RIGHT));
+        let other = crate::session_drive::SharedPump::share(right).expect("the heap has room");
         assert!(
             !other.holds_input(),
             "the second stack's link, shared by its own form"

@@ -26,6 +26,11 @@ license.workspace = true
 authors.workspace = true
 description = "The cooperative engine behind a wz C ABI: one session the program steps, implementing the C ABI's engine port."
 publish = false
+# The build script states whether this build keeps the process's table of engines (`engine-rows`),
+# as metadata a dependent's build script reads (`DEP_WZ_CAPI_COOP_ENGINE_ROWS`, see `build.rs`):
+# Cargo unifies this crate's features across the graph, so no feature of the dependent can say
+# whether the table, and the reach of an engine through it, is built.
+links = "wz_capi_coop"
 
 [lib]
 name = "wz_capi_coop"
@@ -182,6 +187,13 @@ advanced = ["advanced-cache"]
 # carry multicast (`wz_runtime_posix::scouting`), which needs no `std`, so a host library without
 # it scouts as one with it does.
 scout = ["scout-datagram", "dep:wz-runtime-posix"]
+# A host window's socket joined to the scouting group beside its ask sockets
+# (`wz-runtime-posix`'s `scout-group-socket`), which zenoh-pico's scout does not open. Weak: a
+# build that does not scout on a host has no window to add it to.
+scout-group-socket = ["wz-runtime-posix?/scout-group-socket"]
+# A window's verdicts on the datagrams it does not take (`wz-session-core`'s `scout-rx-verdicts`),
+# which zenoh-pico's scout does not name: without it they are one count.
+scout-rx-verdicts = ["wz-session-core/scout-rx-verdicts"]
 # Active scouting over ONE datagram socket of the stack the engine runs on (`scout_datagram`),
 # without `std`: zenoh-pico's window on a platform with no interface iterator (Zephyr), a socket the
 # Scout leaves by and the Hellos come back to. The session's window rules and the two codecs, and
@@ -248,18 +260,15 @@ listen = [
 ]
 # `udp-listen`: the listening role on `udp/` too, the runtime's `udp-listen`, which gives the
 # host's links a `udp/` listener, one socket whose peers are told apart by the address each
-# datagram came from, each a face of its own. The open lends every udp port the rows of its peers
-# and the slots of its datagrams (`CoopEngine::assemble`), so the runtime's ports are compiled in
-# that form alone (`udp-port-lent-only`), and the session's plan lays those rows out for each
-# `udp/` endpoint it listens on. A behaviour zenoh-pico's peer does not have: its POSIX link
-# listens on no unicast `udp/` endpoint (`vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @
+# datagram came from, each a face of its own. The open gives the ports of a session that listens
+# on `udp/` their memory by the kind its links count by (`CoopEngine::assemble`): the rows of
+# their peers and the slots of their datagrams its plan lays out and lends, or, where the tables
+# take their memory on use, the heap's, counted to the same rows and slots. A behaviour
+# zenoh-pico's peer does not have: its POSIX link listens on no unicast `udp/` endpoint
+# (`vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @
 # `static z_result_t _z_udp_posix_listen(`). The pico ABI's capability of the same name
 # (deploy/wz-config.toml) turns it on, which the zenoh-pico preset leaves off.
-udp-listen = [
-    "listen",
-    "wz-runtime-coop/udp-listen",
-    "wz-runtime-coop/udp-port-lent-only",
-]
+udp-listen = ["listen", "wz-runtime-coop/udp-listen"]
 # `link-admission`: one link to a remote node when both dial, or one dials twice. Each link is
 # given its place in the session's admission (the session core's `LinkRegistry`, laid out in the
 # session's arena) before its handshake runs, and a second link to a node the session holds is
@@ -281,7 +290,9 @@ link-admission = ["listen", "wz-runtime-coop/link-admission"]
 # preset leaves it off. A client that only dials answers no Interest and has none of it. The
 # `DeclareFinal` of the initial interest that ends what a peer face is told when its link comes up
 # (`CoopConfig::initial_interest`) is sent by a build that listens or answers, as zenoh-pico's peer
-# ends its push to a new peer with it; a client build links none of that either.
+# ends its push to a new peer with it; a client build links none of that either. The feature is the
+# request; the engine's code reads the core's own statement of what it built (`wz_interest_answer`,
+# build.rs), since another crate of the graph can turn the core's on while this one is off.
 interest-answer = ["wz-session-core/interest-answer"]
 # The send's behaviours that zenoh-pico's transport does not have, each the session core's feature
 # of the same name: on in this crate's own build, and named by the pico ABI's capabilities of the
@@ -531,10 +542,12 @@ runtime-plan = []
 # session's own, one allocation the open takes from the allocator apart from its arena, and no
 # region is laid out; the engine lies in an allocation of its own the open claims first, which keeps
 # the arena's memory while it is held. The arena is still the open's for the rest. Beside
-# `runtime-plan` (which `listen` and `group` turn on, and `--all-features` names) it yields, as
-# features add: a session laid out at the open from its config takes its tables' memory there, so a
-# build of both is the `runtime-plan` form (`src/lib.rs`, where `RowPolicy` is named). Off, every
-# table takes its memory at the open and none after (docs/upstream-parity.md, D12).
+# `runtime-plan` the counts are the config's and the memory is still taken on use: the moment is
+# this feature's and where the counts come from is `runtime-plan`'s, two facts the build script
+# reads apart (`build.rs`, `TablePolicy`), but in a session that takes faces beside its dial role's
+# (`listen`, `group`), whose faces' sets are lent from the pools its arena lays out until they are
+# made on use, and which lends its tables at the open until then (`--all-features` is that form).
+# Off, every table takes its memory at the open and none after (docs/upstream-parity.md, D12).
 tables-on-use = []
 # A clock the program moves (a time base it supplies, `wz-capi-pico`'s `time-base`): the word that
 # tells a read the clock moved on (`CoopConfig::clock_moves`), which ends the read's wait beside

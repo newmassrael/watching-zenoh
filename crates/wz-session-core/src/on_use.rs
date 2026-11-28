@@ -51,7 +51,9 @@ use crate::bounded::{
 #[cfg(debug_assertions)]
 use crate::key_arena::OwnerLock;
 use crate::key_arena::{block_bytes, KeyCounts};
-use crate::limits::MaxKeyexprBytesHeld;
+use crate::limit_binding::Quota;
+use crate::limits::{MaxKeyexprBytesHeld, SessionLimits};
+use crate::row_pool::PeerSlot;
 
 /// The allocation of `rows` rows of `size` bytes each, aligned to `align`; `None` past the address
 /// space.
@@ -473,8 +475,109 @@ impl<T> Drop for FirstUseIntoIter<T> {
     }
 }
 
+/// Every kind of row a peer writes by its own choice, one for each [`PeerSlot`].
+const PEER_SLOTS: [PeerSlot; 7] = [
+    PeerSlot::Aliases,
+    PeerSlot::Subscribers,
+    PeerSlot::Queryables,
+    PeerSlot::Tokens,
+    PeerSlot::SubRepeats,
+    PeerSlot::QueryableRepeats,
+    PeerSlot::Interests,
+];
+
+/// The session's bound of the rows of `slot`'s kind its peers hold together, as `limits` states
+/// it: what a lent session's pool of that kind holds (`peer_tables::PeerPoolRows`), a repeat being
+/// an id its kind's table holds.
+const fn session_bound(slot: PeerSlot, limits: &SessionLimits) -> Quota {
+    match slot {
+        PeerSlot::Aliases => limits.session_max_peer_keyexpr_aliases(),
+        PeerSlot::Subscribers
+        | PeerSlot::Queryables
+        | PeerSlot::Tokens
+        | PeerSlot::SubRepeats
+        | PeerSlot::QueryableRepeats => limits.session_max_remote_decls(),
+        PeerSlot::Interests => limits.session_max_inbound_sub_interests(),
+    }
+}
+
+/// The rows of one kind the peers of a session hold together, across its faces, and the session's
+/// bound of them.
+struct KindRows {
+    bound: Quota,
+    held: Cell<usize>,
+}
+
+impl KindRows {
+    /// No row held, to no bound.
+    const fn unbounded() -> Self {
+        Self {
+            bound: Quota::UNBOUNDED,
+            held: Cell::new(0),
+        }
+    }
+}
+
+/// The rows of each kind a peer writes, the session's peers' together: one [`KindRows`] for each
+/// [`PeerSlot`], reached by a match on the slot, so no kind is read at a place that may lie past
+/// the kinds.
+struct PeerRows {
+    aliases: KindRows,
+    subscribers: KindRows,
+    queryables: KindRows,
+    tokens: KindRows,
+    sub_repeats: KindRows,
+    queryable_repeats: KindRows,
+    interests: KindRows,
+}
+
+impl PeerRows {
+    /// No row of any kind held, to no bound.
+    const fn unbounded() -> Self {
+        Self {
+            aliases: KindRows::unbounded(),
+            subscribers: KindRows::unbounded(),
+            queryables: KindRows::unbounded(),
+            tokens: KindRows::unbounded(),
+            sub_repeats: KindRows::unbounded(),
+            queryable_repeats: KindRows::unbounded(),
+            interests: KindRows::unbounded(),
+        }
+    }
+
+    /// The rows of `slot`'s kind.
+    const fn of(&self, slot: PeerSlot) -> &KindRows {
+        match slot {
+            PeerSlot::Aliases => &self.aliases,
+            PeerSlot::Subscribers => &self.subscribers,
+            PeerSlot::Queryables => &self.queryables,
+            PeerSlot::Tokens => &self.tokens,
+            PeerSlot::SubRepeats => &self.sub_repeats,
+            PeerSlot::QueryableRepeats => &self.queryable_repeats,
+            PeerSlot::Interests => &self.interests,
+        }
+    }
+
+    /// The rows of `slot`'s kind, to set their bound.
+    fn of_mut(&mut self, slot: PeerSlot) -> &mut KindRows {
+        match slot {
+            PeerSlot::Aliases => &mut self.aliases,
+            PeerSlot::Subscribers => &mut self.subscribers,
+            PeerSlot::Queryables => &mut self.queryables,
+            PeerSlot::Tokens => &mut self.tokens,
+            PeerSlot::SubRepeats => &mut self.sub_repeats,
+            PeerSlot::QueryableRepeats => &mut self.queryable_repeats,
+            PeerSlot::Interests => &mut self.interests,
+        }
+    }
+}
+
 /// The bytes a session's keys may take together and the longest key it keeps: what every
-/// [`HeapKey`] made through its [`BudgetKeys`] is counted against (see the module).
+/// [`HeapKey`] made through its [`BudgetKeys`] is counted against (see the module). Beside them,
+/// the rows of each kind the session's peers hold together across its faces: the session is the
+/// one value every table of a peer reaches, through the handle its keys are made by, so it holds
+/// each kind to the session's bound where each table takes rows of its own
+/// ([`Self::holding_peer_rows_to`]).
 pub struct KeyBudget {
     /// The bytes the keys may take together: the session's `KEY_ARENA_BYTES`.
     bytes: usize,
@@ -486,6 +589,8 @@ pub struct KeyBudget {
     refused: Cell<u32>,
     /// The longest key kept: the session's `MAX_KEYEXPR_BYTES`.
     longest: MaxKeyexprBytesHeld,
+    /// The rows of each kind the session's peers hold together.
+    peer_rows: PeerRows,
     /// The lock the budget's owner keeps it behind ([`Self::guard_by_owner_lock`]), `None` for a
     /// budget no lock guards. Written before a second thread reaches the budget, or by its owner
     /// alone.
@@ -497,7 +602,8 @@ pub struct KeyBudget {
 }
 
 impl KeyBudget {
-    /// A budget of `bytes` that keeps keys of at most `longest` bytes, none counted yet.
+    /// A budget of `bytes` that keeps keys of at most `longest` bytes, none counted yet, and holds
+    /// the rows its peers write to no bound.
     pub fn new(bytes: usize, longest: MaxKeyexprBytesHeld) -> Self {
         Self {
             bytes,
@@ -505,11 +611,49 @@ impl KeyBudget {
             peak: Cell::new(0),
             refused: Cell::new(0),
             longest,
+            peer_rows: PeerRows::unbounded(),
             #[cfg(debug_assertions)]
             guard: Cell::new(None),
             #[cfg(debug_assertions)]
             held: AtomicBool::new(false),
         }
+    }
+
+    /// The budget held to `limits`' bounds of the rows the session's peers write together
+    /// (`SESSION_MAX_PEER_KEYEXPR_ALIASES`, `SESSION_MAX_REMOTE_DECLS` for each kind of declaration
+    /// and of its repeats, `SESSION_MAX_INBOUND_SUB_INTERESTS`): a NEW id a peer's table binds takes
+    /// a row of its kind ([`Self::take_peer_row`]), refused past the bound as a lent session's pool
+    /// of that kind refuses it, whichever face's table asks.
+    pub fn holding_peer_rows_to(mut self, limits: &SessionLimits) -> Self {
+        for slot in PEER_SLOTS {
+            self.peer_rows.of_mut(slot).bound = session_bound(slot, limits);
+        }
+        self
+    }
+
+    /// Take a row of `slot`'s kind for a NEW id a peer's table binds: `false`, taking nothing,
+    /// where the session's peers hold its bound of that kind together already.
+    pub fn take_peer_row(&self, slot: PeerSlot) -> bool {
+        self.assert_owner_lock();
+        let rows = self.peer_rows.of(slot);
+        let held = rows.held.get().saturating_add(1);
+        if !rows.bound.admits(held) {
+            return false;
+        }
+        rows.held.set(held);
+        true
+    }
+
+    /// Give back `count` rows of `slot`'s kind: ids a peer's table held were let go of.
+    pub fn give_peer_rows(&self, slot: PeerSlot, count: usize) {
+        self.assert_owner_lock();
+        let rows = self.peer_rows.of(slot);
+        rows.held.set(rows.held.get().saturating_sub(count));
+    }
+
+    /// The rows of `slot`'s kind the session's peers hold together now.
+    pub fn peer_rows(&self, slot: PeerSlot) -> usize {
+        self.peer_rows.of(slot).held.get()
     }
 
     /// Whether the budget keeps a key of `len` bytes: at most the session's `MAX_KEYEXPR_BYTES`.
@@ -1079,6 +1223,69 @@ mod tests {
         assert_eq!(keys.key(&"k".repeat(9)).err(), Some(KeyUnkept::TooLong));
         let at = keys.key(&"k".repeat(8)).expect("a key of the bound itself");
         assert_eq!(at.as_str().len(), 8);
+    }
+
+    /// A budget held to a session's bounds of what its peers write together takes a row of a kind
+    /// for each NEW id up to the kind's bound and refuses the next, taking nothing; a row given back
+    /// is taken again; each kind is counted apart, the kinds of the declarations each to the one
+    /// bound; a budget made alone refuses no row. Turned red by a kind counted against another's
+    /// count or bound (`kind`, `session_bound`), by a refused row that is counted, or by a row
+    /// given back that stays held.
+    #[test]
+    fn a_budget_holds_the_rows_its_peers_write_together_to_the_sessions_bounds() {
+        let unbound = budget_of(0);
+        for _ in 0..64 {
+            assert!(
+                unbound.take_peer_row(PeerSlot::Subscribers),
+                "CONTROL: a budget made alone holds the rows to no bound"
+            );
+        }
+        let mut limits = SessionLimits::defaults();
+        let lowered = limits
+            .select_session_max_remote_decls(Quota::at_most(2))
+            .and_then(|()| limits.select_session_max_peer_keyexpr_aliases(Quota::at_most(1)));
+        if lowered.is_err() {
+            assert!(
+                <crate::limits::SessionMaxRemoteDecls as LimitSpec>::DOMAIN.is_singleton()
+                    || <crate::limits::SessionMaxPeerKeyexprAliases as LimitSpec>::DOMAIN
+                        .is_singleton(),
+                "only a domain of one value refuses a lower bound"
+            );
+            return;
+        }
+        let budget = budget_of(0).holding_peer_rows_to(&limits);
+        assert!(budget.take_peer_row(PeerSlot::Subscribers));
+        assert!(budget.take_peer_row(PeerSlot::Subscribers));
+        assert!(
+            !budget.take_peer_row(PeerSlot::Subscribers),
+            "a third subscriber is past the session's two"
+        );
+        assert_eq!(
+            budget.peer_rows(PeerSlot::Subscribers),
+            2,
+            "the refusal took nothing"
+        );
+        assert!(
+            budget.take_peer_row(PeerSlot::Tokens) && budget.take_peer_row(PeerSlot::SubRepeats),
+            "each kind is counted apart"
+        );
+        assert!(budget.take_peer_row(PeerSlot::Aliases));
+        assert!(
+            !budget.take_peer_row(PeerSlot::Aliases),
+            "the aliases are held to their own bound"
+        );
+        budget.give_peer_rows(PeerSlot::Subscribers, 1);
+        assert_eq!(budget.peer_rows(PeerSlot::Subscribers), 1);
+        assert!(
+            budget.take_peer_row(PeerSlot::Subscribers),
+            "a row given back is taken again"
+        );
+        budget.give_peer_rows(PeerSlot::Tokens, 5);
+        assert_eq!(
+            budget.peer_rows(PeerSlot::Tokens),
+            0,
+            "a give back past the held stops at none"
+        );
     }
 
     /// A clone is one more holder and takes nothing; the key lives until its last holder is let go

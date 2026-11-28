@@ -239,27 +239,26 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     }
 
     /// Note that `listener` of `plane`, whose history is being replayed, is told the row of `key`
-    /// came ([`crate::told`]): whether it is to be told. `false` when the row does not stand,
-    /// having come and gone before the listener was told it, or when the listener was told it
-    /// already. An engine that keeps no told bits answers `true`, every event told as it comes.
-    fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        let Some(ledger) = self.told_ledger() else {
-            return true;
-        };
+    /// came ([`crate::told`]): the row it is to be told, as the engine holds it, which the
+    /// listener's event is written from. `None` when the row does not stand, having come and gone
+    /// before the listener was told it, or when the listener was told it already. An engine that
+    /// keeps no told bits tells the row that stands.
+    fn tell_came(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> Option<FaceLinkRow> {
         // Read before the ledger is held: the rows are the engine's, under its own lock.
         let stands = crate::told::standing_row(self, key);
-        ledger.lock().tell_came(plane, listener, key, stands)
+        match self.told_ledger() {
+            Some(ledger) => ledger.lock().tell_came(plane, listener, key, stands),
+            None => stands,
+        }
     }
 
     /// Note that `listener` of `plane`, whose history is being replayed, is told the row of `key`
-    /// left: whether it is to be told, which it is only when it was told the row came. The
-    /// tombstone of a row that went is let go of once no listener is left to tell. An engine that
-    /// keeps no told bits answers `true`.
-    fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> bool {
-        match self.told_ledger() {
-            Some(ledger) => ledger.lock().tell_went(plane, listener, key),
-            None => true,
-        }
+    /// left: the row as it was told it came, which the listener's event is written from; `None`
+    /// when it was never told the row came. The tombstone of a row that went is let go of once no
+    /// listener is left to tell. An engine that keeps no told bits keeps no row that went, and
+    /// tells none: every engine that reports faces keeps them.
+    fn tell_went(&self, plane: ToldPlane, listener: usize, key: &ToldKey) -> Option<FaceLinkRow> {
+        self.told_ledger()?.lock().tell_went(plane, listener, key)
     }
 
     /// The first row `listener` of `plane` was told came that no longer stands: a tombstone it is

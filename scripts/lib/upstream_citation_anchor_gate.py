@@ -950,7 +950,8 @@ PICO_BARE_BUDGET = 126
 #: 1183 -> 1180: the serial locator grammar, moved into its own module, cites pico's
 #: serial parser and tty open by rooted path and needle instead of by file name and line.
 #: 1180 -> 1170: ten went with the code the twelfth pico ABI integration removed.
-BASENAME_LINE_BUDGET = 1170
+#: 1170 -> 1169: a pico transport line citation went with the code it annotated.
+BASENAME_LINE_BUDGET = 1169
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete

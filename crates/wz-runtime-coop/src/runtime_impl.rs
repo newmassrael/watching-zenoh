@@ -266,6 +266,42 @@ impl<C: ClockSource> CoopRuntime<C> {
         )
     }
 
+    /// [`Self::try_reserved`] for a runtime that hosts no task ([`RuntimeForm::Taskless`]): its
+    /// owner steps its links itself. It holds no cell, whatever `rows.tasks` says: a spawn is
+    /// refused, counted, and a pass walks nothing. `None` as [`Self::try_reserved`] answers it.
+    #[cfg(not(feature = "session-slot"))]
+    #[inline(always)]
+    pub fn try_taskless(clock: C, rows: RuntimeRows) -> Option<Self> {
+        Self::try_over(
+            clock,
+            ExecutorState::try_taskless(rows.task_bytes)?,
+            TimerQueue::of_rows(rows.timers),
+        )
+    }
+
+    /// The runtime [`Self::try_reserved`], [`Self::try_reserved_for_one`], [`Self::try_taskless`] or
+    /// [`Self::try_opening`] makes, as `form` says, with its local set: the heap's twin of
+    /// [`Self::placed`], for an engine whose state takes its memory of the allocator rather than of
+    /// an arena reserved at its open. `None`, having kept nothing of the heap, when the heap has no
+    /// room for the runtime or for its set. Always inlined, as the other makings: a maker that
+    /// states its form as a constant links only the making of that form.
+    #[cfg(not(feature = "session-slot"))]
+    #[inline(always)]
+    pub fn try_formed(
+        clock: C,
+        rows: RuntimeRows,
+        form: RuntimeForm,
+    ) -> Option<(Self, crate::local::CoopLocalSet<C>)> {
+        let runtime = match form {
+            RuntimeForm::Reserved => Self::try_reserved(clock, rows),
+            RuntimeForm::ForOne => Self::try_reserved_for_one(clock, rows),
+            RuntimeForm::Taskless => Self::try_taskless(clock, rows),
+            RuntimeForm::Opening { added } => Self::try_opening(clock, rows, added),
+        }?;
+        let local = crate::local::CoopLocalSet::try_new(&runtime)?;
+        Some((runtime, local))
+    }
+
     /// [`Self::try_reserved`] for an engine whose open spawns tasks it cannot size before it opens
     /// (a group's session): beside the `rows.tasks` cells it holds `added` cells with no bytes
     /// yet, and until [`Self::seal`] a task that no free cell fits takes one of those and bytes of

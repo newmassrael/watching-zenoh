@@ -6,7 +6,7 @@
 //! session that only dials holds its dial role's face alone, and its text has none of this.
 
 use super::*;
-use wz_runtime_coop::faces::Dial;
+use wz_runtime_coop::faces::{Dial, DialNamed};
 // The work form's engine names these for every build; a read that steps each face where it lies
 // names them here.
 #[cfg(not(wz_round))]
@@ -67,6 +67,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.transport.links.advance_face_id();
         let at = held.at();
         self.push_face(held, Link::Idle, 0).then_some(at)
+    }
+
+    /// The Router of a face past the dial role's, over the session's chain buffers, made where the
+    /// face's read slot is made at its place's first face (`direct::DirectFaces::made_at`).
+    #[cfg(all(wz_on_use, not(wz_round)))]
+    pub(super) fn face_router(&self) -> SessionReassembly {
+        let (chains, open) = &self.face_chains;
+        session_reassembly(&self.policy, SessionChains::over(chains, *open))
     }
 
     /// Whether a link taken off a port may take a face now: fewer handshakes of taken links under
@@ -166,6 +174,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 Refusal::FacesFull,
             )));
         };
+        // Where the tables take their memory on use, the face's read slot is made at its place's
+        // first face, before anything is dialled: one the allocator has no room for is refused as
+        // a face past `max_faces` is.
+        #[cfg(all(wz_on_use, not(wz_round)))]
+        if self
+            .direct
+            .made_at(held.at(), || core.face_router())
+            .is_none()
+        {
+            core.session.registry.remove_face(held);
+            return Err(OpenError::Unreachable(EndpointRefusal::new(
+                endpoint,
+                Refusal::FacesFull,
+            )));
+        }
         // The dial is begun here and asked at each step, as the dial role's is: the session is
         // held here, and a connection is not waited for while it is.
         let begun = match core.transport.begin_dial(endpoint) {
@@ -182,7 +205,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if core.push_face(held, Link::Idle, 1) {
             core.transport
                 .links
-                .put_dial(at, Dial::begun(DialEndpoint::Named(named), begun));
+                .put_dial(at, Dial::named(DialNamed::apart(named), begun));
             // The read turns the face from its next turn on, which asks the dial where it lies.
             #[cfg(not(wz_round))]
             self.direct.hold_face(at, true);

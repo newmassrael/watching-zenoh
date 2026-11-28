@@ -50,7 +50,7 @@
 //! the stage's. The allocation has moved from the moment the handler replies to the
 //! moment the session sends, which is where the codec mirrors are replaced.
 
-use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, SpanOffset, Static, Storage};
+use crate::bounded::{BoundedVec, Lent, Profile, SpanOffset, Static, Storage};
 use crate::caps;
 use crate::limit_binding::Quota;
 #[cfg(feature = "alloc")]
@@ -491,34 +491,6 @@ impl ReplyStage<Static> {
 }
 
 impl ReplyStage<Lent> {
-    /// An empty stage whose `replies` rows and `bytes` bytes of reply text and payload are lent
-    /// from `arena`, held to the build's bounds until its creator states the session's
-    /// ([`Self::limit_to`]). Refused when either is over the build's capacity or the arena has not
-    /// the room, the rows lent so far going back with the arena.
-    pub fn lent(arena: &mut Arena, replies: usize, bytes: usize) -> Result<Self, LendRefused> {
-        Ok(Self {
-            rows: arena.lend(replies)?,
-            arena: arena.lend(bytes)?,
-            refusals: ReplyRefusals {
-                staging_full: 0,
-                payload_too_large: 0,
-            },
-            bounds: ReplyBounds::BUILD,
-        })
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes for `replies` rows and `bytes` bytes. `None`
-    /// past the address space.
-    pub const fn arena_bytes(replies: usize, bytes: usize) -> Option<usize> {
-        match (
-            Arena::table_bytes::<Row<Lent>>(replies),
-            Arena::table_bytes::<u8>(bytes),
-        ) {
-            (Some(rows), Some(bytes)) => rows.checked_add(bytes),
-            _ => None,
-        }
-    }
-
     /// The bytes of reply text and payload a stage of `replies` replies holds when each carries a
     /// payload of `payload` bytes and a key of `key`: what [`caps::REPLY_STAGE_BYTES`] is of the
     /// build's values, of the values a session's open resolved. `None` past the address space.
@@ -821,35 +793,37 @@ impl<P: Storage> Default for ReplyStage<P> {
 // nothing until the session states them (`Self::limit_to`).
 unsafe impl<P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for ReplyStage<P> {}
 
-/// The rows of a [`ReplyStage`] of the region policy, which a region lays out beside the stage:
-/// `MAX_PENDING_REPLIES` rows and the `REPLY_STAGE_BYTES` their keys and payloads lie in, the
-/// build's bounds, as a stage of the lent policy is lent them by an open of the build's limits.
-pub struct ReplyStageRows {
-    rows: [core::mem::MaybeUninit<Row<crate::bounded::Region>>; caps::MAX_PENDING_REPLIES],
+/// The rows of a [`ReplyStage`] of a policy a description places, which a region lays out beside
+/// the stage: `MAX_PENDING_REPLIES` rows and the `REPLY_STAGE_BYTES` their keys and payloads lie
+/// in, the build's bounds, as a stage of the lent policy is lent them by an open of the build's
+/// limits. The lent policy's are no value and stand only for the region's offsets.
+pub struct ReplyStageRows<P: crate::bounded::LaidOut = crate::bounded::Region> {
+    rows: [core::mem::MaybeUninit<Row<P>>; caps::MAX_PENDING_REPLIES],
     arena: [core::mem::MaybeUninit<u8>; caps::REPLY_STAGE_BYTES],
 }
 
 // SAFETY: both columns are `MaybeUninit`, valid as any bytes, and hold no value until placed.
-unsafe impl crate::bounded::ZeroEmpty for ReplyStageRows {}
+unsafe impl<P: crate::bounded::LaidOut> crate::bounded::ZeroEmpty for ReplyStageRows<P> {}
 
-impl ReplyStage<crate::bounded::Region> {
-    /// The lines of a region's description ([`place_seqs`](crate::bounded::place_seqs)) that
-    /// place this stage's rows and its bytes, the stage at `at` in the region and its
-    /// [`ReplyStageRows`] at `rows`.
+impl<P: crate::bounded::LaidOut> ReplyStage<P> {
+    /// The lines of a description that place this stage's rows and its bytes, the stage at `at`
+    /// and, in a region, its [`ReplyStageRows`] at `rows`: a plan lends the rows the replies
+    /// staged for a face's peer (`RowCount::Replies`) and the bytes they lie in, a line of rows of
+    /// one byte (`RowCount::ReplyBytes`). A stage is written as [`Default`] makes it before it is
+    /// placed or lent, and held to the session's bounds after ([`Self::limit_to`]).
     pub const fn places(at: usize, rows: usize) -> [crate::bounded::SeqPlace; 2] {
         [
-            crate::bounded::SeqPlace::of_room::<
-                Row<crate::bounded::Region>,
-                { caps::MAX_PENDING_REPLIES },
-            >(
+            crate::bounded::SeqPlace::of_room::<Row<P>, { caps::MAX_PENDING_REPLIES }>(
                 at.wrapping_add(core::mem::offset_of!(Self, rows)),
-                rows.wrapping_add(core::mem::offset_of!(ReplyStageRows, rows)),
-            ),
+                rows.wrapping_add(core::mem::offset_of!(ReplyStageRows<P>, rows)),
+            )
+            .counted(crate::bounded::RowCount::Replies),
             crate::bounded::SeqPlace::of::<u8>(
                 at.wrapping_add(core::mem::offset_of!(Self, arena)),
-                rows.wrapping_add(core::mem::offset_of!(ReplyStageRows, arena)),
+                rows.wrapping_add(core::mem::offset_of!(ReplyStageRows<P>, arena)),
                 caps::REPLY_STAGE_BYTES,
-            ),
+            )
+            .counted(crate::bounded::RowCount::ReplyBytes),
         ]
     }
 }
@@ -1057,24 +1031,6 @@ impl FinalStage<Static> {
     }
 }
 
-impl FinalStage<Lent> {
-    /// An empty table whose `rows` rows are lent from `arena`, held to the build's quota until its
-    /// creator states the session's ([`Self::limit_to`]). Refused when `rows` is over the build's
-    /// capacity or the arena has not the room.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
-        Ok(Self {
-            rows: arena.lend(rows)?,
-            refused_requests: 0,
-            quota: crate::limits::MaxPendingFinalsHeld::build_default(),
-        })
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes for `rows` rows. `None` past the address space.
-    pub const fn arena_bytes(rows: usize) -> Option<usize> {
-        Arena::table_bytes::<(crate::wire_id::RequestId, QosLevel)>(rows)
-    }
-}
-
 #[cfg(feature = "alloc")]
 impl FinalStage<crate::bounded::OnUse> {
     /// An empty table of at most `rows` rows, under the build's bound, that takes their memory at
@@ -1169,8 +1125,8 @@ impl<P: Storage> Default for FinalStage<P> {
 // nothing until the session states it (`Self::limit_to`).
 unsafe impl<P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for FinalStage<P> {}
 
-/// The rows of a [`FinalStage`] of the region policy, which a region lays out beside the stage:
-/// `MAX_PENDING_FINALS` of them, the build's bound.
+/// The rows of a [`FinalStage`] of a policy a description places, which a region lays out beside
+/// the stage: `MAX_PENDING_FINALS` of them, the build's bound.
 pub struct FinalStageRows {
     rows: [core::mem::MaybeUninit<(crate::wire_id::RequestId, QosLevel)>; caps::MAX_PENDING_FINALS],
 }
@@ -1178,10 +1134,11 @@ pub struct FinalStageRows {
 // SAFETY: the rows are `MaybeUninit`, valid as any bytes, and hold no value until placed.
 unsafe impl crate::bounded::ZeroEmpty for FinalStageRows {}
 
-impl FinalStage<crate::bounded::Region> {
-    /// The line of a region's description ([`place_seqs`](crate::bounded::place_seqs)) that
-    /// places this stage's rows, the stage at `at` in the region and its [`FinalStageRows`] at
-    /// `rows`.
+impl<P: crate::bounded::LaidOut> FinalStage<P> {
+    /// The line of a description that places this stage's rows, the stage at `at` and, in a
+    /// region, its [`FinalStageRows`] at `rows`: a plan lends the Finals owed to a face's peer
+    /// (`RowCount::Finals`). A stage is written as [`Default`] makes it before it is placed or
+    /// lent, and held to the session's quota after ([`Self::limit_to`]).
     pub const fn place(at: usize, rows: usize) -> crate::bounded::SeqPlace {
         crate::bounded::SeqPlace::of_room::<
             (crate::wire_id::RequestId, QosLevel),
@@ -1190,6 +1147,7 @@ impl FinalStage<crate::bounded::Region> {
             at.wrapping_add(core::mem::offset_of!(Self, rows)),
             rows.wrapping_add(core::mem::offset_of!(FinalStageRows, rows)),
         )
+        .counted(crate::bounded::RowCount::Finals)
     }
 }
 

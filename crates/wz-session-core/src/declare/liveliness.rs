@@ -23,7 +23,7 @@ use crate::transport_profile::owned::DeclareOwnedVariant;
 ))]
 use wz_codecs::lent::DeclareVariant;
 
-use crate::bounded::{Arena, LendRefused, Lent, Profile, Storage};
+use crate::bounded::{Profile, Storage};
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::decl_sink::BorrowedDecl;
 #[cfg(feature = "alloc")]
@@ -60,8 +60,9 @@ use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf};
 /// matches zenoh-pico's structural separation and lets consumers
 /// reason about each surface independently.
 ///
-/// `P` is the storage of the observer lists: the build's [`Profile`], or [`Lent`] for the lists
-/// a session's arena lent at its open ([`Self::lent`]).
+/// `P` is the storage of the observer lists: the build's [`Profile`], or
+/// [`Lent`](crate::bounded::Lent) for the lists a session's arena lent at its open
+/// ([`SlotObserverOf::lent`](crate::slot_observer::SlotObserverOf::lent)).
 pub struct LivelinessRegistry<D: DeclSink, U: UndeclSink, P: Storage = Profile> {
     /// R311gb (Track 2) — shared 2-list observer machinery composed from
     /// [`crate::decl_sink::DeclObserverPair`] (SSOT across the three
@@ -95,15 +96,15 @@ unsafe impl<D: DeclSink, U: UndeclSink> crate::bounded::ZeroEmpty
 {
 }
 
-impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U, crate::bounded::Region> {
-    /// The description of a registry of the region policy at `at` in a region and its watchers'
-    /// [`DeclObserverRows`](crate::decl_sink::DeclObserverRows) at `rows`.
+impl<D: DeclSink, U: UndeclSink, P: crate::bounded::LaidOut> LivelinessRegistry<D, U, P> {
+    /// The description of a table at `at` and, in a region, its watchers'
+    /// [`DeclObserverRows`](crate::decl_sink::DeclObserverRows) at `rows`: its pair's lines.
     pub const fn places(
         at: usize,
         rows: usize,
     ) -> crate::bounded::RegionLines<LIVELINESS_REGISTRY_LINES> {
         crate::bounded::RegionLines::EMPTY.with(
-            &DeclObserverPair::<D, U, crate::bounded::Region>::places(
+            &DeclObserverPair::<D, U, P>::places(
                 at.wrapping_add(core::mem::offset_of!(Self, observers)),
                 rows,
             ),
@@ -121,22 +122,6 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U, crate::bounded::OnUse>
             observers: DeclObserverPair::counted(rows),
             oversize: 0,
         }
-    }
-}
-
-impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U, Lent> {
-    /// A registry with no observer whose two observer lists are lent from `arena`, `rows` rows
-    /// each ([`DeclObserverPair::lent`]). Refused as that refuses.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
-        Ok(Self {
-            observers: DeclObserverPair::lent(arena, rows)?,
-            oversize: 0,
-        })
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes for `rows` rows. `None` past the address space.
-    pub const fn arena_bytes(rows: usize) -> Option<usize> {
-        DeclObserverPair::<D, U, Lent>::arena_bytes(rows)
     }
 }
 

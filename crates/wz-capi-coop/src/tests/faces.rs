@@ -172,15 +172,21 @@ fn converge(engine: &super::Engine, listener: usize) -> Vec<(&'static str, u8)> 
     let plane = ToldPlane::Transports;
     let mut told = Vec::new();
     while let Some(row) = engine.first_told_gone(plane, listener) {
-        assert!(
-            engine.tell_went(plane, listener, &ToldKey::of_row(&row)),
-            "a departure owed is told"
+        assert_eq!(
+            engine
+                .tell_went(plane, listener, &ToldKey::of_row(&row))
+                .map(|told| told.zid),
+            Some(row.zid),
+            "a departure owed is told of the row it was told came as"
         );
         told.push(("DEL", row.zid[0]));
     }
     let mut at = 0;
     while let Some(row) = engine.face_link_at(at) {
-        if engine.tell_came(plane, listener, &ToldKey::of_row(&row)) {
+        if engine
+            .tell_came(plane, listener, &ToldKey::of_row(&row))
+            .is_some()
+        {
             told.push(("PUT", row.zid[0]));
         }
         at += 1;
@@ -212,8 +218,12 @@ fn a_told_face_that_goes_keeps_its_tomb_until_its_departure_is_told() {
         .face_link_at(0)
         .expect("the session stands on a face");
     let key = ToldKey::of_row(&row);
-    assert!(engine.tell_came(plane, 0, &key), "told once");
-    assert!(!engine.tell_came(plane, 0, &key), "and not again");
+    assert_eq!(
+        engine.tell_came(plane, 0, &key).map(|told| told.zid),
+        Some(row.zid),
+        "told once, of the row that stands"
+    );
+    assert!(engine.tell_came(plane, 0, &key).is_none(), "and not again");
     assert!(
         engine.first_told_gone(plane, 0).is_none(),
         "a face that stands is no tomb"
@@ -234,11 +244,11 @@ fn a_told_face_that_goes_keeps_its_tomb_until_its_departure_is_told() {
         "and to no other"
     );
     assert!(
-        !engine.tell_came(plane, 1, &key),
+        engine.tell_came(plane, 1, &key).is_none(),
         "a face that does not stand is not told"
     );
     assert!(
-        !engine.tell_went(plane, 1, &key),
+        engine.tell_went(plane, 1, &key).is_none(),
         "nor its departure, to a listener never told it came"
     );
 
@@ -247,16 +257,22 @@ fn a_told_face_that_goes_keeps_its_tomb_until_its_departure_is_told() {
         engine.face_link_at(0).is_some()
     });
     assert!(
-        !engine.tell_came(plane, 0, &key),
+        engine.tell_came(plane, 0, &key).is_none(),
         "the face again waits for the departure owed under its key"
     );
     assert!(
-        engine.tell_came(plane, 1, &key),
+        engine.tell_came(plane, 1, &key).is_some(),
         "a listener owed nothing is told it"
     );
-    assert!(engine.tell_went(plane, 0, &key), "the departure is told");
-    assert!(!engine.tell_went(plane, 0, &key), "once");
-    assert!(engine.tell_came(plane, 0, &key), "then the reconnect");
+    assert!(
+        engine.tell_went(plane, 0, &key).is_some(),
+        "the departure is told"
+    );
+    assert!(engine.tell_went(plane, 0, &key).is_none(), "once");
+    assert!(
+        engine.tell_came(plane, 0, &key).is_some(),
+        "then the reconnect"
+    );
 
     engine.forget_told(plane, 0);
     engine.forget_told(plane, 1);
@@ -292,7 +308,7 @@ fn a_second_departure_of_the_dial_face_under_another_key_is_kept_apart() {
     });
     let plane = ToldPlane::Transports;
     let first = ToldKey::of_row(&engine.face_link_at(0).expect("a face stands"));
-    assert!(engine.tell_came(plane, 0, &first));
+    assert!(engine.tell_came(plane, 0, &first).is_some());
     router.send(Command::Close);
     drop(router);
     until(&engine, "the face to be lost", || {
@@ -306,7 +322,7 @@ fn a_second_departure_of_the_dial_face_under_another_key_is_kept_apart() {
     let second_row = engine.face_link_at(0).expect("the face again");
     assert_eq!(second_row.zid[0], 0x5a, "another node, another key");
     let second = ToldKey::of_row(&second_row);
-    assert!(engine.tell_came(plane, 1, &second));
+    assert!(engine.tell_came(plane, 1, &second).is_some());
     router.send(Command::Close);
     drop(router);
     until(&engine, "the second face to be lost", || {
@@ -323,8 +339,14 @@ fn a_second_departure_of_the_dial_face_under_another_key_is_kept_apart() {
         Some(0x5a),
         "the second is kept apart"
     );
-    assert!(engine.tell_went(plane, 1, &second));
-    assert!(engine.tell_went(plane, 0, &first));
+    assert_eq!(
+        engine.tell_went(plane, 1, &second).map(|row| row.zid[0]),
+        Some(0x5a)
+    );
+    assert_eq!(
+        engine.tell_went(plane, 0, &first).map(|row| row.zid[0]),
+        Some(0xc3)
+    );
     assert!(
         engine.first_told_gone(plane, 0).is_none() && engine.first_told_gone(plane, 1).is_none(),
         "both told, nothing kept"
@@ -352,7 +374,7 @@ fn a_second_departure_of_the_dial_face_of_a_dial_only_session_is_not_kept() {
     });
     let plane = ToldPlane::Transports;
     let first = ToldKey::of_row(&engine.face_link_at(0).expect("a face stands"));
-    assert!(engine.tell_came(plane, 0, &first));
+    assert!(engine.tell_came(plane, 0, &first).is_some());
     router.send(Command::Close);
     drop(router);
     until(&engine, "the face to be lost", || {
@@ -364,7 +386,7 @@ fn a_second_departure_of_the_dial_face_of_a_dial_only_session_is_not_kept() {
         engine.face_link_at(0).is_some()
     });
     let second = ToldKey::of_row(&engine.face_link_at(0).expect("the face again"));
-    assert!(engine.tell_came(plane, 1, &second));
+    assert!(engine.tell_came(plane, 1, &second).is_some());
     router.send(Command::Close);
     drop(router);
     until(&engine, "the second face to be lost", || {
@@ -380,8 +402,8 @@ fn a_second_departure_of_the_dial_face_of_a_dial_only_session_is_not_kept() {
         engine.first_told_gone(plane, 1).is_none(),
         "the second has no place to be kept in"
     );
-    assert!(!engine.tell_went(plane, 1, &second));
-    assert!(engine.tell_went(plane, 0, &first));
+    assert!(engine.tell_went(plane, 1, &second).is_none());
+    assert!(engine.tell_went(plane, 0, &first).is_some());
 }
 
 /// A listener whose replay queue ran out of rows converges to the faces as they stand: told the
@@ -441,7 +463,7 @@ fn noting_what_a_replaying_listener_was_told_allocates_nothing() {
     let plane = ToldPlane::Links;
     let key = ToldKey::of_row(&engine.face_link_at(0).expect("a face stands"));
     let standing = super::redial_heap::counted(|| {
-        assert!(engine.tell_came(plane, 3, &key));
+        assert!(engine.tell_came(plane, 3, &key).is_some());
         assert!(engine.first_told_gone(plane, 3).is_none());
     });
     assert_eq!(standing, 0, "noting a face that stands allocates nothing");
@@ -455,7 +477,7 @@ fn noting_what_a_replaying_listener_was_told_allocates_nothing() {
         let row = engine.first_told_gone(plane, 3);
         core::hint::black_box(&row);
         assert!(row.is_some(), "the tomb is read");
-        assert!(engine.tell_went(plane, 3, &key));
+        assert!(engine.tell_went(plane, 3, &key).is_some());
         engine.forget_told(plane, 3);
     });
     assert_eq!(gone, 0, "reading and telling a tomb allocates nothing");

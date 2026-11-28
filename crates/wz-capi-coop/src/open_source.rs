@@ -151,7 +151,10 @@ impl OpenEndpoints<'_> {
     /// role it is written as. Out of line and generic over nothing: the one body of every ABI
     /// and every engine the open is made over.
     #[inline(never)]
-    pub(crate) fn write_into(&self, rows: &mut EndpointTexts) -> Result<(), OpenError> {
+    pub(crate) fn write_into(
+        &self,
+        rows: &mut EndpointTexts<crate::StatePolicy>,
+    ) -> Result<(), OpenError> {
         let lists = [
             (EndpointRole::Dial, self.dial),
             (EndpointRole::Listen, self.listen),
@@ -171,7 +174,7 @@ impl OpenEndpoints<'_> {
 /// and the reading's row lies in its frame alone.
 #[inline(never)]
 fn write_text(
-    rows: &mut EndpointTexts,
+    rows: &mut EndpointTexts<crate::StatePolicy>,
     role: EndpointRole,
     reading: EndpointReading,
     endpoint: &str,
@@ -185,7 +188,9 @@ fn write_text(
 
 /// The open's refusal of the endpoint `text` of `role` that has no row: one longer than a row is
 /// refused as an endpoint to listen on or to dial, as its role is; one past the rows the open
-/// lent, which its config counted, as an arena that does not hold what the input names.
+/// lent, which its config counted, as an arena that does not hold what the input names; one whose
+/// rows the allocator had no room for, where they are taken at the first text, as the memory that
+/// had none to give.
 fn unwritten(text: &str, why: EndpointTextRefused, role: EndpointRole) -> OpenError {
     match why {
         EndpointTextRefused::TooLong { .. } => {
@@ -196,6 +201,9 @@ fn unwritten(text: &str, why: EndpointTextRefused, role: EndpointRole) -> OpenEr
             }
         }
         EndpointTextRefused::Full => OpenError::Arena(ArenaRefused::TooLarge),
+        EndpointTextRefused::NoMemory { bytes } => {
+            OpenError::Arena(ArenaRefused::NoMemory { bytes })
+        }
     }
 }
 
@@ -244,18 +252,22 @@ mod tests {
     use super::{as_written, EndpointRole, EndpointTextList, OpenEndpoints};
     use crate::arena::ArenaRefused;
     use crate::engine::{EndpointRefusal, OpenError, Refusal};
+    #[cfg(not(wz_on_use))]
     use alloc::boxed::Box;
     use alloc::format;
     use alloc::string::String;
+    #[cfg(not(wz_on_use))]
     use core::ptr::NonNull;
     use wz_runtime_coop::faces::EndpointTexts;
+    #[cfg(not(wz_on_use))]
     use wz_session_core::bounded::Arena;
     use wz_session_core::caps::MAX_LOCATOR_LEN;
     use wz_session_core::locator_directory::LocatorText;
 
     /// The rows of a session lent `dials` rows to dial and `listens` to listen on, in a test's
     /// own memory, none written.
-    fn lent_rows(dials: usize, listens: usize) -> EndpointTexts {
+    #[cfg(not(wz_on_use))]
+    fn session_rows(dials: usize, listens: usize) -> EndpointTexts<crate::StatePolicy> {
         const BYTES: usize = 4096;
         #[repr(C, align(16))]
         struct Memory([u8; BYTES]);
@@ -270,6 +282,13 @@ mod tests {
                 .lend(listens)
                 .expect("the memory holds the listen rows"),
         )
+    }
+
+    /// The rows of a session that names `dials` endpoints to dial and `listens` to listen on,
+    /// where the tables take their memory on use: counted to them, none taken or written.
+    #[cfg(wz_on_use)]
+    fn session_rows(dials: usize, listens: usize) -> EndpointTexts<crate::StatePolicy> {
+        EndpointTexts::counted(dials, listens)
     }
 
     /// A reading that keeps a text up to its first `#`, made in `kept`: an ABI's form.
@@ -316,7 +335,7 @@ mod tests {
             },
             reading: as_written,
         };
-        let mut rows = lent_rows(3, 1);
+        let mut rows = session_rows(3, 1);
         assert_eq!(endpoints.write_into(&mut rows), Ok(()));
         assert_eq!(rows.text(EndpointRole::Dial, 0), "tcp/10.0.0.1:7447");
         assert_eq!(rows.text(EndpointRole::Dial, 1), "tcp/10.0.0.2:7447");
@@ -332,7 +351,7 @@ mod tests {
             reading: up_to_hash,
             ..written(&["tcp/10.0.0.1:7447#iface=lo"], &[])
         };
-        let mut rows = lent_rows(1, 0);
+        let mut rows = session_rows(1, 0);
         assert_eq!(endpoints.write_into(&mut rows), Ok(()));
         assert_eq!(rows.text(EndpointRole::Dial, 0), "tcp/10.0.0.1:7447");
     }
@@ -340,7 +359,7 @@ mod tests {
     /// Endpoints that name none write nothing and are not refused.
     #[test]
     fn no_endpoint_writes_nothing() {
-        let mut rows = lent_rows(1, 1);
+        let mut rows = session_rows(1, 1);
         assert_eq!(OpenEndpoints::NONE.write_into(&mut rows), Ok(()));
         assert_eq!(rows.text(EndpointRole::Dial, 0), "");
         assert_eq!(rows.text(EndpointRole::Listen, 0), "");
@@ -354,14 +373,14 @@ mod tests {
         let long = format!("tcp/127.0.0.1:{}", "7".repeat(MAX_LOCATOR_LEN));
         let dial = [long.as_str()];
         assert_eq!(
-            written(&dial, &[]).write_into(&mut lent_rows(1, 1)),
+            written(&dial, &[]).write_into(&mut session_rows(1, 1)),
             Err(OpenError::Unreachable(EndpointRefusal::new(
                 &long,
                 Refusal::TextTooLong
             )))
         );
         assert_eq!(
-            written(&[], &dial).write_into(&mut lent_rows(1, 1)),
+            written(&[], &dial).write_into(&mut session_rows(1, 1)),
             Err(OpenError::Listen(EndpointRefusal::new(
                 &long,
                 Refusal::TextTooLong
@@ -375,7 +394,7 @@ mod tests {
     fn nothing_is_written_past_the_first_refusal() {
         let long = format!("tcp/127.0.0.1:{}", "7".repeat(MAX_LOCATOR_LEN));
         let dial = [long.as_str(), "tcp/10.0.0.1:7447"];
-        let mut rows = lent_rows(2, 1);
+        let mut rows = session_rows(2, 1);
         let refused = written(&dial, &["tcp/0.0.0.0:7447"]).write_into(&mut rows);
         assert!(matches!(refused, Err(OpenError::Unreachable(_))));
         assert_eq!(rows.text(EndpointRole::Dial, 0), "");
@@ -386,7 +405,7 @@ mod tests {
     /// input names. Turned red by a write past the rows, or a refusal of another kind.
     #[test]
     fn a_text_past_the_last_row_is_refused_as_too_large() {
-        let mut rows = lent_rows(1, 0);
+        let mut rows = session_rows(1, 0);
         let refused =
             written(&["tcp/10.0.0.1:7447", "tcp/10.0.0.2:7447"], &[]).write_into(&mut rows);
         assert_eq!(refused, Err(OpenError::Arena(ArenaRefused::TooLarge)));

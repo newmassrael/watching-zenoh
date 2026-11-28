@@ -45,16 +45,15 @@ use wz_capi_port::{MatchId, MatchingSink};
 
 use crate::session::Engine;
 
-use crate::abi::handle_ref;
 use crate::ffi::{catch, guarded, CClosure, HeldIn, InCallback};
 use crate::object_slot::{count_in_entity, kept_at, retire_entity, Answering, Kind, Slot};
 // A build of one engine calls the engine through its own type, so the port's trait is in scope.
 #[cfg(not(feature = "engine-tokio"))]
 use crate::prelude::*;
-use crate::pubsub::{z_closure_drop_callback_t, z_loaned_publisher_t, PublisherState};
+use crate::pubsub::{publisher_filter, z_closure_drop_callback_t, z_loaned_publisher_t};
 use crate::refusal::{refusal_code, Door};
 use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
-use crate::write_filter::WriteFilter;
+use crate::write_filter::FilterOn;
 
 /// pico `z_matching_status_t` — `{ bool matching }`, 1 B measured, field at
 /// offset 0. Passed to the callback BY POINTER, so its layout is read by C.
@@ -118,12 +117,25 @@ impl z_owned_closure_matching_status_t {
 /// lets the callback go after its last call.
 type MatchingCClosure = CClosure<z_closure_matching_status_callback_t>;
 
-/// Behind a `z_owned_matching_listener_t`: the listener's session and its id there, which the
-/// listener's undeclare retracts. It lies in the listener's place, a place of the session's own
-/// for the kind (`crate::object_slot::Kind::MatchingListener`).
+/// Behind a `z_owned_matching_listener_t`: the listener's id in its session, which the listener's
+/// undeclare retracts. It lies in the listener's place, a place of the session's own for the kind
+/// (`crate::object_slot::Kind::MatchingListener`), whose lender holds the session's engine.
 pub(crate) struct MatchingListenerState {
+    /// The session's engine on the tokio engine, whose places are its pools' and hold none.
+    #[cfg(feature = "engine-tokio")]
     shared: crate::session::EngineHold,
     id: MatchId,
+}
+
+/// A listener reaches its session's engine through its place, whose lender keeps the one count.
+impl crate::object_slot::SessionEntity for MatchingListenerState {
+    #[cfg(not(feature = "engine-tokio"))]
+    type Placed = MatchingPlace;
+
+    #[cfg(feature = "engine-tokio")]
+    fn kept_engine(&self) -> &crate::session::EngineHold {
+        &self.shared
+    }
 }
 
 /// What a listener's place keeps past its handle: the C closure the engine calls, and the link
@@ -307,8 +319,10 @@ unsafe fn retract_listener(object: *mut MatchingListenerState) {
             (*(*link).held.get()).take()
         }
     });
-    // SAFETY: the caller's: the state stands until `retire_listener` below.
-    unsafe { (*object).shared.undeclare_matching_listener((*object).id) };
+    // SAFETY: the caller's: the state stands until `retire_listener` below, its place with it.
+    unsafe {
+        crate::object_slot::entity_engine(object).undeclare_matching_listener((*object).id);
+    }
     // The place stands with its owner, so the filter's hold may go first.
     drop(held);
     // SAFETY: the caller's; the owner lets go of the place once, here.
@@ -550,11 +564,10 @@ pub unsafe extern "C" fn z_publisher_get_matching_status(
         if matching_status.is_null() {
             return Z_ERR_NULL;
         }
-        let state = match handle_ref::<z_loaned_publisher_t, PublisherState>(publisher) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
+        let Some(filter) = publisher_filter(publisher) else {
+            return Z_ERR_NULL;
         };
-        (*matching_status).matching = state.filter_matches();
+        (*matching_status).matching = filter.matches();
         Z_OK
     })
 }
@@ -571,13 +584,7 @@ pub unsafe extern "C" fn z_publisher_declare_matching_listener(
     listener: *mut z_owned_matching_listener_t,
     callback: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {
-    guarded(|| {
-        declare_on_filter(
-            handle_ref::<z_loaned_publisher_t, PublisherState>(publisher).map(|s| s.filter()),
-            Some(listener),
-            callback,
-        )
-    })
+    guarded(|| declare_on_filter(publisher_filter(publisher), Some(listener), callback))
 }
 
 /// Declare a session-lifetime matching listener with no handle (pico
@@ -587,13 +594,7 @@ pub unsafe extern "C" fn z_publisher_declare_background_matching_listener(
     publisher: *const z_loaned_publisher_t,
     callback: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {
-    guarded(|| {
-        declare_on_filter(
-            handle_ref::<z_loaned_publisher_t, PublisherState>(publisher).map(|s| s.filter()),
-            None,
-            callback,
-        )
-    })
+    guarded(|| declare_on_filter(publisher_filter(publisher), None, callback))
 }
 
 /// Retract a matching listener (pico `z_undeclare_matching_listener`): taken off its entity's write
@@ -621,10 +622,11 @@ pub unsafe extern "C" fn z_undeclare_matching_listener(
 /// publisher's and a querier's, each with a handle and in the background: consume the
 /// moved closure, keep it in a place of the session's for the listener, declare the listener on
 /// the entity's write filter with a callback that calls the closure there
-/// ([`WriteFilter::declare_matching_listener`]), which is where pico registers it, and put the
-/// listener on the filter's list, which retracts it with the entity.
+/// ([`crate::write_filter::WriteFilter::declare_matching_listener`]), which is where pico
+/// registers it, and put the listener on the filter's list, which retracts it with the entity.
 ///
-/// `filter` is the entity's, `None` when the entity's handle was not a live one.
+/// `filter` is the entity's, with the engine its owner reaches, `None` when the entity's handle
+/// was not a live one.
 /// `listener` is the handle slot, or `None` for the BACKGROUND form, whose listener has no
 /// handle and lives as long as its entity. A null slot is the background form too, as pico's
 /// background door is its handle door with a null slot (`vendor/zenoh-pico/src/api/api.c` @
@@ -643,7 +645,7 @@ pub unsafe extern "C" fn z_undeclare_matching_listener(
 /// `listener`'s slot must be null or valid and writable; `callback` must be null or a
 /// valid moved closure, which is consumed on every path.
 pub(crate) unsafe fn declare_on_filter(
-    filter: Option<&WriteFilter>,
+    filter: Option<FilterOn<'_>>,
     listener: Option<*mut z_owned_matching_listener_t>,
     callback: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {
@@ -660,17 +662,17 @@ pub(crate) unsafe fn declare_on_filter(
         z_owned_closure_matching_status_t::null_value(),
     );
     let closure = MatchingCClosure::uncounted(taken.context, taken.call, taken.drop);
-    let Some(filter) = filter else {
+    let Some(FilterOn { filter, engine }) = filter else {
         return Z_ERR_NULL;
     };
-    let Some(place) = Slot::<MatchingPlace>::take_entity(filter.engine(), Kind::MatchingListener)
-    else {
+    let Some(place) = Slot::<MatchingPlace>::take_entity(engine, Kind::MatchingListener) else {
         return Z_ERR_SYSTEM_OUT_OF_MEMORY;
     };
     let object = place
         .fill_answering(
             MatchingListenerState {
-                shared: crate::session::EngineHold::clone(filter.engine()),
+                #[cfg(feature = "engine-tokio")]
+                shared: crate::session::EngineHold::clone(engine),
                 id: 0,
             },
             MatchingKept {
@@ -682,7 +684,7 @@ pub(crate) unsafe fn declare_on_filter(
     // The closure lies in the place now, counted there before the engine can call it or let it go.
     let kept = kept_at::<MatchingListenerState, MatchingKept>(object);
     count_in_entity::<MatchingListenerState, MatchingKept, _>(object, &mut (*kept).closure);
-    let id = match filter.declare_matching_listener(matching_sink_at(object)) {
+    let id = match filter.declare_matching_listener(engine, matching_sink_at(object)) {
         Ok(id) => id,
         Err(refused) => {
             // The refusal let go of the callback, and so of the closure; the place goes back
@@ -941,10 +943,7 @@ mod tests {
         Slot::<MatchingPlace>::take_entity(engine, Kind::MatchingListener)
             .expect("a listener's place")
             .fill(Answering::keeping(
-                MatchingListenerState {
-                    shared: crate::session::EngineHold::clone(engine),
-                    id: 0,
-                },
+                MatchingListenerState { id: 0 },
                 MatchingKept {
                     closure: MatchingCClosure::uncounted(core::ptr::null_mut(), None, None),
                     link: FilterLink::unlinked(),

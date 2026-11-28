@@ -214,8 +214,8 @@ pub struct LocalTokenRegistry<P: Storage = Profile> {
     /// alone.
     key_quota: crate::limits::MaxKeyexprBytesHeld,
     /// Where the tokens keep their keys ([`Storage::Keys`]): the session's key arena on the lent
-    /// policy ([`Self::lent`]). A key with no room there is refused as a full table refuses the
-    /// token ([`RegisterError::TableFull`]).
+    /// policy, joined by the registry's description ([`Self::places`]). A key with no room there
+    /// is refused as a full table refuses the token ([`RegisterError::TableFull`]).
     keys: P::Keys,
 }
 
@@ -383,22 +383,6 @@ impl TokenAnswers<crate::bounded::Static> {
     }
 }
 
-impl TokenAnswers<Lent> {
-    /// Stage into `rows` rows lent from `arena`, in place of the rows held so far; the quota and
-    /// the count of refused chains are kept. Refused when `rows` is over the build's capacity or the
-    /// arena has not the room, the staging then keeping what it had.
-    pub fn lend_rows(&mut self, arena: &mut Arena, rows: usize) -> Result<(), LendRefused> {
-        self.staged = arena.lend(rows)?;
-        Ok(())
-    }
-
-    /// The bytes of an arena [`Self::lend_rows`] takes for `rows` rows. `None` past the address
-    /// space.
-    pub const fn arena_bytes(rows: usize) -> Option<usize> {
-        Arena::table_bytes::<DeclResponseItem>(rows)
-    }
-}
-
 #[cfg(feature = "alloc")]
 impl TokenAnswers<crate::bounded::OnUse> {
     /// Stage into at most `rows` rows, under the build's bound, taken at the first answer, in place
@@ -419,9 +403,9 @@ impl TokenAnswers<crate::bounded::OnUse> {
 // until the session states it (`Self::limit_to`).
 unsafe impl<P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for TokenAnswers<P> {}
 
-impl TokenAnswers<crate::bounded::Region> {
-    /// The line of a region's description that places this staging's rows, the staging at `at`
-    /// in the region and its `MAX_PENDING_DECLARES` rows of [`DeclResponseItem`] at `rows`.
+impl<P: crate::bounded::LaidOut> TokenAnswers<P> {
+    /// The line of a description that places this staging's rows, the staging at `at` and, in a
+    /// region, its `MAX_PENDING_DECLARES` rows of [`DeclResponseItem`] at `rows`.
     pub const fn place(at: usize, rows: usize) -> crate::bounded::SeqPlace {
         crate::bounded::SeqPlace::of_room::<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>(
             at.wrapping_add(core::mem::offset_of!(Self, staged)),
@@ -743,25 +727,6 @@ fn token_matches(token_keyexpr: &str, pattern: Option<&str>) -> bool {
     }
 }
 
-/// The bytes the token reply is written as for the same arguments, a declaration of its one kind
-/// ([`crate::lent_control::token_reply_declaration`]): what a sender with no allocator asks a link
-/// to lend for it, since a `Declare` has no size constant (its keyexpr suffix's bound is upstream's
-/// u16 length). Its own frame, not inlined, so the declaration it counts is on the stack only while
-/// it counts. A reply that writer refuses counts as zero: the encoder that follows refuses it with
-/// the same error.
-#[cfg(all(
-    feature = "liveliness-token",
-    feature = "storage-profile",
-    not(feature = "alloc")
-))]
-#[inline(never)]
-pub fn token_reply_len(token_id: u64, keyexpr: &str, interest_id: u64) -> usize {
-    crate::lent_control::token_reply_declaration(token_id, keyexpr, interest_id)
-        .map_or(0, |reply| {
-            wz_codecs::declare::DeclareWire::measure(&reply).len()
-        })
-}
-
 /// R311ho — build the borrowed `Declare(DeclToken)` interest-response for
 /// one matching held token: the `I`-flagged outer `Declare` carrying the
 /// peer's `interest_id`, wrapping a `DeclToken` whose keyexpr is inline
@@ -824,9 +789,17 @@ mod tests {
     //! `std` is available under `#[cfg(test)]` per the wz-codecs sibling
     //! convention; production stays no_std + (optionally) alloc. The
     //! no-heap `TokenAnswers::stage` is exercised directly; the `alloc`
-    //! inbound-parse path is exercised through `InterestOwned`.
+    //! inbound-parse path is exercised through `InterestOwned`, and its
+    //! tests carry its gate: the slot profile without `alloc` compiles
+    //! neither the owned Interest nor the peer map they hand it.
+    //!
+    //! A pattern a test expects to match is a literal key or match-all: `*`
+    //! and `**` are the matcher's optional dialect (`keyexpr-wildcard-*`,
+    //! tested in `keyexpr_match`), and a build without it reads them as
+    //! literal chunks. What these tests hold is the staging, in every build.
 
     use super::*;
+    #[cfg(feature = "alloc")]
     use hashbrown::HashMap;
 
     /// Count `(tokens, finals)` staged in `answers`.
@@ -867,7 +840,7 @@ mod tests {
         assert!(reg.register(1, "group1/zenoh-pico").unwrap());
         let mut answers = new_answers();
         let staged = answers
-            .stage(&reg, Some("group1/**"), 42)
+            .stage(&reg, Some("group1/zenoh-pico"), 42)
             .expect("an empty buffer takes the chain");
         assert_eq!(staged, 1);
         assert_eq!(count(&answers), (1, 1));
@@ -905,7 +878,7 @@ mod tests {
         assert!(reg.register(1, "group1/zenoh-pico").unwrap());
         let mut answers = new_answers();
         assert_eq!(
-            answers.stage(&reg, Some("group1/**"), 42).ok(),
+            answers.stage(&reg, Some("group1/zenoh-pico"), 42).ok(),
             Some(1),
             "a matching token must stage exactly one reply — a fixture that \
              stages none would make the assertion below vacuous"
@@ -970,23 +943,30 @@ mod tests {
         assert!(!reg.unregister(1), "double-unregister is idempotent");
         let mut answers = new_answers();
         answers
-            .stage(&reg, Some("group1/**"), 5)
+            .stage(&reg, Some("group1/zenoh-pico"), 5)
             .expect("an empty buffer takes the chain");
         assert_eq!(count(&answers), (0, 1));
     }
 
+    /// Two tokens held on one key are two tokens, each answered with its own
+    /// `DeclToken`; the token on another key is not.
     #[test]
     fn multiple_matching_tokens_each_stage_a_token() {
         let mut reg = LocalTokenRegistry::new();
         reg.register(1, "group1/a").unwrap();
-        reg.register(2, "group1/b").unwrap();
+        reg.register(2, "group1/a").unwrap();
         reg.register(3, "other/c").unwrap();
         let mut answers = new_answers();
         let staged = answers
-            .stage(&reg, Some("group1/**"), 11)
+            .stage(&reg, Some("group1/a"), 11)
             .expect("an empty buffer takes the chain");
         assert_eq!(staged, 2);
         assert_eq!(count(&answers), (2, 1));
+        let ids = answers.iter().filter_map(|item| match item {
+            DeclResponseItem::Token { token_id, .. } => Some(*token_id),
+            DeclResponseItem::Final { .. } => None,
+        });
+        assert!(ids.eq([1, 2]), "each matching token once, in table order");
         // The Final is last (terminates the batch).
         assert!(matches!(
             answers.iter().last(),
@@ -1014,8 +994,9 @@ mod tests {
             answers.stage(&none, None, 0).expect("below capacity");
         }
         let before = answers.len();
+        // Match-all: both tokens, so the chain is three items.
         assert!(
-            answers.stage(&reg, Some("group1/**"), 9).is_err(),
+            answers.stage(&reg, None, 9).is_err(),
             "a chain that does not fit whole is refused"
         );
         assert_eq!(
@@ -1047,7 +1028,7 @@ mod tests {
     /// `alloc` inbound-parse path: an InterestFinal (C/F both clear) is
     /// the subscriber's own terminator, not a request — the declarer
     /// stages nothing.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn final_interest_is_noop() {
         let mut reg = LocalTokenRegistry::new();
@@ -1068,7 +1049,7 @@ mod tests {
     /// `alloc` inbound-parse path: a non-final Interest whose body does
     /// NOT target tokens is out of scope for the liveliness-token
     /// declarer.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn non_tokens_interest_is_noop() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -1105,7 +1086,7 @@ mod tests {
     /// pre-fix gate was "non-final" (C|F), which wrongly replied to a
     /// FUTURE-only (C-clear) interest; this pins the corrected
     /// CURRENT-only gate.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn future_only_interest_stages_nothing() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -1125,8 +1106,10 @@ mod tests {
                     keyexpr: Some(WireexprOwned {
                         body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                             id: 0,
-                            suffix_len: Some(9),
-                            suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
+                            suffix_len: Some(17),
+                            suffix: Some(
+                                crate::codec_owned::owned_string("group1/zenoh-pico").unwrap(),
+                            ),
                         }),
                     }),
                 },
@@ -1145,7 +1128,7 @@ mod tests {
 
     /// `alloc` inbound-parse path: a non-final TOKENS Interest funnels
     /// through to the no-heap staging SSOT.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn tokens_interest_stages_matching_response() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -1165,8 +1148,10 @@ mod tests {
                     keyexpr: Some(WireexprOwned {
                         body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                             id: 0,
-                            suffix_len: Some(9),
-                            suffix: Some(crate::codec_owned::owned_string("group1/**").unwrap()),
+                            suffix_len: Some(17),
+                            suffix: Some(
+                                crate::codec_owned::owned_string("group1/zenoh-pico").unwrap(),
+                            ),
                         }),
                     }),
                 },
@@ -1184,7 +1169,7 @@ mod tests {
     /// it: an Interest is answered with the tokens of the holder the registry is handed, and a
     /// token the registry alone holds is not staged. Turned red by an answer read from the
     /// registry's own rows whatever holder it is handed.
-    #[cfg(all(feature = "storage-profile", feature = "alloc"))]
+    #[cfg(feature = "alloc")]
     #[test]
     fn an_interest_is_answered_with_the_tokens_of_the_holder_it_is_handed() {
         use wz_codecs::interest_body::InterestBodyOwned;
@@ -1253,7 +1238,7 @@ mod tests {
     /// buffer holds chains of, under the build's own bounds. The chains that fit
     /// are staged whole, the last is refused whole and reported, and every staged
     /// chain still ends in its own `Final`.
-    #[cfg(all(feature = "storage-profile", feature = "bounded-heapless"))]
+    #[cfg(all(feature = "alloc", feature = "bounded-heapless"))]
     #[test]
     fn a_frame_of_interests_past_the_buffer_refuses_the_chain_that_does_not_fit() {
         use crate::bounded::BoundedString;
@@ -1305,10 +1290,10 @@ mod tests {
     /// wrong-space read changes which of our own tokens we hand back.
     ///
     /// THE DISCRIMINATOR is the collision plus two disjoint held tokens: id 7
-    /// resolves `ours/**` in our space and `theirs/**` in the peer's, and one
-    /// token is registered under each prefix. Reading the wrong space replays
+    /// resolves `ours/tok` in our space and `theirs/tok` in the peer's, and one
+    /// token is registered under each key. Reading the wrong space replays
     /// the OTHER token — a confident wrong answer, not silence.
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn an_own_space_alias_resolves_in_our_space_on_the_local_token_interest_plane() {
         use alloc::string::ToString;
@@ -1321,9 +1306,9 @@ mod tests {
         reg.register(2, "theirs/tok").unwrap();
 
         let mut peer = HashMap::new();
-        peer.insert(7u64, "theirs/**".to_string());
+        peer.insert(7u64, "theirs/tok".to_string());
         let mut own: HashMap<crate::wire_id::ExprId, String> = HashMap::new();
-        own.insert(7, "ours/**".to_string());
+        own.insert(7, "ours/tok".to_string());
 
         // M=0 (`WireexprNonlocal`) with no inline suffix: the id alone.
         let interest = InterestOwned {
@@ -1358,7 +1343,7 @@ mod tests {
         assert_eq!(
             count(&answers),
             (1, 1),
-            "exactly one token matches `ours/**` -- the interest resolved in \
+            "exactly one token matches `ours/tok` -- the interest resolved in \
              OUR space",
         );
         assert!(
@@ -1373,7 +1358,7 @@ mod tests {
     /// ANTI-VACUITY twin: with only the peer's space the same Interest
     /// resolves nothing, so NO token is replayed (the bare `Final` still
     /// terminates the chain — an unresolvable interest is not a hang).
-    #[cfg(feature = "storage-profile")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn without_an_own_space_the_local_token_interest_plane_refuses_the_same_alias() {
         use alloc::string::ToString;
@@ -1386,7 +1371,7 @@ mod tests {
         reg.register(2, "theirs/tok").unwrap();
 
         let mut peer = HashMap::new();
-        peer.insert(7u64, "theirs/**".to_string());
+        peer.insert(7u64, "theirs/tok".to_string());
 
         let interest = InterestOwned {
             header: 0x19 | 0x20,

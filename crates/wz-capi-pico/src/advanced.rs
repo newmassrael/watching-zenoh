@@ -44,7 +44,6 @@
 //! callback at declare; wz's subscriber now has a registry of its own, and this
 //! ABI's fan-in is a set for the same reason.
 
-use alloc::sync::Arc;
 use core::ffi::c_void;
 use core::ptr::{addr_of_mut, NonNull};
 use core::time::Duration;
@@ -58,8 +57,8 @@ use wz_ext_pubsub::advanced_publisher::{
 };
 use wz_ext_pubsub::advanced_subscriber::FormsHandle;
 use wz_ext_pubsub::advanced_subscriber::{
-    AdvancedSubscriberOptions, Delivery, EngineSubscriber, HistoryConfig, HostError, LentCore,
-    Miss, MissHandlers, OnSample, RecoveryConfig, SubscriberCore, SubscriberDetection,
+    AdvancedSubscriberOptions, Callbacks, Delivery, EngineSubscriber, HistoryConfig, HostError,
+    LentCore, Miss, MissHandlers, OnSample, RecoveryConfig, SubscriberCore, SubscriberDetection,
 };
 use wz_session_core::publish_options::PublishError;
 
@@ -443,9 +442,8 @@ impl ze_owned_advanced_publisher_t {
 /// Behind a `ze_owned_advanced_publisher_t` handle: the composite, on this
 /// session's plane. Dropping it retracts its entities in pico's order, so an
 /// implicit `z_drop` and an explicit `ze_undeclare_advanced_publisher` take the
-/// identical path.
+/// identical path. Its session's engine is the plane's one count ([`Self::engine`]).
 pub(crate) struct AdvPubState {
-    engine: crate::session::EngineHold,
     publisher: AdvancedPublisherOn<PicoPlane>,
     /// R311y559 — the cached `{ start, len }` view of the publisher's key, so
     /// `ze_advanced_publisher_keyexpr` has stable storage to borrow. Bound
@@ -460,9 +458,18 @@ pub(crate) struct AdvPubState {
 }
 
 impl AdvPubState {
-    /// Point the cached view at the wrapped publisher's own key, after boxing.
+    /// The engine of the publisher's session, as its plane keeps it.
+    fn engine(&self) -> &EngineHold {
+        self.publisher.plane().engine()
+    }
+
+    /// Point the cached view at the wrapped publisher's own key, after boxing. The loan names the
+    /// plane's engine, which lies in this state and stays at its address with it.
     fn bind(&mut self) {
-        self.loaned_keyexpr = self.publisher.publisher().lend(&mut self.record);
+        let publisher = &self.publisher;
+        self.loaned_keyexpr = publisher
+            .publisher()
+            .lend(publisher.plane().engine(), &mut self.record);
     }
 }
 
@@ -589,25 +596,39 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             return code;
         }
         let session = PicoSession::of(handle);
-        // The publisher's source identity is the session's own zid, the one its
-        // peers see in the handshake.
-        let engine = session.engine.clone();
         // The publisher lies in a place of its session's, taken before anything is declared, so a
         // session with every place held refuses it and declares nothing, as pico answers a
         // publisher its heap cannot hold.
         let Some(slot) = crate::object_slot::Slot::<AdvPubState>::take_entity(
-            &engine,
+            session.engine,
             crate::object_slot::Kind::AdvancedPublisher,
         ) else {
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let publisher = match AdvancedPublisherOn::declare_on(
-            Arc::new(PicoPlane::new(session.clone(), declared)),
-            ke,
-            advanced_publisher_options(options),
-            engine.session_zid(),
-        ) {
-            Ok(publisher) => publisher,
+        let plane = PicoPlane::new(
+            session,
+            handle.ext.hlc.clone(),
+            handle.ext.time.clone(),
+            declared,
+        );
+        let wz_options = advanced_publisher_options(options);
+        // The publisher's source identity is the session's own zid, the one its
+        // peers see in the handshake.
+        let zid = session.engine.session_zid();
+        // The publisher is declared in the state's place and the rest of the state written after
+        // it, so a refused declaration leaves the place unwritten and the slot gives it back.
+        let filled = slot.try_fill_in_place(|at| -> Result<(), AdvancedPublisherError> {
+            let place = core::ptr::addr_of_mut!((*at).publisher)
+                .cast::<core::mem::MaybeUninit<AdvancedPublisherOn<PicoPlane>>>();
+            AdvancedPublisherOn::declare_in(&mut *place, plane, ke, wz_options, zid)?;
+            core::ptr::addr_of_mut!((*at).loaned_keyexpr).write(
+                crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+            );
+            core::ptr::addr_of_mut!((*at).record).write(crate::keyexpr::RecordKey::UNLENT);
+            Ok(())
+        });
+        let state = match filled {
+            Ok(state) => state,
             // A derived `@adv` key no peer could take is the caller's key and
             // not a failure of the session.
             Err(AdvancedPublisherError::InvalidAdvKeyexpr(_)) => return Z_ERR_INVALID,
@@ -616,12 +637,6 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             Err(AdvancedPublisherError::CacheRingUnavailable) => return Z_ERR_SYSTEM_OUT_OF_MEMORY,
             Err(_) => return Z_ERR_GENERIC,
         };
-        let state = slot.fill(AdvPubState {
-            engine,
-            publisher,
-            loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
-            record: crate::keyexpr::RecordKey::UNLENT,
-        });
         // Bound where it lies: the place does not move until the undeclare gives it back.
         (*state).bind();
         (*pub_).handle = state.cast::<c_void>();
@@ -1132,11 +1147,13 @@ impl MissRooms {
 /// ([`AdvSubPlace`]).
 pub(crate) struct AdvSubState {
     engine: crate::session::EngineHold,
-    /// The subscriber the engine hosts, until its owner lets go of it. Dropping it retracts
-    /// everything it declared, in the order the runtime's own subscriber does; a background
-    /// subscriber is taken out to run on with its entities standing. Hosted on the engine as the
-    /// build names it, so a build of one engine makes no table of the session's operations for it.
-    subscriber: Option<EngineSubscriber<EngineHold>>,
+    /// The subscriber the engine hosts, declared in this place ([`EngineSubscriber::declare_in`])
+    /// and written for every state a handle names: a state whose declaration is refused is retired
+    /// before any handle names it. Its owner's release drops it, which retracts everything it
+    /// declared in the order the runtime's own subscriber does; a background subscriber is read
+    /// out to run on with its entities standing. Hosted on the engine as the build names it, so a
+    /// build of one engine makes no table of the session's operations for it.
+    subscriber: core::mem::MaybeUninit<EngineSubscriber<EngineHold>>,
     /// R311y559 — as `AdvPubState`, for `ze_advanced_subscriber_keyexpr`: a borrow of the key the
     /// subscriber keeps, which no copy of this state's doubles.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
@@ -1197,18 +1214,40 @@ pub(crate) struct AdvSubKept {
 }
 
 impl AdvSubKept {
-    /// `sample` kept, with nothing lodged and no hold for it.
-    fn new(sample: SampleKept) -> Self {
-        Self {
-            sample,
-            core: SubscriberCore::vacant(),
-            core_hold: core::mem::MaybeUninit::uninit(),
-            miss: Lodging::vacant(),
-            miss_keep: core::mem::MaybeUninit::uninit(),
-            forms: Lodging::vacant(),
-            forms_keep: core::mem::MaybeUninit::uninit(),
-            anchors: AnchorRooms::new(),
+    /// `sample` kept, with nothing lodged and no hold for it, written in `at`, where it stays: the
+    /// anchors' rooms are written there row by row ([`AnchorRooms::write_vacant`]).
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self`, aligned for it, and holds none.
+    unsafe fn write_in(at: NonNull<Self>, sample: SampleKept) {
+        let at = at.as_ptr();
+        // SAFETY: the caller's: each field is written once through a pointer to it, not null as
+        // it is inside the place.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).sample).write(sample);
+            core::ptr::addr_of_mut!((*at).core).write(SubscriberCore::vacant());
+            core::ptr::addr_of_mut!((*at).core_hold).write(core::mem::MaybeUninit::uninit());
+            core::ptr::addr_of_mut!((*at).miss).write(Lodging::vacant());
+            core::ptr::addr_of_mut!((*at).miss_keep).write(core::mem::MaybeUninit::uninit());
+            core::ptr::addr_of_mut!((*at).forms).write(Lodging::vacant());
+            core::ptr::addr_of_mut!((*at).forms_keep).write(core::mem::MaybeUninit::uninit());
+            AnchorRooms::write_vacant(NonNull::new_unchecked(core::ptr::addr_of_mut!(
+                (*at).anchors
+            )));
         }
+        // Every field is named here, so a field added and not written above fails to compile.
+        let _every_field_written = |kept: &Self| {
+            let Self {
+                sample: _,
+                core: _,
+                core_hold: _,
+                miss: _,
+                miss_keep: _,
+                forms: _,
+                forms_keep: _,
+                anchors: _,
+            } = kept;
+        };
     }
 }
 
@@ -1263,7 +1302,7 @@ unsafe fn let_go_miss_place(context: *mut c_void) {
 /// are declared, and no forms are lodged in it yet.
 unsafe fn lodge_forms(
     state: *mut AdvSubState,
-    session: &PicoSession,
+    session: PicoSession<'_>,
     base: DeclaredKeyexpr,
 ) -> Strong<PicoSubscriberForms> {
     // SAFETY: the caller's; the keep is written before the forms are lodged, and the forms and
@@ -1369,14 +1408,21 @@ unsafe fn let_go_miss_set(context: *mut c_void) {
 impl AdvSubState {
     /// Point the cached view at the key the subscriber keeps.
     fn bind(&mut self) {
-        let keyexpr = self.keyexpr().unwrap_or_default();
+        let keyexpr = self.keyexpr();
         self.loaned_keyexpr =
             crate::abi::z_loaned_keyexpr_t::borrowed(keyexpr.as_ptr(), keyexpr.len());
     }
 
-    /// The key the subscriber subscribes to, while its owner holds it.
-    fn keyexpr(&self) -> Option<&str> {
-        self.subscriber.as_ref().map(EngineSubscriber::keyexpr)
+    /// The subscriber, which every state a handle names holds.
+    fn subscriber(&self) -> &EngineSubscriber<EngineHold> {
+        // SAFETY: the field's: the subscriber is written before a handle names the state, and the
+        // release that lets go of it is the handle's last use.
+        unsafe { self.subscriber.assume_init_ref() }
+    }
+
+    /// The key the subscriber subscribes to.
+    fn keyexpr(&self) -> &str {
+        self.subscriber().keyexpr()
     }
 }
 
@@ -1500,18 +1546,34 @@ unsafe fn declare_subscriber_state(
         None => DeclaredKeyexpr::literal_of_session(engine, ke)?,
     };
     let session = crate::session::session_count(zs);
-    let state = slot
-        .fill_answering(
-            AdvSubState {
+    let write_state = |at: NonNull<AdvSubState>| {
+        // SAFETY: the place `write_at` hands is valid for writes of the state and holds none.
+        unsafe {
+            at.as_ptr().write(AdvSubState {
                 engine: crate::session::EngineHold::clone(engine),
-                subscriber: None,
+                subscriber: core::mem::MaybeUninit::uninit(),
                 loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                 miss: None,
                 session: Some(session),
-            },
-            AdvSubKept::new(SampleKept::new(closure, background.then(|| session.hold()))),
-        )
-        .cast::<AdvSubState>();
+            })
+        }
+    };
+    let write_kept = |at: NonNull<AdvSubKept>| {
+        // SAFETY: as above, for what the place keeps past the state.
+        unsafe {
+            AdvSubKept::write_in(
+                at,
+                SampleKept::new(closure, background.then(|| session.hold())),
+            )
+        }
+    };
+    let write = |at: *mut AdvSubPlace| {
+        // SAFETY: the slot hands a place valid for writes of an `AdvSubPlace`, holding none; the
+        // two writers write its state and what it keeps whole.
+        unsafe { crate::object_slot::Answering::write_at(at, write_state, write_kept) }
+    };
+    // SAFETY: `write` leaves a whole `AdvSubPlace` in the place it is handed.
+    let state = unsafe { slot.fill_in_place(write) }.cast::<AdvSubState>();
     // SAFETY: `state` was filled for an `AdvSubPlace` just above, and its owner holds it; the
     // closure is counted in the place before anything can call it or let it go, so the place
     // stands until the host lets go of the sample callback, and a C sample closure is called from
@@ -1548,8 +1610,7 @@ unsafe fn declare_subscriber_state(
     // SAFETY: as above; the forms are asked only while the subscriber's entities are declared,
     // below, while the owner holds the place.
     let forms = unsafe { lodge_forms(state, PicoSession::of(handle), base) };
-    let opts =
-        advanced_subscriber_options(options).with_declaration_forms(FormsHandle::lodged(forms));
+    let opts = advanced_subscriber_options(options);
     // SAFETY: as above.
     let miss = unsafe { lodge_miss_set(state) };
     let lent_miss = Strong::into_raw(miss.clone());
@@ -1558,12 +1619,20 @@ unsafe fn declare_subscriber_state(
     // SAFETY: the context is a count of the miss set, let go of once by `let_go_miss_set`; the
     // set is read through a shared borrow, which it admits from any thread.
     let misses = unsafe { MissHandlers::lent(fire_adv_miss, lent_miss, Some(let_go_miss_set)) };
-    let declared = EngineSubscriber::declare_in(engine, ke, opts, on_sample, misses, core);
+    // The subscriber is declared in the state's place, which was filled with none.
+    // SAFETY: as above; nothing else reaches the field until the state is handed out.
+    let place = unsafe { &mut *core::ptr::addr_of_mut!((*state).subscriber) };
+    let declared = EngineSubscriber::declare_in(
+        place,
+        engine,
+        ke,
+        &opts,
+        Some(FormsHandle::lodged(forms)),
+        Callbacks { on_sample, misses },
+        core,
+    );
     match declared {
-        Ok(subscriber) => {
-            // SAFETY: as above; the state was filled with no subscriber, so the write lets go of
-            // nothing in its place.
-            unsafe { core::ptr::addr_of_mut!((*state).subscriber).write(Some(subscriber)) };
+        Ok(_) => {
             (*state).bind();
             Ok(state)
         }
@@ -1590,7 +1659,7 @@ unsafe fn declare_subscriber_state(
 /// # Safety
 /// `state` is a live handle [`declare_subscriber_state`] made, let go of once.
 unsafe fn free_advanced_subscriber(state: *mut AdvSubState) {
-    drop((*state).subscriber.take());
+    (*state).subscriber.assume_init_drop();
     if let Some(set) = (*state).miss.as_deref() {
         set.leave_background();
     }
@@ -1945,10 +2014,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         else {
             return Z_ERR_NULL;
         };
-        let Some(keyexpr) = state.keyexpr() else {
-            return Z_ERR_NULL;
-        };
-        let ke = wz_ext_pubsub::advanced_ke::publisher_detection_ke(keyexpr);
+        let ke = wz_ext_pubsub::advanced_ke::publisher_detection_ke(state.keyexpr());
         let history = if options.is_null() {
             false
         } else {
@@ -2076,12 +2142,10 @@ pub unsafe extern "C" fn ze_advanced_publisher_get_matching_status(
         if matching_status.is_null() {
             return Z_ERR_NULL;
         }
-        let Some(state) =
-            crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(publisher)
-        else {
+        let Some(filter) = advanced_publisher_filter(publisher) else {
             return Z_ERR_NULL;
         };
-        (*matching_status).matching = state.publisher.publisher().filter_matches();
+        (*matching_status).matching = filter.matches();
         Z_OK
     })
 }
@@ -2137,9 +2201,9 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_background_matching_liste
 /// `pub_` must be null or a live loaned advanced publisher.
 unsafe fn advanced_publisher_filter<'a>(
     pub_: *const ze_loaned_advanced_publisher_t,
-) -> Option<&'a crate::write_filter::WriteFilter> {
+) -> Option<crate::write_filter::FilterOn<'a>> {
     crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
-        .map(|state| state.publisher.publisher().filter())
+        .map(|state| state.publisher.publisher().filter_on(state.engine()))
 }
 
 /// Declare a miss listener that lives as long as its subscriber (pico
@@ -2202,7 +2266,7 @@ pub(crate) unsafe fn advanced_publisher_identity(
     // The wrapped publisher's entity id, as pico's `ze_advanced_publisher_id` is
     // `z_publisher_id` of the publisher it wraps.
     crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
-        .map(|state| (state.engine.zid(), state.publisher.eid()))
+        .map(|state| (state.engine().zid(), state.publisher.eid()))
 }
 
 /// The cached keyexpr borrow behind a loaned advanced publisher.
@@ -2226,10 +2290,8 @@ pub(crate) unsafe fn advanced_publisher_keyexpr(
 pub(crate) unsafe fn advanced_subscriber_identity(
     sub: *const ze_loaned_advanced_subscriber_t,
 ) -> Option<([u8; 16], wz_session_core::wire_id::EntityId)> {
-    crate::abi::handle_ref::<ze_loaned_advanced_subscriber_t, AdvSubState>(sub).and_then(|state| {
-        let subscriber = state.subscriber.as_ref()?;
-        Some((state.engine.zid(), subscriber.id().eid()))
-    })
+    crate::abi::handle_ref::<ze_loaned_advanced_subscriber_t, AdvSubState>(sub)
+        .map(|state| (state.engine.zid(), state.subscriber().id().eid()))
 }
 
 /// The cached keyexpr borrow behind a loaned advanced subscriber.
@@ -2274,9 +2336,7 @@ pub unsafe extern "C" fn ze_declare_background_advanced_subscriber(
                 // runs in the background, its entities standing until the session ends. Its owner
                 // lets go of the place at once, with no wait, and the place stays with the sample
                 // closure, which holds the session's count open, so the close waits for it.
-                if let Some(subscriber) = (*state).subscriber.take() {
-                    subscriber.background();
-                }
+                (*state).subscriber.assume_init_read().background();
                 crate::object_slot::retire_entity::<AdvSubState, AdvSubKept>(state);
                 Z_OK
             }
@@ -2327,9 +2387,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
         if state.engine.is_closed() {
             return crate::result::Z_ERR_SESSION_CLOSED;
         }
-        let Some(keyexpr) = state.keyexpr() else {
-            return Z_ERR_NULL;
-        };
+        let keyexpr = state.keyexpr();
         let detection = wz_ext_pubsub::advanced_ke::publisher_detection_ke(keyexpr);
         let history = !options.is_null() && (*options).history;
         let engine = state.engine.clone();
@@ -2359,6 +2417,9 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "engine-tokio")]
+    use alloc::sync::Arc;
+
     use super::*;
 
     /// The publisher-detection keyexpr is derived where every advanced subscriber derives it, and
@@ -2488,21 +2549,36 @@ mod tests {
             crate::object_slot::Kind::AdvancedSubscriber,
         )
         .expect("a place for an advanced subscriber");
-        let state = slot.fill(crate::object_slot::Answering::keeping(
-            AdvSubState {
-                engine,
-                subscriber: Some(subscriber),
-                loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
-                miss: Some(set.clone()),
-                session: None,
-            },
-            // The C closure kept beside the state is counted in nothing and taken out by nothing:
-            // the subscriber's callback is the Rust closure above.
-            AdvSubKept::new(SampleKept::new(
-                CClosure::uncounted(std::ptr::null_mut(), None, None),
-                None,
-            )),
-        ));
+        let write_state = |at: NonNull<AdvSubState>| {
+            // SAFETY: the place `write_at` hands is valid for writes of the state and holds none.
+            unsafe {
+                at.as_ptr().write(AdvSubState {
+                    engine,
+                    subscriber: core::mem::MaybeUninit::new(subscriber),
+                    loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
+                    miss: Some(set.clone()),
+                    session: None,
+                })
+            }
+        };
+        // The C closure kept beside the state is counted in nothing and taken out by nothing: the
+        // subscriber's callback is the Rust closure above.
+        let write_kept = |at: NonNull<AdvSubKept>| {
+            // SAFETY: as above, for what the place keeps past the state.
+            unsafe {
+                AdvSubKept::write_in(
+                    at,
+                    SampleKept::new(CClosure::uncounted(std::ptr::null_mut(), None, None), None),
+                )
+            }
+        };
+        // SAFETY: the slot hands a place valid for writes of an `AdvSubPlace`, holding none, and
+        // the two writers write it whole.
+        let state = unsafe {
+            slot.fill_in_place(|at| {
+                crate::object_slot::Answering::write_at(at, write_state, write_kept)
+            })
+        };
         let owned = ze_owned_advanced_subscriber_t {
             handle: state.cast::<c_void>(),
             _pad: [0u8; SUBSCRIBER_PAD],
@@ -2531,11 +2607,7 @@ mod tests {
         // below consumes it.
         unsafe {
             (*state).bind();
-            let kept = (*state)
-                .subscriber
-                .as_ref()
-                .expect("the owner holds its subscriber")
-                .keyexpr();
+            let kept = (*state).subscriber().keyexpr();
             let view = advanced_subscriber_keyexpr(loaned);
             assert_eq!(crate::keyexpr::keyexpr_str(view), Some("demo/data"));
             assert_eq!(
@@ -3063,6 +3135,63 @@ mod tests {
         );
         drop(held);
 
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// An advanced publisher holds its session's engine through its place and its plane alone:
+    /// its publisher and its liveliness token are used and retracted on the plane's count and keep
+    /// none of their own, and its undeclare gives both counts back. Turned red by a state, a
+    /// publisher or a token that keeps a count of the engine again, or an undeclare that leaves
+    /// one held.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn an_advanced_publisher_holds_its_engine_through_its_place_and_its_plane() {
+        use crate::session::{
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            z_session_move, EngineHold,
+        };
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let loaned = unsafe { z_session_loan(&session) };
+        // SAFETY: as above.
+        let handle = unsafe { session_handle(loaned) }.expect("an open session has its handle");
+        let engine = engine_held(handle).clone();
+        let before = EngineHold::holders(&engine);
+        // SAFETY: a view is plain data, and the text is a live C string.
+        let mut view: crate::abi::z_view_keyexpr_t = unsafe { core::mem::zeroed() };
+        // SAFETY: as above.
+        let viewed = unsafe {
+            crate::keyexpr::z_view_keyexpr_from_str(&mut view, c"demo/adv/held".as_ptr())
+        };
+        assert_eq!(viewed, Z_OK);
+        // SAFETY: the view is live for the rest of the frame.
+        let ke = unsafe { crate::keyexpr::z_view_keyexpr_loan(&view) };
+        // SAFETY: the options are plain data, filled by their default before they are read.
+        let mut options: ze_advanced_publisher_options_t = unsafe { core::mem::zeroed() };
+        // SAFETY: as above.
+        unsafe { ze_advanced_publisher_options_default(&mut options) };
+        options.publisher_detection = true;
+        let mut publisher = ze_owned_advanced_publisher_t::null_value();
+        // SAFETY: every pointer is live.
+        let code = unsafe { ze_declare_advanced_publisher(loaned, &mut publisher, ke, &options) };
+        assert_eq!(code, Z_OK);
+        assert_eq!(
+            EngineHold::holders(&engine) - before,
+            2,
+            "the place's lender and the plane hold the engine, the publisher and the token do not"
+        );
+        // SAFETY: the publisher is live and owned here, and given up by this call.
+        let code =
+            unsafe { ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&mut publisher)) };
+        assert_eq!(code, Z_OK);
+        assert_eq!(
+            EngineHold::holders(&engine),
+            before,
+            "the undeclare gave both counts back"
+        );
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };

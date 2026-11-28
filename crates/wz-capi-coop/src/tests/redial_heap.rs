@@ -18,7 +18,6 @@ use crate::tests::{host_links, PosixLinks};
 use crate::LinkCount;
 use wz_capi_port::SessionDrive;
 use wz_runtime_coop::link_cells::CountKind;
-use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::session_drive::{LinkOpenError, Locator, OpenedLink, SessionLinks};
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
@@ -115,7 +114,7 @@ impl SessionLinks<LinkCount> for Refusals {
     }
 
     // The session's tables reach the links it dials through, as they reach the host's links.
-    fn lend_buffers(&mut self, tables: LinkTables<<LinkCount as CountKind>::Flag>) {
+    fn lend_buffers(&mut self, tables: <LinkCount as CountKind>::Buffers) {
         self.inner.lend_buffers(tables);
     }
 
@@ -320,7 +319,7 @@ fn a_face_lost_is_told_to_a_watcher_of_its_rows_with_nothing_allocated() {
 fn rows_past_the_room_of_a_session_watched_after_its_open_are_told_lost_with_nothing_allocated() {
     use wz_capi_port::SessionEngine;
     use wz_session_core::caps;
-    use wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceRowSink, RowText};
+    use wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceRowSink, LentEnd, RowEnds};
 
     let router = Router::start(CatchAll::None);
     let engine = CoopEngine::open(
@@ -369,8 +368,11 @@ fn rows_past_the_room_of_a_session_watched_after_its_open_are_told_lost_with_not
         is_shm: false,
         link: 0,
         links: 1,
-        src: RowText::of("tcp/127.0.0.1:1"),
-        dst: RowText::of("tcp/127.0.0.1:2"),
+        ends: RowEnds::Lent {
+            kind: wz_session_core::link::LinkKind::Tcp,
+            src: LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 1))),
+            dst: LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 2))),
+        },
         kind: None,
         mtu: 0,
         group_endpoint: None,

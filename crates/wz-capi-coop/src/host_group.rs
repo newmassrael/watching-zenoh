@@ -22,15 +22,15 @@
 use core::cell::RefCell;
 use core::marker::PhantomData;
 
-use wz_runtime_coop::group_transport::{GroupJoiner, GroupTransport};
+use wz_runtime_coop::group_transport::{GroupBuffer, GroupJoiner, GroupRx, GroupTransport};
 use wz_runtime_coop::session_drive::LinkOpenError;
+use wz_runtime_coop::udp_link::UDP_RX_CAPACITY;
 use wz_runtime_posix::group::MulticastSocket;
 #[cfg(feature = "multicast-locator-keys")]
 use wz_runtime_posix::multicast::mark_traffic_class;
 use wz_runtime_posix::multicast::{
     bind_joined, bind_sender, HostGroupTransport, Loopback, MulticastError, RxBind, SocketConfig,
 };
-use wz_session_core::byte_cells::ByteBuf;
 use wz_session_core::group_locator::{GroupLocator, UdpGroup};
 use wz_session_core::policy::{MulticastLoopback, SessionPolicy};
 
@@ -79,12 +79,15 @@ impl<S> HostGroups<S> {
 }
 
 impl<S: MulticastSocket + 'static> GroupJoiner for HostGroups<S> {
+    /// A buffer of the group's own the heap refuses is exhausted before any socket is made; a
+    /// group's own buffer reads the largest UDP payload whole where the session sized none.
     fn join(
         &self,
         group: &GroupLocator,
-        rx: Option<ByteBuf>,
+        rx: GroupBuffer,
     ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         let group = group.udp().ok_or(LinkOpenError::Unsupported)?;
+        let rx = GroupRx::of_heap(rx, UDP_RX_CAPACITY).ok_or(LinkOpenError::Exhausted)?;
         let named_port = group.group().port();
         let given = self.port_given(group);
         let transport = join::<S>(group, given.unwrap_or(named_port), self, rx).map_err(|e| {
@@ -101,7 +104,7 @@ impl<S: MulticastSocket + 'static> GroupJoiner for HostGroups<S> {
 }
 
 /// Join the group `group` names on `port` (its own port, or the one a first join of a port 0 was
-/// given), as `groups` joins one, receiving into `rx` when the session lent a buffer. Port 0 is
+/// given), as `groups` joins one, receiving into `rx`, the session's or its own. Port 0 is
 /// given its port by the bind of the joined socket, which the send socket addresses the group by,
 /// as upstream's multicast link reads the port of its bound socket
 /// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
@@ -110,7 +113,7 @@ fn join<S: MulticastSocket>(
     group: &UdpGroup,
     port: u16,
     groups: &HostGroups<S>,
-    rx: Option<ByteBuf>,
+    rx: GroupRx<Vec<u8>>,
 ) -> Result<HostGroupTransport<S>, MulticastError<S::Error>> {
     let config = SocketConfig {
         iface: group.iface(),
@@ -135,7 +138,12 @@ fn join<S: MulticastSocket>(
     }
     let mut to = read.peer;
     to.set_port(port);
-    Ok(HostGroupTransport::new(read.socket, write.socket, to, rx))
+    Ok(HostGroupTransport::with_rx(
+        read.socket,
+        write.socket,
+        to,
+        rx,
+    ))
 }
 
 #[cfg(all(test, feature = "std", unix))]
@@ -158,7 +166,7 @@ mod tests {
     #[test]
     fn a_group_whose_keys_make_no_socket_is_refused() {
         assert!(matches!(
-            groups().join(&read("udp/239.255.77.12:0#iface=::1"), None),
+            groups().join(&read("udp/239.255.77.12:0#iface=::1"), GroupBuffer::Unsized),
             Err(LinkOpenError::Refused)
         ));
     }
@@ -180,11 +188,14 @@ mod tests {
     fn a_reth_group_reaches_the_raw_sockets_and_a_udp_group_the_hosts() {
         let joiner = with_raweth();
         assert!(matches!(
-            joiner.join(&read("reth/02:00:00:00:00:01#iface=wzabsentif0"), None),
+            joiner.join(
+                &read("reth/02:00:00:00:00:01#iface=wzabsentif0"),
+                GroupBuffer::Unsized
+            ),
             Err(LinkOpenError::Refused)
         ));
         assert!(matches!(
-            joiner.join(&read("udp/239.255.77.12:0#iface=::1"), None),
+            joiner.join(&read("udp/239.255.77.12:0#iface=::1"), GroupBuffer::Unsized),
             Err(LinkOpenError::Refused)
         ));
     }
@@ -229,8 +240,12 @@ mod tests {
             ..groups()
         };
         let group = read(&endpoint);
-        let mut a = joiner.join(&group, None).expect("member a joins");
-        let mut b = joiner.join(&group, None).expect("member b joins");
+        let mut a = joiner
+            .join(&group, GroupBuffer::Unsized)
+            .expect("member a joins");
+        let mut b = joiner
+            .join(&group, GroupBuffer::Unsized)
+            .expect("member b joins");
         assert!(a.open() && b.open());
         a.send_to_group(b"hello group");
         let mut seen = None;

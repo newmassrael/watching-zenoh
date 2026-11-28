@@ -18,6 +18,7 @@ use wz_session_core::caps;
 
 use super::client_config;
 use super::sim::SetClock;
+#[cfg(not(wz_on_use))]
 use crate::arena::{AllocatorMemory, ArenaPlan, SessionArena};
 use crate::engine::{link_task_bytes, read_wait_room, RuntimeTables, RUNTIME_TIMERS};
 use crate::CoopConfig;
@@ -25,6 +26,7 @@ use crate::CoopConfig;
 /// The runtime `tables` are for, placed as an open places it: in a span of an arena that holds
 /// that span alone, which the runtime keeps until its last holder lets go, with the set of the
 /// session's tasks it runs.
+#[cfg(not(wz_on_use))]
 fn placed_runtime(tables: RuntimeTables) -> (CoopRuntime<SetClock>, CoopLocalSet<SetClock>) {
     let bytes = tables
         .placed_bytes::<SetClock>()
@@ -36,6 +38,16 @@ fn placed_runtime(tables: RuntimeTables) -> (CoopRuntime<SetClock>, CoopLocalSet
     tables
         .runtime(SetClock(Arc::new(AtomicU64::new(0))), place)
         .expect("the span fits the runtime")
+}
+
+/// The runtime `tables` are for, made of the allocator as an open of a session whose tables take
+/// their memory on use makes it, with the set of the session's tasks it runs: the same form and
+/// rows as the one placed in an arena.
+#[cfg(wz_on_use)]
+fn placed_runtime(tables: RuntimeTables) -> (CoopRuntime<SetClock>, CoopLocalSet<SetClock>) {
+    tables
+        .made(SetClock(Arc::new(AtomicU64::new(0))))
+        .expect("the allocator has room for the runtime")
 }
 
 /// A read's waits are reserved at the open for every link the session may wait on at once: each
@@ -283,7 +295,10 @@ fn print_the_parts_of_a_link_tasks_cell() {
             "parts to build it: maker + config",
             size_of::<Router>() + size_of::<SessionDriveConfig>(),
         ),
-        ("event sink (FaceDispatch)", size_of::<FaceDispatch<C>>()),
+        (
+            "event sink (FaceDispatch)",
+            size_of::<FaceDispatch<C, dyn BoxedLinkDriver>>(),
+        ),
     ];
     std::println!("link task cell: {cell} B");
     for (name, bytes) in parts {

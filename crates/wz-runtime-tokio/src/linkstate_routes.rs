@@ -288,8 +288,8 @@ pub(crate) fn charge_interceptor_drop(
     let class = wz_session_core::network_message::stats_class(msg, |_id| None);
     let pl_bytes = class.payload.map_or(0, |p| p.pl_bytes);
     match flow {
-        InterceptorFlow::Ingress => actions.stats.inc_rx_drop(reason, 1, pl_bytes),
-        InterceptorFlow::Egress => actions.stats.inc_tx_drop(reason, 1, pl_bytes),
+        InterceptorFlow::Ingress => actions.tx.stats.inc_rx_drop(reason, 1, pl_bytes),
+        InterceptorFlow::Egress => actions.tx.stats.inc_tx_drop(reason, 1, pl_bytes),
     }
 }
 

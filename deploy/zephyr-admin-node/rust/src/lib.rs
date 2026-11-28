@@ -11,7 +11,7 @@
 //! this firmware changes is the stack under it, which the BOARD chooses, so that a
 //! lab can drive one on whatever it has on the bench.
 //!
-//! What a board contributes is a [`NodeNet`]: its links (`SessionLinks`), the
+//! What a board contributes is a [`NodeNet`]: its links (`OpenSetLinks`), the
 //! address it advertises, the id it claims, and whatever work its stack needs
 //! each pass. [`net_zephyr`] is Zephyr's own sockets, for a board whose
 //! Ethernet Zephyr drives. Nothing in the node's assembly or its loop names a
@@ -40,7 +40,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 #[cfg(not(storage_fixed))]
-use wz::runtime_coop::session_drive::SessionLinks;
+use wz::runtime_coop::session_drive::OpenSetLinks;
 #[cfg(all(role_admin, not(storage_fixed)))]
 use wz::runtime_coop::session_runtime::new_session_actions;
 #[cfg(not(storage_fixed))]
@@ -252,7 +252,7 @@ static STATUS: NodeStatus = NodeStatus::new(true);
 #[cfg(not(storage_fixed))]
 pub trait NodeNet {
     /// The links the node opens: one that accepts, one per endpoint it dials.
-    type Links: SessionLinks + 'static;
+    type Links: OpenSetLinks + 'static;
 
     /// The node's links.
     fn links(&self) -> Rc<Self::Links>;

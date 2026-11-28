@@ -54,6 +54,8 @@ wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, featu
 # verbs need before they compile (decision D2), and a cooperative build gets it from here and
 # from nowhere else.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["no_std", "secure-channel"] }
+# The port a sealed lifecycle command is verified through (`es256`), without its host signer.
+wz-command-seal = { path = "../wz-command-seal", default-features = false, optional = true }
 
 [build-dependencies]
 # The pinned Mbed TLS through its own CMake, as zenoh-pico-sys builds zenoh-pico.
@@ -75,6 +77,9 @@ rcgen = "0.13"
 wz-capi-coop = { path = "../wz-capi-coop", features = ["listen", "runtime-plan"] }
 # The test's subscriber is its own closure (`shared-sinks`).
 wz-capi-port = { path = "../wz-capi-port", features = ["shared-sinks"] }
+# A key that signs what the `es256` tests verify, made by another implementation than the one
+# under test (`ring`, which the peer's rustls already links).
+wz-command-seal = { path = "../wz-command-seal" }
 
 [features]
 # `wz-runtime-coop`'s session tier needs a form of its task pool, and the two forms are mutually
@@ -109,6 +114,10 @@ rsa = []
 # they compile only beside one (decision D2): this crate always states `secure-channel`, so every
 # build that has the verbs through it has the channel too. The runtime offers no such feature.
 session-close-ingress = ["wz-session-core/session-close-ingress"]
+# ES256 over the library's PSA Crypto (`es256::PsaEs256`): what a fixed-memory node verifies a
+# sealed lifecycle command with (decision D17, docs/command-seal.md), and the echo it draws when
+# it starts (`es256::random_echo`). The C side is always compiled; this is the Rust port over it.
+es256 = ["dep:wz-command-seal"]
 
 [lints]
 workspace = true

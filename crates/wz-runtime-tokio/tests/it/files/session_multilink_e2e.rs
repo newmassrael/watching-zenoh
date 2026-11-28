@@ -333,7 +333,7 @@ async fn two_links_aggregate_and_survive_link_death() {
     // exact post-`release_link`+`del_link` state a real socket death produces (the
     // accept-loop `Step::Driven` response) — then abort its drive.
     a1_task.abort();
-    a_primary.link.transport_available.close();
+    a_primary.link.tx.transport_available.close();
     let remaining = a_primary.del_link(&a_primary.link);
     assert_eq!(
         remaining, 1,

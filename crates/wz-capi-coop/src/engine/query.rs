@@ -51,6 +51,7 @@ use wz_capi_port::sync::Lock;
 use wz_capi_port::{HeldQueryId, QblId, QueryHolder, QueryableSink, Refusal};
 
 use super::CoopLinks;
+use super::DynSink;
 use super::LinkActions;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::named_key::NamedKey;
@@ -92,11 +93,11 @@ impl QueryableRow {
 
     /// Declare queryable `id`, the id its row in the tables holds, on `key`, answering for the
     /// whole of it when `complete`, over `actions`: whether the link took it.
-    pub(super) fn declare<C: ClockSource + 'static>(
+    pub(super) fn declare<C: ClockSource + 'static, D: ?Sized + DynSink>(
         id: QblId,
         key: NamedKey<'_>,
         complete: bool,
-        actions: &LinkActions<C>,
+        actions: &LinkActions<C, D>,
     ) -> bool {
         actions
             .send_declare_queryable(id, key_on_link(actions, key), complete)
@@ -106,10 +107,10 @@ impl QueryableRow {
     /// Retract queryable `id` over `actions`, naming its key as `names` says (the declaration's
     /// id and the rest of the key) when its declaration asked to. Read off the row before it is
     /// undeclared, as a subscriber's is.
-    pub(super) fn retract<C: ClockSource + 'static>(
+    pub(super) fn retract<C: ClockSource + 'static, D: ?Sized + DynSink>(
         id: QblId,
         names: Option<(wz_session_core::wire_id::ExprId, &str)>,
-        actions: &LinkActions<C>,
+        actions: &LinkActions<C, D>,
     ) {
         match names {
             Some((mapping, suffix)) => {
@@ -261,7 +262,7 @@ pub(super) type QueryPlane = wz_session_core::query_plane::QueryPlane<CoopCalls>
 
 // The rows a form that lays its state out at the open lends the Finals and refusals; the on-use
 // form counts them in its own tables and names neither.
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 pub(crate) use wz_session_core::query_plane::{FinalHold, RefusedFinal};
 pub(super) use wz_session_core::query_plane::{FinalHolds, HeldFinals, RefusedFinals};
 
@@ -389,7 +390,7 @@ pub(super) fn leaked_plane(rows: usize) -> Box<QueryPlane> {
 }
 
 /// The Finals of at most `rows` queries, in rows lent from an arena the test leaks.
-#[cfg(all(test, feature = "runtime-plan"))]
+#[cfg(all(test, wz_lent))]
 fn leaked_holds(rows: usize) -> FinalHolds<crate::StatePolicy> {
     use wz_session_core::bounded::Arena;
     let held = Arena::table_bytes::<FinalHold>(rows).expect("rows the address space holds");
@@ -408,7 +409,7 @@ fn leaked_holds(rows: usize) -> FinalHolds<crate::StatePolicy> {
 }
 
 /// The Finals of at most `rows` queries, counted, taking their rows at the first query held.
-#[cfg(all(test, feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(all(test, wz_on_use))]
 fn leaked_holds(rows: usize) -> FinalHolds<crate::StatePolicy> {
     use wz_session_core::bounded::BoundedVec;
     FinalHolds::over(BoundedVec::counted(rows), BoundedVec::counted(rows))

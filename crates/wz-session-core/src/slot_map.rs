@@ -45,7 +45,7 @@ use core::marker::PhantomData;
 use core::num::{NonZeroU16, NonZeroU32};
 
 use crate::bounded::{
-    push_erased, Arena, BoundedVec, CapacityFull, LendRefused, Lent, LentSeq, Profile, Region,
+    push_erased, Arena, BoundedVec, CapacityFull, LaidOut, LendRefused, Lent, LentSeq, Profile,
     SeqBacking, SeqPlace, Storage, TableLender, ZeroEmpty, ZeroSeqs, ARENA_ALIGN,
 };
 use core::mem::MaybeUninit;
@@ -1615,11 +1615,12 @@ pub struct SlotRows<T, const N: usize> {
 // SAFETY: both columns are `MaybeUninit`, valid as any bytes, and hold no value until placed.
 unsafe impl<T, const N: usize> ZeroEmpty for SlotRows<T, N> {}
 
-impl<K, T, const N: usize> SlotMap<K, T, N, Region> {
-    /// The lines of a region's description ([`place_seqs`]) that place this table's two columns,
-    /// the table at `at` in the region and its [`SlotRows`] at `rows`.
+impl<K, T, const N: usize, P: LaidOut> SlotMap<K, T, N, P> {
+    /// The lines of a description ([`place_seqs`], [`lend_seqs`]) of this table's two columns,
+    /// the table at `at` and, in a region, its [`SlotRows`] at `rows`.
     ///
     /// [`place_seqs`]: crate::bounded::place_seqs
+    /// [`lend_seqs`]: crate::bounded::lend_seqs
     pub const fn places(at: usize, rows: usize) -> [SeqPlace; 2] {
         [
             SeqPlace::of::<Meta>(

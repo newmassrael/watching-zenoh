@@ -170,9 +170,16 @@ pub(crate) enum UnderCoreLock {}
 // in an `Rc`.
 unsafe impl ConfinedOwner for UnderCoreLock {}
 
-/// How the session's runtime holds what it lends a link's session: the form's choice
-/// ([`LockForm::SessionLock`]), made here once for the engine.
-pub(crate) type SessionLock = <CoopForm as LockForm>::SessionLock;
+/// The lock kind the form chooses ([`LockForm::SessionLock`]), made here once for the engine.
+pub(crate) type FormLock = <CoopForm as LockForm>::SessionLock;
+
+/// How the session's runtime holds what it lends a link's session: the form's lock kind.
+#[cfg(not(wz_on_use))]
+pub(crate) type SessionLock = FormLock;
+/// The form's lock kind, each part of a link made on the heap as the link opens: a session whose
+/// tables take their memory on use lends its links no table of cells.
+#[cfg(wz_on_use)]
+pub(crate) type SessionLock = wz_runtime_coop::sync::LinksOnHeap<FormLock>;
 
 /// How the handles on the parts of one link are counted under [`SessionLock`]: the stacks the
 /// engine opens its links over serve sessions counted so. Named by the crate's concrete kind

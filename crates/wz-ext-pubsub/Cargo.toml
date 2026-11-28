@@ -39,11 +39,16 @@ crate-type = ["rlib"]
 # `std`: a wall-clock instant is `std`'s `SystemTime`, the locks are `wz-host-sync`'s in its `std`
 # build (a panicked holder's lock reads as poisoned), and the node clock and the engine port are
 # their `std` forms. On by default, which every build has had.
-default = ["std"]
+default = ["std", "cache-heap"]
 std = ["dep:wz-host-sync", "wz-host-sync/std", "wz-node-time?/std", "wz-capi-port?/std"]
 # The host's own lock (`wz-host-sync`), for a build without `std`, and the same host calls for the
 # node clock and the engine port.
 host-sync = ["dep:wz-host-sync", "wz-node-time?/host-sync", "wz-capi-port?/os-sys"]
+# A cache's samples on the heap (`CacheStore::new`, and a plane's store when the plane names
+# none), for an engine whose sessions reserve no ring of cached samples: the tokio engine's. On by
+# default; the cooperative engine's C library, whose sessions always keep a ring, leaves it off and
+# links the ring's form alone (`CacheStore::in_ring`).
+cache-heap = []
 # The advanced publisher's composite (`advanced_publisher`): the four declarations, what a put
 # stamps and retains, the beacon. It stamps a source identity and a timestamp on every put, so it
 # turns on the session-core setters for them and the node's HLC; a build without it pulls in

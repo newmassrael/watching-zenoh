@@ -64,7 +64,7 @@
 //!    [`wz_codecs::declare::DeclareOwned`] + resolve its keyexpr through
 //!    the shared peer table, then funnel through the no-heap SSOT.
 
-use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
+use crate::bounded::{BoundedVec, Profile, Storage};
 use crate::caps;
 use crate::registry_error::RegisterError;
 use crate::reply_sink::{BorrowedReply, ReplyKind, ReplySink};
@@ -326,32 +326,6 @@ impl<C: ReplySink> LivelinessGetRegistry<C, crate::bounded::OnUse> {
     }
 }
 
-impl<C: ReplySink> LivelinessGetRegistry<C, Lent> {
-    /// An empty registry whose pending gets, and the markers they leave when they end, are `rows`
-    /// rows each lent from `arena`, at most `MAX_PENDING_LIVELINESS_GETS`: the snapshots a session
-    /// holds pending on one face, at its open. Refused past that ceiling or past what the arena has
-    /// left, the rows lent so far going back with the arena.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
-        Ok(Self {
-            pending: arena.lend(rows)?,
-            finalized: arena.lend(rows)?,
-            ..Self::default()
-        })
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes for `rows` rows: its two tables, each a span of
-    /// its own. `None` past the address space.
-    pub const fn arena_bytes(rows: usize) -> Option<usize> {
-        match (
-            Arena::table_bytes::<PendingGet<C>>(rows),
-            Arena::table_bytes::<u64>(rows),
-        ) {
-            (Some(pending), Some(finalized)) => pending.checked_add(finalized),
-            _ => None,
-        }
-    }
-}
-
 /// The rows of a [`LivelinessGetRegistry`] of the region policy, which a region lays out beside
 /// it: its pending gets' and the markers they leave, each at the build's bound.
 pub struct LivelinessGetRows<C: ReplySink> {
@@ -362,32 +336,35 @@ pub struct LivelinessGetRows<C: ReplySink> {
 // SAFETY: both tables' rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
 unsafe impl<C: ReplySink> crate::bounded::ZeroEmpty for LivelinessGetRows<C> {}
 
-/// The lines a region's description holds for one [`LivelinessGetRegistry`] of the region
-/// policy: its two tables' rows.
+/// The lines a description holds for one [`LivelinessGetRegistry`]: its two tables' rows.
 pub const LIVELINESS_GET_LINES: usize = 2;
 
-impl<C: ReplySink> LivelinessGetRegistry<C, crate::bounded::Region> {
-    /// The description of a registry of the region policy at `at` in a region and its
-    /// [`LivelinessGetRows`] at `rows`: the lines of its pending gets' rows and of their markers'.
+impl<C: ReplySink, P: crate::bounded::LaidOut> LivelinessGetRegistry<C, P> {
+    /// The description of a registry at `at` and, in a region, its [`LivelinessGetRows`] at `rows`:
+    /// the lines of its pending gets' rows and of their markers', each lent a face's
+    /// `MAX_PENDING_LIVELINESS_GETS`.
     pub const fn places(
         at: usize,
         rows: usize,
     ) -> crate::bounded::RegionLines<LIVELINESS_GET_LINES> {
         crate::bounded::RegionLines::EMPTY
-            .seq(crate::bounded::SeqPlace::of_room::<
-                PendingGet<C>,
-                { caps::MAX_PENDING_LIVELINESS_GETS },
-            >(
-                at.wrapping_add(core::mem::offset_of!(Self, pending)),
-                rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, pending)),
-            ))
-            .seq(crate::bounded::SeqPlace::of_room::<
-                u64,
-                { caps::MAX_PENDING_LIVELINESS_GETS },
-            >(
-                at.wrapping_add(core::mem::offset_of!(Self, finalized)),
-                rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, finalized)),
-            ))
+            .seq(
+                crate::bounded::SeqPlace::of_room::<
+                    PendingGet<C>,
+                    { caps::MAX_PENDING_LIVELINESS_GETS },
+                >(
+                    at.wrapping_add(core::mem::offset_of!(Self, pending)),
+                    rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, pending)),
+                )
+                .counted(crate::bounded::RowCount::LivelinessGets),
+            )
+            .seq(
+                crate::bounded::SeqPlace::of_room::<u64, { caps::MAX_PENDING_LIVELINESS_GETS }>(
+                    at.wrapping_add(core::mem::offset_of!(Self, finalized)),
+                    rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, finalized)),
+                )
+                .counted(crate::bounded::RowCount::LivelinessGets),
+            )
     }
 }
 

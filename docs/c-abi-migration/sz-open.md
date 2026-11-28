@@ -168,7 +168,7 @@ inside the one refusal of the three, once the entropy's cell is held, and reads 
 once and whole; `an_open_refused_after_its_lend_gives_its_arena_back_once` holds the text's
 refusal. `a_vacant_span_holds_nothing_until_it_is_filled` (`placed.rs`) and
 `a_supervisor_made_over_a_reserved_wait_room_holds_that_room` (`faces.rs`) and, with
-`tables-on-use`, `an_own_vacant_allocation_holds_nothing_until_it_is_filled`
+`tables-on-use`, `an_on_use_vacant_allocation_holds_nothing_until_it_is_filled`
 (`engine/state_places.rs`) hold the new makers.
 
 What the main session reads to land it: the case's total and `assemble` in the explain document

@@ -23,7 +23,7 @@
 use crate::bounded::EpochCounter;
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::bounded::KeyUnkept;
-use crate::bounded::{Arena, LendRefused, Lent, Profile, Static, Storage};
+use crate::bounded::{Profile, Static, Storage};
 #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::id_map::key_text_within;
 #[cfg(feature = "storage-profile")]
@@ -313,9 +313,8 @@ impl<P: Storage> Default for RemoteSubscriberPeer<P> {
 unsafe impl crate::bounded::ZeroEmpty for RemoteSubscriberPeer<crate::bounded::Region> {}
 
 #[cfg(feature = "storage-profile")]
-impl RemoteSubscriberPeer<crate::bounded::Region> {
-    /// Where a table of the region policy at `at` in a region keeps its handle to the region's key
-    /// arena: the line of a region's description
+impl<P: crate::bounded::LaidOut> RemoteSubscriberPeer<P> {
+    /// Where a table at `at` keeps its handle to the key arena: the key line of a description
     /// ([`place_region`](crate::key_arena::place_region)) that hands it the arena.
     pub const fn key_line(at: usize) -> usize {
         at.wrapping_add(core::mem::offset_of!(Self, keys))
@@ -959,17 +958,17 @@ unsafe impl<D: DeclSink, U: UndeclSink, M: MatchingReport> crate::bounded::ZeroE
 {
 }
 
-impl<D: DeclSink, U: UndeclSink, M: MatchingReport>
-    RemoteSubscriberTable<D, U, crate::bounded::Region, M>
+impl<D: DeclSink, U: UndeclSink, P: crate::bounded::LaidOut, M: MatchingReport>
+    RemoteSubscriberTable<D, U, P, M>
 {
-    /// The description of a table of the region policy at `at` in a region and its watchers'
-    /// [`DeclObserverRows`](crate::decl_sink::DeclObserverRows) at `rows`.
+    /// The description of a table at `at` and, in a region, its watchers'
+    /// [`DeclObserverRows`](crate::decl_sink::DeclObserverRows) at `rows`: its pair's lines.
     pub const fn places(
         at: usize,
         rows: usize,
     ) -> crate::bounded::RegionLines<REMOTE_SUBSCRIBER_TABLE_LINES> {
         crate::bounded::RegionLines::EMPTY.with(
-            &DeclObserverPair::<D, U, crate::bounded::Region>::places(
+            &DeclObserverPair::<D, U, P>::places(
                 at.wrapping_add(core::mem::offset_of!(Self, observers)),
                 rows,
             ),
@@ -992,25 +991,6 @@ impl<D: DeclSink, U: UndeclSink, M: MatchingReport>
             #[cfg(not(all(feature = "session-matching", feature = "alloc")))]
             matching_watches: core::marker::PhantomData,
         }
-    }
-}
-
-impl<D: DeclSink, U: UndeclSink, M: MatchingReport> RemoteSubscriberTable<D, U, Lent, M> {
-    /// A table with no observer whose two observer lists are lent from `arena`, `rows` rows each
-    /// ([`DeclObserverPair::lent`]). Refused as that refuses.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
-        Ok(Self {
-            observers: DeclObserverPair::lent(arena, rows)?,
-            #[cfg(all(feature = "session-matching", feature = "alloc"))]
-            matching_watches: MatchingWatchList::new(),
-            #[cfg(not(all(feature = "session-matching", feature = "alloc")))]
-            matching_watches: core::marker::PhantomData,
-        })
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes for `rows` rows. `None` past the address space.
-    pub const fn arena_bytes(rows: usize) -> Option<usize> {
-        DeclObserverPair::<D, U, Lent>::arena_bytes(rows)
     }
 }
 
@@ -1369,6 +1349,18 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
     ) {
         // Consumed only by the `session-matching` re-evaluation below.
         let _ = &local_matching;
+        #[cfg(feature = "alloc")]
+        let told_as = peer.told_as(resolved);
+        // A repeat is kept as an alias, whose rows may be taken at their first alias: one they
+        // find no memory for is refused before anything of it is kept, as a declaration the
+        // table has no room for, so no id stands that the application was not told of.
+        #[cfg(feature = "alloc")]
+        if told_as.is_some_and(|told| told != id)
+            && !RemoteSubscriberPeer::<Q>::aliases_mut(&mut peer.aliases, &peer.keys).take_rows()
+        {
+            RemoteSubscriberPeer::<Q>::declared_mut(&mut peer.declared, &peer.keys).count_refused();
+            return;
+        }
         // R290 — same membership-tracking pattern as the
         // Q-side registry: same-id-replaces semantic, no
         // explicit conflict surfacing.
@@ -1386,8 +1378,6 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
                 return;
             }
         };
-        #[cfg(feature = "alloc")]
-        let told_as = peer.told_as(resolved);
         // Past the room or the quota: refused and counted by the table, and announced to no
         // observer, so what they are told is what the table holds.
         let quota = peer.quota;

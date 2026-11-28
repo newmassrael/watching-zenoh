@@ -227,7 +227,7 @@ lent chain, after for a borrowed one).
 | step | what | expected | send Ir | receive Ir | before it |
 |------|------|---------:|---------|------------|-----------|
 | B3a | **built** (commit "Borrow the open frame's lease into its send"): the open frame's lease lent to `send_lent_batch` by reference, so a message that does not join the open frame copies no lease whole (the 52 of 5.1) | -40 to -55 | lower: one 56-byte copy fewer on that message, no call added | none | built |
-| B3b | the conduit's open frame written where it lies: one write cursor over the slot's memory, the one `TxBuf` table of a lent frame, which the lease holds as a field, so neither the pick-up nor the put-down copies the frame's state | -150 to -250 | lower | none | a build loop: the lease and its put-down forms are named on 115 lines of 9 other files |
+| B3b | the conduit's open frame written where it lies: one write cursor over the slot's memory, the one `TxBuf` table of a lent frame, which the lease holds as a field, so neither the pick-up nor the put-down copies the frame's state (its change read in 5.4) | -150 to -250 | lower | none | **built** (5.5) |
 | B3c | the slot held for the batch: a single-conduit lend-only link lends the batch one slot, and a frame that does not join leaves before the next opens in it, as zenoh-pico's batch does; no per-frame `acquire`, no holder record | -250 to -500 | lower: no lend per frame | none | B3b; the cooperative link's slot pool (driver area) |
 | B3d | the chain's length read off its first fragment's run (`BodyWindow` counts the message's position already): no counting pass, so `emit_fragments_encoded`, `try_encoded_len` and `CountTxBuf`'s table leave the lend-only build | -200 to -300 | none (a chain only) | none | B3b; the cap's refusal moved between the first fragment's write and its emit |
 | B4a | one open chain per reliability in a `OnePeer` Router: the slot is the reliability's index, so no search, no free-slot walk and no quota count | -150 to -250 | none | none per sample (a fragment is the cold path) | a line reading of the case's own Router |
@@ -236,6 +236,163 @@ lent chain, after for a borrowed one).
 B3 is -640 to -1,105 by these lines, below the earlier -800 to -1,300 at both ends; B4 is -350
 to -650, below the earlier -600 to -1,000. None of the steps touches the receive's hot path (a
 frame's records are walked as before), and none adds a call to the send path.
+
+### 5.4 B3b's change, read in the code (not built)
+
+What the 360 bytes of 5.1 copy is the frame's write state: `TxLease` is `{ driver, slot, base,
+total, headroom, len, sent }` and `OpenSlot` `{ slot, base, total, headroom, len }`
+(`wz-session-core/src/tx_lease.rs`), so `pick_up` builds a lease of seven words out of the five
+the stage keeps (`BatchStage::lent`, `session_actions.rs`) and `keep_open` copies five back, at
+every message that joins the open frame; the holder record is read around it. The form that copies
+nothing keeps the write state in one place and writes through it where it lies:
+
+- `FrameCursor { base, total, headroom, len }` (in `tx_lease.rs`): the one `TxBuf` of a lent
+  slot, with `append`, `append_byte`, `reserve`, `reserve_rest`, `truncate`, `as_slice`
+  and `hold_to` as the lease's are now. `TxLease` is `{ driver, slot, frame: FrameCursor, sent }`
+  and `OpenSlot` `{ slot, frame: FrameCursor }`: `keep_open` and `pick_up` move the cursor
+  whole, and `OpenSlot::frame_mut` (unsafe, the safety `pick_up`'s: the record says the slot is
+  still lent) lends the cursor where the stage keeps it.
+- The join (`push_unicast`'s lent arm, line "if let Some(open) = batch.stage.lent.take()"): the
+  stage's `OpenSlot` stays in the stage; the reliability is read off `frame_mut().as_slice()`,
+  the message written through `TxSink::new(open.frame_mut())`, and a write that does not fit
+  truncated in place. Only a frame that does not join is taken out of the stage and picked up as
+  a lease for `send_lent_batch`, the cold arm.
+- One `TxBuf` table: `TxLease` no longer implements `TxBuf`; every place that unsizes a lease
+  into `EncodeBuf` writes through `lease.frame_mut()` instead, and the lease keeps `len`,
+  `as_slice`, `truncate`, `capacity` and `hold_to` as inherent methods forwarding to the
+  cursor, so the readers do not change. Were both to implement it, a lease's table (267 in the
+  case) and the cursor's would both be linked.
+
+The sites that change are those that write into a lease through `TxBuf`: in `wz-session-core`
+`session_actions.rs` (the join; `emit_on_link` reads the lease's bytes, sends it or gives it
+back, and writes nothing through `TxBuf`),
+`multicast_tx.rs` (`TxSink::new(&mut slot)`), and in the drivers and tests that name the lease
+(`wz-runtime-tokio` `stream_link.rs`, `quic_pipeline.rs` and three test files,
+`wz-session-lwip` `driver.rs`, `bundle_tests.rs`): the 115 lines of 5.3 hold the lease's name,
+and of them only the writes through `TxBuf` change. `wz-runtime-tokio` and `wz-session-lwip`
+are what the build loop is for: neither is in the case, and a call there that reads the lease as a
+`TxBuf` is found only by compiling them.
+
+Expected as 5.3 says, -150 to -250 on the transport row: `pick_up`'s 53 and the put-downs' 64
+and 70 at the join go, the open frame's state no longer copied, and the lease's `TxBuf` table
+becomes the cursor's (one table either way). Send Ir lower at each joined message (no 7-word
+build, no 5-word copy back); receive untouched. Tests: `tx_lease`'s tests over the cursor (a frame
+kept open and written again in place holds what was written, its budget, and gives the slot back
+once), the batching tests of `bundle_tests.rs` (`transport-batching` with `transport-tx-lend`),
+and the case's join counted by `BatchLendCounts`.
+
+### 5.5 B3b as built (not built or run by this lane)
+
+Two commits. "Drop the held slot no sender puts down": `HeldSlot`, `TxLease::hold` and
+`TxLease::resume` had no caller but `tx_lease`'s own tests, so the open slot is the one form a
+frame kept across calls takes. "Write a joined message where its frame lies": as 5.4 reads it,
+with one change of shape. `FrameCursor` is private to `tx_lease.rs`, and both holders lend it as
+`&mut dyn TxBuf<Error = CodecError>` (`TxLease::frame_mut`, and `OpenSlot::frame_mut`, unsafe);
+a cursor reached by `&mut FrameCursor` could be swapped between two leases by safe code, which
+would send one slot with another's lengths. The lease keeps `len`, `is_empty`, `as_slice`,
+`truncate`, `capacity` and `hold_to` as inherent forwards, and the open slot `len`, `is_empty`,
+`truncate` and `written` (unsafe), so the join reads the frame's reliability, its length and its
+roll-back with no call through the table. The join (`write_n_msg`) keeps the stage's open slot
+where it is and writes through `TxSink::new(open.frame_mut())`; only a frame that does not take
+the message is taken out of the stage and picked up for `send_lent_batch`. The `TxBuf` imports
+the lease's readers needed in `session_actions.rs` went; `wz-runtime-tokio`'s and
+`wz-session-lwip`'s tests write a lease through `frame_mut`.
+
+Tests: `tx_lease::tests::a_frame_written_where_it_is_kept_open_is_what_the_link_is_handed` (red
+if `OpenSlot::frame_mut` writes from the headroom or drops the hold, or a pick-up loses what was
+written in place), the other `tx_lease` tests over the cursor, and the joins of
+`bundle_tests::lent_window` (`tx-lend-only`, `transport-batching`, `codec-push`, `alloc`):
+`puts_of_one_reliability_share_a_frame_and_the_other_opens_its_own` and
+`a_put_the_open_frame_has_no_room_for_sends_it_once_and_opens_the_next`, whose second put is the
+message written in place and rolled back in place. Expected as 5.4 says; not measured.
+
+### 5.6 B4 read on the case, and B4a's premise corrected (not built)
+
+The case's explain report (`explain-pico-client-coop-nostd.json`, 2026-11-27, pin `6a881c21dad1`)
+gives each inlined byte to the source file, the owner, of the line it came from, and no finer: it
+splits a body by file, not by line. What it gives of the receive's fragment path:
+
+| where | bytes |
+|-------|------:|
+| `drive::fragment_in_place`, by the file of its lines: `reassembly_dispatch.rs` (the Router) 1,199, `drive.rs` 699, `chain_staging.rs` 625 (counted in the sessions area), `session_drive.rs` 111, `sn.rs` 103, `byte_cells.rs` 96, its own 61, `peer_init_caps.rs` 38, `driver_loop.rs` 33, `runtime_cell.rs` 26, `qos.rs` 24 | 3,015 |
+| the Router out of line: `ReassemblyDispatcher::init_in` 187, `Slot::end` 148 (and 70 of the staging's), `abort_rejected_channel` 67 and 7 | 479 |
+| the slot machine: the SCE engine of `ReassemblySlotPolicy` (`run_turn` 151, `new_in_place` 111, `initialize` 66), `turn_slot_engine` 24, 46 and 57, `start_slot_engine` 26 and 31 | 512 |
+
+So the case's Router is 1,199 bytes inside the fragment path, not the 2,594 of the threaded build of
+5.2: its `ManyPeers` lines and its lock are not in the case, as 5.2 expected.
+
+**B4a as 5.3 states it is not built: its premise does not hold.** Under `OnePeer` a chain is still
+keyed by its channel, the reliability and the priority (`ChainKey::matches`): a session that
+negotiated QoS interleaves the fragments of two priorities of one reliability, each on its own
+sequence numbers, as zenoh's transport keeps a defragmenter per channel. The slot cannot be the
+reliability's index without ending one priority's chain when the other opens, a behaviour the
+preset's peer (a router with QoS) can reach. zenoh-pico keys by reliability alone because it
+negotiates no QoS; wz does, so that cut would be a narrower behaviour, not a smaller form.
+
+**B4a, corrected: one walk of the slots answers the three questions.** `judge` walks the slots for
+the open chain of the fragment's channel (`find_active`); a first fragment walks them again for the
+peer's count (`peer_chain_count`) and a third time for a free slot (`Iterator::position(Slot::is_free)`
+in `admit_chain_start`). One pass over the same slots gives all three: the slot of the channel's
+open chain, the first free slot, and the count of open chains of the peer (under `OnePeer` the open
+slots, `OnePeer::is` being constant). `judge` takes that answer, and `admit_chain_start` takes the
+free slot and the count from it instead of walking. The quota stays first (§5.M), the eviction of
+`make_room` stays `ManyPeers`'s alone. Expected -80 to -150 of the Router's 1,199; receive Ir: a
+first fragment walks once instead of three times (the cold path). Tests: the existing quota, pool
+and continuation tests of `reassembly_dispatch` hold the behaviour; a new one counts, over a
+`OnePeer` Router of two slots, that a continuation finds its chain with the other slot free and a
+start refused on quota leaves both slots as they were.
+
+**B4b** stands as 5.3 states it, after the corrected B4a.
+
+### 5.7 B4a and B4b as built (not built or run by this lane)
+
+**B4a**, "Answer a fragment's slot questions in one walk", as 5.6 corrects it. `census` walks the
+slots once and answers `SlotCensus { active, free, of_peer }`: the slot of the open chain on the
+fragment's channel, the first free slot and the peer's open chains (under `OnePeer` the open
+slots, `ChainKey::same_peer` being constant there). `ChainKey::matches` became `on_channel`, read
+only for a chain of the same peer. `judge` takes the census, `admit_chain_start` reads the quota
+and the slot from it, and `abort_channel` reads its `active`; `find_active` and the quota's count
+went (`peer_chain_count` stays for the tests, over the census).
+
+What `apply_chain_boundary_markers` asked: a `First` on a channel whose chain is open evicts that
+chain before the start is admitted, so the census taken before it is stale in two answers. The
+rules now take and give the census, and an eviction answers `SlotCensus::ended`: no chain on the
+channel, the evicted slot free if it is below the first free one, and one chain fewer the peer's,
+which is what a second walk would find, since `Slot::end` frees the slot whichever way the machine
+answers. Without that a restart in a full pool would be refused as one, and a restart at the quota
+on the quota.
+
+Tests (`one_peer_tests`): `one_walk_finds_a_continuations_chain_and_refuses_a_start_past_the_quota`
+(red if the walk answers the free slot as the chain's, or its count misses an open chain) and
+`a_restart_in_a_full_pool_at_the_quota_takes_the_slot_it_ended` (red if `ended` keeps the slot
+taken or the count). The quota, pool and marker tests of `reassembly_dispatch` hold the rest, and
+`peer_chain_count`'s callers now read the census's count. Expected as 5.6 says, -80 to -150 of
+the Router's 1,199; a first fragment walks the slots once instead of three times.
+
+**B4b, corrected: `Judged` stays.** The case's explain report (5.6) places the Router's lines
+inside `fragment_in_place`: `judge`, both admissions and the drive are inlined into the one body,
+and only `init_in`, `Slot::end` and `abort_rejected_channel` are out of line. Inlined, `Judged`
+and the admissions' answers are values the compiler keeps in registers, not hand-offs through
+memory, and `Judged` is what lets the five places a judgement ends a chain (the drop marker, the
+two aborts of a continuation, a machine that disagrees, a refused stage) share one call of
+`Slot::end`; ending each where it is judged would be five call sequences for one. So 5.3's
+"without the `Judged` and `admitted` hand-offs" is not a smaller form here. What was built,
+"Release a delivered chain's slot in one order":
+
+- `finish` delivers and then releases the slot, whichever hand it took: a kept or lent chain's
+  staging is taken out of the slot before the delivery as before, so the release after it only
+  turns the slot's machine, and the delivery holds the Router borrowed, so it cannot see the
+  order. The branch on `released_first` and the second call of `Slot::end` go.
+- Each admission answers only what it decides: `admit_continuation` `Result<(), Judged>` (its
+  slot is the one it was handed), `admit_chain_start` `Result<usize, IngestOutcome>`; `judge`
+  pairs the slot with whether the chain starts. Source only; no bytes expected.
+
+Expected -20 to -60 of the Router's 1,199 (one call of `Slot::end` with its slot's address and
+one branch), well under 5.3's -200 to -400, whose share was the hand-offs. Receive Ir: one branch
+fewer at a completed chain. Test: `a_kept_chain_holds_its_buffer_until_the_delivery_drops_it`
+now holds that a kept chain's slot machine is back at `Empty` after the ingest (red if the one
+release after the delivery is skipped for a kept chain, which `active_chains` alone cannot see,
+the chain having left the slot before the delivery).
 
 ## 6. The work steps as built
 

@@ -90,7 +90,7 @@ pub(crate) struct PicoSessionExt {
 impl PicoSessionExt {
     /// A session of role `mode` and identity `zid`, under `policy` and `limits`, the snapshots its
     /// open resolved; with the connectivity plane, over the faces of `engine`, the engine that runs
-    /// it.
+    /// it, and the text of the endpoint it joined its `group` by, which its open wrote.
     ///
     /// The clock STAMPS whatever the role, which is pico's: its timestamps come
     /// from the session's own clock and zid unconditionally
@@ -119,6 +119,7 @@ impl PicoSessionExt {
         policy: SessionPolicy,
         limits: SessionLimits,
         #[cfg(feature = "connectivity")] engine: &EngineHold,
+        #[cfg(feature = "connectivity")] group: Option<crate::connectivity::GroupText>,
     ) -> Option<Self> {
         let time = crate::last_timestamp::SessionTime::try_new()?;
         // The snapshot is read by the clock and by a door a policy governs: a build with neither
@@ -139,7 +140,7 @@ impl PicoSessionExt {
         )))]
         let _ = limits;
         #[cfg(feature = "connectivity")]
-        let connectivity = Connectivity::new(lodging_place(engine)?);
+        let connectivity = Connectivity::new(lodging_place(engine)?, group);
         #[cfg(feature = "connectivity")]
         let watch_id = {
             // Weak: the engine holds the watch, and a strong hold in it would keep the engine
@@ -331,6 +332,7 @@ mod tests {
             policy,
             SessionLimits::defaults(),
             &shared.as_engine(),
+            None,
         )
         .expect("the test's heap");
         assert_eq!(
@@ -353,6 +355,7 @@ mod tests {
                 policy,
                 SessionLimits::defaults(),
                 &shared.as_engine(),
+                None,
             )
             .expect("the test's heap")
         }

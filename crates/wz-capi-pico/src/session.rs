@@ -945,12 +945,40 @@ type SocketLinks = SecuredLinks;
 #[cfg(not(feature = "engine-tokio"))]
 type WaitedSocketLinks = <SocketLinks as wz_capi_coop::ComposedLinks>::WaitedByOwner;
 
+/// [`WaitedSocketLinks`] as the session reads them: the one type the host's links are, with no
+/// table between a read and its link, where the build adds no links of its own beside the host's
+/// sockets ([`open_on_coop`]); behind their tables where it does, as the links it adds are.
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "transport-link-ws",
+        feature = "transport-link-serial",
+        all(
+            feature = "transport-link-unixpipe",
+            any(target_os = "linux", target_os = "android")
+        )
+    ))
+))]
+type ReadSocketLinks = <WaitedSocketLinks as wz_capi_coop::ComposedLinks>::Closed;
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    any(
+        feature = "transport-link-ws",
+        feature = "transport-link-serial",
+        all(
+            feature = "transport-link-unixpipe",
+            any(target_os = "linux", target_os = "android")
+        )
+    )
+))]
+type ReadSocketLinks = WaitedSocketLinks;
+
 /// The links a cooperative session opens over the host's network: its sockets', and WebSocket
 /// links over its TCP beside them where the build has them (`transport-link-ws`).
 #[cfg(all(not(feature = "engine-tokio"), feature = "transport-link-ws"))]
-type NetLinks = crate::coop_host::WithWs<WaitedSocketLinks>;
+type NetLinks = crate::coop_host::WithWs<ReadSocketLinks>;
 #[cfg(all(not(feature = "engine-tokio"), not(feature = "transport-link-ws")))]
-type NetLinks = WaitedSocketLinks;
+type NetLinks = ReadSocketLinks;
 
 /// The links a cooperative session opens over the host's network and lines: its network's, and
 /// its ttys' beside them where the build has serial links (`transport-link-serial`).
@@ -999,19 +1027,16 @@ pub(crate) struct PicoSessionHandle {
     /// What the session's report of its memory is computed from, as its open decided it.
     #[cfg(feature = "session-memory")]
     pub(crate) memory: crate::session_memory::MemoryBasis,
-    /// What an entity declared on the session needs of it, made once by the open and lent to each
-    /// declaring door (`crate::write_filter::PicoSession::of`), so no door makes its own copy and
-    /// lets it go on each of its ways out.
-    pub(crate) pico: crate::write_filter::PicoSession,
 }
 
 impl PicoSessionHandle {
+    /// The handle of the session `drive` runs, whose pico-side state is `ext`. A door that
+    /// declares on it borrows the drive's engine and the role from here
+    /// (`crate::write_filter::PicoSession::of`), so the handle holds the engine once.
     pub(crate) fn new(drive: HeldDrive, ext: crate::session_ext::PicoSessionExt) -> Self {
-        let pico = crate::write_filter::PicoSession::over(drive.engine(), &ext);
         Self {
             drive,
             ext,
-            pico,
             #[cfg(feature = "session-memory")]
             memory: crate::session_memory::MemoryBasis::default(),
         }
@@ -2008,6 +2033,10 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
     // the multicast transport has no link for it, and refuses it as pico's does.
     let group =
         group_endpoint(listen.as_deref(), connect.first().map(String::as_str)).map(String::from);
+    // The text pico writes of the group's endpoint, which each member's link starts at, written
+    // once, here.
+    #[cfg(feature = "connectivity")]
+    let group_text = group.as_deref().map(crate::connectivity::GroupText::of);
     #[cfg(not(feature = "multicast-transport"))]
     if group.is_some() {
         return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
@@ -2163,6 +2192,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
                 policy,
                 limits,
                 drive.engine_hold(),
+                group_text,
             );
             #[cfg(not(feature = "connectivity"))]
             let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid, policy, limits);
@@ -2547,6 +2577,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // transport refuses it.
     let group = group_endpoint(listen, stated);
     let joins_a_group = group.is_some();
+    // The text pico writes of the group's endpoint, which each member's link starts at, written
+    // once, here, while the config it is read from stands.
+    #[cfg(feature = "connectivity")]
+    let group_text = group.map(crate::connectivity::GroupText::of);
     #[cfg(not(feature = "multicast-transport"))]
     if joins_a_group {
         return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
@@ -2676,6 +2710,17 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // that takes the session (a get takes it more than once) would wait behind the read task
     // turn after turn.
     let links = links.waited_by_owner();
+    // A build that adds no links of its own beside the host's sockets reads each link as the one
+    // type they are (`ReadSocketLinks`).
+    #[cfg(not(any(
+        feature = "transport-link-ws",
+        feature = "transport-link-serial",
+        all(
+            feature = "transport-link-unixpipe",
+            any(target_os = "linux", target_os = "android")
+        )
+    )))]
+    let links = links.closed();
     // WebSocket links run over the host's TCP beside its sockets, waited for as those are, each
     // listener answering as many opening requests at once as the session admits handshakes.
     #[cfg(feature = "transport-link-ws")]
@@ -2830,6 +2875,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         policy,
         limits,
         drive.engine_hold(),
+        group_text,
     );
     #[cfg(not(feature = "connectivity"))]
     let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, policy, limits);
@@ -3545,11 +3591,12 @@ pub unsafe extern "C" fn z_publisher_id(
     publisher: *const crate::pubsub::z_loaned_publisher_t,
 ) -> crate::entity::z_entity_global_id_t {
     entity_id_of(
-        crate::abi::handle_ref::<
-            crate::pubsub::z_loaned_publisher_t,
-            crate::pubsub::PublisherState,
-        >(publisher)
-        .map(|s| (s.shared_zid(), s.entity_id())),
+        crate::abi::handle_at::<_, crate::pubsub::PublisherState>(publisher).map(|state| {
+            // SAFETY: the caller's: a live loaned publisher names a live state in its place.
+            let engine = unsafe { crate::object_slot::entity_engine(state) };
+            // SAFETY: as above.
+            (engine.zid(), unsafe { (*state).entity_id() })
+        }),
     )
 }
 
@@ -3584,10 +3631,12 @@ pub unsafe extern "C" fn z_querier_id(
     querier: *const crate::querier::z_loaned_querier_t,
 ) -> crate::entity::z_entity_global_id_t {
     entity_id_of(
-        crate::abi::handle_ref::<crate::querier::z_loaned_querier_t, crate::querier::QuerierState>(
-            querier,
-        )
-        .map(|s| (s.shared_zid(), s.entity_id())),
+        crate::abi::handle_at::<_, crate::querier::QuerierState>(querier).map(|state| {
+            // SAFETY: the caller's: a live loaned querier names a live state in its place.
+            let engine = unsafe { crate::object_slot::entity_engine(state) };
+            // SAFETY: as above.
+            (engine.zid(), unsafe { (*state).entity_id() })
+        }),
     )
 }
 
@@ -3625,14 +3674,16 @@ pub unsafe extern "C" fn z_subscriber_keyexpr(
 pub unsafe extern "C" fn z_subscriber_id(
     subscriber: *const crate::pubsub::z_loaned_subscriber_t,
 ) -> crate::entity::z_entity_global_id_t {
-    entity_id_of(crate::pubsub::subscriber_at(subscriber).and_then(|state| {
-        // SAFETY: the caller's: a live loaned subscriber names a live state.
-        let engine = unsafe { crate::pubsub::subscriber_engine(state) };
-        // SAFETY: as above.
-        let row = unsafe { (*state).row() }?;
-        let eid = wz_capi_port::SessionEngine::entity_id_of(&**engine, row)?;
-        Some((engine.zid(), eid))
-    }))
+    entity_id_of(
+        crate::abi::handle_at::<_, crate::pubsub::SubscriberState>(subscriber).and_then(|state| {
+            // SAFETY: the caller's: a live loaned subscriber names a live state.
+            let engine = unsafe { crate::object_slot::entity_engine(state) };
+            // SAFETY: as above.
+            let row = unsafe { (*state).row() }?;
+            let eid = wz_capi_port::SessionEngine::entity_id_of(&**engine, row)?;
+            Some((engine.zid(), eid))
+        }),
+    )
 }
 
 /// A queryable's global entity id (pico `z_queryable_id`).

@@ -616,6 +616,16 @@ impl<E: EngineHolder> LentCore<E> {
     }
 }
 
+/// What a subscriber hands its samples and its holes to, both kept as long as it stands and let
+/// go of together: refused, a declaration drops the two at once, and its shared part is made
+/// with the two.
+pub struct Callbacks {
+    /// What each sample is delivered to, in order.
+    pub on_sample: OnSample,
+    /// The miss listeners registered from the start.
+    pub misses: MissHandlers,
+}
+
 /// A live advanced subscriber on an engine's port, named by the engine's type `E` (the port's
 /// object unless the holder names its engine's own).
 pub struct EngineSubscriber<E: EngineHolder = Arc<dyn SessionEngine>> {
@@ -685,8 +695,10 @@ impl<E: EngineHolder> EngineSubscriber<E> {
             engine,
             keyexpr,
             options,
-            OnSample::boxed(Box::new(on_sample)),
-            MissHandlers::default(),
+            Callbacks {
+                on_sample: OnSample::boxed(Box::new(on_sample)),
+                misses: MissHandlers::default(),
+            },
         )
     }
 
@@ -704,50 +716,66 @@ impl<E: EngineHolder> EngineSubscriber<E> {
             engine,
             keyexpr,
             options,
-            OnSample::boxed(Box::new(on_sample)),
-            misses,
+            Callbacks {
+                on_sample: OnSample::boxed(Box::new(on_sample)),
+                misses,
+            },
         )
     }
 
-    /// [`Self::declare`] delivering to `on_sample` and reporting holes to the listeners
-    /// `misses` holds from the start, in whichever form each was made: a host whose callbacks are
-    /// lent ([`OnSample::lent`], [`MissHandlers::lent`]) declares with no memory taken for them.
+    /// [`Self::declare`] delivering to `callbacks`' sample callback and reporting holes to the
+    /// listeners it holds from the start, in whichever form each was made: a host whose callbacks
+    /// are lent ([`OnSample::lent`], [`MissHandlers::lent`]) declares with no memory taken for
+    /// them.
     pub fn declare_with(
         engine: &E,
         keyexpr: impl AsRef<str>,
-        options: AdvancedSubscriberOptions,
-        on_sample: OnSample,
-        misses: MissHandlers,
+        mut options: AdvancedSubscriberOptions,
+        callbacks: Callbacks,
     ) -> Result<Self, HostError> {
+        let forms = options.forms.take();
         let base_keyexpr = admitted(engine, keyexpr.as_ref(), &options)?;
         let make = |place: NonNull<Shared<E>>| {
             // SAFETY: the place is the box's, valid for one `Shared`, holding none, never moved.
-            unsafe { write_shared_part(place, engine, base_keyexpr, &options, on_sample, misses) }
+            unsafe { write_shared_part(place, engine, base_keyexpr, &options, callbacks) }
         };
         // SAFETY: `make` makes the whole shared part in the place it is handed. Refused, `make` is
         // dropped uncalled, and the callbacks with it.
         let shared = unsafe { Strong::try_boxed_in(make) }.map_err(|NoPlace| HostError::NoRoom)?;
-        Self::declare_over(engine, shared, &options)
+        let mut place = MaybeUninit::uninit();
+        Self::declare_over(&mut place, engine, shared, &options, forms)?;
+        // SAFETY: `declare_over` answered `Ok`, which it does with every field written.
+        Ok(unsafe { place.assume_init() })
     }
 
-    /// [`Self::declare_with`] with what the subscriber's callbacks and jobs share lodged in `core`,
-    /// a place its host lends, and not in memory of its own: a host that keeps its objects in
-    /// places of its own declares with no memory taken for it.
+    /// [`Self::declare_with`] with the subscriber made in `place` and what its callbacks and jobs
+    /// share lodged in `core`, both places its host lends: a host that keeps its objects in places
+    /// of its own declares with no memory taken for it and moves no subscriber into its place.
+    /// Refused, `place` is left unwritten.
     ///
-    /// The place is given back once ([`LentCore::new`]): at once when the declaration is refused
+    /// The options are read where the caller holds them, and the entities are named by `forms`,
+    /// handed over by value so the subscriber keeps them with no count of its own; the options'
+    /// own `forms` is [`Self::declare_with`]'s and is left empty here.
+    ///
+    /// The core is given back once ([`LentCore::new`]): at once when the declaration is refused
     /// before the part is made, and otherwise with the last of what holds the part.
-    pub fn declare_in(
+    pub fn declare_in<'p>(
+        place: &'p mut MaybeUninit<Self>,
         engine: &E,
         keyexpr: impl AsRef<str>,
-        options: AdvancedSubscriberOptions,
-        on_sample: OnSample,
-        misses: MissHandlers,
+        options: &AdvancedSubscriberOptions,
+        forms: Option<FormsHandle>,
+        callbacks: Callbacks,
         core: LentCore<E>,
-    ) -> Result<Self, HostError> {
-        let base_keyexpr = match admitted(engine, keyexpr.as_ref(), &options) {
+    ) -> Result<&'p mut Self, HostError> {
+        debug_assert!(
+            options.forms.is_none(),
+            "a subscriber declared in a lent place is named by the forms handed over"
+        );
+        let base_keyexpr = match admitted(engine, keyexpr.as_ref(), options) {
             Ok(base_keyexpr) => base_keyexpr,
             Err(refused) => {
-                drop((on_sample, misses));
+                drop((callbacks, forms));
                 // SAFETY: `LentCore::new`'s: nothing was lodged, so the place goes back now, once.
                 unsafe { (core.give_back)(core.context) };
                 return Err(refused);
@@ -756,7 +784,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         let make = |place: NonNull<Shared<E>>| {
             // SAFETY: the place is the lent core's, valid for one `Shared`, holding none, never
             // moved while it is counted.
-            unsafe { write_shared_part(place, engine, base_keyexpr, &options, on_sample, misses) }
+            unsafe { write_shared_part(place, engine, base_keyexpr, options, callbacks) }
         };
         // SAFETY: `LentCore::new`'s; a `SubscriberCore` is the place of its lodging
         // (`repr(transparent)`); `make` makes the whole shared part in the place it is handed.
@@ -768,20 +796,23 @@ impl<E: EngineHolder> EngineSubscriber<E> {
                 core.context,
             )
         };
-        Self::declare_over(engine, shared, &options)
+        Self::declare_over(place, engine, shared, options, forms)
     }
 
-    /// Declare what `options` asks for over `shared`, the subscriber's shared part, made. The
-    /// options are read where the caller holds them, as nothing declared keeps them.
-    fn declare_over(
+    /// Declare what `options` asks for over `shared`, the subscriber's shared part, made, and
+    /// write the subscriber in `place` once nothing is left to refuse, so a refusal leaves it
+    /// unwritten. The options are read where the caller holds them, as nothing declared keeps them;
+    /// the entities are named by `forms`, which the subscriber keeps.
+    fn declare_over<'p>(
+        place: &'p mut MaybeUninit<Self>,
         engine: &E,
         shared: Strong<Shared<E>>,
         options: &AdvancedSubscriberOptions,
-    ) -> Result<Self, HostError> {
+        forms: Option<FormsHandle>,
+    ) -> Result<&'p mut Self, HostError> {
         let zid = engine.session_zid();
         let recovery = options.recovery;
         let history = options.history;
-        let forms = options.forms.clone();
         let base = shared.base();
 
         // The live subscription.
@@ -789,7 +820,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         let subscriber = declare_subscription(
             engine,
             base,
-            &subscriber_form,
+            subscriber_form,
             options.allowed_origin,
             own_sink(&shared, on_live::<E>),
         )?;
@@ -835,7 +866,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
                 )
             };
             Some(declare_liveliness_subscription(
-                engine, &keyexpr, &form, true, sink,
+                engine, &keyexpr, form, true, sink,
             )?)
         } else {
             None
@@ -850,7 +881,7 @@ impl<E: EngineHolder> EngineSubscriber<E> {
                 Some(declare_subscription(
                     engine,
                     &keyexpr,
-                    &form,
+                    form,
                     options.allowed_origin,
                     own_sink(&shared, on_heartbeat::<E>),
                 )?)
@@ -867,24 +898,47 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         };
 
         // The detection token, last: a subscriber advertises itself once it can receive.
-        let detection_token = declare_detection_token(engine, base, options, id)?;
+        let detection_token = declare_detection_token(engine, base, options, forms.as_ref(), id)?;
 
-        Ok(Self {
-            subscriber,
-            periodic,
+        let cancel = GetCancel {
+            shared: shared.clone(),
+            armed: true,
+        };
+        let at = place.as_mut_ptr();
+        // SAFETY: each field is written once through a pointer to it, inside the place, after the
+        // last step that can refuse.
+        unsafe {
+            addr_of_mut!((*at).subscriber).write(subscriber);
+            addr_of_mut!((*at).periodic).write(periodic);
             #[cfg(feature = "advanced-retention")]
-            retention,
-            cancel: GetCancel {
-                shared: shared.clone(),
-                armed: true,
-            },
-            late_publishers,
-            heartbeat,
-            detection_token,
-            shared,
-            id,
-            forms,
-        })
+            addr_of_mut!((*at).retention).write(retention);
+            addr_of_mut!((*at).cancel).write(cancel);
+            addr_of_mut!((*at).late_publishers).write(late_publishers);
+            addr_of_mut!((*at).heartbeat).write(heartbeat);
+            addr_of_mut!((*at).detection_token).write(detection_token);
+            addr_of_mut!((*at).shared).write(shared);
+            addr_of_mut!((*at).id).write(id);
+            addr_of_mut!((*at).forms).write(forms);
+        }
+        // Every field is named here, so a field added to the subscriber and not written above fails
+        // to compile rather than leaving its place unwritten.
+        let _every_field_written = |subscriber: &Self| {
+            let Self {
+                subscriber: _,
+                periodic: _,
+                #[cfg(feature = "advanced-retention")]
+                    retention: _,
+                cancel: _,
+                late_publishers: _,
+                heartbeat: _,
+                detection_token: _,
+                shared: _,
+                id: _,
+                forms: _,
+            } = subscriber;
+        };
+        // SAFETY: every field was written above.
+        Ok(unsafe { place.assume_init_mut() })
     }
 
     /// This subscriber's global identity: the session's zid and the id its subscription carries.
@@ -959,8 +1013,13 @@ impl<E: EngineHolder> EngineSubscriber<E> {
         if let Some(ticker) = retention {
             ticker.detach();
         }
-        for held in [late_publishers, heartbeat].into_iter().flatten() {
-            let Held { mut entity, keeps } = held;
+        // One arm per entity and not a loop over an array of them: the array's iterator moves both
+        // entities into it and carries the drop of those it did not reach.
+        if let Some(Held { mut entity, keeps }) = late_publishers {
+            entity.retract = false;
+            retain(keeps);
+        }
+        if let Some(Held { mut entity, keeps }) = heartbeat {
             entity.retract = false;
             retain(keeps);
         }
@@ -1007,8 +1066,7 @@ unsafe fn write_shared_part<E: EngineHolder>(
     engine: &E,
     base_keyexpr: FixedKey,
     options: &AdvancedSubscriberOptions,
-    on_sample: OnSample,
-    misses: MissHandlers,
+    callbacks: Callbacks,
 ) {
     let history = options.history;
     // SAFETY: the caller's, which is `write_in`'s; the part is whole before its bounds are set.
@@ -1019,8 +1077,8 @@ unsafe fn write_shared_part<E: EngineHolder>(
             |cell| {
                 State::write_in(
                     cell,
-                    on_sample,
-                    misses,
+                    callbacks.on_sample,
+                    callbacks.misses,
                     options.recovery.is_some(),
                     usize::from(history.is_some()),
                     history
@@ -1053,20 +1111,20 @@ fn identity_of(
     EntityGlobalId::of_session(zid, eid)
 }
 
-/// Declare a plain subscription on `keyexpr` in `form`.
+/// Declare a plain subscription on `keyexpr` in `form`, whose keep the subscription holds.
 fn declare_subscription<E: EngineHolder>(
     engine: &E,
     keyexpr: &str,
-    form: &EntityForm,
+    form: EntityForm,
     origin: Locality,
     sink: SubscriberSink,
 ) -> Result<Held<Subscription<E>>, HostError> {
     let id = engine
         .declare_subscriber_on_wire(
             keyexpr,
-            wire_of(form),
+            wire_of(&form),
             origin,
-            form.retraction().cloned(),
+            form.retraction().copied(),
             sink,
         )
         .map_err(HostError::of("the engine has no subscribers"))?
@@ -1077,20 +1135,20 @@ fn declare_subscription<E: EngineHolder>(
             id,
             retract: true,
         },
-        keeps: form.kept().cloned(),
+        keeps: form.into_kept(),
     })
 }
 
-/// Declare a liveliness subscription on `keyexpr` in `form`.
+/// Declare a liveliness subscription on `keyexpr` in `form`, whose keep the subscription holds.
 fn declare_liveliness_subscription<E: EngineHolder>(
     engine: &E,
     keyexpr: &str,
-    form: &EntityForm,
+    form: EntityForm,
     history: bool,
     sink: LivelinessSink,
 ) -> Result<Held<Subscription<E>>, HostError> {
     let id = engine
-        .declare_liveliness_subscriber_on_wire(keyexpr, wire_of(form), history, sink)
+        .declare_liveliness_subscriber_on_wire(keyexpr, wire_of(&form), history, sink)
         .map_err(HostError::of("the engine has no liveliness plane"))?
         .id;
     Ok(Held {
@@ -1099,7 +1157,7 @@ fn declare_liveliness_subscription<E: EngineHolder>(
             id,
             retract: true,
         },
-        keeps: form.kept().cloned(),
+        keeps: form.into_kept(),
     })
 }
 
@@ -1108,6 +1166,7 @@ fn declare_detection_token<E: EngineHolder>(
     engine: &E,
     keyexpr: &str,
     options: &AdvancedSubscriberOptions,
+    forms: Option<&FormsHandle>,
     id: EntityGlobalId,
 ) -> Result<Option<Held<Token<E>>>, HostError> {
     let Some(detection) = options.subscriber_detection.as_ref() else {
@@ -1120,7 +1179,7 @@ fn declare_detection_token<E: EngineHolder>(
         id.eid(),
         detection.metadata.as_deref(),
     );
-    let form = form_of(options.forms.as_ref(), |f| f.token(&ke));
+    let form = form_of(forms, |f| f.token(&ke));
     let retraction = form.names_key_on_retraction().then(|| {
         if form.is_literal() {
             RetractionKey::literal()
@@ -1137,7 +1196,7 @@ fn declare_detection_token<E: EngineHolder>(
             id: token,
             retract: true,
         },
-        keeps: form.kept().cloned(),
+        keeps: form.into_kept(),
     }))
 }
 
@@ -1145,6 +1204,9 @@ fn declare_detection_token<E: EngineHolder>(
 /// runtime's own query, not an entity of the application), goes where the subscriber was told to,
 /// is bounded by the timeout so a get nobody answers ends, asks every queryable and not the best
 /// match, and takes every sample of a range and not the latest of each key.
+// Out of line, so the five gets of a subscriber share one body of the builder's stores and do not
+// each carry a copy of the chain, whose every step moves the whole options.
+#[inline(never)]
 fn get_options<'a, E: EngineHolder>(
     shared: &Shared<E>,
     parameters: &'a GetParameters,

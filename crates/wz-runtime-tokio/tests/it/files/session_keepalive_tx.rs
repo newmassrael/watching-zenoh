@@ -58,6 +58,7 @@ fn the_line_has_not_spoken_at_construction() {
     assert!(
         !actions
             .link
+            .tx
             .spoke
             .load(core::sync::atomic::Ordering::Relaxed),
         "no TX has happened at construction"
@@ -77,6 +78,7 @@ fn close_emit_marks_the_line_spoken() {
     assert!(
         actions
             .link
+            .tx
             .spoke
             .load(core::sync::atomic::Ordering::Relaxed),
         "CLOSE emit must mark the line (pico sets _transmitted on every t_msg send)"
@@ -105,6 +107,7 @@ fn handshake_emit_marks_the_line_spoken() {
     assert!(
         actions
             .link
+            .tx
             .spoke
             .load(core::sync::atomic::Ordering::Relaxed),
         "InitSyn emit must mark the line"
@@ -230,7 +233,7 @@ mod keepalive_emitter {
             "the exit from Established stops the keepalive worker"
         );
         assert!(
-            actions.link.transport_available.is_open(),
+            actions.link.tx.transport_available.is_open(),
             "Closing still holds the link, so the transport gate does not stop the emit"
         );
         assert_eq!(
@@ -393,6 +396,7 @@ mod keepalive_emitter {
         assert!(
             !actions
                 .link
+                .tx
                 .spoke
                 .load(core::sync::atomic::Ordering::Relaxed),
             "a frame still in the writer's queue has not spoken on the line"
@@ -493,6 +497,7 @@ mod keepalive_emitter {
         let idle_check = actions.clock.now_monotonic_ms() + 4_000;
         actions
             .link
+            .tx
             .spoke
             .store(true, core::sync::atomic::Ordering::Relaxed);
         assert_eq!(

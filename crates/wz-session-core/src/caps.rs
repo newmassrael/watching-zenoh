@@ -695,6 +695,11 @@ pub const MAX_CONNECTIVITY_REPLAY_EVENTS: usize = generated::MAX_CONNECTIVITY_RE
 /// loss carries it.
 pub const MAX_CONNECTIVITY_TOLD_ROWS: usize = generated::MAX_CONNECTIVITY_TOLD_ROWS;
 
+/// The interfaces a scouting window asks on: the rows its ask sockets are held in, beside the
+/// group's socket. An interface past them is left out and counted, as zenoh-pico's scout leaves
+/// out one past `Z_MAX_NUM_SCOUT_INTERFACES`.
+pub const MAX_SCOUT_INTERFACES: usize = generated::MAX_SCOUT_INTERFACES;
+
 /// The rows of faces that came or went a session holds for the program's watchers of its faces
 /// between two deliveries, reserved at its open: a session that holds fewer faces reserves fewer.
 /// A row past them is let go of and counted on the last row kept, which tells the watchers of it

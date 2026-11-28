@@ -107,9 +107,8 @@ use alloc::vec::Vec;
 
 // R311gb (Track 2) — bounded backing + the capacity SSOT for the no-alloc
 // pending table.
-use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
+use crate::bounded::{BoundedVec, Profile, Storage};
 use crate::caps;
-use crate::key_arena::{KeySpace, LentKeys};
 use crate::key_gate::KeyGate;
 use crate::registry_error::RegisterError;
 use crate::reply_acceptance::{ReplyAcceptance, ReplyAcceptanceStored};
@@ -1586,56 +1585,39 @@ impl<C: ReplySink> ReplyRegistry<C, crate::bounded::OnUse> {
     }
 }
 
-impl<C: ReplySink> ReplyRegistry<C, Lent> {
-    /// An empty registry whose pending queries are `rows` rows lent from `arena`, at most
-    /// `MAX_PENDING_QUERIES`, the keyexpr each was asked under kept in `keys`, the session's key
-    /// arena: the gets a session holds pending on one face, at its open. Refused, taking nothing,
-    /// past that ceiling or past what the arena has left.
-    pub fn lent(arena: &mut Arena, keys: KeySpace, rows: usize) -> Result<Self, LendRefused> {
-        Ok(Self {
-            pending: arena.lend(rows)?,
-            keys: LentKeys::from(keys),
-            ..Self::default()
-        })
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes for `rows` rows. `None` past the address space.
-    pub const fn arena_bytes(rows: usize) -> Option<usize> {
-        Arena::table_bytes::<Pending<C, Lent>>(rows)
-    }
-}
-
-/// The rows of a [`ReplyRegistry`] of the region policy, which a region lays out beside it: its
-/// pending queries', at the build's bound.
-pub struct ReplyRegistryRows<C: ReplySink> {
-    pending:
-        [core::mem::MaybeUninit<Pending<C, crate::bounded::Region>>; caps::MAX_PENDING_QUERIES],
+/// The rows of a [`ReplyRegistry`] of a policy a description places, which a region lays out
+/// beside it: its pending queries', at the build's bound.
+pub struct ReplyRegistryRows<C: ReplySink, P: crate::bounded::LaidOut = crate::bounded::Region> {
+    pending: [core::mem::MaybeUninit<Pending<C, P>>; caps::MAX_PENDING_QUERIES],
 }
 
 // SAFETY: the rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
-unsafe impl<C: ReplySink> crate::bounded::ZeroEmpty for ReplyRegistryRows<C> {}
+unsafe impl<C: ReplySink, P: crate::bounded::LaidOut> crate::bounded::ZeroEmpty
+    for ReplyRegistryRows<C, P>
+{
+}
 
-/// The lines a region's description holds for one [`ReplyRegistry`] of the region policy: its
-/// pending queries' rows (and its handle to the key arena, a line of the other kind).
+/// The lines a description holds for one [`ReplyRegistry`]: its pending queries' rows (and its
+/// handle to the key arena, a line of the other kind).
 pub const REPLY_REGISTRY_LINES: usize = 1;
 
-impl<C: ReplySink> ReplyRegistry<C, crate::bounded::Region> {
-    /// The description of a registry of the region policy at `at` in a region and its
-    /// [`ReplyRegistryRows`] at `rows`: the line of its pending queries' rows and its handle to
-    /// the region's key arena. The registry is written as [`Default`] makes one before the
-    /// region is placed, since a deadline of none and the build's key gate are not zero bytes.
+impl<C: ReplySink, P: crate::bounded::LaidOut> ReplyRegistry<C, P> {
+    /// The description of a registry at `at` and, in a region, its [`ReplyRegistryRows`] at
+    /// `rows`: the line of its pending queries' rows, lent a face's `MAX_PENDING_QUERIES`, and its
+    /// handle to the key arena. The registry is written as [`Default`] makes one before it is
+    /// placed or lent, since a deadline of none and the build's key gate are not zero bytes.
     pub const fn places(
         at: usize,
         rows: usize,
     ) -> crate::bounded::RegionLines<REPLY_REGISTRY_LINES> {
         crate::bounded::RegionLines::EMPTY
-            .seq(crate::bounded::SeqPlace::of_room::<
-                Pending<C, crate::bounded::Region>,
-                { caps::MAX_PENDING_QUERIES },
-            >(
-                at.wrapping_add(core::mem::offset_of!(Self, pending)),
-                rows.wrapping_add(core::mem::offset_of!(ReplyRegistryRows<C>, pending)),
-            ))
+            .seq(
+                crate::bounded::SeqPlace::of_room::<Pending<C, P>, { caps::MAX_PENDING_QUERIES }>(
+                    at.wrapping_add(core::mem::offset_of!(Self, pending)),
+                    rows.wrapping_add(core::mem::offset_of!(ReplyRegistryRows<C, P>, pending)),
+                )
+                .counted(crate::bounded::RowCount::Queries),
+            )
             .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
     }
 }
@@ -6216,7 +6198,7 @@ mod tests {
 // (C1c-g each pin a reply-consumer marker ON, cfg'ing the module out).
 #[cfg(test)]
 #[cfg(all(
-    feature = "storage-profile",
+    feature = "alloc",
     feature = "codec-response",
     not(feature = "pubsub-put"),
     not(feature = "pubsub-delete"),

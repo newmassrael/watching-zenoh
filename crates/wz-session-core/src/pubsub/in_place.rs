@@ -1211,8 +1211,8 @@ mod tests {
         use crate::bounded::Lent;
         let mut side = SubscriberPeer::<Lent>::default();
         if lend {
-            let bytes = SubscriberPeer::<Lent>::arena_bytes(0).expect("one row");
-            side.lend_rows(&mut arena(bytes), 0)
+            let bytes = SubscriberPeer::<Lent>::compose_bytes().expect("one row");
+            side.lend_compose_row(&mut arena(bytes))
                 .expect("the arena has the bytes the side says it takes");
         }
         let mut table: hashbrown::HashMap<crate::wire_id::ExprId, String> =
@@ -1315,15 +1315,15 @@ mod tests {
     #[test]
     fn a_lent_side_takes_the_bytes_it_says_for_its_row() {
         use crate::bounded::Lent;
-        let bytes = SubscriberPeer::<Lent>::arena_bytes(0).expect("one row");
+        let bytes = SubscriberPeer::<Lent>::compose_bytes().expect("one row");
         assert!(bytes >= crate::caps::MAX_KEYEXPR_BYTES, "{bytes} bytes");
         let mut exact = arena(bytes);
         assert!(SubscriberPeer::<Lent>::default()
-            .lend_rows(&mut exact, 0)
+            .lend_compose_row(&mut exact)
             .is_ok());
         assert_eq!(exact.high_water(), bytes);
         assert!(SubscriberPeer::<Lent>::default()
-            .lend_rows(&mut arena(bytes - 1), 0)
+            .lend_compose_row(&mut arena(bytes - 1))
             .is_err());
     }
 

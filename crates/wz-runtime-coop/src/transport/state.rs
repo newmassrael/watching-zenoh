@@ -18,11 +18,10 @@ use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use core::ops::Deref;
 
-use wz_session_core::byte_cells::LentByteCells;
+use wz_session_core::bounded::Storage;
 use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 #[cfg(feature = "group")]
 use wz_session_core::group_locator::parse_group_locator;
-use wz_session_core::link::BoxedLinkDriver;
 #[cfg(feature = "link-admission")]
 use wz_session_core::link_admission::LinkAdmission;
 #[cfg(feature = "link-admission")]
@@ -40,7 +39,7 @@ use wz_session_core::unicast_rx::RouterLend;
 
 #[cfg(feature = "group")]
 use super::GroupRecord;
-use super::{EndpointRefusal, LinkCalls, Refusal, TransportRefusal, TransportSession};
+use super::{EndpointRefusal, LinkCalls, Refusal, TransportRefusal, TransportSession, WalkRefusal};
 use crate::dial::Begun;
 use crate::executor::SpawnRefusal;
 #[cfg(feature = "listen")]
@@ -56,9 +55,9 @@ use crate::link_cells::{CellRc, CountKind, OneTask};
 use crate::locator_text::parse_listen_locator;
 use crate::reassembly_rx::SessionReassembly;
 use crate::session_drive::{
-    place_session_with_router, spawn_session_with_router, LinkOpenError, LinkWait, OpenedLink,
-    PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionPump, SessionRole,
-    WaitOn,
+    place_session_with_router, spawn_session_with_router, DynLink, LinkOpenError, LinkWait,
+    OpenedLink, PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionPump,
+    SessionRole, SharedPump, WaitOn,
 };
 use crate::session_runtime::{EntropyCount, SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
@@ -67,9 +66,19 @@ use wz_session_core::link_life::{Effects, LinkPhase, LinkRole};
 use wz_session_core::reassembly_dispatch::ChainPeers;
 
 /// The runtime of a link's session over the transport of `T`, read under the lock type of the
-/// values it lends the session.
+/// values it lends the session and as sending through the type of its link's sink.
 type LinkRuntime<T> =
-    CoopRuntime<<T as TransportFaces>::Clock, dyn BoxedLinkDriver, <T as TransportFaces>::Lock>;
+    CoopRuntime<<T as TransportFaces>::Clock, SinkOf<T>, <T as TransportFaces>::Lock>;
+
+/// The type the actions of a link's session over the network of `T` send through the link as: the
+/// stack's own type where its set of links is closed, the driver's trait where it is open
+/// (`SharedPump::Sink`).
+type SinkOf<T> = <PumpOf<T> as SharedPump<CountOf<T>>>::Sink;
+
+/// What the pump of a link's session over the transport of `T` is built of, reading the link
+/// through `P` and sending through the type of the link's sink.
+pub type LinkFields<T, P> =
+    PumpFields<<T as TransportFaces>::Clock, P, SinkOf<T>, <T as TransportFaces>::Lock>;
 
 /// The session of a link over the transport of `T` whose pump its owner holds and steps itself
 /// ([`TransportState::place_link`]): it stages its fragments in the Router of the face it serves,
@@ -77,7 +86,7 @@ type LinkRuntime<T> =
 pub type LinkPump<T, P> = SessionPump<
     <T as TransportFaces>::Clock,
     P,
-    dyn BoxedLinkDriver,
+    SinkOf<T>,
     RouterLend<RouterOf<T>, <T as TransportFaces>::RouterPlace>,
     <T as TransportFaces>::Lock,
 >;
@@ -88,7 +97,7 @@ pub type RouterOf<T> = SessionReassembly<<T as TransportFaces>::Peers>;
 
 /// The handle on the actions of a link's session over the transport of `T`.
 type LinkHandle<T> =
-    SessionHandle<<T as TransportFaces>::Clock, dyn BoxedLinkDriver, <T as TransportFaces>::Lock>;
+    SessionHandle<<T as TransportFaces>::Clock, SinkOf<T>, <T as TransportFaces>::Lock>;
 
 /// The session's clock over the transport of `T`.
 type LinkTime<T> = CoopTime<<T as TransportFaces>::Clock>;
@@ -110,9 +119,16 @@ type CountOf<T> = <<T as TransportFaces>::Lock as LockKind>::LinkCount;
 /// entropy): as the lock kind counts them (`LockKind::SharedCount`).
 type SharedOf<T> = <<T as TransportFaces>::Lock as LockKind>::SharedCount;
 
-/// The handle on the link a session over the transport of `T` sends and reads by, counted as the
-/// link's parts are.
-type LinkOf<T> = CellRc<dyn SessionDatagramLink, CountOf<T>>;
+/// The type the shared handle on a link over the network of `T` reads it as: the stack's own type
+/// where its set of links is closed, the link's trait where it is open (`SharedPump::Link`).
+pub type StackLinkOf<T> =
+    <<<T as TransportFaces>::Links as SessionLinks<CountOf<T>>>::Pump as SharedPump<
+        CountOf<T>,
+    >>::Link;
+
+/// The shared handle on the link a session over the transport of `T` reads by, counted as the
+/// link's parts are: what the pump of a link no gate holds back reads.
+pub type LinkOf<T> = CellRc<StackLinkOf<T>, CountOf<T>>;
 
 /// What a session's transport is made of: the session's clock, the network its links are opened
 /// on, and the engine's records of the session's half of a link, of a face and of a group it
@@ -124,8 +140,15 @@ pub trait TransportFaces {
     type Lock: LockKind;
     /// The network the session's links, ports and groups are opened on.
     type Links: SessionLinks<<Self::Lock as LockKind>::LinkCount> + 'static;
-    /// The session's half of one link.
-    type Session: TransportSession<Self::Clock, Self::Lock>;
+    /// The session's half of one link, whose actions send through the link as the type its stack's
+    /// pump names (`SharedPump::Sink`).
+    type Session: TransportSession<
+        Self::Clock,
+        Self::Lock,
+        <<Self::Links as SessionLinks<<Self::Lock as LockKind>::LinkCount>>::Pump as SharedPump<
+            <Self::Lock as LockKind>::LinkCount,
+        >>::Sink,
+    >;
     /// What a face holds of its link while the link is up or in its handshake: the session's half
     /// of the link itself, or a handle on the place that holds it apart from the session's state.
     type Wire: FaceWire;
@@ -159,6 +182,10 @@ pub trait TransportFaces {
     /// pump of the one link it steps itself, so that a receive that lends the Router does so with
     /// nothing of the session's state held.
     type Router: TransportRouter;
+    /// The storage of the transport's own rows, the texts of the session's endpoints: the rows
+    /// its open lent, or rows of the allocator counted to the endpoints it names and taken at the
+    /// first text written, where the session's tables take their memory on use.
+    type Policy: Storage;
 }
 
 /// The Router a transport holds of its session ([`TransportFaces::Router`]): what the transport
@@ -210,9 +237,9 @@ pub struct TransportState<T: TransportFaces> {
     /// asked of each.
     pub links: LinkSupervisor<T::Links, T::Face, T::Places, CountOf<T>>,
     /// The texts of the endpoints the session dials and listens on, written once when it opened
-    /// into rows of its arena: a dial and a port name their endpoint by its row, and the config's
-    /// copies went with the open.
-    pub endpoints: EndpointTexts,
+    /// into rows of the transport's storage (`TransportFaces::Policy`): a dial and a port name
+    /// their endpoint by its row, and the config's copies went with the open.
+    pub endpoints: EndpointTexts<T::Policy>,
     /// The multicast groups the session joined, each a face of its own (`group`).
     #[cfg(feature = "group")]
     pub groups: Vec<T::Group>,
@@ -223,16 +250,15 @@ pub struct TransportState<T: TransportFaces> {
     /// engine owns, which it drops after every link's actions and task.
     #[cfg(feature = "link-admission")]
     pub admission: PlacedRef<dyn LinkAdmission>,
-    /// The cells each link's gates are placed in when the session makes the link, where they hold
-    /// the link back (`LinkCalls::gate`), lent from the arena; none for a plan that laid out none.
-    pub gate_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
-    /// The cells each link's actions are placed in when the session makes the link, lent from the
-    /// arena; none for a plan that laid out none.
-    pub actions_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
-    /// The cells the two halves of each link's actions are placed in together when the session
-    /// makes the link (its own state and the session's kernel, `place_halves`), lent from the
-    /// arena; none for a plan that laid out none, whose halves lie on the heap.
-    pub halves_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
+    /// Where each link's gates are placed when the session makes the link, where they hold the
+    /// link back (`LinkCalls::gate`): the cells the arena lent, the heap for a plan that laid out
+    /// none, or the heap alone where the links' kind lends no table ([`CountKind::Cells`]).
+    pub gate_cells: <CountOf<T> as CountKind>::Cells,
+    /// Where each link's actions are placed when the session makes the link, as its gates are.
+    pub actions_cells: <CountOf<T> as CountKind>::Cells,
+    /// Where the two halves of each link's actions are placed together when the session makes the
+    /// link (its own state and the session's kernel, `place_halves`), as its gates are.
+    pub halves_cells: <CountOf<T> as CountKind>::Cells,
     /// The key-wire form of each link the session opens: the session's, and the one stated for an
     /// endpoint apart from it (`shared-key-ids`).
     #[cfg(feature = "shared-key-ids")]
@@ -305,7 +331,12 @@ pub struct PumpPlace<'p, T: TransportFaces, E> {
 
 /// A link whose session its owner steps itself, made ([`TransportState::place_wire`]): the
 /// wire its face keeps, what the session hands its reads to, and the pump, in its place.
-pub struct PlacedWire<'p, T: TransportFaces, K: LinkCalls<T::Clock, T::Lock>, E> {
+pub struct PlacedWire<
+    'p,
+    T: TransportFaces,
+    K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, SinkOf<T>>,
+    E,
+> {
     /// The wire the face keeps.
     pub wire: Wire<K::Session, E, CountOf<T>>,
     /// What the owner hands each step of the pump.
@@ -315,12 +346,13 @@ pub struct PlacedWire<'p, T: TransportFaces, K: LinkCalls<T::Clock, T::Lock>, E>
 }
 
 /// What the making of a link's session builds before the session runs
-/// ([`TransportState::build_wire`]).
-struct WireBuilt<T: TransportFaces, D, S> {
-    fields: PumpFields<T::Clock, LinkOf<T>, dyn BoxedLinkDriver, T::Lock>,
-    dispatch: D,
-    session: S,
-    link: LinkOf<T>,
+/// ([`TransportState::build_wire`]), by the session's calls `K`: its pump reads the link as the
+/// type the gates read it as (`LinkCalls::Link`).
+struct WireBuilt<T: TransportFaces, K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, SinkOf<T>>> {
+    fields: LinkFields<T, CellRc<K::Link, CountOf<T>>>,
+    dispatch: K::Dispatch,
+    session: K::Session,
+    link: CellRc<K::Link, CountOf<T>>,
     input_wait: Option<WaitOn>,
     room_wait: Option<WaitOn>,
 }
@@ -413,6 +445,12 @@ impl<T: TransportFaces> TransportState<T> {
         endpoint.map_or("", |endpoint| endpoint.text(&self.endpoints))
     }
 
+    /// The refusal the walk over the endpoints ends the session with: `refusal`, the text of
+    /// the endpoint it passed read in the session's texts now, once.
+    pub fn walk_refused(&self, refusal: &WalkRefusal) -> TransportRefusal {
+        refusal.with_text(self.endpoint_text(refusal.passed()))
+    }
+
     /// A link to `endpoint` refused for want of a cell of the session's tables, as one past the
     /// stack's buffers is. Out of line: each part of a link a cell holds is refused by it.
     #[cold]
@@ -439,7 +477,7 @@ impl<T: TransportFaces> TransportState<T> {
         endpoint: Option<&DialEndpoint>,
     ) -> Result<LinkHandle<T>, TransportRefusal> {
         let actions: LinkHandle<T> =
-            CellRc::<_, CountOf<T>>::in_cells_of(self.actions_cells.as_ref(), actions)
+            CellRc::<_, CountOf<T>>::in_cells_of(&self.actions_cells, actions)
                 .map_err(|_| self.cells_exhausted(endpoint))?;
         #[cfg(feature = "link-admission")]
         actions
@@ -467,7 +505,7 @@ impl<T: TransportFaces> TransportState<T> {
             unsafe { halves.write(link, kernel) }
         };
         // SAFETY: `HalvesMaking::write` leaves a whole value at each place when it returns.
-        unsafe { CellRc::<_, CountOf<T>>::halves_in_of(self.halves_cells.as_ref(), write) }
+        unsafe { CellRc::<_, CountOf<T>>::halves_in_of(&self.halves_cells, write) }
             .ok_or_else(|| self.cells_exhausted(endpoint))
     }
 
@@ -493,7 +531,7 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn spawn_link<P, D>(
         &self,
         local: &CoopLocalSet<T::Clock>,
-        fields: PumpFields<T::Clock, P, dyn BoxedLinkDriver, T::Lock>,
+        fields: LinkFields<T, P>,
         dispatch: D,
     ) -> Result<CoopLocalJoinHandle<DriverOutcome>, TransportRefusal>
     where
@@ -514,8 +552,8 @@ impl<T: TransportFaces> TransportState<T> {
     pub fn place_link<'p, P>(
         &self,
         place: &'p mut MaybeUninit<LinkPump<T, P>>,
-        runtime: CoopRuntime<T::Clock, dyn BoxedLinkDriver, T::Lock>,
-        fields: PumpFields<T::Clock, P, dyn BoxedLinkDriver, T::Lock>,
+        runtime: CoopRuntime<T::Clock, SinkOf<T>, T::Lock>,
+        fields: LinkFields<T, P>,
         lend: RouterLend<RouterOf<T>, T::RouterPlace>,
     ) -> Option<&'p mut LinkPump<T, P>>
     where
@@ -673,7 +711,7 @@ impl<T: TransportFaces> TransportState<T> {
     // Always inlined: its one caller is never inlined, so what is built here lies in that frame,
     // which has returned before the link's task first runs.
     #[inline(always)]
-    pub fn make_wire<K: LinkCalls<T::Clock, T::Lock>>(
+    pub fn make_wire<K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, SinkOf<T>>>(
         &self,
         calls: &mut K,
         face: FaceId,
@@ -691,7 +729,7 @@ impl<T: TransportFaces> TransportState<T> {
         Ok(Wire::new(
             built.session,
             task,
-            built.link,
+            <K::Link as DynLink>::into_dyn(built.link),
             built.input_wait,
             built.room_wait,
         ))
@@ -703,14 +741,17 @@ impl<T: TransportFaces> TransportState<T> {
     /// [`TransportRefusal::NoTask`] when the pump could not be built in its place.
     // Always inlined, as `make_wire` is: its one caller is never inlined.
     #[inline(always)]
-    pub fn place_wire<'p, K: LinkCalls<T::Clock, T::Lock>, E: LinkEnd>(
+    pub fn place_wire<'p, K, E: LinkEnd>(
         &self,
         calls: &mut K,
         opened: OpenedOf<T>,
         opened_as: OpenedAs<'_>,
         making: WireMaking<'_, T::Clock, SharedOf<T>>,
         place: PumpPlace<'p, T, E>,
-    ) -> Result<PlacedWire<'p, T, K, E>, TransportRefusal> {
+    ) -> Result<PlacedWire<'p, T, K, E>, TransportRefusal>
+    where
+        K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, SinkOf<T>, Link = StackLinkOf<T>>,
+    {
         let runtime = making.local.runtime().retyped();
         let OpenedAs {
             face,
@@ -726,7 +767,7 @@ impl<T: TransportFaces> TransportState<T> {
             wire: Wire::new(
                 built.session,
                 end,
-                built.link,
+                <K::Link as DynLink>::into_dyn(built.link),
                 built.input_wait,
                 built.room_wait,
             ),
@@ -739,7 +780,7 @@ impl<T: TransportFaces> TransportState<T> {
     /// halves placed in their cells, the session's tables told of the link, its pump behind the
     /// gates, placed in theirs, and the parts the session's pump is built of.
     #[inline(always)]
-    fn build_wire<K: LinkCalls<T::Clock, T::Lock>>(
+    fn build_wire<K: LinkCalls<T::Clock, T::Lock, StackLinkOf<T>, SinkOf<T>>>(
         &self,
         calls: &mut K,
         face: FaceId,
@@ -747,7 +788,7 @@ impl<T: TransportFaces> TransportState<T> {
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
         making: WireMaking<'_, T::Clock, SharedOf<T>>,
-    ) -> Result<WireBuilt<T, K::Dispatch, K::Session>, TransportRefusal> {
+    ) -> Result<WireBuilt<T, K>, TransportRefusal> {
         let OpenedLink { sink, pump } = opened;
         let WireMaking {
             params,
@@ -776,9 +817,10 @@ impl<T: TransportFaces> TransportState<T> {
             return Err(TransportRefusal::EntropyUnavailable);
         }
         // One handle to the link, which its gates hold: a stack whose pump is a shared handle
-        // already gives that one (`SessionLinks::share_pump`). Had before the session's tables
-        // learn of the link, so a heap with no room for it leaves them as they were.
-        let pump = <T::Links as SessionLinks<CountOf<T>>>::share_pump(pump)
+        // already gives that one (`SharedPump::share`), read as the type the stack's links are.
+        // Had before the session's tables learn of the link, so a heap with no room for it leaves
+        // them as they were.
+        let pump = <PumpOf<T> as SharedPump<CountOf<T>>>::share(pump)
             .ok_or(TransportRefusal::HeapRefused)?;
         #[cfg(feature = "shared-key-ids")]
         let key_form = Some(self.key_form_of(endpoint));
@@ -792,7 +834,7 @@ impl<T: TransportFaces> TransportState<T> {
         // The gates take a cell of the session's table where they hold the link back, and a link
         // past the cells is refused as one past the buffers is.
         let gate = calls
-            .gate(pump, &actions, self.gate_cells.as_ref())
+            .gate(pump, &actions, &self.gate_cells)
             .ok_or_else(|| self.cells_exhausted(endpoint))?;
         let link = K::gated_link(&gate);
         let (dispatch, session) = calls.wire_parts(face, actions.clone(), &gate);
@@ -825,7 +867,7 @@ impl<T: TransportFaces> TransportState<T> {
     #[inline(always)]
     pub fn dial_row(&mut self, at: usize, row: usize) -> Result<AnswerOf<T>, TransportRefusal> {
         let begun = self.begin_dial(self.endpoints.dial_text(row))?;
-        Ok(self.links.ask_dial(at, DialEndpoint::Listed(row), begun))
+        Ok(self.links.ask_dial(at, begun))
     }
 
     /// The link a dial of `endpoint` answered with, or why it is none: the endpoint and the

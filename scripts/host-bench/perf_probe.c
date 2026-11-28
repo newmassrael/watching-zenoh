@@ -9,6 +9,7 @@
 //
 //   perf_probe pong -m peer (-l|-e) ENDPOINT [-b] [-T NAME]
 //   perf_probe ping -m peer (-l|-e) ENDPOINT -s SIZE -n PINGS -w WARMUP_MS [-o TIMEOUT_MS] [-b] [-M] [-T NAME]
+//                   [-H FILE]
 //   perf_probe sub  -m peer (-l|-e) ENDPOINT -w WARMUP_MS -t WINDOW_S [-T NAME]
 //   perf_probe pub  -m peer (-l|-e) ENDPOINT -s SIZE -t SECONDS [-b] [-d] [-M] [-T NAME]
 //
@@ -27,7 +28,8 @@
 // pong prints `perf_probe pong answered=<n> cpu_ns=<process CPU from the first ping to the stop>
 // stopped_by=<stop|signal>` when the stop arrives, or when it is sent SIGTERM (then the window ends at the
 // signal and includes the idle time after the last ping, which the reader does not use). A run that lost more
-// than a tenth of the counted round trips stops early with aborted=1.
+// than a tenth of the counted round trips stops early with aborted=1. With -H, ping also writes each counted
+// round trip to FILE (`write_samples`).
 //
 // sub / pub: the throughput. pub puts SIZE bytes on perf/thr as fast as the session takes them for SECONDS
 // (congestion control BLOCK, or DROP with -d) and prints
@@ -811,12 +813,13 @@ struct options {
     int drop;
     int match;
     const char *transport_name;
+    const char *samples;
 };
 
 static int usage(void) {
     fprintf(stderr,
             "usage: perf_probe ping|pong|pub|sub -m MODE [-l ENDPOINT] [-e ENDPOINT] [-s SIZE] [-n PINGS]\n"
-            "                  [-w WARMUP_MS] [-o TIMEOUT_MS] [-t SECONDS] [-b] [-d] [-M] [-T NAME]\n");
+            "                  [-w WARMUP_MS] [-o TIMEOUT_MS] [-t SECONDS] [-b] [-d] [-M] [-T NAME] [-H FILE]\n");
     return 2;
 }
 
@@ -1041,6 +1044,21 @@ static uint64_t nearest_rank(const uint64_t *sorted, size_t n, unsigned p) {
     return sorted[rank - 1];
 }
 
+// -H FILE: each counted round trip in the order it was made, a line `<start_ns> <rtt_ns>` with its start from
+// the first one's, so a tail is read as a histogram and in time (a period, a burst) and not only as a rank.
+// A file that cannot be written is said on stderr and leaves the figures as they are.
+static void write_samples(const char *path, const uint64_t *at, const uint64_t *rtt, size_t counted) {
+    FILE *out = fopen(path, "w");
+    if (out == NULL) {
+        fprintf(stderr, "perf_probe ping: unable to write the samples to %s\n", path);
+        return;
+    }
+    for (size_t i = 0; i < counted; i++) {
+        fprintf(out, "%llu %llu\n", (unsigned long long)at[i], (unsigned long long)rtt[i]);
+    }
+    fclose(out);
+}
+
 // One round trip of `seq`: its time in nanoseconds, or 0 when no answer came in `timeout_ns`.
 static uint64_t round_trip(const z_loaned_session_t *session, const z_loaned_publisher_t *pub, uint8_t *buf,
                            const struct options *o, uint64_t seq, uint64_t timeout_ns) {
@@ -1073,7 +1091,9 @@ static int run_ping(const z_loaned_session_t *session, const struct options *o) 
     }
     uint8_t *buf = malloc(o->size);
     uint64_t *rtt = malloc(sizeof *rtt * (o->pings > 0 ? o->pings : 1));
-    if (buf == NULL || rtt == NULL) {
+    // With -H, the start of each counted round trip (from the first) beside its time, for the file.
+    uint64_t *at = o->samples != NULL ? malloc(sizeof *at * (o->pings > 0 ? o->pings : 1)) : NULL;
+    if (buf == NULL || rtt == NULL || (o->samples != NULL && at == NULL)) {
         printf("perf_probe ping: out of memory\n");
         return 1;
     }
@@ -1088,9 +1108,12 @@ static int run_ping(const z_loaned_session_t *session, const struct options *o) 
     size_t counted = 0;
     unsigned lost = 0;
     int aborted = 0;
+    const uint64_t first_ns = now_ns();
     for (unsigned i = 0; i < o->pings && !terminated; i++) {
+        const uint64_t start_ns = now_ns();
         uint64_t t = round_trip(session, pub, buf, o, ++seq, timeout_ns);
         if (t > 0) {
+            if (at != NULL) at[counted] = start_ns - first_ns;
             rtt[counted++] = t;
             all++;
         } else if (++lost > o->pings / 10U) {
@@ -1099,6 +1122,7 @@ static int run_ping(const z_loaned_session_t *session, const struct options *o) 
         }
     }
     const uint64_t cpu1 = cpu_ns();
+    if (at != NULL) write_samples(o->samples, at, rtt, counted);
     uint64_t p50 = 0, p90 = 0, p99 = 0, lo = 0, hi = 0, mean = 0;
     if (counted > 0) {
         qsort(rtt, counted, sizeof *rtt, compare_u64);
@@ -1126,6 +1150,7 @@ static int run_ping(const z_loaned_session_t *session, const struct options *o) 
         trace_rc("stop put end", (int)put);
         sleep_ms(20);
     }
+    free(at);
     free(rtt);
     free(buf);
     return 0;
@@ -1335,12 +1360,12 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
 #endif
     if (argc < 2) return usage();
-    struct options o = {argv[1], 8, 20000, 3000, 100, 5, 0, 0, 0, NULL};
+    struct options o = {argv[1], 8, 20000, 3000, 100, 5, 0, 0, 0, NULL, NULL};
     z_owned_config_t config;
     z_config_default(&config);
     int opt;
     // The role is the first word; the options follow it, read as a command line of their own.
-    while ((opt = getopt(argc - 1, argv + 1, "m:l:e:s:n:w:o:t:bdMT:")) != -1) {
+    while ((opt = getopt(argc - 1, argv + 1, "m:l:e:s:n:w:o:t:bdMT:H:")) != -1) {
         switch (opt) {
             case 'm':
                 zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_MODE_KEY, optarg);
@@ -1377,6 +1402,9 @@ int main(int argc, char **argv) {
                 break;
             case 'T':
                 o.transport_name = optarg;
+                break;
+            case 'H':
+                o.samples = optarg;
                 break;
             default:
                 return usage();

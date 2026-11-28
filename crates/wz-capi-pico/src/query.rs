@@ -1373,6 +1373,9 @@ pub unsafe extern "C" fn z_query_reply_err_options_default(
 /// (→ the C `drop(context)`). It lies in its place ([`QueryablePlace`]) beside the C
 /// closure the row calls, which outlives it until the row lets go of it.
 pub(crate) struct QueryableState {
+    /// The session's engine on the tokio engine, whose places are its pools' and hold none. On the
+    /// cooperative engine the place's lender holds it (`crate::object_slot::entity_engine`).
+    #[cfg(feature = "engine-tokio")]
     engine: crate::session::EngineHold,
     /// The declaration, once made: the place is filled before the queryable is declared, as the
     /// closure its row calls lies in it, and one whose declaration was refused is let go of with
@@ -1396,22 +1399,45 @@ struct DeclaredQueryable {
     record: crate::keyexpr::RecordKey,
 }
 
-impl QueryableState {
-    /// Point the cached loan at `lent`, the key the session's record of the queryable keeps as its
-    /// declaration answered it, once declared and placed.
-    ///
-    /// A queryable already gone when its declaration returned answers no key: no loan is bound,
-    /// and `z_queryable_keyexpr` lends the empty loan it was filled with.
-    fn bind(&mut self, lent: wz_capi_port::KeyView) {
-        let Some(declared) = self.declared.as_mut() else {
-            return;
-        };
-        if lent.is_absent() {
-            return;
-        }
-        declared.record = crate::keyexpr::RecordKey::lent(&self.engine, lent.own);
-        self.loaned_keyexpr = crate::keyexpr::record_loan(lent, &declared.record);
+/// A queryable reaches its session's engine through its place, whose lender keeps the one count.
+impl crate::object_slot::SessionEntity for QueryableState {
+    #[cfg(not(feature = "engine-tokio"))]
+    type Placed = QueryablePlace;
+
+    #[cfg(feature = "engine-tokio")]
+    fn kept_engine(&self) -> &crate::session::EngineHold {
+        &self.engine
     }
+}
+
+/// Point the cached loan of the queryable at `state` at `lent`, the key the session's record of
+/// the queryable keeps as its declaration answered it, once declared and placed, naming the engine
+/// where the queryable reaches it.
+///
+/// A queryable already gone when its declaration returned answers no key: no loan is bound,
+/// and `z_queryable_keyexpr` lends the empty loan it was filled with.
+///
+/// # Safety
+/// `state` is a live queryable filled in a place
+/// [`Slot::take_entity`](crate::object_slot::Slot::take_entity) took, read through the pointer it
+/// was filled at, and its owner holds it.
+unsafe fn bind_queryable(state: *mut QueryableState, lent: wz_capi_port::KeyView) {
+    if lent.is_absent() {
+        return;
+    }
+    // The record names the engine where the queryable reaches it, standing while the state does.
+    // SAFETY: the caller's.
+    let record = crate::keyexpr::RecordKey::lent(
+        unsafe { crate::object_slot::entity_engine(state) },
+        lent.own,
+    );
+    // SAFETY: the caller's: the state is live and its owner holds it.
+    let state = unsafe { &mut *state };
+    let Some(declared) = state.declared.as_mut() else {
+        return;
+    };
+    declared.record = record;
+    state.loaned_keyexpr = crate::keyexpr::record_loan(lent, &declared.record);
 }
 
 /// What a queryable's place keeps for its row past the queryable's handle: the C closure the row
@@ -1471,8 +1497,11 @@ impl z_owned_queryable_t {
 /// `h` must be a live `QueryableState` handle, let go of once.
 unsafe fn free_queryable(h: *mut c_void) {
     let state = h as *mut QueryableState;
-    if let Some(declared) = &(*state).declared {
-        wz_capi_port::SessionEngine::undeclare_queryable(&*(*state).engine, declared.row);
+    if let Some(row) = (*state).declared.as_ref().map(|declared| declared.row) {
+        wz_capi_port::SessionEngine::undeclare_queryable(
+            crate::session::EngineHold::as_ref(crate::object_slot::entity_engine(state)),
+            row,
+        );
     }
     crate::object_slot::closures_of::<QueryableState, QueryableKept>(state).wait_none();
     crate::object_slot::retire_entity::<QueryableState, QueryableKept>(state);
@@ -1534,14 +1563,15 @@ unsafe fn declare_queryable_in(
     let state = slot
         .fill_answering(
             QueryableState {
-                engine: crate::session::EngineHold::clone(&session.engine),
+                #[cfg(feature = "engine-tokio")]
+                engine: crate::session::EngineHold::clone(session.engine),
                 declared: None,
                 loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             },
             QueryableKept {
                 closure,
                 _session: background.then(|| crate::session::session_count(zs).hold()),
-                engine: crate::session::EngineHold::downgrade(&session.engine),
+                engine: crate::session::EngineHold::downgrade(session.engine),
             },
         )
         .cast::<QueryableState>();
@@ -1569,7 +1599,7 @@ unsafe fn declare_queryable_in(
             // The loan names the state where it lies, which is where it stays; a background
             // queryable has no handle to lend it through.
             if !background {
-                (*state).bind(declared.key);
+                bind_queryable(state, declared.key);
             }
             Ok(state)
         }
@@ -1600,16 +1630,16 @@ unsafe fn declare_queryable_in(
 /// reaches a peer is decided here once, and the sink is the only thing that
 /// differs.
 pub(crate) fn declare_queryable_on(
-    session: &crate::write_filter::PicoSession,
+    session: crate::write_filter::PicoSession<'_>,
     keyexpr: &str,
     existing: Option<&DeclaredKeyexpr>,
     complete: bool,
     allowed_origin: wz_session_core::locality::Locality,
     sink: QueryableSink,
 ) -> Result<wz_capi_port::Declared<EntityRow>, ZResult> {
-    let key = crate::keyexpr::EntityKey::non_wild_prefix(&session.engine, keyexpr, existing)?;
+    let key = crate::keyexpr::EntityKey::non_wild_prefix(session.engine, keyexpr, existing)?;
     let declared = wz_capi_port::SessionEngine::declare_queryable_on_wire(
-        &*session.engine,
+        crate::session::EngineHold::as_ref(session.engine),
         keyexpr,
         key.wire(),
         complete,
@@ -1626,12 +1656,12 @@ pub(crate) fn declare_queryable_on(
     Ok(declared)
 }
 
-/// A pico queryable with no C handle around it, retracted when dropped, for a composite that
-/// answers with something other than a C closure (an advanced publisher's cache, the admin
-/// space). The session's record of the queryable keeps its key.
+/// A pico queryable with no C handle around it, for a composite that answers with something other
+/// than a C closure (an advanced publisher's cache, the admin space). The session's record of the
+/// queryable keeps its key. It names no engine: its owner keeps the session it was declared on and
+/// retracts it there ([`Self::retract`]).
 #[cfg(any(feature = "advanced", feature = "admin-space"))]
 pub(crate) struct PlainQueryable {
-    engine: crate::session::EngineHold,
     row: EntityRow,
 }
 
@@ -1639,7 +1669,7 @@ pub(crate) struct PlainQueryable {
 impl PlainQueryable {
     /// Declare a queryable on `keyexpr` answered by `sink`.
     pub(crate) fn declare(
-        session: &crate::write_filter::PicoSession,
+        session: crate::write_filter::PicoSession<'_>,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
         complete: bool,
@@ -1656,17 +1686,16 @@ impl PlainQueryable {
             sink,
         )?
         .id;
-        Ok(Self {
-            engine: session.engine.clone(),
-            row,
-        })
+        Ok(Self { row })
     }
-}
 
-#[cfg(any(feature = "advanced", feature = "admin-space"))]
-impl Drop for PlainQueryable {
-    fn drop(&mut self) {
-        wz_capi_port::SessionEngine::undeclare_queryable(&*self.engine, self.row);
+    /// Retract the queryable from `engine`, the session it was declared on: once, by its owner,
+    /// which lets go of it with this.
+    pub(crate) fn retract(self, engine: &crate::session::EngineHold) {
+        wz_capi_port::SessionEngine::undeclare_queryable(
+            crate::session::EngineHold::as_ref(engine),
+            self.row,
+        );
     }
 }
 
@@ -2133,10 +2162,12 @@ pub(crate) unsafe fn queryable_identity(
 ) -> Option<([u8; 16], wz_session_core::wire_id::EntityId)> {
     // Read off the session's record of the queryable, which a closed session no longer holds: the
     // null id is answered then, as zenoh-pico answers.
-    handle_ref::<z_loaned_queryable_t, QueryableState>(queryable).and_then(|state| {
-        let declared = state.declared.as_ref()?;
-        let eid = wz_capi_port::SessionEngine::entity_id_of(&*state.engine, declared.row)?;
-        Some((wz_capi_port::SessionEngine::zid(&*state.engine), eid))
+    crate::abi::handle_at::<z_loaned_queryable_t, QueryableState>(queryable).and_then(|state| {
+        // A live loaned queryable names a live state in its place, whose lender holds the engine.
+        let engine = crate::session::EngineHold::as_ref(crate::object_slot::entity_engine(state));
+        let declared = (*state).declared.as_ref()?;
+        let eid = wz_capi_port::SessionEngine::entity_id_of(engine, declared.row)?;
+        Some((wz_capi_port::SessionEngine::zid(engine), eid))
     })
 }
 
@@ -3134,7 +3165,6 @@ mod tests {
             .expect("a queryable's place")
             .fill(Answering::keeping(
                 QueryableState {
-                    engine: crate::session::EngineHold::clone(&engine),
                     declared: None,
                     loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                 },

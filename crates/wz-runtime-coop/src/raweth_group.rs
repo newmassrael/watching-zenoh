@@ -29,7 +29,7 @@ use wz_session_core::byte_cells::ByteBuf;
 use wz_session_core::group_locator::GroupLocator;
 use wz_session_core::raweth_link::{frame_into, RethLocator, RethRoutes, MAX_ETH_FRAME_SIZE};
 
-use crate::group_transport::{GroupJoiner, GroupRx, GroupSend, GroupTransport};
+use crate::group_transport::{GroupBuffer, GroupJoiner, GroupRx, GroupSend, GroupTransport};
 use crate::session_drive::{LinkOpenError, WaitOn};
 
 /// One end of a raw Ethernet medium: whole frames written to and read from one interface.
@@ -79,17 +79,20 @@ pub struct RawEthGroup<D> {
 }
 
 impl<D: RawEthDevice> RawEthGroup<D> {
-    /// The group `endpoint` describes, on `device`, reading into `rx` when the session lent one.
-    pub fn new(device: D, endpoint: RethLocator, rx: Option<ByteBuf>) -> Self {
-        Self {
+    /// The group `endpoint` describes, on `device`, reading into what the session gave it: a
+    /// buffer it lent, or one of the group's own of the length it sized or of the largest frame.
+    /// `None` when the heap has no room for a buffer of the group's own.
+    pub fn new(device: D, endpoint: RethLocator, rx: GroupBuffer) -> Option<Self> {
+        let rx = GroupRx::given(rx, MAX_ETH_FRAME_SIZE, |len| {
+            crate::link_storage::zeroed_bytes(len).map(alloc::vec::Vec::into_boxed_slice)
+        })?;
+        Some(Self {
             device: Some(device),
             endpoint,
             routes: RethRoutes::default(),
-            rx: GroupRx::lent_or_own(rx, || {
-                alloc::vec![0u8; MAX_ETH_FRAME_SIZE].into_boxed_slice()
-            }),
+            rx,
             tx: alloc::vec![0u8; MAX_ETH_FRAME_SIZE].into_boxed_slice(),
-        }
+        })
     }
 }
 
@@ -184,13 +187,14 @@ impl<J: GroupJoiner, O: RawEthOpen> GroupJoiner for RawethJoiner<J, O> {
     fn join(
         &self,
         group: &GroupLocator,
-        rx: Option<ByteBuf>,
+        rx: GroupBuffer,
     ) -> Result<Box<dyn GroupTransport>, LinkOpenError> {
         let Some(endpoint) = group.raweth() else {
             return self.inner.join(group, rx);
         };
         let device = self.raweth.open(endpoint.interface())?;
-        Ok(Box::new(RawEthGroup::new(device, endpoint.clone(), rx)))
+        let joined = RawEthGroup::new(device, endpoint.clone(), rx);
+        Ok(Box::new(joined.ok_or(LinkOpenError::Exhausted)?))
     }
 }
 
@@ -277,7 +281,7 @@ mod tests {
     fn joined(medium: &Rc<RefCell<Medium>>, endpoint: &str) -> Box<dyn GroupTransport> {
         let group = parse_group_locator(endpoint).expect("a group endpoint");
         let mut joined = joiner(medium)
-            .join(&group, None)
+            .join(&group, GroupBuffer::Unsized)
             .expect("a reth group joins");
         assert!(joined.open());
         joined
@@ -310,17 +314,19 @@ mod tests {
         let medium = Rc::default();
         let joiner = joiner(&medium);
         let reth = parse_group_locator("reth/02:00:00:00:00:01#iface=eth9").expect("reth");
-        let group = joiner.join(&reth, None).expect("a reth group joins");
+        let group = joiner
+            .join(&reth, GroupBuffer::Unsized)
+            .expect("a reth group joins");
         assert_eq!(joiner.raweth.opened.borrow().as_slice(), ["eth9"]);
         assert_eq!(group.frame_budget(), Some(1514 - 16));
         let udp = parse_group_locator("udp/224.0.0.224:7446").expect("udp");
         assert!(matches!(
-            joiner.join(&udp, None),
+            joiner.join(&udp, GroupBuffer::Unsized),
             Err(LinkOpenError::Unsupported)
         ));
         let down = parse_group_locator("reth/02:00:00:00:00:01#iface=down").expect("reth");
         assert!(matches!(
-            joiner.join(&down, None),
+            joiner.join(&down, GroupBuffer::Unsized),
             Err(LinkOpenError::Refused)
         ));
     }

@@ -42,8 +42,7 @@ use wz_session_core::sample::SampleKind;
 use wz_session_core::sink::SampleRef;
 
 use crate::abi::{
-    handle_ref, impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t,
-    z_owned_bytes_t,
+    impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t, z_owned_bytes_t,
 };
 use crate::bytes::{Block, ByteBuf, NoRoom};
 use crate::encoding::OwnedEncoding;
@@ -56,7 +55,7 @@ use crate::result::{
     Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
 use crate::session::{engine_held, engine_ref, session_handle, z_loaned_session_t, Engine};
-use crate::write_filter::{FilteredKey, PicoSession, WriteFilter};
+use crate::write_filter::{FilterOn, FilteredKey, PicoSession};
 // The cooperative engine is its own type, so its operations are the trait's methods in scope; the
 // tokio engine is a trait object, whose methods need no import.
 #[cfg(not(feature = "engine-tokio"))]
@@ -1411,10 +1410,10 @@ pub(crate) struct PlainPublisher {
     /// `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &publisher->_key, keyexpr),`),
     /// the key as every put and delete names it on the wire, the `eid` half of the global id
     /// `z_publisher_id` reports, and pico's write filter, which decides whether a put or delete
-    /// is SENT and holds the session the publisher reaches through it. Held whole as it was
-    /// declared, so nothing of it is moved field by field on the way to the publisher's place;
-    /// its filter drops before its key, which is upstream's order (`_z_undeclare_publisher`
-    /// clears the filter, then the key).
+    /// is SENT. Held whole as it was declared, so nothing of it is moved field by field on the way
+    /// to the publisher's place. It names no engine: its owner hands it the engine of its session
+    /// on each call and retracts it with that engine ([`Self::retract`]), its filter before its
+    /// key, which is upstream's order (`_z_undeclare_publisher` clears the filter, then the key).
     entity: FilteredKey,
     /// What it was declared with, applied to every put and delete it makes
     /// ([`PublisherQos`]).
@@ -1586,7 +1585,7 @@ impl PlainPublisher {
     /// itself: `declare_entity_at` with a key of its own.
     #[cfg(feature = "advanced")]
     pub(crate) fn declare(
-        session: &PicoSession,
+        session: PicoSession<'_>,
         keyexpr: &str,
         declared: PublisherQos,
     ) -> Result<Self, ZResult> {
@@ -1612,7 +1611,7 @@ impl PlainPublisher {
     /// `at` is valid for the write of a `FilteredKey` and holds none.
     unsafe fn declare_entity_at(
         at: *mut FilteredKey,
-        session: &PicoSession,
+        session: PicoSession<'_>,
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
         declared: &PublisherQos,
@@ -1633,6 +1632,7 @@ impl PlainPublisher {
         // was declared with, when a declaration names the whole key: the filter's row keeps it.
         let wire = &filtered.wire;
         filtered.filter.keep_plain(
+            session.engine,
             matches!(wire.names_in(filtered.keyexpr()), (id, None) if id != 0)
                 .then(|| {
                     let mut bare = put_options();
@@ -1652,10 +1652,13 @@ impl PlainPublisher {
     /// (`vendor/zenoh-pico/src/api/api.c` @
     /// `!_z_write_filter_active(&pub->_filter)`). A session that holds a multicast group
     /// sends whatever the filter says, as upstream's multicast transport does. The engine
-    /// judges the filter in the step that sends ([`WriteFilter::publish`]). `None` is a put that
-    /// brings nothing of its own, which goes the plain way the filter's row keeps.
+    /// judges the filter in the step that sends
+    /// ([`crate::write_filter::WriteFilter::publish`]). `None` is a put that brings nothing of
+    /// its own, which goes the plain way the filter's row keeps. `engine` is the session's the
+    /// publisher was declared on, as its owner reaches it.
     pub(crate) fn publish<'a>(
         &'a self,
+        engine: &crate::session::EngineHold,
         payload: &[u8],
         opts: Option<&mut PublishOptions<'a>>,
     ) -> ZResult {
@@ -1664,7 +1667,6 @@ impl PlainPublisher {
         // default), and before the write filter is consulted.
         let FilteredKey { filter, wire, .. } = &self.entity;
         let key = self.entity.keyexpr();
-        let engine = filter.engine();
         if engine.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
@@ -1672,7 +1674,7 @@ impl PlainPublisher {
             self.declared.apply(opts);
             &*opts
         });
-        match filter.publish(key, wire, payload, opts) {
+        match filter.publish(engine, key, wire, payload, opts) {
             FilteredPut::Suppressed => Z_OK,
             FilteredPut::Sent(sent) => publish_code(sent),
             // The filter let a bare put through and it is not plain on this node (no plain form
@@ -1692,87 +1694,124 @@ impl PlainPublisher {
     }
 
     /// A key of its own made of the publisher's, holding the declaration the session's record of
-    /// the publisher holds, as a copy of the publisher's loan is ([`DeclaredKeyexpr::of_record`]).
+    /// the publisher holds on `engine`, the publisher's session, as a copy of the publisher's loan
+    /// is ([`DeclaredKeyexpr::of_record`]).
     #[cfg(feature = "advanced")]
-    pub(crate) fn key_copy(&self) -> Result<DeclaredKeyexpr, ZResult> {
-        let (session, own) = self.entity.record_key();
+    pub(crate) fn key_copy(
+        &self,
+        engine: &crate::session::EngineHold,
+    ) -> Result<DeclaredKeyexpr, ZResult> {
         let key = self.entity.keyexpr();
-        DeclaredKeyexpr::of_record(session, own, key, key)
+        DeclaredKeyexpr::of_record(engine, self.entity.own_key(), key, key)
     }
 
-    /// The loan of the publisher's key, from the session's record of it, naming it by `record`
-    /// ([`FilteredKey::lend`]): valid while the publisher and `record` stay at their address.
-    #[cfg(feature = "advanced")]
-    pub(crate) fn lend(&self, record: &mut crate::keyexpr::RecordKey) -> z_loaned_keyexpr_t {
-        self.entity.lend(record)
+    /// The loan of the publisher's key, from the session's record of it, naming `engine`, the
+    /// publisher's session, by `record` ([`FilteredKey::lend`]): valid while the publisher,
+    /// `engine` and `record` stay at their address.
+    pub(crate) fn lend(
+        &self,
+        engine: &crate::session::EngineHold,
+        record: &mut crate::keyexpr::RecordKey,
+    ) -> z_loaned_keyexpr_t {
+        self.entity.lend(engine, record)
     }
 
-    /// pico's matching status of the publisher: whether its write filter has a match
-    /// (`!_z_write_filter_active`).
-    pub(crate) fn filter_matches(&self) -> bool {
-        !self.entity.filter.active()
+    /// The publisher's write filter on `engine`, the publisher's session: its matching status is
+    /// read off it and its matching listeners are declared on it
+    /// ([`crate::write_filter::WriteFilter::declare_matching_listener`]), and it retracts them when
+    /// the publisher goes, as pico's filter takes its callbacks with it at `z_undeclare_publisher`.
+    pub(crate) fn filter_on<'a>(&'a self, engine: &'a crate::session::EngineHold) -> FilterOn<'a> {
+        FilterOn {
+            filter: &self.entity.filter,
+            engine,
+        }
     }
 
-    /// The publisher's write filter: its matching listeners are declared on it
-    /// ([`WriteFilter::declare_matching_listener`]), and it retracts them when the publisher
-    /// goes, as pico's filter takes its callbacks with it at `z_undeclare_publisher`.
-    pub(crate) fn filter(&self) -> &WriteFilter {
-        &self.entity.filter
+    /// Retract the publisher from `engine`, its session: its filter and the listeners on it, then
+    /// its key's record ([`FilteredKey::retract`]). Once, by its owner, on every path that lets go
+    /// of it.
+    pub(crate) fn retract(&self, engine: &crate::session::EngineHold) {
+        self.entity.retract(engine);
     }
 }
 
 /// Behind a `z_owned_publisher_t` handle: a keyexpr bound to the session's
-/// face registry, so a put fans out to every connected peer.
+/// face registry, so a put fans out to every connected peer. It lies in a place of its session's,
+/// whose lender holds the session's engine (`crate::object_slot::entity_engine`), which every door
+/// of the publisher hands its publisher.
 pub(crate) struct PublisherState {
+    /// The session's engine on the tokio engine, whose places are its pools' and hold none.
+    #[cfg(feature = "engine-tokio")]
+    shared: crate::session::EngineHold,
     core: PlainPublisher,
     /// The loan `z_publisher_keyexpr` hands back: the key as the session's record of the
     /// publisher's filter keeps it, with the declaration the record holds, so a put on it aliases
     /// as one on pico's loan of `&pub->_key` does ([`FilteredKey::lend`]). Bound by
-    /// [`PublisherState::bind`] once the state sits at its final address.
+    /// `bind_publisher` once the state sits at its final address.
     loaned_keyexpr: z_loaned_keyexpr_t,
     /// What the loan names besides the key's text, in the state with the session it names.
     record: crate::keyexpr::RecordKey,
 }
 
+/// A publisher reaches its session's engine through its place, whose lender keeps the one count.
+impl crate::object_slot::SessionEntity for PublisherState {
+    #[cfg(not(feature = "engine-tokio"))]
+    type Placed = Self;
+
+    #[cfg(feature = "engine-tokio")]
+    fn kept_engine(&self) -> &crate::session::EngineHold {
+        &self.shared
+    }
+}
+
 impl PublisherState {
-    /// Point the cached loan at the key the session's record keeps. MUST run only once the state
-    /// sits at its FINAL address, which the loan names.
-    pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr = self.core.entity.lend(&mut self.record);
-    }
-
-    /// Publish on this publisher's key — [`PlainPublisher::publish`].
-    fn publish<'a>(&'a self, payload: &[u8], opts: Option<&mut PublishOptions<'a>>) -> ZResult {
-        self.core.publish(payload, opts)
-    }
-
     /// The `eid` half of the global id `z_publisher_id` reports.
     #[cfg(feature = "unstable-api")]
     pub(crate) fn entity_id(&self) -> wz_session_core::wire_id::EntityId {
         self.core.entity.eid
     }
 
-    /// The SESSION's zid — the other half of that global id.
-    #[cfg(feature = "unstable-api")]
-    pub(crate) fn shared_zid(&self) -> [u8; 16] {
-        self.core.entity.filter.engine().zid()
-    }
-
     /// The cached borrow `z_publisher_keyexpr` hands back.
     pub(crate) fn loaned_keyexpr(&self) -> *const z_loaned_keyexpr_t {
         &self.loaned_keyexpr as *const z_loaned_keyexpr_t
     }
+}
 
-    /// pico's matching status: whether the write filter has a match, which is
-    /// `!_z_write_filter_active`.
-    pub(crate) fn filter_matches(&self) -> bool {
-        self.core.filter_matches()
+/// Point the cached loan of the publisher at `state` at the key the session's record keeps, naming
+/// the engine where the publisher reaches it. MUST run only once the state sits at its FINAL
+/// address, which the loan names.
+///
+/// # Safety
+/// `state` is a live publisher filled in a place
+/// [`Slot::take_entity`](crate::object_slot::Slot::take_entity) took, read through the pointer it
+/// was filled at, and its owner holds it.
+unsafe fn bind_publisher(state: *mut PublisherState) {
+    // SAFETY: the caller's.
+    let engine = unsafe { crate::object_slot::entity_engine(state) };
+    // SAFETY: the caller's: the state is live and its owner holds it; the publisher and the record
+    // are fields of their own, apart from the engine's count.
+    unsafe {
+        let loan = (*state)
+            .core
+            .lend(engine, &mut *core::ptr::addr_of_mut!((*state).record));
+        core::ptr::addr_of_mut!((*state).loaned_keyexpr).write(loan);
     }
+}
 
-    /// The publisher's write filter, which its matching listeners are declared on.
-    pub(crate) fn filter(&self) -> &WriteFilter {
-        self.core.filter()
-    }
+/// The write filter of the publisher a loaned publisher's handle names, on the engine its place
+/// reaches: what its matching status is read off and its matching listeners are declared on.
+/// `None` for a null loan or a null handle.
+///
+/// # Safety
+/// `publisher` must be null or a live loaned publisher, which stands for `'a`.
+pub(crate) unsafe fn publisher_filter<'a>(
+    publisher: *const z_loaned_publisher_t,
+) -> Option<FilterOn<'a>> {
+    let state = crate::abi::handle_at::<_, PublisherState>(publisher)?;
+    // SAFETY: the caller's: a live loaned publisher names a live state in its place.
+    let engine = unsafe { crate::object_slot::entity_engine(state) };
+    // SAFETY: as above.
+    Some(unsafe { &(*state).core }.filter_on(engine))
 }
 
 /// Owned publisher (pico `z_owned_publisher_t`). Round 1 uses a handle model;
@@ -1816,7 +1855,8 @@ impl z_owned_publisher_t {
 /// back with its handle.
 pub(crate) struct SubscriberState {
     /// The session's engine, on the tokio engine, whose places are its pools' and hold none. On the
-    /// cooperative engine the place's lender holds it ([`subscriber_engine`]).
+    /// cooperative engine the place's lender holds it
+    /// ([`entity_engine`](crate::object_slot::entity_engine)).
     #[cfg(feature = "engine-tokio")]
     shared: crate::session::EngineHold,
     /// The declaration, once made: the place is filled before the subscriber is declared, as the
@@ -1861,14 +1901,19 @@ impl DeclaredSubscriber {
 /// and `z_subscriber_keyexpr` lends the empty loan it was filled with.
 ///
 /// # Safety
-/// As [`subscriber_engine`]'s, and the state's owner holds it.
+/// `state` is a live subscriber [`fill_subscriber_place`] filled in a place
+/// [`Slot::take_entity`](crate::object_slot::Slot::take_entity) took, read through the pointer it
+/// was filled at, and its owner holds it.
 unsafe fn bind_subscriber(state: *mut SubscriberState, lent: wz_capi_port::KeyView) {
     if lent.is_absent() {
         return;
     }
     // The record names the engine where the subscriber reaches it, standing while the state does.
     // SAFETY: the caller's.
-    let record = crate::keyexpr::RecordKey::lent(unsafe { subscriber_engine(state) }, lent.own);
+    let record = crate::keyexpr::RecordKey::lent(
+        unsafe { crate::object_slot::entity_engine(state) },
+        lent.own,
+    );
     // SAFETY: the caller's: the state is live and its owner holds it.
     let state = unsafe { &mut *state };
     let Some(declared) = state.declared.as_mut() else {
@@ -1878,50 +1923,16 @@ unsafe fn bind_subscriber(state: *mut SubscriberState, lent: wz_capi_port::KeyVi
     state.loaned_keyexpr = crate::keyexpr::record_loan(lent, &declared.record);
 }
 
-/// The engine of the session the subscriber at `state` was declared on: the one count its place's
-/// lender keeps on the cooperative engine, so the subscriber holds no count of its own beside it.
-///
-/// # Safety
-/// `state` is a live subscriber [`fill_subscriber_place`] filled in a place
-/// [`Slot::take_entity`](crate::object_slot::Slot::take_entity) took, read through the pointer it
-/// was filled at, and stands for `'a`.
-#[cfg(not(feature = "engine-tokio"))]
-pub(crate) unsafe fn subscriber_engine<'a>(
-    state: *const SubscriberState,
-) -> &'a crate::session::EngineHold {
-    // SAFETY: the caller's.
-    unsafe { crate::object_slot::lent_engine(state) }
-}
+/// A subscriber reaches its session's engine through its place: the one count the place's lender
+/// keeps on the cooperative engine, so the subscriber holds no count of its own beside it.
+impl crate::object_slot::SessionEntity for SubscriberState {
+    #[cfg(not(feature = "engine-tokio"))]
+    type Placed = Self;
 
-/// The engine of the session the subscriber at `state` was declared on, which the state holds on
-/// the tokio engine, whose places are its pools'.
-///
-/// # Safety
-/// `state` is a live subscriber [`fill_subscriber_place`] filled, which stands for `'a`.
-#[cfg(feature = "engine-tokio")]
-pub(crate) unsafe fn subscriber_engine<'a>(
-    state: *const SubscriberState,
-) -> &'a crate::session::EngineHold {
-    // SAFETY: the caller's.
-    unsafe { &(*state).shared }
-}
-
-/// The state a loaned subscriber's handle names, read as the pointer the place was filled at, so
-/// the engine its place keeps is reached through it ([`subscriber_engine`]); `None` for a null
-/// loan or a null handle.
-///
-/// # Safety
-/// `subscriber` must be null or a live loaned subscriber.
-#[cfg(feature = "unstable-api")]
-pub(crate) unsafe fn subscriber_at(
-    subscriber: *const z_loaned_subscriber_t,
-) -> Option<*const SubscriberState> {
-    if subscriber.is_null() {
-        return None;
+    #[cfg(feature = "engine-tokio")]
+    fn kept_engine(&self) -> &crate::session::EngineHold {
+        &self.shared
     }
-    // SAFETY: the caller's: a live loan, whose handle lies at its start.
-    let handle = unsafe { (*subscriber).handle };
-    (!handle.is_null()).then_some(handle as *const SubscriberState)
 }
 
 impl SubscriberState {
@@ -1932,7 +1943,8 @@ impl SubscriberState {
 }
 
 /// Fill `slot` with a subscriber of `engine` not declared yet. On the cooperative engine the
-/// place's lender already holds `engine` (`subscriber_engine`), so the state takes no count.
+/// place's lender already holds `engine` (`crate::object_slot::entity_engine`), so the state
+/// takes no count.
 pub(crate) fn fill_subscriber_place(
     slot: crate::object_slot::Slot<SubscriberState>,
     engine: &crate::session::EngineHold,
@@ -2009,10 +2021,18 @@ impl z_owned_subscriber_t {
 // `z_*_drop`; either consumes the moved handle and nulls the source, so a
 // defensive double-call is a safe no-op.
 
+/// Let go of a publisher: its write filter is retracted, its matching listeners with it, each
+/// waited for until its closure's `drop(context)` has run, then the session's record of its key
+/// lets the declaration go, and the place goes back.
+///
 /// # Safety
-/// `h` must be a live `PublisherState` handle.
+/// `h` must be a live `PublisherState` handle, let go of once.
 unsafe fn free_publisher(h: *mut c_void) {
-    crate::object_slot::release_entity(h as *mut PublisherState);
+    let state = h as *mut PublisherState;
+    (*state)
+        .core
+        .retract(crate::object_slot::entity_engine(state));
+    crate::object_slot::release_entity(state);
 }
 /// Let go of a subscriber: its subscription is retracted, which returns once its row's callback
 /// has been let go of after its last call (pico's `_z_sync_group_wait`), unless it is made from
@@ -2025,7 +2045,7 @@ unsafe fn free_publisher(h: *mut c_void) {
 unsafe fn free_subscriber(h: *mut c_void) {
     let state = h as *mut SubscriberState;
     if let Some(row) = (*state).row() {
-        subscriber_engine(state).undeclare_subscriber(row);
+        crate::object_slot::entity_engine(state).undeclare_subscriber(row);
     }
     crate::object_slot::release_entity(state);
 }
@@ -3485,9 +3505,13 @@ unsafe fn publisher_write(
             },
             PublisherWrite::Delete(_) => None,
         };
-        let Some(state) = handle_ref::<z_loaned_publisher_t, PublisherState>(publisher) else {
+        let Some(state) = crate::abi::handle_at::<z_loaned_publisher_t, PublisherState>(publisher)
+        else {
             return Z_ERR_NULL;
         };
+        // A live loaned publisher names a live state in its place, whose lender holds the engine.
+        let engine = crate::object_slot::entity_engine(state);
+        let state = &*state;
         let mut held = PutHeld::default();
         let mut room = None;
         let opts = match write {
@@ -3498,7 +3522,11 @@ unsafe fn publisher_write(
                 Some(opts)
             }
         };
-        state.publish(buf.as_deref().map_or(&[][..], ByteBuf::as_slice), opts)
+        state.core.publish(
+            engine,
+            buf.as_deref().map_or(&[][..], ByteBuf::as_slice),
+            opts,
+        )
     })
 }
 
@@ -3620,7 +3648,7 @@ pub unsafe extern "C" fn z_declare_publisher(
         // The publisher's place is taken from its session before it is declared, so a session
         // with no place left refuses the declaration and nothing is declared.
         let Some(slot) = crate::object_slot::Slot::take_entity(
-            &session.engine,
+            session.engine,
             crate::object_slot::Kind::Publisher,
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
@@ -3637,6 +3665,9 @@ pub unsafe extern "C" fn z_declare_publisher(
                 &declared,
             )?;
             core::ptr::addr_of_mut!((*plain).declared).write(declared);
+            #[cfg(feature = "engine-tokio")]
+            core::ptr::addr_of_mut!((*at).shared)
+                .write(crate::session::EngineHold::clone(session.engine));
             core::ptr::addr_of_mut!((*at).loaned_keyexpr)
                 .write(z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0));
             core::ptr::addr_of_mut!((*at).record).write(crate::keyexpr::RecordKey::UNLENT);
@@ -3646,7 +3677,7 @@ pub unsafe extern "C" fn z_declare_publisher(
             Ok(state) => state,
             Err(rc) => return rc,
         };
-        (*state).bind();
+        bind_publisher(state);
         *publisher = z_owned_publisher_t {
             handle: state as *mut c_void,
             _pad: [core::ptr::null_mut(); 3],
@@ -3676,7 +3707,7 @@ pub unsafe extern "C" fn z_undeclare_publisher(publisher: *mut z_moved_publisher
         }
         let handle = (*publisher)._this.handle;
         if !handle.is_null() {
-            crate::object_slot::release_entity(handle as *mut PublisherState);
+            free_publisher(handle);
             (*publisher)._this = z_owned_publisher_t::null_value();
         }
         Z_OK
@@ -4547,7 +4578,7 @@ mod tests {
         );
         // SAFETY: the state was filled in a place `take_entity` took, and stands until it is
         // released below.
-        let reached = unsafe { subscriber_engine(state) };
+        let reached = unsafe { crate::object_slot::entity_engine(state) };
         assert!(
             EngineHold::ptr_eq(reached, &engine),
             "the place's engine is the session's"
@@ -4559,6 +4590,139 @@ mod tests {
             before,
             "the place's one count went back"
         );
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// A publisher and its matching listener, a querier, a liveliness token and a queryable each
+    /// reach their session's engine through the count their place's lender keeps, and take none of
+    /// their own: each declaration adds its place's one count, and each undeclaration gives it
+    /// back. Turned red by a state or a write filter that holds the engine again
+    /// (`PublisherState`, `WriteFilter`, `MatchingListenerState`, `QuerierState`, `TokenState`,
+    /// `QueryableState`), or an undeclaration that leaves its place standing.
+    #[cfg(all(
+        not(feature = "engine-tokio"),
+        feature = "peer",
+        feature = "query",
+        feature = "queryable",
+        feature = "liveliness"
+    ))]
+    #[test]
+    fn each_entity_reaches_its_engine_through_its_places_one_count() {
+        use crate::liveliness::{
+            z_liveliness_declare_token, z_liveliness_token_move, z_liveliness_undeclare_token,
+            z_owned_liveliness_token_t,
+        };
+        use crate::matching::{
+            z_closure_matching_status, z_closure_matching_status_move, z_matching_listener_move,
+            z_matching_status_t, z_owned_closure_matching_status_t, z_owned_matching_listener_t,
+            z_publisher_declare_matching_listener, z_undeclare_matching_listener,
+        };
+        use crate::querier::{
+            z_declare_querier, z_owned_querier_t, z_querier_move, z_undeclare_querier,
+        };
+        use crate::query::{
+            z_closure_query, z_closure_query_move, z_declare_queryable, z_owned_closure_query_t,
+            z_owned_queryable_t, z_queryable_move, z_undeclare_queryable,
+        };
+        use crate::session::{
+            engine_held, listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
+            EngineHold,
+        };
+
+        unsafe extern "C" fn ignore(_status: *const z_matching_status_t, _context: *mut c_void) {}
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let loaned_session = unsafe { z_session_loan(&session) };
+        // SAFETY: as above.
+        let handle =
+            unsafe { session_handle(loaned_session) }.expect("an open session has its handle");
+        let engine = engine_held(handle).clone();
+        let before = EngineHold::holders(&engine);
+        let counted = || EngineHold::holders(&engine) - before;
+        let key = "demo/places/one";
+        let caller = z_loaned_keyexpr_t::borrowed(key.as_ptr(), key.len());
+        // SAFETY: every pointer is to a live value of this frame; null options are pico's
+        // defaults; each entity is let go of once, through its moved owned value.
+        unsafe {
+            let mut publisher: z_owned_publisher_t = core::mem::zeroed();
+            assert_eq!(
+                z_declare_publisher(loaned_session, &mut publisher, &caller, core::ptr::null()),
+                Z_OK
+            );
+            assert_eq!(counted(), 1, "the publisher's place alone holds the engine");
+            let mut status: z_owned_closure_matching_status_t = core::mem::zeroed();
+            assert_eq!(
+                z_closure_matching_status(&mut status, Some(ignore), None, core::ptr::null_mut()),
+                Z_OK
+            );
+            let mut listener: z_owned_matching_listener_t = core::mem::zeroed();
+            assert_eq!(
+                z_publisher_declare_matching_listener(
+                    z_publisher_loan(&publisher),
+                    &mut listener,
+                    z_closure_matching_status_move(&mut status),
+                ),
+                Z_OK
+            );
+            assert_eq!(counted(), 2, "the listener's place holds one more");
+            assert_eq!(
+                z_undeclare_matching_listener(z_matching_listener_move(&mut listener)),
+                Z_OK
+            );
+            assert_eq!(counted(), 1, "the listener gave its place's count back");
+            assert_eq!(
+                z_undeclare_publisher(z_publisher_move(&mut publisher)),
+                Z_OK
+            );
+            assert_eq!(counted(), 0, "the publisher gave its place's count back");
+
+            let mut querier: z_owned_querier_t = core::mem::zeroed();
+            assert_eq!(
+                z_declare_querier(loaned_session, &mut querier, &caller, core::ptr::null_mut()),
+                Z_OK
+            );
+            assert_eq!(counted(), 1, "the querier's place alone holds the engine");
+            assert_eq!(z_undeclare_querier(z_querier_move(&mut querier)), Z_OK);
+            assert_eq!(counted(), 0, "the querier gave its place's count back");
+
+            let mut token: z_owned_liveliness_token_t = core::mem::zeroed();
+            assert_eq!(
+                z_liveliness_declare_token(loaned_session, &mut token, &caller, core::ptr::null()),
+                Z_OK
+            );
+            assert_eq!(counted(), 1, "the token's place alone holds the engine");
+            assert_eq!(
+                z_liveliness_undeclare_token(z_liveliness_token_move(&mut token)),
+                Z_OK
+            );
+            assert_eq!(counted(), 0, "the token gave its place's count back");
+
+            let mut answer: z_owned_closure_query_t = core::mem::zeroed();
+            assert_eq!(
+                z_closure_query(&mut answer, None, None, core::ptr::null_mut()),
+                Z_OK
+            );
+            let mut queryable: z_owned_queryable_t = core::mem::zeroed();
+            assert_eq!(
+                z_declare_queryable(
+                    loaned_session,
+                    &mut queryable,
+                    &caller,
+                    z_closure_query_move(&mut answer),
+                    core::ptr::null(),
+                ),
+                Z_OK
+            );
+            assert_eq!(counted(), 1, "the queryable's place alone holds the engine");
+            assert_eq!(
+                z_undeclare_queryable(z_queryable_move(&mut queryable)),
+                Z_OK
+            );
+            assert_eq!(counted(), 0, "the queryable gave its place's count back");
+        }
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };

@@ -36,8 +36,8 @@ struct Pipe(Rc<Wire>);
 impl StreamSocket for Pipe {
     type Error = core::convert::Infallible;
 
-    type Link<B: RxStore + 'static, X: TxStore + 'static>
-        = StreamDriver<Self, B, X>
+    type Link<B: RxStore + 'static, X: TxStore + 'static, W: crate::session_drive::InputWaiter>
+        = StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
     where
         Self: 'static;
 

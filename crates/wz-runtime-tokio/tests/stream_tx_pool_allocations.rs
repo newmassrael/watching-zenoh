@@ -48,7 +48,6 @@ use wz_runtime_tokio::writer_queue::WriterHandle;
 use wz_session_core::link::{BoxedLinkDriver, LinkSendOutcome, LinkSubject};
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
-use wz_session_core::tx_buf::TxBuf;
 use wz_session_core::tx_lease::TxLease;
 
 /// Counts the allocations made BY THE CURRENT THREAD.
@@ -175,6 +174,7 @@ fn send_lent(driver: &StreamWriteDriver, payload: &[u8]) {
     let mut lease =
         TxLease::acquire(driver, payload.len(), Priority::DEFAULT).expect("the link lends");
     lease
+        .frame_mut()
         .append(payload)
         .expect("the lent slot holds the frame");
     assert_eq!(

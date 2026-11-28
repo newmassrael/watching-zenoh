@@ -109,7 +109,8 @@ impl AdvancedPublisherPlane for CPlane {
     type Queryable = CacheQueryable;
     type Token = Token;
     /// The beacon is sent on its literal key with no publisher of its own, as the runtime's is.
-    type Beacon = ();
+    /// The session again: the beacon goes on its literal key, with no publisher of its own.
+    type Beacon = Self;
     /// The engine's periodic job, which is its own to run.
     type Timer = Option<Ticker>;
 
@@ -210,8 +211,8 @@ impl AdvancedPublisherPlane for CPlane {
         &self,
         _keyexpr: &str,
         _sporadic: bool,
-    ) -> Result<(), AdvancedPublisherError> {
-        Ok(())
+    ) -> Result<Self, AdvancedPublisherError> {
+        Ok(Self::new(&self.shared))
     }
 
     fn start_beacon_timer(
@@ -260,7 +261,11 @@ impl AdvancedPublisherPlane for CPlane {
         }
     }
 
-    fn publish_beacon(&self, _beacon: Option<&()>, keyexpr: &str, payload: &[u8], sporadic: bool) {
+    fn send_beacon(beacon: &Self, keyexpr: &str, payload: &[u8], sporadic: bool) {
+        beacon.publish_beacon(keyexpr, payload, sporadic);
+    }
+
+    fn publish_beacon(&self, keyexpr: &str, payload: &[u8], sporadic: bool) {
         let _ = self.shared.publish_all(
             keyexpr,
             payload,
@@ -330,7 +335,8 @@ impl AdvancedPublisherPlane for NodePlane {
     type Publisher = ();
     type Queryable = NodeCacheQueryable;
     type Token = NodeToken;
-    type Beacon = ();
+    /// The node again: the beacon goes on its literal key, with no publisher of its own.
+    type Beacon = Self;
     /// The period of the heartbeat beacon: a job that ticks until it is dropped.
     type Timer = Option<PeriodicJob>;
 
@@ -380,8 +386,8 @@ impl AdvancedPublisherPlane for NodePlane {
         &self,
         _keyexpr: &str,
         _sporadic: bool,
-    ) -> Result<(), AdvancedPublisherError> {
-        Ok(())
+    ) -> Result<Self, AdvancedPublisherError> {
+        Ok(Self::new(&self.node))
     }
 
     fn start_beacon_timer(
@@ -429,7 +435,11 @@ impl AdvancedPublisherPlane for NodePlane {
         }
     }
 
-    fn publish_beacon(&self, _beacon: Option<&()>, keyexpr: &str, payload: &[u8], sporadic: bool) {
+    fn send_beacon(beacon: &Self, keyexpr: &str, payload: &[u8], sporadic: bool) {
+        beacon.publish_beacon(keyexpr, payload, sporadic);
+    }
+
+    fn publish_beacon(&self, keyexpr: &str, payload: &[u8], sporadic: bool) {
         let _ = self.node.forwarder().publish_with(
             keyexpr,
             payload,
@@ -496,7 +506,7 @@ mod tests {
         options: AdvancedPublisherOptions,
     ) -> Result<AdvancedPublisherOn<CPlane>, AdvancedPublisherError> {
         AdvancedPublisherOn::declare_on(
-            Arc::new(CPlane::new(shared)),
+            CPlane::new(shared),
             keyexpr.to_owned(),
             options,
             test_zid(),

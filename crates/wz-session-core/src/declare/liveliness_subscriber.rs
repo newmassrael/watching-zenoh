@@ -524,9 +524,8 @@ impl<P: Storage> Default for PeerTokens<P> {
 unsafe impl crate::bounded::ZeroEmpty for PeerTokens<crate::bounded::Region> {}
 
 #[cfg(feature = "storage-profile")]
-impl PeerTokens<crate::bounded::Region> {
-    /// Where a table of the region policy at `at` in a region keeps its handle to the region's key
-    /// arena: the line of a region's description
+impl<P: crate::bounded::LaidOut> PeerTokens<P> {
+    /// Where a table at `at` keeps its handle to the key arena: the key line of a description
     /// ([`place_region`](crate::key_arena::place_region)) that hands it the arena.
     pub const fn key_line(at: usize) -> usize {
         at.wrapping_add(core::mem::offset_of!(Self, keys))
@@ -581,6 +580,188 @@ impl PeerTokens<crate::bounded::Lent> {
             keys: self.keys,
             _policy: core::marker::PhantomData,
         })
+    }
+}
+
+/// Tokens of a lost link waiting for their retraction to the liveliness subscribers, a `Delete`
+/// each: one peer's table ([`PeerTokens`]), or the relation of the tokens of the faces that went
+/// (`OwedTokens`). What a caller that retracts either with the same subscribers names.
+pub trait LostTokens {
+    /// Retract the waiting tokens in their order while `room` says the next `Delete` can be
+    /// taken; the tokens left wait for a later call, in the same order. How many were retracted,
+    /// and whether none is left.
+    fn flush_on_link_loss_while<L: LocalLivelinessSubscribers, X>(
+        &mut self,
+        subs: &mut L,
+        cx: &mut X,
+        room: &mut dyn FnMut() -> bool,
+    ) -> (usize, bool)
+    where
+        L::Sink: LivelinessDelivered<X, L::RowId>;
+}
+
+impl<P: Storage> LostTokens for PeerTokens<P> {
+    fn flush_on_link_loss_while<L: LocalLivelinessSubscribers, X>(
+        &mut self,
+        subs: &mut L,
+        cx: &mut X,
+        room: &mut dyn FnMut() -> bool,
+    ) -> (usize, bool)
+    where
+        L::Sink: LivelinessDelivered<X, L::RowId>,
+    {
+        PeerTokens::<P>::flush_on_link_loss_while(self, subs, cx, room)
+    }
+}
+
+/// One token a peer declared, keyed by the face it came in on and its id, its key held by the
+/// row: a row of a relation of a session's tokens with the face as a column.
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+pub struct FaceToken<P: Storage> {
+    /// The face the token came in on, as the session numbers its faces.
+    pub face: u64,
+    /// The token's id, as the face's peer numbered it.
+    pub id: u64,
+    key: KeyText<P>,
+}
+
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+impl<P: Storage> FaceToken<P> {
+    /// The token's keyexpr.
+    pub fn keyexpr(&self) -> &str {
+        crate::bounded::KeyBacking::as_str(&self.key)
+    }
+}
+
+/// The tokens of the faces that went, still owed to the liveliness subscribers: a relation whose
+/// rows are tokens keyed by face and id ([`FaceToken`]), in the order the faces went and, within
+/// a face, by ascending id, the order a held face retracts its own in. Its rows are counted when
+/// the session is made and taken whole when the first face that may go is admitted; each holds
+/// its token's key, still counted against the session's key budget.
+///
+/// Bounded by the admission of the faces rather than by a refusal as one goes: a face is admitted
+/// only while the rows left hold the tokens of every face that may go, the new one among them
+/// ([`Self::admits_face`]), so a face that goes always finds rows for its tokens and none of
+/// their retractions is lost.
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+pub struct OwedTokens<const N: usize> {
+    rows: BoundedVec<FaceToken<crate::bounded::OnUse>, N, crate::bounded::OnUse>,
+    /// The most tokens one face's table holds: the rows each face that may go is held room for.
+    per_face: usize,
+}
+
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+impl<const N: usize> OwedTokens<N> {
+    /// The relation of a session whose faces besides its dial role's are at most `faces`, each
+    /// holding at most `per_face` tokens: a row for each token they may hold together, at most
+    /// `N`, none taken yet.
+    pub const fn counted(faces: usize, per_face: usize) -> Self {
+        Self {
+            rows: BoundedVec::counted(faces.saturating_mul(per_face)),
+            per_face,
+        }
+    }
+
+    /// Whether a face may be admitted beside the `held` faces that may go and are held now: the
+    /// rows left hold the tokens of all of them and of the new one, and the relation's rows are
+    /// taken now where they were not, so a face that goes later takes nothing. A refusal is
+    /// answered as a face past the session's faces is.
+    pub fn admits_face(&mut self, held: usize) -> bool {
+        let need = held.saturating_add(1).saturating_mul(self.per_face);
+        need == 0 || (need <= self.rows.free_slots() && self.rows.make_room())
+    }
+
+    /// Owe the tokens of `tokens`, the table of face `face` as it goes, in ascending id: each
+    /// moves into a row of its own with its key, and `tokens` is left holding none. Whether they
+    /// moved: `false`, moving none, when the rows left cannot hold them all, which a session that
+    /// admits its faces by [`Self::admits_face`] never meets.
+    pub fn owe(&mut self, face: u64, tokens: &mut PeerTokens<crate::bounded::OnUse>) -> bool {
+        let held = tokens.count();
+        if held == 0 {
+            return true;
+        }
+        if held > self.rows.free_slots() || !self.rows.make_room() {
+            return false;
+        }
+        let PeerTokens { table, keys, .. } = tokens;
+        let mut table = PeerTokens::<crate::bounded::OnUse>::tokens_mut(table, keys);
+        while let Some(id) = table.entries().map(|(id, _)| id).min() {
+            let Some(key) = table.unbind(id) else {
+                break;
+            };
+            let kept = self.rows.push(FaceToken { face, id, key }).is_ok();
+            debug_assert!(kept, "the room for every token was taken first");
+        }
+        true
+    }
+
+    /// The next token owed, taken out of the relation, its `Delete` written into `news`, for a
+    /// caller that hands it to the liveliness subscribers itself with the tables let go of: the
+    /// first in the relation's order. A link loss is a live event, so the news is not historical.
+    /// `false` once none is left.
+    pub fn take_lost(&mut self, news: &mut TokenNews) -> bool {
+        while !self.rows.is_empty() {
+            let row = self.rows.remove(0);
+            let keyexpr = crate::bounded::KeyBacking::as_str(&row.key);
+            if news.write(LivelinessSampleKind::Delete, keyexpr, row.id, false) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether no token is owed.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// How many tokens are owed.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// The tokens owed, in the relation's order.
+    pub fn iter(&self) -> impl Iterator<Item = &FaceToken<crate::bounded::OnUse>> + '_ {
+        self.rows.iter()
+    }
+
+    /// Owe nothing any more: every row dropped, its key's bytes back in the session's budget, the
+    /// rows taken kept.
+    pub fn clear(&mut self) {
+        self.rows.clear();
+    }
+}
+
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+impl<const N: usize> LostTokens for OwedTokens<N> {
+    fn flush_on_link_loss_while<L: LocalLivelinessSubscribers, X>(
+        &mut self,
+        subs: &mut L,
+        cx: &mut X,
+        room: &mut dyn FnMut() -> bool,
+    ) -> (usize, bool)
+    where
+        L::Sink: LivelinessDelivered<X, L::RowId>,
+    {
+        let mut flushed = 0usize;
+        while !self.rows.is_empty() {
+            if !room() {
+                return (flushed, false);
+            }
+            let row = self.rows.remove(0);
+            // Live, as a held face's retraction is: every matching row hears it.
+            tell_reached(
+                subs,
+                cx,
+                LivelinessSampleKind::Delete,
+                crate::bounded::KeyBacking::as_str(&row.key),
+                crate::bounded::KeyBacking::held(&row.key),
+                row.id,
+                false,
+            );
+            flushed = flushed.saturating_add(1);
+        }
+        (flushed, true)
     }
 }
 
@@ -3283,6 +3464,110 @@ mod tests {
         );
         assert!(!peer.take_lost(&mut news), "none left");
         assert_eq!(peer.count(), 0);
+    }
+
+    /// The tokens of faces that went are owed as rows of one relation keyed by face and id: a face
+    /// is admitted only while the rows left hold the tokens of every face that may go, the new one
+    /// among them; a face's tokens move whole, in ascending id, after those of the faces that went
+    /// before it, their keys still counted against the budget; a table whose tokens do not fit
+    /// moves none; and the rows are retracted in that order, a `Delete` each, while the caller has
+    /// room. Turned red by an admission that holds no room for the new face (`held + 1` read as
+    /// `held`), by `owe` leaving a token behind or moving part of a table that does not fit, by
+    /// a relation that hands its rows back in another order, or by one that drops a key early.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn the_tokens_of_faces_that_went_are_owed_as_one_relation_of_tokens() {
+        use crate::bounded::OnUse;
+        use crate::limits::SessionLimits;
+        use crate::on_use::KeyBudget;
+
+        let budget: &'static KeyBudget = Box::leak(Box::new(KeyBudget::new(
+            256,
+            SessionLimits::defaults().max_keyexpr_bytes_held(),
+        )));
+        let declare = |id: u64, key: &str| {
+            DeclareOwnedVariant::CodecZenohDeclToken(decl_token(id, 0, Some(key)))
+        };
+        let mut news = TokenNews::default();
+        let peer = |tokens: &[(u64, &str)], news: &mut TokenNews| {
+            let mut peer: PeerTokens<OnUse> = PeerTokens::default();
+            // SAFETY: the budget is leaked, so it outlives every table and key counted against it.
+            peer.keep_keys_in(unsafe { budget.keys() });
+            for &(id, key) in tokens {
+                assert!(peer.take_token(&declare(id, key), &HashMap::new(), false, news));
+            }
+            peer
+        };
+        // Two faces that may go, two tokens each: four rows.
+        let mut owed: OwedTokens<8> = OwedTokens::counted(2, 2);
+        assert!(
+            owed.admits_face(0) && owed.admits_face(1),
+            "CONTROL: two faces' tokens fit"
+        );
+        assert!(!owed.admits_face(2), "a third face's would not");
+        let mut first = peer(&[(4, "t/four"), (2, "t/two")], &mut news);
+        let held = budget.counts().used;
+        assert!(owed.owe(7, &mut first));
+        assert_eq!(first.count(), 0, "the face's table holds none");
+        assert_eq!(budget.counts().used, held, "their keys stay counted");
+        assert!(
+            !owed.admits_face(1),
+            "the tokens owed hold the rows of a face that may go"
+        );
+        assert!(owed.admits_face(0));
+        let mut second = peer(&[(9, "t/nine")], &mut news);
+        assert!(owed.owe(8, &mut second));
+        let rows: Vec<(u64, u64, String)> = owed
+            .iter()
+            .map(|row| (row.face, row.id, row.keyexpr().to_string()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (7, 2, "t/two".to_string()),
+                (7, 4, "t/four".to_string()),
+                (8, 9, "t/nine".to_string()),
+            ],
+            "by the order the faces went, each face's by ascending id"
+        );
+        let mut third = peer(&[(1, "t/one"), (3, "t/three")], &mut news);
+        assert!(!owed.owe(9, &mut third), "two tokens, one row left");
+        assert_eq!((third.count(), owed.len()), (2, 3), "none of them moved");
+        assert!(owed.take_lost(&mut news));
+        let sample = news.sample();
+        assert_eq!(
+            (sample.kind, sample.keyexpr.to_string(), sample.token_id),
+            (LivelinessSampleKind::Delete, "t/two".to_string(), 2)
+        );
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
+        for (interest, key) in [(1, "t/four"), (2, "t/nine")] {
+            reg.register(interest, key, false, make_subscriber(sink.clone()))
+                .unwrap();
+        }
+        let mut allowed = 1usize;
+        let mut once = || {
+            let fits = allowed > 0;
+            allowed = allowed.saturating_sub(1);
+            fits
+        };
+        assert_eq!(
+            owed.flush_on_link_loss_while(&mut reg.table, &mut (), &mut once),
+            (1, false),
+            "one Delete had room, the rest wait"
+        );
+        assert_eq!(owed.len(), 1);
+        assert_eq!(
+            owed.flush_on_link_loss_while(&mut reg.table, &mut (), &mut || true),
+            (1, true)
+        );
+        let names: Vec<String> = sink.lock().unwrap().iter().map(|c| c.1.clone()).collect();
+        assert_eq!(names, ["t/four", "t/nine"], "in the relation's order");
+        assert!(owed.is_empty());
+        drop(first);
+        drop(second);
+        drop(third);
+        assert_eq!(budget.counts().used, 0, "every key's bytes back");
     }
 
     /// A token's news holds its key in a buffer of the static policy on every profile, so writing

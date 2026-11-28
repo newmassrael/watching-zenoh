@@ -186,6 +186,20 @@ pub(crate) fn test_links(link: Rc<LwipLink>) -> LwipLinks {
     }
 }
 
+/// The pump is put behind a cell's handle of the heap when its session shares it, and read as its
+/// own type.
+#[cfg(not(feature = "session-slot"))]
+impl<L: Deref<Target = LwipLink> + 'static, N: wz_runtime_coop::link_cells::CountKind>
+    wz_runtime_coop::session_drive::SharedPump<N> for LwipSessionLink<L>
+{
+    type Link = Self;
+    type Sink = dyn wz_session_core::link::BoxedLinkDriver;
+
+    fn share(self) -> Option<wz_runtime_coop::link_cells::CellRc<Self, N>> {
+        wz_runtime_coop::link_cells::CellRc::try_on_heap(self)
+    }
+}
+
 // The seam opens a link as an `Rc` of its driver, the form every profile but
 // `session-slot` has; under it a link is opened by `bind_driver` and the slot
 // that takes the driver, which no shell is written against yet (steps S8, S9).

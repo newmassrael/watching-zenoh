@@ -4,6 +4,9 @@
 //! The build's conformance digest and the cfgs of its forms. The artifact a C program links, and
 //! its SONAME, are `wz-capi-pico-lib`'s.
 
+/// The cooperative engine's metadata saying whether it keeps the process's table of engines.
+const ENGINE_ROWS: &str = "DEP_WZ_CAPI_COOP_ENGINE_ROWS";
+
 fn main() {
     // The conformance digest of this build, read from the configuration it was built with, which
     // `zext_conformance_digest` hands out (`src/conformance.rs`).
@@ -22,6 +25,15 @@ fn main() {
         || std::env::var_os("CARGO_FEATURE_ENGINE_TOKIO").is_none()
     {
         println!("cargo:rustc-cfg=wz_process_pools");
+    }
+    // Whether the cooperative engine of this build keeps the process's table of engines, through
+    // which a holder's `downgrade` reaches its engine: stated by that crate's build script
+    // (`links = "wz_capi_coop"`), since Cargo unifies its `engine-rows` across the graph and no
+    // feature of this crate can say what it was built with. Absent with no cooperative engine.
+    println!("cargo:rustc-check-cfg=cfg(wz_engine_rows)");
+    println!("cargo:rerun-if-env-changed={ENGINE_ROWS}");
+    if std::env::var(ENGINE_ROWS).is_ok_and(|kept| kept == "1") {
+        println!("cargo:rustc-cfg=wz_engine_rows");
     }
     refuse_discarded_unwind_tables_with_std();
 }

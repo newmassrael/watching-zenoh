@@ -16,31 +16,28 @@
 //! round are not among those places: each of those tables takes its own at its first row
 //! (`PlacedTables::counted`, `RoundRows::counted`).
 
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 use core::alloc::Layout;
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 use core::mem::ManuallyDrop;
 use core::mem::MaybeUninit;
 use core::ptr::{addr_of_mut, NonNull};
 
-use wz_session_core::bounded::{BoundedVec, ZeroEmpty};
-#[cfg(all(
-    feature = "queryable",
-    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-))]
+#[cfg(any(not(wz_on_use), feature = "queryable"))]
+use wz_session_core::bounded::BoundedVec;
+use wz_session_core::bounded::ZeroEmpty;
+#[cfg(all(feature = "queryable", not(wz_on_use)))]
 use wz_session_core::caps;
 use wz_session_core::placed::Placed;
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 use wz_session_core::placed::PlacedRef;
-#[cfg(all(
-    wz_round,
-    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-))]
+#[cfg(all(wz_round, not(wz_on_use)))]
 use wz_session_core::round::RoundRowPlaces;
 use wz_session_core::step_lend::LendCell;
 
 #[cfg(feature = "queryable")]
 use super::query;
+#[cfg(not(wz_on_use))]
 use super::registry::FACE_SETS;
 #[cfg(feature = "connectivity")]
 use super::FacePlane;
@@ -48,29 +45,25 @@ use super::FacePlane;
 use super::QueryPlane;
 #[cfg(wz_round)]
 use super::Registry;
-#[cfg(all(
-    feature = "queryable",
-    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-))]
+#[cfg(all(feature = "queryable", not(wz_on_use)))]
 use super::{FinalHold, RefusedFinal};
-use super::{RoomPlace, RoomPlaces, SessionReassembly, StepPlaces};
+#[cfg(not(wz_on_use))]
+use super::{RoomPlace, RoomPlaces};
+use super::{SessionReassembly, StepPlaces};
 #[cfg(feature = "queryable")]
 use crate::arena::SessionRows;
-#[cfg(all(
-    wz_round,
-    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-))]
+#[cfg(all(wz_round, not(wz_on_use)))]
 use crate::calls::CoopCalls;
 #[cfg(wz_round)]
 use crate::round::{Round, RoundRowCounts, RoundRows};
 #[cfg(feature = "queryable")]
 use crate::StatePolicy;
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 use wz_session_core::limits::SessionLimits;
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 use wz_session_core::on_use::{BudgetKeys, KeyBudget};
 
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 use crate::arena::ArenaRefused;
 
 /// The plain tables of the session's state, what an arena lends a session whose shape the open
@@ -84,10 +77,7 @@ pub(super) struct PlacedTables {
     pub(super) refused_finals: query::RefusedFinals<StatePolicy>,
 }
 
-#[cfg(all(
-    feature = "queryable",
-    all(feature = "tables-on-use", not(feature = "runtime-plan"))
-))]
+#[cfg(all(feature = "queryable", wz_on_use))]
 impl PlacedTables {
     /// The session's plain tables where they take their memory on use: each counted as `rows`
     /// counts its rows, under the build's bound, and holding none until its first row. A count past
@@ -115,29 +105,22 @@ pub(crate) struct StatePlaces {
     round: MaybeUninit<Round>,
     /// The rows of the round's tables, which the round reads where they lie: the build's bound of
     /// each, as the round's form keeps them.
-    #[cfg(all(
-        wz_round,
-        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-    ))]
+    #[cfg(all(wz_round, not(wz_on_use)))]
     round_rows: RoundRowPlaces<CoopCalls>,
     #[cfg(feature = "queryable")]
     queries: MaybeUninit<QueryPlane>,
     #[cfg(feature = "connectivity")]
     faces: MaybeUninit<FacePlane>,
     /// What the face holding each set names for a wait for its room, a place for each set the
-    /// region holds.
+    /// region holds; where the tables take their memory on use, each face's place is made at its
+    /// first hold of a wait instead, none in the state (`crate::engine::RoomPlaces`).
+    #[cfg(not(wz_on_use))]
     room_places: [MaybeUninit<Option<RoomPlace>>; FACE_SETS],
     /// The rows of the session's plain tables, each table's at the build's bound: the Finals the
     /// queryables' plane holds and the requests it refused.
-    #[cfg(all(
-        feature = "queryable",
-        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-    ))]
+    #[cfg(all(feature = "queryable", not(wz_on_use)))]
     held_finals: [MaybeUninit<FinalHold>; caps::MAX_PENDING_FINALS],
-    #[cfg(all(
-        feature = "queryable",
-        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-    ))]
+    #[cfg(all(feature = "queryable", not(wz_on_use)))]
     refused_finals: [MaybeUninit<RefusedFinal>; caps::MAX_PENDING_FINALS],
 }
 
@@ -192,14 +175,14 @@ impl StatePlaces {
         let at = at.as_ptr();
         // SAFETY: the caller's contract; the rows' field holds no value and is reached by the
         // round's tables alone, which the round's owner drops before the region goes.
-        #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+        #[cfg(not(wz_on_use))]
         let rows = unsafe {
             RoundRows::placed_in(
                 NonNull::new_unchecked(addr_of_mut!((*at).round_rows)),
                 counts,
             )
         };
-        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+        #[cfg(wz_on_use)]
         let rows = RoundRows::counted(counts);
         // SAFETY: the caller's contract; the field is aligned for a round and the owner's alone.
         unsafe { Round::placed_at(value_at(addr_of_mut!((*at).round)), rows) }
@@ -211,10 +194,7 @@ impl StatePlaces {
     /// # Safety
     /// As [`Self::steps`], for the tables' fields: each is reached by the one table placed over it
     /// here, which the session's planes and its state drop before the region goes.
-    #[cfg(all(
-        feature = "queryable",
-        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-    ))]
+    #[cfg(all(feature = "queryable", not(wz_on_use)))]
     pub(super) unsafe fn tables(at: NonNull<Self>, rows: &SessionRows) -> PlacedTables {
         let at = at.as_ptr();
         // SAFETY: the caller's contract; each field holds no value, and a field of a value at a
@@ -241,6 +221,7 @@ impl StatePlaces {
     /// # Safety
     /// As [`Self::steps`], for the rooms' field: it is reached by the one table placed over it
     /// here.
+    #[cfg(not(wz_on_use))]
     pub(super) unsafe fn rooms(at: NonNull<Self>, sets: usize) -> RoomPlaces {
         // SAFETY: the caller's contract; the field holds no value, and a field of a value at a
         // pointer that is not null is not null either.
@@ -293,7 +274,7 @@ impl StatePlaces {
 /// keys are counted against. The allocator gives it zeroed at the open ([`OwnBlock::take`]),
 /// every place holding no value until its owner writes it, and it is reached through a pointer,
 /// each field projected from it, as a region is.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 pub(crate) struct OwnState {
     places: StatePlaces,
     /// The budget the session's keys are counted against, written by the open ([`Self::place`]):
@@ -303,18 +284,18 @@ pub(crate) struct OwnState {
 }
 
 // SAFETY: the places are `ZeroEmpty`, and the key budget is a `MaybeUninit`, valid as any bytes.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 unsafe impl ZeroEmpty for OwnState {}
 
 // The budget lies in a `MaybeUninit`, which the state's drop leaves alone: a budget whose drop did
 // anything would not have it done.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 const _: () = assert!(
     !core::mem::needs_drop::<KeyBudget>(),
     "the state's drop leaves the key budget as it lies"
 );
 
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 impl OwnState {
     /// Write the budget the session's keys are counted against in the zeroed state at `state`:
     /// its keys at most `limits`' `MAX_KEYEXPR_BYTES` long and together at most its
@@ -332,10 +313,10 @@ impl OwnState {
         // not written again.
         let budget = unsafe {
             let field = addr_of_mut!((*state.as_ptr()).keys).cast::<KeyBudget>();
-            field.write(KeyBudget::new(
-                limits.key_arena_bytes(),
-                limits.max_keyexpr_bytes_held(),
-            ));
+            field.write(
+                KeyBudget::new(limits.key_arena_bytes(), limits.max_keyexpr_bytes_held())
+                    .holding_peer_rows_to(limits),
+            );
             &*field
         };
         // SAFETY: the caller's contract: the state, and the budget in it, neither moves nor is
@@ -359,13 +340,13 @@ impl OwnState {
 /// when this is, and its allocation given back after it, so one owner answers for both and no
 /// field is held for its drop alone. What the faces' rooms lie in where the tables take their
 /// memory on use (`Core::rooms`).
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 pub(crate) struct OwnPlaced<T> {
     /// Dropped by this owner's drop, before the allocation it lies in is given back.
     value: ManuallyDrop<Placed<T>>,
 }
 
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 impl<T> OwnPlaced<T> {
     /// An allocation of its own for one `T`, nothing written in it yet ([`OwnVacant`]): what the
     /// open reserves while what it would write the value from is still whole, and fills once
@@ -398,7 +379,7 @@ impl<T> OwnPlaced<T> {
     }
 }
 
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 impl<T> core::ops::Deref for OwnPlaced<T> {
     type Target = T;
 
@@ -407,7 +388,7 @@ impl<T> core::ops::Deref for OwnPlaced<T> {
     }
 }
 
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 impl<T> Drop for OwnPlaced<T> {
     fn drop(&mut self) {
         let at = NonNull::from(&**self.value).cast::<u8>();
@@ -425,12 +406,12 @@ impl<T> Drop for OwnPlaced<T> {
 /// ([`OwnPlaced::vacant`]), as a span an arena lends is (`wz_session_core::placed::Vacant`), but
 /// owned: given back unwritten when it is dropped unfilled, so a refusal between its reservation
 /// and its fill leaves nothing taken.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 pub(crate) struct OwnVacant<T> {
     at: NonNull<T>,
 }
 
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 impl<T> OwnVacant<T> {
     /// The owner of the value `write` writes in the allocation, which drops it there and gives the
     /// allocation back after it.
@@ -451,7 +432,7 @@ impl<T> OwnVacant<T> {
     }
 }
 
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 impl<T> Drop for OwnVacant<T> {
     fn drop(&mut self) {
         // SAFETY: the allocation is the one `OwnPlaced::vacant` took with this layout, holding no
@@ -464,12 +445,12 @@ impl<T> Drop for OwnVacant<T> {
 /// (`ZeroEmpty`) until its owner writes it, dropped in place and given back when this is. It
 /// holds the pointer and never a reference to the whole `T`: what lies in it is reached by
 /// fields projected from [`Self::as_ptr`], as a region's block is reached.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 pub(crate) struct OwnBlock<T: ZeroEmpty> {
     at: NonNull<T>,
 }
 
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 impl<T: ZeroEmpty> OwnBlock<T> {
     /// A `T` of all zero bytes in an allocation of its own. Refused, having taken nothing, when
     /// the allocator has no room for it.
@@ -498,13 +479,13 @@ impl<T: ZeroEmpty> OwnBlock<T> {
 
 // SAFETY: the block owns the `T` at its pointer, which nothing else reaches, as a `Box` owns its
 // value.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 unsafe impl<T: ZeroEmpty + Send> Send for OwnBlock<T> {}
 // SAFETY: a shared block hands out nothing but its pointer, as above.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 unsafe impl<T: ZeroEmpty + Sync> Sync for OwnBlock<T> {}
 
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 impl<T: ZeroEmpty> Drop for OwnBlock<T> {
     fn drop(&mut self) {
         // SAFETY: the block holds a `T` (zero bytes are one, and every write since kept one),
@@ -520,12 +501,14 @@ impl<T: ZeroEmpty> Drop for OwnBlock<T> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    #[cfg(any(not(wz_on_use), feature = "queryable"))]
     use crate::arena::{ArenaPlan, PlanShape};
     use wz_session_core::limits::SessionLimits;
 
     /// The table of the rooms' places placed over a region's places takes the sets asked, at most
     /// the sets the region holds, and lies in the places. Turned red by a field of fewer places
     /// than the sets the build's plan counts, or by a table placed anywhere but the places.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn the_rooms_places_take_the_regions_sets_at_most() {
         let plan = ArenaPlan::planned(
@@ -558,9 +541,9 @@ mod tests {
     /// and one dropped unfilled drops no value. Turned red by a fill that writes anywhere but the
     /// allocation reserved, or by `OwnVacant`'s drop dropping a value in place before it gives the
     /// allocation back.
-    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[cfg(wz_on_use)]
     #[test]
-    fn an_own_vacant_allocation_holds_nothing_until_it_is_filled() {
+    fn an_on_use_vacant_allocation_holds_nothing_until_it_is_filled() {
         use core::cell::Cell;
 
         struct Counted<'d>(&'d Cell<usize>, u32);
@@ -592,10 +575,7 @@ mod tests {
     /// the region keeps every one of, and lie in the places. Turned red by a field of fewer rows
     /// than the plan counts, by a table held to other counts than the plan's, or by one placed
     /// anywhere but the places.
-    #[cfg(all(
-        feature = "queryable",
-        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-    ))]
+    #[cfg(all(feature = "queryable", not(wz_on_use)))]
     #[test]
     fn the_plain_tables_take_the_plans_rows_in_the_places() {
         let shape =
@@ -624,10 +604,7 @@ mod tests {
     /// plan counts their rows and hold none until their first row: no place of the state keeps
     /// them. Turned red by a table counted with the build's bound in place of the plan's count, or by
     /// one that takes its rows when made (`PlacedTables::counted` over the region's places).
-    #[cfg(all(
-        feature = "queryable",
-        all(feature = "tables-on-use", not(feature = "runtime-plan"))
-    ))]
+    #[cfg(all(feature = "queryable", wz_on_use))]
     #[test]
     fn the_plain_tables_on_use_hold_the_plans_counts_and_no_row() {
         let shape =
@@ -651,14 +628,18 @@ mod tests {
     /// allocation of its own: it holds the session's key budget, which the open writes at the
     /// session's `KEY_ARENA_BYTES`, a key made through the handle it hands back counted there as
     /// its arena block and given back, and the places of the state's own values lie inside it.
-    /// Turned red by a budget of other bytes than the limits state, by a handle of no budget
-    /// (`BudgetKeys::default` in place of `budget.keys()`), which keeps no key, or by places
-    /// projected anywhere but the state.
-    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    /// The budget holds the rows the session's peers write to the limits' session bounds, the
+    /// tokens to `SESSION_MAX_REMOTE_DECLS` among them. Turned red by a budget of other bytes than
+    /// the limits state, by a handle of no budget (`BudgetKeys::default` in place of
+    /// `budget.keys()`), which keeps no key, by a budget held to no peer bound
+    /// (`holding_peer_rows_to` left out of `OwnState::place`), or by places projected anywhere
+    /// but the state.
+    #[cfg(wz_on_use)]
     #[test]
     fn an_on_use_state_holds_the_sessions_key_budget_and_its_places() {
         use wz_session_core::bounded::KeyMaker;
         use wz_session_core::key_arena::block_bytes;
+        use wz_session_core::row_pool::PeerSlot;
         let state = OwnBlock::<OwnState>::take().expect("the test allocator answers");
         let limits = SessionLimits::BUILD;
         // SAFETY: the state is zeroed, aligned and this test's alone, and is given back after the
@@ -673,6 +654,19 @@ mod tests {
         );
         drop(key);
         assert_eq!(keys.counts().used, 0, "the key's bytes went back");
+        let budget = keys
+            .budget()
+            .expect("the handle names the session's budget");
+        if let Some(most) = limits.session_max_remote_decls().most() {
+            for _ in 0..most {
+                assert!(budget.take_peer_row(PeerSlot::Tokens));
+            }
+            assert!(
+                !budget.take_peer_row(PeerSlot::Tokens),
+                "the session's SESSION_MAX_REMOTE_DECLS binds its peers' tokens together"
+            );
+            budget.give_peer_rows(PeerSlot::Tokens, most);
+        }
         let start = state.as_ptr().as_ptr() as usize;
         // SAFETY: the state is the one taken above.
         let places = unsafe { OwnState::places_at(state.as_ptr()) }.as_ptr() as usize;

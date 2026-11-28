@@ -310,9 +310,9 @@ Read against the four things the fold reaches:
 - The consolidation. Each leg consolidates on its own: its sink holds the get's mode and its own
   held replies, flushed at that leg's end. A get of two legs in `Latest` hands its callback a
   reply of a key from each leg. zenoh consolidates over every Final of the query and flushes once,
-  at the last (`api/session.rs:3025-3029`, as `reply_sink.rs` reads it), and zenoh-pico holds one
-  pending query with its remaining Finals (`_z_pending_query_t._remaining_finals`). Per-leg
-  consolidation is right only for a get of one leg: a client's get of its one link, its own
+  at the last (`zenoh/src/api/session.rs` @ `if query.nb_final == 0 {`, as `reply_sink.rs`
+  reads it), and zenoh-pico holds one pending query with its remaining Finals
+  (`_z_pending_query_t._remaining_finals`). Per-leg consolidation is right only for a get of one leg: a client's get of its one link, its own
   queryables not asked.
 - The deadline index. A leaf per table, each table keeping its earliest deadline as entries come
   and go (`ReplyRegistry::due_ms`); an end is not told, a read raises a stale key (`DueIndex`).
@@ -670,11 +670,12 @@ part of the face's row: the merge of the two lanes is the main session's to orde
 `GetLegs` is the part of the face's row R3b names (its pending gets).
 
 **Whether an ABI shows a reply's request id: none does.** Read before the timeout takes the row's
-id. zenoh's `Reply` (`zenoh/src/api/query.rs` at the pin) holds its result and, behind
+id. zenoh's `Reply` (`zenoh/src/api/query.rs` @ `pub struct Reply {`) holds its result and, behind
 `unstable`, its replier's id; zenoh-c's accessors, as `crates/wz-capi-c/src/get.rs` implements
 them, are `z_reply_is_ok`, `z_reply_ok`, `z_reply_err`, `z_reply_replier_id` and the
 clone, loan, take and drop of a reply; zenoh-pico's `_z_reply_t` holds a `_z_reply_data_t` of
-`_result`, `replier_id` and `_tag` (`vendor/zenoh-pico/include/zenoh-pico/net/reply.h`), and
+`_result`, `replier_id` and `_tag` (`vendor/zenoh-pico/include/zenoh-pico/net/reply.h` @
+`typedef struct _z_reply_data_t {`), and
 `crates/wz-capi-pico/src/get.rs` keeps the same accessors. `ReplyView::rid` is read inside wz
 alone, by the tables that find a reply's get. So the timeout the deliveries hand out may name the
 row's id before any leg carries it, and H7c2b need not move the id: H7c2c makes it the one id every
@@ -1120,6 +1121,51 @@ its Interest's id, the asker's end and the face's one Final, and asserts it ends
 `add_leg` counts no leg, or a face's leg owes a second Final). Expected size and Ir: the change is
 in the test crate's stand-in and a session-core unit test; no library text moves and the
 pico-compare cases do not move.
+
+### 6.8 The lane merged over integration j
+
+Main landed integration j (`39fd76b09c`), which carries this lane at `673db8c8f7` with
+peer-prop's description walk, heap-native's policy cfgs (`wz_lent`, `wz_on_use`), base-td's
+typed links and the fixes in `int-j-merges.md`. The switch and the fixes after it were merged over
+it (a merge, not a rebase). Each conflict keeps what the switch does in main's structure:
+
+- The faces' legs are described, not lent by a call of their own. peer-prop lends a set by one
+  walk of its description (`FaceTables::places`, `described.rs`), so `Gets::lent`,
+  `Gets::arena_bytes` and `face_leg_bytes` go and the legs take lines in that walk:
+  `GetLegs::places` is generic over the laid-out policy (`LaidOut`) and names the count its
+  line is lent (`RowCount::Queries` for a face's queries, `RowCount::LivelinessGets` for its
+  snapshots), so a region places and a plan lends the same line. `GetRows`, `GET_LINES` and
+  `Gets::places` move from `placed.rs` to `described.rs`, where main keeps the set's
+  description; `placed.rs` is main's. A leg states no quota, so `FaceTables::lend` holds the
+  gets to no limit and takes none (`Gets::limit_to` never existed after the switch; main's
+  `registry.local.limit_to` goes). The plan's part of a face's gets is main's
+  `set_get_bytes`, the set's lines of the gets' counts.
+- `TableRows`: main's `counts` states `RowCount::PendingGets` as the switch's
+  `pending_gets()` (queries and snapshots), and `SessionRows` keeps `PENDING_GET_ROWS` rows
+  of the generic policy `P` main gave it. `SessionTables::lent` and `arena_bytes` are main's
+  walk; the gets' bounds are set by `limit_to` after it, as the switch's `limit_to` does.
+- The cfgs the switch narrowed (`StatePolicy`, `calls`, the state's places and rows, the arena's
+  `GET_ROWS` and `PLANE_ROWS`) are written in main's policy cfgs: `runtime-plan` as `wz_lent`,
+  `tables-on-use` without `runtime-plan` as `wz_on_use`. `StatePolicy` is main's
+  `not(wz_on_use)` in every build, as main reads it for the publishes and the endpoints' texts
+  too; `FACE_ROWS` is main's.
+- `adding.rs`: main's `FacesFull` refusal with the switch's `build_to`, which rebuilds no index of
+  deadlines.
+- `direct.rs`: base-td carries a link's effects through `link_life::carry`
+  (`DirectLinkIo`); the switch's note of the gets a lost face ended moves into
+  `DirectLinkIo::lose`, after `lose_face_link`.
+- `tests.rs`: both sides added the stand-in's answer to a tokens Interest. Main's
+  (`answer_token_interests` over a `TokenAnswers` of its own, before the dispatch) is kept and the
+  switch's second call goes, so each Interest is answered once.
+- `get_plane.rs`: main rooted two citations in it; the switch removed the file, which stays
+  removed.
+- `registry.rs` test of the plan's parts: the set's gets are compared with the bytes of the legs'
+  tables (`GetLegs::arena_bytes` of each kind) where main compared them with `Requesters`'.
+  `get_legs/tests.rs` asserts the region's line is counted (`RowCount::Queries`), red if
+  `GetLegs::places` drops its count and a plan lends the build's bound.
+
+Expected size and Ir: the region's and the plan's lines of a face's legs are the ones the switch
+laid out, now read through one description; no receive body moves.
 
 ## 7. The receive
 

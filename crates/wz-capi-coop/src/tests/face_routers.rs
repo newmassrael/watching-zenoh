@@ -7,19 +7,28 @@
 
 use wz_session_core::WhatAmI;
 
-use super::{client_config, config_zid, open_with, Engine};
+use super::sim::{Sim, SimEngine};
+use super::{config_zid, CatchAll};
 use crate::{CoopConfig, EngineHold};
 
-/// A session that listens on a loopback port the kernel picks and dials nothing, not stepped: its
-/// face table holds the dial role's row and one row for each face it may take beside it.
-fn listening() -> EngineHold<Engine> {
-    open_with(CoopConfig {
+/// The simulation's seed: the session here draws nothing it reads, so any seed is the run.
+const SEED: u64 = 0xa6;
+
+/// A peer that dials the router stand-in, opened in the simulated world and not stepped past its
+/// open: a build that takes faces beside the dial role's lays its face table out for the faces
+/// its config allows, so the table holds the dial role's row and one row for each face it may
+/// take beside it, each row's read slot made, as where the tables take their memory on use each
+/// is at its first face.
+fn peer(sim: &Sim) -> EngineHold<SimEngine> {
+    let engine = sim.open(CoopConfig {
         whatami: WhatAmI::Peer,
         zid: config_zid(0xa6),
-        listen: vec!["tcp/127.0.0.1:0".to_owned()],
         max_faces: 2,
-        ..client_config()
-    })
+        ..sim.config()
+    });
+    #[cfg(wz_on_use)]
+    engine.make_every_face();
+    engine
 }
 
 /// While a face lends its Router for a step, no other face's pump finds a Router lent where it
@@ -28,7 +37,9 @@ fn listening() -> EngineHold<Engine> {
 /// session's place, as each face was before it had a cell of its own).
 #[test]
 fn a_faces_router_is_lent_where_its_own_pump_alone_looks() {
-    let engine = listening();
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = peer(&sim);
     let rows = engine.direct_faces().0;
     assert!(
         rows >= 2,
@@ -62,7 +73,9 @@ fn each_faces_router_keys_its_chains_by_channel_and_ends_them_alone() {
 
     const DIAL_PEER: &[u8] = &[0x5a; 16];
     const TAKEN_PEER: &[u8] = &[0x5b; 16];
-    let engine = listening();
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = peer(&sim);
     assert!(
         engine.direct_faces().0 >= 2,
         "CONTROL: the face table holds a row beside the dial role's"

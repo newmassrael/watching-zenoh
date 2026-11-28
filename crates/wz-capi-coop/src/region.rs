@@ -203,9 +203,9 @@ mod tests {
         let seqs = StateRegion::DESCRIPTION.seq_lines();
         assert!(!seqs.is_empty());
         for (at, line) in seqs.iter().enumerate() {
-            assert!(line.seq < size, "a sequence lies in the region");
+            assert!((line.seq as usize) < size, "a sequence lies in the region");
             assert!(
-                line.room == 0 || line.rows < size,
+                line.room == 0 || (line.rows as usize) < size,
                 "its rows lie in the region"
             );
             for other in seqs.iter().skip(at + 1) {
