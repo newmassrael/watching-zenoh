@@ -10489,9 +10489,9 @@
       "reason": "OPEN (M): domain-transport omits 5 atoms; not established whether the omissions are intentional."
     },
     "debt-completeness-partial-atoms": {
-      "status": "active",
+      "status": "deprecated",
       "source": "open-debt register",
-      "reason": "OPEN 2026-11-21 (docs/upstream-parity.md D11, deploy/completeness_ratchet.json c.partial-atoms = 2). The feature inventory grades two atoms PARTIAL: api-compat-rust and session-close-ingress, each with the residue its own reason states. Closed when both grade COMPLETE and the row is locked at 0."
+      "reason": "CLOSED 2026-11-28: the feature inventory grades no atom PARTIAL (completeness_gate.py --check reads c.partial-atoms 0; api-compat-rust and session-close-ingress both COMPLETE), and deploy/completeness_ratchet.json locks the row at 0 with no debt. The gate stays and re-reads the figure on every push, so a new PARTIAL atom fails the locked row rather than reopening this entry."
     },
     "debt-completeness-pico-api-shortfall": {
       "status": "active",

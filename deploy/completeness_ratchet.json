@@ -12,9 +12,9 @@
     "a.pico-api.wz-passes": {
       "state": "ratchet",
       "better": "higher",
-      "value": 15,
+      "value": 16,
       "target": null,
-      "read": "2026-11-21",
+      "read": "2026-11-28",
       "debt": null
     },
     "a.zenoh-c.shortfall": {
@@ -38,12 +38,12 @@
       "note": "read from the document WZ_FEATURE_CATALOGUE names; its figure and its ratchet stay in that document"
     },
     "c.partial-atoms": {
-      "state": "ratchet",
+      "state": "locked",
       "better": "lower",
-      "value": 2,
+      "value": 0,
       "target": 0,
-      "read": "2026-11-21",
-      "debt": "debt-completeness-partial-atoms"
+      "read": "2026-11-28",
+      "debt": null
     },
     "c.logic-census-unplaced": {
       "state": "locked",
