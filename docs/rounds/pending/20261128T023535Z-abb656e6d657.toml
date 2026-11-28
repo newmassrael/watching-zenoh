@@ -1,0 +1,24 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"]
+decision = '''
+Rule D19 to D25, delegated by the owner on the questions D16 to D18
+left open: replay slots per granted commander made with the policy,
+echo alone across a restart, replies sealed by the node and bound to
+the request, configure as a sealed verb over key and value digest,
+grant to anyone only on images that prove no subject, one decision
+record vocabulary, one verifying in-band type on the fixed profile.
+'''
+changes = '''
+- session-lifecycle-intent.md: section 5c, rulings D19 to D25.
+- command-seal.md: B.1.1 citation corrected; decisions section ruled.
+'''
+verification = '''
+- RFC 8613 appendix B.1 and sections 5.4, 7.1, 8.2 read for D20, D21.
+- RFC 9175 section 2.3 read for D21.
+- upstream citation anchor gate OK; nda-scan OK.
+- validate-workspace rc 0, no new T1 orphan.
+'''
+carry = '''
+- Build D19 to D25 in the order section 5c states.
+- Eight round_fed gates red on origin/main b5a09705b1, not this item.
+- Kit row of the D18 matrix not run.
+'''
