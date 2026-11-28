@@ -9837,6 +9837,30 @@
       "carry_forward_bullets": [
         "limit_read_gate and feature_public_surface_census stay red on main until integration m lands its fixes (924ae39288, b34b34ff42 and the posix census row)."
       ]
+    },
+    "Round 4761": {
+      "decision_summary": "Build rulings D19 and D20 of docs/session-lifecycle-intent.md 5c: a sealed command's replay state is one slot per granted commander, made with the policy, and a node recovers freshness across a start with the echo alone, persisting no window.",
+      "changes_bullets": [
+        "wz-command-seal: ReplayWindow<S> holds a Slot per granted commander (Slot::granted) in the storage S, an array on the fixed profile and a boxed slice on the heap; SealError::WindowFull becomes NoContext, a key no grant names (RFC 8613 8.2 step 2).",
+        "wz-command-seal: Freshness<S>::started(window, echo) is the one start; Restart, Freshness::persisted and the window's iter go; fresh.rs cites appendix B.1.1 as the sender's counter, no longer a persisted window.",
+        "Freshness::check leaves a commander with no slot to the monitor; take refuses it as NoContext, so a key no grant names is never asked for the echo and never takes a counter.",
+        "wz-runtime-tokio lifecycle_seal: the window is made from the distinct commanders of the grants; HEAP_SEALED_COMMANDERS and TooManyCommanders go.",
+        "wz-session-mcu FixedSeal::new takes the build's distinct commanders; start_persisted and window() go, last() reads a commander's counter; declared_node builds the list at compile time (distinct_commander_list).",
+        "docs/command-seal.md and session-lifecycle-intent.md 5c record D19 and D20 as built."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-command-seal --features ring: 44 passed.",
+        "wz-session-core lifecycle_query::tests::sealed:: (sealed-commands, session-unicast, session-close-ingress, secure-channel): 5 passed.",
+        "wz-session-mcu admin_fixed::sealed_tests:: (the D17 leg's features): 2 passed; wz-runtime-tokio lifecycle_seal:: (session-close-ingress, transport-link-tls): 5 passed.",
+        "clippy -D warnings, all targets, per crate with those features: wz-command-seal, wz-session-core, wz-session-mcu, wz-runtime-tokio, each exit 0; wz_package.py builds declared-node for slot-commander (verbs over tls): exit 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-23-adminspace"
+      ],
+      "carry_forward_bullets": [
+        "D24 next (decision record vocabulary in lifecycle_wire, CONFIG_WZ_DECISION_ROWS), then D25, D21, D22 with D23."
+      ]
     }
   },
   "inventory_entries": {
