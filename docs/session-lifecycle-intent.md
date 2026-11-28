@@ -1770,8 +1770,95 @@ says `sealed:<zid>`; the same object again is a replay; an unlisted key's object
 the lists and takes no counter; and after the node restarts with the same provisioned identity, a
 command sealed before and one carrying the old echo are refused with a new echo, and the repeat
 carrying it is permitted. On the demo's peer (`zenohd_lane_heap_`), the first three, the record
-read off its log. What remains: the admin image above, and whether a node with storage should
-persist its window (`docs/command-seal.md`, decisions for the owner).
+read off its log. What remains: the admin image above, and the questions
+`docs/command-seal.md` left for the owner, which 5c rules.
+
+### 5c. Rulings (owner, 2026-11-28)
+
+The owner delegated the questions 5b and `docs/command-seal.md` left open: rule on the structure
+that is right for the long term and as the literature teaches it, cost not counted. Seven rulings
+follow. None is built yet; the order of work closes the subsection.
+
+**D19. The replay state is a recipient context per granted commander, made with the policy.** OSCORE
+keeps the replay state of a sender in the recipient context, which exists before the first message
+because it is established with the security context (RFC 8613, sections 3 and 7.4). A sealed
+command's counter slot is therefore made when the policy is: one slot per distinct commander the
+declaration grants, at build time on the fixed profile (as `SEALED_COMMANDERS` already is) and once,
+when the declaration is read, on the heap profile. The table of free slots goes, and with it
+`SealError::WindowFull`, the heap profile's bound of 64 commanders (`HEAP_SEALED_COMMANDERS`) and
+its refusal at start: a commander with no slot is one no grant names, which the monitor refuses
+before it asks the admission. No slot is evicted, as now.
+
+**D20. Across a restart, the echo alone; no node persists its window.** RFC 8613 recovers a lost
+replay window with the Echo option (appendix B.1.2, "Replay Window") and does not persist the
+window; appendix B.1.1, which `docs/command-seal.md` and `crates/wz-command-seal/src/fresh.rs` cite
+for a persisted window, is the sender's sequence number. A persisted window is also unsafe when the
+storage is rolled back: a copy older than the last command taken accepts that command again, while
+the echo refuses it whatever the storage holds. `Restart::Persisted`, `Freshness::persisted` and
+`FixedSeal::start_persisted` go, and the citation is corrected. Appendix B.1.1 belongs to the
+commander: a commander keeps its counter in nonvolatile memory in steps of K and starts above the
+stored value (SSN2 = SSN1 + K + F), so it never needs a node to tell it its last counter.
+
+**D21. Every reply to a sealed command whose signature verified is sealed by the node and bound to
+the request.** In OSCORE the 4.01 that carries the Echo option is itself protected (RFC 8613,
+appendix B.1.2), a response is bound to its request by the request's `kid` and Partial IV in its
+additional data (sections 5.4 and 7.1), and an echo used for freshness must be integrity protected
+(RFC 9175, section 2.3). The plain reply of today costs more than one round trip: a router that
+forges the `"last"` of a replay refusal can move a commander's counter to the top of its range,
+after which the node refuses every command that key seals, for good. So the node answers such a
+request (permit, refusal, echo, last) with a COSE_Sign1 under its own key, whose zid is the `node`
+the commander sealed for, with external data naming the request: the commander's zid and the
+request's counter. The commander takes a reply only when the key's zid is that node and the external
+data is its own request. A request refused before its signature verified (a malformed object, a bad
+signature) is answered unsealed as now and carries no echo and no counter, as OSCORE answers its own
+errors unprotected (section 8.2). A build that verifies sealed commands holds the key of its zid; a
+build without one is refused when it is built.
+
+**D22. `configure` is a sealed verb, and its sealed object carries the written key and the digest of
+the value.** The monitor's object for a write stays the node and the key (D16 follow-up): a grant is
+narrowed to keys, never to values. A signature is a different matter: an object that named the key
+and not the value would let a router write another value under the commander's authority. A sealed
+write therefore travels as a lifecycle query `configure` whose payload is the value and whose
+attachment is the sealed object, with `configure` among the verbs and its object `[key: tstr, value:
+bstr .size 32]`, the key as written and the SHA-256 of the value; the node checks the digest against
+the payload before the monitor. A query and not a sample, because the sealed reply of D21 needs a
+request to answer. The decision record keeps the first sixteen bytes of the digest, so a row of
+fixed size still names what was written.
+
+**D23. A grant to anyone is the preset of an image that proves no subject; an image that holds a
+secure channel cannot state it.** Fail-safe defaults and least privilege (Saltzer and Schroeder,
+1975): a node that can prove who asks grants by name. Upstream's `adminspace.permissions.write`
+stays the preset of the images with no channel. On an image with a secure channel,
+`Policy::grants_anyone` is refused when the image is built (by the capability check and by the
+declaration's parser), and `configure` is granted to zids, proven by a sealed write (D22) or, for a
+writer on a direct link, by the key that link proved: a sample carries the proven zid of the face it
+arrived on, as a query does (`ProvenQuery`). The admin images with a TLS overlay move from the grant
+to anyone to declared commanders.
+
+**D24. The decision record is a stream in one vocabulary; a node's ring is its cache.** One table of
+words in `lifecycle_wire`, written once for both profiles and every reader: the console line, the
+heap log and any later reader. Not the `Debug` spelling of Rust's enums, which changes whenever an
+enum does. The fields are `made` (the decision's sequence number), `subject` (`pipe`, `nobody`,
+`link:<zid>`, `sealed:<zid>`), `verb` (the key's word: `open`, `open_passive`, `close`, `reset`,
+`status`, `configure`), the object (`peer`, `generation`, `key`, the value's digest), `channel`,
+`decision` (`permit` or `deny`) and `reason` (the grounds or the refusal in lower snake case). A
+test pins the table. `made` lets a reader count the rows it missed; overwriting the oldest row and
+counting all is the audit storage of Common Criteria FAU_STG.4 (prevention of audit data loss). The
+rows a fixed node keeps are a build parameter (`CONFIG_WZ_DECISION_ROWS`, default 4), and their RAM
+is a measured row of the image's size table.
+
+**D25. One in-band entry type on the fixed profile, and it verifies.** Complete mediation: every
+entry point that takes an attachment verifies it. `Verbs<N>` and `VerbLegs`
+(`crates/wz-session-mcu/src/admin_fixed.rs`) become one type that holds the node, its name and a
+verifier. The admin image (`deploy/zephyr-admin-node`, `fixed_admin.rs`) gets a window sized by its
+declaration (D19) and an echo from the TLS library's generator, and joins the target matrix of D18
+with the sealed scenario.
+
+Order of work: D19 and D20 (one change of `wz-command-seal` and its two hosts), D24 (independent of
+the others), D25, D21 (a signer on each profile: `ring` on the heap profile, the PSA Crypto API's
+message signature with the identity key on the fixed one), then D22 and D23 together, since the
+admin images of D23 keep a writer only through the sealed write of D22 or the proof a sample
+carries. The kit row of D18's matrix runs when a board lane is free; it waits on no ruling.
 
 ## 6. The contract for every verb (step 8; A, B and D built, C in part)
 

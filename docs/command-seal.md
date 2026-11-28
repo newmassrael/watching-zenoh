@@ -158,8 +158,8 @@ window never fills in a correct deployment, so `WindowFull` names a declaration 
 commanders than the window holds.
 
 **A restart.** The window is memory, so a node that restarts has forgotten its counters and would
-take a replayed command once more. OSCORE meets the same loss two ways (RFC 8613, appendix B.1),
-and `Freshness<N>` (`crates/wz-command-seal/src/fresh.rs`) has both:
+take a replayed command once more. OSCORE recovers a lost replay window with the echo (RFC 8613,
+appendix B.1.2), and `Freshness<N>` (`crates/wz-command-seal/src/fresh.rs`) does so:
 
 - **Echo** (appendix B.1.2; RFC 9175, section 2), what every node does: when it starts it draws an
   echo of sixteen bytes from its entropy (`Freshness::echo`). A verified command of a commander the
@@ -169,11 +169,11 @@ and `Freshness<N>` (`crates/wz-command-seal/src/fresh.rs`) has both:
   sealed before the start cannot carry an echo drawn after it, so none is taken twice, and the
   node keeps nothing across the start. The echo of a commander the window holds is not read: its
   counter already refuses what it sealed before. It costs one round trip per commander per start.
-- **A persisted window** (appendix B.1.1), what a port may provide: a node that writes the window
-  down after each command it takes and before it answers (`ReplayWindow::iter`), and gives it back
-  when it starts (`Freshness::persisted`), has lost nothing and asks for no echo. No image of the
-  workspace has the storage for it today; the fixed profile's `FixedSeal::start_persisted` and
-  `FixedSeal::window` are its door.
+- **A persisted window**, which the crate still offers (`Freshness::persisted`, the fixed
+  profile's `FixedSeal::start_persisted`), is not OSCORE's: appendix B.1.1, cited here before, is
+  the sender's sequence number, and B.1.2 recovers the window with the echo alone. A copy of the
+  window older than the last command taken would accept that command again. Ruling D20 removes
+  it; the commander, as the sender, keeps its own counter as B.1.1 says.
 
 `Freshness::check` answers whether a command would be taken, taking nothing, and
 `Freshness::take` takes it after the same check.
@@ -275,13 +275,19 @@ A commander seals with `seal` (or `crates/wz-command-seal/examples/seal_command.
 a PKCS#8 PEM, takes the echo a refusal handed out as `echo=<hex>`, and prints the object in hex
 and the commander's zid) and sends a get on the lifecycle key with the object as the attachment.
 
-## Decisions for the owner
+## Decisions (owner, 2026-11-28)
 
-- **The window across a restart**: closed by the textbook answer, the echo (appendix B.1.2), on
-  every node, with a persisted window (appendix B.1.1) as a port's option. Open: whether an
-  image with storage should persist the window and skip the round trip.
-- **A sealed command that fails**: refused by name, never judged as the channel's commander.
-- **The echo reply is not signed.** OSCORE protects its 4.01 with the echo; a refusal here is a
-  plain document, so a router can hand the commander a wrong echo. That costs the commander one
-  more round trip and grants nothing (the node refuses a wrong echo with the right one); a router
-  that drops replies can deny service either way. Open: whether the node should sign its refusals.
+The questions this section left open are ruled in `docs/session-lifecycle-intent.md`, 5c:
+
+- **The window across a restart**: the echo alone, on every node (D20). The persisted window is
+  removed: it is not OSCORE's recipient method, and a rolled-back copy accepts a replay.
+- **The window's size**: one slot per commander the declaration grants, made with the policy on
+  both profiles; `WindowFull` and the heap profile's bound of 64 go (D19).
+- **A sealed command that fails**: refused by name, never judged as the channel's commander
+  (unchanged).
+- **The reply**: every reply to a command whose signature verified is a COSE_Sign1 under the
+  node's key, bound to the commander's zid and the request's counter (D21). A plain reply let a
+  router forge `"last"` and push a commander's counter to the top of its range.
+- **`configure`**: a sealed verb whose object is the written key and the SHA-256 of the value,
+  carried as a lifecycle query with the value as its payload (D22); a secure image grants it by
+  name only (D23).
