@@ -1315,6 +1315,53 @@ through `chain_router` over the lent table, as integration k does, and keep the 
 the receive path is k's plus the lane's, so its Ir moves by neither side's step more than each
 side measured alone.
 
+### 7.16 Integration k's verdict: the client tested as it ships, and its one place unmarked
+
+Main's run of integration k with the lane merged (`224d3dc840`) found three things of the lane's,
+each fixed at its cause:
+
+- **A test-only form of the registry** (`engine/registry.rs`, `engine/registry/held.rs`). R3a's
+  one `HeldPlaces` kept the gates of the two forms it replaced, `any(listen, group, all(test,
+  wz_lent))`, so a test build of the client (`runtime-plan` with neither `listen` nor `group`)
+  compiled the table of many places: a line of marks counted `RowCount::HeldSets`, the spare sets
+  and the faces' adding. Its plan then laid a held faces row of no rows, which `FACE_ROWS` does not
+  count where the build takes no face beside the dial role's, so a plan of every row was refused
+  (`TooLarge`), the faces' test found a held faces row where none is, and the reservation test a
+  row that holds nothing. The test arm is gone from everything that shapes the registry or its walk
+  (the marks' type and line, `Others`, the spares, `adding`, the open's build of the sets): a test
+  of the client builds the client's registry. The registry's tests of faces beside the dial role's
+  (an added face, a removed one, the spares, the walks of many sets) are built where the build
+  takes such faces; a method that shapes nothing (`remove_face`, `held_ids`, `HeldFace::new`,
+  `HeldPlaces::mark_mut`) keeps the test arm, so the one-face tests still ask it of the one face.
+  **Held by:** `tests::arena`'s `a_plan_with_every_row_holds_exactly_arena_rows`,
+  `the_faces_a_config_opens_with_fit_the_sets_the_arena_lends` and
+  `the_reservation_is_the_plan_and_lending_every_row_fills_it` in the client's lent builds;
+  `registry::tests`' `the_plans_parts_of_the_registry_are_the_lines_of_their_counts` (no line of
+  marks in a build of one face: red if the client describes one) and
+  `a_session_of_one_face_holds_its_dial_role_s_face_alone` (its others by type there).
+- **The one place of the dial role's table** (`wz-runtime-coop` `faces.rs`). `OneRow` held a
+  `TablePlace`, the place of a table of many faces with its mark (`held`), its face in
+  `MaybeUninit` and a drop that reads the mark: a dial-only build paid for a mark nothing writes.
+  A store now names how it keeps each place (`PlaceStore::Place`, the trait `Place`):
+  `ReservedRows` keeps `TablePlace`, `OneRow` keeps `DialRolePlace`, the face and its row of
+  the dials as plain values, read with no look at a mark, never vacant and never cleared. The
+  walks are still `FaceRows`' one body over either. **Held by:** `faces::tests`'
+  `a_table_of_one_face_keeps_no_mark_beside_its_face` (red if `OneRow` keeps a `TablePlace`,
+  whose mark the CONTROL measures), and `a_table_of_one_face_holds_its_dial_role_alone` and
+  `a_places_row_of_the_dials_goes_with_its_face` as before.
+- **The on-use client's case** (`scripts/lib/capability_cost_gate.py`). Main added
+  `pico-client-coop-nostd-on-use` after the lane listed its removed bodies, so the case forbade
+  none of them, and the selftest arm that every case of the cooperative engine forbids every
+  removed name went red. The case now forbids them, as its D12 twin does.
+
+**Expected.** The client's text: the mark's writes at the open and its drop's look at the mark
+leave every build without `listen` or `group`, as do the walks' reads of the mark at place 0;
+the engine's place is the mark's byte and its padding smaller. Whether that is the whole of the
+D12 client's `sessions` and `driver` growth across the merge (+1,204 B and +472 B) is the size
+ledger's to say: the symbol tables main sent cut each name before its method, so the rest of the
+growth (`engine::replay`, `engine::deliveries`) is not attributed here. Receive Ir: none; a
+Push's walk reads the one face as it did.
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)
