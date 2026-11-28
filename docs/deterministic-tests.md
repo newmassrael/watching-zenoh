@@ -420,3 +420,55 @@ The program clock's original also held, by its wall clock running 1.6 s, that no
 engine reads the host's clock. In the world, a read's wait takes no time of the host's, so that
 half is not a unit test's: it is held by the engine's build without `std` (`no_std` in
 `crates/wz-capi-coop/src/lib.rs`), where the engine has no host clock to name.
+
+## 9. Python selftests run twice
+
+The same rule holds for the selftests of the tools under `scripts/`: a selftest is a function of
+its script. Its exit code is a verdict a lane reads, and a selftest that reads the order of a set
+of strings is a function of a seed Python draws at random for each process.
+
+`scripts/lib/python_selftest_determinism.py`, `--check`, `--selftest` and `--list`, Python 3.10
+at the lowest, standard library only:
+
+- **Population**, derived: every tracked `.py` file below `scripts/` whose code reads
+  `--selftest` from its command line. A file that carries `--selftest` as a string constant (AST,
+  so a comment or a docstring is not one) is read for the shape that takes it: an `add_argument`
+  call, a comparison against the constant or a list, tuple or set holding it, a key of a dict of
+  modes, or a `case` of a `match`. A file that carries the constant in no such shape is a
+  finding, not skipped (`changed_gate_selftests.py` measured that a rule of the shapes its
+  author thought of missed four real selftests). `--list` prints the population.
+- **Two runs**, one after the other from the repository's root: `PYTHONHASHSEED=0` with
+  `TMPDIR` a fresh directory A, then `PYTHONHASHSEED=1` with `TMPDIR` a fresh directory B. The
+  seed changes the hash of every `str`, and so the iteration order of a set or a dict of strings
+  built in another order than the one it is read in; the directory changes every path tempfile
+  hands out. The runs are compared on their exit codes and on their stdout and stderr, each read
+  with its run's `TMPDIR` as one token and each entry directly below it named by its order of
+  first appearance (tempfile draws those names from the system's randomness, which no seed
+  reaches). Verdicts: SAME; NONDETERMINISTIC, with the first line that differs; FAILING, both
+  runs exit non-zero, outside this judgement and reported apart; STALLED, a run passed the stall
+  guard (300 s by default, `--stall`), which is a guard named as one and judges nothing.
+  `--check` prints a line per member (its verdict and its seconds) and then the count of runs,
+  same, different, failing and stalled.
+- **Table**: `docs/deterministic-tests/python-nondeterministic.tsv`, a header (`path`,
+  `reason`) and one row per selftest known to differ. The first table is written from the
+  first run of `--check`; a selftest made deterministic deletes its row, and a row is added
+  only with a reason why the selftest cannot be one yet.
+- **Findings**: a member that differs and has no row; a row whose member ran the same twice (the
+  row is stale); a row for a path that is not a member, a second row, a row with no reason, a
+  line that does not read as a row, a table with no header; a member that fails both runs or
+  stalls; a run of no selftest. A table of a header and no row is the ratchet's end and not a
+  lost subject: the subject is the population, and a run of nothing is the finding for it.
+- **Selftest**: fixture scripts written to a temporary directory and run through the same
+  judgement with a guard of one second: a steady one (the CONTROL, SAME), one that prints a set
+  of strings in its order (NONDETERMINISTIC), one that prints the paths tempfile gives it (SAME),
+  one whose exit code counts its runs (NONDETERMINISTIC on the exit code alone), one that always
+  fails (FAILING) and one that never ends (STALLED); one tabled copy that differs (no finding)
+  and one tabled copy that does not (stale). The judgement takes its runner as a parameter, and a
+  runner of no process drives a stall of the second run and the table's findings.
+
+What two runs do not see: a selftest that reads the date, the host, the network or the clock
+differs only when it reads them across a boundary the two runs a few seconds apart did not
+straddle, and a network that answers the same twice is not a function of the script either; a
+name drawn from the clock directly below `TMPDIR` is read as its order; a temporary path not
+below `TMPDIR` (a hard-coded `/tmp`) is not replaced; and state one run leaves in the tree is
+seen only as the difference it makes to the second.
