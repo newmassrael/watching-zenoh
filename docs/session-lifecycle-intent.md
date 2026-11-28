@@ -1854,6 +1854,11 @@ verifier. The admin image (`deploy/zephyr-admin-node`, `fixed_admin.rs`) gets a 
 declaration (D19) and an echo from the TLS library's generator, and joins the target matrix of D18
 with the sealed scenario.
 
+D19 and D20 are built (2026-11-28): `ReplayWindow<S>` holds a `Slot` per granted commander, made
+by `FixedSeal::new` from the image's declaration and by `lifecycle_seal_from_os_entropy` from the
+heap node's; `SealError::NoContext` names a key with no slot; `Freshness::started` is the one start,
+and `fresh.rs` cites appendix B.1.1 as the sender's.
+
 Order of work: D19 and D20 (one change of `wz-command-seal` and its two hosts), D24 (independent of
 the others), D25, D21 (a signer on each profile: `ring` on the heap profile, the PSA Crypto API's
 message signature with the identity key on the fixed one), then D22 and D23 together, since the

@@ -6,39 +6,29 @@
 //! ES256 by `ring`, which the TLS links of this runtime already link, and the freshness of each
 //! commander, started with an echo drawn from the OS when the node starts.
 //!
-//! The replay window evicts no commander (forgetting one would let every command it sealed be
-//! replayed once more), so it must hold every commander the node's declaration grants a verb to.
-//! The heap profile reads its grants when it starts, and the window is a table of fixed size, so a
-//! declaration that grants more commanders than the table holds is refused here, by name, before
-//! any command is taken, rather than found out when a granted commander is refused for room.
+//! The replay window holds one slot for each commander the node's declaration grants a verb to,
+//! made here once, when the declaration is read (decision D19 of
+//! `docs/session-lifecycle-intent.md`): OSCORE establishes a recipient context with the security
+//! context, before the first message (RFC 8613, section 3). No slot is free and none is evicted,
+//! so the window has no bound of its own to refuse a declaration by: it is as long as the grants.
 
 use std::fmt;
 
 use wz_command_seal::RingEs256;
 use wz_session_core::credential_identity::zid_from_key_text;
 use wz_session_core::lifecycle_monitor::HeapGrants;
-use wz_session_core::sealed_command::seal::{Echo, Freshness, ECHO_LEN};
+use wz_session_core::sealed_command::seal::{Echo, Freshness, ReplayWindow, Slot, Zid, ECHO_LEN};
 use wz_session_core::sealed_command::SealedCommands;
 
-/// The commanders whose last counter a heap node keeps. A declaration names the operators and
-/// controllers that may command one node, a handful in a deployment, and every one of them must
-/// fit, since the window evicts none; 64 leaves room far past that for the cost of 64 rows of a
-/// zid and a counter, 2 KiB in the node's queries, which a sealed command scans once.
-pub const HEAP_SEALED_COMMANDERS: usize = 64;
-
-/// The verifier `LifecycleQueries::with_seal` takes on the heap profile.
-pub type HeapSeal = SealedCommands<RingEs256, HEAP_SEALED_COMMANDERS>;
+/// The verifier `LifecycleQueries::with_seal` takes on the heap profile: a slot for each
+/// commander the declaration grants, in a slice as long as they are.
+pub type HeapSeal = SealedCommands<RingEs256, Box<[Slot]>>;
 
 /// Why a heap node verifies no sealed command.
 #[derive(Debug)]
 pub enum LifecycleSealError {
     /// The node's zid is not spelled as a lifecycle key spells one, so no command names it.
     NotAZid,
-    /// The declaration grants verbs to more commanders than the window keeps counters for.
-    TooManyCommanders {
-        /// The commanders the declaration grants a verb to.
-        granted: usize,
-    },
     /// The OS gave no entropy for the echo of this start.
     Entropy(getrandom::Error),
 }
@@ -49,11 +39,6 @@ impl fmt::Display for LifecycleSealError {
             Self::NotAZid => {
                 f.write_str("the node's zid is not lowercase hex with no leading zero")
             }
-            Self::TooManyCommanders { granted } => write!(
-                f,
-                "the declaration grants verbs to {granted} commanders and a node keeps the \
-                 counters of {HEAP_SEALED_COMMANDERS}"
-            ),
             Self::Entropy(why) => {
                 write!(f, "no entropy for the echo of the sealed commands ({why})")
             }
@@ -80,25 +65,27 @@ fn lifecycle_seal_with_echo(
     echo: Echo,
 ) -> Result<HeapSeal, LifecycleSealError> {
     let node = zid_from_key_text(zid_hex).ok_or(LifecycleSealError::NotAZid)?;
-    let granted = granted_commanders(grants);
-    if granted > HEAP_SEALED_COMMANDERS {
-        return Err(LifecycleSealError::TooManyCommanders { granted });
-    }
-    Ok(SealedCommands::new(node, RingEs256, Freshness::echo(echo)))
+    let slots: Box<[Slot]> = granted_commanders(grants)
+        .into_iter()
+        .map(Slot::granted)
+        .collect();
+    Ok(SealedCommands::new(
+        node,
+        RingEs256,
+        Freshness::started(ReplayWindow::granting(slots), echo),
+    ))
 }
 
-/// The commanders `grants` names, each once: a zid granted on several rows takes one counter.
-fn granted_commanders(grants: &HeapGrants) -> usize {
-    let rows = grants.grants();
-    rows.iter()
-        .enumerate()
-        .filter(|&(at, grant)| {
-            !rows
-                .iter()
-                .take(at)
-                .any(|earlier| earlier.commander == grant.commander)
-        })
-        .count()
+/// The commanders `grants` names, each once, in the order of their first row: a zid granted on
+/// several rows takes one slot.
+fn granted_commanders(grants: &HeapGrants) -> Vec<Zid> {
+    let mut commanders: Vec<Zid> = Vec::new();
+    for grant in grants.grants() {
+        if !commanders.contains(&grant.commander) {
+            commanders.push(grant.commander);
+        }
+    }
+    commanders
 }
 
 #[cfg(test)]
@@ -198,30 +185,21 @@ mod tests {
         );
     }
 
-    /// A declaration may grant as many commanders as the window holds and no more; a zid granted
-    /// on two rows is one commander. Red if the bound moved or a commander were counted per row.
+    /// The window holds a slot for each commander the declaration grants and for no other, made
+    /// before any command: a zid granted on two rows takes one, and a declaration of a hundred
+    /// commanders is read whole. Red if a slot were made per row, or a bound refused a declaration.
     #[test]
-    fn the_declaration_grants_no_more_commanders_than_the_window_holds() {
-        let commanders: Vec<Zid> = (1..=HEAP_SEALED_COMMANDERS + 1)
-            .map(|n| u128::try_from(n).expect("a small number").to_le_bytes())
-            .collect();
-        let fits = commanders
-            .get(..HEAP_SEALED_COMMANDERS)
-            .expect("as many commanders as the window holds");
-        assert!(lifecycle_seal_with_echo(NODE, &grants(fits), [0; ECHO_LEN]).is_ok());
-        assert!(matches!(
-            lifecycle_seal_with_echo(NODE, &grants(&commanders), [0; ECHO_LEN]),
-            Err(LifecycleSealError::TooManyCommanders { granted }) if granted == HEAP_SEALED_COMMANDERS + 1
-        ));
-        let mut rows: Vec<String> = fits
+    fn the_window_holds_a_slot_for_each_granted_commander() {
+        let commanders: Vec<Zid> = (1..=100u128).map(u128::to_le_bytes).collect();
+        let mut rows: Vec<String> = commanders
             .iter()
             .map(|commander| format!("{}=close", zid_text(commander)))
             .collect();
-        let again = fits.first().expect("a commander");
+        let again = commanders.first().expect("a commander");
         rows.push(format!("{}=status", zid_text(again)));
-        let twice = HeapGrants::parse(rows.iter().map(String::as_str)).expect("grants");
-        assert_eq!(granted_commanders(&twice), HEAP_SEALED_COMMANDERS);
-        assert!(lifecycle_seal_with_echo(NODE, &twice, [0; ECHO_LEN]).is_ok());
+        let granted = HeapGrants::parse(rows.iter().map(String::as_str)).expect("grants");
+        assert_eq!(granted_commanders(&granted), commanders);
+        assert!(lifecycle_seal_with_echo(NODE, &granted, [0; ECHO_LEN]).is_ok());
     }
 
     /// A node whose zid no lifecycle key can spell verifies nothing, and no grant is read for it.

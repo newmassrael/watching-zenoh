@@ -131,49 +131,54 @@ first that fails:
 | a node zid other than this node's | `WrongNode` |
 | a signature that does not verify under the carried key | `BadSignature` |
 | a counter not above the commander's last | `Replay { last }` |
-| a commander the window has no counter for and no room for | `WindowFull` |
+| a commander the window holds no slot for: no grant names it | `NoContext` |
 
 The decoding refusals interleave in the order the bytes are read. The counter is taken only after
 the signature verified, so a forged object moves no counter.
 
 `verify_sealed` and `Verified::take` are the same two steps apart. They exist because the key is
-self-certifying: anyone can make a key and seal a command that verifies under it. A node that took
-the counter of every verified command would give a slot of its window to every key that wrote to
-it, and a full window refuses the commanders it does grant. So a node judges the commander between
-the two steps and takes the counter only of a command it permits (below).
+self-certifying: anyone can make a key and seal a command that verifies under it. So a node judges
+the commander between the two steps and takes the counter only of a command it permits (below); a
+key no grant names has no slot to take it into.
 
 ## The replay window
 
-`ReplayWindow<N>` holds the last counter of up to `N` commanders, in a fixed table with no
-allocator. A counter above the commander's last is taken; any other is `Replay`. This is the
+`ReplayWindow<S>` holds one slot for each commander the node's policy grants (`Slot::granted`), in
+the storage `S`: an array the build sizes on the fixed profile, a boxed slice the declaration
+sizes on the heap profile. A counter above the commander's last is taken; any other is `Replay`. This is the
 replay window of RFC 8613, section 7.4, narrowed to its high-water mark: a lifecycle command is
 rare and its commander waits for the answer, so the window OSCORE keeps for messages arriving out
 of order is not needed. A commander with two commands in flight gives the later counter to the one
 it sends later; if the other arrives second it is refused and is sent again with a new counter.
 
-When the table is full a new commander is refused with `WindowFull`, and no commander is evicted:
-forgetting one would let every command it ever sealed be replayed once more. Sized to the
-commanders the node's declaration grants, and filled only with commanders the node permits, a
-window never fills in a correct deployment, so `WindowFull` names a declaration that grants more
-commanders than the window holds.
+The slots are made with the policy (ruling D19), as OSCORE establishes a recipient context with the
+security context, before the first message (RFC 8613, section 3): at build time on the fixed
+profile (`FixedSeal::new` takes the distinct commanders the image's declaration grants), once,
+when the declaration is read, on the heap profile (`lifecycle_seal_from_os_entropy`). No slot is
+free and none is evicted: forgetting a commander would let every command it ever sealed be
+replayed once more. A commander with no slot is one no grant names; the monitor refuses it before
+it asks the admission, and a take for it is `NoContext`, as OSCORE answers a `kid` it holds no
+recipient context for (section 8.2, step 2).
 
 **A restart.** The window is memory, so a node that restarts has forgotten its counters and would
 take a replayed command once more. OSCORE recovers a lost replay window with the echo (RFC 8613,
-appendix B.1.2), and `Freshness<N>` (`crates/wz-command-seal/src/fresh.rs`) does so:
+appendix B.1.2) and keeps no window across a start, and `Freshness<S>`
+(`crates/wz-command-seal/src/fresh.rs`) does the same (ruling D20):
 
-- **Echo** (appendix B.1.2; RFC 9175, section 2), what every node does: when it starts it draws an
-  echo of sixteen bytes from its entropy (`Freshness::echo`). A verified command of a commander the
+- **Echo** (appendix B.1.2; RFC 9175, section 2): when a node starts it draws an echo of sixteen
+  bytes from its entropy (`Freshness::started`). A verified command of a commander the
   window holds no counter for is refused with `EchoRequired { echo }` unless its payload carries
   that echo; the commander seals the command again, under a new counter, with the echo as the
   payload's fifth item, and that command is taken and starts the commander's counter. A command
   sealed before the start cannot carry an echo drawn after it, so none is taken twice, and the
   node keeps nothing across the start. The echo of a commander the window holds is not read: its
   counter already refuses what it sealed before. It costs one round trip per commander per start.
-- **A persisted window**, which the crate still offers (`Freshness::persisted`, the fixed
-  profile's `FixedSeal::start_persisted`), is not OSCORE's: appendix B.1.1, cited here before, is
-  the sender's sequence number, and B.1.2 recovers the window with the echo alone. A copy of the
-  window older than the last command taken would accept that command again. Ruling D20 removes
-  it; the commander, as the sender, keeps its own counter as B.1.1 says.
+- **No persisted window.** Appendix B.1.1, which this document once cited for a window written
+  down and given back, is the sender's sequence number: the commander keeps its counter in
+  nonvolatile memory in steps of K and starts above the stored value. A node that persisted its
+  window would accept again every command taken after a copy it was rolled back to; the echo
+  refuses them whatever the storage holds. Removed with ruling D20 (`Restart::Persisted`,
+  `Freshness::persisted`, `FixedSeal::start_persisted`).
 
 `Freshness::check` answers whether a command would be taken, taking nothing, and
 `Freshness::take` takes it after the same check.
@@ -228,21 +233,21 @@ lifecycle query that carries a sealed command, is written once for both profiles
    its generation is the key's for a reset and absent otherwise, and its node is the key's node
    (`verify_sealed` checked it against the node's own). A mismatch refuses
    (`NotTheRequest`): a router must not move a sealed command onto another key.
-3. `Freshness::check`: a replay, a window with no room, or a commander with no counter and no
-   echo refuses, taking nothing.
+3. `Freshness::check`: a replay, or a granted commander with no counter yet and no echo, refuses,
+   taking nothing. A commander with no slot passes to the monitor, which refuses it.
 4. The monitor judges the request with `Commander::Sealed(&sealed.commander)`. The entry point
    judges the node through `SealedNode`, whose monitor holds the `Admission` that takes the
    counter: `Monitor::decide` asks it only after a grant permits the commander, and a refused
    take turns the permit into `Refusal::NotFresh`. A monitor given no admission refuses every
-   sealed commander so (fail-safe). An object no grant permits therefore takes no counter and no
-   slot of the window.
+   sealed commander so (fail-safe). An object no grant permits therefore takes no counter, and a
+   key no grant names has no slot.
 5. The effect, as for any commander.
 
 A query that carries no attachment keeps today's subject, the channel's commander. A query that
 carries an attachment on a node given no verifier, or built without `sealed-commands`, is
 refused as `NotVerified`. The window lives with the node: on the heap profile a
-`SealedCommands<E, N>` in the node's `LifecycleQueries` (`with_seal`), on the fixed profile a
-`FixedSeal<E, N>` in a static behind the runtime's critical section, handed to the verbs'
+`SealedCommands<E, S>` in the node's `LifecycleQueries` (`with_seal`), on the fixed profile a
+`FixedSeal<E, N>` (its `N` granted commanders given to `new`) in a static behind the runtime's critical section, handed to the verbs'
 queryable with `VerbLegs::verify_sealed_with` and started with the node's zid and an echo once
 the node knows its zid (`FixedSeal::start`). An admin node's `Verbs` and a node that binds only
 the open verb verify none.
@@ -279,10 +284,12 @@ and the commander's zid) and sends a get on the lifecycle key with the object as
 
 The questions this section left open are ruled in `docs/session-lifecycle-intent.md`, 5c:
 
-- **The window across a restart**: the echo alone, on every node (D20). The persisted window is
-  removed: it is not OSCORE's recipient method, and a rolled-back copy accepts a replay.
+- **The window across a restart**: the echo alone, on every node (D20, built 2026-11-28). The
+  persisted window is removed: it is not OSCORE's recipient method, and a rolled-back copy accepts
+  a replay.
 - **The window's size**: one slot per commander the declaration grants, made with the policy on
-  both profiles; `WindowFull` and the heap profile's bound of 64 go (D19).
+  both profiles; `WindowFull` and the heap profile's bound of 64 are gone (D19, built
+  2026-11-28).
 - **A sealed command that fails**: refused by name, never judged as the channel's commander
   (unchanged).
 - **The reply**: every reply to a command whose signature verified is a COSE_Sign1 under the

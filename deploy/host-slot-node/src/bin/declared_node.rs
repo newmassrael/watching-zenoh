@@ -487,11 +487,36 @@ const COMMANDER_LISTS: [&[[u8; 16]]; 4] = [
     &COMMANDERS_STATUS,
 ];
 
-/// The commanders whose last counter the node keeps for their sealed commands: every zid the
-/// declaration grants a verb to, each once. The window evicts no commander, and only a commander
-/// a grant permits takes a row of it, so sized so it never refuses a granted one for room.
+/// How many commanders the node keeps a counter for, for their sealed commands: every zid the
+/// declaration grants a verb to, each once.
 #[cfg(all(feature = "verbs", feature = "tls"))]
 const SEALED_COMMANDERS: usize = distinct_commanders(&COMMANDER_LISTS);
+
+/// The commanders whose last counter the node keeps, each once, in the order the lists first name
+/// them: the window's slots, made with the policy when the image is built (decision D19).
+#[cfg(all(feature = "verbs", feature = "tls"))]
+const SEALED: [[u8; 16]; SEALED_COMMANDERS] = distinct_commander_list(&COMMANDER_LISTS);
+
+/// The zids `lists` name, each once, in the order they are first named. `N` is their count,
+/// [`distinct_commanders`]; a smaller one leaves the rest out, a larger one leaves zeros.
+#[cfg(all(feature = "verbs", feature = "tls"))]
+const fn distinct_commander_list<const N: usize>(lists: &[&[[u8; 16]]]) -> [[u8; 16]; N] {
+    let mut out = [[0u8; 16]; N];
+    let mut count = 0;
+    let mut list = 0;
+    while list < lists.len() {
+        let mut at = 0;
+        while at < lists[list].len() {
+            if !named_before(lists, list, at) && count < N {
+                out[count] = lists[list][at];
+                count += 1;
+            }
+            at += 1;
+        }
+        list += 1;
+    }
+    out
+}
 
 /// How many zids `lists` name, each counted once whatever lists name it.
 #[cfg(all(feature = "verbs", feature = "tls"))]
@@ -538,7 +563,7 @@ const fn named_before(lists: &[&[[u8; 16]]], list: usize, at: usize) -> bool {
 /// The verifier of the sealed commands the verbs may be asked with (decision D17): ES256 by the
 /// secure channel's library, started with the node's zid and the echo of this start.
 #[cfg(all(feature = "verbs", feature = "tls"))]
-static SEAL: FixedSeal<PsaEs256, SEALED_COMMANDERS> = FixedSeal::new(PsaEs256);
+static SEAL: FixedSeal<PsaEs256, SEALED_COMMANDERS> = FixedSeal::new(PsaEs256, SEALED);
 
 /// Start verifying the sealed commands sent to the node `zid` and hand the verifier to the verbs'
 /// queryable, before it is registered. A command of a commander the node holds no counter for

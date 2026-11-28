@@ -85,6 +85,16 @@ fn to_be_signed(protected: &[u8], payload: &[u8]) -> Vec<u8> {
     out[..len].to_vec()
 }
 
+/// The window of a node whose policy grants `commanders`, one slot each (decision D19).
+fn granting(commanders: &[Zid]) -> ReplayWindow<Vec<Slot>> {
+    ReplayWindow::granting(commanders.iter().copied().map(Slot::granted).collect())
+}
+
+/// The zid of the pinned key, the commander of the pinned object.
+fn pinned_commander() -> Zid {
+    zid_of_point(&pinned_point())
+}
+
 /// What a verifier was asked: the point, the message and the signature.
 type Asked = (Vec<u8>, Vec<u8>, Vec<u8>);
 
@@ -165,7 +175,7 @@ fn open_unsigned(protected: &str, payload: &str) -> Result<Sealed, SealError> {
     open_sealed(
         &bytes,
         &NODE,
-        &mut ReplayWindow::<4>::new(),
+        &mut granting(&[pinned_commander()]),
         &Recording::answering(true),
     )
 }
@@ -185,7 +195,7 @@ fn the_test_helpers_assemble_the_pinned_object() {
 #[test]
 fn the_pinned_object_opens_to_its_commander_and_its_command() {
     let verifier = Recording::answering(true);
-    let mut window = ReplayWindow::<4>::new();
+    let mut window = granting(&[pinned_commander()]);
     let sealed = open_sealed(&hex(PINNED_SEALED_HEX), &NODE, &mut window, &verifier)
         .expect("the pinned object opens");
     assert_eq!(zid_text(&sealed.commander), PINNED_ZID_TEXT);
@@ -236,7 +246,7 @@ fn seal_writes_the_pinned_object_byte_for_byte() {
 
 #[test]
 fn a_signature_that_does_not_verify_is_refused_and_takes_no_counter() {
-    let mut window = ReplayWindow::<4>::new();
+    let mut window = granting(&[pinned_commander()]);
     assert_eq!(
         open_sealed(
             &hex(PINNED_SEALED_HEX),
@@ -246,43 +256,47 @@ fn a_signature_that_does_not_verify_is_refused_and_takes_no_counter() {
         ),
         Err(SealError::BadSignature)
     );
-    assert_eq!(window.iter().count(), 0);
+    assert_eq!(window.last(&pinned_commander()), None);
 }
 
 #[test]
 fn a_command_for_another_node_is_refused_before_its_signature_is_checked() {
     let verifier = Recording::answering(true);
-    let mut window = ReplayWindow::<4>::new();
+    let mut window = granting(&[pinned_commander()]);
     assert_eq!(
         open_sealed(&hex(PINNED_SEALED_HEX), &PEER, &mut window, &verifier),
         Err(SealError::WrongNode)
     );
     assert!(verifier.asked.borrow().is_empty());
-    assert_eq!(window.iter().count(), 0);
+    assert_eq!(window.last(&pinned_commander()), None);
 }
 
 #[test]
 fn a_verified_command_takes_no_counter_until_it_is_taken() {
     let verifier = Recording::answering(true);
-    let mut window = ReplayWindow::<1>::new();
+    let mut window = granting(&[pinned_commander()]);
     let bytes = hex(PINNED_SEALED_HEX);
     let verified = verify_sealed(&bytes, &NODE, &verifier).expect("verifies");
     assert_eq!(verified.sealed().counter, 42);
     assert_eq!(zid_text(&verified.sealed().commander), PINNED_ZID_TEXT);
-    assert_eq!(window.iter().count(), 0, "verifying took nothing");
+    assert_eq!(
+        window.last(&pinned_commander()),
+        None,
+        "verifying took nothing"
+    );
     let again = verify_sealed(&bytes, &NODE, &verifier).expect("a replay verifies too");
     assert_eq!(verified.take(&mut window), Ok(*verified.sealed()));
     assert_eq!(again.take(&mut window), Err(SealError::Replay { last: 42 }));
 }
 
 #[test]
-fn a_command_verified_and_not_taken_leaves_the_window_to_the_commanders_taken() {
+fn a_verified_command_of_a_commander_no_grant_names_takes_no_slot() {
     let verifier = Recording::answering(true);
-    let mut window = ReplayWindow::<1>::new();
     let other: Zid = [0x77; 16];
+    let mut window = granting(&[other]);
     assert_eq!(window.accept(&other, 1), Ok(()));
     let verified = verify_sealed(&hex(PINNED_SEALED_HEX), &NODE, &verifier).expect("verifies");
-    assert_eq!(verified.take(&mut window), Err(SealError::WindowFull));
+    assert_eq!(verified.take(&mut window), Err(SealError::NoContext));
     assert_eq!(window.last(&other), Some(1));
     assert_eq!(
         verify_sealed(&hex(PINNED_SEALED_HEX), &PEER, &verifier),
@@ -293,7 +307,7 @@ fn a_command_verified_and_not_taken_leaves_the_window_to_the_commanders_taken() 
 #[test]
 fn the_same_object_twice_is_a_replay() {
     let verifier = Recording::answering(true);
-    let mut window = ReplayWindow::<4>::new();
+    let mut window = granting(&[pinned_commander()]);
     let bytes = hex(PINNED_SEALED_HEX);
     assert!(open_sealed(&bytes, &NODE, &mut window, &verifier).is_ok());
     assert_eq!(
@@ -311,7 +325,7 @@ fn a_head_longer_than_its_value_needs_is_refused_wherever_it_is() {
         open_sealed(
             &longer_array,
             &NODE,
-            &mut ReplayWindow::<4>::new(),
+            &mut granting(&[pinned_commander()]),
             &Recording::answering(true)
         ),
         Err(SealError::NonCanonical)
@@ -396,7 +410,7 @@ fn a_header_out_of_order_or_unprotected_is_not_the_format() {
         open_sealed(
             &with_kid,
             &NODE,
-            &mut ReplayWindow::<4>::new(),
+            &mut granting(&[pinned_commander()]),
             &Recording::answering(true)
         ),
         Err(SealError::Malformed)
@@ -410,7 +424,7 @@ fn an_object_untagged_detached_or_followed_by_bytes_is_not_the_format() {
         open_sealed(
             bytes,
             &NODE,
-            &mut ReplayWindow::<4>::new(),
+            &mut granting(&[pinned_commander()]),
             &Recording::answering(true),
         )
     };
@@ -496,7 +510,7 @@ fn every_verb_seals_and_opens_with_its_word() {
         let sealed = open_sealed(
             &out[..len],
             &NODE,
-            &mut ReplayWindow::<1>::new(),
+            &mut granting(&[pinned_commander()]),
             &Recording::answering(true),
         )
         .expect("opens");
@@ -618,14 +632,14 @@ fn an_echo_of_another_length_or_a_sixth_item_is_not_the_format() {
 /// replay. Red if `Freshness::take` took a counter before `check` passed.
 #[test]
 fn after_a_start_the_echo_is_asked_then_taken_then_a_replay_refused() {
-    let mut fresh = Freshness::<2>::echo(BOOT_ECHO);
+    let mut fresh = Freshness::started(granting(&[pinned_commander()]), BOOT_ECHO);
     let verifier = Recording::answering(true);
     let first = verify_sealed(&sealed_with_echo(43, None), &NODE, &verifier).expect("verifies");
     assert_eq!(
         fresh.take(first),
         Err(SealError::EchoRequired { echo: BOOT_ECHO })
     );
-    assert_eq!(fresh.window().iter().count(), 0);
+    assert_eq!(fresh.window().last(&pinned_commander()), None);
     let repeat = sealed_with_echo(44, Some(BOOT_ECHO));
     let taken = fresh
         .take(verify_sealed(&repeat, &NODE, &verifier).expect("verifies"))
@@ -674,7 +688,7 @@ mod with_ring {
         let sealed = open_sealed(
             &hex(PINNED_SEALED_HEX),
             &NODE,
-            &mut ReplayWindow::<1>::new(),
+            &mut granting(&[pinned_commander()]),
             &RingEs256,
         )
         .expect("openssl's signature verifies");
@@ -684,7 +698,7 @@ mod with_ring {
     #[test]
     fn a_command_sealed_by_a_key_opens_to_that_keys_zid() {
         let signer = RingSigner::generate().expect("a key");
-        let mut window = ReplayWindow::<2>::new();
+        let mut window = granting(&[zid_of_point(&signer.point())]);
         for (counter, verb) in Verb::ALL.into_iter().enumerate() {
             let command = Command {
                 verb,
@@ -723,7 +737,12 @@ mod with_ring {
             let mut flipped = bytes.clone();
             flipped[at] ^= 0x01;
             assert_eq!(
-                open_sealed(&flipped, &NODE, &mut ReplayWindow::<1>::new(), &RingEs256),
+                open_sealed(
+                    &flipped,
+                    &NODE,
+                    &mut granting(&[zid_of_point(&signer.point())]),
+                    &RingEs256
+                ),
                 Err(SealError::BadSignature),
                 "bit 0 of byte {at}"
             );
@@ -739,7 +758,12 @@ mod with_ring {
         swapped.extend_from_slice(&protected_of(&other));
         swapped.extend_from_slice(&bytes[2 + 2 + PROTECTED_LEN..]);
         assert_eq!(
-            open_sealed(&swapped, &NODE, &mut ReplayWindow::<1>::new(), &RingEs256),
+            open_sealed(
+                &swapped,
+                &NODE,
+                &mut granting(&[zid_of_point(&signer.point())]),
+                &RingEs256
+            ),
             Err(SealError::BadSignature)
         );
     }
@@ -747,7 +771,7 @@ mod with_ring {
     #[test]
     fn an_older_counter_is_a_replay_and_a_forged_one_moves_nothing() {
         let signer = RingSigner::generate().expect("a key");
-        let mut window = ReplayWindow::<1>::new();
+        let mut window = granting(&[zid_of_point(&signer.point())]);
         let mut forged = sealed_by(&signer, &reset(100));
         let last = forged.len() - 1;
         forged[last] ^= 0x01;
@@ -790,10 +814,12 @@ mod with_ring {
     }
 
     #[test]
-    fn a_full_window_refuses_a_second_commander_and_still_serves_the_first() {
+    /// A key no grant names has no slot: its genuine command is refused and the granted
+    /// commander is served before and after. Red if the window made a slot for a key it was sent.
+    fn a_commander_no_grant_names_is_refused_and_the_granted_one_served() {
         let first = RingSigner::generate().expect("a key");
         let second = RingSigner::generate().expect("a key");
-        let mut window = ReplayWindow::<1>::new();
+        let mut window = granting(&[zid_of_point(&first.point())]);
         assert!(open_sealed(
             &sealed_by(&first, &reset(1)),
             &NODE,
@@ -808,7 +834,7 @@ mod with_ring {
                 &mut window,
                 &RingEs256
             ),
-            Err(SealError::WindowFull)
+            Err(SealError::NoContext)
         );
         assert!(open_sealed(
             &sealed_by(&first, &reset(2)),
@@ -828,7 +854,7 @@ mod with_ring {
             open_sealed(
                 &signed_by(&signer, &protected, &payload),
                 &NODE,
-                &mut ReplayWindow::<1>::new(),
+                &mut granting(&[zid_of_point(&signer.point())]),
                 &RingEs256
             ),
             Err(SealError::NonCanonical)
@@ -840,7 +866,7 @@ mod with_ring {
             open_sealed(
                 &signed_by(&signer, &es384, &payload),
                 &NODE,
-                &mut ReplayWindow::<1>::new(),
+                &mut granting(&[zid_of_point(&signer.point())]),
                 &RingEs256
             ),
             Err(SealError::Algorithm)
@@ -849,7 +875,7 @@ mod with_ring {
             open_sealed(
                 &signed_by(&signer, &protected, &payload),
                 &NODE,
-                &mut ReplayWindow::<1>::new(),
+                &mut granting(&[zid_of_point(&signer.point())]),
                 &RingEs256
             )
             .is_ok(),
@@ -864,7 +890,7 @@ mod with_ring {
             open_sealed(
                 &sealed_by(&signer, &reset(1)),
                 &PEER,
-                &mut ReplayWindow::<1>::new(),
+                &mut granting(&[zid_of_point(&signer.point())]),
                 &RingEs256
             ),
             Err(SealError::WrongNode)
