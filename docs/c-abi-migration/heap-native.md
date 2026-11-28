@@ -2414,7 +2414,8 @@ The order that builds at each step:
    plane's `HeldReplies<u64, Lent>` (`:288`), `HeldFinals` and `RefusedFinals`
    (`query_plane.rs:118`, `:121`) and the round's `RoundRows` (`round.rs:775`). Each needs the
    policy as a parameter, and each push a first row the allocator may refuse:
-   `EndedLegs::note` asserts its push is kept (`get_plane.rs:224`), `FinalHolds::admit` lets a
+   `EndedLegs::note` asserted its push was kept (in the get plane, since removed: the gets are rows of
+   `session_tables.rs`), `FinalHolds::admit` lets a
    refused request's push go (`query_plane.rs:223`), and the round pushes on the receive. Each is
    given its room before the push, as `FinalStaging::make_room` is (below), or a refusal its
    caller answers.
