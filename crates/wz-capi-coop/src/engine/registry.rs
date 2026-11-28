@@ -71,7 +71,7 @@ use wz_session_core::slot_observer::NoRequesters;
     feature = "declarations-synced-event"
 )))]
 use wz_session_core::slot_observer::NoSink;
-#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+#[cfg(any(feature = "listen", feature = "group"))]
 use wz_session_core::slot_observer::OtherPeers;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf, TakenAhead};
 
@@ -382,7 +382,7 @@ fn names_face(holder: FaceId) -> bool {
     holder < NAMES_NO_FACE
 }
 
-#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+#[cfg(any(feature = "listen", feature = "group"))]
 mod adding;
 // The registry's and each set's descriptions, read by the forms that lay their tables out at the
 // open: the region's and the plan's.
@@ -445,7 +445,7 @@ impl HeldFace {
     }
 
     /// The place of the face's set, which its link and its room keep too.
-    #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+    #[cfg(any(feature = "listen", feature = "group"))]
     pub(super) const fn at(&self) -> usize {
         self.at
     }
@@ -470,7 +470,7 @@ pub(super) struct HistoryCursor {
 /// the table's rows but the caller's ([`HeldPlaces::split`]): the dial role's set where the call
 /// is another face's, the sets past it before the call's own and after it, and the marks of those
 /// places, which name the faces that hold them.
-#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+#[cfg(any(feature = "listen", feature = "group"))]
 pub(super) struct Others<'a> {
     dial: Option<&'a FaceTables>,
     before: &'a [FaceTables],
@@ -479,7 +479,7 @@ pub(super) struct Others<'a> {
     held_after: &'a [FaceId],
 }
 
-#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+#[cfg(any(feature = "listen", feature = "group"))]
 impl Others<'_> {
     fn faces(&self) -> impl Iterator<Item = &FaceTables> {
         let before = self.before.iter().zip(self.held_before);
@@ -492,7 +492,7 @@ impl Others<'_> {
     }
 }
 
-#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+#[cfg(any(feature = "listen", feature = "group"))]
 impl OtherPeers for Others<'_> {
     fn subscribes(
         &self,
@@ -656,7 +656,7 @@ pub(super) struct Registry {
     /// it, the session's pools of what its peers write by their own choice among it, where the open
     /// lends the tables, or counted as the dial face's set is where they take their memory on use.
     /// A session of its dial role's face alone builds its one set at the open and keeps none.
-    #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+    #[cfg(any(feature = "listen", feature = "group"))]
     spares: adding::SpareSets,
     /// Every set of face tables built so far, each where it was built and never moved from, in a
     /// table with a row for each face the config admits, lent by the arena at the open or, where the
@@ -829,11 +829,11 @@ impl Registry {
         // written by nothing until then: on a host the pages of the places no face took stay
         // unresident. Every span an arena lends starts on one alignment, so the order the open
         // lends them in moves none of the bytes the plan counts.
-        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+        #[cfg(any(feature = "listen", feature = "group"))]
         let built = usize::from(peers.dial).min(peers.tables);
-        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+        #[cfg(not(any(feature = "listen", feature = "group")))]
         let built = peers.tables;
-        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+        #[cfg(any(feature = "listen", feature = "group"))]
         let spares = adding::SpareSets::reserved(
             arena,
             keys,
@@ -852,7 +852,7 @@ impl Registry {
             owed: owed::Owed::rowless(),
             #[cfg(feature = "multicast-declarations")]
             peer_aliases: limits.max_peer_keyexpr_aliases_held(),
-            #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+            #[cfg(any(feature = "listen", feature = "group"))]
             spares,
             #[cfg(feature = "local-queryable")]
             local: Gets::default(),
@@ -907,11 +907,11 @@ impl Registry {
                 ceiling: 0,
             })?;
         }
-        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+        #[cfg(any(feature = "listen", feature = "group"))]
         let pools = &mut registry.spares.pools;
-        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+        #[cfg(not(any(feature = "listen", feature = "group")))]
         let mut own_pools = pools;
-        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+        #[cfg(not(any(feature = "listen", feature = "group")))]
         let pools = &mut own_pools;
         for _ in 0..built {
             lend_set(
@@ -2432,17 +2432,24 @@ unsafe fn let_go(
 }
 
 // The registry's own tests build it from an arena, as a build that lays its arena out at the open
-// does; a build of the region's form is held by the region's tests (`crate::tests::region`).
+// does; a build of the region's form is held by the region's tests (`crate::tests::region`). Each
+// test builds the registry of the build under test, so those of faces beside the dial role's are
+// built where the build takes such faces (`listen`, `group`): a build of the dial role's face
+// alone is tested in the form it ships, whose plan lays out no mark past that face.
 #[cfg(all(test, wz_lent))]
 mod tests {
     //! Each face's tables are lent from the session's arena: the dial face's at the open, an
     //! accepted face's from the spares the open lent, and past those tables of no rows that refuse
     //! what is asked of them: the session takes no memory but its arena.
+    #[cfg(any(feature = "listen", feature = "group"))]
     use super::adding::FacesFull;
     use super::*;
     use crate::arena::{AllocatorMemory, SessionArena};
-    use wz_session_core::bounded::{seq_bytes, seq_rows, RowCounts, SeqPlace};
+    #[cfg(any(feature = "listen", feature = "group"))]
+    use wz_session_core::bounded::seq_bytes;
+    use wz_session_core::bounded::{seq_rows, RowCounts, SeqPlace};
     use wz_session_core::peer_tables::PeerPoolRows;
+    #[cfg(any(feature = "listen", feature = "group"))]
     use wz_session_core::pubsub::SubscriberPeer;
     use wz_session_core::reply_stage::FinalStaging;
     use wz_session_core::sample::QosLevel;
@@ -2478,6 +2485,9 @@ mod tests {
     struct Held {
         registry: Registry,
         arena: SessionArena,
+        /// How many sets the open lent rows to, which the tests of faces beside the dial role's
+        /// read.
+        #[cfg(any(feature = "listen", feature = "group"))]
         lent: usize,
         /// The key arena the registry's tables keep their keys in, lent from `arena`.
         keys: KeySpace,
@@ -2543,6 +2553,7 @@ mod tests {
         Ok(Held {
             registry,
             arena,
+            #[cfg(any(feature = "listen", feature = "group"))]
             lent: faces,
             keys,
         })
@@ -2648,6 +2659,7 @@ mod tests {
         registry.held_mut(id).expect("the registry holds the face")
     }
 
+    #[cfg(any(feature = "listen", feature = "group"))]
     /// How many sets the open lent that no face holds: the lent sets lie first.
     fn free_lent(held: &Held) -> usize {
         marks(&held.registry)
@@ -2662,22 +2674,26 @@ mod tests {
         registry.holders.marks().collect()
     }
 
+    #[cfg(any(feature = "listen", feature = "group"))]
     /// Whether face `id` holds a set the open lent rows to.
     fn in_a_lent_set(held: &Held, id: FaceId) -> bool {
         held.registry.held_at(id).is_some_and(|at| at < held.lent)
     }
 
+    #[cfg(any(feature = "listen", feature = "group"))]
     /// The faces the registry holds, in the order its walks take them.
     fn face_ids(registry: &Registry) -> Vec<FaceId> {
         registry.held_ids().collect()
     }
 
+    #[cfg(any(feature = "listen", feature = "group"))]
     /// Remove face `id` by the key its link or its group holds.
     fn remove(registry: &mut Registry, id: FaceId) {
         let face = registry.held(id);
         registry.remove_face(face);
     }
 
+    #[cfg(any(feature = "listen", feature = "group"))]
     /// Where the sets the walk over the faces takes lie.
     fn walked(registry: &Registry) -> Vec<*const FaceTables> {
         registry
@@ -2686,6 +2702,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(any(feature = "listen", feature = "group"))]
     /// Where the sets at `at` lie.
     fn lying_at(registry: &Registry, at: &[usize]) -> Vec<*const FaceTables> {
         at.iter()
@@ -2770,6 +2787,7 @@ mod tests {
     /// face's set and the sets the open lent that faces take as they come (a group's, which the
     /// session adds as it joins the group, `join_groups`). A subscriber each face's peer declares
     /// is held and matched, its key a block of the one arena, and nothing is refused.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn every_face_keeps_what_its_peer_declares_in_the_sessions_key_arena() {
         use wz_session_core::declare_build::build_declare_subscriber;
@@ -2819,6 +2837,7 @@ mod tests {
     /// arena and nothing of the pools: the one set it lent, with one face's own spans, is the first
     /// accepted face's, whose peer's subscriber is held there. The CONTROL is the same plan with
     /// the dial face's set lent, where the first accepted face is past the plan and holds nothing.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn a_session_that_dials_nothing_keeps_its_one_set_for_the_face_that_comes() {
         use wz_session_core::declare_build::build_declare_subscriber;
@@ -2898,7 +2917,7 @@ mod tests {
     /// dial face and on a face that takes a lent set as it comes (a group's): the interest's row
     /// holds its key, so the answer staged for it names what it asked. A side whose rows were lent
     /// after it was handed the key arena keeps it.
-    #[cfg(wz_interest_answer)]
+    #[cfg(all(wz_interest_answer, any(feature = "listen", feature = "group")))]
     #[test]
     fn a_faces_peer_interest_keeps_its_key_in_the_sessions_key_arena() {
         use wz_session_core::key_arena::block_bytes;
@@ -2974,6 +2993,7 @@ mod tests {
 
     /// An accepted face takes the set the open lent where it lies, empties it there when it goes,
     /// and the next face takes the same set at the same address: a set is never moved.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn an_accepted_face_takes_a_lent_set_where_it_lies_and_gives_it_back_there() {
         let mut held = held(2);
@@ -3177,6 +3197,7 @@ mod tests {
     /// The faces' sets given back in place leave the arena's pools as full as before the faces
     /// came: every lent set is free again with every row it was lent, and the arena lent nothing
     /// more.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn faces_that_go_leave_the_pools_as_full_as_before() {
         let mut held = held(3);
@@ -3235,6 +3256,7 @@ mod tests {
     /// registry's or a set's description at another offset or count than the table it names (the
     /// sets' line counted as another table's, the index's line left out), by a walk that lends in
     /// another order than its description, or by a span lent between the walks.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn every_table_of_the_registry_lies_where_its_description_counts_it() {
         let pools = PeerPoolRows {
@@ -3359,11 +3381,15 @@ mod tests {
             Some(core::mem::size_of::<FaceTables>()),
             "a row of the sets' table is a set"
         );
+        #[cfg(any(feature = "listen", feature = "group"))]
         assert_eq!(
             registry_row_bytes(RowCount::HeldSets),
             Some(core::mem::size_of::<FaceId>()),
             "a row of the table of marks names a face"
         );
+        // A build of the dial role's face alone keeps no mark past it, so no line of them.
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        assert_eq!(registry_row_bytes(RowCount::HeldSets), None);
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
         assert_eq!(
             registry_row_bytes(RowCount::OwedTokens),
@@ -3512,6 +3538,7 @@ mod tests {
     /// A face past the sets the open lent is refused and nothing is lent or held for it: the
     /// session refuses it as one past `max_faces`. The CONTROL is the same face once a set is
     /// free again, which takes it.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn a_face_past_the_plan_is_refused() {
         let mut held = held(2);
@@ -3545,6 +3572,7 @@ mod tests {
     /// the same place builds nothing, and nothing more is lent from the session's arena. Turned red
     /// by an open that builds every set (`built` in `Registry::new`), by a reserve that is not the
     /// sets' rows, or by a face that builds a set where one lies.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn a_set_is_built_when_a_face_first_takes_its_place() {
         let mut held = held(3);
@@ -3590,7 +3618,7 @@ mod tests {
     /// kept place on the way to its own, and once the tomb is freed the next face takes that set,
     /// rows and all. Turned red by a removal of the accepted faces that leaves a kept place past
     /// the sets built, or by a face that takes a place past the sets built without building them.
-    #[cfg(feature = "connectivity")]
+    #[cfg(all(feature = "connectivity", any(feature = "listen", feature = "group")))]
     #[test]
     fn a_place_kept_where_no_set_lies_is_freed_and_passed() {
         let mut held = held(3);
@@ -3624,6 +3652,7 @@ mod tests {
     /// A free place's mark names no face: a lookup of the id it reads
     /// finds no set while sets are free, and one removed by it removes none. Turned red by a
     /// lookup that matches a free set's row.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn a_free_sets_row_names_no_face() {
         let mut held = held(3);
@@ -3701,6 +3730,7 @@ mod tests {
     /// A face's key finds its set by its place while the face holds it, and nothing once the face
     /// went, though another face took the set since; the key of a face the session does not hold
     /// finds nothing. Turned red by a key read off the place alone, without the id.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn a_faces_key_finds_its_set_until_the_face_goes() {
         let mut held = held(3);
@@ -3730,6 +3760,7 @@ mod tests {
     /// The walk over the faces takes exactly the sets faces hold, in set order, as faces come, go
     /// and take a set another left: the next face takes the first free set, in its place among
     /// the others, and a lookup by face finds the set the walk takes for it.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn the_walk_takes_the_held_sets_in_set_order() {
         let mut held = held(5);
@@ -3781,6 +3812,7 @@ mod tests {
     /// and each face past it where the caller is the dial role's; none that no face holds. Turned
     /// red by others that leave out the dial role's set (`HeldPlaces::split`), or that count the
     /// caller's set or a free one.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn the_other_faces_are_the_other_held_sets() {
         let mut held = held(6);
@@ -3844,6 +3876,7 @@ mod tests {
     /// rows, where the faces' own bounds add up to eight times `MAX_REMOTE_DECLS`. The next
     /// declaration, on any face, finds the pool full: it alone is refused, counted by that face's
     /// table and by the pool, and every face keeps what it held.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn many_faces_each_declaring_a_few_fit_a_pool_far_smaller_than_their_bounds() {
         if wz_session_core::caps::MAX_REMOTE_DECLS < 3 {
@@ -3908,6 +3941,7 @@ mod tests {
     /// A face that goes gives back to the session's pools exactly the rows its peer held, and the
     /// faces that stay keep theirs; the rows it gave back take the next face's declarations, and
     /// the faces past the dial role's all going leaves the dial's alone in the pools.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn a_face_that_goes_gives_back_exactly_its_rows() {
         if wz_session_core::caps::MAX_REMOTE_DECLS < 3 {
@@ -3998,6 +4032,7 @@ mod tests {
     /// pool counts: the dial face's peer is held to its spans' rows, the declaration past them
     /// refused and counted by its table. A face past the plan is refused, and the dial face keeps
     /// every row.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn a_session_of_one_face_keeps_its_peers_rows_in_spans_of_its_own() {
         if wz_session_core::caps::MAX_REMOTE_DECLS < 3 {
@@ -4084,6 +4119,7 @@ mod tests {
 
     /// A walk over the faces reads the sets the faces hold and no other: of the sixteen sets the
     /// open lent, a walk over three faces reads three.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn a_walk_over_the_faces_reads_the_held_sets_alone() {
         let mut held = held(16);
@@ -4139,6 +4175,7 @@ mod tests {
         assert_eq!(registry.place(registry.held(5)), None);
         assert_eq!(registry.place(HeldFace::new(1, DIAL_FACE)), None);
         assert_eq!(registry.faces().count(), 1);
+        #[cfg(any(feature = "listen", feature = "group"))]
         assert_eq!(
             registry
                 .split(Some(0))
@@ -4146,6 +4183,9 @@ mod tests {
             Some(0),
             "the call of the one face counts no other"
         );
+        // A build of the dial role's face alone counts no other face by its type (`NoOtherPeers`).
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        assert!(registry.split(Some(0)).is_some());
         assert!(
             registry.split(Some(1)).is_none(),
             "one set lies at the first place"
@@ -4173,6 +4213,7 @@ mod tests {
     /// a session of one face is lent none, its table of one row. Turned red by a table that lends a
     /// row for the dial role's place too (`HeldPlaces::rows_of`), or that names a face at a place no
     /// face took.
+    #[cfg(any(feature = "listen", feature = "group"))]
     #[test]
     fn the_dial_roles_place_is_marked_for_the_tables_life_and_lent_no_row() {
         let many = held(3);

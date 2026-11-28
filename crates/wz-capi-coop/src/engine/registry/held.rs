@@ -21,49 +21,41 @@ use wz_session_core::bounded::LendRefused;
 #[cfg(not(wz_on_use))]
 use wz_session_core::bounded::RegionLines;
 
-#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+#[cfg(any(feature = "listen", feature = "group"))]
 use super::Others;
-#[cfg(any(
-    feature = "connectivity",
-    feature = "listen",
-    feature = "group",
-    all(test, wz_lent)
-))]
+#[cfg(any(feature = "connectivity", feature = "listen", feature = "group"))]
 use super::NO_FACE;
-#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+#[cfg(any(feature = "listen", feature = "group"))]
 use crate::arena::MAX_FACE_SETS;
-#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+#[cfg(any(feature = "listen", feature = "group"))]
 use crate::RowPolicy;
-#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+#[cfg(any(feature = "listen", feature = "group"))]
 use wz_session_core::bounded::BoundedVec;
-#[cfg(all(
-    not(wz_on_use),
-    any(feature = "listen", feature = "group", all(test, wz_lent))
-))]
+#[cfg(all(not(wz_on_use), any(feature = "listen", feature = "group")))]
 use wz_session_core::bounded::{RowCount, SeqPlace};
 
-#[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+#[cfg(not(any(feature = "listen", feature = "group")))]
 use wz_session_core::slot_observer::NoOtherPeers;
 
 /// The marks of the places past the dial role's, by the place less one: a row for each place the
 /// open counted past it, of the policy of the session's tables, lent from the arena with the sets
 /// (`crate::arena::ArenaPart::HeldFaces`) or taken at the open where the tables take their memory
 /// on use, so a face coming or going writes its place's row and moves none.
-#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+#[cfg(any(feature = "listen", feature = "group"))]
 type PastDial = BoundedVec<FaceId, MAX_FACE_SETS, RowPolicy>;
 
 /// See the form of a build that adds faces: a session of its dial role's face alone has no place
 /// past it.
-#[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+#[cfg(not(any(feature = "listen", feature = "group")))]
 type PastDial = [FaceId; 0];
 
 /// The faces other than the one a call acts on, which the matching verdicts of that call count:
 /// the sets of the table's rows but the caller's that a face holds.
-#[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+#[cfg(any(feature = "listen", feature = "group"))]
 pub(super) type OtherFaces<'a> = Others<'a>;
 
 /// See the form of a build that adds faces: the table of one row has no row but the caller's.
-#[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+#[cfg(not(any(feature = "listen", feature = "group")))]
 pub(super) type OtherFaces<'a> = NoOtherPeers;
 
 /// The table of the session's places, by its marks (see the module documentation).
@@ -83,20 +75,14 @@ impl HeldPlaces {
     /// The table's line in the registry's description, from where the registry keeps it: the
     /// marks past the dial role's, lent `RowCount::HeldSets`, where the build adds faces; none
     /// where the table is of the dial role's one row.
-    #[cfg(all(
-        not(wz_on_use),
-        any(feature = "listen", feature = "group", all(test, wz_lent))
-    ))]
+    #[cfg(all(not(wz_on_use), any(feature = "listen", feature = "group")))]
     pub(super) const LINES: RegionLines<HELD_LINES> = RegionLines::EMPTY.seq(
         SeqPlace::of::<FaceId>(core::mem::offset_of!(Self, past_dial), 0, MAX_FACE_SETS)
             .counted(RowCount::HeldSets),
     );
 
     /// See the form of a build that adds faces: the table of one row lends nothing.
-    #[cfg(all(
-        not(wz_on_use),
-        not(any(feature = "listen", feature = "group", all(test, wz_lent)))
-    ))]
+    #[cfg(all(not(wz_on_use), not(any(feature = "listen", feature = "group"))))]
     pub(super) const LINES: RegionLines<HELD_LINES> = RegionLines::EMPTY;
 
     /// The table before the registry's walk lends it its rows (`Registry::new`): of no row.
@@ -112,7 +98,7 @@ impl HeldPlaces {
     /// its dial role's face alone is lent one set, and marks nothing.
     #[cfg(wz_lent)]
     pub(super) fn hold_sets(&mut self, sets: usize) -> Result<(), LendRefused> {
-        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+        #[cfg(any(feature = "listen", feature = "group"))]
         for _ in 0..Self::rows_of(sets) {
             self.past_dial
                 .push(NO_FACE)
@@ -121,7 +107,7 @@ impl HeldPlaces {
                     ceiling: 0,
                 })?;
         }
-        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+        #[cfg(not(any(feature = "listen", feature = "group")))]
         debug_assert_eq!(sets, 1, "a session of one face is lent one set");
         Ok(())
     }
@@ -207,12 +193,7 @@ impl HeldPlaces {
     }
 
     /// The first place no face holds and no tomb keeps.
-    #[cfg(any(
-        feature = "connectivity",
-        feature = "listen",
-        feature = "group",
-        all(test, wz_lent)
-    ))]
+    #[cfg(any(feature = "connectivity", feature = "listen", feature = "group"))]
     pub(super) fn free(&self) -> Option<usize> {
         let past = self
             .past_dial
@@ -222,7 +203,7 @@ impl HeldPlaces {
     }
 
     /// The set at `at` among `sets`, to write, and the faces of the table's other rows.
-    #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+    #[cfg(any(feature = "listen", feature = "group"))]
     pub(super) fn split<'a>(
         &'a self,
         sets: &'a mut [FaceTables],
@@ -253,7 +234,7 @@ impl HeldPlaces {
     }
 
     /// See the form of a build that adds faces: the one set lies at the first place.
-    #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+    #[cfg(not(any(feature = "listen", feature = "group")))]
     pub(super) fn split<'a>(
         &'a self,
         sets: &'a mut [FaceTables],
