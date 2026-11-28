@@ -932,7 +932,11 @@ CASES: tuple[Case, ...] = (
     # drops the unwind tables). The dated notes above read the same client built with `std`, a form
     # the crate no longer has; its row went with it, and this case is the client's own ceiling row.
     Case("pico-client-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", "os-host,link-udp",
-         1_049_200,
+         # 2026-11-28 -- set from its reading at `ce63a0f7bd` (GNU ld 2.42), 237,978 against
+         # zenoh-pico's 329,664, by `budget_for`. The 1,049,200 it carried was pico-client-coop's
+         # budget of 2026-11-21, taken when the case was added as a ceiling the form sat under
+         # until its first reading set its own; no reading had replaced it.
+         242_800,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
