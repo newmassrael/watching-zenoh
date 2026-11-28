@@ -1622,7 +1622,59 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   `engine::cache_ring::tests::an_on_use_ring_takes_its_bytes_zeroed_at_its_first_use_and_keeps_them`
   (unchanged; red if the ring is not zeroed, taken at the open or taken again at each use).
 
+### 7.34 The reds of hn22
+
+- `6fb3b5d4fc`: `tests::arena` imported `BoundedVec` and `Lent` in every form, and since
+  `f90e925543` only tests of an arena read them (the reservation test and the lent tables'
+  sizes); the import is `not(wz_on_use)`, the forms that reserve one.
+- `7f5cda0bbe`: `CoopEngine::rooms_place` (test, `std`, on use) lost its one reader with the
+  on-use arena tests 7.31 removed; it is gone.
+- `5a728e6395`: `OwnBuf::written` (`wz-session-core` `byte_cells.rs`) is written through by a
+  chain's staging alone (`chain_staging`, `reassembly`) and by the module's tests; a build with
+  `alloc` and no `reassembly` (`wz-runtime-coop` `alloc,session-unicast`) compiled it unread.
+  It is `any(test, feature = "reassembly")`.
+
+### 7.35 N5's first reading: the on-use client against its D12 twin
+
+- The main session's `--measure` at `ce63a0f7bd` (GNU ld 2.42): `pico-client-coop-nostd` 237,978
+  bytes of text, `pico-client-coop-nostd-on-use` 241,680, both 443 exports, against zenoh-pico's
+  329,664 (0.72x and 0.73x). `839961f86e` writes the reading where 10.2 and 11.3 said it goes: the
+  case's budget 246,600 (the gate's own figure), its ceiling row locked at WIN on that reading, its
+  ledger case with every area unfilled (the ledger's rule: rows are set from `--measure`, never
+  by hand), and the ledger selftest's set of the cases it must hold.
+- The on-use client is 3,702 bytes (1.6%) over its twin. What it adds and what it drops, by the
+  code (not yet by a reading): it drops the arena's reservation and lender (`SessionArena`,
+  `TableLender`, `ArenaKept` and its last-holder body, the lend bodies of the state's tables) and
+  the lent staging and cells; it adds the first-use column's bodies (`FirstUse`, its first take
+  per row type around the shared out-of-line `take_rows` and `give_rows`), the staging of a chain
+  in its own buffer (`OwnStaging`, a growing `Vec`, and `HeapByteCells`' count, one allocation
+  with a holders' count), the places taken one by one (`OwnBlock`, `OwnHandle`, `RoomPlaces`,
+  the entity places of `PlaceLender` each an allocation), and the links' buffers of the heap
+  (`HeapBuffers` through `zeroed_bytes`). Only one staging form is linked in either build
+  (`ChainStore` is chosen by the policy's type), so no form carries the other's code.
+- Which of it can go is read, not guessed: `size_ledger_gate.py --per-feature` steps from the
+  ledger's base case to this one by exactly `tables-on-use` and prints what it adds to each area
+  on each side, and the two libraries' `nm --size-sort` name the bodies. The candidates the
+  reading decides: (1) the per-type `FirstUse` bodies, where the first take could move into one
+  non-generic body as `take_rows` did, leaving each type its row stride alone; (2) `OwnStaging`'s
+  `Vec` growth paths, where a buffer whose room is taken whole at its claim needs no grow path
+  (`extend_from_slice` within reserved room, written as a copy into the reserved tail); (3)
+  `HeapByteCells`' separate count allocation, if one holder can own it. Each that the reading
+  shows smaller is taken (the measured-gain rule); none is changed before it is read.
+
 ## 8. What the main session runs
+
+- The reds of hn22 and N5's figures (`6fb3b5d4fc`, `7f5cda0bbe`, `5a728e6395`, `839961f86e`), not
+  built or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
+  --features tables-on-use --lib`, `--features listen,tables-on-use --lib` and `--features
+  threads,tables-on-use --lib`; clippy of wz-capi-coop `--features tables-on-use` and `--features
+  listen,tables-on-use`; `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-coop
+  --features alloc,session-unicast --lib kept` and its clippy; `cargo test --manifest-path
+  crates/Cargo.toml -p wz-session-core --features alloc --lib byte_cells`. Then
+  `python3 scripts/lib/capability_cost_gate.py --selftest`, `python3
+  scripts/lib/size_ledger_gate.py --selftest`, and `--measure pico-client-coop-nostd-on-use` of
+  the size ledger, whose rows fill the case's unfilled areas; `--per-feature` attributes the
+  3,702 bytes (7.35). Size and receive Ir: unchanged (dead code and a test import).
 
 - The reds of hn21 (`62167084dc`, `c849c5897b`), not built or run by this lane. `cargo clippy
   --manifest-path crates/Cargo.toml -p wz-capi-coop --features tables-on-use,advanced
