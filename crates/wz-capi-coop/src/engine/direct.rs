@@ -1488,20 +1488,18 @@ pub(super) struct DirectFaces<L: CoopLinks + 'static, C: ClockSource + 'static> 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C> {
     /// The faces past the dial role's, `rows` of them lent from `arena`: the face of the face
     /// table's place `n` in the table's row `n - 1`, each with a Router of its own under
-    /// `policy`, staging at most `open` chains at once in `chains`, lent through a cell of its
-    /// own. Refused past what the arena has left.
+    /// `policy`, staging its chains as `chains` says, lent through a cell of its own. Refused
+    /// past what the arena has left.
     #[cfg(all(feature = "listen", not(wz_on_use)))]
     pub(super) fn taken_in(
         arena: &mut Arena,
         rows: usize,
         policy: &SessionPolicy,
-        chains: &LentByteCells,
-        open: usize,
+        chains: &ChainSource,
     ) -> Result<TakenFaces<L, C>, LendRefused> {
         let mut taken = arena.lend::<DirectFace<L, C>, { usize::MAX }>(rows)?;
         for at in 1..=rows {
-            let router: SessionReassembly =
-                session_reassembly(policy, SessionChains::over(chains, open));
+            let router = chain_router(policy, chains);
             let write = move |row: &mut MaybeUninit<DirectFace<L, C>>| {
                 // SAFETY: the row is aligned and valid for writes of a face, holds none, and is
                 // kept where it lies by the table for as long as the face is.

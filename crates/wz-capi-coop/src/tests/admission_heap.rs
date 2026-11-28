@@ -14,7 +14,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(wz_round)]
 use std::sync::Arc;
 
-use wz_session_core::link_admission::{LinkAdmission, LinkLease};
+// The admission's place is read in the arena alone, which a session whose tables take their memory
+// on use reserves none of.
+#[cfg(not(wz_on_use))]
+use wz_session_core::link_admission::LinkAdmission;
+use wz_session_core::link_admission::LinkLease;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::WhatAmI;
 
@@ -108,7 +112,9 @@ fn listening() -> CoopConfig {
 }
 
 /// A listening session's admission lies in the session's own arena. Turned red by an admission
-/// made anywhere but the place its plan laid out for it.
+/// made anywhere but the place its plan laid out for it. A session whose tables take their memory
+/// on use reserves no arena, and holds the admission in an allocation of its own.
+#[cfg(not(wz_on_use))]
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_listening_sessions_admission_lies_in_its_own_arena() {

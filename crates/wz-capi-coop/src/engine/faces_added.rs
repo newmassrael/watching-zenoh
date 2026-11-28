@@ -73,8 +73,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// face's read slot is made at its place's first face (`direct::DirectFaces::made_at`).
     #[cfg(all(wz_on_use, not(wz_round)))]
     pub(super) fn face_router(&self) -> SessionReassembly {
-        let (chains, open) = &self.face_chains;
-        session_reassembly(&self.policy, SessionChains::over(chains, *open))
+        chain_router(&self.policy, &self.face_chains)
     }
 
     /// Whether a link taken off a port may take a face now: fewer handshakes of taken links under

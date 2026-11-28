@@ -2815,6 +2815,204 @@ mod tests {
         staging.release(chain);
     }
 
+    /// A staging whose chains take their own buffers takes one of its table when a chain starts
+    /// and gives it back when the chain ends: none is held while no chain is open, no more chains
+    /// than its count are open at once, each refusal is counted and a served chain counts nothing,
+    /// and its count and its buffers' length are held to the Router's `SLOTS` and `CAP`. Turned
+    /// red by an `acquire` past the count, one that refuses without counting, or a `release`
+    /// that does not free the chain's place or its table's buffer.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_own_staging_takes_a_buffer_when_a_chain_starts_and_none_past_its_count() {
+        use crate::byte_cells::HeapByteCells;
+        use crate::chain_staging::{ChainStaging, OwnStaging};
+
+        let table = |bytes, count| HeapByteCells::try_new(bytes, count).expect("the count");
+        let cells = table(8, 2);
+        let mut staging = OwnStaging::<4, 64>::over(&cells, 2);
+        assert_eq!((staging.available(), staging.capacity()), (2, 8));
+        let first = staging.acquire().expect("a buffer");
+        assert_eq!(staging.available(), 1, "the first chain holds one");
+        let second = staging.acquire().expect("another buffer");
+        assert_eq!(staging.refused(), 0, "a chain served counts nothing");
+        assert!(staging.acquire().is_none(), "no third chain");
+        assert_eq!(
+            (staging.available(), staging.refused()),
+            (0, 1),
+            "refused at its count, and counted"
+        );
+        staging.release(first);
+        assert_eq!(staging.available(), 1);
+        let again = staging.acquire().expect("the place the first left");
+        assert_eq!(
+            staging.refused(),
+            1,
+            "served again, nothing more is counted"
+        );
+        staging.release(again);
+        staging.release(second);
+        assert_eq!((staging.available(), cells.in_use()), (2, 0));
+
+        let held = OwnStaging::<4, 64>::over(&table(100, 9), 9);
+        assert_eq!(
+            (held.available(), held.capacity()),
+            (4, 64),
+            "the Router's slots and ceiling bound the staging"
+        );
+        let mut none = OwnStaging::<4, 64>::over(&table(8, 2), 0);
+        assert!(
+            none.acquire().is_none(),
+            "a staging of no chain refuses each"
+        );
+        assert_eq!(none.refused(), 1);
+    }
+
+    /// A reservation of a chain of its own buffer is staged as far as it was filled, a commit past
+    /// it is refused, and the chain is held to the staging's capacity, not to `CAP`.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn an_own_chain_stages_what_its_filler_wrote() {
+        use crate::byte_cells::HeapByteCells;
+        use crate::chain_staging::{ChainStaging, OwnStaging, StagingError};
+
+        let cells = HeapByteCells::try_new(8, 1).expect("the count");
+        let mut staging = OwnStaging::<1, 64>::over(&cells, 1);
+        let mut chain = staging.acquire().expect("a buffer");
+        staging.append(&mut chain, b"ab").expect("room");
+        staging
+            .buf(&mut chain, 4)
+            .expect("room for four")
+            .copy_from_slice(b"cdef");
+        staging.commit(&mut chain, 3).expect("three of four filled");
+        assert_eq!(staging.bytes(&chain), b"abcde");
+        assert!(!staging.fits(&chain, 4), "five staged, eight the most");
+        assert_eq!(
+            staging.buf(&mut chain, 4).err(),
+            Some(StagingError::ChainCapExceeded)
+        );
+        assert_eq!(
+            staging.append(&mut chain, b"wxyz"),
+            Err(StagingError::ChainCapExceeded)
+        );
+        staging.buf(&mut chain, 1).expect("room for one");
+        assert_eq!(
+            staging.commit(&mut chain, 2),
+            Err(StagingError::ChainCapExceeded)
+        );
+        staging.release(chain);
+    }
+
+    /// A Router over chains of their own buffers ends a chain at the staging's capacity, the
+    /// session's bound, though its slot's `CAP` would hold more, and a chain of exactly the bound
+    /// reassembles; each ended chain's place is free again. Turned red by a staging that holds a
+    /// chain to `CAP` and not to the bound it was sized to.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_chain_past_the_own_bound_is_refused() {
+        use crate::byte_cells::HeapByteCells;
+        use crate::chain_staging::OwnStaging;
+
+        let cells = HeapByteCells::try_new(8, 2).expect("the count");
+        let mut d: ReassemblyDispatcher<4, 64, OwnStaging<4, 64>> =
+            ReassemblyDispatcher::with_staging(
+                ReassemblyConfig::new(2, 5_000),
+                OwnStaging::over(&cells, 2),
+            );
+        let mut out = None;
+        d.ingest(frag(PEER_A, true, 1, 1, b"aaaa"), MASK, 0, |_| {});
+        let r = d.ingest(frag(PEER_A, true, 2, 0, b"bbbb"), MASK, 0, |m| {
+            out = Some(m.to_vec())
+        });
+        assert_eq!(r, IngestOutcome::Reassembled);
+        assert_eq!(out.as_deref(), Some(&b"aaaabbbb"[..]));
+        d.ingest(frag(PEER_A, true, 3, 1, b"aaaa"), MASK, 0, |_| {});
+        let r = d.ingest(frag(PEER_A, true, 4, 0, b"bbbbb"), MASK, 0, |_| {
+            panic!("past the bound, no deliver")
+        });
+        assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
+        assert_eq!(d.capacity_refusals(), 1);
+        assert_eq!(d.staging_available(), 2, "both places are free again");
+    }
+
+    /// A chain of its own buffer ingested to be kept is handed up as that buffer, read where it
+    /// was staged: the Router's slot and the staging's place are free at once, and the buffer is
+    /// out of its table until the kept bytes drop, so a chain that starts while it is kept begins
+    /// over a table of a buffer more than the chains, and is refused over a table of as many, as
+    /// a lent table refuses it. Turned red by a keep that copies the chain, one that keeps the
+    /// place held while the buffer is kept, or one that gives the buffer back to its table before
+    /// the kept bytes drop.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_kept_own_chain_is_handed_up_where_it_was_staged() {
+        use crate::byte_cells::HeapByteCells;
+        use crate::chain_staging::{ChainStaging, OwnStaging};
+
+        let table = |count| HeapByteCells::try_new(8, count).expect("the count");
+        let mut staging = OwnStaging::<2, 64>::over(&table(2), 1);
+        let mut chain = staging.acquire().expect("a buffer");
+        staging.append(&mut chain, b"abc").expect("room");
+        let staged = staging.bytes(&chain).as_ptr();
+        let kept = staging
+            .keep(chain)
+            .unwrap_or_else(|_| panic!("a staging of its own buffers keeps a chain"));
+        assert_eq!(kept.as_slice(), b"abc");
+        assert_eq!(kept.as_slice().as_ptr(), staged, "read where it was staged");
+        assert_eq!(staging.available(), 1, "the place is free while it is kept");
+
+        let router = |count| -> ReassemblyDispatcher<4, 64, OwnStaging<4, 64>> {
+            ReassemblyDispatcher::with_staging(
+                ReassemblyConfig::new(2, 5_000),
+                OwnStaging::over(&table(count), 1),
+            )
+        };
+        let mut d = router(2);
+        d.ingest_keeping(frag(PEER_A, true, 1, 1, b"aaaa"), MASK, 0, |_| {});
+        let mut kept = None;
+        let r = d.ingest_keeping(frag(PEER_A, true, 2, 0, b"bbbb"), MASK, 0, |chain| {
+            kept = match chain {
+                ChainBytes::Kept(bytes) => Some(bytes),
+                _ => panic!("a staging of its own buffers keeps a completed chain"),
+            }
+        });
+        assert_eq!(r, IngestOutcome::Reassembled);
+        let kept = kept.expect("the chain completed");
+        assert_eq!(kept.as_slice(), b"aaaabbbb");
+        assert_eq!(d.active_chains(), 0, "the Router's slot is free");
+        assert_eq!(
+            d.ingest_keeping(frag(PEER_A, true, 3, 1, b"cccc"), MASK, 0, |_| {}),
+            IngestOutcome::Begun,
+            "the next chain begins while the message is kept"
+        );
+        drop(kept);
+        assert_eq!(
+            d.staging_available(),
+            0,
+            "the open chain holds the one place"
+        );
+
+        let mut short = router(1);
+        short.ingest_keeping(frag(PEER_A, true, 1, 1, b"aaaa"), MASK, 0, |_| {});
+        let mut kept = None;
+        short.ingest_keeping(frag(PEER_A, true, 2, 0, b"bbbb"), MASK, 0, |chain| {
+            if let ChainBytes::Kept(bytes) = chain {
+                kept = Some(bytes);
+            }
+        });
+        assert!(kept.is_some(), "CONTROL: the chain completed and is kept");
+        assert_eq!(
+            short.ingest_keeping(frag(PEER_A, true, 3, 1, b"cccc"), MASK, 0, |_| {}),
+            IngestOutcome::Refused(RefuseReason::PoolExhausted),
+            "the table's one buffer is the kept message's"
+        );
+        assert_eq!(short.staging_available(), 0, "no buffer is free");
+        drop(kept);
+        assert_eq!(
+            short.staging_available(),
+            1,
+            "let go of, the buffer is the table's again"
+        );
+    }
+
     /// A first fragment already past the bound never opens a chain.
     #[test]
     fn a_first_fragment_past_the_bound_opens_no_chain() {

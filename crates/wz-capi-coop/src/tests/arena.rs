@@ -14,6 +14,8 @@ use crate::tests::host_links;
 use wz_capi_port::{SessionEngine, WireKey};
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
+// The arena's spans and the lent tables' sizes are read where an open reserves an arena.
+#[cfg(not(wz_on_use))]
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::caps;
 use wz_session_core::limit_binding::{LimitValue, Quota, UnlentRows};
@@ -27,9 +29,9 @@ use super::entity_tables::{lowered, open_under};
 use super::{
     client_config, config, open, open_with, until, CatchAll, Command, Engine, Router, LOOPBACK,
 };
-use crate::arena::{
-    AllocatorMemory, ArenaLimit, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena,
-};
+#[cfg(not(wz_on_use))]
+use crate::arena::SessionArena;
+use crate::arena::{AllocatorMemory, ArenaLimit, ArenaMemory, ArenaPlan, ArenaRefused};
 #[cfg(wz_round)]
 use crate::round::RoundRowCounts;
 use crate::{CoopConfig, OpenError, OpenKeyIds};
@@ -165,7 +167,9 @@ fn row(plan: &ArenaPlan, part: &str) -> crate::arena::ArenaRow {
 
 /// The arena is the sum of its rows' spans, and lending every row from it brings its high-water
 /// mark to its size: the plan the open reserves by is exactly what the rows take. The client
-/// dials an endpoint, whose text is a row as every other part is.
+/// dials an endpoint, whose text is a row as every other part is. A session whose tables take
+/// their memory on use reserves no arena (`tests::on_use`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_reservation_is_the_plan_and_lending_every_row_fills_it() {
     let plan = ArenaPlan::of(
@@ -211,7 +215,10 @@ fn an_open_reserves_the_arena_its_plan_lays_out() {
 /// An open asked to hold the ABI's handle reserves the plan the open lays out with the handle's
 /// place, and one asked for none the plan without it: the places are laid out on the one plan the
 /// open reserves by. Turned red by an open that reserves a plan other than the one it lends from,
-/// or lays the places out apart from it.
+/// or lays the places out apart from it. A session whose tables take their memory on use holds the
+/// handle's place in an allocation of its own and reserves no arena
+/// (`tests::an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena`).
+#[cfg(not(wz_on_use))]
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_open_holding_the_handle_reserves_the_plan_with_its_place() {
@@ -303,8 +310,9 @@ fn held_plan(
 }
 
 /// An open whose memory has none to give is refused with the bytes it asked for, before anything
-/// is dialled. The CONTROL is the same open with memory, which dials the probe (and fails, as
-/// nothing answers it).
+/// is dialled: its arena's (with its region's in the region's form), and on use its state's
+/// block. The CONTROL is the same open with memory, which dials the probe (and fails, as nothing
+/// answers it).
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_open_whose_arena_the_memory_refuses_dials_nothing() {
@@ -313,8 +321,13 @@ fn an_open_whose_arena_the_memory_refuses_dials_nothing() {
         .expect("the build's limits lay an arena out");
     let bytes = plan.reserved_bytes().expect("within the address space");
     // A session of the region's form asks for its region and its arena as one block, the arena
-    // after the region on a span's alignment; one whose tables take their memory on use takes its
-    // state from the allocator apart, and asks the memory for its arena alone.
+    // after the region on a span's alignment; one whose tables take their memory on use reserves
+    // no arena, and the one block it asks the memory for is its state.
+    #[cfg(wz_on_use)]
+    let bytes = {
+        assert_eq!(bytes, 0, "CONTROL: an on-use plan reserves no arena");
+        core::mem::size_of::<crate::engine::OwnState>()
+    };
     #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
     let bytes = bytes
         + wz_session_core::bounded::Arena::span(core::mem::size_of::<crate::region::StateRegion>())
@@ -1757,10 +1770,11 @@ fn an_on_use_session_counts_the_publishes_it_keeps_and_lays_out_none() {
         HeldPublishDrop::HeldFaces => caps::HANDED_LEG_BYTES / batch,
         HeldPublishDrop::EveryFace => 0,
     };
-    let mut session =
-        SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
-    let mut lend = session.lender();
-    let mut handed = plan.transport().lent_from(&mut lend).handed;
+    let mut handed = plan
+        .transport()
+        .counted()
+        .expect("the allocator has the count")
+        .handed;
     // A publish whose key and payload fill a batch fits a place; one a byte longer does not.
     let whole = vec![0u8; batch - 1];
     let longer = vec![0u8; batch];
@@ -1807,6 +1821,7 @@ fn a_session_that_sends_each_face_its_own_leg_reserves_no_handed_places() {
 /// The faces whose reads stage their chains apart, a share of the reassembly table each: each set
 /// of face tables of a session that listens and reads each face where it lies, and one otherwise
 /// (`crate::arena::ArenaPlan::lay_out`).
+#[cfg(not(wz_on_use))]
 fn chain_shares(plan: &ArenaPlan) -> usize {
     if cfg!(wz_round) || !cfg!(feature = "listen") {
         1
@@ -1821,7 +1836,9 @@ fn chain_shares(plan: &ArenaPlan) -> usize {
 /// count and the length a session lowers them to, no buffer for a session that states none, and a
 /// value over the build's refuses the plan under its own name. A report reads the same count
 /// (`link_buffers`). Turned red by a table laid out at the build's count whatever the session
-/// states, or one that grows with the links.
+/// states, or one that grows with the links. A session whose tables take their memory on use is
+/// lent no table, each chain taking a buffer of its own (`tests::on_use`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_count_and_length() {
     let config = CoopConfig {
@@ -3341,6 +3358,9 @@ fn selecting(mut limits: SessionLimits, id: &str, value: usize) -> Option<Sessio
 /// of pending liveliness gets as many as its liveliness gets', each kind under its own limit; a
 /// build that asks no get, or no liveliness get, lays none of the kind. Turned red by places
 /// counted by another limit, or a kind laid out in a build that cannot ask for it.
+// The places are laid out where the arena holds them; on use each is counted by
+// `EntityPlaces::counted` (`arena::tests`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_places_of_pending_gets_are_the_rows_of_a_table_of_them() {
     use crate::arena::{EntityKind, HeldPlaces};
@@ -3374,6 +3394,9 @@ fn the_places_of_pending_gets_are_the_rows_of_a_table_of_them() {
 /// The ABI's places of matching listeners are as many as the rows of the engine's table of them,
 /// counted by `MAX_MATCHING_LISTENERS`, in every build. Turned red by places counted by another
 /// limit, or none laid out for the kind.
+// The places are laid out where the arena holds them; on use each is counted by
+// `EntityPlaces::counted` (`arena::tests`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_places_of_matching_listeners_are_the_rows_of_their_table() {
     use crate::arena::{EntityKind, HeldPlaces};
@@ -3396,6 +3419,9 @@ fn the_places_of_matching_listeners_are_the_rows_of_their_table() {
 /// The ABI's places of declaration watches are as many as `MAX_DECL_WATCHES` admits in a build
 /// with the watch, and none without it. Turned red by places counted by another limit, or laid
 /// out in a build that has no watch to hold.
+// The places are laid out where the arena holds them; on use each is counted by
+// `EntityPlaces::counted` (`arena::tests`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_places_of_declaration_watches_are_counted_by_their_limit() {
     use crate::arena::{EntityKind, HeldPlaces};
@@ -3425,6 +3451,9 @@ fn the_places_of_declaration_watches_are_counted_by_their_limit() {
 /// The ABI's places of transport events listeners are as many as
 /// `MAX_TRANSPORT_EVENTS_LISTENERS` admits in a build with `connectivity`, and none without it.
 /// Turned red by places counted by another limit, or laid out in a build with no listener to hold.
+// The places are laid out where the arena holds them; on use each is counted by
+// `EntityPlaces::counted` (`arena::tests`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_places_of_transport_events_listeners_are_counted_by_their_limit() {
     use crate::arena::{EntityKind, HeldPlaces};
@@ -3454,6 +3483,9 @@ fn the_places_of_transport_events_listeners_are_counted_by_their_limit() {
 /// The ABI's places of link events listeners are as many as `MAX_LINK_EVENTS_LISTENERS` admits in
 /// a build with `connectivity`, and none without it, apart from the transport events listeners'.
 /// Turned red by places counted by another limit, or laid out in a build with no listener to hold.
+// The places are laid out where the arena holds them; on use each is counted by
+// `EntityPlaces::counted` (`arena::tests`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_places_of_link_events_listeners_are_counted_by_their_limit() {
     use crate::arena::{EntityKind, HeldPlaces};
@@ -3543,6 +3575,7 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         .expect("the build's limits lay the rooms out");
     plan.holding(&held)
         .expect("the build's limits lay the places out");
+    #[cfg(not(wz_on_use))]
     plan.holding_runtime(64)
         .expect("the build's limits lay the runtime's span out");
     plan.holding_engine(64)
@@ -3878,7 +3911,10 @@ fn a_region_lays_out_its_rows_for_its_own_shape_and_limits_alone() {
 /// lays out at the open, the links' cells, the rooms, the ABI's places, the runtime's span and the
 /// engine's place after the tables included, so an open by it takes the plan whole and lays out
 /// no row. Turned red by a region that leaves a place out (`OpenRegion::laid` laying none) or
-/// sizes one by anything but the engine's types and the ABI's constants.
+/// sizes one by anything but the engine's types and the ABI's constants. The forms that reserve
+/// an arena alone: on use neither plan lays out a row or a byte
+/// (`tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn a_region_with_the_engines_places_holds_every_row_an_open_lays_out() {
     use crate::arena::HeldPlaces;
@@ -4108,10 +4144,15 @@ fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
         );
     }
     let read = if cfg!(feature = "listen") { sets } else { 1 };
+    assert_eq!(plan.reassembly().1, caps::REASSEMBLY_CHAINS * read);
+    // On use each chain takes a buffer of its own, so no table of them is laid out.
+    #[cfg(not(wz_on_use))]
     assert_eq!(
         row(&plan, "reassembly buffers").count,
         caps::REASSEMBLY_CHAINS * read
     );
+    #[cfg(wz_on_use)]
+    assert!(plan.rows().all(|laid| laid.part() != "reassembly buffers"));
     let direct = plan.rows().find(|row| row.part() == "direct faces");
     #[cfg(not(wz_on_use))]
     if read > 1 {
@@ -4130,8 +4171,9 @@ fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
 
 /// An open's plan lays out what a listed plan of the same session lays out, every sum and every
 /// layer's rows, and lists no row, so the open's frame holds no table of them; a listed plan taken
-/// on by an open's plan, as a region's is, is the same plan. Turned red by a walk whose sums depend
-/// on the list it keeps, or a `take_on` that leaves a sum or a layer's rows behind.
+/// on by an open's plan, as a region's is, is the same plan, in the lent form and on use. Turned
+/// red by a walk whose sums depend on the list it keeps, or a `take_on` that leaves a sum or a
+/// layer's rows behind.
 #[cfg(feature = "runtime-plan")]
 #[test]
 fn an_open_s_plan_lays_out_a_listed_plan_s_sums_and_lists_no_row() {
@@ -4140,6 +4182,13 @@ fn an_open_s_plan_lays_out_a_listed_plan_s_sums_and_lists_no_row() {
     let mut open = crate::arena::OpenPlan::blank();
     open.count(&config, &config.limits)
         .expect("lays an arena out");
+    assert!(
+        listed.reassembly().1 > 0,
+        "CONTROL: the listed plan counts the chains"
+    );
+    // On use no plan lists a row, each table taking its own memory, so the sums are all the two
+    // plans have to share.
+    #[cfg(not(wz_on_use))]
     assert!(
         listed.rows().count() > 0,
         "CONTROL: the listed plan lists its rows"

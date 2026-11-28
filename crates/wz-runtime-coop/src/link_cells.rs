@@ -309,7 +309,7 @@ impl<N: CountKind> CountKind for OnHeap<N> {
     type Flag = N::Flag;
     type Shared = N::Shared;
     type Cells = HeapCells;
-    type Buffers = HeapBuffers;
+    type Buffers = HeapBuffers<N::Flag>;
     #[cfg(feature = "udp-listen")]
     type Ports = crate::udp_link::HeapPorts;
     type Groups = crate::group_transport::HeapGroups;

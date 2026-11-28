@@ -53,7 +53,7 @@ use crate::group_transport::GroupTransport;
 use crate::link_cells::{CellRc, CountKind, OneTask};
 #[cfg(feature = "listen")]
 use crate::locator_text::parse_listen_locator;
-use crate::reassembly_rx::SessionReassembly;
+use crate::reassembly_rx::{ChainStore, SessionReassembly, SESSION_REASSEMBLY_SLOTS};
 use crate::session_drive::{
     place_session_with_router, spawn_session_with_router, DynLink, LinkOpenError, LinkWait,
     OpenedLink, PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionPump,
@@ -62,6 +62,8 @@ use crate::session_drive::{
 use crate::session_runtime::{EntropyCount, SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
 use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
+use wz_session_core::caps;
+use wz_session_core::chain_staging::ChainStaging;
 use wz_session_core::link_life::{Effects, LinkPhase, LinkRole};
 use wz_session_core::reassembly_dispatch::ChainPeers;
 
@@ -92,8 +94,12 @@ pub type LinkPump<T, P> = SessionPump<
 >;
 
 /// A reassembly Router of the transport of `T`, holding the chains of the peers its links compose
-/// it for ([`TransportFaces::Peers`]).
-pub type RouterOf<T> = SessionReassembly<<T as TransportFaces>::Peers>;
+/// it for ([`TransportFaces::Peers`]) in the buffers the storage of its tables gives them
+/// ([`TransportFaces::Policy`]).
+pub type RouterOf<T> = SessionReassembly<<T as TransportFaces>::Peers, ChainsOf<T>>;
+
+/// The staging of a reassembly Router of the transport of `T`, as the storage of its tables says.
+type ChainsOf<T> = <<T as TransportFaces>::Policy as ChainStore>::Chains;
 
 /// The handle on the actions of a link's session over the transport of `T`.
 type LinkHandle<T> =
@@ -176,16 +182,21 @@ pub trait TransportFaces {
     type Peers: ChainPeers + 'static;
     /// The handle on the place the session lends its Router in ([`TransportState::lend`]): a
     /// counted cell, or one the session's arena holds.
-    type RouterPlace: Deref<Target = LendCell<SessionReassembly<Self::Peers>>> + Clone + 'static;
+    type RouterPlace: Deref<
+            Target = LendCell<SessionReassembly<Self::Peers, <Self::Policy as ChainStore>::Chains>>,
+        > + Clone
+        + 'static;
     /// The Router as the transport holds it ([`TransportState::router`]): the session's one
     /// Router, or nothing where the session keeps its Router apart from its state, beside the
     /// pump of the one link it steps itself, so that a receive that lends the Router does so with
     /// nothing of the session's state held.
     type Router: TransportRouter;
-    /// The storage of the transport's own rows, the texts of the session's endpoints: the rows
-    /// its open lent, or rows of the allocator counted to the endpoints it names and taken at the
-    /// first text written, where the session's tables take their memory on use.
-    type Policy: Storage;
+    /// The storage of the transport's own rows, the texts of the session's endpoints and the
+    /// buffers its reassembly chains stage into: the rows and the table its open lent, or, where
+    /// the session's tables take their memory on use, rows of the allocator counted to the
+    /// endpoints it names and taken at the first text written, and a buffer of each chain's own
+    /// taken at its first fragment ([`ChainStore`]).
+    type Policy: Storage + ChainStore;
 }
 
 /// The Router a transport holds of its session ([`TransportFaces::Router`]): what the transport
@@ -195,7 +206,11 @@ pub trait TransportRouter {
     fn abort_peer_chains(&mut self, zid: &[u8]);
 }
 
-impl<P: ChainPeers> TransportRouter for SessionReassembly<P> {
+impl<P, S> TransportRouter for SessionReassembly<P, S>
+where
+    P: ChainPeers,
+    S: ChainStaging<SESSION_REASSEMBLY_SLOTS, { caps::PICO_FRAG_MAX_BYTES }>,
+{
     fn abort_peer_chains(&mut self, zid: &[u8]) {
         // The count of the chains ended is the Router's own record, read by no caller here.
         let _ended = self.abort_peer(zid);
