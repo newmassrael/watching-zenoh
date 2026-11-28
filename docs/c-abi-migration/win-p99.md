@@ -3,7 +3,8 @@
 Status: attribution measured on pc3-win (Windows 11 x64, Intel Core Ultra 7 155H, timer resolution 1 ms
 set by another process, power plan Balanced), 2026-11-28. Branch `win-p99-1128` holds the bench's
 change (section 2), the put sent with the session let go of (section 4.2) and the fix of the spin its
-first form made (section 4.3). Under disturbance W's tail is still longer than P's (section 4.4).
+first form made (section 4.3). Under disturbance W's tail is still longer than P's (section 4.4): it is
+ping's main thread descheduled by the disturbance twice as often, with no wait of wz in it (section 4.5).
 Every figure below is a reading of this lane, and says which.
 
 ## 1. What the ceilings say
@@ -195,6 +196,133 @@ and never in P's. Which wait of ping's main thread or read task makes it is not 
 `analyze.py` pairs with a switch made while `hog.exe` shares the CPU carry the hog's frames, so
 the pairing has to be checked before a frame is named.
 
+### 4.5 The disturbed tail is ping's main thread descheduled, not a wait of wz
+
+**The pairing first.** In a CSwitch row's stack walk the `Stack` rows carry the thread id of the
+thread switched IN (its stack where it last left a CPU, WPA's "new thread stack"); a ReadyThread's
+carry the readier's. `analyze.py` gave each switch the stack rows of its timestamp without
+reading their thread id, so a switch that put `hog.exe` on ping's CPU was given the hog's frames.
+Re-dumped with each stack row kept only where its thread id is the incoming thread's (CSwitch) or
+the readier's (ReadyThread), the two t3h traces keep 7.08 M and 6.89 M stack rows and drop 14,472
+and 16,599 (against 1.66 M and 1.43 M dropped by the old reading, which attributed them).
+
+**What a slow round trip is, both arms.** Each counted round trip of the t3h runs was placed on its
+trace by its start (94 to 96% of the sampled round trips land on a ping's arrival at pong's read
+within 40 us). In every round trip over 0.45 ms of both arms but three, ping's main thread (the
+probe's thread that calls `z_publisher_put` and spins on the answer) stands `Ready` on CPU 2 for
+the length of a hog's quantum (about 430 to 550 us) while ping's read task and pong both wait in
+`WSAPoll`/`select` with nothing to do: the ping is not sent yet, or the answer is stored and
+nobody reads it. No thread of ping waits on a lock in them: the read task's waits are all its poll
+(`UserRequest`; ready to running at most 223 us in either arm), the main thread waits on nothing.
+The other three (W only) are pong's read task out for the hog's whole 2 ms.
+
+The main thread loses CPU 2 in one of two ways, counted over every burst of the two traces:
+
+| how ping's main thread lost CPU 2 to `hog.exe` | W | P |
+|---|---:|---:|
+| a quantum end of the main thread (`WrQuantumEnd`) handed it to the hog | 57 | 25 |
+| the read task, woken on CPU 2 (priority 10, +2 for the network), preempted the main thread, and when it went back to its poll 12 us later the CPU went to the hog | 47 | 53 |
+
+The excess is the first row. Those quantum ends are not the quantum spent: the main thread's
+remaining quantum there is 0.4 to 4.5 M cycles of a 5.2 M refill (median 2.2 M, both arms), and
+the main thread runs at priority 8, QoS `Utility` at each of them, as the hog does. W's main thread
+meets such a dispatcher quantum end about twice as often as P's in general (1,918 against 1,103 in
+the traces, 1,836 against 1,038 of them handing the CPU to nothing and back within microseconds);
+972 of W's come 15 to 20 us after its send readied pong's read task, with the thread inside the
+loopback send (`ntoskrnl`, `tcpip`, `afd` under `WSASend`), against 106 of P's.
+
+**The work is the same.** A CPU profile of each arm under the same disturbance (one cell each,
+`-SetProfInt 1221`, `pt2.ps1`/`prof3.py`): ping's main thread spends 46.0% of its samples in the
+kernel's send path (`tcpip`/`afd`/`NETIO`) against P's 44.3%, 34.2% in the probe's spin against
+34.8%, 2.3% in the library's own code against 2.5%; the read tasks divide alike. W's put costs the
+kernel no more than zenoh-pico's `send`.
+
+**Untraced, interleaved** (`tl-mrun.ps1`: base W, the branch's W, P, rep by rep; 20,000 counted
+round trips each; 2026-11-28):
+
+| arm | quiet p99 (us) | quiet p99.9 (us) | quiet over 0.5 ms | disturbed p99 (us) | disturbed p99.9 (us) | disturbed over 0.5 ms (0.5 to 1 ms) |
+|---|---|---|---|---|---|---|
+| 99c88e8372 (base) | 61.4, 61.1, 60.5 | 90.5, 82.5, 83.4 | 0, 0, 0 | 122.9, 132.6, 120.3 | 567.8, 568.8, 555.2 | 32 (27), 36 (31), 33 (32) |
+| branch (22f68c8733 package) | 60.4, 62.9, 60.9 | 90.2, 88.8, 83.6 | 0, 0, 0 | 128.8, 69.3, 76.8 | 557.8, 557.1, 555.6 | 33 (29), 32 (30), 33 (32) |
+| P | 59.8, 158.4, 61.0 | 95.0, 342.2, 119.1 | 0, 1, 0 | 121.4, 118.2, 132.2 | 409.1, 349.5, 553.8 | 17 (15), 13 (12), 21 (14) |
+
+The difference is the band of one hog quantum (0.5 to 1 ms: W 27 to 32, P 12 to 15); the band of
+the whole burst (over 1.8 ms) is the same (W 1 to 5, P 0 to 5). Quiet, the three arms do not differ.
+
+**What this leaves.** The disturbed p99.9 of W is set by how often Windows' dispatcher, at a
+quantum end while a hog thread of the same priority is ready, takes CPU 2 from the application's
+spinning thread; no wz call on ping's path blocks or yields there, so there is no wz wait to remove
+for it. Why W's main thread meets twice the quantum ends, most of them at one point of its loopback
+send, is not read: the kernel frames are not symbolized here, and the two arms' sockets differ in
+one way that reaches that path (wz's is non-blocking and sends with `WSASend`
+(`crates/wz-runtime-posix/src/windows/stream.rs` @ `ws::WSASend(`), zenoh-pico's is blocking and
+sends with `send`). That is the next reading: the same trace with `ntoskrnl`/`tcpip`/`afd`
+resolved from the public symbols, or an A/B of a package whose stream sends on a blocking socket.
+
+### 4.6 The quantum ends sit at tcpip's send lock, and no socket mode of wz moves them
+
+**Where the main thread stood.** The t3h traces were re-dumped (`dump4.ps1`) and each
+`WrQuantumEnd` of ping's main thread read with the stack of the switch that brings the thread
+back (where it left the CPU), the `ntoskrnl`, `tcpip`, `afd` and `NETIO` frames resolved
+from the public symbols of the traced build (`fetchpdb.py`, `qe.py`):
+
+| where ping's main thread took its quantum end | W | P |
+|---|---:|---:|
+| deferred to `KeReleaseSpinLock` in `tcpip!TcpTcbSend` (`KiDpcInterrupt`, `KiDispatchInterrupt`, `KiQuantumEnd`), under `TcpEnqueueTcbSend` and `TcpTlConnectionSendCalloutRoutine` | 1,062 | 347 |
+| at an interrupt of its own code (`KiInterruptDispatchNoLockNoEtw`, `KiDpcInterruptBypass`) | 667 | 568 |
+| no kernel frame recorded | 105 | 117 |
+| elsewhere (mostly inside the trace's own stack walk) | 84 | 71 |
+| all | 1,918 | 1,103 |
+
+The quantum ends taken in the thread's own code are alike; the excess is the one point where the
+loopback send lets go of the connection's spin lock, so a quantum end that came due while the
+lock was held is taken there. The same quantum ends, timed (`qe2.py`, `qe3.py`):
+
+- they come a fixed time after the main thread's send readied pong's read task: 15 to 20 us in
+  W (972 of 1,918), 20 to 25 us in P (249 of 1,103; 106 at 15 to 20 us);
+- pong's read task is running at that instant in 1,894 of W's and 1,082 of P's: the request is
+  being taken in, the answer not yet sent (only 88 and 95 come within 5 us after the answer
+  readied ping's read task; pong's turnaround is 33 and 34 us p50 in the two traces);
+- 1,590 of W's and 764 of P's hand the CPU to nothing and the thread is back within 2 us; 82
+  and 65 hand it to `hog.exe`, which is the disturbed tail of 4.5.
+
+No wz code runs at that point: the thread is inside `WSASend`, under `afd` and `tcpip`, as P's
+is inside `send`. What decides the count is how the two processes' kernel work on the loopback
+connection overlaps in time, which the ETW stack walks themselves slow (p50 70 us traced).
+
+**The socket modes, A/B.** Three packages of 22f68c8733 differing only in
+`crates/wz-runtime-posix/src/windows/stream.rs`, each against that commit's package (base) and P,
+interleaved rep by rep (`ab-mrun.ps1`, `ab2-mrun.ps1`), tcp/off/rtt/8, 20,000 counted round trips
+each, quiet and under `hog.exe 0x3FC,2000,40`, 2026-11-28:
+
+- **blocking**: the socket left blocking after connect and accept, the write one blocking
+  `send` as zenoh-pico's (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @
+  `_z_tcp_windows_write`), the read `WSAPoll` with no wait before `recv`;
+- **snd0**: `SO_SNDBUF` 0 on every stream (AFD does not buffer the send);
+- **lfp**: `SIO_LOOPBACK_FAST_PATH` on the dialling socket before connect and on the listener.
+
+| set | arm | quiet p50 (us) | quiet p99.9 (us) | disturbed p99 (us) | disturbed p99.9 (us) | disturbed over 0.5 ms (0.5 to 1 ms) |
+|---|---|---|---|---|---|---|
+| 1 | base | 48.4, 48.3, 47.9 | 92.6, 83.8, 88.0 | 129.9, 130.8, 125.8 | 557.6, 556.8, 566.6 | 33 (31), 38 (37), 36 (34) |
+| 1 | blocking | 52.6, 52.7, 52.8 | 87.2, 87.7, 87.0 | 137.7, 130.3, 139.9 | 571.1, 561.0, 571.9 | 48 (44), 42 (41), 37 (30) |
+| 1 | P | 48.1, 47.8, 47.4 | 126.2, 127.0, 102.0 | 152.8, 122.0, 117.5 | 512.4, 555.1, 357.3 | 22 (19), 28 (26), 15 (13) |
+| 2 | base | 48.0, 49.3, 47.9 | 84.5, 90.6, 80.7 | 124.8, 131.5, 79.1 | 613.6, 556.9, 557.4 | 32 (31), 34 (33), 32 (29) |
+| 2 | snd0 | 49.5, 49.7, 49.4 | 116.6, 82.7, 118.7 | 137.4, 133.4, 152.4 | 566.8, 563.9, 453.3 | 30 (27), 26 (23), 19 (11) |
+| 2 | lfp | 48.1, 48.1, 48.0 | 85.8, 90.9, 83.2 | 132.7, 86.4, 123.2 | 557.3, 555.6, 556.8 | 37 (37), 32 (32), 36 (34) |
+| 2 | P | 47.9, 47.8, 47.8 | 102.2, 108.3, 98.3 | 117.3, 117.7, 122.2 | 357.8, 385.1, 294.2 | 11 (8), 15 (10), 14 (11) |
+
+The blocking socket does not shorten the tail and costs 4.5 us of p50;
+the loopback fast path changes nothing; `SO_SNDBUF` 0 thins the band of one hog quantum in one
+rep of three but leaves p99.9 at 453 to 567 us against P's 294 to 385 and costs 1.5 us of quiet
+p50. None of them closes the gap, and the base's non-blocking `WSASend` stays.
+
+**What this leaves.** Within wz's socket the null result holds for its mode, its send buffer and
+the loopback path. The excess is a kernel-side coincidence on the loopback connection (a quantum
+end deferred to `TcpTcbSend`'s lock release while the peer's read task takes the request in),
+which lands 15 to 20 us after the request's delivery in W and 20 to 25 us after it in P. A completion
+model on I/O completion ports was not built: it changes how the read task waits, and the quantum
+ends are on the caller's send, inside the same `tcpip` routine under either call.
+
 ## 5. Recipe
 
 On pc3-win, under `C:\wzperf\win-p99`: `build-pkg.sh <ref> <name> <bundle>` (Git Bash) builds
@@ -202,7 +330,14 @@ the preset package of a commit carried in a git bundle; `buildw.bat <package dir
 perf_probe against it beside the P probe; `m.ps1 -Bin <bin dir> -Transport tcp -Size 8 -Reps 3
 [-Hog <mask>,<busy_us>,<period_ms>]` runs ping and pong pinned as the runner pins them and keeps
 each round trip (`-H`); `trace.ps1` and `ptrace.ps1` wrap one such cell in `xperf` (context
-switches with stacks; CPU samples with stacks), and `analyze.py`, `prof2.py` read the dump.
+switches with stacks; CPU samples with stacks), and `analyze.py`, `prof2.py` read the dump. A
+CSwitch's stack rows are the incoming thread's and a ReadyThread's the readier's: a reader keeps a
+`Stack` row for an event only where its thread id is that thread's (`extract2.py`; `analyze.py`
+does not, see 4.5). `pt2.ps1` with `prof3.py` profiles one cell of an arm under a disturbance. `ab-mrun.ps1` and
+`ab2-mrun.ps1` interleave experiment packages with the base and P rep by rep; `dump4.ps1` dumps a
+trace keeping the probe's rows and the kernel modules' load rows, `fetchpdb.py` fetches the public
+PDB of a named image by its CodeView record, and `qe.py` (with `qe2.py`, `qe3.py`) reads where and
+when ping's main thread took its quantum ends, the kernel frames resolved through dbghelp.
 
 ## 6. Re-measuring every Windows row
 
