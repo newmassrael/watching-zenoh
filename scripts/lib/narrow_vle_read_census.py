@@ -319,21 +319,32 @@ ADJUDICATED: dict[str, tuple[str, str]] = {
         "a Query value's encoding id, `Zenoh080Bounded::<u32>` upstream on both "
         "sides, as `walk_encoding`'s `packed_id` above.",
     ),
-    # The Push reader's own primitives and fields (`network_message/push_read.rs`).
-    "crates/wz-session-core/src/network_message/push_read.rs::vle_u16::": (
+    # The network body readers' shared primitives and fields (`network_message/body_read.rs`),
+    # which a Push, a Request's Put and a Reply's Put are read with alike.
+    "crates/wz-session-core/src/network_message/body_read.rs::vle_u16::": (
         "REFUSE",
         "the PRIMITIVE, not a field: a one-byte fast path in front of the cursor's "
         "refusing `read_vle_u16`, called for a key expression's scope (`read_key`).",
     ),
-    "crates/wz-session-core/src/network_message/push_read.rs::read_key::": (
+    "crates/wz-session-core/src/network_message/body_read.rs::read_key::": (
         "REFUSE",
-        "a Push key's scope, `Zenoh080Bounded::<ExprId>` upstream "
+        "a Push's, Request's or Response's key scope, `Zenoh080Bounded::<ExprId>` upstream "
         "(`commons/zenoh-codec/src/core/wire_expr.rs` @ `let scope: ExprId = zodec.read(&mut *reader)?;`).",
     ),
-    "crates/wz-session-core/src/network_message/push_read.rs::read_put::": (
+    "crates/wz-session-core/src/network_message/body_read.rs::read_put::": (
         "REFUSE",
         "a sliced Put payload's slice count, `Zenoh080Bounded::<u32>` through "
         "`Zenoh080Sliced::<u32>` upstream, as `walk_msg_put`'s `slice_count`.",
+    ),
+    "crates/wz-session-core/src/network_message/request_read.rs::read_request_view::": (
+        "REFUSE",
+        "a Request's id, `Zenoh080Bounded::<RequestId>` upstream (u32), as "
+        "`walk_request`'s `rid`.",
+    ),
+    "crates/wz-session-core/src/network_message/response_read.rs::read_response_view::": (
+        "REFUSE",
+        "a Response's request id, `Zenoh080Bounded::<RequestId>` upstream, as "
+        "`walk_response`'s `request_id`.",
     ),
 }
 
