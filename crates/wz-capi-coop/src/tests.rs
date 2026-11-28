@@ -531,6 +531,39 @@ enum StandInEnd {
     Dials(std::net::SocketAddr),
 }
 
+/// Answer each liveliness Interest `event` carries as a router answers it, whatever the session
+/// under test answers itself: a declaration of each token `observer` holds on the asked key, then
+/// the DeclFinal, sent through `sink`. The stand-in is built with the session core of the build
+/// under test, which stages no answer of its own without `interest-answer`; a snapshot and a
+/// history subscriber of that build are answered all the same by the router they ask.
+#[cfg(all(feature = "liveliness", not(feature = "interest-answer")))]
+fn answer_token_interests<S: wz_session_core::response_sink::DeclareReplySink>(
+    observer: &ApplicationLayerObserver,
+    answers: &mut wz_session_core::declare::local_token::TokenAnswers,
+    event: IterationEvent<'_, '_>,
+    sink: &S,
+) {
+    use wz_session_core::declare::local_token::DeclResponseItem;
+    observer.read_parts(|app, face| {
+        answers.answer_iteration_event(app.local_tokens, event, face.subscribers.mapping_spaces());
+        while let Some(item) = answers.next_answer() {
+            match item {
+                DeclResponseItem::Token {
+                    token_id,
+                    interest_id,
+                } => {
+                    if let Some(keyexpr) = app.local_tokens.keyexpr_for(token_id) {
+                        sink.send_declare_token_reply(token_id, keyexpr, interest_id);
+                    }
+                }
+                DeclResponseItem::Final { interest_id } => {
+                    sink.send_declare_final_reply(interest_id);
+                }
+            }
+        }
+    });
+}
+
 fn run_router(
     end: StandInEnd,
     (zid, whatami): (u8, WhatAmI),
@@ -618,6 +651,12 @@ fn run_router(
     let silenced = silent.clone();
     #[cfg(feature = "query")]
     let counted_queries = seen.clone();
+    // The tokens Interests the stand-in answers itself (`answer_token_interests`), with the
+    // tokens it holds and through its own link.
+    #[cfg(all(feature = "liveliness", not(feature = "interest-answer")))]
+    let (token_holder, token_sink) = (observer.clone(), actions.clone());
+    #[cfg(all(feature = "liveliness", not(feature = "interest-answer")))]
+    let mut token_answers: wz_session_core::declare::local_token::TokenAnswers = Default::default();
     let mut dispatch = dispatch_to(observer, actions.clone());
     let counted = seen;
     let _task = spawn_session(
@@ -812,6 +851,13 @@ fn run_router(
                 }
             }
             dispatch(event);
+            #[cfg(all(feature = "liveliness", not(feature = "interest-answer")))]
+            answer_token_interests(
+                &token_holder.borrow(),
+                &mut token_answers,
+                event,
+                &*token_sink,
+            );
         },
     );
     loop {
