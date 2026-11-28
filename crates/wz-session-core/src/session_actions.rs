@@ -755,6 +755,20 @@ impl TxLimits {
     }
 }
 
+/// The link set an aggregated session routes by (`transport-multilink`), the one type its
+/// session core holds and every transmit route borrows.
+///
+/// A `std::sync::Mutex`, NOT the runtime `R::Mutex<T>` GAT: the latter's `where T: Send`
+/// naming-bound cannot be discharged for the opaque `R::Shared<LinkState>` element in
+/// generic-`R` struct WF (coop's `LinkState` is genuinely `!Send` -- an `Rc` driver -- so no
+/// unconditional bound is sound), whereas `std::sync::Mutex<T>` carries no naming-bound and is
+/// `Send + Sync` structurally on the only runtime that enables this feature (std
+/// `TokioRuntime`, `R::Shared = Arc`). AP-only + rsa-gated, so std is always present (see
+/// `lib.rs`), and the cooperative C ABI's graph never selects the feature.
+#[cfg(feature = "transport-multilink")]
+pub type LinkSet<R> =
+    std::sync::Mutex<alloc::vec::Vec<<R as SessionRuntime>::Shared<LinkState<R>>>>;
+
 /// R311y205 (transport-multilink IMPL-2a) — the SHARED session kernel: the
 /// ~30 fields that are one-per-logical-session regardless of how many physical
 /// links carry it (SN generators, RX-SN gate, negotiated caps, peer identity,
@@ -1145,16 +1159,9 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// from this set; the session-send gate is the OR over these links'
     /// `transport_available`, so the session survives until the set empties.
     ///
-    /// A `std::sync::Mutex`, NOT the runtime `R::Mutex<T>` GAT: the latter's
-    /// `where T: Send` naming-bound cannot be discharged for the opaque
-    /// `R::Shared<LinkState>` element in generic-`R` struct WF (coop's
-    /// `LinkState` is genuinely `!Send` — an `Rc` driver — so no unconditional
-    /// bound is sound), whereas `std::sync::Mutex<T>` carries no naming-bound and
-    /// is `Send + Sync` structurally on the only runtime that enables this
-    /// feature (std `TokioRuntime`, `R::Shared = Arc`). AP-only + rsa-gated, so
-    /// std is always present (see `lib.rs`).
+    /// Why the set is `std`'s lock and not the runtime's: [`LinkSet`].
     #[cfg(feature = "transport-multilink")]
-    pub links: std::sync::Mutex<alloc::vec::Vec<R::Shared<LinkState<R>>>>,
+    pub links: LinkSet<R>,
 }
 
 /// What the session's establishment learned of its peer and agreed with it, as one row of
@@ -3887,7 +3894,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // multilink join populates it (link 1 at register, link 2+ at
                 // add_link) only when a session actually aggregates.
                 #[cfg(feature = "transport-multilink")]
-                links: std::sync::Mutex::new(Vec::new()),
+                links: LinkSet::<R>::default(),
             } in_place {
                 // R121f1 — default ext chains seed both Init roles with the
                 // patch-extension entry that zenoh-pico's accept-side

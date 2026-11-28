@@ -866,8 +866,7 @@ pub struct TxRoute<'a, R: SessionRuntime> {
     /// An aggregated session's links, from which each conduit's link is chosen
     /// (`TxRoute::select_link`); empty while the session drives one link.
     #[cfg(feature = "transport-multilink")]
-    pub links:
-        &'a std::sync::Mutex<alloc::vec::Vec<R::Shared<crate::session_actions::LinkState<R>>>>,
+    pub links: &'a crate::session_actions::LinkSet<R>,
 }
 
 impl<R: SessionRuntime> TxRoute<'_, R> {
@@ -2588,7 +2587,7 @@ pub struct GroupTx<R: SessionRuntime> {
     /// The set an aggregated unicast session routes by: a group sends on its one link, so the set
     /// is empty and every frame leaves by `link`.
     #[cfg(feature = "transport-multilink")]
-    no_links: std::sync::Mutex<alloc::vec::Vec<R::Shared<crate::session_actions::LinkState<R>>>>,
+    no_links: crate::session_actions::LinkSet<R>,
 }
 
 impl<R: SessionRuntime> GroupTx<R> {
@@ -2613,7 +2612,7 @@ impl<R: SessionRuntime> GroupTx<R> {
             link,
             limits,
             #[cfg(feature = "transport-multilink")]
-            no_links: std::sync::Mutex::new(alloc::vec::Vec::new()),
+            no_links: crate::session_actions::LinkSet::<R>::default(),
         }
     }
 

@@ -85,8 +85,8 @@ ALLOWED: dict[str, tuple[int, str]] = {
         "made in two places, by value and in the place it stays (`Mutex::init_at`)",
     ),
     "crates/wz-session-core/src/session_actions.rs": (
-        2,
-        "the link set of `transport-multilink`, which only the tokio runtime builds (it needs "
+        1,
+        "the link set of `transport-multilink` (`LinkSet`, the one name every route borrows), which only the tokio runtime builds (it needs "
         "`std` and an RSA handshake): the cooperative C ABI's graph never selects the feature",
     ),
 }
