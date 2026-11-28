@@ -93,17 +93,30 @@ pub(crate) struct AdminSpaceSlot {
     running: Mutex<Option<Running>>,
 }
 
-/// The queryables a started admin space holds, undeclared together when it stops.
-///
-/// Fields are held for their drop, never read.
+/// The queryables a started admin space holds, retracted together when it stops
+/// ([`Running::retract`]). A session that closes takes them with it, as zenoh-pico's close flushes
+/// the session's queryables and forgets `_admin_space_queryable_id`
+/// (`vendor/zenoh-pico/src/session/utils.c` @ `zn->_admin_space_queryable_id = 0;`), so a running
+/// admin space let go of with its session's state, after the session's drive closed it, retracts
+/// nothing.
 struct Running {
     /// pico's own documents, at `@/<zid>/pico/**`.
-    _pico: PlainQueryable,
+    pico: PlainQueryable,
     /// wz's resource snapshot, at `wz/@/<zid>/snapshot`: under the wz-owned root and not inside
     /// pico's tree, as the hosted admin space serves its own, so a query for pico's documents
     /// meets exactly the documents pico has.
     #[cfg(feature = "resource-snapshot")]
-    _snapshot: PlainQueryable,
+    snapshot: PlainQueryable,
+}
+
+impl Running {
+    /// Retract both queryables from `engine`, the session they were declared on, which the
+    /// admin space's own place, the session handle, reaches.
+    fn retract(self, engine: &crate::session::EngineHold) {
+        self.pico.retract(engine);
+        #[cfg(feature = "resource-snapshot")]
+        self.snapshot.retract(engine);
+    }
 }
 
 impl AdminSpaceSlot {
@@ -173,17 +186,20 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
             Ok(queryable) => queryable,
             Err(code) => return code,
         };
-        // A refusal of the second declaration leaves the admin space stopped: `pico` drops here
-        // and undeclares itself, so the program is not left with half of one.
+        // A refusal of the second declaration leaves the admin space stopped: `pico` is
+        // retracted here, so the program is not left with half of one.
         #[cfg(feature = "resource-snapshot")]
         let snapshot = match declare_snapshot(handle, &snapshot_zid) {
             Ok(queryable) => queryable,
-            Err(code) => return code,
+            Err(code) => {
+                pico.retract(engine_held(handle));
+                return code;
+            }
         };
         *running = Some(Running {
-            _pico: pico,
+            pico,
             #[cfg(feature = "resource-snapshot")]
-            _snapshot: snapshot,
+            snapshot,
         });
         Z_OK
     })
@@ -221,9 +237,11 @@ pub unsafe extern "C" fn zp_stop_admin_space(zs: *mut z_loaned_session_t) -> ZRe
         let Some(handle) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
-        // Taken out under the lock and undeclared after it is released.
+        // Taken out under the lock and retracted after it is released.
         let stopped = handle.ext.admin_space.running().take();
-        drop(stopped);
+        if let Some(running) = stopped {
+            running.retract(engine_held(handle));
+        }
         Z_OK
     })
 }

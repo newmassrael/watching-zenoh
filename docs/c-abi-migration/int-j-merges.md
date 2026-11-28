@@ -1,0 +1,224 @@
+# Integration J: merge resolutions
+
+Each section is one lane merged into integration J, with the files whose
+conflicts needed a decision and why the result reads as it does. A merge that
+applied cleanly is not listed. Nothing here was built; main verifies.
+
+## Generated outputs
+
+- conn-scout: `deploy/wz-config.toml` and
+  `sources/features/wz-session-core.scxml` merged textually with the
+  earlier lanes' edits. Main regenerates both (`wz_config --write`,
+  `sce_feature_model --write`) rather than trusting the textual merge.
+
+## l3-queryable (673db8c8f7) over peer-prop and feat-adv
+
+The two lanes reshaped the same seam: peer-prop lends every table set by
+walking its description (`places` lines and `RowCount`s), l3-queryable
+moves the session's own tokens out of the observer and the staging of token
+answers into the peer's tables, and names entities by their row. Both are
+kept: the description walk is the lend, and it walks l3-queryable's layout.
+
+- `crates/wz-session-core/src/slot_observer.rs`: the observer has no
+  registry of tokens of its own (l3-queryable), so `ObserverRegionRows` lost
+  its `LOCAL_TOKENS` parameter and keeps peer-prop's policy parameter; the
+  observer's description is the three watcher pairs
+  (`SLOT_OBSERVER_LINES`), lent by `lend_seqs` since no key line is left;
+  `list_counts`, `counts` and `arena_bytes` take the watchers alone. The
+  description test asserts no key line, and the count of tokens past the
+  build's bound is now refused by the tables (`RegistryRows::local_tokens`).
+- `crates/wz-session-core/src/bounded.rs`: `RowCount::LocalTokens` removed,
+  as no line counts the observer's tokens any more.
+- `crates/wz-session-core/src/declare/local_token.rs`: l3-queryable's
+  removal of `LocalTokenRows` and the observer's `places` kept;
+  `TokenAnswers::place` is generic over the laid-out policy so the peer's
+  description names it for a region and a plan alike, and
+  `TokenAnswers<Lent>::lend_rows` / `arena_bytes` go, the walk lending the
+  staging. The staging tests take l3-queryable's `TokenAnswers::stage` with
+  debt-repay's keys that every keyexpr dialect reads, and keep the
+  table-order assertion.
+- `crates/wz-session-core/src/peer_tables.rs`: peer-prop's description lend
+  and `arena_bytes`; its token line is `TokenAnswers::place` counted by
+  `RowCount::PendingDeclares`.
+- `crates/wz-session-core/src/session_tables.rs`: peer-prop's lend by
+  description; l3-queryable's `get_due` and `ended_gets` are set by
+  `SessionTables::of`, which the rowless tables start from.
+- `crates/wz-capi-coop/src/engine/registry.rs`, `registry/placed.rs`,
+  `registry/described.rs`: peer-prop's registry walk with l3-queryable's
+  `TableRows` in place of `ObserverRows`. The test that refused an open
+  counting a token on the observer's line of no room now refuses one counting
+  a subscription past the table's bound, the same walk refusal on a line that
+  still exists.
+- `crates/wz-capi-pico/src/{query,pubsub,liveliness,session,advanced_plane}.rs`:
+  feat-adv's reach of an entity's engine through its place, with
+  l3-queryable's `EntityRow` for what is retracted and `entity_id_of` for an
+  identity; the advanced plane's token is an `EntityRow`.
+
+## group-link-writer (8794590753)
+
+- `crates/wz-session-core/src/session_actions.rs`: the lane moves
+  `LentDeclaration` into `lent_control` as the one writer a link and a group
+  send declarations with, which supersedes debt-repay's token-reply arm and
+  `qos` in the session's own copy (`798f8720aa`); the lane's version is
+  kept. Debt-repay's `lent_declaration_tests` is kept and reads the shared
+  writer: `write_wire` (`WireWrite`) in place of the copy's `encode`.
+
+## base-td (fcf3273d01)
+
+- `crates/wz-capi-coop/src/engine.rs`, `engine/replay.rs`: the lane gives a
+  link's actions and transmit handle the stack's sink type
+  (`LinkActions<C, SinkOf<L>>`, `LinkTx<'_, C, SinkOf<L>>`, `Wire<C, D>`).
+  The get and snapshot legs l3-queryable moved into `ask_get_legs` and
+  `ask_snapshot_legs`, and the single-link publish path
+  (`alone_run`, `send_leg_alone`), take the same types; the
+  `wz_interest_answer` gates of the integration are kept.
+- `crates/wz-session-core/src/session_actions.rs`,
+  `crates/wz-session-core/src/transport_tx.rs`: group-link-writer moved the
+  transmit walk into `transport_tx.rs`; the lane's change to that walk (a
+  joined message is written where the open frame lies, through
+  `OpenSlot::frame_mut`, and the slot is picked up only to be sent; a lease
+  is written through `TxLease::frame_mut`, no longer a `TxBuf` itself) is
+  applied there, line for line.
+- `crates/wz-runtime-coop/src/ip_stack.rs`, `ip_link.rs`: the lane makes a
+  stack's links one closed type (`IpLink`), with a variant for a `udp/`
+  port's peer; peer-prop made a dialled socket and a port's peer one driver
+  (`LinkSocket`, F6 of `peer-proportion.md`). Both are kept: in a build
+  that listens on `udp/` the `Udp` variant is a driver over `LinkSocket`
+  and a port's peer opens as that variant (`LinkSocket::Port`), so the
+  enum has no `Peer` variant and the driver is one body. `IpLink` and
+  `ClosedLink` forward `owes_write_if_free`, which an earlier lane added to
+  `SessionDatagramLink`.
+
+## heap-native (ce7e699b2c)
+
+The lane states the tables' policy once, in the build script (`wz_lent`,
+`wz_on_use`), and renames every item that differs by the policy from
+`runtime-plan` to the policy's cfg; the config's plan keeps `runtime-plan`.
+
+- `crates/wz-capi-coop` (`arena.rs`, `engine.rs`, `engine/registry.rs`,
+  `registry/held.rs`, `registry/described.rs`, `registry/adding.rs`,
+  `engine/state_places.rs`, `tests/arena.rs`, `tests/sim.rs`): the items
+  the earlier lanes added under `runtime-plan` (peer-prop's description
+  walk of the registry and the sets, the plan's parts read off it,
+  l3-queryable's leg rows) take the policy's cfg the same way: the lent form
+  `wz_lent`, "not the on-use form" `not(wz_on_use)`, the on-use form
+  `wz_on_use`.
+- `crates/wz-capi-coop/src/engine/registry/owed.rs`, `described.rs`: the
+  lane holds the tokens owed by the faces that went in one type
+  (`owed::Owed`); peer-prop lends that table through the registry's
+  description. Both are kept: the lent form is described by
+  `Owed::place` and starts rowless (`Owed::rowless`), so `Owed::lent`
+  goes, and the on-use form is the lane's relation. `counted.rs` counts the
+  application's tables with l3-queryable's `App::counted(keys, tables, ..)`.
+- `crates/wz-runtime-coop` (`ip_stack.rs`, `ip_link.rs`,
+  `unixpipe_link.rs`, `ws_link/links.rs`, `transport.rs`): the lane takes a
+  link's cells and buffers through its kind's sources (`N::Cells`,
+  `RxOf<N>`, `TxOf<N>`); base-td's closed link type and its in-place
+  makers take them the same way, and the gate takes the cells as the lane
+  states them. Both lanes' stack tests are kept.
+
+## Fixes after main's build of c780b02348
+
+- `crates/wz-session-core/src/declare/local_token.rs`: the l3-queryable
+  resolution dropped the imports of `LocalTokenRegistry::lent` with
+  peer-prop's region form. The lent form stays: l3-queryable's D9b
+  (`arch-l3-rows.md`) moves the session's tokens into
+  `RegistryTables::local_tokens`, lent by `RegistryRows::local_tokens`
+  through `LentTables::lend` as the subscriber, queryable and liveliness
+  subscriber tables are, and removes only the observer's field and the
+  registry's region and counted forms. The imports (`Arena`, `LendRefused`,
+  `Lent`, `KeySpace`, `LentKeys`) are restored as l3-queryable had them.
+- `crates/wz-runtime-coop/src/ip_stack.rs`: base-td's `IpLinks::closed`
+  was written before heap-native held a port's slots and a group's receive
+  buffers in the links themselves (`port_slots`, `group_rx`, lent by
+  `lend_port_rows` and `lend_group_rx`), so the merge left it without both
+  fields. It now carries them over as every other reshaping constructor does;
+  `port_slots` under `udp-listen`, which the failing builds did not enable.
+- `crates/wz-session-core/src/get_legs/tests.rs`: l3-queryable's region
+  test of `GetLegs::places` read peer-prop's `SeqPlace` offsets as `usize`.
+  peer-prop keeps a description's offsets in 32 bits; the test widens them,
+  as the observer's own description test does.
+- `crates/wz-runtime-coop/src/faces.rs`: win-p99's `SiteFacts::read_wrote`
+  took its link as the trait-object cell, and base-td gives a face's pump
+  the stack's own link type, so the direct read's call
+  (`engine/direct.rs`, `tell_facts`) passed a typed cell. It is generic
+  over the link type as `ReadFacts::of_link` beside it is; the holders'
+  reads go through `FaceWire::owes_write_if_free`, generic already.
+- `crates/wz-session-core/src/link_life.rs`: base-td's test of a look's
+  read of establishment lent its counting closure by reference; the closure
+  borrows its counter alone, so it is `Copy` and passed by value
+  (`clippy::needless_borrows_for_generic_args`).
+- `crates/wz-capi-coop/src/tests/on_use.rs`: main moved the module to the
+  simulated world (`2beb31c051`) while heap-native added on-use tests on the
+  host harness (`Router::start`, `open`, `until`), so the merge kept tests
+  naming items the module no longer imports. The face's room place, the
+  link admission and the link parts tests open in the sim (`opened`,
+  `Sim::steps_until`). The read slot test dials a second stand-in, which the
+  sim now makes at an address and node of a test's choosing
+  (`Sim::stand_in_as`; `Sim::stand_in` is that at `STAND_IN_AT`). The
+  listener test's subject is the host's accept of stream connections that
+  never speak, which the sim's datagram ends do not have: it moves, unchanged,
+  to `tests/on_use_listen.rs`, a system-layer module with its row in
+  `docs/deterministic-tests/system-layer.tsv`, so `tests::on_use` stays in
+  the unit layer and the `on_use` filter of the on-use legs still runs it.
+- `crates/wz-capi-coop/src/engine.rs`: heap-native's `HeldGate` had a
+  form off the round (`LinkGate` itself) that read `LinkGates` in every
+  build; base-td's pump reads the link with no cell of gates between, so the
+  merge kept only the round's `HeldGate`. `LinkGates` and `LinkGate` are
+  then read by the round's gate cell (`wz_round`) and by the laid-out link
+  cells (`not(wz_on_use)`) alone, and carry that cfg; an on-use session that
+  steps its links itself names neither.
+- `crates/wz-capi-coop/src/engine/registry/counted.rs`: heap-native's
+  on-use tests read the count of face places as `places()`, which peer-prop
+  renamed `face_places()` (`9a08b72f2a`), `places` being the registry's
+  description; the tests read the new name.
+- `crates/wz-capi-coop/src/tests.rs`: main's router stand-in answers a
+  token Interest itself (`answer_token_interests`, `25e6f6358b`) through
+  `LocalTokenRegistry::answer_iteration_event`, which l3-queryable moved to
+  the peer's staging (`TokenAnswers`, `b88db8bad5`). It now stages into a
+  `TokenAnswers` of its own from the stand-in's registry, reads the refusals
+  off it and drains it with `next_answer`, as the observer drains a peer's.
+- `docs/deterministic-tests/system-layer.tsv`: `tests/no_engine_rows.rs`
+  (from integration i) reaches the host's links, clock and entropy and had
+  no row. Its subject is not the host: it assembles engines and dials none,
+  so it is owed a move. The move needs a link stack, clock and entropy of no
+  host reachable from an integration test, which the crate does not export
+  (the sim is its unit tests' `tests::sim`), and the test must be a binary of
+  its own built without `engine-rows`. So it takes a `pending` row, as its
+  sibling `tests/engine_rows.rs` has for the same reason.
+
+## heap-native (3d8b5368d9), second merge
+
+The lane's later fixes: a table the on-use plan lays out none of counts no
+row (`LINK_ROWS`, `GROUP_RX_ROWS`, `PORT_RX_ROWS`), a udp port's memory and a
+group's buffer taken through the links' kind (`CountKind::Ports`,
+`CountKind::Groups`, `SessionLinks::lend_ports`, `lend_groups`), and
+`udp-port-lent-only` gone with the port's memory of its own.
+
+- `crates/wz-runtime-coop/src/udp_link.rs`: peer-prop's `LinkSocket` (a
+  dialled socket and a port's peer, one driver) keeps its variants and takes
+  the port's source as a third parameter, `P: PortSource<N::Flag>`, as the
+  lane's `PortPeer<S, N, P>` and `UdpPort<S, N, P>` do. The lane's
+  `leaked_ports` is kept beside it. The lent-only port test goes with its
+  feature, as the lane removed it; peer-prop's one-driver test makes its port
+  over `leaked_ports` and `shared_book` in place of the arena it built and
+  `UdpPort::lent_in_book`.
+- `crates/wz-runtime-coop/src/ip_link.rs`: `UdpOf` names the socket
+  `LinkSocket<U, N::Shared, N::Ports>`, the same port source as the lane's
+  `PortPeerOf<U, N>`, so a kind on use (whose `Shared` is the kind it wraps)
+  holds the shares of ports over the heap's memory.
+- `crates/wz-runtime-coop/src/ip_stack.rs`: base-td's one closed link type
+  stays, so `LINK_CELL_BYTES` is the cell of `IpLinkOf`; the `udp/` listener
+  is the lane's (a port only over the book its session gave, `UdpPort::in_book`)
+  built as base-td's `IpUdpListener<U, S, T, N, W, F>`; the port's peer and the
+  own socket are `LinkSocket<U, N::Shared, N::Ports>`. `IpLinks::closed` loses
+  the `port_slots` an earlier fix of this integration gave it, the field being
+  gone with the slots now kept in the ports' book.
+- `crates/wz-capi-coop/src/arena.rs`: `Lent` is imported under
+  `all(feature = "query", wz_lent)`, its one reader (the held replies' row);
+  the lane dropped the `udp-listen` arm, as the arena names no port row.
+- `crates/wz-runtime-coop/src/ip_stack.rs`: base-td's test
+  `a_closed_link_in_a_lent_cell_gives_it_back_whole` lent its links a table
+  of cells bare, where heap-native makes a link's cells through its kind's
+  source (`CountKind::Cells`, `Option<LentByteCells>` for the lent kinds);
+  it lends `Some(cells)`, as the lane's own stack tests do.

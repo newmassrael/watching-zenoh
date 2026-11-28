@@ -496,6 +496,58 @@ pub fn judge_ext_entries<E: crate::ext_view::ExtEntryView>(
     judge_end(carrier)
 }
 
+/// [`judge_ext_entries`] over a chain a message may not carry, held as a slice of its entries:
+/// `None` is a message with no chain, which carries nothing to refuse
+/// ([`ExtAdmission::Admissible`]).
+pub fn judge_chain<E: crate::ext_view::ExtEntryView>(
+    carrier: ExtCarrier,
+    chain: Option<&[E]>,
+) -> ExtAdmission {
+    judge_entries(carrier, chain.map(|chain| chain.iter()))
+}
+
+/// [`judge_chain`] over the entries a chain yields, held or walked where its frame lies, so the
+/// held, the lent and the walked forms of a message refuse the same chains.
+pub fn judge_entries<I>(carrier: ExtCarrier, entries: Option<I>) -> ExtAdmission
+where
+    I: IntoIterator,
+    I::Item: crate::ext_view::ExtEntryView,
+{
+    entries.map_or(ExtAdmission::Admissible, |entries| {
+        judge_ext_entries(carrier, entries)
+    })
+}
+
+/// `first` unless it is admissible, and then `next()`: the chains of a message are read in the
+/// order upstream reads them, the envelope's before the body's, and the first offender is the one
+/// reported. A verdict that is no refusal and no admission (`Unjudged`) stops the reading as well,
+/// since a build that cannot judge the envelope has no space to judge the body against either.
+///
+/// The order is the rule's and not a reader's, so every reader of a message (the owned one, and
+/// each one read where its frame lies) takes it from here, and it is compiled whatever a build
+/// reads: a generic item costs nothing in a build that calls it nowhere.
+pub fn then_judge(first: ExtAdmission, next: impl FnOnce() -> ExtAdmission) -> ExtAdmission {
+    match first {
+        ExtAdmission::Admissible => next(),
+        other => other,
+    }
+}
+
+/// The verdict on a Declare: its own chain (`outer`), then the chain of the declaration it
+/// carries (`kind`, `chain`), each against its own space. One rule for the owned message and the
+/// Declare read where its frame lies, so the receive path that delivers a Declare without copying
+/// it refuses exactly what the one that copies it does.
+pub fn judge_declare_chains<E: crate::ext_view::ExtEntryView>(
+    outer: Option<&[E]>,
+    kind: DeclarationKind,
+    chain: Option<&[E]>,
+) -> ExtAdmission {
+    then_judge(
+        judge_chain(ExtCarrier::Network(NetworkEnvelope::Declare), outer),
+        || judge_chain(ExtCarrier::Declaration(kind), chain),
+    )
+}
+
 /// The verdict on one entry, `None` for one a participant reads past: what [`judge_entry`]
 /// answers, asked only of an entry the rule's screen does not pass ([`may_refuse`]). An entry
 /// no reader can refuse (an extension that is not mandatory, of an encoding with a shape, and
@@ -1720,5 +1772,59 @@ mod tests {
         assert!(!may_refuse(0x21));
         assert!(may_refuse(0x42));
         assert!(may_refuse(0x33));
+    }
+
+    /// A message's chains are read in upstream's order, the envelope's before its body's, and the
+    /// first offender is the one reported; a chain a message does not carry refuses nothing; a
+    /// Declare's envelope and its declaration are each judged against their own space. Turned red
+    /// by a `then_judge` that reads the body past a refused envelope or reports the body's verdict
+    /// over the envelope's, by a `judge_entries` or `judge_chain` that answers anything but
+    /// `Admissible` for no chain, or by a `judge_declare_chains` that reads the body first.
+    #[test]
+    fn the_envelope_is_judged_before_the_body_and_an_absent_chain_refuses_nothing() {
+        let asked = core::cell::Cell::new(0u8);
+        let refused = ExtAdmission::UnknownMandatory { eid: 0x14 };
+        let after_refusal = then_judge(refused, || {
+            asked.set(asked.get() + 1);
+            ExtAdmission::MalformedExt { eid: 0x41 }
+        });
+        assert_eq!(after_refusal, refused);
+        assert_eq!(
+            asked.get(),
+            0,
+            "the body is not read past a refused envelope"
+        );
+        assert_eq!(then_judge(ExtAdmission::Admissible, || refused), refused);
+        assert_eq!(
+            then_judge(ExtAdmission::Unjudged, || refused),
+            ExtAdmission::Unjudged
+        );
+        assert_eq!(
+            judge_entries(ExtCarrier::Zenoh(ZenohBody::Del), None::<[Entry; 0]>),
+            ExtAdmission::Admissible
+        );
+        assert_eq!(
+            judge_chain::<Entry>(ExtCarrier::Network(NetworkEnvelope::Push), None),
+            ExtAdmission::Admissible
+        );
+        // `0x15` and `0x14` are mandatory and declared neither by a Declare nor by its Final.
+        assert_eq!(
+            judge_declare_chains(
+                Some(&[unit(0x15)][..]),
+                DeclarationKind::Final,
+                Some(&[unit(0x14)][..])
+            ),
+            ExtAdmission::UnknownMandatory { eid: 0x15 },
+            "the envelope's offender is reported before the declaration's"
+        );
+        assert_eq!(
+            judge_declare_chains(None, DeclarationKind::Final, Some(&[unit(0x14)][..])),
+            ExtAdmission::UnknownMandatory { eid: 0x14 },
+            "a declaration's chain is judged when the envelope carries none"
+        );
+        assert_eq!(
+            judge_declare_chains(Some(&[unit(0x04)][..]), DeclarationKind::Final, None),
+            ExtAdmission::Admissible
+        );
     }
 }

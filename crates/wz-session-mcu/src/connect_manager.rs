@@ -42,6 +42,11 @@
 
 use core::convert::Infallible;
 
+#[cfg(any(
+    feature = "lifecycle-verbs",
+    all(feature = "adminspace-fixed", feature = "session-slot")
+))]
+use crate::decision_log::{DecisionLog, DECISION_ROWS};
 use heapless::Vec as FixedVec;
 use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps::{self, MAX_PEER_NODES};
@@ -51,9 +56,14 @@ use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
     feature = "lifecycle-verbs",
     all(feature = "adminspace-fixed", feature = "session-slot")
 ))]
-use wz_session_core::lifecycle_node::Commander;
+use wz_session_core::lifecycle_monitor::{Grant, Monitor, Policy};
+#[cfg(any(
+    feature = "lifecycle-verbs",
+    all(feature = "adminspace-fixed", feature = "session-slot")
+))]
+use wz_session_core::lifecycle_node::Verb;
 #[cfg(feature = "lifecycle-verbs")]
-use wz_session_core::lifecycle_node::{Generation, LifecycleNode, Verb, Zid};
+use wz_session_core::lifecycle_node::{Generation, LifecycleNode, Zid};
 #[cfg(feature = "lifecycle-verbs")]
 use wz_session_core::lifecycle_wire::{CloseOrder, MachineReport, SessionLinks};
 use wz_session_core::lifecycle_wire::{OpenMode, OpenOutcome};
@@ -557,23 +567,15 @@ impl NodeDesk {
     }
 }
 
-/// Who may ask the node to hold, close, reset or report a peer: one answer per verb, and a node
-/// refuses by default (least privilege). The image that binds a verb states who may use it.
-#[cfg(feature = "lifecycle-verbs")]
-pub trait LifecyclePermits {
-    /// Whether the node permits `verb` to `commander` (decision D12): the authority is a
-    /// function of who asks, per verb, and the answer of a node that was told nothing is no.
-    fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool;
-}
-
 /// The zids that may command each verb, compiled into the image (decision D12): a list per verb
 /// because "may hold a peer", "may close", "may cycle" and "may read the status" are permissions
 /// to grant apart. A verb with an empty list is commanded by nobody, which is where an image
 /// starts, and a wildcard commander does not exist: a zid is on a list or it is not.
 ///
-/// It judges the commander a link's key proved ([`Commander::Verified`]) and nobody else. The
-/// owner of a control pipe is the pipe's ([`PipeOr`]), and a commander the link proved nothing
-/// of is never on a list.
+/// It is the fixed profile's policy for the reference monitor every verb is judged by (decision
+/// D16): data, which the monitor reads, and no predicate. It names a zid a key proved, by a link
+/// (`Commander::Verified`) or by a sealed command (`Commander::Sealed`); the owner of a control
+/// pipe is the pipe's ([`PipeOr`]), and a commander nothing proved is on no list.
 #[cfg(feature = "lifecycle-verbs")]
 #[derive(Debug, Clone, Copy)]
 pub struct Commanders {
@@ -597,23 +599,30 @@ impl Commanders {
         status: &[],
     };
 
-    /// The zids that may command `verb`.
+    /// The zids that may command `verb`. None may write the configuration: a write arrives as a
+    /// sample, which proves no writer, so a list of zids could never permit one, and the write
+    /// permission of the configuration is what grants it (`ConnectControl`).
     pub const fn of(&self, verb: Verb) -> &'static [DirectoryZid] {
         match verb {
             Verb::Open => self.open,
             Verb::Close => self.close,
             Verb::Reset => self.reset,
             Verb::Status => self.status,
+            Verb::Configure => &[],
         }
     }
 }
 
 #[cfg(feature = "lifecycle-verbs")]
-impl LifecyclePermits for Commanders {
-    fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
-        match commander {
-            Commander::Verified(zid) => self.of(verb).iter().any(|listed| listed == zid),
-            Commander::Pipe | Commander::Unproven => false,
+impl Policy for Commanders {
+    fn each_grant(&self, verb: Verb, visit: &mut dyn FnMut(Grant<'_>) -> bool) {
+        for commander in self.of(verb) {
+            if visit(Grant {
+                commander,
+                key: None,
+            }) {
+                return;
+            }
         }
     }
 }
@@ -708,55 +717,72 @@ const fn zid_from_hex(text: &[u8]) -> (DirectoryZid, &[u8]) {
     (value.to_le_bytes(), rest)
 }
 
-/// The permit of a node that is commanded over a pipe as well as by peers (decision D12): the
-/// owner of the pipe may ask any verb, since the process that starts a node owns it, and every
-/// other commander is judged by `P`.
+/// The policy of a node that is commanded over a pipe as well as by peers (decision D12): the
+/// node's statement gives the owner of the pipe every verb, since the process that starts a node
+/// owns it, and every other commander is granted what `P` grants.
 #[cfg(feature = "lifecycle-verbs")]
 #[derive(Debug, Clone, Copy)]
 pub struct PipeOr<P>(pub P);
 
 #[cfg(feature = "lifecycle-verbs")]
-impl<P: LifecyclePermits> LifecyclePermits for PipeOr<P> {
-    fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
-        matches!(commander, Commander::Pipe) || self.0.permits(verb, commander)
+impl<P: Policy> Policy for PipeOr<P> {
+    fn pipe_commands(&self, _verb: Verb) -> bool {
+        true
+    }
+
+    fn grants_anyone(&self, verb: Verb) -> bool {
+        self.0.grants_anyone(verb)
+    }
+
+    fn each_grant(&self, verb: Verb, visit: &mut dyn FnMut(Grant<'_>) -> bool) {
+        self.0.each_grant(verb, visit);
     }
 }
 
 /// A node's lifecycle verbs, for `lifecycle_node::lifecycle_verdict` to decide: the desk of the
-/// store that holds its nodes, and a permit per verb.
+/// store that holds its nodes, the policy its monitor reads, and the record of every decision.
 #[cfg(feature = "lifecycle-verbs")]
 pub struct StoreNode<P> {
     desk: NodeDesk,
-    permits: P,
+    policy: P,
+    record: DecisionLog<DECISION_ROWS>,
 }
 
 #[cfg(feature = "lifecycle-verbs")]
-impl<P: LifecyclePermits> StoreNode<P> {
-    /// The verbs of the nodes held in `store`, permitted as `permits` says. `const`, so the image
+impl<P: Policy> StoreNode<P> {
+    /// The verbs of the nodes held in `store`, granted as `policy` says. `const`, so the image
     /// declares it in a `static` beside the store.
-    pub const fn new(store: &'static PeerStore, permits: P) -> Self {
+    pub const fn new(store: &'static PeerStore, policy: P) -> Self {
         Self {
             desk: NodeDesk::in_store(store),
-            permits,
+            policy,
+            record: DecisionLog::new(),
         }
+    }
+
+    /// The record of the monitor's decisions on this node.
+    pub fn decisions(&self) -> &DecisionLog<DECISION_ROWS> {
+        &self.record
     }
 }
 
 #[cfg(feature = "lifecycle-verbs")]
-impl<P: LifecyclePermits> LifecycleNode for StoreNode<P> {
+impl<P: Policy> LifecycleNode for StoreNode<P> {
     /// The verbs the build compiled in: `open` whenever the machinery is, and each of the others
-    /// by its own feature.
+    /// by its own feature. The configuration is written through the node's connection control,
+    /// which decides its writes itself, and never through the store.
     fn binds(&self, verb: Verb) -> bool {
         match verb {
             Verb::Open => true,
             Verb::Close => cfg!(feature = "lifecycle-close"),
             Verb::Reset => cfg!(feature = "lifecycle-reset"),
             Verb::Status => cfg!(feature = "lifecycle-status"),
+            Verb::Configure => false,
         }
     }
 
-    fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
-        self.binds(verb) && self.permits.permits(verb, commander)
+    fn monitor(&self) -> Monitor<'_> {
+        Monitor::new(&self.policy, &self.record)
     }
 
     fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome {
@@ -799,11 +825,13 @@ impl From<NodeRefusal> for OpenOutcome {
 }
 
 /// A [`NodeOpener`] under a permit: what a node binds to answer `session/open/<peer>`, as the
-/// node's write permit says (which gates the config write too).
+/// node's write permit says (which gates the config write too), with the record of every decision
+/// its monitor makes.
 #[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
 pub struct ControlledOpener {
     opener: NodeOpener,
     permit: &'static (dyn crate::admin_status::ConnectStatusSource + Sync),
+    record: DecisionLog<DECISION_ROWS>,
 }
 
 #[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
@@ -817,17 +845,32 @@ impl ControlledOpener {
         Self {
             opener: NodeOpener::in_store(store),
             permit,
+            record: DecisionLog::new(),
         }
     }
+
+    /// The record of the monitor's decisions on this opener.
+    pub fn decisions(&self) -> &DecisionLog<DECISION_ROWS> {
+        &self.record
+    }
+}
+
+/// The policy of the opener: the write permission of the node's configuration grants the open
+/// verb to anyone, and no other verb. An image that names its commanders states them by
+/// `Commanders` in a `StoreNode` (a build with `lifecycle-verbs`) and not by this opener.
+#[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
+impl Policy for ControlledOpener {
+    fn grants_anyone(&self, verb: Verb) -> bool {
+        matches!(verb, Verb::Open) && self.permit.write_permit()
+    }
+
+    fn each_grant(&self, _verb: Verb, _visit: &mut dyn FnMut(Grant<'_>) -> bool) {}
 }
 
 #[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
 impl crate::admin_fixed::NodeOpening for ControlledOpener {
-    /// The write permit of the configuration, judged alike for every commander: the image that
-    /// names who may command the verbs states it by `Commanders` (a build with `lifecycle-verbs`
-    /// has it) and not by this opener.
-    fn permitted(&self, _commander: Commander<'_>) -> bool {
-        self.permit.write_permit()
+    fn monitor(&self) -> Monitor<'_> {
+        Monitor::new(self, &self.record)
     }
 
     fn open(&self, zid: &DirectoryZid, mode: OpenMode) -> OpenOutcome {
@@ -838,10 +881,10 @@ impl crate::admin_fixed::NodeOpening for ControlledOpener {
     }
 }
 
-/// The permit of a node whose only authority is the write permit of its configuration
-/// (`adminspace.permissions.write`): it lets a request open a session and permits no other verb.
-/// Close, reset and status each need an authority of their own, which an image that binds one
-/// states by its own [`LifecyclePermits`]; this one grants them nothing.
+/// The policy of a node whose only authority is the write permit of its configuration
+/// (`adminspace.permissions.write`): it lets a request open a session and grants no other verb.
+/// Close, reset and status each need a grant of their own, which an image that binds one states by
+/// its own [`Commanders`]; this one grants them nothing.
 #[cfg(all(
     feature = "adminspace-fixed",
     feature = "session-slot",
@@ -854,12 +897,14 @@ pub struct WritePermit(pub &'static (dyn crate::admin_status::ConnectStatusSourc
     feature = "session-slot",
     feature = "lifecycle-verbs"
 ))]
-impl LifecyclePermits for WritePermit {
-    /// Judged alike for every commander, which is what the write permit has always done; an
-    /// image that wants the commanders named gives [`Commanders`] in its place.
-    fn permits(&self, verb: Verb, _commander: Commander<'_>) -> bool {
+impl Policy for WritePermit {
+    /// A grant to anyone, which is what the write permit has always been; an image that wants
+    /// the commanders named gives [`Commanders`] in its place.
+    fn grants_anyone(&self, verb: Verb) -> bool {
         matches!(verb, Verb::Open) && self.0.write_permit()
     }
+
+    fn each_grant(&self, _verb: Verb, _visit: &mut dyn FnMut(Grant<'_>) -> bool) {}
 }
 
 /// What names a peer to the machines: a configured endpoint by the slot of its row, or a node by
@@ -3372,20 +3417,41 @@ mod tests {
     ))]
     mod lifecycle_verbs {
         use super::*;
+        use wz_session_core::lifecycle_monitor::{decide, Asker, Channel, Object, Request};
+        use wz_session_core::lifecycle_node::Commander;
+
+        /// Whether `policy` permits `verb` to `commander`, as the monitor decides a request of a
+        /// verb the node binds.
+        fn grants(policy: &dyn Policy, verb: Verb, commander: Commander<'_>) -> bool {
+            let request = Request {
+                subject: commander,
+                verb,
+                object: Object {
+                    peer: "1f",
+                    generation: None,
+                    key: None,
+                },
+                channel: Channel::Query,
+            };
+            decide(policy, true, &request).permits()
+        }
 
         /// A node under test: the verbs of the store under the permits a case's world states, with the
         /// number of times it was told to order a close counted, as the heap profile's test counts it.
         struct CasePermits(wz_session_core::lifecycle_contract::verbs::Permits);
 
-        impl LifecyclePermits for CasePermits {
-            fn permits(&self, verb: Verb, _commander: Commander<'_>) -> bool {
+        /// The owner of the pipe is given what the case permits; no zid is.
+        impl Policy for CasePermits {
+            fn pipe_commands(&self, verb: Verb) -> bool {
                 match verb {
                     Verb::Open => true,
                     Verb::Close => self.0.close,
                     Verb::Reset => self.0.reset,
                     Verb::Status => self.0.status,
+                    Verb::Configure => false,
                 }
             }
+            fn each_grant(&self, _verb: Verb, _visit: &mut dyn FnMut(Grant<'_>) -> bool) {}
         }
 
         struct Counting<N> {
@@ -3394,8 +3460,11 @@ mod tests {
         }
 
         impl<N: LifecycleNode> LifecycleNode for Counting<N> {
-            fn permits(&self, verb: Verb, commander: Commander<'_>) -> bool {
-                self.inner.permits(verb, commander)
+            fn binds(&self, verb: Verb) -> bool {
+                self.inner.binds(verb)
+            }
+            fn monitor(&self) -> Monitor<'_> {
+                self.inner.monitor()
             }
             fn open(&self, peer: &Zid, mode: OpenMode) -> OpenOutcome {
                 self.inner.open(peer, mode)
@@ -3475,7 +3544,7 @@ mod tests {
                         Request::Status(peer) => Command::Status { peer },
                     };
                     let mut out = FixedText::<256>::new();
-                    lifecycle_verdict(&node, command, Commander::Pipe, &mut out);
+                    lifecycle_verdict(&node, command, Asker::PIPE, &mut out);
                     std::assert!(!out.overflowed());
                     Some(String::from(out.prefix()))
                 })
@@ -3539,7 +3608,7 @@ mod tests {
                     peer: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
                     generation: "1",
                 },
-                Commander::Pipe,
+                Asker::PIPE,
                 &mut out,
             );
             std::assert_eq!(out.prefix(), "{\"verdict\":\"resetting\",\"links\":1}");
@@ -3569,7 +3638,7 @@ mod tests {
                 Command::Close {
                     peer: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
                 },
-                Commander::Pipe,
+                Asker::PIPE,
                 &mut out,
             );
             std::assert_eq!(out.prefix(), "{\"verdict\":\"closing\",\"links\":1}");
@@ -3592,7 +3661,7 @@ mod tests {
             wz_session_core::lifecycle_node::lifecycle_verdict(
                 node,
                 command,
-                Commander::Pipe,
+                Asker::PIPE,
                 &mut out,
             );
             std::assert!(!out.overflowed());
@@ -3703,38 +3772,47 @@ mod tests {
             let verbs = [Verb::Open, Verb::Close, Verb::Reset, Verb::Status];
             for verb in verbs {
                 std::assert!(
-                    listed.permits(verb, Commander::Verified(&ADMIN)),
+                    grants(&listed, verb, Commander::Verified(&ADMIN)),
                     "{verb:?}"
                 );
-                std::assert!(!listed.permits(verb, Commander::Unproven), "{verb:?}");
+                std::assert!(!grants(&listed, verb, Commander::Unproven), "{verb:?}");
                 std::assert!(
-                    !listed.permits(verb, Commander::Pipe),
+                    !grants(&listed, verb, Commander::Pipe),
                     "a list is no pipe's"
                 );
                 std::assert!(
-                    !Commanders::NONE.permits(verb, Commander::Verified(&ADMIN)),
+                    !grants(&Commanders::NONE, verb, Commander::Verified(&ADMIN)),
                     "a node with no list is commanded by nobody"
                 );
             }
-            std::assert!(listed.permits(Verb::Status, Commander::Verified(&READER)));
+            std::assert!(grants(&listed, Verb::Status, Commander::Verified(&READER)));
             for verb in [Verb::Open, Verb::Close, Verb::Reset] {
                 std::assert!(
-                    !listed.permits(verb, Commander::Verified(&READER)),
+                    !grants(&listed, verb, Commander::Verified(&READER)),
                     "{verb:?}: a zid listed for one verb commands no other"
                 );
             }
-            std::assert!(!listed.permits(
+            std::assert!(!grants(
+                &listed,
                 Verb::Open,
                 Commander::Verified(&[0u8; CREDENTIAL_ZID_BYTES])
             ));
 
             let with_pipe = PipeOr(listed);
             for verb in verbs {
-                std::assert!(with_pipe.permits(verb, Commander::Pipe), "{verb:?}");
-                std::assert!(!with_pipe.permits(verb, Commander::Unproven), "{verb:?}");
+                std::assert!(grants(&with_pipe, verb, Commander::Pipe), "{verb:?}");
+                std::assert!(!grants(&with_pipe, verb, Commander::Unproven), "{verb:?}");
             }
-            std::assert!(with_pipe.permits(Verb::Status, Commander::Verified(&READER)));
-            std::assert!(!with_pipe.permits(Verb::Open, Commander::Verified(&READER)));
+            std::assert!(grants(
+                &with_pipe,
+                Verb::Status,
+                Commander::Verified(&READER)
+            ));
+            std::assert!(!grants(
+                &with_pipe,
+                Verb::Open,
+                Commander::Verified(&READER)
+            ));
         }
 
         /// Decision D12, step 4: the text a build states its commanders in reads as the bytes a
@@ -3764,8 +3842,8 @@ mod tests {
                 open: ONE.as_slice(),
                 ..Commanders::NONE
             };
-            std::assert!(listed.permits(Verb::Open, Commander::Verified(&one)));
-            std::assert!(!listed.permits(Verb::Open, Commander::Verified(&kit)));
+            std::assert!(grants(&listed, Verb::Open, Commander::Verified(&one)));
+            std::assert!(!grants(&listed, Verb::Open, Commander::Verified(&kit)));
         }
 
         /// A list fills to the rows it holds, and a text that names one commander more is refused.
@@ -3798,12 +3876,17 @@ mod tests {
             );
             let ask = |commander: Commander<'_>| {
                 let mut out = FixedText::<256>::new();
+                let asker = Asker {
+                    commander,
+                    channel: Channel::Query,
+                    key: None,
+                };
                 let verdict = lifecycle_verdict(
                     &node,
                     Command::Status {
                         peer: "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
                     },
-                    commander,
+                    asker,
                     &mut out,
                 );
                 (verdict, String::from(out.prefix()))
@@ -3825,6 +3908,38 @@ mod tests {
                     "{doc}"
                 );
             }
+            // Decision D16: the node's record carries every decision, the permit and the three
+            // refusals, each with its subject and reason. Red if a verdict skipped the monitor.
+            use wz_session_core::lifecycle_monitor::{Decision, Grounds, Refusal, Subject};
+            let mut kept = Vec::new();
+            node.decisions()
+                .each(|row| kept.push((row.subject, row.verb, row.decision)));
+            std::assert_eq!(
+                kept,
+                [
+                    (
+                        Subject::Verified(READER),
+                        Verb::Status,
+                        Decision::Permit(Grounds::Granted)
+                    ),
+                    (
+                        Subject::Verified([0x3f; CREDENTIAL_ZID_BYTES]),
+                        Verb::Status,
+                        Decision::Deny(Refusal::NotListed)
+                    ),
+                    (
+                        Subject::Unproven,
+                        Verb::Status,
+                        Decision::Deny(Refusal::Unproven)
+                    ),
+                    (
+                        Subject::Pipe,
+                        Verb::Status,
+                        Decision::Deny(Refusal::PipeNotPermitted)
+                    ),
+                ]
+            );
+            std::assert_eq!(node.decisions().made(), 4);
         }
 
         fn all_permits() -> wz_session_core::lifecycle_contract::verbs::Permits {

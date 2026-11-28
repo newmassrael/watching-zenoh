@@ -102,11 +102,19 @@ use declared::{LISTEN_ADDR, LISTEN_PORT};
 #[cfg(feature = "get")]
 use declared::{QUERIED, QUERIED_ABOUT_SELF};
 #[cfg(feature = "verbs")]
+use wz_session_core::lifecycle_monitor::{Decided, Subject};
+#[cfg(all(feature = "verbs", feature = "tls"))]
+use wz_session_mcu::admin_fixed::FixedSeal;
+#[cfg(feature = "verbs")]
 use wz_session_mcu::admin_fixed::VerbLegs;
 #[cfg(feature = "verbs")]
 use wz_session_mcu::connect_manager::{Commanders, StoreNode};
+#[cfg(feature = "verbs")]
+use wz_session_mcu::decision_log::DECISION_ROWS;
 #[cfg(feature = "tls")]
 use wz_tls_mbedtls::channel::Arena;
+#[cfg(all(feature = "verbs", feature = "tls"))]
+use wz_tls_mbedtls::es256::{random_echo, PsaEs256};
 
 /// The runtime's task table: a pump task per session, the dialled and the accepted, and one for the
 /// group the node is a member of; nothing else runs as a task.
@@ -470,6 +478,83 @@ static VERB_NODE: StoreNode<Commanders> = StoreNode::new(
 #[cfg(feature = "verbs")]
 static VERB_LEGS: VerbLegs = VerbLegs::new(&VERB_NODE);
 
+/// The lists of commanders, one per verb, as the declaration names them.
+#[cfg(all(feature = "verbs", feature = "tls"))]
+const COMMANDER_LISTS: [&[[u8; 16]]; 4] = [
+    &COMMANDERS_OPEN,
+    &COMMANDERS_CLOSE,
+    &COMMANDERS_RESET,
+    &COMMANDERS_STATUS,
+];
+
+/// The commanders whose last counter the node keeps for their sealed commands: every zid the
+/// declaration grants a verb to, each once. The window evicts no commander, and only a commander
+/// a grant permits takes a row of it, so sized so it never refuses a granted one for room.
+#[cfg(all(feature = "verbs", feature = "tls"))]
+const SEALED_COMMANDERS: usize = distinct_commanders(&COMMANDER_LISTS);
+
+/// How many zids `lists` name, each counted once whatever lists name it.
+#[cfg(all(feature = "verbs", feature = "tls"))]
+const fn distinct_commanders(lists: &[&[[u8; 16]]]) -> usize {
+    let mut count = 0;
+    let mut list = 0;
+    while list < lists.len() {
+        let mut at = 0;
+        while at < lists[list].len() {
+            if !named_before(lists, list, at) {
+                count += 1;
+            }
+            at += 1;
+        }
+        list += 1;
+    }
+    count
+}
+
+/// Whether the zid at `at` of list `list` is named earlier: in a list before it, or before it in
+/// its own.
+#[cfg(all(feature = "verbs", feature = "tls"))]
+const fn named_before(lists: &[&[[u8; 16]]], list: usize, at: usize) -> bool {
+    let zid = u128::from_le_bytes(lists[list][at]);
+    let mut earlier = 0;
+    while earlier <= list {
+        let end = if earlier == list {
+            at
+        } else {
+            lists[earlier].len()
+        };
+        let mut row = 0;
+        while row < end {
+            if u128::from_le_bytes(lists[earlier][row]) == zid {
+                return true;
+            }
+            row += 1;
+        }
+        earlier += 1;
+    }
+    false
+}
+
+/// The verifier of the sealed commands the verbs may be asked with (decision D17): ES256 by the
+/// secure channel's library, started with the node's zid and the echo of this start.
+#[cfg(all(feature = "verbs", feature = "tls"))]
+static SEAL: FixedSeal<PsaEs256, SEALED_COMMANDERS> = FixedSeal::new(PsaEs256);
+
+/// Start verifying the sealed commands sent to the node `zid` and hand the verifier to the verbs'
+/// queryable, before it is registered. A command of a commander the node holds no counter for
+/// carries the echo drawn here, so a command sealed before this start is not taken again; the
+/// library that draws it was started with the node's identity.
+#[cfg(all(feature = "verbs", feature = "tls"))]
+fn start_seal(zid: [u8; 16]) -> Result<(), &'static str> {
+    let echo = random_echo()
+        .ok_or("wz: FAIL - the node could not draw the echo of its sealed commands")?;
+    if SEAL.start(zid, echo) && VERB_LEGS.verify_sealed_with(&SEAL) {
+        Ok(())
+    } else {
+        Err("wz: FAIL - the verifier of the sealed commands was started twice")
+    }
+}
+
 /// The cell the group's session lives in, the one the node's group takes, and what the group keeps
 /// for the loop: the peer tables its pump dispatches against and the members it has.
 #[cfg(feature = "multicast")]
@@ -615,10 +700,15 @@ struct Report {
     /// were last said.
     #[cfg(feature = "multicast")]
     group: (u32, u32, u32, u32),
+    /// How many decisions the verbs' monitor had made when they were last said.
+    #[cfg(feature = "verbs")]
+    decided: u32,
 }
 
 impl NodeApp for Report {
     fn after_tick(&mut self, _now_ms: u64, _node: &dyn NodeHandle) -> ControlFlow<i32> {
+        #[cfg(feature = "verbs")]
+        say_decisions(&mut self.decided);
         // The group, said once for each round that found it changed: `HOST-WZ-GROUP <locator>
         // joins=<n> refused=<n> turned_away=<n> members=<n>`. A lab waits for `members=1` to know
         // the node has admitted a peer's JOIN, for `joins=1` to know the group is joined at all, and
@@ -679,6 +769,61 @@ impl NodeApp for Report {
                 say_verdict(&sample);
             });
         ControlFlow::Continue(())
+    }
+}
+
+/// The decisions the verbs' monitor made since `said` of them were said, the oldest first, each as
+/// `HOST-WZ-DECISION made=<n> subject=<who> verb=<verb> decision=<decision>` (decision D16): the
+/// node's record read out, so a lab sees who each verb was decided for, a link's key
+/// (`verified:<zid>`) or a sealed command's (`sealed:<zid>`, decision D17), and why. `made` is the
+/// count of every decision so far; one written over before a round read it is not said, and the
+/// count shows it was made.
+#[cfg(feature = "verbs")]
+fn say_decisions(said: &mut u32) {
+    let record = VERB_NODE.decisions();
+    let made = record.made();
+    if made == *said {
+        return;
+    }
+    let new = usize::try_from(made.wrapping_sub(*said)).unwrap_or(usize::MAX);
+    let mut rows: [Option<Decided>; DECISION_ROWS] = [None; DECISION_ROWS];
+    let mut kept = 0;
+    record.each(|row| {
+        if let Some(slot) = rows.get_mut(kept) {
+            *slot = Some(*row);
+        }
+        kept += 1;
+    });
+    for row in rows
+        .iter()
+        .take(kept)
+        .skip(kept.saturating_sub(new))
+        .flatten()
+    {
+        log_args(format_args!(
+            "HOST-WZ-DECISION made={made} subject={} verb={:?} decision={:?}",
+            Who(&row.subject),
+            row.verb,
+            row.decision
+        ));
+    }
+    *said = made;
+}
+
+/// A decision's subject as its line says it: `pipe`, `verified:<zid>`, `sealed:<zid>` or
+/// `unproven`, a zid as a key spells it.
+#[cfg(feature = "verbs")]
+struct Who<'a>(&'a Subject);
+
+#[cfg(feature = "verbs")]
+impl core::fmt::Display for Who<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Subject::Pipe => f.write_str("pipe"),
+            Subject::Verified(zid) => write!(f, "verified:{:x}", u128::from_le_bytes(*zid)),
+            Subject::Sealed(zid) => write!(f, "sealed:{:x}", u128::from_le_bytes(*zid)),
+            Subject::Unproven => f.write_str("unproven"),
+        }
     }
 }
 
@@ -811,6 +956,11 @@ fn run() -> i32 {
         }
         Err(()) => return 2,
     };
+    #[cfg(all(feature = "verbs", feature = "tls"))]
+    if let Err(why) = start_seal(zid) {
+        log(why);
+        return 2;
+    }
 
     let Some(identity) = NodeIdentity::new(&zid, key) else {
         log("wz: FAIL - the zenoh id does not fit");
@@ -960,6 +1110,8 @@ fn run() -> i32 {
         queried: QueryWatch::new(),
         #[cfg(feature = "multicast")]
         group: (0, 0, 0, 0),
+        #[cfg(feature = "verbs")]
+        decided: 0,
     };
     // Out of band, a test agent tells the node which peer to hold (decision D7).
     #[cfg(feature = "control")]

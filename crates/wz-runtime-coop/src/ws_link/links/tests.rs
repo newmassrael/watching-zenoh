@@ -32,8 +32,8 @@ struct Conn(Rc<Net>);
 impl StreamSocket for Conn {
     type Error = ();
 
-    type Link<B: RxStore + 'static, X: TxStore + 'static>
-        = StreamDriver<Self, B, X>
+    type Link<B: RxStore + 'static, X: TxStore + 'static, W: crate::session_drive::InputWaiter>
+        = StreamDriver<Self, B, X, crate::stream_link::LengthPrefix, W>
     where
         Self: 'static;
 

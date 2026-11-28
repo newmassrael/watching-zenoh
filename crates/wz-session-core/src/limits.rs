@@ -1096,20 +1096,17 @@ mod enforcement {
         }
         #[cfg(feature = "liveliness-token")]
         {
-            let observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
-            let mut pending: crate::bounded::BoundedVec<
-                crate::declare::local_token::DeclResponseItem,
-                { caps::MAX_PENDING_DECLARES },
-            > = crate::bounded::BoundedVec::new();
+            let mut observer = ApplicationLayerObserver::with_limits(&SessionLimits::defaults());
             for interest in 0..admitted as u64 {
-                observer.read_app(|app_half| {
-                    app_half
-                        .local_tokens
-                        .respond_to_interest_borrowed(None, interest, &mut pending)
+                observer.with_parts(|app_half, face_half| {
+                    face_half
+                        .token_answers
+                        .stage(&*app_half.local_tokens, None, interest)
                         .expect("no quota is stated")
                 });
             }
-            assert_eq!(pending.len(), admitted);
+            assert_eq!(observer.face_ref().token_answers.len(), admitted);
+            assert_eq!(observer.token_interest_chains_refused(), 0);
         }
     }
 
@@ -1170,46 +1167,29 @@ mod enforcement {
                             .register(1, "bound/token")
                             .expect("no quota on tokens is stated")
                     });
-                    let mut pending: crate::bounded::BoundedVec<
-                        crate::declare::local_token::DeclResponseItem,
-                        { caps::MAX_PENDING_DECLARES },
-                    > = crate::bounded::BoundedVec::new();
-                    assert_eq!(
-                        observer
-                            .read_app(|app_half| {
-                                app_half.local_tokens.respond_to_interest_borrowed(
-                                    None,
-                                    1,
-                                    &mut pending,
-                                )
-                            })
-                            .expect("two places take the chain"),
-                        1
-                    );
-                    assert!(observer
-                        .read_app(|app_half| {
-                            app_half.local_tokens.respond_to_interest_borrowed(
-                                None,
-                                2,
-                                &mut pending,
-                            )
+                    let mut stage = |interest: u64| {
+                        observer.with_parts(|app_half, face_half| {
+                            face_half
+                                .token_answers
+                                .stage(&*app_half.local_tokens, None, interest)
                         })
-                        .is_err());
-                    assert_eq!(pending.len(), 2);
-                    pending.clear();
+                    };
+                    assert_eq!(stage(1).expect("two places take the chain"), 1);
+                    assert!(stage(2).is_err());
+                    assert_eq!(observer.face_ref().token_answers.len(), 2);
+                    assert_eq!(observer.token_interest_chains_refused(), 1);
+                    observer.face().token_answers.clear();
                     assert_eq!(
                         observer
-                            .read_app(|app_half| {
-                                app_half.local_tokens.respond_to_interest_borrowed(
-                                    None,
-                                    3,
-                                    &mut pending,
-                                )
+                            .with_parts(|app_half, face_half| {
+                                face_half
+                                    .token_answers
+                                    .stage(&*app_half.local_tokens, None, 3)
                             })
                             .expect("the drained places take the chain"),
                         1
                     );
-                    assert_eq!(pending.len(), 2);
+                    assert_eq!(observer.face_ref().token_answers.len(), 2);
                 }
             },
         );

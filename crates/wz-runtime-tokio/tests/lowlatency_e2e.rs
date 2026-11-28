@@ -390,7 +390,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
         let mut handed = 0usize;
         let mut lent_puts = 0usize;
         #[cfg(feature = "transport-stats")]
-        let counted_before = actions.stats.report().rx.n_msgs_total();
+        let counted_before = actions.tx.stats.report().rx.n_msgs_total();
         let (path, in_place_cost) = allocations_during(|| {
             dispatch_datagram(
                 unit,
@@ -424,7 +424,7 @@ async fn a_lean_unit_is_read_in_place_and_handed_over_as_the_copying_path_reads_
         }
         #[cfg(feature = "transport-stats")]
         assert_eq!(
-            actions.stats.report().rx.n_msgs_total() - counted_before,
+            actions.tx.stats.report().rx.n_msgs_total() - counted_before,
             expected.len(),
             "a counting build counts each record it reads in place"
         );

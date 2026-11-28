@@ -805,6 +805,14 @@ config WZ_LIMIT_MAX_CONNECTIVITY_TOLD_ROWS
 	  kept: it is told came again at each loss, and its departure is not told
 	  when a loss carries it.
 
+config WZ_LIMIT_MAX_SCOUT_INTERFACES
+	int "MAX_SCOUT_INTERFACES"
+	default 10
+	help
+	  The interfaces a scouting window asks on, one socket each, held in rows of
+	  the window's own beside the scouting group's socket. An interface past them
+	  is left out of the window and counted, and the window asks on the others.
+
 config WZ_LIMIT_MAX_STATIC_CONNECT
 	int "MAX_STATIC_CONNECT"
 	default 8

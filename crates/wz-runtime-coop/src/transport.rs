@@ -21,10 +21,10 @@ use wz_session_core::policy::KeyWireForm;
 use wz_session_core::response_sink::ResponseSink;
 
 use crate::executor::SpawnRefusal;
-use crate::faces::{FaceId, FaceSession, HandshakeEnd};
+use crate::faces::{DialEndpoint, FaceId, FaceSession, HandshakeEnd};
 use crate::link_cells::{CellRc, CountKind};
 use crate::locator_text::DialRefused;
-use crate::session_drive::{LinkOpenError, LinkWait, SessionDatagramLink};
+use crate::session_drive::{DynLink, LinkOpenError, LinkWait, SessionDatagramLink};
 use crate::session_runtime::SessionHandle;
 use crate::sync::LockKind;
 use crate::ClockSource;
@@ -35,8 +35,8 @@ use crate::ClockSource;
 mod state;
 #[cfg(feature = "reassembly")]
 pub use state::{
-    FaceStep, LinkPump, OpenedAs, PlacedWire, PumpPlace, RouterOf, TransportFaces, TransportRouter,
-    TransportState, WireMaking,
+    FaceStep, LinkOf, LinkPump, OpenedAs, PlacedWire, PumpPlace, RouterOf, StackLinkOf,
+    TransportFaces, TransportRouter, TransportState, WireMaking,
 };
 
 /// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was
@@ -118,6 +118,79 @@ impl From<HandshakeEnd> for Refusal {
     }
 }
 
+/// Why the walk over a session's endpoints passed an endpoint, kept until the walk ends the
+/// session with it: the endpoint passed, as its dial names it, and why, with no text. The text a
+/// caller reads is the endpoint's own, read once in the session's texts when the walk ends
+/// (`TransportState::walk_refused`), so each endpoint passed writes a value of a few words and
+/// not a refusal that holds `MAX_LOCATOR_LEN` bytes of text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkRefusal {
+    endpoint: Option<DialEndpoint>,
+    why: WalkCause,
+}
+
+/// Why a walk passed an endpoint ([`WalkRefusal`]): what a dial, its handshake or the link it
+/// made came to, in the shape of the [`TransportRefusal`] the session ends with, the endpoint's
+/// text left out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalkCause {
+    /// The endpoint could not be used, for this reason.
+    Endpoint(Refusal),
+    /// No face was left to run the link's session in.
+    NoEndpoint,
+    /// The platform gave no entropy for the link's cookie key.
+    EntropyUnavailable,
+    /// The session's runtime had no task for the link's session.
+    NoTask(SpawnRefusal),
+    /// The heap had no room for the link's shared handle.
+    HeapRefused,
+}
+
+impl WalkRefusal {
+    /// `endpoint` could not be used, for `why`; `None` for a refusal no endpoint names (a
+    /// link lost with no endpoint dialled again).
+    pub fn endpoint(endpoint: Option<DialEndpoint>, why: Refusal) -> Self {
+        Self {
+            endpoint,
+            why: WalkCause::Endpoint(why),
+        }
+    }
+
+    /// What `refused`, the refusal of a dial of `endpoint` or of the beginning of its link's
+    /// handshake, leaves to keep: its reason, with no text, which `endpoint` names again when
+    /// the walk ends. A refusal of an endpoint is one to dial whatever the refusal was raised as.
+    pub fn of(endpoint: Option<DialEndpoint>, refused: TransportRefusal) -> Self {
+        let why = match refused {
+            TransportRefusal::Unreachable(refused)
+            | TransportRefusal::Listen(refused)
+            | TransportRefusal::Group(refused) => WalkCause::Endpoint(refused.why),
+            TransportRefusal::NoEndpoint => WalkCause::NoEndpoint,
+            TransportRefusal::EntropyUnavailable => WalkCause::EntropyUnavailable,
+            TransportRefusal::NoTask(why) => WalkCause::NoTask(why),
+            TransportRefusal::HeapRefused => WalkCause::HeapRefused,
+        };
+        Self { endpoint, why }
+    }
+
+    /// The endpoint passed, when one is named.
+    pub fn passed(&self) -> Option<&DialEndpoint> {
+        self.endpoint.as_ref()
+    }
+
+    /// The refusal the session ends with, `text` being the passed endpoint's text.
+    pub fn with_text(&self, text: &str) -> TransportRefusal {
+        match self.why {
+            WalkCause::Endpoint(why) => {
+                TransportRefusal::Unreachable(EndpointRefusal::new(text, why))
+            }
+            WalkCause::NoEndpoint => TransportRefusal::NoEndpoint,
+            WalkCause::EntropyUnavailable => TransportRefusal::EntropyUnavailable,
+            WalkCause::NoTask(why) => TransportRefusal::NoTask(why),
+            WalkCause::HeapRefused => TransportRefusal::HeapRefused,
+        }
+    }
+}
+
 impl core::fmt::Display for EndpointRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         if !self.endpoint.is_empty() {
@@ -168,23 +241,40 @@ pub enum TransportRefusal {
 
 /// What the transport reads of the session's half of a link beyond what its supervisor asks
 /// ([`FaceSession`]): the actions the session sends over the link through. `K` is how the
-/// session's runtime locks what it lends.
-pub trait TransportSession<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>:
-    FaceSession
+/// session's runtime locks what it lends; `D` is the type the actions send through the link as
+/// (`crate::session_drive::SharedPump::Sink`).
+pub trait TransportSession<
+    C: ClockSource + 'static,
+    K: LockKind = crate::sync::Shared,
+    D: ?Sized + BoxedLinkDriver + 'static = dyn BoxedLinkDriver,
+>: FaceSession
 {
     /// The actions of the link's session.
-    fn actions(&self) -> &SessionHandle<C, dyn BoxedLinkDriver, K>;
+    fn actions(&self) -> &SessionHandle<C, D, K>;
 }
 
 /// What the session does in the making of each of its links' sessions, in the engine's own types
 /// ([`TransportState::make_wire`]): the transport makes the link's actions, its cells and its task;
 /// the session tells its tables of the link, puts the link's pump behind its gates, and says what
-/// the link's task hands its reads to and what its face keeps of the link.
-pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared> {
+/// the link's task hands its reads to and what its face keeps of the link. `L` is the type the
+/// stack's shared handle on a link reads it as (`crate::session_drive::SharedPump::Link`), and `D`
+/// the type the link's actions send through it as (`crate::session_drive::SharedPump::Sink`): each
+/// the stack's own type where its set of links is closed, the link's trait where it is open.
+pub trait LinkCalls<
+    C: ClockSource + 'static,
+    K: LockKind = crate::sync::Shared,
+    L: ?Sized + DynLink = dyn SessionDatagramLink,
+    D: ?Sized + BoxedLinkDriver + 'static = dyn BoxedLinkDriver,
+>
+{
     /// The gates the session puts a link's pump behind, as the link's session and its pump hold
     /// them: a handle on their cell of the session's table where they hold the link back, or the
     /// link's own handle where nothing does ([`Self::gate`]).
     type Gate: Clone + 'static;
+    /// The type the pump of a link's session reads the link as behind its gates
+    /// ([`Self::gated_link`]): `L` where the link is its own gate, the gates' trait where they
+    /// hold it back.
+    type Link: ?Sized + DynLink;
     /// What a link's task hands what its session reads to, or, for a link whose session its
     /// owner steps itself, what the owner hands each step of it (`TransportState::place_wire`).
     type Dispatch;
@@ -197,7 +287,7 @@ pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>
     fn link_made(
         &mut self,
         face: FaceId,
-        actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
+        actions: &SessionHandle<C, D, K>,
         key_form: Option<KeyWireForm>,
     );
 
@@ -208,21 +298,21 @@ pub trait LinkCalls<C: ClockSource + 'static, K: LockKind = crate::sync::Shared>
     /// table of the gates over it.
     fn gate(
         &self,
-        pump: CellRc<dyn SessionDatagramLink, K::LinkCount>,
-        actions: &SessionHandle<C, dyn BoxedLinkDriver, K>,
+        pump: CellRc<L, K::LinkCount>,
+        actions: &SessionHandle<C, D, K>,
         cells: &<K::LinkCount as CountKind>::Cells,
     ) -> Option<Self::Gate>;
 
     /// The link as it is read behind `gate`: what the pump of its session steps and what its face
     /// waits on.
-    fn gated_link(gate: &Self::Gate) -> CellRc<dyn SessionDatagramLink, K::LinkCount>;
+    fn gated_link(gate: &Self::Gate) -> CellRc<Self::Link, K::LinkCount>;
 
     /// What the task of the link of face `face` hands its reads to, and what the face keeps of the
     /// link: its actions and its gates.
     fn wire_parts(
         &self,
         face: FaceId,
-        actions: SessionHandle<C, dyn BoxedLinkDriver, K>,
+        actions: SessionHandle<C, D, K>,
         gate: &Self::Gate,
     ) -> (Self::Dispatch, Self::Session);
 }
@@ -313,6 +403,43 @@ mod tests {
         assert_eq!(kept.endpoint.as_str(), &long[..row.saturating_sub(1)]);
         let short = EndpointRefusal::new("udp/1.2.3.4:5", Refusal::LinkLost);
         assert_eq!(short.endpoint.as_str(), "udp/1.2.3.4:5");
+    }
+
+    /// A walk's refusal keeps a dial's or a handshake's reason with no text, and the refusal it
+    /// ends the session with carries the text it is read with; one no endpoint caused is the
+    /// session's as it was raised. Turned red by a reason lost or changed on the way, or by a
+    /// text kept from the refusal rather than read again.
+    #[test]
+    fn a_walks_refusal_keeps_the_reason_and_reads_the_text_once() {
+        let dialled = TransportRefusal::Unreachable(EndpointRefusal::new(
+            "udp/1.2.3.4:5",
+            Refusal::Link(LinkOpenError::Refused),
+        ));
+        let kept = WalkRefusal::of(Some(DialEndpoint::Listed(1)), dialled);
+        assert_eq!(kept.passed(), Some(&DialEndpoint::Listed(1)));
+        assert_eq!(
+            kept.with_text("tcp/5.6.7.8:9"),
+            TransportRefusal::Unreachable(EndpointRefusal::new(
+                "tcp/5.6.7.8:9",
+                Refusal::Link(LinkOpenError::Refused),
+            )),
+            "the reason kept, the text the one read at the end"
+        );
+        let lost = WalkRefusal::endpoint(None, Refusal::LinkLost);
+        assert_eq!(lost.passed(), None);
+        assert_eq!(
+            lost.with_text(""),
+            TransportRefusal::Unreachable(EndpointRefusal::new("", Refusal::LinkLost))
+        );
+        for raised in [
+            TransportRefusal::NoEndpoint,
+            TransportRefusal::EntropyUnavailable,
+            TransportRefusal::NoTask(SpawnRefusal::NoTaskCell),
+            TransportRefusal::HeapRefused,
+        ] {
+            let kept = WalkRefusal::of(Some(DialEndpoint::Listed(0)), raised.clone());
+            assert_eq!(kept.with_text("udp/1.2.3.4:5"), raised);
+        }
     }
 
     /// A handshake's end reads as the refusal of its endpoint with the same reason.

@@ -20,7 +20,7 @@ use wz_session_core::peer_tables::PeerRows;
 #[cfg(feature = "local-queryable")]
 use wz_session_core::pending_get::DueRow;
 use wz_session_core::session_tables::TableRows;
-use wz_session_core::slot_observer::{ObserverRows, RequesterRows};
+use wz_session_core::slot_observer::RequesterRows;
 
 use super::held::Holders;
 #[cfg(any(
@@ -103,17 +103,7 @@ impl<H: Holders> RegistryOf<H> {
         peers: FacePeers,
         delivery: RoundDelivery,
     ) -> Result<Self, ArenaRefused> {
-        // The session's tokens are rows of its one table set, which answers a peer's Interest too,
-        // so the observer's own registry of them is counted none.
-        let app = App::counted(
-            keys,
-            ObserverRows {
-                tables,
-                local_tokens: 0,
-            },
-            limits,
-        )
-        .map_err(ArenaRefused::Lend)?;
+        let app = App::counted(keys, tables, limits).map_err(ArenaRefused::Lend)?;
         let sets_refused = ArenaRefused::NoMemory {
             bytes: core::mem::size_of::<FaceTables>().saturating_mul(peers.sets()),
         };
@@ -352,7 +342,7 @@ mod tests {
         // SAFETY: the budget outlives the registry, which is dropped first, and every key of it.
         let keys = unsafe { budget.keys() };
         let mut registry = many(&limits, keys, 3, true);
-        assert_eq!(registry.places(), 3);
+        assert_eq!(registry.face_places(), 3);
         assert_eq!(
             registry.sets.len(),
             1,
@@ -448,7 +438,7 @@ mod tests {
         let keys = unsafe { budget.keys() };
         let mut registry = many(&limits, keys, 1, false);
         assert_eq!(
-            registry.places(),
+            registry.face_places(),
             2,
             "the dial face's place and the face to come"
         );

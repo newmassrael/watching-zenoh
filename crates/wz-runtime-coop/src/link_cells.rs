@@ -894,7 +894,10 @@ impl<T: ?Sized, N: CountKind> CellRc<T, N> {
     /// # Safety
     /// `as_part` answers a pointer to a value that lives as long as the value it is handed: the
     /// last handle drops the whole value placed, through the cell's `whole`, never the part.
-    unsafe fn part<U>(self, as_part: impl FnOnce(NonNull<T>) -> NonNull<U>) -> CellRc<U, N> {
+    pub(crate) unsafe fn part<U>(
+        self,
+        as_part: impl FnOnce(NonNull<T>) -> NonNull<U>,
+    ) -> CellRc<U, N> {
         let this = core::mem::ManuallyDrop::new(self);
         CellRc {
             head: this.head,

@@ -8,11 +8,15 @@
 //! set and no other face is held ([`OneHolder`]), and keeps no index. The registry is written once
 //! over [`Holders`], so its tests build either form whatever the build.
 
+#[cfg(not(wz_on_use))]
+use super::described::HELD_LINES;
 use super::{FaceId, FaceTables, DIAL_FACE};
 #[cfg(wz_on_use)]
 use crate::arena::ArenaRefused;
 #[cfg(wz_lent)]
-use wz_session_core::bounded::{Arena, LendRefused};
+use wz_session_core::bounded::LendRefused;
+#[cfg(not(wz_on_use))]
+use wz_session_core::bounded::RegionLines;
 use wz_session_core::slot_observer::OtherPeers;
 
 #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
@@ -23,6 +27,11 @@ use crate::arena::MAX_FACE_SETS;
 use crate::RowPolicy;
 #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 use wz_session_core::bounded::BoundedVec;
+#[cfg(all(
+    not(wz_on_use),
+    any(feature = "listen", feature = "group", all(test, wz_lent))
+))]
+use wz_session_core::bounded::{RowCount, SeqPlace};
 
 #[cfg(any(not(any(feature = "listen", feature = "group")), all(test, wz_lent)))]
 use wz_session_core::slot_observer::NoOtherPeers;
@@ -36,11 +45,21 @@ pub(in crate::engine) trait Holders: Sized {
     where
         Self: 'a;
 
-    /// The index of `sets` sets, lent from `arena` where the form keeps one: the dial role's face
-    /// holds the first set, and every other is free. Refused when the arena has not the rows. A
-    /// build of the region's form holds its one set in the region and asks for no index.
+    /// The index's lines in the registry's description, from where the registry keeps the index: a
+    /// row for each set, lent `RowCount::HeldSets`, where the form keeps an index, and none where
+    /// the one set's holder is known when compiled.
+    #[cfg(not(wz_on_use))]
+    const LINES: RegionLines<HELD_LINES>;
+
+    /// The index before the registry's walk lends it its rows (`RegistryOf::new`): of no row.
     #[cfg(wz_lent)]
-    fn lent(arena: &mut Arena, sets: usize) -> Result<Self, LendRefused>;
+    fn rowless() -> Self;
+
+    /// Name the holder of each of `sets` sets in the rows the walk lent the index, where the form
+    /// keeps one: the dial role's face holds the first set, and every other is free. Refused when
+    /// the index was lent fewer rows, which the walk has refused first.
+    #[cfg(wz_lent)]
+    fn hold_sets(&mut self, sets: usize) -> Result<(), LendRefused>;
 
     /// The index of `sets` sets where the session's tables take their memory at their first row:
     /// the dial role's face holds the first set, and every other is free. Refused when the
@@ -76,17 +95,27 @@ impl Holders for ManyHolders {
     where
         Self: 'a;
 
+    #[cfg(not(wz_on_use))]
+    const LINES: RegionLines<HELD_LINES> = RegionLines::EMPTY.seq(
+        SeqPlace::of::<FaceId>(core::mem::offset_of!(Self, 0), 0, MAX_FACE_SETS)
+            .counted(RowCount::HeldSets),
+    );
+
     #[cfg(wz_lent)]
-    fn lent(arena: &mut Arena, sets: usize) -> Result<Self, LendRefused> {
-        let mut rows: BoundedVec<FaceId, MAX_FACE_SETS, RowPolicy> = arena.lend(sets)?;
+    fn rowless() -> Self {
+        Self(BoundedVec::default())
+    }
+
+    #[cfg(wz_lent)]
+    fn hold_sets(&mut self, sets: usize) -> Result<(), LendRefused> {
         let faces = core::iter::once(DIAL_FACE).chain(core::iter::repeat(NO_FACE));
         for holder in faces.take(sets) {
-            rows.push(holder).map_err(|_| LendRefused::OverCeiling {
+            self.0.push(holder).map_err(|_| LendRefused::OverCeiling {
                 rows: 1,
                 ceiling: 0,
             })?;
         }
-        Ok(Self(rows))
+        Ok(())
     }
 
     #[cfg(wz_on_use)]
@@ -144,10 +173,18 @@ impl Holders for OneHolder {
     where
         Self: 'a;
 
+    #[cfg(not(wz_on_use))]
+    const LINES: RegionLines<HELD_LINES> = RegionLines::EMPTY;
+
     #[cfg(wz_lent)]
-    fn lent(_arena: &mut Arena, sets: usize) -> Result<Self, LendRefused> {
+    fn rowless() -> Self {
+        Self
+    }
+
+    #[cfg(wz_lent)]
+    fn hold_sets(&mut self, sets: usize) -> Result<(), LendRefused> {
         debug_assert_eq!(sets, 1, "a session of one face is lent one set");
-        Ok(Self)
+        Ok(())
     }
 
     #[cfg(wz_on_use)]

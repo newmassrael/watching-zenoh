@@ -841,7 +841,7 @@ mod table {
         let (actions, _entropy) =
             new_session_in_slot(claim, || params(0xc1), CoopTime::new(&runtime));
         let clone = actions.clone();
-        let sink = actions.link.driver.clone();
+        let sink = actions.link.tx.driver.clone();
         assert_eq!(TABLE.in_use(), 1);
 
         drop(actions);
@@ -965,7 +965,6 @@ mod table {
                 },
                 Tracked,
             )
-            .ok()
             .expect("the slot that came back takes a link made in it");
         assert_eq!(
             third.driver().peer().map(|peer| peer.1),

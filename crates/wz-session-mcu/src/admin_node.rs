@@ -30,7 +30,9 @@
 //!
 //! The node was written on lwIP and named for it. What it needs from the stack
 //! is two things: a link that accepts on a port, and a link that dials an
-//! address. Both are [`SessionLinks`], so the node is generic over `L` and a
+//! address. Both are a stack's
+//! [`SessionLinks`](wz_runtime_coop::session_drive::SessionLinks), sent through behind the
+//! driver's table ([`OpenSetLinks`]), so the node is generic over `L` and a
 //! board's network is a type parameter: lwIP's, Zephyr's sockets, or the
 //! in-memory network its tests run on. The node's own code names none of them.
 //!
@@ -48,7 +50,7 @@ use wz_admin::admin_config_space::write_config_space_pattern;
 use wz_admin::adminspace::admin_queryable_key;
 use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::session_drive::{
-    spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
+    spawn_session, OpenSetLinks, OpenedLink, SessionDriveConfig, SessionRole,
 };
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopTime};
@@ -75,7 +77,7 @@ type DialSink<C> = Box<dyn FnMut(&SessionHandle<C>) -> EventSink>;
 /// An MCU node a host can reach, and reconfigure, at runtime.
 pub struct AdminNode<'a, L, C, P, A>
 where
-    L: SessionLinks,
+    L: OpenSetLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
     A: FnMut(CellRc<dyn BoxedLinkDriver>) -> Option<(SessionHandle<C>, SessionEntropy)>,
@@ -121,7 +123,7 @@ fn declare_admin<C: ClockSource + 'static>(
 
 impl<'a, L, C, P, A> AdminNode<'a, L, C, P, A>
 where
-    L: SessionLinks,
+    L: OpenSetLinks,
     C: ClockSource + 'static,
     P: FnMut() -> SessionInitParams,
     A: FnMut(CellRc<dyn BoxedLinkDriver>) -> Option<(SessionHandle<C>, SessionEntropy)>,
@@ -334,6 +336,7 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use wz_codecs::lent::{Push, PushVariant, Wireexpr, WireexprNonlocal, WireexprVariant};
+    use wz_runtime_coop::session_drive::SessionLinks;
     use wz_runtime_coop::session_runtime::new_session_actions;
     use wz_runtime_coop::CoopRuntime;
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};

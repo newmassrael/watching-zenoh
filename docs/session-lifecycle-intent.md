@@ -1599,6 +1599,180 @@ verbs to its commanders, which is D12's step (4).
 Order: D16 first (the port every later piece feeds), D17 beside it (its codec
 and verification stand alone until D16's subject takes it), D18 beside both.
 
+**D16 built.** One function decides every lifecycle request on both profiles:
+`decide` over a `Request` of subject (the `Commander`), verb, object (the
+peer, a reset's generation and the key the request arrived on) and context (the
+`Channel`), answering a `Decision` that names its reason, permit or refusal
+(`crates/wz-session-core/src/lifecycle_monitor.rs` @ `pub fn decide<P: Policy + ?Sized>`).
+It refuses a verb the node does not bind, then reads the policy: the node's own
+statement about its pipe, the grants of the verb (a grant names a zid a key
+proved, and may be narrowed to a key expression the arriving key must lie in),
+and last the write permission of the configuration, which names no subject and
+stands only for the admin images that hold no secure channel (D12, step 4). The
+policy is data behind `Policy`: the fixed profile's compiled `Commanders`
+lists (`crates/wz-session-mcu/src/connect_manager.rs` @ `impl Policy for Commanders`),
+`PipeOr` for a node commanded over a pipe as well, and the heap profile's
+`HeapGrants`, read at run time in the declaration's shape `<zid>=<verb>[,<verb>...]`
+with an optional `=<key expression>` (`lifecycle_monitor.rs` @ `pub fn parse(text: &str) -> Result<Self, GrantError>`;
+the demo's `--session-commander`). `Monitor` is the one type both profiles judge
+through: the policy and a `DecisionRecord` that every decision is written to
+before it is answered (`lifecycle_monitor.rs` @ `let decision = decide(self.policy, bound, request);`).
+The record is bounded on the fixed profile, the latest decisions and the count
+of all (`crates/wz-session-mcu/src/decision_log.rs` @ `pub struct DecisionLog<const N: usize>`,
+held by `StoreNode` and `ControlledOpener`), and the process's log on the heap
+profile (`LogRecord`). `Commander::Sealed` names the commander a sealed command
+proved (D17); nothing constructs it yet, and the lists judge it as they judge a
+verified zid.
+
+Every entry point reaches a verb through it. `LifecycleNode` no longer judges:
+its `permits` became `monitor`, and `lifecycle_verdict` asks the monitor
+first for every verb (`crates/wz-session-core/src/lifecycle_node.rs` @ `node.monitor().decide(node.binds(verb), &request).permits()`),
+so the pipe (`control_port`), the in-band queries of both profiles
+(`admin_fixed`, `lifecycle_query`) and the connect manager's store
+(`StoreNode`) share it. `NodeOpening::permitted` became `monitor` too. The heap
+profile's Push ingress decides with the zid the session proved
+(`crates/wz-session-core/src/drive.rs` @ `subject: Commander::of_requester(proven.as_ref()),`),
+and `SessionLifecycleAuthority`, which judged the key alone, is gone. The heap
+profile's dispatch now says who asks: a hosted queryable is handed the query as
+a `ProvenQuery` that answers the zid the asking face's link proved
+(`crates/wz-runtime-tokio/src/router_forward.rs` @ `.and_then(|face| face.runtime.actions.verified_peer_zid());`),
+which step (1) of D12 left open. An unproven or unlisted commander is refused
+on the heap profile, a listed zid commands only its verbs, and both records
+carry every decision (the tests beside each piece).
+
+What remains. The admin write of the fixed profile (`ConnectControl::apply`,
+the configuration's `connect/endpoints`) is still gated by the write permission
+inside the parse and does not yet ask the monitor; it is the one entry point
+left, and it waits on a ruling, because its object is a list of locators and not
+a peer, so it is none of the four verbs as they stand. No test drives a lifecycle query over the wire through the heap dispatch
+with a proven commander: the demo's end-to-end test reaches the node over plain
+TCP and now witnesses the refusal, and a permitted close over the wire needs a
+client whose TLS key names its zid. The heap profile reads its grants from the
+command line in the declaration's shape, not from a node declaration file. The
+Zephyr loopback image names a `Commander` where `lifecycle_verdict` now takes an
+`Asker` (lane D18's file).
+
+**D17 built.** A sealed command reaches the monitor as its commander on both profiles' in-band
+entry points. The object travels as the lifecycle query's attachment, which a router hands on as
+it received it (upstream's router clones the request body that holds it,
+`zenoh/src/net/routing/dispatcher/queries.rs` @ `payload: msg.payload.clone(),`; wz's clones the
+whole request, `crates/wz-runtime-tokio/src/router_forward.rs` @ `let mut carrier = request.clone();`).
+One function reads it for both profiles (`crates/wz-session-core/src/sealed_command.rs` @
+`pub fn claim<'v>(`): the object is verified against the node's zid, held to the verb, the peer
+and the generation the key names, and checked fresh; then the monitor judges the request with
+`Commander::Sealed`, and the counter is taken by an `Admission` the monitor asks only after a
+grant permits the commander (`crates/wz-session-core/src/lifecycle_monitor.rs` @
+`pub fn with_admission(self, admission: &'a dyn Admission) -> Self {`), before any effect, so an
+object no grant permits takes no counter; a monitor given no admission refuses a sealed commander
+(`Refusal::NotFresh`). A query whose object fails is refused by name, never judged as the link's
+commander, and a node with no verifier refuses every query that carries an attachment. The heap
+profile verifies in `LifecycleQueries::with_seal`; the fixed profile in `admin_fixed::FixedSeal`,
+handed to the client's verbs by `VerbLegs::verify_sealed_with`, over ES256 by the TLS library's
+PSA Crypto (`crates/wz-tls-mbedtls/src/es256.rs`, `wz_tls_es256_verify`), so it links no
+`ring`. Across a restart the node uses OSCORE's echo (RFC 8613, appendix B.1.2): it draws one
+when it starts, refuses a commander it holds no counter for with
+`{"verdict":"refused","reason":"...","echo":"<hex>"}` until the repeated command carries it, and
+a port may give back a persisted window instead (appendix B.1.1;
+`crates/wz-command-seal/src/fresh.rs`). The format, the reply and the ports are
+`docs/command-seal.md`. What remains: no host wires a verifier yet (the heap binding in
+`wz-runtime-tokio` and the declared node of `deploy/host-slot-node` each construct their
+`LifecycleQueries` or `VerbLegs` without one, and draw no echo), so the end-to-end case over a
+stock zenohd, a commander behind a router whose own key no grant names, is witnessed at both entry
+points with the router's zid as the link's proof and not yet over the wire; and stock zenoh's
+`z_get` carries no attachment, so that witness needs a commander of wz's.
+
+**D16 follow-up.** The three entries the paragraph above left are built.
+
+The admin write is an entry point of the monitor. Writing the node's configuration is the
+fifth verb, `Verb::Configure` (`crates/wz-session-core/src/lifecycle_node.rs` @ `Configure,`),
+whose object is the node the written key names and the key itself
+(`crates/wz-session-core/src/lifecycle_monitor.rs` @ `pub fn configure(asker: Asker<'a>) -> Self {`);
+the value is no part of the object, since no grant is narrowed to a value and a record of
+fixed size could not keep one, and the parse reads it only after a permit. A write arrives as
+a sample, and a sample carries no proof of its writer, so it is asked by nobody shown over
+`Channel::AdminWrite` (`Asker::admin_write`). The write permission is no longer a fallback
+the function reads for every refusal: it is a grant of a verb to anyone, which a policy states
+per verb (`Policy::grants_anyone`, `Grounds::GrantedToAnyone`), and the configuration's write
+permission is the policy `WritePermission`, which grants `Configure` and nothing else. The
+fixed profile's `ConnectControl::apply` decides every write through the monitor before it
+reads the value and keeps the decision in a `DecisionLog` of its own
+(`crates/wz-session-mcu/src/admin_host.rs` @ `let permitted = Monitor::new(&policy, &self.record)`);
+the heap profile's three hosts of the config-write surface (the session's
+`apply_admin_config_write` and the demo's peer and router) ask
+`admin_write_permitted`, which decides the same request into the process's log
+(`crates/wz-runtime-tokio/src/lib.rs` @ `pub fn admin_write_permitted(`). The admin images
+keep working because their declaration states the grant: `ConnectControl::new(true)`, the
+configuration's `adminspace.permissions.write`, is the grant of `Configure` to anyone, and
+through `ControlledOpener` and `WritePermit` the grant of `open` to anyone, in
+`deploy/mcu-admin-node` (`main.rs`, `fixed.rs`, `fixed_tcp.rs`), `deploy/zephyr-admin-node`
+(`lib.rs`, `fixed_node.rs`, `fixed_tcp.rs`, `fixed_admin.rs`) and
+`deploy/zephyr-admin-loopback`; none of them changed. A grant of `Configure` to a zid is
+expressible (a grant narrowed to a key names the keys it may write) and permits nothing yet,
+because no sample says who wrote it; that waits on the sample path carrying the proof of the
+link it came over, as a query's does.
+
+The heap profile reads its grants from the node's declaration. `--node-declaration <file>`
+names the declaration a fixed node of the same policy is built from, and its `[[endpoint]]`
+rows whose `role` is `commander` are the grants (`crates/wz-runtime-tokio/src/node_declaration.rs`
+@ `pub fn commander_grants(text: &str) -> Result<HeapGrants, DeclarationError> {`), so one
+declaration states the policy of both profiles. `--session-commander` is gone: no test needs
+it, since the end-to-end tests write a declaration.
+
+The end-to-end witness has its positive leg again
+(`crates/wz-integration-tests/tests/it/files/wz_peer_session_lifecycle_query.rs`): the node
+listens on TCP and on mutual TLS (`--tls-mtls`, the demo's `enable_mtls`), its declaration
+grants `close` and `status` to the zid of a key the test makes, and a client that presents that
+key (`--tls-connect-cert`, `--tls-connect-key`) and claims the zid it names reads the peer's
+status and closes its session, whose face goes down. A key on no row of the declaration is
+refused the same close over the same listener, and the refusal over plain TCP and the refusal
+with no declaration stand beside it.
+
+**D17 wired.** The shipped hosts of both profiles verify a sealed command, and the end-to-end
+case is witnessed over the wire through a stock zenohd whose own key no grant names.
+
+The heap profile's verifier is `HeapSeal`, `SealedCommands<RingEs256, HEAP_SEALED_COMMANDERS>`
+(`crates/wz-runtime-tokio/src/lifecycle_seal.rs` @ `pub fn lifecycle_seal_from_os_entropy(`):
+the node's zid, ES256 by `ring`, which the TLS links the verbs need already link, and an echo of
+sixteen bytes drawn from the OS when the node starts. It comes with `session-close-ingress`,
+which now turns on `wz-session-core/sealed-commands` and `wz-command-seal`, so a heap node that
+hosts the verbs always verifies. The window holds 64 commanders: it evicts none, so it must hold
+every commander the declaration grants, and a declaration that grants more is refused when the
+node starts, by name, rather than found out when a granted commander is refused for room; the
+demo then hosts no lifecycle query, as it does when it has no entropy
+(`crates/wz-ap-demo/src/runner.rs` @ `.with_seal(seal),`).
+
+The fixed profile's declared node holds `static SEAL: FixedSeal<PsaEs256, SEALED_COMMANDERS>`,
+where `SEALED_COMMANDERS` is computed when the node is built: the zids its declaration's
+commander lists name, each once, so the window is exactly the commanders it may permit. It is
+started with the node's zid and an echo from the TLS library's generator once the identity is
+made, and handed to the verbs before their queryable is registered
+(`deploy/host-slot-node/src/bin/declared_node.rs` @ `fn start_seal(zid: [u8; 16])`). The
+node's `verbs` feature brings `wz-session-mcu/sealed-commands` and, beside the channel a
+commander needs, `wz-tls-mbedtls/es256`; it links no `ring`. The node now says its record:
+every decision of the verbs' monitor is a console line, `HOST-WZ-DECISION made=<n>
+subject=<who> verb=<verb> decision=<decision>`, the subject `sealed:<zid>` for a sealed command.
+
+The Zephyr admin image (`deploy/zephyr-admin-node`, `fixed_admin.rs`) does not verify one yet:
+its in-band verbs are the admin node's `Verbs`, which take no verifier
+(`crates/wz-session-mcu/src/admin_fixed.rs` @ `impl<N: wz_session_core::lifecycle_node::LifecycleNode + Sync + 'static> InBand for Verbs<N>`),
+so it needs `Verbs` to carry one as `VerbLegs` does, a change of `wz-session-mcu`. Its PSA
+configuration already states what `PsaEs256` needs (`overlays/qemu_admin_fixed_tls.conf` and
+`overlays/t2g_client_tls.conf`: `CONFIG_PSA_WANT_ALG_ECDSA`, `CONFIG_PSA_WANT_ECC_SECP_R1_256`,
+`CONFIG_PSA_WANT_ALG_SHA_256`, `CONFIG_PSA_WANT_KEY_TYPE_ECC_PUBLIC_KEY`).
+
+The witness is `crates/wz-integration-tests/tests/it/files/wz_sealed_commander_zenohd_interop.rs`.
+The router dials the node over mutual TLS with a key of its own, so its own query is refused,
+and the commander is a wz client of the router, since stock zenoh's `z_get` sends no attachment:
+it seals each command with `wz_command_seal::seal` and a `RingSigner` over a key the test makes
+and sends it as the attachment of the lifecycle GET. On the declared node (`zenohd_lane_fixed_`):
+a listed commander's sealed `status` and `close` are permitted after the echo, and the record
+says `sealed:<zid>`; the same object again is a replay; an unlisted key's object is refused by
+the lists and takes no counter; and after the node restarts with the same provisioned identity, a
+command sealed before and one carrying the old echo are refused with a new echo, and the repeat
+carrying it is permitted. On the demo's peer (`zenohd_lane_heap_`), the first three, the record
+read off its log. What remains: the admin image above, and whether a node with storage should
+persist its window (`docs/command-seal.md`, decisions for the owner).
+
 ## 6. The contract for every verb (step 8; A, B and D built, C in part)
 
 Step 7e held the transports to one table for `open`. The other verbs of D6

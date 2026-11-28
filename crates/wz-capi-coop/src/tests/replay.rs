@@ -11,7 +11,7 @@
 use crate::EngineHold;
 use std::time::{Duration, Instant};
 
-use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey};
+use wz_capi_port::{EntityRow, PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::locality::Locality;
 use wz_session_core::replay_pacing::ReplayPacing;
 use wz_session_core::sink::SampleView;
@@ -21,7 +21,7 @@ use super::{config, open_with, router_port, until, CatchAll, Command, Engine, Ro
 use crate::CoopConfig;
 
 /// Declare a subscriber on `key` that hears nothing, for the declaration it makes.
-fn subscribe(engine: &Engine, key: &str) -> SubId {
+fn subscribe(engine: &Engine, key: &str) -> EntityRow {
     engine
         .declare_subscriber_on_wire(
             key,
@@ -50,7 +50,7 @@ fn told_subscribers(router: &Router) -> Vec<u64> {
 fn reconnected(
     keys: &[&str],
     pacing: Option<ReplayPacing>,
-) -> (Router, EngineHold<Engine>, Vec<SubId>) {
+) -> (Router, EngineHold<Engine>, Vec<EntityRow>) {
     let (router, engine, ids, _) = reconnected_after(keys, pacing);
     (router, engine, ids)
 }
@@ -60,7 +60,7 @@ fn reconnected(
 fn reconnected_after(
     keys: &[&str],
     pacing: Option<ReplayPacing>,
-) -> (Router, EngineHold<Engine>, Vec<SubId>, Vec<u64>) {
+) -> (Router, EngineHold<Engine>, Vec<EntityRow>, Vec<u64>) {
     let first = Router::start(CatchAll::None);
     let port = first.port;
     let engine = open_with(CoopConfig {
@@ -68,7 +68,7 @@ fn reconnected_after(
         open_timeout_ms: 300,
         ..config(&first)
     });
-    let ids: Vec<SubId> = keys.iter().map(|key| subscribe(&engine, key)).collect();
+    let ids: Vec<EntityRow> = keys.iter().map(|key| subscribe(&engine, key)).collect();
     until(&engine, "the router to be told every subscriber", || {
         told(&first) == keys.len()
     });
@@ -345,7 +345,10 @@ fn every_form_of_the_replay_tells_the_new_peer_the_same_declarations_in_the_same
             live,
             "{pacing:?}: the new peer is told what the first was, in its order"
         );
-        let held: Vec<u64> = ids.iter().map(|&id| u64::from(id)).collect();
+        let held: Vec<u64> = ids
+            .iter()
+            .map(|&id| u64::from(engine.entity_id_of(id).expect("the subscriber stands")))
+            .collect();
         assert_eq!(live, held, "{pacing:?}: the order the session made them in");
         SessionDrive::close(&*engine);
     }
@@ -415,7 +418,7 @@ fn peer_config(router: &Router, initial_interest: bool) -> CoopConfig {
 /// to a peer is lost and dialled again with the declarations paced as `pacing` says: the new
 /// peer and the session, as soon as the new link's first turn is sent. The CONTROL is that the
 /// first peer was told every subscriber and one Final.
-#[cfg(any(feature = "interest-answer", feature = "listen"))]
+#[cfg(any(wz_interest_answer, feature = "listen"))]
 fn reconnected_peer(keys: &[&str], pacing: Option<ReplayPacing>) -> (Router, EngineHold<Engine>) {
     let first = peer_on(router_port());
     let port = first.port;
@@ -457,7 +460,7 @@ fn reconnected_peer(keys: &[&str], pacing: Option<ReplayPacing>) -> (Router, Eng
 /// later is followed by no second Final. Turned red by a Final sent before the replay
 /// (`end_initial_interest` called before the turn), not sent at all, or sent again by a later
 /// declaration.
-#[cfg(any(feature = "interest-answer", feature = "listen"))]
+#[cfg(any(wz_interest_answer, feature = "listen"))]
 #[test]
 fn a_peer_face_is_sent_the_initial_final_once_after_its_replay() {
     let (router, engine) = reconnected_peer(&["g/1", "g/2"], None);
@@ -482,7 +485,7 @@ fn a_peer_face_is_sent_the_initial_final_once_after_its_replay() {
 /// A paced replay sends the Final only in the turn that tells its last declaration: none while
 /// turns are owed, and one after the last. Turned red by a Final sent by the first turn of a
 /// paced replay.
-#[cfg(any(feature = "interest-answer", feature = "listen"))]
+#[cfg(any(wz_interest_answer, feature = "listen"))]
 #[test]
 fn a_paced_replay_sends_the_initial_final_after_its_last_turn() {
     // A build that reaches no pace replays in one lap whatever is stated.
@@ -513,7 +516,7 @@ fn a_paced_replay_sends_the_initial_final_after_its_last_turn() {
 /// the switch on, told the Final beside it. Turned red by a Final sent without reading the switch
 /// (`config.initial_interest` in `owe_link_initial_final`) or the roles
 /// (`meets_remote_as_peer_hat`).
-#[cfg(any(feature = "interest-answer", feature = "listen"))]
+#[cfg(any(wz_interest_answer, feature = "listen"))]
 #[test]
 fn no_initial_final_goes_to_a_face_that_is_not_a_peer_or_when_the_switch_is_off() {
     let cases = [
@@ -572,7 +575,7 @@ fn no_initial_final_goes_to_a_face_that_is_not_a_peer_or_when_the_switch_is_off(
 /// and nothing after it. The CONTROL is the subscriber, which shows the replay ran over the link the
 /// Final would have ended. Turned red by a Final sent from a build without `listen` and without
 /// `interest-answer` (`owe_link_initial_final` or `end_initial_interest` compiled into it).
-#[cfg(not(any(feature = "interest-answer", feature = "listen")))]
+#[cfg(not(any(wz_interest_answer, feature = "listen")))]
 #[test]
 fn a_build_that_answers_no_interest_sends_no_initial_final() {
     let router = peer_on(router_port());

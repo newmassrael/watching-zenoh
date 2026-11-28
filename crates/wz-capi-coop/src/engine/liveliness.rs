@@ -18,12 +18,11 @@
 //! held; the tokens alive when the subscriber asked for its history are handed on the declaring
 //! thread.
 
-use core::ptr::NonNull;
-
 #[cfg(feature = "group")]
 use super::CoopLinks;
+use super::DynSink;
 use super::LinkActions;
-use wz_capi_port::{KeyAnchor, LivelinessSink, SubId, TokenId, WireKey};
+use wz_capi_port::{LivelinessSink, SubId, TokenId, WireKey};
 use wz_runtime_coop::ClockSource;
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::named_key::NamedKey;
@@ -31,7 +30,6 @@ use wz_session_core::row_callback::RowCallback;
 use wz_session_core::session_tables::WireForm;
 use wz_session_core::wire_id::ExprId;
 
-use crate::form::Latch;
 #[allow(unused_imports)]
 use crate::prelude::*;
 
@@ -40,8 +38,8 @@ use super::transport::TellGroups;
 
 /// Announce the token `id` the session holds on `key` over `actions`, its key named as the
 /// session's tables name it or as the link's key-wire form says: whether the link took it.
-pub(super) fn declare_token<C: ClockSource + 'static>(
-    actions: &LinkActions<C>,
+pub(super) fn declare_token<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    actions: &LinkActions<C, D>,
     id: TokenId,
     key: NamedKey<'_>,
 ) -> bool {
@@ -78,8 +76,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> super::Core<L, C>
 
 /// Retract the token `id` over `actions`, naming its key as `names` says (the declaration's id
 /// and the rest of the key) when its declaration asked to.
-pub(super) fn retract_token<C: ClockSource + 'static>(
-    actions: &LinkActions<C>,
+pub(super) fn retract_token<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    actions: &LinkActions<C, D>,
     id: TokenId,
     names: Option<(ExprId, &str)>,
 ) {
@@ -96,27 +94,9 @@ pub(super) fn retract_token<C: ClockSource + 'static>(
 /// of it, its callback. The subscriber is that one row (`docs/c-abi-architecture.md`, P1), and so
 /// is its callback's life (P11): a call is begun on the row's latch with the session held and made
 /// after it, and an undeclared row is let go of by whoever sees its last call end.
-pub(crate) struct LivelinessRow {
-    /// What the ABI's key kept alive (an object of the ABI's), let go of with the row, with no
-    /// lock of the session held: the declaration the key names is the tables' row's to hold.
-    _anchor: KeyAnchor,
-    /// The program's callback, called where the row lies: the tables lend their rows from the
-    /// session's arena and never move one.
-    sink: LivelinessSink,
-    /// How many calls of the callback run, and whether the subscriber was undeclared.
-    latch: Latch,
-}
+pub(crate) type LivelinessRow = super::LatchedRow<LivelinessSink>;
 
 impl LivelinessRow {
-    /// A subscriber keeping `anchor`, handing what it hears to `sink`.
-    pub(crate) fn new(anchor: KeyAnchor, sink: LivelinessSink) -> Self {
-        Self {
-            _anchor: anchor,
-            sink,
-            latch: Latch::new(),
-        }
-    }
-
     /// Hand `sample` to the callback, unless the subscriber was undeclared since the call was
     /// begun: the one place a token's change is handed to a liveliness subscriber's callback.
     fn hand(&self, sample: LivelinessSample<'_>) {
@@ -129,8 +109,8 @@ impl LivelinessRow {
 /// Send the Interest of liveliness subscriber `id` on `keyexpr` over `actions`: the tokens to
 /// come, and with `history` the ones alive now, its key named as the session's tables name it
 /// (`form`) or as the link's key-wire form says: whether the link took it.
-pub(super) fn ask<C: ClockSource + 'static>(
-    actions: &LinkActions<C>,
+pub(super) fn ask<C: ClockSource + 'static, D: ?Sized + DynSink>(
+    actions: &LinkActions<C, D>,
     id: SubId,
     keyexpr: &str,
     form: WireForm<'_>,
@@ -144,46 +124,17 @@ pub(super) fn ask<C: ClockSource + 'static>(
         .is_ok()
 }
 
-/// A call of a liveliness subscriber's callback, begun on its row's latch: where the row lies.
-pub(crate) struct LivelinessRowCall(NonNull<LivelinessRow>);
-
-impl RowCallback for LivelinessRow {
-    type Call = LivelinessRowCall;
-
-    const READS_ROW_IN_PLACE: bool = true;
-
-    fn begin(&self) -> Option<LivelinessRowCall> {
-        self.latch
-            .begin()
-            .then(|| LivelinessRowCall(NonNull::from(self)))
-    }
-
-    unsafe fn end(call: LivelinessRowCall) -> bool {
-        // SAFETY: the caller's: the row has not moved since the call began and is still in its
-        // table, which keeps it until its last call ended.
-        unsafe { call.0.as_ref() }.latch.end()
-    }
-
-    fn retire(&self) -> bool {
-        self.latch.retire()
-    }
-
-    fn drained(&self) -> bool {
-        self.latch.drained()
-    }
-}
-
 /// A call of a liveliness subscriber's callback the session began under its lock and a delivery
 /// makes after it, as a subscriber's ([`super::SubscriberCall`]): where its row lies, and nothing
 /// else. Each is ended once ([`Self::end`]), or its row would keep its slot for good.
 #[must_use = "a call is ended, or its row is never let go of"]
 pub(crate) struct LivelinessCall {
-    call: LivelinessRowCall,
+    call: super::RowCall<LivelinessSink>,
 }
 
 impl LivelinessCall {
     /// `call`, begun on a liveliness subscriber's row.
-    pub(crate) fn new(call: LivelinessRowCall) -> Self {
+    pub(crate) fn new(call: super::RowCall<LivelinessSink>) -> Self {
         Self { call }
     }
 

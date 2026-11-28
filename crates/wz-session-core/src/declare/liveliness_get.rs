@@ -64,7 +64,7 @@
 //!    [`wz_codecs::declare::DeclareOwned`] + resolve its keyexpr through
 //!    the shared peer table, then funnel through the no-heap SSOT.
 
-use crate::bounded::{Arena, BoundedVec, LendRefused, Lent, Profile, Storage};
+use crate::bounded::{BoundedVec, Profile, Storage};
 use crate::caps;
 use crate::registry_error::RegisterError;
 use crate::reply_sink::{BorrowedReply, ReplyKind, ReplySink};
@@ -219,32 +219,6 @@ impl<C: ReplySink> LivelinessGetRegistry<C, crate::bounded::OnUse> {
     }
 }
 
-impl<C: ReplySink> LivelinessGetRegistry<C, Lent> {
-    /// An empty registry whose pending gets, and the markers they leave when they end, are `rows`
-    /// rows each lent from `arena`, at most `MAX_PENDING_LIVELINESS_GETS`: the snapshots a session
-    /// holds pending on one face, at its open. Refused past that ceiling or past what the arena has
-    /// left, the rows lent so far going back with the arena.
-    pub fn lent(arena: &mut Arena, rows: usize) -> Result<Self, LendRefused> {
-        Ok(Self {
-            pending: arena.lend(rows)?,
-            finalized: arena.lend(rows)?,
-            ..Self::default()
-        })
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes for `rows` rows: its two tables, each a span of
-    /// its own. `None` past the address space.
-    pub const fn arena_bytes(rows: usize) -> Option<usize> {
-        match (
-            Arena::table_bytes::<PendingGet<C>>(rows),
-            Arena::table_bytes::<u64>(rows),
-        ) {
-            (Some(pending), Some(finalized)) => pending.checked_add(finalized),
-            _ => None,
-        }
-    }
-}
-
 /// The rows of a [`LivelinessGetRegistry`] of the region policy, which a region lays out beside
 /// it: its pending gets' and the markers they leave, each at the build's bound.
 pub struct LivelinessGetRows<C: ReplySink> {
@@ -255,32 +229,35 @@ pub struct LivelinessGetRows<C: ReplySink> {
 // SAFETY: both tables' rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
 unsafe impl<C: ReplySink> crate::bounded::ZeroEmpty for LivelinessGetRows<C> {}
 
-/// The lines a region's description holds for one [`LivelinessGetRegistry`] of the region
-/// policy: its two tables' rows.
+/// The lines a description holds for one [`LivelinessGetRegistry`]: its two tables' rows.
 pub const LIVELINESS_GET_LINES: usize = 2;
 
-impl<C: ReplySink> LivelinessGetRegistry<C, crate::bounded::Region> {
-    /// The description of a registry of the region policy at `at` in a region and its
-    /// [`LivelinessGetRows`] at `rows`: the lines of its pending gets' rows and of their markers'.
+impl<C: ReplySink, P: crate::bounded::LaidOut> LivelinessGetRegistry<C, P> {
+    /// The description of a registry at `at` and, in a region, its [`LivelinessGetRows`] at `rows`:
+    /// the lines of its pending gets' rows and of their markers', each lent a face's
+    /// `MAX_PENDING_LIVELINESS_GETS`.
     pub const fn places(
         at: usize,
         rows: usize,
     ) -> crate::bounded::RegionLines<LIVELINESS_GET_LINES> {
         crate::bounded::RegionLines::EMPTY
-            .seq(crate::bounded::SeqPlace::of_room::<
-                PendingGet<C>,
-                { caps::MAX_PENDING_LIVELINESS_GETS },
-            >(
-                at.wrapping_add(core::mem::offset_of!(Self, pending)),
-                rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, pending)),
-            ))
-            .seq(crate::bounded::SeqPlace::of_room::<
-                u64,
-                { caps::MAX_PENDING_LIVELINESS_GETS },
-            >(
-                at.wrapping_add(core::mem::offset_of!(Self, finalized)),
-                rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, finalized)),
-            ))
+            .seq(
+                crate::bounded::SeqPlace::of_room::<
+                    PendingGet<C>,
+                    { caps::MAX_PENDING_LIVELINESS_GETS },
+                >(
+                    at.wrapping_add(core::mem::offset_of!(Self, pending)),
+                    rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, pending)),
+                )
+                .counted(crate::bounded::RowCount::LivelinessGets),
+            )
+            .seq(
+                crate::bounded::SeqPlace::of_room::<u64, { caps::MAX_PENDING_LIVELINESS_GETS }>(
+                    at.wrapping_add(core::mem::offset_of!(Self, finalized)),
+                    rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, finalized)),
+                )
+                .counted(crate::bounded::RowCount::LivelinessGets),
+            )
     }
 }
 
@@ -416,6 +393,19 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
             self.rearm_due();
         }
         before != self.pending.len()
+    }
+
+    /// Remove the first pending get whose sink `pick` names without firing `on_final`: what the
+    /// cancellation of the get the sink is a leg of does to it, the sink's drop being the leg's end.
+    /// Whether one was removed.
+    pub fn unregister_first(&mut self, mut pick: impl FnMut(&C) -> bool) -> bool {
+        let Some(at) = self.pending.iter().position(|entry| pick(&entry.sink)) else {
+            return false;
+        };
+        if self.pending.remove(at).deadline_ms == Some(self.due_ms) {
+            self.rearm_due();
+        }
+        true
     }
 
     /// Number of currently-outstanding pending gets.
@@ -968,6 +958,43 @@ mod tests {
         assert!(reg.unregister(7));
         assert_eq!(reg.len(), 0);
         assert!(!reg.unregister(7), "double-unregister is idempotent");
+    }
+
+    /// A sink that names itself, for a test that finds a get by its sink.
+    struct Tagged(u8);
+
+    impl ReplySink for Tagged {
+        fn on_reply(&mut self, _reply: &dyn ReplyView) {}
+
+        fn on_final(&mut self, _rid: crate::wire_id::RequestId) {
+            panic!("a get removed by its sink fires no final");
+        }
+    }
+
+    /// The first get whose sink the pick names is removed, its final not fired, and the earliest
+    /// deadline is worked out again from the gets left; a pick that names none removes nothing.
+    /// Turned red by a removal that keeps the deadline of the get gone, or one that takes every
+    /// get the pick names.
+    #[test]
+    fn the_first_get_its_sink_names_is_removed_and_the_deadline_moves_on() {
+        let mut reg = LivelinessGetRegistry::<Tagged>::with_sink_backing();
+        for (interest_id, tag, due) in [(1, 1, 100), (2, 2, 300), (3, 1, 500)] {
+            assert!(reg
+                .register(interest_id, Some(due), Tagged(tag))
+                .expect("a row is free"));
+        }
+        assert_eq!(reg.due_ms(), 100);
+        assert!(reg.unregister_first(|sink| sink.0 == 1));
+        assert_eq!(reg.len(), 2, "the first the pick names, and no other");
+        assert_eq!(
+            reg.due_ms(),
+            300,
+            "the deadline of the get gone is not kept"
+        );
+        assert!(!reg.unregister_first(|sink| sink.0 == 9));
+        assert!(reg.unregister_first(|sink| sink.0 == 1));
+        assert!(reg.unregister_first(|sink| sink.0 == 2));
+        assert!(reg.is_empty());
     }
 
     /// R311y740 (N37) — the own-space WITNESS for the liveliness-GET reply

@@ -134,10 +134,15 @@ fn declare_matching_listener(&mut self, filter: WriteFilterHandle, cb: F::Matchi
     -> Result<MatchingListenerHandle, Refused<F::Matching>>;
 fn undeclare_write_filter(&mut self, h: WriteFilterHandle,
     each: impl FnMut(MatchingListenerHandle, Removal<Matching<F>>)) -> Option<Unwatched<WriteFilterRow>>;
-fn begin_get(&mut self, accept: ReplyAcceptance<'_>, legs: u16, deadline: u64, cb: F::Reply)
-    -> Result<GetBegun, Refused<F::Reply>>;
-fn end_leg(&mut self, h: PendingGetHandle) -> Option<LegEnded<PendingGet<F, P>>>;
-fn end_get(&mut self, h: PendingGetHandle) -> Option<Removal<PendingGet<F, P>>>;
+fn begin_get(&mut self, accept: ReplyAcceptance<'_>, mode: ConsolidationMode, legs: u16,
+    deadline: u64, cb: F::Reply) -> Result<GetBegun, Refused<F::Reply>>;
+fn add_leg(&mut self, h: PendingGetHandle) -> bool;
+fn admit_reply(&mut self, h: PendingGetHandle, reply: &dyn ReplyView)
+    -> ReplyAdmitted<<F::Reply as RowCallback>::Call>;
+fn end_leg(&mut self, h: PendingGetHandle) -> Option<LegEnded>;
+fn time_out_get(&mut self, h: PendingGetHandle) -> bool;
+fn next_ended_get(&self, cursor: &mut usize) -> Option<(PendingGetHandle, GetEnd)>;
+fn retire_get(&mut self, h: PendingGetHandle) -> Option<Removal<PendingGet<F, P>>>;
 
 // Look up and match: total functions over the rows.
 fn wire_of<'a, Key>(&'a self, key: &'a EntityKey<Key>) -> WireForm<'a>;
@@ -197,9 +202,12 @@ keeps every test green and is measured against the size ledger (P9).
    peers declare is followed by `next_matching_change`.
 5. **Pending gets.** `Requesters` per face, `PendingGet`, `EndedLegs` and the reply targets go:
    a get is one row whose request id every leg carries, so a reply finds it by
-   `pending_get(request)`, is admitted by its gate (`PendingGetRow::admits`) and is handed to its
-   callback on the row's latch (`begin_reply`); a leg's Final, or the loss of the face it was asked
-   on, is `end_leg`, and a deadline found by `next_expired_get` is `end_get`.
+   `pending_get(request)`, is admitted by its gate, its standing and its mode's consolidation
+   (`admit_reply`) and is handed to its callback on the row's latch; a leg's Final, or the loss of
+   the face it was asked on, is `end_leg`, and a deadline found by `next_expired_get` is
+   `time_out_get`. Either ends the row in place (`GetEnd`); the deliveries find it
+   (`next_ended_get`), hand out what it held and its timeout, and `retire_get` it, which a
+   cancellation does at once.
 6. **The delivery lane.** With every callback in a row, a delivery pins the rows it reaches and
    calls them from the received bytes (P4); `SharedLane`, `targets`, `Resolved`, `TryCell` and
    `LiveCallback` go. Backpressure becomes the transport's flow control alone: the session takes

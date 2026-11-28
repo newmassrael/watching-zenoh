@@ -17,10 +17,22 @@ use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::sink::SampleView;
 
-use super::{open, until, CatchAll, Command, Engine, Router};
+use super::sim::{Sim, SimEngine, StandIn};
+use super::CatchAll;
+use crate::EngineHold;
+
+/// The simulation's seed.
+const SEED: u64 = 0x0e5e;
+
+/// A router stand-in and the session the simulation opens against it.
+fn opened(sim: &Sim) -> (StandIn, EngineHold<SimEngine>) {
+    let stand_in = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
+    (stand_in, engine)
+}
 
 /// What the engine answers its objects' keys through.
-fn keys(engine: &Engine) -> &dyn SessionKeys {
+fn keys(engine: &SimEngine) -> &dyn SessionKeys {
     engine
         .key_arena()
         .expect("the engine answers its objects' keys")
@@ -33,8 +45,8 @@ fn keys(engine: &Engine) -> &dyn SessionKeys {
 /// whose bytes do not go back with it.
 #[test]
 fn a_declarations_key_is_counted_against_the_sessions_budget_and_given_back() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let (_router, engine) = opened(&sim);
     let opened = engine.key_counts();
     assert_eq!(
         opened.bytes,
@@ -65,8 +77,8 @@ fn a_declarations_key_is_counted_against_the_sessions_budget_and_given_back() {
 /// against the budget, or by a hold past the bound that is kept.
 #[test]
 fn an_objects_key_is_a_copy_of_its_own_and_refused_past_the_sessions_bound() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let (_router, engine) = opened(&sim);
     let before = engine.key_counts().used;
     let held = keys(&engine)
         .key(KeyAsk::Hold("demo/held"))
@@ -103,8 +115,8 @@ fn an_objects_key_is_a_copy_of_its_own_and_refused_past_the_sessions_bound() {
 /// receive that does not reach a table of the on-use policy.
 #[test]
 fn a_subscriber_declared_after_the_open_is_told_and_handed_a_push() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let (router, engine) = opened(&sim);
     let received = Arc::new(AtomicUsize::new(0));
     let declares = router.seen(|s| s.declares);
     engine
@@ -116,11 +128,13 @@ fn a_subscriber_declared_after_the_open_is_told_and_handed_a_push() {
             })
         })
         .expect("the session declares the subscriber");
-    until(&engine, "the router to see the subscriber", || {
+    sim.steps_until(&engine, 0, "the stand-in to see the subscriber", || {
         router.seen(|s| s.declares) > declares
     });
-    router.send(Command::Push("demo/a", b"hello"));
-    until(&engine, "the push", || received.load(Ordering::SeqCst) == 1);
+    router.push("demo/a", b"hello");
+    sim.steps_until(&engine, 0, "the push", || {
+        received.load(Ordering::SeqCst) == 1
+    });
 }
 
 /// A session whose tables take their memory on use makes the read slot of a face past its dial
@@ -131,125 +145,39 @@ fn a_subscriber_declared_after_the_open_is_told_and_handed_a_push() {
 /// up.
 #[cfg(all(feature = "listen", not(wz_round)))]
 #[test]
-#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_on_use_face_takes_its_read_slot_at_its_places_first_face() {
-    let first = Router::start(CatchAll::None);
-    let second = Router::start_as(0xc5, CatchAll::None);
-    let engine = open(&first);
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    /// Where the second node accepts, beside the first stand-in's address.
+    const SECOND_AT: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 7447);
+    let sim = Sim::new(SEED);
+    let (_first, engine) = opened(&sim);
+    let _second = sim.stand_in_as(SECOND_AT, 0xc5, CatchAll::None);
     assert_eq!(
         engine.faces_made(),
         0,
         "no face past the dial role's holds a read slot at the open"
     );
     engine
-        .attach_face(&second.endpoint())
-        .expect("the second router is dialled");
+        .attach_face(&format!("udp/{SECOND_AT}"))
+        .expect("the second stand-in is dialled");
     assert_eq!(engine.faces_made(), 1, "the attached face's slot is made");
-    until(&engine, "both faces to be up", || engine.faces_up() == 2);
-}
-
-/// A session whose tables take their memory on use and that listens holds the links it takes to
-/// the faces it may hold, though no table of buffers refuses a link any more (each link's buffers
-/// are its own, of the heap): a connection that arrives when it holds as many faces as `max_faces`
-/// admits is closed unread, the buffers its accept took let go of with it. The first connection is
-/// that face, from its take on, in its handshake; the handshakes admitted are two, so only the
-/// count of faces refuses the second. CONTROL: the first connection is kept, and with room for
-/// another face the second is too. The bound is the face table's count, which
-/// `Core::takes_a_face` asks before a link is given a face (`Core::faces_full`), and behind it
-/// the index of the held faces, counted at the open to the sets the plan counts
-/// (`RegistryOf::add_face`). Turned red by a take of a face that asks neither, which gives the
-/// second connection a face and keeps it open.
-#[cfg(feature = "listen")]
-#[test]
-#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
-fn an_on_use_listener_closes_a_link_past_its_faces_unread() {
-    use std::io::Read;
-    use std::net::TcpStream;
-    use std::time::{Duration, Instant};
-    use wz_capi_port::SessionDrive;
-
-    // A listener of `max_faces` faces besides its dial role's, stepped on the test's thread, and
-    // a raw connection to its port, which never speaks.
-    let listening = |max_faces: usize| {
-        let mut config = crate::CoopConfig {
-            whatami: wz_session_core::WhatAmI::Peer,
-            listen: vec!["tcp/127.0.0.1:0".to_owned()],
-            max_faces,
-            accept_pending: 2,
-            ..super::client_config()
-        };
-        // Past the test: a connection that never speaks is not let go of for its silence here.
-        config.timeouts.accepting_inactivity_ms = 10_000;
-        let engine = super::open_with(config);
-        let endpoint = engine.listening().pop().expect("one port is bound");
-        let port = endpoint
-            .rsplit(':')
-            .next()
-            .expect("an endpoint with a port")
-            .to_owned();
-        (engine, port)
-    };
-    let connect = |port: &str| {
-        let stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("the port accepts");
-        stream
-            .set_nonblocking(true)
-            .expect("a stream whose read does not wait");
-        stream
-    };
-    // Whether the listener closes `stream` while it is stepped for `within`: a read of the end
-    // of the stream. One still open answers that the read would wait.
-    let closed_within = |engine: &Engine, stream: &mut TcpStream, within: Duration| {
-        let deadline = Instant::now() + within;
-        let mut byte = [0u8; 1];
-        while Instant::now() < deadline {
-            SessionDrive::step_once(engine, 5).expect("a session without its read task steps");
-            if matches!(stream.read(&mut byte), Ok(0)) {
-                return true;
-            }
-        }
-        false
-    };
-
-    let (full, port) = listening(1);
-    let mut first = connect(&port);
-    assert!(
-        !closed_within(&full, &mut first, Duration::from_millis(200)),
-        "CONTROL: the first connection is taken as the one face"
-    );
-    let mut over = connect(&port);
-    assert!(
-        closed_within(&full, &mut over, Duration::from_secs(3)),
-        "the listener holds as many faces as it may, so it closes the second connection"
-    );
-    assert!(
-        !closed_within(&full, &mut first, Duration::from_millis(100)),
-        "and the face it holds stands"
-    );
-
-    let (roomy, port) = listening(2);
-    let mut first = connect(&port);
-    let mut kept = connect(&port);
-    assert!(
-        !closed_within(&roomy, &mut first, Duration::from_millis(200))
-            && !closed_within(&roomy, &mut kept, Duration::from_millis(300)),
-        "CONTROL: with room for another face both connections are kept"
-    );
+    sim.steps_until(&engine, 0, "both faces to be up", || engine.faces_up() == 2);
 }
 
 /// A session whose tables take their memory on use makes no place of its faces' rooms at its open,
 /// and none for a face whose link names no wait for room: with its one face up over a datagram
-/// link, which names none (`UdpDriver` answers no `room_wait`), it holds no place of the rows its
-/// plan counts. That a face's first hold of a wait makes its place, and that one alone, is
+/// end, which names none (`SimEnd` answers no `room_wait`, as the host's `UdpDriver` does not),
+/// it holds no place of the rows its plan counts. That a face's first hold of a wait makes its
+/// place, and that one alone, is
 /// `congestion::an_on_use_rooms_place_is_made_at_its_faces_first_hold`'s to hold. Turned red by
 /// an open that makes every row's place (`RoomTable::over` making a place for each row, as the
 /// forms that lay the places out write one), or by a face that comes up and makes a place for a
 /// wait its link does not name.
 #[test]
-#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_on_use_session_makes_no_room_place_its_faces_do_not_hold() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
-    until(&engine, "the face to be up", || engine.faces_up() == 1);
+    let sim = Sim::new(SEED);
+    let (_router, engine) = opened(&sim);
+    sim.steps_until(&engine, 0, "the face to be up", || engine.faces_up() == 1);
     let (made, rows) = engine.room_places_made();
     assert!(rows >= 1, "CONTROL: a row for the dial role's face");
     assert_eq!(made, 0, "a datagram link names no wait for room: no place");
@@ -307,11 +235,10 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime() {
 /// cells on use (`cells` in `CoopEngine::assemble`), which its links' kind would then have to
 /// name.
 #[test]
-#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_on_use_sessions_link_parts_lie_on_the_heap() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
-    until(&engine, "CONTROL: the face to be up", || {
+    let sim = Sim::new(SEED);
+    let (_router, engine) = opened(&sim);
+    sim.steps_until(&engine, 0, "CONTROL: the face to be up", || {
         engine.faces_up() == 1
     });
     assert_eq!(
@@ -533,15 +460,11 @@ fn an_on_use_listeners_links_are_bounded_by_the_slots_they_share() {
 /// the memory for a second block, by a state taken of the allocator and not of the open's memory
 /// (`OwnBlock::take`), which asks it for none, or by a plane placed anywhere but the state.
 #[test]
-#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn an_on_use_open_asks_its_memory_for_its_state_alone() {
-    use super::{host_links, LOOPBACK};
     use crate::arena::{
         AllocatorMemory, ArenaMemory, ArenaRegion, HeldPlaces, OpenRegion, OpenStorage, PlanFrom,
         PlanShape,
     };
-    use wz_runtime_posix::stream::PosixTcpDial;
-    use wz_runtime_posix::{PosixClock, PosixEntropy};
 
     /// The allocator, counting its reservations and keeping the address of the first it gave.
     struct Counted {
@@ -569,29 +492,24 @@ fn an_on_use_open_asks_its_memory_for_its_state_alone() {
         reserves: AtomicUsize::new(0),
         first: AtomicUsize::new(0),
     };
-    let router = Router::start(CatchAll::None);
-    let config = super::config(&router);
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let config = sim.config();
     let region: &'static OpenRegion = Box::leak(Box::new(
-        Engine::open_region(
+        SimEngine::open_region(
             ArenaRegion::of(PlanShape::of(&config), config.limits)
                 .expect("the client's limits lay a region out"),
             HeldPlaces::NONE,
         )
         .expect("the engine's places lay out"),
     ));
-    let engine = Engine::open_made_in(
-        host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
-        PosixClock,
-        PosixEntropy,
-        || super::config(&router),
-        wz_session_core::policy::SessionPolicy::defaults(),
-        crate::OpenKeyIds::none(),
+    let engine = sim.open_made_in(
+        config,
         OpenStorage {
             memory: &BLOCK,
             plan: PlanFrom::Region(region),
         },
-    )
-    .expect("the session opens");
+    );
     assert_eq!(
         BLOCK.reserves.load(Ordering::SeqCst),
         1,

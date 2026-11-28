@@ -734,3 +734,47 @@ void wz_tls_session_free(struct wz_tls_session *s)
 	mbedtls_ssl_config_free(&s->conf);
 	mbedtls_free(s);
 }
+
+/* ES256 of a sealed lifecycle command (docs/command-seal.md): PSA's import format for a P-256
+ * public key is the uncompressed point and its signature format for ECDSA is r then s, which are
+ * the forms the command carries, so nothing is converted. A point not on the curve is refused by
+ * the import and verifies nothing. */
+int wz_tls_es256_verify(const uint8_t *point, const uint8_t *message, size_t len,
+			const uint8_t *signature)
+{
+	if (!started) {
+		return WZ_TLS_E_STATE;
+	}
+	psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+	psa_set_key_type(&attributes, PSA_KEY_TYPE_ECC_PUBLIC_KEY(PSA_ECC_FAMILY_SECP_R1));
+	psa_set_key_bits(&attributes, 256);
+	psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_VERIFY_MESSAGE);
+	psa_set_key_algorithm(&attributes, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
+	mbedtls_svc_key_id_t key = MBEDTLS_SVC_KEY_ID_INIT;
+	psa_status_t st = psa_import_key(&attributes, point, 65, &key);
+	psa_reset_key_attributes(&attributes);
+	if (st == PSA_ERROR_INVALID_ARGUMENT || st == PSA_ERROR_NOT_SUPPORTED) {
+		return 0;
+	}
+	if (st != PSA_SUCCESS) {
+		return (int)st;
+	}
+	st = psa_verify_message(key, PSA_ALG_ECDSA(PSA_ALG_SHA_256), message, len, signature, 64);
+	(void)psa_destroy_key(key);
+	if (st == PSA_SUCCESS) {
+		return 1;
+	}
+	if (st == PSA_ERROR_INVALID_SIGNATURE || st == PSA_ERROR_INVALID_ARGUMENT) {
+		return 0;
+	}
+	return (int)st;
+}
+
+int wz_tls_random(uint8_t *out, size_t len)
+{
+	if (!started) {
+		return WZ_TLS_E_STATE;
+	}
+	psa_status_t st = psa_generate_random(out, len);
+	return st == PSA_SUCCESS ? 0 : (int)st;
+}

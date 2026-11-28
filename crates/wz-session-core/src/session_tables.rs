@@ -65,12 +65,13 @@ use core::sync::atomic::AtomicU32;
 use portable_atomic::AtomicU32;
 
 use crate::bounded::{
-    Arena, BoundedVec, CapacityFull, KeyBacking, KeyLength, KeyMaker, KeyUnkept, LendRefused, Lent,
-    Profile, Region, RegionLines, Static, Storage, TableLender, ZeroEmpty,
+    seq_bytes, Arena, BoundedVec, CapacityFull, KeyBacking, KeyLength, KeyMaker, KeyUnkept,
+    LaidOut, LendRefused, Lent, Profile, Region, RegionLines, RowCount, RowCounts, SeqPlace,
+    Static, Storage, TableLender, ZeroEmpty,
 };
 use crate::caps;
 use crate::declare_form::RetractionKey;
-use crate::key_arena::{KeyRef, KeySpace, LentKeys};
+use crate::key_arena::{KeySpace, LentKeys};
 use crate::key_gate::{ClassId, KeyGate};
 use crate::keyexpr_match::{keyexpr_intersects, KeyFacts};
 use crate::locality::Locality;
@@ -138,22 +139,39 @@ pub type PendingGetHandle = Handle<kind::PendingGet>;
 
 /// The tables of the declarations a session tells its peers, each named apart from its rows'
 /// type: what a walk of them in one order reads through [`SessionTables::slots_of`], and what a
-/// row of any of them is named by as data ([`DeclaredRow`]).
+/// row of any of them is named by as data ([`DeclaredRow`]). Its value is the code a row's word
+/// names its table by ([`DeclaredRow::to_bits`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum DeclaredTable {
     /// The key expression declarations.
-    Keyexprs,
+    Keyexprs = 0,
     /// The subscribers.
-    Subscribers,
+    Subscribers = 1,
     /// The write filters, each told as the Interest it holds open; one that holds none has
     /// nothing to tell.
-    Interests,
+    Interests = 2,
     /// The queryables.
-    Queryables,
+    Queryables = 3,
     /// The liveliness tokens.
-    Tokens,
+    Tokens = 4,
     /// The liveliness subscribers.
-    LivelinessSubscribers,
+    LivelinessSubscribers = 5,
+}
+
+impl DeclaredTable {
+    /// The table whose code is `code` (its value), or `None` for a code no table has.
+    fn of_code(code: u64) -> Option<Self> {
+        Some(match code {
+            0 => Self::Keyexprs,
+            1 => Self::Subscribers,
+            2 => Self::Interests,
+            3 => Self::Queryables,
+            4 => Self::Tokens,
+            5 => Self::LivelinessSubscribers,
+            _ => return None,
+        })
+    }
 }
 
 /// A kind of row kept in one of the tables of declarations ([`DeclaredTable`]).
@@ -205,6 +223,32 @@ impl DeclaredRow {
             table: K::TABLE,
             row: handle.to_bits(),
         }
+    }
+
+    /// The row as one word, for an object outside the tables to keep: its table's code in the
+    /// high half, its handle's bits in the low half. Two tables number their rows apart, so a
+    /// handle's bits alone may name a row of each; the table's code tells them apart. Never zero.
+    pub fn to_bits(self) -> u64 {
+        (u64::from(self.table as u8) << 32) | u64::from(self.row.get())
+    }
+
+    /// The row a word of [`Self::to_bits`] names; `None` for a word whose table's code no table
+    /// has, or whose handle's half is zero, neither of which a row writes.
+    pub fn from_bits(bits: u64) -> Option<Self> {
+        let table = DeclaredTable::of_code(bits >> 32)?;
+        // The low half is the handle's bits.
+        let row = core::num::NonZeroU32::new(bits as u32)?;
+        Some(Self { table, row })
+    }
+
+    /// The handle of the row, when it is a row of the table whose kind is `K`: `None` for a row
+    /// of another table, whatever its handle's bits. Whether the row still stands is the table's
+    /// to say, by the handle's generation.
+    pub fn handle<K: DeclaredKind>(self) -> Option<Handle<K>> {
+        if self.table != K::TABLE {
+            return None;
+        }
+        Handle::from_bits(self.row)
     }
 }
 
@@ -302,10 +346,6 @@ pub trait Presence: sealed::Presence {
     /// The table, to write, where the kind is kept.
     fn get_mut<T>(table: &mut Self::Table<T>) -> Option<&mut T>;
 
-    /// The table lent by `lend`, `rows` rows of it, where the kind is kept; nothing is lent where
-    /// it is not.
-    fn lent_from<T: LentTable>(lend: &mut TableLender<'_>, rows: usize) -> Self::Table<T>;
-
     /// The table of `rows` rows that takes its memory at its first row ([`CountedTable`]), where
     /// the kind is kept; nothing is made where it is not.
     #[cfg(feature = "alloc")]
@@ -346,18 +386,6 @@ impl<T> Unkept<T> {
         match self {
             Self::Never(never, _) => match *never {},
         }
-    }
-}
-
-/// A table a session's arena lends at its open, `rows` rows of it ([`Presence::lent_from`]).
-pub trait LentTable {
-    /// The table of `rows` rows `lend` lends.
-    fn lent_from(lend: &mut TableLender<'_>, rows: usize) -> Self;
-}
-
-impl<K, T, const N: usize> LentTable for SlotMap<K, T, N, Lent> {
-    fn lent_from(lend: &mut TableLender<'_>, rows: usize) -> Self {
-        SlotMap::lent_from(lend, rows)
     }
 }
 
@@ -407,10 +435,6 @@ impl Presence for Present {
 
     fn get_mut<T>(table: &mut T) -> Option<&mut T> {
         Some(table)
-    }
-
-    fn lent_from<T: LentTable>(lend: &mut TableLender<'_>, rows: usize) -> T {
-        T::lent_from(lend, rows)
     }
 
     #[cfg(feature = "alloc")]
@@ -486,10 +510,6 @@ impl Presence for Absent {
 
     fn get_mut<T>(_table: &mut AbsentTable<T>) -> Option<&mut T> {
         None
-    }
-
-    fn lent_from<T: LentTable>(_lend: &mut TableLender<'_>, _rows: usize) -> AbsentTable<T> {
-        AbsentTable::new()
     }
 
     #[cfg(feature = "alloc")]
@@ -606,11 +626,6 @@ impl<Key: KeyBacking> EntityKey<Key> {
     /// What the retraction names beside the id, as the declaration stated it.
     pub fn retraction(&self) -> Retraction {
         self.retraction
-    }
-
-    /// The key as the row keeps it: a clone is one more holder of it, for a reader past the row.
-    pub fn backing(&self) -> &Key {
-        &self.key
     }
 }
 
@@ -927,12 +942,6 @@ impl<Key, Cb> SubscriberRow<Key, Cb> {
     pub fn into_callback(self) -> Cb {
         self.callback
     }
-
-    /// Its callback and its key, the row let go of: the key for the retraction to name once the
-    /// row went from the tables.
-    fn into_parts(self) -> (Cb, Key) {
-        (self.callback, self.key.key)
-    }
 }
 
 /// A queryable of the session's.
@@ -1207,6 +1216,16 @@ impl<'r> PlannedPut<'r> {
         self.head
     }
 
+    /// The filter's key as [`Self::key`] names it, lent by `text`, a text equal to it that the
+    /// caller holds itself (the put's own key): a send made once the tables are let go of names the
+    /// key as the plan does. `None` for a text that is not the filter's key.
+    pub fn key_on<'k>(&self, text: &'k str) -> Option<crate::named_key::NamedKey<'k>> {
+        if text != self.key.text() {
+            return None;
+        }
+        crate::named_key::NamedKey::by_head(text, &self.head)
+    }
+
     /// The facts the Put is sent from.
     pub fn params(&self) -> crate::publish_options::PlainPutParams {
         self.params
@@ -1364,15 +1383,34 @@ impl<Cb> MatchingRow<Cb> {
 }
 
 /// A get the session waits on: the request id its legs carry, the key its replies must
-/// intersect, how many legs still owe their Final, and when it ends unanswered.
+/// intersect, how they are consolidated over every leg, how many legs still owe their Final, when
+/// it ends unanswered, and whether it ended.
 #[derive(Debug)]
 pub struct PendingGetRow<Key, Cb> {
     request: RequestId,
     /// `None` for a get that takes a reply on any key (pico's `_anyke`).
     gate: Option<Key>,
+    /// One mode for the get, whatever leg a reply comes by, as zenoh keeps the reception mode in
+    /// the query's state.
+    mode: crate::query_mode::ConsolidationMode,
     legs: u16,
+    /// `u64::MAX` for a get that waits with no deadline.
     deadline: u64,
+    end: GetEnd,
     callback: Cb,
+}
+
+/// Whether a pending get still takes replies. An ended get takes none, and its row stays until
+/// the caller has handed out what it held and its end, and retires it
+/// ([`SessionTables::retire_get`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GetEnd {
+    /// Its legs still owe Finals, and its deadline has not passed.
+    Standing,
+    /// Every leg's Final came, or no leg is left to send one.
+    Answered,
+    /// Its deadline passed first: its callback is owed a timeout after what it held.
+    TimedOut,
 }
 
 impl<Key: KeyBacking, Cb> PendingGetRow<Key, Cb> {
@@ -1392,14 +1430,24 @@ impl<Key: KeyBacking, Cb> PendingGetRow<Key, Cb> {
         crate::reply_acceptance::admits_reply(self.gate(), reply)
     }
 
+    /// How its replies are consolidated.
+    pub fn mode(&self) -> crate::query_mode::ConsolidationMode {
+        self.mode
+    }
+
     /// How many legs still owe their Final.
     pub fn legs(&self) -> u16 {
         self.legs
     }
 
-    /// When it ends unanswered, in the driver's clock.
+    /// When it ends unanswered, in the driver's clock; `u64::MAX` for never.
     pub fn deadline(&self) -> u64 {
         self.deadline
+    }
+
+    /// Whether it still takes replies, or how it ended.
+    pub fn end(&self) -> GetEnd {
+        self.end
     }
 
     /// Its callback.
@@ -1760,25 +1808,25 @@ pub struct Unwatched<R> {
 }
 
 /// What ending one leg of a get left of it.
-#[derive(Debug)]
-pub enum LegEnded<R> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LegEnded {
     /// Other legs still owe their Final: how many.
     Owed(u16),
-    /// That was the last leg: the get is over, its row as [`SessionTables::end_get`] hands it.
-    Over(Removal<R>),
+    /// That was the last leg: the get ended answered ([`GetEnd::Answered`]).
+    Over,
 }
 
-/// The bytes the table of held replies takes of an arena for `rows`; none in a build that holds
-/// none (no `storage-profile`).
-#[cfg(feature = "storage-profile")]
-const fn held_arena_bytes(rows: usize) -> Option<usize> {
-    crate::reply_hold::HeldReplies::<PendingGetHandle, Lent>::arena_bytes(rows)
-}
-
-/// See the `storage-profile` form.
-#[cfg(not(feature = "storage-profile"))]
-const fn held_arena_bytes(_rows: usize) -> Option<usize> {
-    Some(0)
+/// What the tables made of a reply handed to a pending get (`SessionTables::admit_reply`).
+#[derive(Debug)]
+pub enum ReplyAdmitted<C> {
+    /// Let through to the get's callback: the call begun on its row, made once the tables are
+    /// let go, or `None` where the row begins none.
+    Passed(Option<C>),
+    /// Held back by the get's consolidation, for its end.
+    Held,
+    /// Not handed on: no standing get of the handle, a key its gate does not take, or a reply
+    /// older than what its key holds.
+    Dropped,
 }
 
 /// A get begun: its row and the request id its query carries.
@@ -1818,7 +1866,14 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     plane_bounds: PlaneBounds,
     matching: MatchingListenersKept<F, P>,
     pending_gets: PendingGetsKept<F, P>,
-    /// What the consolidating gets hold back (`consolidate_reply`).
+    /// The earliest deadline of a standing get, past by one so that zero is none and the tables'
+    /// zero bytes hold no deadline: kept as gets begin and stop standing, so a driver's wait reads
+    /// it with no walk ([`Self::next_get_deadline`]).
+    get_due: u64,
+    /// How many gets their answer or their deadline ended and that are not retired yet: what a
+    /// delivery that hands out their ends reads with no walk ([`Self::owes_ended_get`]).
+    ended_gets: u16,
+    /// What the consolidating gets hold back (`admit_reply`).
     #[cfg(feature = "storage-profile")]
     held: crate::reply_hold::HeldReplies<PendingGetHandle, P>,
 }
@@ -1956,6 +2011,54 @@ impl<Key: KeyBacking> Entity for TokenRow<Key> {
     }
 }
 
+/// A row whose undeclaration reads its retraction off it ([`Retracting`]): what it was keyed by,
+/// and what the caller drops and the key the retraction holds once the row leaves the tables.
+trait RetractedEntity: Entity {
+    /// The key's backing.
+    type Key: KeyBacking;
+    /// What the caller drops where it holds no lock.
+    type Callback;
+    /// The key as the row keeps it.
+    fn entity_key(&self) -> &EntityKey<Self::Key>;
+    /// Its callback and its key, the row let go of: the key for the retraction to name once the
+    /// row went from the tables.
+    fn into_parts(self) -> (Self::Callback, Self::Key);
+}
+
+impl<Key: KeyBacking, Cb: RowCallback> RetractedEntity for SubscriberRow<Key, Cb> {
+    type Key = Key;
+    type Callback = Cb;
+    fn entity_key(&self) -> &EntityKey<Key> {
+        &self.key
+    }
+    fn into_parts(self) -> (Cb, Key) {
+        (self.callback, self.key.key)
+    }
+}
+
+impl<Key: KeyBacking, Cb: RowCallback> RetractedEntity for QueryableRow<Key, Cb> {
+    type Key = Key;
+    type Callback = Cb;
+    fn entity_key(&self) -> &EntityKey<Key> {
+        &self.key
+    }
+    fn into_parts(self) -> (Cb, Key) {
+        (self.callback, self.key.key)
+    }
+}
+
+/// A token's row hands back no callback, none being called: only its key, to its retraction.
+impl<Key: KeyBacking> RetractedEntity for TokenRow<Key> {
+    type Key = Key;
+    type Callback = ();
+    fn entity_key(&self) -> &EntityKey<Key> {
+        &self.key
+    }
+    fn into_parts(self) -> ((), Key) {
+        ((), self.key.key)
+    }
+}
+
 impl<Key: KeyBacking, Cb: RowCallback> Entity for LivelinessSubscriberRow<Key, Cb> {
     fn entity_id(&self) -> EntityId {
         self.id
@@ -2049,6 +2152,46 @@ fn undeclare_entity<K, R: Entity, T, V, P: Storage, const N: usize>(
     })
 }
 
+/// Remove the entity `handle` names from `table` as [`undeclare_entity`] does, with what its
+/// retraction names read off the row it removes ([`Retracting`]). The row's key goes to the
+/// retraction: moved out of a row that leaves its slot now, held once more for one a call of which
+/// runs, which keeps its key in its slot until that call ends.
+fn undeclare_retracted<K, R, P, const N: usize>(
+    table: &mut SlotMap<K, R, N, P>,
+    keyexprs: &mut Keyexprs<P>,
+    handle: Handle<K>,
+) -> Option<RetractedUndeclared<R::Callback, P::Key>>
+where
+    R: RetractedEntity<Key = P::Key>,
+    P: Storage,
+{
+    let undeclared = undeclare_entity(
+        table,
+        keyexprs,
+        handle,
+        |keyexprs, row, leaves| {
+            let key = row.entity_key();
+            let names = retraction_names(keyexprs, key)?;
+            Some((names, (!leaves).then(|| key.key.clone())))
+        },
+        R::into_parts,
+    )?;
+    let (taken, key) = undeclared.taken.unzip();
+    let retraction = undeclared.retraction.and_then(|(names, kept)| {
+        Some(Retracting {
+            names,
+            key: kept.or(key)?,
+        })
+    });
+    Some(Undeclared {
+        id: undeclared.id,
+        taken,
+        keyexpr: undeclared.keyexpr,
+        named: undeclared.named,
+        retraction,
+    })
+}
+
 /// `key` as the wire carries it, by the declarations of `keyexprs` ([`SessionTables::wire_of`]).
 fn wire_form<'k, P: Storage>(keyexprs: &Keyexprs<P>, key: &'k EntityKey<P::Key>) -> WireForm<'k> {
     let whole = text(&key.key);
@@ -2100,9 +2243,19 @@ fn release_drained<K, R: Entity, P: Storage, const N: usize>(
     table: &mut SlotMap<K, R, N, P>,
     cursor: &mut usize,
 ) -> Option<R> {
+    release_drained_by(table, cursor, R::drained)
+}
+
+/// [`release_drained`] for a table whose rows are not declared entities (the pending gets),
+/// `drained` reading the row's latch.
+fn release_drained_by<K, R, P: Storage, const N: usize>(
+    table: &mut SlotMap<K, R, N, P>,
+    cursor: &mut usize,
+    drained: impl Fn(&R) -> bool,
+) -> Option<R> {
     let handle = loop {
         let (handle, row) = table.next_retired_from(cursor)?;
-        if row.drained() {
+        if drained(row) {
             break handle;
         }
     };
@@ -2246,15 +2399,24 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// so were lent no rows and refuse every declaration; [`SessionTables::lent`] makes the ones a
     /// session holds.
     pub fn new() -> Self {
+        Self::of(
+            Default::default(),
+            MatchMemo::new(
+                <crate::limits::MatchMemoSlots as crate::limit_binding::LimitSpec>::DEFAULT,
+            ),
+        )
+    }
+
+    /// Tables of no rows, each holding at most the build's bound, their keys kept in `keys` and the
+    /// subscribers' receive match cache `memo`.
+    fn of(keys: P::Keys, memo: MatchMemo<P>) -> Self {
         Self {
-            keys: Default::default(),
+            keys,
             next_entity: EntityIds::default(),
             next_expr: 1,
             next_request: 0,
             subscriber_epoch: 0,
-            memo: MatchMemo::new(
-                <crate::limits::MatchMemoSlots as crate::limit_binding::LimitSpec>::DEFAULT,
-            ),
+            memo,
             key_gate: KeyGate::of_build(),
             keyexprs: SlotMap::new(),
             subscribers: SlotMap::new(),
@@ -2267,6 +2429,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             plane_bounds: PlaneBounds::UNBOUND,
             matching: <F::FilterPresence as Presence>::empty::<MatchingListeners<F, P>>(),
             pending_gets: <F::GetPresence as Presence>::empty::<PendingGets<F, P>>(),
+            get_due: 0,
+            ended_gets: 0,
             #[cfg(feature = "storage-profile")]
             held: crate::reply_hold::HeldReplies::default(),
         }
@@ -2649,33 +2813,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         &mut self,
         handle: SubscriberHandle,
     ) -> Option<RetractedUndeclared<F::Subscriber, P::Key>> {
-        let undeclared = undeclare_entity(
-            &mut self.subscribers,
-            &mut self.keyexprs,
-            handle,
-            |keyexprs, row, leaves| {
-                let names = retraction_names(keyexprs, &row.key)?;
-                // A row a call keeps holds its key until the call ends, so the retraction holds it
-                // once more; a row that leaves hands its key over with it.
-                Some((names, (!leaves).then(|| row.key.key.clone())))
-            },
-            SubscriberRow::into_parts,
-        )?;
+        let undeclared = undeclare_retracted(&mut self.subscribers, &mut self.keyexprs, handle)?;
         self.subscriber_epoch = self.subscriber_epoch.wrapping_add(1);
-        let (taken, key) = undeclared.taken.unzip();
-        let retraction = undeclared.retraction.and_then(|(names, kept)| {
-            Some(Retracting {
-                names,
-                key: kept.or(key)?,
-            })
-        });
-        Some(Undeclared {
-            id: undeclared.id,
-            taken,
-            keyexpr: undeclared.keyexpr,
-            named: undeclared.named,
-            retraction,
-        })
+        Some(undeclared)
     }
 
     /// Declare a queryable on `key`, answering what `origin` admits, `complete` or not.
@@ -2713,20 +2853,16 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         })
     }
 
-    /// Undeclare the queryable `handle` names, its callback handed back.
+    /// Undeclare the queryable `handle` names, its callback handed back, as a subscriber is
+    /// ([`Self::undeclare_subscriber`]): what its retraction names is read off the row it removes,
+    /// with the row's key.
     pub fn undeclare_queryable(
         &mut self,
         handle: QueryableHandle,
-    ) -> Option<Undeclared<F::Queryable>> {
+    ) -> Option<RetractedUndeclared<F::Queryable, P::Key>> {
         let queryables =
             <F::QueryablePresence as Presence>::get_mut::<Queryables<F, P>>(&mut self.queryables)?;
-        undeclare_entity(
-            queryables,
-            &mut self.keyexprs,
-            handle,
-            |_, _, _| (),
-            QueryableRow::into_callback,
-        )
+        undeclare_retracted(queryables, &mut self.keyexprs, handle)
     }
 
     /// Declare a liveliness token on `key`.
@@ -2747,16 +2883,16 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         .map_err(|refused| refused.why)
     }
 
-    /// Undeclare the liveliness token `handle` names.
-    pub fn undeclare_token(&mut self, handle: TokenHandle) -> Option<Undeclared<TokenRow<P::Key>>> {
+    /// Undeclare the liveliness token `handle` names, as a subscriber is
+    /// ([`Self::undeclare_subscriber`]): what its retraction names is read off the row it removes,
+    /// with the row's key. A token has no callback, so no call keeps its row, and nothing else of
+    /// the row is handed back.
+    pub fn undeclare_token(
+        &mut self,
+        handle: TokenHandle,
+    ) -> Option<RetractedUndeclared<(), P::Key>> {
         let tokens = <F::LivelinessPresence as Presence>::get_mut::<Tokens<P>>(&mut self.tokens)?;
-        undeclare_entity(
-            tokens,
-            &mut self.keyexprs,
-            handle,
-            |_, _, _| (),
-            core::convert::identity,
-        )
+        undeclare_retracted(tokens, &mut self.keyexprs, handle)
     }
 
     /// Declare a liveliness subscriber on `key`, asking for the tokens alive now with `history`.
@@ -3320,8 +3456,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
 
     // ---- pending gets ----------------------------------------------------------------------
 
-    /// Begin a get whose replies pass `accept`, owed a Final by each of its `legs`, ending
-    /// unanswered at `deadline`: its row and the request id every leg's query carries.
+    /// Begin a get whose replies pass `accept`, consolidated by `mode` over every leg, owed a
+    /// Final by each of its `legs`, ending unanswered at `deadline` (`u64::MAX` for never): its
+    /// row and the request id every leg's query carries. A caller that issues the legs one at a
+    /// time begins it with one, its own, which it ends once it has issued them ([`Self::add_leg`]).
     ///
     /// Refused in the order the other declarations are, so a refused get spends no request id
     /// and keeps no key: table room, then the gate's key (`KeyexprTooLong` past what a row
@@ -3329,6 +3467,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     pub fn begin_get(
         &mut self,
         accept: crate::reply_acceptance::ReplyAcceptance<'_>,
+        mode: crate::query_mode::ConsolidationMode,
         legs: u16,
         deadline: u64,
         callback: F::Reply,
@@ -3361,8 +3500,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         let row = PendingGetRow {
             request,
             gate,
+            mode,
             legs,
             deadline,
+            end: GetEnd::Standing,
             callback,
         };
         let Some(gets) = self.kept_pending_gets_mut() else {
@@ -3372,7 +3513,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             });
         };
         match gets.insert(row) {
-            Ok(handle) => Ok(GetBegun { handle, request }),
+            Ok(handle) => {
+                self.lower_get_due(deadline);
+                Ok(GetBegun { handle, request })
+            }
             Err(CapacityFull(row)) => Err(Refused {
                 why: RegisterError::TableFull,
                 callback: row.callback,
@@ -3405,9 +3549,62 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             .find(|(_, row)| row.request == request)
     }
 
-    /// Begin a call of the get `handle` names, with a reply the tables admitted, the tables held:
-    /// what the call is made with once they are let go, `None` when no live row is named. See
-    /// [`Self::begin_subscriber`].
+    /// One more leg of the standing get `handle` names, owing its Final: whether it was counted.
+    /// An ended get takes no leg, and a get counts at most `u16::MAX` at once.
+    pub fn add_leg(&mut self, handle: PendingGetHandle) -> bool {
+        let Some(row) = self
+            .kept_pending_gets_mut()
+            .and_then(|gets| gets.get_mut(handle))
+        else {
+            return false;
+        };
+        if row.end != GetEnd::Standing {
+            return false;
+        }
+        let Some(legs) = row.legs.checked_add(1) else {
+            return false;
+        };
+        row.legs = legs;
+        true
+    }
+
+    #[cfg(feature = "storage-profile")]
+    /// Hand `reply` to the get `handle` names, with the tables held: refused unless the get
+    /// stands and its gate admits the reply; then its mode's consolidation holds it back, drops it
+    /// as stale, or lets it through, with a call of the get's callback begun for the caller to
+    /// make once the tables are let go, as a subscriber's call is begun. An Err and every reply of
+    /// a get that does not consolidate are let through; one `Latest` has no room to hold is let
+    /// through at once and counted ([`Self::held_refused`]). The rule is
+    /// [`crate::reply_hold::consolidate`]'s, the one every consolidating get applies, over every
+    /// leg of the get.
+    pub fn admit_reply(
+        &mut self,
+        handle: PendingGetHandle,
+        reply: &dyn crate::reply_sink::ReplyView,
+    ) -> ReplyAdmitted<<F::Reply as RowCallback>::Call> {
+        let Some(row) = self.kept_pending_gets().and_then(|gets| gets.get(handle)) else {
+            return ReplyAdmitted::Dropped;
+        };
+        if row.end != GetEnd::Standing || !row.admits(reply) {
+            return ReplyAdmitted::Dropped;
+        }
+        let mode = row.mode;
+        let consolidated =
+            crate::reply_hold::consolidate(mode, &mut self.held.of(handle), reply, &mut |_| {});
+        match consolidated {
+            crate::reply_hold::Consolidated::Forwarded
+            | crate::reply_hold::Consolidated::Refused(_) => {
+                ReplyAdmitted::Passed(self.begin_reply(handle))
+            }
+            crate::reply_hold::Consolidated::Held => ReplyAdmitted::Held,
+            crate::reply_hold::Consolidated::Stale => ReplyAdmitted::Dropped,
+        }
+    }
+
+    /// Begin a call of the get `handle` names, the tables held, whether or not it still stands:
+    /// what the call is made with once they are let go, `None` when no live row is named. What an
+    /// ended get held and its timeout are handed to its callback by such calls before it is
+    /// retired. See [`Self::begin_subscriber`].
     pub fn begin_reply(&self, handle: PendingGetHandle) -> Option<<F::Reply as RowCallback>::Call> {
         const {
             assert!(row_may_lie_in::<F::Reply, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
@@ -3415,58 +3612,147 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.kept_pending_gets()?.get(handle)?.callback.begin()
     }
 
-    /// Let go of the get `handle` named, ended while a call of it ran, once that call ended last:
-    /// its row, to drop where no lock is held.
+    /// Let go of the get `handle` named, retired while a call of it ran, once that call ended
+    /// last: its row, to drop where no lock is held.
     pub fn release_get(&mut self, handle: PendingGetHandle) -> Option<PendingGet<F, P>> {
         self.kept_pending_gets_mut()?.release(handle)
     }
 
-    /// One leg of the get `handle` names has its Final, or will have none (its face is gone): what
-    /// is left of the get. The last leg ends it as [`Self::end_get`] does.
-    pub fn end_leg(&mut self, handle: PendingGetHandle) -> Option<LegEnded<PendingGet<F, P>>> {
+    /// [`Self::release_drained_subscriber`] for the pending gets: a get retired while a call of
+    /// it ran, whose last call has ended since, where that call ended with no handle of the get
+    /// (a reply a round of deliveries held).
+    pub fn release_drained_get(&mut self, cursor: &mut usize) -> Option<PendingGet<F, P>> {
+        release_drained_by(self.kept_pending_gets_mut()?, cursor, |row| {
+            row.callback.drained()
+        })
+    }
+
+    /// The next get at or after `cursor` still in the table, standing or ended, whose callback
+    /// `picks` names: what a caller that ends every get of one asker (a cancellation) or of the
+    /// session (its close) retires. A walk from cursor `0` to `None` finds each such get once,
+    /// and a get retired on the way is not found again.
+    pub fn next_get_of(
+        &self,
+        cursor: &mut usize,
+        picks: impl Fn(&F::Reply) -> bool,
+    ) -> Option<PendingGetHandle> {
+        loop {
+            let (handle, row) = self.kept_pending_gets()?.next_from(cursor)?;
+            if picks(&row.callback) {
+                return Some(handle);
+            }
+        }
+    }
+
+    /// Retire the next get at or after `cursor` whose callback `picks` names, standing or ended,
+    /// `mark` run on its callback first, under the same hold, so that no call of it made after
+    /// reads it unmarked (a cancellation's mark): its handle and how its row left
+    /// ([`Self::retire_get`]), for a caller that ends every get of one asker (a cancellation) or
+    /// of the session (its close), letting go of the session between two. A walk from cursor `0`
+    /// to `None` retires each such get once and ends: the cursor moves past every get it reads,
+    /// so a get is never read twice, whatever its retirement answered.
+    pub fn retire_next_get_of(
+        &mut self,
+        cursor: &mut usize,
+        picks: impl Fn(&F::Reply) -> bool,
+        mark: impl Fn(&F::Reply),
+    ) -> Option<(PendingGetHandle, Removal<PendingGet<F, P>>)> {
+        loop {
+            let handle = self.next_get_of(cursor, &picks)?;
+            if let Some(row) = self.kept_pending_gets().and_then(|gets| gets.get(handle)) {
+                mark(&row.callback);
+            }
+            if let Some(removal) = self.retire_get(handle) {
+                return Some((handle, removal));
+            }
+        }
+    }
+
+    /// One leg of the standing get `handle` names has its Final, or will have none (its face is
+    /// gone): what is left of the get. The last leg ends it answered; an ended get has no leg.
+    pub fn end_leg(&mut self, handle: PendingGetHandle) -> Option<LegEnded> {
         let row = self.kept_pending_gets_mut()?.get_mut(handle)?;
+        if row.end != GetEnd::Standing {
+            return None;
+        }
         row.legs = row.legs.saturating_sub(1);
         if row.legs > 0 {
             return Some(LegEnded::Owed(row.legs));
         }
-        self.end_get(handle).map(LegEnded::Over)
+        row.end = GetEnd::Answered;
+        let deadline = row.deadline;
+        self.ended_gets = self.ended_gets.saturating_add(1);
+        self.raise_get_due(deadline);
+        Some(LegEnded::Over)
     }
 
-    /// End the get `handle` names, whatever its legs still owe (its deadline passed, its asker
-    /// cancelled it): no call of its callback begins after this. Its row is handed back at once
-    /// when no call runs, else the call that ends last lets it go ([`Self::release_get`]).
-    pub fn end_get(&mut self, handle: PendingGetHandle) -> Option<Removal<PendingGet<F, P>>> {
-        // What it held back goes with it: a get that delivers its held replies takes them out
-        // first (`take_held`).
+    /// The standing get `handle` names timed out, whatever its legs still owe: it takes no reply
+    /// from here on, and its callback is owed a timeout after what it held. Whether it stood.
+    pub fn time_out_get(&mut self, handle: PendingGetHandle) -> bool {
+        let Some(row) = self
+            .kept_pending_gets_mut()
+            .and_then(|gets| gets.get_mut(handle))
+        else {
+            return false;
+        };
+        if row.end != GetEnd::Standing {
+            return false;
+        }
+        row.end = GetEnd::TimedOut;
+        let deadline = row.deadline;
+        self.ended_gets = self.ended_gets.saturating_add(1);
+        self.raise_get_due(deadline);
+        true
+    }
+
+    /// Whether a get ended by its answer or its deadline is still to be handed out and retired:
+    /// what a delivery reads before it walks the gets for it ([`Self::next_ended_get`]).
+    pub fn owes_ended_get(&self) -> bool {
+        self.ended_gets != 0
+    }
+
+    /// The next get at or after `cursor` that ended, and how: what the caller hands out (what it
+    /// held, then its timeout) before it retires it. A walk from cursor `0` to `None` finds every
+    /// such get, each once.
+    pub fn next_ended_get(&self, cursor: &mut usize) -> Option<(PendingGetHandle, GetEnd)> {
+        loop {
+            let (handle, row) = self.kept_pending_gets()?.next_from(cursor)?;
+            if row.end != GetEnd::Standing {
+                return Some((handle, row.end));
+            }
+        }
+    }
+
+    /// Retire the get `handle` names, ended or not (its end handed out, or its asker cancelled it,
+    /// or the session is closed): no call of its callback begins after this, and what it still
+    /// holds back goes with it. Its row is handed back at once when no call runs, else the call
+    /// that ends last lets it go ([`Self::release_get`]). `None` only when `handle` names no
+    /// live get: a get's slot is pinned by nothing but this retirement (no `&mut` of the gets'
+    /// table leaves these tables), and a retired get is found by no lookup, so its slot holds no
+    /// pin when the one a running call needs is taken here, and that pin is never refused.
+    pub fn retire_get(&mut self, handle: PendingGetHandle) -> Option<Removal<PendingGet<F, P>>> {
         #[cfg(feature = "storage-profile")]
         self.held.forget(handle);
         let gets =
             <F::GetPresence as Presence>::get_mut::<PendingGets<F, P>>(&mut self.pending_gets)?;
         let mut entry = gets.entry(handle)?;
-        if !(entry.get()?.callback.retire() || entry.pin()) {
+        let row = entry.get()?;
+        let stood = (row.end == GetEnd::Standing).then_some(row.deadline);
+        if !(row.callback.retire() || entry.pin()) {
             return None;
         }
-        entry.remove()
-    }
-
-    #[cfg(feature = "storage-profile")]
-    /// Apply the get's consolidation `mode` to `reply`, one its gate admitted: hold it back, drop
-    /// it as stale, or let it through (`Consolidated::Forwarded`), for the caller to hand to the
-    /// get's callback once the tables are let go. The rule is [`crate::reply_hold::consolidate`]'s,
-    /// the one every consolidating get applies.
-    pub fn consolidate_reply(
-        &mut self,
-        handle: PendingGetHandle,
-        mode: crate::query_mode::ConsolidationMode,
-        reply: &dyn crate::reply_sink::ReplyView,
-    ) -> crate::reply_hold::Consolidated {
-        crate::reply_hold::consolidate(mode, &mut self.held.of(handle), reply, &mut |_| {})
+        let removed = entry.remove();
+        match stood {
+            Some(deadline) => self.raise_get_due(deadline),
+            None => self.ended_gets = self.ended_gets.saturating_sub(1),
+        }
+        removed
     }
 
     #[cfg(feature = "storage-profile")]
     /// Take out the next reply the get `handle` names held back, for its caller to hand to the
-    /// get's callback once the tables are let go: what a `Latest` get delivers at its end, before
-    /// [`Self::end_get`] lets go of what is left.
+    /// get's callback once the tables are let go: what a consolidating get delivers at its end,
+    /// before [`Self::retire_get`] lets go of what is left.
     pub fn take_held(
         &mut self,
         handle: PendingGetHandle,
@@ -3480,22 +3766,49 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.held.refused()
     }
 
-    /// The next get at or after `cursor` whose deadline is at or before `now`.
+    /// The next standing get at or after `cursor` whose deadline is at or before `now`.
     pub fn next_expired_get(&self, now: u64, cursor: &mut usize) -> Option<PendingGetHandle> {
         loop {
             let (handle, row) = self.kept_pending_gets()?.next_from(cursor)?;
-            if row.deadline <= now {
+            if row.end == GetEnd::Standing && row.deadline <= now {
                 return Some(handle);
             }
         }
     }
 
-    /// The nearest deadline of a pending get: what a driver's wait is cut short to.
+    /// The nearest deadline of a standing get: what a driver's wait is cut short to. Read with no
+    /// walk of the gets.
     pub fn next_get_deadline(&self) -> Option<u64> {
-        self.kept_pending_gets()?
+        self.get_due.checked_sub(1)
+    }
+
+    /// A standing get due at `deadline` began: the gets' due time is that, if earlier.
+    fn lower_get_due(&mut self, deadline: u64) {
+        // A deadline of `u64::MAX` is none, and so is its count past by one.
+        let due = deadline.wrapping_add(1);
+        if due != 0 && (self.get_due == 0 || due < self.get_due) {
+            self.get_due = due;
+        }
+    }
+
+    /// A get due at `deadline` stopped standing: the gets' due time is worked out again from the
+    /// ones left when it was the one due.
+    fn raise_get_due(&mut self, deadline: u64) {
+        if self.get_due != deadline.wrapping_add(1) {
+            return;
+        }
+        self.get_due = 0;
+        let Some(gets) = self.kept_pending_gets() else {
+            return;
+        };
+        let earliest = gets
             .iter()
+            .filter(|(_, row)| row.end == GetEnd::Standing)
             .map(|(_, row)| row.deadline)
-            .min()
+            .min();
+        if let Some(earliest) = earliest {
+            self.lower_get_due(earliest);
+        }
     }
 
     // ---- delivery --------------------------------------------------------------------------
@@ -3958,7 +4271,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     }
 
     /// The pending gets' table, to write, where the tables keep one.
-    pub fn kept_pending_gets_mut(&mut self) -> Option<&mut PendingGets<F, P>> {
+    fn kept_pending_gets_mut(&mut self) -> Option<&mut PendingGets<F, P>> {
         <F::GetPresence as Presence>::get_mut::<PendingGets<F, P>>(&mut self.pending_gets)
     }
 }
@@ -4002,87 +4315,49 @@ impl<F: RowCallbacks, P: Storage> fmt::Debug for SessionTables<F, P> {
 }
 
 impl<F: RowCallbacks> SessionTables<F, Lent> {
-    /// The tables of a session, `rows` of each lent from `arena` in the order of
-    /// [`TableRows`], their keys kept in `keys`, the session's key arena. Refused past the
-    /// build's bound of a table or past what the arena has left.
+    /// The description of tables of the lent policy, the region's of the same tables: the lines
+    /// [`Self::lent`] lends and [`Self::arena_bytes`] counts, from the tables' start.
+    const LINES: RegionLines<SESSION_TABLE_LINES> = Self::places(0, 0);
+
+    /// Tables of no rows and no key arena, each refusing what is asked of it until a walk of a
+    /// description that holds their lines ([`Self::lent`]'s, or one of what holds the tables) lends
+    /// them their rows where they lie. A table whose rows are lent at the open remembers no key:
+    /// each slot of the cache would be rows of its own, which only the arena could give it.
+    pub fn rowless() -> Self {
+        Self::of(LentKeys::default(), MatchMemo::new(0))
+    }
+
+    /// The tables of a session, `rows` of each lent from `arena` in the order of their description
+    /// ([`SessionTables::places`]), their keys kept in `keys`, the session's key arena, and each
+    /// held to its rows. Refused past the build's bound of a table or past what the arena has left.
     pub fn lent(arena: &mut Arena, keys: KeySpace, rows: &TableRows) -> Result<Self, LendRefused> {
+        let mut tables = Self::rowless();
         // Lent whole and given up whole: a refused table leaves the ones after it rowless, and
         // the set goes at once, not one table at a time behind each refusal.
         let mut lend = TableLender::new(arena);
-        let tables = Self {
-            keys: LentKeys::from(keys),
-            next_entity: EntityIds::default(),
-            next_expr: 1,
-            next_request: 0,
-            subscriber_epoch: 0,
-            // A table whose rows are lent at open remembers no key: each slot of the cache would
-            // be rows of its own, which only the arena could give it.
-            memo: MatchMemo::new(0),
-            key_gate: KeyGate::of_build(),
-            keyexprs: SlotMap::lent_from(&mut lend, rows.keyexprs),
-            subscribers: SlotMap::lent_from(&mut lend, rows.subscribers),
-            queryables: <F::QueryablePresence as Presence>::lent_from::<Queryables<F, Lent>>(
+        // SAFETY: the description is this type's: each line names a sequence of `tables`, which
+        // holds no value, and states the bytes of its rows (`SeqPlace::of`), and its key line the
+        // tables' handle, which holds no key; `tables` is reached by nothing else during the call,
+        // and `keys` is the session's, which outlives them.
+        unsafe {
+            crate::key_arena::lend_region(
+                core::ptr::NonNull::from(&mut tables).cast::<u8>(),
+                keys,
+                &Self::LINES,
+                &rows.counts(),
                 &mut lend,
-                rows.queryables,
-            ),
-            tokens: <F::LivelinessPresence as Presence>::lent_from::<Tokens<Lent>>(
-                &mut lend,
-                rows.tokens,
-            ),
-            liveliness_subscribers: <F::LivelinessPresence as Presence>::lent_from::<
-                LivelinessSubscribers<F, Lent>,
-            >(&mut lend, rows.liveliness_subscribers),
-            write_filters: <F::FilterPresence as Presence>::lent_from::<WriteFilters<Lent>>(
-                &mut lend,
-                rows.write_filters(),
-            ),
-            plane_bounds: PlaneBounds::of(rows),
-            matching: <F::FilterPresence as Presence>::lent_from::<MatchingListeners<F, Lent>>(
-                &mut lend,
-                rows.matching_listeners,
-            ),
-            pending_gets: <F::GetPresence as Presence>::lent_from::<PendingGets<F, Lent>>(
-                &mut lend,
-                rows.pending_gets,
-            ),
-            #[cfg(feature = "storage-profile")]
-            held: lend
-                .lend_with(|arena| crate::reply_hold::HeldReplies::lent(arena, rows.held_replies)),
-        };
+            );
+        }
         lend.finish()?;
+        tables.limit_to(rows);
         Ok(tables)
     }
 
-    /// The bytes [`Self::lent`] takes of an arena for `rows`. `None` past the address space.
-    /// A const fn, so a build whose limits are fixed lays its session's arena out when it compiles.
+    /// The bytes [`Self::lent`] takes of an arena for `rows`: its description's lines summed. `None`
+    /// past the address space. A const fn, so a build whose limits are fixed lays its session's
+    /// arena out when it compiles.
     pub const fn arena_bytes(rows: &TableRows) -> Option<usize> {
-        let parts = [
-            <Keyexprs<Lent>>::arena_bytes(rows.keyexprs),
-            <Subscribers<F, Lent>>::arena_bytes(rows.subscribers),
-            kept_bytes::<F::QueryablePresence>(<Queryables<F, Lent>>::arena_bytes(rows.queryables)),
-            kept_bytes::<F::LivelinessPresence>(<Tokens<Lent>>::arena_bytes(rows.tokens)),
-            kept_bytes::<F::LivelinessPresence>(<LivelinessSubscribers<F, Lent>>::arena_bytes(
-                rows.liveliness_subscribers,
-            )),
-            kept_bytes::<F::FilterPresence>(<WriteFilters<Lent>>::arena_bytes(
-                rows.write_filters(),
-            )),
-            kept_bytes::<F::FilterPresence>(<MatchingListeners<F, Lent>>::arena_bytes(
-                rows.matching_listeners,
-            )),
-            kept_bytes::<F::GetPresence>(<PendingGets<F, Lent>>::arena_bytes(rows.pending_gets)),
-            held_arena_bytes(rows.held_replies),
-        ];
-        let mut sum = Some(0_usize);
-        let mut rest: &[Option<usize>] = &parts;
-        while let [part, tail @ ..] = rest {
-            sum = match (sum, *part) {
-                (Some(sum), Some(part)) => sum.checked_add(part),
-                _ => None,
-            };
-            rest = tail;
-        }
-        sum
+        seq_bytes(Self::LINES.seq_lines(), &rows.counts())
     }
 }
 
@@ -4125,13 +4400,16 @@ impl<F: RowCallbacks> SessionTables<F, crate::bounded::OnUse> {
             pending_gets: <F::GetPresence as Presence>::counted::<
                 PendingGets<F, crate::bounded::OnUse>,
             >(rows.pending_gets),
+            get_due: 0,
+            ended_gets: 0,
             held: crate::reply_hold::HeldReplies::counted(rows.held_replies),
         }
     }
 }
 
 // SAFETY: the key arena handle is `LentKeys`, whose zero is no arena; the ids are counts of ids
-// handed out, a zero expression id is minted as 1, the request id and the epoch are counts; the
+// handed out, a zero expression id is minted as 1, the request id and the epoch are counts, the
+// gets' due time of zero is none; the
 // match memory and the held replies are `ZeroEmpty` of this policy; every table is a `SlotMap` of
 // this policy (`ZeroEmpty`) or, absent, no bytes (`Presence` is sealed to the two); the plane
 // bounds of zero are none. Nothing drops a value, every sequence holding none.
@@ -4141,110 +4419,155 @@ unsafe impl<F: RowCallbacks> ZeroEmpty for SessionTables<F, Region> {}
 /// two for each of its eight tables, one for its held replies; and its one key arena handle.
 pub const SESSION_TABLE_LINES: usize = 17;
 
-/// The rows of a [`SessionTables`] of the region policy, which a region lays out beside the tables:
-/// each table's [`SlotRows`] at the build's bound of it, none of a kind the build keeps none of.
-pub struct SessionRows<F: RowCallbacks> {
-    keyexprs: SlotRows<KeyexprRow<KeyRef>, { caps::MAX_DECLARED_KEYEXPRS }>,
-    subscribers: SlotRows<Subscriber<F, Region>, { caps::MAX_SUBSCRIPTIONS }>,
+/// The rows of a [`SessionTables`] of a policy a description places, which a region lays out beside
+/// the tables: each table's [`SlotRows`] at the build's bound of it, none of a kind the build keeps
+/// none of. The region policy's are a value of a region; the lent policy's are no value, the plan
+/// lending each line's rows from an arena, and stand only for the description's region offsets.
+pub struct SessionRows<F: RowCallbacks, P: LaidOut = Region> {
+    keyexprs: SlotRows<
+        KeyexprRow<<P as Storage>::Key, <P as Storage>::KeyLen>,
+        { caps::MAX_DECLARED_KEYEXPRS },
+    >,
+    subscribers: SlotRows<Subscriber<F, P>, { caps::MAX_SUBSCRIPTIONS }>,
     queryables: <F::QueryablePresence as Presence>::Table<
-        SlotRows<Queryable<F, Region>, { caps::MAX_QUERYABLES }>,
+        SlotRows<Queryable<F, P>, { caps::MAX_QUERYABLES }>,
     >,
     tokens: <F::LivelinessPresence as Presence>::Table<
-        SlotRows<TokenRow<KeyRef>, { caps::MAX_LOCAL_TOKENS }>,
+        SlotRows<TokenRow<<P as Storage>::Key>, { caps::MAX_LOCAL_TOKENS }>,
     >,
     liveliness_subscribers: <F::LivelinessPresence as Presence>::Table<
-        SlotRows<LivelinessSubscriber<F, Region>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
+        SlotRows<LivelinessSubscriber<F, P>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
     >,
-    write_filters:
-        <F::FilterPresence as Presence>::Table<SlotRows<WriteFilterRow<KeyRef>, FILTER_ROWS>>,
+    write_filters: <F::FilterPresence as Presence>::Table<
+        SlotRows<WriteFilterRow<<P as Storage>::Key>, FILTER_ROWS>,
+    >,
     matching: <F::FilterPresence as Presence>::Table<
         SlotRows<Matching<F>, { caps::MAX_MATCHING_LISTENERS }>,
     >,
     pending_gets: <F::GetPresence as Presence>::Table<
-        SlotRows<PendingGet<F, Region>, { caps::MAX_PENDING_QUERIES }>,
+        SlotRows<PendingGet<F, P>, { caps::MAX_PENDING_QUERIES }>,
     >,
     #[cfg(feature = "storage-profile")]
-    held: [core::mem::MaybeUninit<crate::reply_hold::HeldReply<PendingGetHandle, Region>>;
+    held: [core::mem::MaybeUninit<crate::reply_hold::HeldReply<PendingGetHandle, P>>;
         caps::MAX_PENDING_REPLIES],
 }
 
 // SAFETY: each table's rows are `SlotRows` (`ZeroEmpty`) or, of a kind not kept, no bytes
 // (`Presence` is sealed to the two); the held replies' rows are `MaybeUninit`.
-unsafe impl<F: RowCallbacks> ZeroEmpty for SessionRows<F> {}
+unsafe impl<F: RowCallbacks, P: LaidOut> ZeroEmpty for SessionRows<F, P> {}
 
-impl<F: RowCallbacks> SessionTables<F, Region> {
-    /// The description of tables of the region policy at `at` in a region and their rows, a
-    /// [`SessionRows`], at `rows`: a line for each column of each table the build keeps, one for
-    /// the held replies, and the tables' handle to the region's key arena. What
-    /// [`place_region`](crate::key_arena::place_region) reads to make zeroed tables a session's.
+/// The two lines of a table's columns, each lent the rows `count` states.
+const fn counted(columns: [SeqPlace; 2], count: RowCount) -> [SeqPlace; 2] {
+    let [meta, rows] = columns;
+    [meta.counted(count), rows.counted(count)]
+}
+
+impl TableRows {
+    /// The counts the lines of the tables' description are lent ([`SessionTables::places`]).
+    pub const fn counts(&self) -> RowCounts {
+        RowCounts::NONE
+            .with(RowCount::Keyexprs, self.keyexprs)
+            .with(RowCount::Subscribers, self.subscribers)
+            .with(RowCount::Queryables, self.queryables)
+            .with(RowCount::Tokens, self.tokens)
+            .with(RowCount::LivelinessSubscribers, self.liveliness_subscribers)
+            .with(RowCount::WriteFilters, self.write_filters())
+            .with(RowCount::MatchingListeners, self.matching_listeners)
+            .with(RowCount::PendingGets, self.pending_gets)
+            .with(RowCount::HeldReplies, self.held_replies)
+    }
+}
+
+impl<F: RowCallbacks, P: LaidOut> SessionTables<F, P> {
+    /// The description of tables at `at` and, in a region, their rows, a [`SessionRows`], at
+    /// `rows`: a line for each column of each table the build keeps and one for the held replies,
+    /// each lent the count of [`TableRows`] that holds it, and the tables' handle to the region's
+    /// key arena. What [`place_region`](crate::key_arena::place_region) reads to make a region's
+    /// zeroed tables a session's, and what the lent policy's open lends and counts
+    /// ([`SessionTables::lent`]).
     pub const fn places(at: usize, rows: usize) -> RegionLines<SESSION_TABLE_LINES> {
         let mut lines = RegionLines::EMPTY
             .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
-            .seqs(&<Keyexprs<Region>>::places(
-                at.wrapping_add(core::mem::offset_of!(Self, keyexprs)),
-                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, keyexprs)),
+            .seqs(&counted(
+                <Keyexprs<P>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, keyexprs)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, keyexprs)),
+                ),
+                RowCount::Keyexprs,
             ))
-            .seqs(&<Subscribers<F, Region>>::places(
-                at.wrapping_add(core::mem::offset_of!(Self, subscribers)),
-                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, subscribers)),
+            .seqs(&counted(
+                <Subscribers<F, P>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, subscribers)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, subscribers)),
+                ),
+                RowCount::Subscribers,
             ));
         if <F::QueryablePresence as Presence>::KEPT {
-            lines = lines.seqs(&<Queryables<F, Region>>::places(
-                at.wrapping_add(core::mem::offset_of!(Self, queryables)),
-                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, queryables)),
+            lines = lines.seqs(&counted(
+                <Queryables<F, P>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, queryables)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, queryables)),
+                ),
+                RowCount::Queryables,
             ));
         }
         if <F::LivelinessPresence as Presence>::KEPT {
             lines = lines
-                .seqs(&<Tokens<Region>>::places(
-                    at.wrapping_add(core::mem::offset_of!(Self, tokens)),
-                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, tokens)),
+                .seqs(&counted(
+                    <Tokens<P>>::places(
+                        at.wrapping_add(core::mem::offset_of!(Self, tokens)),
+                        rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, tokens)),
+                    ),
+                    RowCount::Tokens,
                 ))
-                .seqs(&<LivelinessSubscribers<F, Region>>::places(
-                    at.wrapping_add(core::mem::offset_of!(Self, liveliness_subscribers)),
-                    rows.wrapping_add(core::mem::offset_of!(
-                        SessionRows<F>,
-                        liveliness_subscribers
-                    )),
+                .seqs(&counted(
+                    <LivelinessSubscribers<F, P>>::places(
+                        at.wrapping_add(core::mem::offset_of!(Self, liveliness_subscribers)),
+                        rows.wrapping_add(core::mem::offset_of!(
+                            SessionRows<F, P>,
+                            liveliness_subscribers
+                        )),
+                    ),
+                    RowCount::LivelinessSubscribers,
                 ));
         }
         if <F::FilterPresence as Presence>::KEPT {
             lines = lines
-                .seqs(&<WriteFilters<Region>>::places(
-                    at.wrapping_add(core::mem::offset_of!(Self, write_filters)),
-                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, write_filters)),
+                .seqs(&counted(
+                    <WriteFilters<P>>::places(
+                        at.wrapping_add(core::mem::offset_of!(Self, write_filters)),
+                        rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, write_filters)),
+                    ),
+                    RowCount::WriteFilters,
                 ))
-                .seqs(&<MatchingListeners<F, Region>>::places(
-                    at.wrapping_add(core::mem::offset_of!(Self, matching)),
-                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, matching)),
+                .seqs(&counted(
+                    <MatchingListeners<F, P>>::places(
+                        at.wrapping_add(core::mem::offset_of!(Self, matching)),
+                        rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, matching)),
+                    ),
+                    RowCount::MatchingListeners,
                 ));
         }
         if <F::GetPresence as Presence>::KEPT {
-            lines = lines.seqs(&<PendingGets<F, Region>>::places(
-                at.wrapping_add(core::mem::offset_of!(Self, pending_gets)),
-                rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, pending_gets)),
+            lines = lines.seqs(&counted(
+                <PendingGets<F, P>>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, pending_gets)),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, pending_gets)),
+                ),
+                RowCount::PendingGets,
             ));
         }
         #[cfg(feature = "storage-profile")]
         {
             lines = lines.seq(
-                crate::reply_hold::HeldReplies::<PendingGetHandle, Region>::place(
+                crate::reply_hold::HeldReplies::<PendingGetHandle, P>::place(
                     at.wrapping_add(core::mem::offset_of!(Self, held)),
-                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, held)),
-                ),
+                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F, P>, held)),
+                )
+                .counted(RowCount::HeldReplies),
             );
         }
         lines
-    }
-}
-
-/// `bytes`, what a table of a kind takes of an arena, where the presence `K` keeps the kind, and
-/// none where it keeps none: a kind left out lends no table.
-const fn kept_bytes<K: Presence>(bytes: Option<usize>) -> Option<usize> {
-    if K::KEPT {
-        bytes
-    } else {
-        Some(0)
     }
 }
 

@@ -90,13 +90,21 @@ struct AnchorRoom {
 }
 
 impl AnchorRooms {
-    /// Four rooms holding no anchor.
-    pub(crate) fn new() -> Self {
-        Self(core::array::from_fn(|_| AnchorRoom {
-            lodging: UnsafeCell::new(Lodging::vacant()),
-            keep: UnsafeCell::new(None),
-            vacant: AtomicBool::new(true),
-        }))
+    /// Four rooms holding no anchor, written in `at`, where they stay, row by row through one
+    /// out-of-line body, so the declaration that lays a subscriber's place out carries no copy of a
+    /// room's stores for each row.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self`, aligned for it, and holds none.
+    pub(crate) unsafe fn write_vacant(at: NonNull<Self>) {
+        // SAFETY: the caller's: each row index below the array's length names a room of the array
+        // inside `at`, written once.
+        unsafe {
+            let first = addr_of_mut!((*at.as_ptr()).0).cast::<AnchorRoom>();
+            for row in 0..ENTITIES {
+                AnchorRoom::write_vacant(first.add(row));
+            }
+        }
     }
 
     fn room(&self, entity: Entity) -> &AnchorRoom {
@@ -127,6 +135,25 @@ impl AnchorRooms {
                 vacate,
                 core::ptr::from_ref(room).cast_mut().cast::<c_void>(),
             )
+        }
+    }
+}
+
+impl AnchorRoom {
+    /// A room holding no anchor, written in `place`.
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a `Self`, aligned for it, and holds none.
+    // Out of line, so the rows of the rooms share this one body of stores.
+    #[inline(never)]
+    unsafe fn write_vacant(place: *mut Self) {
+        // SAFETY: the caller's.
+        unsafe {
+            place.write(Self {
+                lodging: UnsafeCell::new(Lodging::vacant()),
+                keep: UnsafeCell::new(None),
+                vacant: AtomicBool::new(true),
+            });
         }
     }
 }
@@ -187,7 +214,7 @@ impl PicoSubscriberForms {
     /// the forms are not moved from it until they are dropped there.
     pub(crate) unsafe fn write_in(
         at: NonNull<Self>,
-        session: &PicoSession,
+        session: PicoSession<'_>,
         base: DeclaredKeyexpr,
         rooms: NonNull<AnchorRooms>,
         place: Option<CountIn>,
@@ -196,8 +223,7 @@ impl PicoSubscriberForms {
         // SAFETY: the caller's: each field is written once through a pointer to it, not null as
         // it is inside the place, the locks made there.
         unsafe {
-            addr_of_mut!((*at).shared)
-                .write(crate::session::EngineHold::downgrade(&session.engine));
+            addr_of_mut!((*at).shared).write(crate::session::EngineHold::downgrade(session.engine));
             addr_of_mut!((*at).mode).write(session.mode);
             addr_of_mut!((*at).base).write(base);
             mutex_in(
@@ -286,24 +312,30 @@ impl PicoSubscriberForms {
             return EntityForm::literal();
         };
         let kept = Kept::lodged(anchor.clone());
-        let form = match anchor
+        // Made once and named where it lies, not handed through a chain of builders each moving it.
+        let mut form = match anchor
             .announced
             .aliased_parts(crate::session::EngineHold::as_ref(&shared))
         {
             // SAFETY: the rest lies in the anchor's announced key, which the anchor keeps,
             // unchanged, for as long as a count of it is held, and `kept` is one.
             Some((mapping_id, rest)) => unsafe { EntityForm::aliased_in(mapping_id, rest, kept) },
-            None => EntityForm::literal().keeping(kept),
+            None => {
+                let mut literal = EntityForm::literal();
+                literal.keep(kept);
+                literal
+            }
         };
         match entity {
-            Entity::Subscriber | Entity::Heartbeat => form.with_retraction_naming(
+            Entity::Subscriber | Entity::Heartbeat => form.name_on_retraction(
                 anchor
                     .key
                     .retraction_naming_in(self.mode, crate::session::EngineHold::as_ref(&shared)),
             ),
-            Entity::LatePublishers => form,
-            Entity::Token => form.with_token_retraction_naming_the_key(true),
+            Entity::LatePublishers => {}
+            Entity::Token => form.name_key_on_token_retraction(true),
         }
+        form
     }
 }
 
@@ -334,6 +366,30 @@ impl DeclarationForms for PicoSubscriberForms {
     }
 }
 
+#[cfg(test)]
+mod room_tests {
+    use super::*;
+
+    /// The rooms are written in their place, every row vacant. Turned red by a write that leaves a
+    /// row unwritten: the place is zeroed first, so such a row reads as held.
+    #[test]
+    fn every_room_is_written_vacant_in_its_place() {
+        let mut place = MaybeUninit::<AnchorRooms>::zeroed();
+        // SAFETY: the place is valid for writes of the rooms, aligned for them, and holds none.
+        unsafe { AnchorRooms::write_vacant(NonNull::from(&mut place).cast::<AnchorRooms>()) };
+        // SAFETY: `write_vacant` wrote the rooms whole.
+        let rooms = unsafe { place.assume_init_ref() };
+        for entity in [
+            Entity::Subscriber,
+            Entity::LatePublishers,
+            Entity::Heartbeat,
+            Entity::Token,
+        ] {
+            assert!(rooms.room(entity).vacant.load(Ordering::Acquire));
+        }
+    }
+}
+
 #[cfg(all(test, feature = "engine-tokio"))]
 mod tests {
     use super::*;
@@ -341,7 +397,17 @@ mod tests {
 
     use wz_capi_core::faces::SharedSession;
     use wz_capi_core::runtime::runtime_impl::TokioTime;
-    use wz_node_time::node_clock::NodeHlc;
+
+    /// Four vacant rooms, written where the box keeps them.
+    fn vacant_rooms() -> Box<AnchorRooms> {
+        let mut rooms = Box::<AnchorRooms>::new_uninit();
+        // SAFETY: the box's place is valid for the rooms and holds none, and they are whole once
+        // `write_vacant` returns.
+        unsafe {
+            AnchorRooms::write_vacant(NonNull::from(&mut *rooms).cast::<AnchorRooms>());
+            rooms.assume_init()
+        }
+    }
 
     /// The forms of an advanced subscriber on `key`, over a registry with no
     /// face: what they declare is read back from the registry's key table, which
@@ -361,13 +427,12 @@ mod tests {
             )
             .expect("test host entropy"),
         );
+        let engine = shared.as_engine();
         let session = PicoSession {
-            engine: shared.as_engine(),
+            engine: &engine,
             mode: WhatAmI::Peer,
-            hlc: NodeHlc::default(),
-            time: crate::last_timestamp::SessionTime::new(),
         };
-        let rooms = Box::new(AnchorRooms::new());
+        let rooms = vacant_rooms();
         let base = DeclaredKeyexpr::literal_only(key).expect("the test's heap");
         let mut place = Box::<PicoSubscriberForms>::new_uninit();
         // SAFETY: the rooms are vacant, and each test keeps them past the forms and every anchor
@@ -376,7 +441,7 @@ mod tests {
         let forms = unsafe {
             PicoSubscriberForms::write_in(
                 NonNull::from(&mut *place).cast::<PicoSubscriberForms>(),
-                &session,
+                session,
                 base,
                 NonNull::from(&*rooms),
                 None,
@@ -407,7 +472,7 @@ mod tests {
     /// `vacate` that does not mark the room vacant reds the second assertion.
     #[test]
     fn an_anchor_lies_in_its_room_and_takes_no_memory() {
-        let rooms = AnchorRooms::new();
+        let rooms = vacant_rooms();
         let anchor = Anchor {
             key: DeclaredKeyexpr::literal_only(BASE).expect("the test's heap"),
             announced: DeclaredKeyexpr::literal_only(BASE).expect("the test's heap"),

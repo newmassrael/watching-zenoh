@@ -149,9 +149,14 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
     payloads.sort();
     assert_eq!(payloads, [b"from-first".to_vec(), b"from-second".to_vec()]);
 
-    // Each client answers a query with its own payload; the listener's one get is one leg for each
-    // face, and ends when both Finals are in.
-    for (peer, text) in [(&first, &b"a-first"[..]), (&second, &b"a-second"[..])] {
+    // Each client answers on a key of its own under the one the listener asks: the get names no
+    // consolidation, so it consolidates `Latest` over both legs, one reply a key, and two clients
+    // answering one key would leave one answer. The listener's one get is one leg for each face,
+    // with one callback for the get, dropped once both Finals are in.
+    for (peer, key, text) in [
+        (&first, "demo/g/first", &b"a-first"[..]),
+        (&second, "demo/g/second", &b"a-second"[..]),
+    ] {
         peer.declare_queryable_on_wire(
             "demo/g/**",
             WireKey::literal(),
@@ -159,15 +164,15 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
             Locality::Any,
             None,
             QueryableSink::shared(
-                move |query: &dyn QueryView, out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
-                    out.reply_keyed(query.keyexpr(), text)
-                        .expect("a reply on the query's own key");
+                move |_query: &dyn QueryView, out: &mut dyn ReplyOut, _holder: &dyn QueryHolder| {
+                    out.reply_keyed(key, text)
+                        .expect("a reply on a key under the query's");
                 },
             ),
         )
         .expect("the engine has queryables in this build");
     }
-    let replies = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let replies = Arc::new(Mutex::new(Vec::<(String, Vec<u8>)>::new()));
     let ended = Arc::new(Mutex::new(0usize));
     struct End(Arc<Mutex<usize>>);
     impl Drop for End {
@@ -176,7 +181,7 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
         }
     }
     let issued = listener.get_on_wire(
-        "demo/g/a",
+        "demo/g/*",
         &WireKey::literal(),
         &remote_get(),
         None,
@@ -185,15 +190,26 @@ fn a_listener_hears_and_asks_every_client_it_has_taken() {
             let into = replies.clone();
             ReplyCallback::shared(move |view: &dyn ReplyView| {
                 let _held = &end;
-                into.lock().unwrap().push(view.payload().to_vec());
+                into.lock()
+                    .unwrap()
+                    .push((view.keyexpr().to_owned(), view.payload().to_vec()));
             })
         },
     );
     assert_eq!(issued, Ok(2), "one leg for each face the listener holds");
-    eventually("both legs to end", || *ended.lock().unwrap() == 2);
+    eventually("the get to end with both legs", || {
+        *ended.lock().unwrap() == 1
+    });
     let mut answers = replies.lock().unwrap().clone();
     answers.sort();
-    assert_eq!(answers, [b"a-first".to_vec(), b"a-second".to_vec()]);
+    assert_eq!(
+        answers,
+        [
+            ("demo/g/first".to_owned(), b"a-first".to_vec()),
+            ("demo/g/second".to_owned(), b"a-second".to_vec()),
+        ],
+        "each client's answer, on its own key"
+    );
 
     // A client that goes takes its face and nothing else with it.
     drop(first);

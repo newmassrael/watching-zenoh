@@ -775,13 +775,14 @@ mod tests {
             got.push((delivery.hello.zid[0], delivery.window));
             true
         };
-        actions.hellos.lock().unwrap().extend([
+        actions.record().hellos.lock().unwrap().extend([
             hello(1, Some(WhatAmI::Peer)),
             hello(2, Some(WhatAmI::Router)),
             hello(3, None),
         ]);
         assert!(hand_over(&actions, 2, 7, &mut handed, &mut each));
         actions
+            .record()
             .hellos
             .lock()
             .unwrap()
@@ -789,6 +790,7 @@ mod tests {
         assert!(hand_over(&actions, 2, 7, &mut handed, &mut each));
         assert_eq!(got, vec![(1, 7), (4, 7)], "once each, and the peers only");
         actions
+            .record()
             .hellos
             .lock()
             .unwrap()

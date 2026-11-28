@@ -41,6 +41,9 @@ use wz_admin::admin_connect::{
     parse_connect_endpoints_write, ConnectEndpoints, ConnectWriteOutcome,
 };
 use wz_runtime_coop::cs::Mutex;
+use wz_session_core::lifecycle_monitor::{Asker, Monitor, Request, WritePermission};
+
+use crate::decision_log::{DecisionLog, DECISION_ROWS};
 
 /// The write as it arrived, which [`ConnectControl::apply`] takes: named here as well as in
 /// `wz_admin::admin_connect`, so a host that drives this module names the types of its
@@ -75,8 +78,15 @@ struct State {
 
 /// A node's runtime connection control: the endpoints it should hold
 /// sessions with, and whether a remote config write may change them.
+///
+/// A write is a request of the verb `Configure` to the node's reference monitor
+/// (decision D16 of `docs/session-lifecycle-intent.md`), decided before its
+/// value is read and kept in [`Self::decisions`]. The policy is the write
+/// permission the control is made with, a grant of the verb to anyone
+/// (`WritePermission`): a write arrives as a sample, which proves no writer.
 pub struct ConnectControl {
     state: Mutex<RefCell<State>>,
+    record: DecisionLog<DECISION_ROWS>,
 }
 
 impl ConnectControl {
@@ -93,7 +103,18 @@ impl ConnectControl {
                 last: None,
                 writes: 0,
             })),
+            record: DecisionLog::new(),
         }
+    }
+
+    /// The record of the monitor's decisions on the writes this control received.
+    pub fn decisions(&self) -> &DecisionLog<DECISION_ROWS> {
+        &self.record
+    }
+
+    /// Whether a write is permitted now: the write permission, read under the lock.
+    fn permits_writes(&self) -> bool {
+        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow().permit_write)
     }
 
     /// Change the write permit at runtime, as upstream's
@@ -138,9 +159,14 @@ impl ConnectControl {
     }
 
     /// Decide one config write as the subscriber of `host_connect_writes` does and
-    /// apply the verdict: the permit first, then whether the key is this node's own
+    /// apply the verdict: the monitor first, then whether the key is this node's own
     /// config space, then the value. `zid_hex` and `whatami` name this node,
     /// `keyexpr` is the key the write arrived on.
+    ///
+    /// The monitor decides a `Configure` of `keyexpr` asked by nobody shown over
+    /// the admin space (`Asker::admin_write`), and records it, before the lock
+    /// that applies the write is taken: the policy and the record take the same
+    /// critical section themselves. A refusal is the outcome `Denied`.
     ///
     /// Public so an image that learns its endpoints some other way than a remote
     /// write (a list it read from its own flash at boot) takes them through the SAME
@@ -148,6 +174,10 @@ impl ConnectControl {
     /// list without a session to carry the write. The verdict is
     /// [`last_outcome`](Self::last_outcome).
     pub fn apply(&self, zid_hex: &str, whatami: &str, keyexpr: &str, body: ConfigWriteBody<'_>) {
+        let policy = WritePermission(self.permits_writes());
+        let permitted = Monitor::new(&policy, &self.record)
+            .decide(true, &Request::configure(Asker::admin_write(keyexpr)))
+            .permits();
         let mut scratch = ConnectEndpoints::new();
         wz_runtime_coop::cs::with(|cs| {
             let mut s = self.state.borrow(cs).borrow_mut();
@@ -156,7 +186,7 @@ impl ConnectControl {
                 whatami,
                 keyexpr,
                 body,
-                s.permit_write,
+                permitted,
                 &mut scratch,
             );
             match outcome {
@@ -214,7 +244,7 @@ impl crate::admin_status::ConfigView for ConnectControl {
 #[cfg(feature = "adminspace-fixed")]
 impl crate::admin_status::ConnectStatusSource for ConnectControl {
     fn write_permit(&self) -> bool {
-        wz_runtime_coop::cs::with(|cs| self.state.borrow(cs).borrow().permit_write)
+        self.permits_writes()
     }
 
     /// R2851 — every verdict carries `seq`, the number of writes
@@ -521,6 +551,64 @@ mod tests {
             CONTROL.last_outcome(),
             Some(ConnectWriteOutcome::Malformed(_))
         ));
+    }
+
+    /// A write is a `Configure` the monitor decides before the value is read, asked
+    /// by nobody shown over the admin space, and every decision is kept: refused
+    /// while the write permission is off, permitted as a grant to anyone once it is
+    /// on, and the permission grants no other verb. Red if `apply` read the
+    /// permit itself instead of the monitor's decision, or skipped the record.
+    #[test]
+    fn a_config_write_is_decided_by_the_monitor_and_recorded() {
+        use wz_session_core::lifecycle_monitor::{
+            decide, Channel, Decision, Grounds, Refusal, Subject,
+        };
+        use wz_session_core::lifecycle_node::{Commander, Verb};
+
+        static CONTROL: ConnectControl = ConnectControl::new(false);
+        let body = br#"["tcp/10.0.0.9:7447"]"#;
+        CONTROL.apply(ZID, "peer", KEY, ConfigWriteBody::Put(body));
+        std::assert_eq!(CONTROL.last_outcome(), Some(ConnectWriteOutcome::Denied));
+        CONTROL.set_write_permit(true);
+        CONTROL.apply(ZID, "peer", KEY, ConfigWriteBody::Put(body));
+        std::assert_eq!(CONTROL.last_outcome(), Some(ConnectWriteOutcome::Replace));
+
+        let node = wz_session_core::credential_identity::zid_from_key_text(ZID);
+        let mut rows = Vec::new();
+        CONTROL.decisions().each(|row| {
+            rows.push((row.subject, row.verb, row.peer, row.channel, row.decision));
+        });
+        std::assert_eq!(
+            rows,
+            [
+                (
+                    Subject::Unproven,
+                    Verb::Configure,
+                    node,
+                    Channel::AdminWrite,
+                    Decision::Deny(Refusal::Unproven),
+                ),
+                (
+                    Subject::Unproven,
+                    Verb::Configure,
+                    node,
+                    Channel::AdminWrite,
+                    Decision::Permit(Grounds::GrantedToAnyone),
+                ),
+            ]
+        );
+        std::assert_eq!(CONTROL.decisions().made(), 2);
+
+        // The write permission is a grant of the configuration alone.
+        let open = Request {
+            verb: Verb::Open,
+            ..Request::configure(Asker::admin_write(KEY))
+        };
+        std::assert_eq!(
+            decide(&WritePermission(true), true, &open),
+            Decision::Deny(Refusal::Unproven)
+        );
+        std::assert_eq!(open.subject, Commander::Unproven);
     }
 
     /// R2846 — the verdict on the last write, as `status/connect`

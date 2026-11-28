@@ -26,7 +26,7 @@ use crate::bounded::Storage;
 use crate::face::{FaceEventKind, FaceLinkRow};
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 use crate::face_plane::FaceReports;
-use crate::pending_get::{PendingGet, PendingLegs, SessionFaces};
+use crate::pending_get::SessionFaces;
 use crate::replay_pacing::ReplayPacing;
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
 use crate::round::{Owing, ReadRoom, Round, RoundCalls};
@@ -59,8 +59,6 @@ pub trait SessionParts {
     type Entities;
     /// The plane the session's queryables answer through.
     type Queryables;
-    /// The legs of the session's gets still pending on its links.
-    type PendingGets;
     /// The plane the session's gets are handed their replies through.
     type Gets;
     /// The session's round of deliveries, which every link's gate asks before it reads a record.
@@ -141,8 +139,6 @@ pub struct SessionState<P: SessionParts> {
     pub replay_pacing: Option<ReplayPacing>,
     /// The plane the session's queryables answer through.
     pub plane: P::Queryables,
-    /// The legs of the session's gets still pending on its links.
-    pub pending_gets: P::PendingGets,
     /// The plane the session's gets are handed their replies through.
     pub gets: P::Gets,
     /// The session's round of deliveries.
@@ -169,32 +165,13 @@ where
     }
 }
 
-impl<P: SessionParts> SessionState<P>
-where
-    P::PendingGets: PendingLegs,
-{
-    /// Hold the pending leg `leg` in a row of the session's: `false` past the rows, which a leg
-    /// registered in a face's table of pending gets never reaches, as the rows are one for each
-    /// entry of those tables; its entry is dropped then, which says its end, and the leg is over.
-    pub fn note_pending(&mut self, leg: PendingGet<<P::PendingGets as PendingLegs>::Fan>) -> bool {
-        match self.pending_gets.note(leg) {
-            Ok(()) => true,
-            Err(leg) => {
-                leg.unregister(P::faces_mut(&mut self.registry));
-                false
-            }
-        }
-    }
-
+impl<P: SessionParts> SessionState<P> {
     /// What the lost link of face `face` takes with it: every subscriber, queryable and token its
     /// peer declared, so a matching status or a write filter that counted on one reads the session
     /// as it now is, and every get asked of it, whose Final its peer can no longer send: each
-    /// pending leg's entry is dropped, which ends the leg.
+    /// pending leg's entry is dropped, which ends the leg ([`SessionFaces::lose_face`]).
     pub fn lose_face(&mut self, face: u64) {
-        let faces = P::faces_mut(&mut self.registry);
-        faces.lose_face(face);
-        self.pending_gets
-            .drop_face(face, |leg| leg.unregister(&mut *faces));
+        P::faces_mut(&mut self.registry).lose_face(face);
     }
 
     /// When the earliest pending get is due: a query's or a liveliness snapshot's, on any face.
@@ -269,7 +246,6 @@ mod tests {
     use crate::bounded::{Arena, Profile, ARENA_ALIGN};
     use crate::key_arena::KeySpace;
     use crate::limits::SessionLimits;
-    use crate::pending_get::GetKind;
     use crate::session_tables::Absent;
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
     use core::cell::RefCell;
@@ -296,7 +272,6 @@ mod tests {
     #[derive(Default)]
     struct Registry {
         tables: Tables,
-        ended: std::vec::Vec<(u64, GetKind)>,
         lost: std::vec::Vec<u64>,
         /// The tokens of lost links still to be retracted.
         owed_tokens: usize,
@@ -311,10 +286,6 @@ mod tests {
     type TestLane = crate::placed::PlacedRef<Round<crate::round::tests::Kept>>;
 
     impl SessionFaces for Registry {
-        fn end_leg(&mut self, face: u64, kind: GetKind) {
-            self.ended.push((face, kind));
-        }
-
         fn lose_face(&mut self, face: u64) {
             self.lost.push(face);
         }
@@ -350,10 +321,9 @@ mod tests {
     }
 
     /// The parts of an engine whose registry is [`Registry`], which reports its faces to
-    /// `$watchers`, holds its pending legs in `$legs`, delivers through `$lane` and keeps no
-    /// other part.
+    /// `$watchers`, delivers through `$lane` and keeps no other part.
     macro_rules! tables_only {
-        ($name:ident, $watchers:ty, $legs:ty, $lane:ty) => {
+        ($name:ident, $watchers:ty, $lane:ty) => {
             enum $name {}
 
             impl SessionParts for $name {
@@ -365,7 +335,6 @@ mod tests {
                 type Watchers = $watchers;
                 type Entities = ();
                 type Queryables = ();
-                type PendingGets = $legs;
                 type Gets = ();
                 type Lane = $lane;
                 type KeyIds = ();
@@ -390,15 +359,11 @@ mod tests {
         };
     }
 
-    /// Rows of two pending legs.
-    type TwoLegs = crate::bounded::BoundedVec<PendingGet<u8>, 2, crate::bounded::Static>;
-
-    tables_only!(Unwatched, (), (), ());
-    tables_only!(Legs, (), TwoLegs, ());
+    tables_only!(Unwatched, (), ());
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    tables_only!(Rounds, (), (), TestLane);
+    tables_only!(Rounds, (), TestLane);
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
-    tables_only!(Watched, WatchedPlane, (), ());
+    tables_only!(Watched, WatchedPlane, ());
 
     /// A plane of the faces, made in a box of its own, as the state's field of a test.
     #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -470,7 +435,6 @@ mod tests {
             LocalRequests = LocalRequests,
         >,
         P::Watchers: Default,
-        P::PendingGets: Default,
         P::Lane: Default,
     {
         new_state_with(Default::default())
@@ -489,7 +453,6 @@ mod tests {
             LocalRequests = LocalRequests,
         >,
         P::Watchers: Default,
-        P::PendingGets: Default,
     {
         SessionState {
             registry: Registry::default(),
@@ -501,53 +464,21 @@ mod tests {
             matching: MatchingRead::default(),
             replay_pacing: None,
             plane: (),
-            pending_gets: Default::default(),
             gets: (),
             lane,
         }
     }
 
-    fn leg(face: u64, id: u64) -> PendingGet<u8> {
-        PendingGet {
-            face,
-            leg: id,
-            kind: GetKind::Query(id as RequestId),
-            fan: None,
-        }
-    }
-
-    /// A leg past the rows is refused and its entry ended in the tables of the face it was asked
-    /// of; a session that holds no rows refuses every leg so.
+    /// A lost face is told to the faces, once, which end the gets asked of it with what its peer
+    /// declared; the deadline of the gets left is read off them. Turned red by a loss the state
+    /// keeps a record of its own for, or one it does not hand the faces.
     #[test]
-    fn a_leg_past_the_rows_is_ended_where_it_was_registered() {
-        let mut state = new_state::<Legs>();
-        assert!(state.note_pending(leg(1, 1)));
-        assert!(state.note_pending(leg(2, 2)));
-        assert!(!state.note_pending(leg(3, 3)));
-        assert_eq!(faces_told(&state).ended, [(3, GetKind::Query(3))]);
-        let mut none = new_state::<Unwatched>();
-        let refused = PendingGet {
-            face: 5,
-            leg: 5,
-            kind: GetKind::Query(5),
-            fan: None::<core::convert::Infallible>,
-        };
-        assert!(!none.note_pending(refused));
-        assert_eq!(faces_told(&none).ended, [(5, GetKind::Query(5))]);
-    }
-
-    /// A lost face takes what its peer declared first, then ends each leg asked of it, once, and
-    /// keeps the legs of the other faces.
-    #[test]
-    fn a_lost_face_ends_the_legs_asked_of_it_and_keeps_the_rest() {
-        let mut state = new_state::<Legs>();
-        assert!(state.note_pending(leg(1, 1)));
-        assert!(state.note_pending(leg(2, 2)));
+    fn a_lost_face_is_the_faces_to_end_and_the_deadline_is_read_off_them() {
+        let mut state = new_state::<Unwatched>();
         state.lose_face(1);
         assert_eq!(faces_told(&state).lost, [1]);
-        assert_eq!(faces_told(&state).ended, [(1, GetKind::Query(1))]);
-        let kept: std::vec::Vec<u64> = state.pending_gets.iter().map(|leg| leg.leg).collect();
-        assert_eq!(kept, [2]);
+        state.lose_face(2);
+        assert_eq!(faces_told(&state).lost, [1, 2]);
         assert_eq!(state.next_get_deadline_ms(), Some(40), "read off the faces");
     }
 
@@ -691,8 +622,11 @@ mod tests {
             is_shm: false,
             link: 0,
             links: 1,
-            src: crate::face::RowText::of("tcp/127.0.0.1:1"),
-            dst: crate::face::RowText::of("tcp/127.0.0.1:2"),
+            ends: crate::face::RowEnds::Lent {
+                kind: crate::link::LinkKind::Tcp,
+                src: crate::face::LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 1))),
+                dst: crate::face::LentEnd::Ip(core::net::SocketAddr::from(([127, 0, 0, 1], 2))),
+            },
             kind: None,
             mtu: 0,
             group_endpoint: None,

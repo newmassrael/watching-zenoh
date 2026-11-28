@@ -717,6 +717,10 @@ files::decl_watch_doors::"
     # engine with a Rust API hands the port and a C library never does (`shared-sinks`): the call
     # through each arm and the hold let go with the sink (`shared_sink_tests::`).
     "wz-capi-port|hook|shared-sinks|shared_sink_tests::"
+    # A key that keeps an object of the ABI's alive past its declaration (`key-anchors`), which the
+    # advanced subscriber's host and the Rust API make and a build without them never does: the
+    # rest lent from what the key keeps, and the anchor that outlives the key (`tests::a_kept_`).
+    "wz-capi-port|hook|key-anchors|tests::a_kept_"
     # The port's `os` made of the host's own calls (`os-sys`, `wz-host-sync`), which a host library
     # without `std` runs its read task and holds its locks on: a test build with `std` compiles the
     # module beside `std`'s for its own tests (`os::sys::tests::`), a spawned thread's identity and
@@ -934,6 +938,11 @@ tests::group_congested::replies_past_the_reply_limit_are_the_transports_drops"
     "wz-capi-coop|hook|app-transport,group|engine::member_key_tests::"
     "wz-capi-coop|hook|app-transport,group|tests::arena::a_session_that_joins_groups_is_lent_a_receive_buffer_for_each"
     "wz-session-core|hook|alloc|round::tests::a_given_back_group_buffer_is_kept_while_a_record_reads_in_it"
+    # Decision D17: a sealed lifecycle command judged at both profiles' in-band entry points,
+    # through a link that proved only a router no grant names (the heap queries and the fixed
+    # node's verbs), and the verifier's echo after a start.
+    "wz-session-core|hook|sealed-commands,session-unicast,session-close-ingress,secure-channel|lifecycle_query::tests::sealed::"
+    "wz-session-mcu|hook|sealed-commands,alloc,adminspace-fixed,session-slot,lifecycle-close|admin_fixed::sealed_tests::"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::arena::a_groups_face_counts_every_members_aliases_in_the_pool"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|engine::registry::tests::a_groups_face_holds_its_members_aliases_until_its_set_is_given_back"
     # The tests of a group in the form whose read steps each face's link session itself

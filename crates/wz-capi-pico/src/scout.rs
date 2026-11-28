@@ -1002,7 +1002,9 @@ impl<'a> ScoutConfig<'a> {
     /// pico reads whatever its fixed indexes land on there (`vendor/zenoh-pico/src/api/api.c` @
     /// `_z_uuid_to_bytes(zid.id, zid_str);`), which is no id the caller named.
     fn read(cfg: Option<&'a ConfigState>) -> Result<Self, ZResult> {
-        let get = |key: u8| cfg.and_then(|c| c.get(key)).map(str::trim);
+        // ASCII whitespace alone, as the config's other readers take it off: a reader of C text
+        // has no use for Unicode's, whose table a trim of it links.
+        let get = |key: u8| cfg.and_then(|c| c.get(key)).map(str::trim_ascii);
         Ok(Self {
             what: get(Z_CONFIG_SCOUTING_WHAT_KEY)
                 .and_then(|s| s.parse::<u8>().ok())
@@ -1330,6 +1332,31 @@ mod tests {
                 "the stated id `{refused}`"
             );
         }
+    }
+
+    /// A scout's config values are read with the ASCII whitespace around them taken off, as the
+    /// config's other readers take it, and a non-ASCII space is part of the value, which then
+    /// states nothing and leaves pico's default. Turned red by a Unicode trim, or by none.
+    #[test]
+    fn a_scout_config_value_is_trimmed_of_ascii_whitespace_alone() {
+        let read = |key: u8, text: &str| {
+            let mut cfg = ConfigState::default();
+            cfg.insert(key, text);
+            ScoutConfig::read(Some(&cfg)).map(|read| (read.what, read.budget_ms))
+        };
+        assert_eq!(
+            read(Z_CONFIG_SCOUTING_WHAT_KEY, " \t1\n"),
+            Ok((1, SCOUTING_TIMEOUT_DEFAULT_MS))
+        );
+        assert_eq!(
+            read(Z_CONFIG_SCOUTING_TIMEOUT_KEY, " 250 "),
+            Ok((SCOUTING_WHAT_DEFAULT, 250))
+        );
+        assert_eq!(
+            read(Z_CONFIG_SCOUTING_TIMEOUT_KEY, "\u{a0}250"),
+            Ok((SCOUTING_WHAT_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS)),
+            "a no-break space is no ASCII whitespace"
+        );
     }
 
     /// `z_scout` with a stated id the open refuses answers `Z_ERR_INVALID` before it scouts: the

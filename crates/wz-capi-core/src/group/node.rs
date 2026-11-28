@@ -21,7 +21,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use wz_capi_port::{
-    QblId, QueryHolder, QueryableSink, ReplyCallback, SessionEngine, SubId, SubscriberSink, Ticker,
+    EntityRow, QueryHolder, QueryableSink, ReplyCallback, SessionEngine, SubscriberSink, Ticker,
     WireKey,
 };
 use wz_session_core::group_membership::{
@@ -120,8 +120,8 @@ struct Held {
     engine: Arc<dyn SessionEngine>,
     keep_alive: Option<Ticker>,
     watchdog: Option<Ticker>,
-    subscriber: SubId,
-    queryable: QblId,
+    subscriber: EntityRow,
+    queryable: EntityRow,
 }
 
 impl Drop for Held {

@@ -91,7 +91,7 @@ mod heap {
     use alloc::rc::Rc;
 
     use wz_runtime_coop::session_drive::{
-        spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
+        spawn_session, OpenSetLinks, OpenedLink, SessionDriveConfig, SessionRole,
     };
     use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopTime};
     use wz_session_core::close_reason::CloseReason;
@@ -186,7 +186,7 @@ mod heap {
     /// is asked for the sink each new session reports to.
     pub struct UdpDialer<'a, L, C, P, E>
     where
-        L: SessionLinks,
+        L: OpenSetLinks,
         C: ClockSource + 'static,
         P: FnMut() -> SessionInitParams,
         E: FnMut(&SessionHandle<C>) -> EventSink,
@@ -204,7 +204,7 @@ mod heap {
 
     impl<'a, L, C, P, E> UdpDialer<'a, L, C, P, E>
     where
-        L: SessionLinks,
+        L: OpenSetLinks,
         C: ClockSource + 'static,
         P: FnMut() -> SessionInitParams,
         E: FnMut(&SessionHandle<C>) -> EventSink,
@@ -282,7 +282,7 @@ mod heap {
 
     impl<'a, L, C, P, E> Dialer for UdpDialer<'a, L, C, P, E>
     where
-        L: SessionLinks,
+        L: OpenSetLinks,
         C: ClockSource + 'static,
         P: FnMut() -> SessionInitParams,
         E: FnMut(&SessionHandle<C>) -> EventSink,

@@ -41,10 +41,10 @@
 //! MCU's 128 KiB SRAM region.
 //!
 //! `now_ms` is a caller parameter (not read from a
-//! [`crate::time::ClockSource`]) so the seam needs no executor / timer:
+//! `time::ClockSource`) so the seam needs no executor / timer:
 //! the no-alloc main loop supplies the monotonic clock from its SysTick /
 //! RTC read, mirroring how the dispatcher itself takes `now_ms`. The
-//! `alloc`-profile auto-sweep (a timer task on the [`crate::executor`])
+//! `alloc`-profile auto-sweep (a timer task on the `executor`)
 //! lands with the MCU session drive loop.
 //!
 //! [`ReassemblyDispatcher`]: wz_session_core::reassembly_dispatch::ReassemblyDispatcher

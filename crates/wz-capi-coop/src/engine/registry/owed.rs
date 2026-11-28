@@ -24,6 +24,7 @@ use super::FaceId;
 use super::{names_face, DIAL_FACE};
 #[cfg(wz_round)]
 use super::{App, RoundDelivery};
+#[cfg(wz_on_use)]
 use crate::arena::FacePeers;
 use crate::RowPolicy;
 use wz_session_core::declare::liveliness_subscriber::PeerTokens;
@@ -31,7 +32,7 @@ use wz_session_core::declare::liveliness_subscriber::PeerTokens;
 #[cfg(wz_on_use)]
 use crate::arena::MAX_FACE_SETS;
 #[cfg(wz_lent)]
-use wz_session_core::bounded::{Arena, BoundedVec, LendRefused};
+use wz_session_core::bounded::{BoundedVec, RowCount, SeqPlace};
 #[cfg(wz_on_use)]
 use wz_session_core::caps;
 #[cfg(wz_on_use)]
@@ -59,12 +60,22 @@ pub(super) struct Owed(OwedTokens<OWED_ROWS>);
 
 #[cfg(wz_lent)]
 impl Owed {
-    /// The table of a session whose faces' tables `peers` counts, lent from `arena`: a row for each
-    /// row of the session's token pool, as a table owed holds one of them at least, so the faces
-    /// owing at once are never more (`FacePeers::owed_tokens`); none for a session of one face,
-    /// whose one face never goes.
-    pub(super) fn lent(arena: &mut Arena, peers: &FacePeers) -> Result<Self, LendRefused> {
-        arena.lend(peers.owed_tokens()).map(Self)
+    /// The table before the registry's walk lends it its rows (`RegistryOf::new`): of no row.
+    pub(super) fn rowless() -> Self {
+        Self(BoundedVec::default())
+    }
+
+    /// The line of the registry's description that places the table at `at`: a row for each row
+    /// of the session's token pool (`RowCount::OwedTokens`, `FacePeers::owed_tokens`), as a table
+    /// owed holds one of them at least, so the faces owing at once are never more; none for a
+    /// session of one face, whose one face never goes.
+    pub(super) const fn place(at: usize) -> SeqPlace {
+        SeqPlace::of::<FaceTokens>(
+            at.wrapping_add(core::mem::offset_of!(Self, 0)),
+            0,
+            wz_session_core::caps::SESSION_MAX_REMOTE_DECLS,
+        )
+        .counted(RowCount::OwedTokens)
     }
 
     /// Whether a face may be admitted beside those `holders` names: always, the session's token

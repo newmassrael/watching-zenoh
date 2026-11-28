@@ -1294,8 +1294,6 @@ mod tests {
     use crate::arena::{AllocatorMemory, SessionArena};
     #[cfg(any(feature = "query", feature = "queryable", not(wz_round)))]
     use wz_session_core::decl_sink::BorrowedDecl;
-    #[cfg(all(wz_lent, any(feature = "query", feature = "queryable")))]
-    use wz_session_core::slot_observer::ObserverRows;
 
     use super::super::registry::CoopSinks;
 
@@ -1648,7 +1646,7 @@ mod tests {
         let mut app = App::lent(
             arena.arena_mut(),
             keys,
-            ObserverRows::default(),
+            Default::default(),
             &SessionLimits::defaults(),
         )
         .expect("the arena has the rows");

@@ -312,6 +312,44 @@ fn a_bundle_the_heap_has_no_room_for_is_refused() {
     assert!(made.is_ok(), "room for all three pointers is the bundle");
 }
 
+/// The transmit half of a link is made over its driver alone, with no session: closed to data
+/// sends, its line silent and its batches bare, and a write through it reaches the driver it was
+/// made over, which it lets go of when it goes. Turned red by `LinkTx::new` opening the send
+/// gate, marking the line or compressing before an establishment settles them, by `link_driver`
+/// answering another driver, or by a half that keeps its driver past its drop.
+#[test]
+fn a_link_transmit_half_is_made_without_a_session() {
+    let link = Arc::new(CountingLink::default());
+    let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+    #[cfg(feature = "transport-stats")]
+    let tx = crate::transport_tx::LinkTx::<PlainRuntime>::new(sink, None);
+    #[cfg(not(feature = "transport-stats"))]
+    let tx = crate::transport_tx::LinkTx::<PlainRuntime>::new(sink);
+    assert!(
+        !tx.transport_available.is_open(),
+        "no data leaves before an establishment"
+    );
+    #[cfg(feature = "transport-keepalive")]
+    assert!(!tx.spoke.load(Ordering::Relaxed), "the line has not spoken");
+    #[cfg(feature = "transport-compression")]
+    assert!(
+        !tx.compresses_batches(),
+        "a batch is bare before an establishment"
+    );
+    assert_eq!(
+        tx.link_driver()
+            .send_blocking(&[0x04], Reliability::Reliable),
+        LinkSendOutcome::Sent
+    );
+    assert_eq!(
+        link.written.load(Ordering::SeqCst),
+        1,
+        "the write reached the driver the half was made over"
+    );
+    drop(tx);
+    assert_eq!(Arc::strong_count(&link), 1, "the half lets its driver go");
+}
+
 /// A face's read raises the hold of its replies only in a build with `query-replies-with-final`:
 /// without it, as the zenoh-pico preset builds the session core, the hold answers that it raised
 /// nothing, so each reply leaves as it is made and the Final after them. With it the first hold
@@ -344,6 +382,72 @@ fn a_datagram_dropped_before_the_session_read_it_is_a_receive_drop() {
     let report = actions.stats_report();
     assert_eq!(report.rx.n_dropped, 3, "each dropped datagram is counted");
     assert_eq!(report.tx.n_dropped, 0, "nothing sent was dropped");
+}
+
+/// A sender that may not wait reads the lane bound the established transport's queue took, and
+/// none before it is established. Turned red by a lane bounded before the send limits are
+/// settled, or by a settle that records another shape than the one the session's parameters
+/// give its link's queue.
+#[cfg(all(
+    feature = "tx-probe",
+    feature = "transport-fragmentation",
+    feature = "codec-push"
+))]
+#[test]
+fn a_probe_reads_the_lane_the_established_queue_took() {
+    let (actions, _link) = bundle();
+    let priority = crate::qos::Priority::DEFAULT;
+    assert_eq!(
+        actions.tx.lane_bytes(priority),
+        usize::MAX,
+        "no lane is bounded before the transport is established"
+    );
+    actions.enter_established();
+    let shape = actions.params.tx_queue.shape(
+        actions.negotiated_qos(),
+        actions.negotiated_batch_mtu(),
+        actions.params.effective_batch_size() as usize,
+    );
+    assert_eq!(actions.tx.lane_bytes(priority), shape.lane_bytes(priority));
+}
+
+/// A link compresses its batches from its establishment, and only when the session negotiated
+/// compression: its handshake leaves bare, a link established over a session whose peer offered
+/// none compresses nothing, and a reopen writes the next handshake bare again. Turned red by
+/// `enter_established` settling the link's choice from anything but the negotiated capability,
+/// by a link that compresses before it is established, or by a reopen that leaves it compressing.
+#[cfg(feature = "session-extcompression")]
+#[test]
+fn a_link_compresses_from_its_establishment_what_its_session_negotiated() {
+    let (actions, _link) = bundle();
+    actions.set_compression_offer(true);
+    actions.negotiate_compression_against_peer(true);
+    assert!(
+        !actions.compresses_batches(),
+        "the handshake is written bare"
+    );
+    actions.enter_established();
+    assert!(
+        actions.compresses_batches(),
+        "an established link of a session that negotiated compression compresses"
+    );
+    #[cfg(feature = "session-reconnect")]
+    {
+        actions.reset_for_reopen();
+        assert!(
+            !actions.compresses_batches(),
+            "the reopen's handshake is written bare"
+        );
+    }
+
+    let (refused, _link) = bundle();
+    refused.set_compression_offer(true);
+    refused.negotiate_compression_against_peer(false);
+    refused.enter_established();
+    assert!(
+        !refused.compresses_batches(),
+        "a link whose peer offered no compression compresses nothing"
+    );
 }
 
 /// [`bundle`] with its link established ([`SessionLinkActions::enter_established`]): the
@@ -2671,7 +2775,7 @@ mod facts_lock {
             batch_size: 1024,
         }));
         actions.enter_established();
-        assert!(actions.link.transport_available.is_open(), "established");
+        assert!(actions.link.tx.transport_available.is_open(), "established");
         #[cfg(feature = "codec-push")]
         assert!(
             actions.negotiated_tx_limits().is_some(),
@@ -2691,7 +2795,7 @@ mod facts_lock {
         assert_eq!(whatami, None, "the role is the closed transport's");
         assert_eq!(caps, None, "the capabilities are the closed transport's");
         assert!(
-            !actions.link.transport_available.is_open(),
+            !actions.link.tx.transport_available.is_open(),
             "the reopened link waits for its establishment"
         );
         #[cfg(feature = "codec-push")]
@@ -3804,6 +3908,7 @@ mod link_stamps {
         assert!(
             actions
                 .link
+                .tx
                 .spoke
                 .load(core::sync::atomic::Ordering::Relaxed),
             "CONTROL: a frame on a link that writes inline marks the line"
@@ -3836,10 +3941,12 @@ mod link_stamps {
             (Reliability::BestEffort, Priority::Control),
         ];
         for (n, (class, priority)) in frames.into_iter().enumerate() {
-            actions.link.spoke.store(false, Ordering::Relaxed);
-            actions.emit_on_link(&actions.link, &[0x04], None, class, priority, false);
+            actions.link.tx.spoke.store(false, Ordering::Relaxed);
+            actions
+                .tx
+                .emit_on_link(&actions.link.tx, &[0x04], None, class, priority, false);
             assert!(
-                actions.link.spoke.load(Ordering::Relaxed),
+                actions.link.tx.spoke.load(Ordering::Relaxed),
                 "frame {n} marks the line"
             );
         }
@@ -3918,9 +4025,11 @@ mod link_stamps {
         actions.link.arm_keepalive();
         let interval = actions.keepalive_interval_ms();
         let marks = |class, priority| {
-            actions.link.spoke.store(false, Ordering::Relaxed);
-            actions.emit_on_link(&actions.link, &[0x04], None, class, priority, false);
-            actions.link.spoke.load(Ordering::Relaxed)
+            actions.link.tx.spoke.store(false, Ordering::Relaxed);
+            actions
+                .tx
+                .emit_on_link(&actions.link.tx, &[0x04], None, class, priority, false);
+            actions.link.tx.spoke.load(Ordering::Relaxed)
         };
         assert!(
             !marks(Reliability::Reliable, Priority::DEFAULT),
@@ -3934,7 +4043,7 @@ mod link_stamps {
             !marks(Reliability::BestEffort, Priority::Control),
             "a frame carried apart is not the link's line"
         );
-        actions.link.spoke.store(false, Ordering::Relaxed);
+        actions.link.tx.spoke.store(false, Ordering::Relaxed);
         let read = crate::drive::keepalive_deadlines(&*actions).expect("the worker runs");
         assert_eq!(
             read.earliest(),
@@ -4084,7 +4193,7 @@ mod rx_sn_gate {
     }
 }
 
-/// The one value of a one-face session's transport, over a real session's machine and actions: what
+/// The one value of a link's session's transport, over a real session's machine and actions: what
 /// it raises before input is read, the order it hands a datagram and the time to the session, and
 /// when it is next due.
 mod unicast_transport {
@@ -4095,17 +4204,9 @@ mod unicast_transport {
     use super::{bundle, NoEntropy, PlainRuntime, StillClock};
     use crate::drive::{new_session_engine, SessionEngine};
     use crate::driver_loop::IterationEvent;
-    use crate::link_life::{LinkInput, LinkTimes};
     use crate::session_actions::SessionLinkActions;
     use crate::session_timeouts::SessionTimeouts;
-    use crate::unicast_transport::{MadeLink, UnicastTransport};
-
-    const TIMES: LinkTimes = LinkTimes {
-        open_timeout_ms: 1_000,
-        redial_ms: Some(500),
-        dial_look_ms: 10,
-        accept_timeout_ms: 1_000,
-    };
+    use crate::unicast_transport::UnicastTransport;
 
     /// The session's machine over `actions`, entered in its initial state and given no role.
     fn engine(
@@ -4124,14 +4225,11 @@ mod unicast_transport {
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
         let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
-        let transport = UnicastTransport::init_in(
-            &mut place,
-            TIMES,
-            1,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
+        let transport =
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
         actions.set_app_wake_deadline_ms(Some(0));
         let mut wakes = 0usize;
         let mut count = |event: IterationEvent<'_, '_>| {
@@ -4145,34 +4243,25 @@ mod unicast_transport {
         assert_eq!(actions.app_wake_deadline_ms(), None, "and spent");
     }
 
-    /// The transport is due at the first of what its link and its session have due: the session's
-    /// application deadline while the link waits on nothing, and the link's look at once when a
-    /// dial it asked for is owed. Turned red by a due instant that leaves the link's wake out.
+    /// The transport is due when its session is: at the application layer's deadline when no
+    /// timer of the session's is nearer. Turned red by a `due_ms` that leaves the session's
+    /// deadline out.
     #[test]
-    fn the_transport_is_due_at_the_first_of_its_links_and_its_sessions() {
+    fn the_transport_is_due_when_its_session_is() {
         let (actions, _link) = bundle();
         let engine = engine(&actions);
         let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
-        let transport = UnicastTransport::init_in(
-            &mut place,
-            TIMES,
-            1,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
+        let transport =
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
         actions.set_app_wake_deadline_ms(Some(9));
         assert!(
             transport
                 .due_ms(&engine, &*actions, 0)
                 .is_some_and(|due_ms| due_ms <= 9),
-            "an idle link leaves the session's deadline to bound the look"
-        );
-        assert_eq!(transport.input(LinkInput::Open, 0).dial(), Some(0));
-        assert_eq!(
-            transport.due_ms(&engine, &*actions, 0),
-            Some(0),
-            "a dial owed a report is looked at now"
+            "the session's deadline bounds the look"
         );
     }
 
@@ -4187,14 +4276,11 @@ mod unicast_transport {
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
         let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
-        let transport = UnicastTransport::init_in(
-            &mut place,
-            TIMES,
-            1,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
+        let transport =
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
         actions.set_app_wake_deadline_ms(Some(0));
         let mut wakes: Vec<bool> = Vec::new();
         let path = transport.on_datagram(
@@ -4229,14 +4315,11 @@ mod unicast_transport {
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
         let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
-        let transport = UnicastTransport::init_in(
-            &mut place,
-            TIMES,
-            1,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
+        let transport =
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
+                slot.write(())
+            })
+            .expect("built");
         assert_eq!(actions.link.fact_last_inbound_at(|slot| *slot), None);
         // A reliable `Frame` at SN 1 that carries no record.
         let frame = [T_MID_FRAME | FLAG_T_FRAME_R, 0x01];
@@ -4323,9 +4406,9 @@ mod unicast_transport {
 
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
-        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
         let transport =
-            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
                 slot.write(())
             })
             .expect("built");
@@ -4364,53 +4447,15 @@ mod unicast_transport {
         );
     }
 
-    /// A transport over a link handed to it made is due when its session is, and a life that
-    /// asks for a look moves only the transport that holds it. Turned red by a made link that adds
-    /// a wake of its own, or a due instant that reads another transport's life.
-    #[test]
-    fn a_transport_over_a_made_link_is_due_when_its_session_is() {
-        let (actions, _link) = bundle();
-        let engine = engine(&actions);
-        let mut made_place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
-        let made = UnicastTransport::init_made_in(
-            &mut made_place,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
-        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
-        let dialling = UnicastTransport::init_in(
-            &mut place,
-            TIMES,
-            1,
-            SessionTimeouts::from_build(),
-            |slot| slot.write(()),
-        )
-        .expect("built");
-        actions.set_app_wake_deadline_ms(Some(9));
-        assert_eq!(
-            made.due_ms(&engine, &*actions, 0),
-            dialling.due_ms(&engine, &*actions, 0),
-            "an idle life adds nothing to the session's own"
-        );
-        assert_eq!(dialling.input(LinkInput::Open, 0).dial(), Some(0));
-        assert_eq!(dialling.due_ms(&engine, &*actions, 0), Some(0));
-        assert!(
-            made.due_ms(&engine, &*actions, 0)
-                .is_some_and(|due_ms| due_ms <= 9),
-            "the session's deadline still bounds the made link's transport"
-        );
-    }
-
     /// A turn that raises nothing first leaves the application layer's deadline for the time its
     /// owner hands apart, and a turn begun raises it. Turned red by an `input_at` that raises.
     #[test]
     fn a_turn_that_raises_nothing_leaves_the_deadline_for_the_time() {
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
-        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
         let transport =
-            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
                 slot.write(())
             })
             .expect("built");
@@ -4443,9 +4488,9 @@ mod unicast_transport {
 
         let (actions, _link) = bundle();
         let mut engine = engine(&actions);
-        let mut place = MaybeUninit::<UnicastTransport<(), MadeLink>>::uninit();
+        let mut place = MaybeUninit::<UnicastTransport<()>>::uninit();
         let transport =
-            UnicastTransport::init_made_in(&mut place, SessionTimeouts::from_build(), |slot| {
+            UnicastTransport::init_in(&mut place, SessionTimeouts::from_build(), |slot| {
                 slot.write(())
             })
             .expect("built");
@@ -4458,5 +4503,226 @@ mod unicast_transport {
         let turn = transport.begin_input(&*actions, 0, &mut seen);
         turn.lose(&mut engine, LostCause::PeerClosed, &mut seen);
         assert_eq!(lost, [true], "one loss, with the peer's close as its cause");
+    }
+}
+
+// A group's transmit state over a runtime of this crate's own: what its one link is handed, and
+// the numbers its JOIN reads. The tests send whole frames on the heap, which a lend-only build
+// has no form of.
+#[cfg(all(feature = "codec-push", not(feature = "tx-lend-only")))]
+mod group_tx_tests {
+    use alloc::sync::Arc;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use sce_forge_runtime::codec::{CodecError, SceSink};
+
+    use super::PlainRuntime;
+    use crate::link::{BoxedLinkDriver, LinkDropCause, LinkSendOutcome};
+    use crate::qos::Priority;
+    use crate::reliability::Reliability;
+    use crate::send_wire_error::SendWireError;
+    use crate::session_init_params::TxQueueConf;
+    use crate::transport_tx::{GroupTx, GroupTxLimits, GroupTxMessage};
+    use crate::tx_buf::TxSink;
+    use crate::tx_deadline::PushOutcome;
+
+    /// A group's send socket that keeps each datagram it is handed, or, once its writer is gone,
+    /// refuses each as a driver with no writer does.
+    #[derive(Default)]
+    struct Socket {
+        sent: std::sync::Mutex<Vec<Vec<u8>>>,
+        gone: AtomicBool,
+    }
+
+    impl Socket {
+        fn sent(&self) -> Vec<Vec<u8>> {
+            self.sent.lock().expect("no test thread panicked").clone()
+        }
+    }
+
+    impl BoxedLinkDriver for Socket {
+        fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            if self.gone.load(Ordering::SeqCst) {
+                return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+            }
+            self.sent
+                .lock()
+                .expect("no test thread panicked")
+                .push(bytes.to_vec());
+            LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+    }
+
+    /// The limits of a group of 1,024-byte frames in the 28-bit ring, with no QoS, waiting as the
+    /// default policy waits.
+    fn limits() -> GroupTxLimits {
+        GroupTxLimits {
+            frame_budget: 1024,
+            sn_mask: crate::sn::mask_from_res(2),
+            max_reassembly_bytes: usize::MAX,
+            qos: false,
+            compresses: false,
+            tx_queue: TxQueueConf::of_snapshot(
+                &crate::policy::SessionPolicy::defaults(),
+                &crate::limits::SessionLimits::BUILD,
+            ),
+        }
+    }
+
+    /// A group of [`limits`] numbered from 7.
+    fn group() -> (GroupTx<PlainRuntime>, Arc<Socket>) {
+        let socket = Arc::new(Socket::default());
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = socket.clone();
+        (GroupTx::new(sink, 7, limits()), socket)
+    }
+
+    /// A reliable message that waits for room, of two bytes.
+    const PUT: GroupTxMessage = GroupTxMessage {
+        priority: Priority::DEFAULT,
+        reliable: true,
+        droppable: false,
+        express: false,
+        worst_case_payload: 2,
+    };
+
+    fn body(sink: &mut TxSink<'_>) -> Result<(), CodecError> {
+        sink.write_bytes(&[0xAA, 0xBB])
+    }
+
+    /// A message leaves as one reliable frame of the group's first number on its one link, and
+    /// the JOIN reads the reliable channel past it and the best-effort one where it began. Turned
+    /// red by a send that mints on another channel than the message's, by a group whose gate is
+    /// closed at its making, or by a `next_sn` that answers the last number minted.
+    #[test]
+    fn a_group_frames_a_message_on_its_link_and_its_join_reads_past_it() {
+        let (group, socket) = group();
+        assert_eq!(group.next_sn(Priority::DEFAULT, true), 7);
+        assert!(matches!(group.send(PUT, &body), Ok(PushOutcome::Pushed)));
+        assert_eq!(
+            socket.sent(),
+            [vec![0x25, 0x07, 0xAA, 0xBB]],
+            "a reliable Frame of SN 7 holding the message"
+        );
+        assert_eq!(group.next_sn(Priority::DEFAULT, true), 8);
+        assert_eq!(
+            group.next_sn(Priority::DEFAULT, false),
+            7,
+            "the best-effort channel minted nothing"
+        );
+    }
+
+    /// A group whose socket's writer went away refuses its next send typed, as a link's closed
+    /// gate does, and hands the socket nothing more. Turned red by a send that does not read the
+    /// gate, or an emit that leaves it open on a writer that is gone.
+    #[test]
+    fn a_group_whose_writer_is_gone_refuses_its_next_send() {
+        let (group, socket) = group();
+        socket.gone.store(true, Ordering::SeqCst);
+        assert!(
+            matches!(group.send(PUT, &body), Ok(PushOutcome::Pushed)),
+            "the frame was handed over; the socket's refusal closes the gate behind it"
+        );
+        assert!(matches!(
+            group.send(PUT, &body),
+            Err(SendWireError::TransportUnavailable)
+        ));
+        assert!(socket.sent().is_empty());
+    }
+
+    /// A link whose queue stays full: each ask for room is answered congested, the wait it was
+    /// made with noted.
+    #[derive(Default)]
+    struct Full {
+        asked: std::sync::Mutex<Vec<u64>>,
+    }
+
+    impl BoxedLinkDriver for Full {
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            LinkSendOutcome::Sent
+        }
+
+        fn wait_for_room(
+            &self,
+            _priority: Priority,
+            wait: crate::link::RoomWait,
+        ) -> crate::link::RoomAnswer {
+            self.asked
+                .lock()
+                .expect("no test thread panicked")
+                .push(wait.wait_us());
+            crate::link::RoomAnswer {
+                room: crate::link::LinkRoom::Congested,
+                waited_us: wait.wait_us(),
+            }
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+    }
+
+    /// A message that may not be dropped, sent at once on a link whose queue is full, asks for
+    /// room with no wait and is congested, where the same message sent to wait asks with the
+    /// group's `wait_before_close`. Turned red by an at-once send that asks with the message's
+    /// own wait, or one that is answered pushed on a full link.
+    #[test]
+    fn a_message_sent_at_once_asks_for_room_with_no_wait() {
+        let full = Arc::new(Full::default());
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = full.clone();
+        let close_us = limits().tx_queue.wait_before_close_us;
+        assert!(close_us > 0, "the default policy waits before it closes");
+        let group = GroupTx::<PlainRuntime>::new(sink, 7, limits());
+        assert!(matches!(
+            group.send_at_once(PUT, &body),
+            Ok(PushOutcome::Congested)
+        ));
+        assert!(matches!(group.send(PUT, &body), Ok(PushOutcome::Congested)));
+        assert_eq!(
+            *full.asked.lock().expect("no test thread panicked"),
+            [0, close_us]
+        );
+        assert_eq!(group.next_sn(Priority::DEFAULT, true), 7, "nothing minted");
+    }
+
+    /// A sender is read as holding its conduit while its body is written, and as gone once its
+    /// send returned. Turned red by a reading of no flag, or of a flag the walk does not raise.
+    #[test]
+    fn a_group_reads_a_sender_inside_its_conduit() {
+        let (group, _socket) = group();
+        assert!(!group.sending(), "no sender at rest");
+        let inside = core::cell::Cell::new(false);
+        let probe = |sink: &mut TxSink<'_>| {
+            inside.set(group.sending());
+            body(sink)
+        };
+        assert!(matches!(group.send(PUT, &probe), Ok(PushOutcome::Pushed)));
+        assert!(inside.get(), "the sender held its conduit while it wrote");
+        assert!(!group.sending(), "and let go of it once it returned");
+    }
+
+    /// Inside the batch window two messages join one frame, which leaves only at the stop, under
+    /// one number. Turned red by a `batch_start` that opens no window, or a `batch_stop` that
+    /// closes it without handing the open frame over.
+    #[cfg(feature = "transport-batching")]
+    #[test]
+    fn a_group_window_holds_its_messages_in_one_frame_until_the_stop() {
+        let (group, socket) = group();
+        group.batch_start();
+        assert!(matches!(group.send(PUT, &body), Ok(PushOutcome::Pushed)));
+        assert!(matches!(group.send(PUT, &body), Ok(PushOutcome::Pushed)));
+        assert!(socket.sent().is_empty(), "the window holds the frame");
+        group.batch_stop();
+        assert_eq!(
+            socket.sent(),
+            [vec![0x25, 0x07, 0xAA, 0xBB, 0xAA, 0xBB]],
+            "one frame of SN 7 holding both"
+        );
+        assert_eq!(group.next_sn(Priority::DEFAULT, true), 8);
     }
 }

@@ -3125,8 +3125,8 @@ impl SubscriberPeer<crate::bounded::Static> {
     }
 }
 
-/// The rows of a [`SubscriberPeer`] of the region policy, which a region lays out beside it: the
-/// staging of the answers to the peer's interests, at the build's bound. The peer's aliases and
+/// The rows of a [`SubscriberPeer`] of a policy a description places, which a region lays out
+/// beside it: the staging of the answers to the peer's interests, at the build's bound. The peer's aliases and
 /// interests are inline in the side, at their bounds, as the region policy keeps a peer's rows.
 pub struct SubscriberPeerRows {
     #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
@@ -3136,8 +3136,8 @@ pub struct SubscriberPeerRows {
 // SAFETY: the staging's rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
 unsafe impl crate::bounded::ZeroEmpty for SubscriberPeerRows {}
 
-/// The lines a region's description holds for one [`SubscriberPeer`] of the region policy, at
-/// most: its staging's rows; and its two handles to the key arena, its aliases' and its interests'.
+/// The lines a description holds for one [`SubscriberPeer`], at most: its staging's rows; and its
+/// two handles to the key arena, its aliases' and its interests'.
 pub const SUBSCRIBER_PEER_LINES: usize = 2;
 
 // SAFETY: of the region policy, at all zero bytes: the aliases are a `FixedIdMap` and the interests
@@ -3150,10 +3150,10 @@ pub const SUBSCRIBER_PEER_LINES: usize = 2;
 // `ComposeInline` (`ZeroEmpty`). Nothing drops a value, every sequence holding none.
 unsafe impl crate::bounded::ZeroEmpty for SubscriberPeer<crate::bounded::Region> {}
 
-impl SubscriberPeer<crate::bounded::Region> {
-    /// The description of a side of the region policy at `at` in a region and its
-    /// [`SubscriberPeerRows`] at `rows`: the line of its staging's rows and its handles to the
-    /// region's key arena, those the build keeps.
+impl<Q: crate::bounded::LaidOut> SubscriberPeer<Q> {
+    /// The description of a side at `at` and, in a region, its [`SubscriberPeerRows`] at `rows`:
+    /// the line of its staging's rows, which a plan lends the answers staged for a face's peer
+    /// (`RowCount::PendingDeclares`), and its handles to the key arena, those the build keeps.
     pub const fn places(
         at: usize,
         rows: usize,
@@ -3162,15 +3162,19 @@ impl SubscriberPeer<crate::bounded::Region> {
         #[cfg(feature = "storage-profile")]
         let lines = lines.keys_at(at.wrapping_add(core::mem::offset_of!(Self, naming.keys)));
         #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
-        let lines = lines
-            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, interests.keys)))
-            .seq(crate::bounded::SeqPlace::of_room::<
-                SubInterestReply,
-                { caps::MAX_PENDING_DECLARES },
-            >(
-                at.wrapping_add(core::mem::offset_of!(Self, interests.staged)),
-                rows.wrapping_add(core::mem::offset_of!(SubscriberPeerRows, staged)),
-            ));
+        let lines =
+            lines
+                .keys_at(at.wrapping_add(core::mem::offset_of!(Self, interests.keys)))
+                .seq(
+                    crate::bounded::SeqPlace::of_room::<
+                        SubInterestReply,
+                        { caps::MAX_PENDING_DECLARES },
+                    >(
+                        at.wrapping_add(core::mem::offset_of!(Self, interests.staged)),
+                        rows.wrapping_add(core::mem::offset_of!(SubscriberPeerRows, staged)),
+                    )
+                    .counted(crate::bounded::RowCount::PendingDeclares),
+                );
         #[cfg(not(feature = "storage-profile"))]
         let _ = at;
         #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
@@ -3251,78 +3255,34 @@ mod on_use_alias_tests {
 }
 
 impl SubscriberPeer<Lent> {
-    /// An empty side whose staging (`staged` rows) is lent from `arena`. Refused when it is over
-    /// the build's capacity or the arena has not the room. The alias table and the interest table
-    /// keep their rows in the session's pools they are handed (`keep_alias_rows_in`,
-    /// `keep_interest_rows_in`) and their keys in the key arena it is handed (`keep_keys_in`), and
-    /// refuse what the peer asks before.
-    pub fn lent(arena: &mut Arena, staged: usize) -> Result<Self, LendRefused> {
-        let mut side = Self::default();
-        side.lend_rows(arena, staged)?;
-        Ok(side)
-    }
-
-    /// Lend an empty side its staging (`staged` rows) and the row it composes keys in from
-    /// `arena`, where it lies: what [`Self::lent`] makes, without the side being a value of its
-    /// own. Refused as `lent` is.
-    ///
-    /// The key arena and the rows of interests the side was handed stay its own: lending its
-    /// staging before or after it was handed them keeps the interests' keys and rows in them.
-    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
-    pub fn lend_rows(&mut self, arena: &mut Arena, staged: usize) -> Result<(), LendRefused> {
-        self.interests.staged = arena.lend(staged)?;
-        self.lend_compose_row(arena)
-    }
-
-    /// Lend an empty side the row it composes keys in: a build that answers no Interest keeps no
-    /// interest of the peer, and stages nothing back to it.
-    #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
-    pub fn lend_rows(&mut self, arena: &mut Arena, _staged: usize) -> Result<(), LendRefused> {
-        self.lend_compose_row(arena)
-    }
-
-    /// Lend the side the row it composes keys in ([`ComposeRow`](crate::wireexpr_resolve::ComposeRow)).
+    /// Lend an empty side the row it composes keys in
+    /// ([`ComposeRow`](crate::wireexpr_resolve::ComposeRow)) from `arena`, where it lies: a row
+    /// the region keeps inline, so no line of the side's description ([`SubscriberPeer::places`])
+    /// and lent beside them. Its staging is lent by that description, and its aliases and
+    /// interests keep their rows in the session's pools they are handed (`keep_alias_rows_in`,
+    /// `keep_interest_rows_in`) and their keys in the key arena it is handed (`keep_keys_in`).
     #[cfg(feature = "storage-profile")]
-    fn lend_compose_row(&mut self, arena: &mut Arena) -> Result<(), LendRefused> {
+    pub fn lend_compose_row(&mut self, arena: &mut Arena) -> Result<(), LendRefused> {
         self.compose = crate::wireexpr_resolve::ComposeRow::lent(arena)?;
         Ok(())
     }
 
     /// Nothing to lend: a build with no storage profile resolves no key of the peer's.
     #[cfg(not(feature = "storage-profile"))]
-    fn lend_compose_row(&mut self, arena: &mut Arena) -> Result<(), LendRefused> {
+    pub fn lend_compose_row(&mut self, arena: &mut Arena) -> Result<(), LendRefused> {
         let _ = arena;
         Ok(())
     }
 
-    /// The bytes of an arena [`Self::lent`] takes. `None` past the address space.
-    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
-    pub const fn arena_bytes(staged: usize) -> Option<usize> {
-        match (
-            InterestSide::<Lent>::arena_bytes(staged),
-            Self::compose_bytes(),
-        ) {
-            (Some(staging), Some(compose)) => staging.checked_add(compose),
-            _ => None,
-        }
-    }
-
-    /// The bytes of an arena [`Self::lent`] takes: its row to compose keys in alone, in a build
-    /// that answers no Interest.
-    #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
-    pub const fn arena_bytes(_staged: usize) -> Option<usize> {
-        Self::compose_bytes()
-    }
-
-    /// The bytes of the row the side composes keys in.
+    /// The bytes of an arena [`Self::lend_compose_row`] takes. `None` past the address space.
     #[cfg(feature = "storage-profile")]
-    const fn compose_bytes() -> Option<usize> {
+    pub const fn compose_bytes() -> Option<usize> {
         crate::wireexpr_resolve::ComposeRow::arena_bytes()
     }
 
     /// No row: a build with no storage profile composes no key.
     #[cfg(not(feature = "storage-profile"))]
-    const fn compose_bytes() -> Option<usize> {
+    pub const fn compose_bytes() -> Option<usize> {
         Some(0)
     }
 
@@ -4115,15 +4075,6 @@ impl<P: Storage> Default for InterestSide<P> {
             key_quota: crate::limit_binding::Limited::build_default(),
             keys: Default::default(),
         }
-    }
-}
-
-#[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
-impl InterestSide<Lent> {
-    /// The bytes of an arena [`SubscriberPeer::lend_rows`] takes: the staging's. `None` past the
-    /// address space.
-    const fn arena_bytes(staged: usize) -> Option<usize> {
-        Arena::table_bytes::<SubInterestReply>(staged)
     }
 }
 

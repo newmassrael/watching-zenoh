@@ -41,14 +41,14 @@ use wz_session_core::bounded::BoundedVec;
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
 #[cfg(wz_lent)]
-use wz_session_core::bounded::{Arena, LendRefused};
+use wz_session_core::bounded::{Arena, LendRefused, RowCount, TableLender};
 #[cfg(not(wz_round))]
 use wz_session_core::driver_loop::InPlaceRecord;
 
 use crate::RowPolicy;
 use wz_session_core::driver_loop::IterationEvent;
 #[cfg(wz_lent)]
-use wz_session_core::key_arena::{KeySpace, LentKeys};
+use wz_session_core::key_arena::{lend_region, KeySpace, LentKeys};
 #[cfg(feature = "multicast-declarations")]
 use wz_session_core::limit_binding::Quota;
 #[cfg(feature = "multicast-declarations")]
@@ -73,16 +73,16 @@ use wz_session_core::slot_observer::NoRequesters;
     feature = "declarations-synced-event"
 )))]
 use wz_session_core::slot_observer::NoSink;
-#[cfg(wz_lent)]
-use wz_session_core::slot_observer::ObserverRows;
 #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 use wz_session_core::slot_observer::OtherPeers;
 #[cfg(feature = "query")]
 use wz_session_core::slot_observer::Requesters;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf, TakenAhead};
 
+#[cfg(wz_lent)]
+use super::CoopTables;
 #[cfg(feature = "query")]
-use super::{LegHold, LegSink};
+use super::{LegHold, LegId, LegSink};
 use super::{RoundDelivery, SubscriberRow};
 use crate::arena::MAX_FACE_SETS;
 #[cfg(wz_lent)]
@@ -91,14 +91,16 @@ use crate::arena::{FacePeers, GetTables};
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::MatchingSink;
+use wz_session_core::pending_get::SessionFaces;
 #[cfg(feature = "query")]
 use wz_session_core::pending_get::{DueIndex, DueRow, LegTables};
-use wz_session_core::pending_get::{GetKind, SessionFaces};
 use wz_session_core::session_tables::{PeerDeclarations, Plane};
 
 #[allow(unused_imports)]
 use crate::prelude::*;
 use core::mem::{ManuallyDrop, MaybeUninit};
+#[cfg(wz_lent)]
+use core::ptr::NonNull;
 use core::ptr::{self, addr_of_mut};
 
 #[cfg(any(
@@ -243,24 +245,6 @@ impl FaceTables {
         set
     }
 
-    /// Lend a set of no rows its rows where it lies: `gets` rows of its gets and `peer` of its
-    /// peer's tables, from `arena`, in that order, the peer's keys kept in `keys`, the session's
-    /// key arena, held to `limits`. Refused when the arena has not the rows; the set stays whole,
-    /// with what was lent before the refusal.
-    #[cfg(wz_lent)]
-    fn lend(
-        &mut self,
-        arena: &mut Arena,
-        keys: KeySpace,
-        pools: &mut PeerPools,
-        gets: RequesterRows,
-        peer: PeerRows,
-        limits: &SessionLimits,
-    ) -> Result<(), LendRefused> {
-        self.gets = Gets::lent(arena, keys, gets, limits)?;
-        self.peer.lend_rows(arena, keys, peer, pools, limits)
-    }
-
     /// Give the set back where it lies, for the next face: what its peer wrote is dropped, its rows
     /// of the session's pools back to them, one step for each, and its pending gets end, as the
     /// loss of the face they were asked of ends them, each table keeping the rows it was lent.
@@ -273,17 +257,6 @@ impl FaceTables {
         }
     }
 }
-
-/// The bytes of one set of face tables, a row of the arena's table of them
-/// (`crate::arena::ArenaPlan`), where the arena lends them (`runtime-plan`).
-#[cfg(wz_lent)]
-pub(crate) const FACE_SET_BYTES: usize = core::mem::size_of::<FaceTables>();
-
-/// The bytes of one entry of the index of held sets, a row of the arena's table of them: kept by a
-/// build that adds faces beside its dial role's alone (`held::ManyHolders`), where the arena lends
-/// it.
-#[cfg(all(wz_lent, any(feature = "listen", feature = "group")))]
-pub(crate) const HELD_SET_BYTES: usize = core::mem::size_of::<FaceId>();
 
 /// What the index of held sets reads for a free set: the session numbers its faces up from 1
 /// one at a time (`LinkSupervisor::next_face_id`), so no face is known by it.
@@ -305,6 +278,16 @@ fn names_face(holder: FaceId) -> bool {
 
 #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
 mod adding;
+// The registry's and each set's descriptions, read by the forms that lay their tables out at the
+// open: the region's and the plan's.
+#[cfg(not(wz_on_use))]
+mod described;
+// What the arena's plan counts of the registry and of a set, by the part of its report: the lines
+// of the same descriptions the open walks.
+#[cfg(all(feature = "query", wz_lent))]
+pub(crate) use described::set_get_bytes;
+#[cfg(wz_lent)]
+pub(crate) use described::{registry_bytes, registry_row_bytes, set_peer_bytes};
 mod held;
 use held::Holders;
 // What the faces that went owe the liveliness subscribers, kept by a build that adds faces.
@@ -349,7 +332,7 @@ impl HeldFace {
     #[cfg(any(
         feature = "listen",
         feature = "group",
-        feature = "interest-answer",
+        wz_interest_answer,
         all(test, wz_lent)
     ))]
     pub(super) const fn new(at: usize, id: FaceId) -> Self {
@@ -651,21 +634,18 @@ pub(super) struct RegistryOf<H: Holders> {
     drains_within_frames: usize,
 }
 
-/// The faces as the session's state reaches them (`SessionState`): a
-/// leg's entry ended in its face's tables, what a lost face's peer declared let go of, the
-/// earliest deadline of the gets pending on them, and the tokens of lost links retracted.
+/// The faces as the session's state reaches them (`SessionState`): what a lost face's peer
+/// declared and the gets asked of it let go of, the earliest deadline of the gets pending on them,
+/// and the tokens of lost links retracted.
 impl<H: Holders> SessionFaces for RegistryOf<H> {
-    fn end_leg(&mut self, face: FaceId, kind: GetKind) {
-        #[cfg(feature = "query")]
-        if let Some(gets) = self.gets_mut(face) {
-            gets.end_leg(kind);
-        }
-        #[cfg(not(feature = "query"))]
-        let _ = (face, kind);
-    }
-
     fn lose_face(&mut self, face: FaceId) {
         self.flush_declarations_on_link_loss(face);
+        // Its peer can send no Final now: every get asked of it ends, each entry's drop saying its
+        // leg's end, and the face's tables keep their rows for the link that comes up next.
+        #[cfg(feature = "query")]
+        if let Some(gets) = self.gets_mut(face) {
+            gets.clear();
+        }
         // Its peer's tokens are retracted as the round of deliveries takes each, the rest owed.
         #[cfg(feature = "liveliness")]
         self.lose_tokens(face);
@@ -777,69 +757,37 @@ struct Split<'a, H: Holders + 'a> {
 
 impl<H: Holders> RegistryOf<H> {
     /// A session that holds nothing and has been told nothing, with its dial face, its tables
-    /// held to the session limits its open resolved, the application's lent from `arena`, `rows`
-    /// of each, the pools of what the peers write `peers` counts lent from it next, and the tables
-    /// of each face `gets` and `peers` count lent from it too: the dial face's (one of no rows for
-    /// a session that dials nothing, `FacePeers::dial`), the rest reserved for the faces to come
-    /// and built as each first comes (`adding::SpareSets`), and the session's own gets where it
-    /// answers its own. What the peers declare keeps its keys in `keys`, the session's key arena,
-    /// as the session's own declarations do. What the application's subscribers match goes to `delivery`. Refused when
-    /// the arena has not the rows, which one reserved by the plan that counts them always has.
+    /// held to the session limits its open resolved and lent from `arena`: the pools of what the
+    /// peers write, `peers` counting them; the span the sets of the faces to come are built in as
+    /// each first comes (`adding::SpareSets`); every table of the registry's own, by one walk of
+    /// its description (`described`), the application's of `rows`, the sets' table and its index
+    /// of a row for each face the config admits, the tokens owed by the faces that went, and the
+    /// session's own gets where it answers its own; then the dial face's set, by the set's own
+    /// description (one of no rows for a session that dials nothing, `FacePeers::dial`). What the
+    /// peers declare keeps its keys in `keys`, the session's key arena, as the session's own
+    /// declarations do. What the application's subscribers match goes to `delivery`. Refused when
+    /// the arena has not the rows, which one reserved by the plan that counts them always has, or
+    /// when `limits` admit more declaration watchers or watches than the build.
     #[cfg(wz_lent)]
     pub(super) fn new(
         limits: &SessionLimits,
         arena: &mut Arena,
         keys: KeySpace,
-        rows: ObserverRows<wz_session_core::session_tables::TableRows>,
+        rows: wz_session_core::session_tables::TableRows,
         gets: GetTables,
         peers: FacePeers,
         delivery: RoundDelivery,
     ) -> Result<Self, LendRefused> {
-        let app = App::lent(arena, keys, rows, limits)?;
-        let mut pools = PeerPools::lent(arena, keys, peers.pools)?;
-        #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-        let owed = owed::Owed::lent(arena, &peers)?;
-        // One face's own spans are handed to that face's tables alone, so a plan that lends them
-        // lends one set; a build without pools keeps each set's rows inline.
-        debug_assert!(!SHARES_ROWS || pools.is_shared() || peers.tables <= 1);
-        // A session that dials nothing lent its dial face no set: that face holds one of no rows,
-        // first, and every lent set is for the faces to come. Otherwise the first lent set is the
-        // dial face's. Either way every set is built and lent by `lend_set`, at the open or as a
-        // face comes, so a set is built in one place.
-        let mut sets = arena.lend(peers.sets())?;
-        let holders = H::lent(arena, peers.sets())?;
-        if !peers.dial {
-            push_unpeered(&mut sets, keys, limits).ok_or(LendRefused::OverCeiling {
-                rows: 1,
-                ceiling: 0,
-            })?;
-        }
-        // Where faces are added beside the dial role's, the dial face's set is built now and the
-        // set of each other place when a face first takes it, from a span reserved here and written
-        // by nothing until then: on a host the pages of the places no face took stay unresident.
-        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
-        let built = usize::from(peers.dial).min(peers.tables);
-        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
-        let built = peers.tables;
-        for _ in 0..built {
-            lend_set(
-                &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
-            )?;
-        }
-        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
-        let spares = adding::SpareSets::reserved(
-            arena,
-            keys,
-            pools,
-            gets.rows,
-            peers.rows,
-            *limits,
-            peers.tables.saturating_sub(built),
-        )?;
-        // Every span an arena lends starts on one alignment, so lending the session's own gets
-        // after the faces' takes the bytes the plan counts for them wherever it lends them.
-        #[cfg(feature = "local-queryable")]
-        let local = Gets::lent(arena, keys, gets.rows, limits)?;
+        // The rows each line of the registry's description is lent: the application's tables' and
+        // lists', the session's own gets', a set and a row of the index for each set, and a table
+        // owed for each row of the session's pool of its peers' tokens.
+        let counts = rows
+            .counts()
+            .and(&App::list_counts(limits)?)
+            .and(&gets.rows.counts())
+            .with(RowCount::FaceSets, peers.sets())
+            .with(RowCount::HeldSets, peers.sets())
+            .with(RowCount::OwedTokens, peers.owed_tokens());
         // The watches hold what the peers declare in the round the application's deliveries go to,
         // where the links are read by a task or a listener; a read that steps its one link itself
         // hands it after each record from a room of the watches' own.
@@ -859,19 +807,42 @@ impl<H: Holders> RegistryOf<H> {
             not(wz_round)
         ))]
         let decl_watches = DeclWatches::under(limits)?;
+        let pools = PeerPools::lent(arena, keys, peers.pools)?;
+        // One face's own spans are handed to that face's tables alone, so a plan that lends them
+        // lends one set; a build without pools keeps each set's rows inline.
+        debug_assert!(!SHARES_ROWS || pools.is_shared() || peers.tables <= 1);
+        // Where faces are added beside the dial role's, the dial face's set is built at the open
+        // and the set of each other place when a face first takes it, from a span reserved here and
+        // written by nothing until then: on a host the pages of the places no face took stay
+        // unresident. Every span an arena lends starts on one alignment, so the order the open
+        // lends them in moves none of the bytes the plan counts.
+        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+        let built = usize::from(peers.dial).min(peers.tables);
+        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+        let built = peers.tables;
+        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+        let spares = adding::SpareSets::reserved(
+            arena,
+            keys,
+            pools,
+            gets.rows,
+            peers.rows,
+            *limits,
+            peers.tables.saturating_sub(built),
+        )?;
         let mut registry = Self {
-            app: ManuallyDrop::new(app),
+            app: ManuallyDrop::new(App::over(CoopTables::rowless())),
             delivery,
-            sets: ManuallyDrop::new(sets),
-            holders,
+            sets: ManuallyDrop::new(BoundedVec::default()),
+            holders: H::rowless(),
             #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-            owed,
+            owed: owed::Owed::rowless(),
             #[cfg(feature = "multicast-declarations")]
             peer_aliases: limits.max_peer_keyexpr_aliases_held(),
             #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
             spares,
             #[cfg(feature = "local-queryable")]
-            local,
+            local: Gets::default(),
             #[cfg(feature = "local-queryable")]
             local_due: DueRow::NEVER,
             #[cfg(any(
@@ -893,6 +864,57 @@ impl<H: Holders> RegistryOf<H> {
             #[cfg(all(test, feature = "std", feature = "queryable"))]
             drains_within_frames: 0,
         };
+        // Lent whole and given up whole: a refused table leaves the ones after it rowless, and the
+        // registry goes at once with what it was lent.
+        let mut lend = TableLender::new(arena);
+        // SAFETY: the description is this type's own (`Self::places`): each line names a table of
+        // the registry, which holds no value (each made of no rows above), and states the bytes of
+        // its rows, and each key line a table's handle to the key arena, which holds no key; the
+        // registry is reached by nothing else during the call, and `keys` is the session's, which
+        // outlives it.
+        unsafe {
+            lend_region(
+                NonNull::from(&mut registry).cast::<u8>(),
+                keys,
+                &Self::LINES,
+                &counts,
+                &mut lend,
+            );
+        }
+        lend.finish()?;
+        registry.app.tables.limit_to(&rows);
+        registry.app.limit_to(limits);
+        #[cfg(feature = "local-queryable")]
+        registry.local.limit_to(limits);
+        registry.holders.hold_sets(peers.sets())?;
+        // A session that dials nothing lent its dial face no set: that face holds one of no rows,
+        // first, and every lent set is for the faces to come. Otherwise the first lent set is the
+        // dial face's. Either way every set is built and lent by `lend_set`, at the open or as a
+        // face comes, so a set is built in one place; its rows keep what its peer writes in the
+        // pools the faces to come keep theirs in, or in the open's own where none comes.
+        if !peers.dial {
+            push_unpeered(&mut registry.sets, keys, limits).ok_or(LendRefused::OverCeiling {
+                rows: 1,
+                ceiling: 0,
+            })?;
+        }
+        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+        let pools = &mut registry.spares.pools;
+        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+        let mut own_pools = pools;
+        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+        let pools = &mut own_pools;
+        for _ in 0..built {
+            lend_set(
+                &mut registry.sets,
+                arena,
+                keys,
+                pools,
+                gets.rows,
+                peers.rows,
+                limits,
+            )?;
+        }
         registry.index_dues();
         Ok(registry)
     }
@@ -1050,8 +1072,8 @@ impl<H: Holders> RegistryOf<H> {
         gets
     }
 
-    /// [`Self::all_gets`], to write.
-    #[cfg(all(feature = "query", any(feature = "liveliness-get", all(test, wz_lent))))]
+    /// The pending gets of every face the session holds, and the session's own, to write.
+    #[cfg(feature = "query")]
     pub(super) fn all_gets_mut(&mut self) -> impl Iterator<Item = &mut Gets> {
         let gets = self
             .sets
@@ -1062,6 +1084,45 @@ impl<H: Holders> RegistryOf<H> {
         #[cfg(feature = "local-queryable")]
         let gets = gets.chain(core::iter::once(&mut self.local));
         gets
+    }
+
+    /// End the first leg pending on any face, or on the session's own queryables, whose entry's
+    /// sink `pick` names: the entry is dropped where it lies, which says the leg's end. The row of
+    /// the leg's get, for the caller to let go of what the get held with no lock held; `None` when
+    /// no entry is named. A leg is its entry alone, so a cancellation finds it here and nowhere
+    /// else.
+    #[cfg(feature = "query")]
+    pub(super) fn end_first_leg(
+        &mut self,
+        mut pick: impl FnMut(&LegSink) -> bool,
+    ) -> Option<LegId> {
+        let mut ended = None;
+        for gets in self.all_gets_mut() {
+            let mut named = |sink: &LegSink| {
+                let hit = pick(sink);
+                if hit {
+                    ended = Some(sink.row());
+                }
+                hit
+            };
+            if gets.replies.unregister_first(|sink| named(sink.inner())) {
+                break;
+            }
+            #[cfg(feature = "liveliness-get")]
+            if gets.liveliness_gets.unregister_first(named) {
+                break;
+            }
+        }
+        ended
+    }
+
+    /// End every get pending on any face and on the session's own queryables, each entry's drop
+    /// saying its leg's end: what the session's close and its last handle do.
+    #[cfg(feature = "query")]
+    pub(super) fn end_every_get(&mut self) {
+        for gets in self.all_gets_mut() {
+            gets.clear();
+        }
     }
 
     /// The pending gets of the face `id` names, or the session's own for [`LOCAL_FACE`], while it
@@ -1152,7 +1213,7 @@ impl<H: Holders> RegistryOf<H> {
 
     /// How many places the open holds for the faces' sets, each set built when a face first takes
     /// its place: the places of every table of the session's faces.
-    pub(super) fn places(&self) -> usize {
+    pub(super) fn face_places(&self) -> usize {
         self.holders.rows().len()
     }
 
@@ -1525,7 +1586,7 @@ impl<H: Holders> RegistryOf<H> {
     /// side beside the table staged both as it was told; the table that serves one peer or many
     /// leaves each peer to read the table's epoch, and nothing else reads it. Only a build that
     /// answers its peers' Interests keeps any to reconcile.
-    #[cfg(feature = "interest-answer")]
+    #[cfg(wz_interest_answer)]
     fn reconcile_subscribers(&mut self, face: HeldFace) {
         // Handed out to be written, as `Self::split` hands a face's tables out.
         self.writing();
@@ -1543,7 +1604,7 @@ impl<H: Holders> RegistryOf<H> {
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
-        #[cfg(feature = "interest-answer")]
+        #[cfg(wz_interest_answer)]
         self.reconcile_subscribers(face);
         if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
             app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
@@ -1736,11 +1797,14 @@ impl<H: Holders> RegistryOf<H> {
             .subscribers
             .mapping_spaces_over(own)
             .from_sender(record.sender());
-        face.gets.replies.project_response(response, spaces)
+        face.gets
+            .replies
+            .receive_mut()
+            .project_response(response, spaces)
     }
 
     /// The reply `response`, a record of a frame of face `face` the copying receive decoded, is
-    /// delivered as (`ReplyRegistry::take_response`), for a read that hands it to the get it
+    /// delivered as (`ReplyReceive::take_response`), for a read that hands it to the get it
     /// answers with the session let go of (`replies`), the frame's other planes told the rest of
     /// it after (`Planes::BesideSubscribers`). A face the session no longer holds takes nothing.
     #[cfg(all(feature = "query", not(wz_round)))]
@@ -1752,12 +1816,17 @@ impl<H: Holders> RegistryOf<H> {
         let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
         let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
         let spaces = face.peer.subscribers.mapping_spaces_over(own);
-        face.gets.replies.take_response(response, spaces)
+        face.gets
+            .replies
+            .receive_mut()
+            .take_response(response, spaces)
     }
 
     /// Hand `reply`, read by [`Self::lend_reply`] or projected by [`Self::project_reply`], to
-    /// the pending gets of face `face` it answers, as the face's dispatch hands a Response to
-    /// them. A face the session no longer holds hands it to none.
+    /// the pending get of face `face` it answers: the one entry its id names, found in the row the
+    /// id carries as the face's dispatch finds it (`ReplyRegistry::reply_to_one`), since every id
+    /// this engine puts in a face's table names one entry. A face the session no longer holds hands
+    /// it to none.
     #[cfg(all(feature = "query", not(wz_round)))]
     pub(super) fn fire_reply(
         &mut self,
@@ -1765,7 +1834,7 @@ impl<H: Holders> RegistryOf<H> {
         reply: &dyn wz_session_core::reply_sink::ReplyView,
     ) {
         if let Some(Split { face, .. }) = self.split_unwritten(self.place(face)) {
-            face.gets.replies.dispatch_borrowed(reply);
+            face.gets.replies.reply_to_one(reply);
         }
     }
 
@@ -1887,7 +1956,7 @@ impl<H: Holders> RegistryOf<H> {
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         if let Some(Split { app, face, .. }) = self.split_unwritten(self.place(face)) {
-            #[cfg(feature = "interest-answer")]
+            #[cfg(wz_interest_answer)]
             reconcile_face(app, face);
             app.flush_pending_replies(&mut face.peer, &mut face.gets, actions);
             // No `Final` is owed here: only a Request's dispatch owes one
@@ -1921,7 +1990,7 @@ impl<H: Holders> RegistryOf<H> {
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         self.dispatch_event_to(face, event, planes);
-        #[cfg(feature = "interest-answer")]
+        #[cfg(wz_interest_answer)]
         self.reconcile_subscribers(face);
         if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
@@ -1938,7 +2007,7 @@ impl<H: Holders> RegistryOf<H> {
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
         if let Some(Split { app, face, .. }) = self.split_unwritten(self.place(face)) {
-            #[cfg(feature = "interest-answer")]
+            #[cfg(wz_interest_answer)]
             reconcile_face(app, face);
             app.flush_pending(&mut face.peer, &mut face.gets, actions);
         }
@@ -2160,7 +2229,7 @@ impl<H: Holders> RegistryOf<H> {
 /// Stage for `face`'s peer what the application did to its subscriptions since the peer last looked
 /// ([`RegistryOf::reconcile_subscribers`]): one body for every caller, not one for each that inlines
 /// it. Only a build that answers its peers' Interests keeps any to reconcile.
-#[cfg(feature = "interest-answer")]
+#[cfg(wz_interest_answer)]
 #[inline(never)]
 fn reconcile_face(app: &App, face: &mut FaceTables) {
     face.peer.subscribers.reconcile(&app.tables);
@@ -2224,7 +2293,7 @@ fn lend_set(
         rows: at.saturating_add(1),
         ceiling: at,
     })?;
-    set.lend(arena, keys, pools, gets, peer, limits)
+    set.lend(arena, keys, gets, peer, limits)
 }
 
 /// The engine is generic over its links, so the crate that names them drops the registry, and a
@@ -2275,7 +2344,9 @@ mod tests {
     use super::held::{Holders, ManyHolders, OneHolder};
     use super::*;
     use crate::arena::{AllocatorMemory, SessionArena};
+    use wz_session_core::bounded::{seq_bytes, seq_rows, RowCounts, SeqPlace};
     use wz_session_core::peer_tables::PeerPoolRows;
+    use wz_session_core::pubsub::SubscriberPeer;
     use wz_session_core::reply_stage::FinalStaging;
     use wz_session_core::sample::QosLevel;
 
@@ -2347,26 +2418,19 @@ mod tests {
 
     /// [`held_as`], its faces held as `H` holds them.
     fn held_of<H: Holders>(faces: usize, pools: PeerPoolRows, dial: bool) -> Held<H> {
+        try_held_of(faces, pools, dial, observer_rows()).expect("the arena has the rows")
+    }
+
+    /// The registry [`held_of`] opens, the application's tables and lists lent `rows`, or why
+    /// the open refused it.
+    fn try_held_of<H: Holders>(
+        faces: usize,
+        pools: PeerPoolRows,
+        dial: bool,
+        rows: wz_session_core::session_tables::TableRows,
+    ) -> Result<Held<H>, LendRefused> {
         let mut arena =
             SessionArena::of_bytes(1 << 20, &AllocatorMemory).expect("the host has the memory");
-        let gets = GetTables {
-            rows: RequesterRows {
-                queries: 1,
-                liveliness_gets: 0,
-            },
-            tables: faces + usize::from(cfg!(feature = "local-queryable")),
-        };
-        let peers = FacePeers {
-            rows: PeerRows {
-                pending_declares: 1,
-                replies: 1,
-                reply_bytes: 64,
-                finals: 1,
-            },
-            tables: faces,
-            pools,
-            dial,
-        };
         let keys = arena
             .arena_mut()
             .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
@@ -2383,25 +2447,113 @@ mod tests {
             &SessionLimits::defaults(),
             arena.arena_mut(),
             keys,
-            // A row for a liveliness subscriber, which the tests of retractions declare.
-            ObserverRows {
-                tables: wz_session_core::session_tables::TableRows {
-                    liveliness_subscribers: 1,
-                    ..Default::default()
-                },
-                ..ObserverRows::default()
-            },
-            gets,
-            peers,
+            rows,
+            test_gets(faces),
+            test_peers(faces, pools, dial),
             delivery,
-        )
-        .expect("the arena has the rows");
-        Held {
+        )?;
+        Ok(Held {
             registry,
             arena,
             lent: faces,
             keys,
+        })
+    }
+
+    /// The application's rows a test's registry is lent: a row for a liveliness subscriber, which
+    /// the tests of retractions declare.
+    fn observer_rows() -> wz_session_core::session_tables::TableRows {
+        wz_session_core::session_tables::TableRows {
+            liveliness_subscribers: 1,
+            ..Default::default()
         }
+    }
+
+    /// The tables of gets a test's registry of `faces` faces is lent: one row each.
+    fn test_gets(faces: usize) -> GetTables {
+        GetTables {
+            rows: RequesterRows {
+                queries: 1,
+                liveliness_gets: 0,
+            },
+            tables: faces + usize::from(cfg!(feature = "local-queryable")),
+        }
+    }
+
+    /// The rows of the tables of each of `faces` faces a test's registry is lent, and its pools:
+    /// one of each table, and no reply staged, as the engine's plan lends none
+    /// (`arena::peer_rows`).
+    fn test_peers(faces: usize, pools: PeerPoolRows, dial: bool) -> FacePeers {
+        FacePeers {
+            rows: PeerRows {
+                pending_declares: 1,
+                replies: 0,
+                reply_bytes: 0,
+                finals: 1,
+            },
+            tables: faces,
+            pools,
+            dial,
+        }
+    }
+
+    /// The counts the registry's own lines are lent for a test's registry of `faces` faces.
+    fn registry_counts(faces: usize, pools: PeerPoolRows) -> RowCounts {
+        let rows = observer_rows();
+        let peers = test_peers(faces, pools, true);
+        rows.counts()
+            .and(&App::list_counts(&SessionLimits::defaults()).expect("the build's watchers"))
+            .and(&test_gets(faces).rows.counts())
+            .with(RowCount::FaceSets, peers.sets())
+            .with(RowCount::HeldSets, peers.sets())
+            .with(RowCount::OwedTokens, peers.owed_tokens())
+    }
+
+    /// Hold what a walk lent through `lines` at `base`, a value of `size` bytes, to the lines:
+    /// each sequence lies inside the value and no two share a place, each table holds its line's
+    /// count, its rows lie at the offset the count of the lines before it says from the first
+    /// table's, and no two tables' rows meet. Answers where the first table's rows lie, none where
+    /// the build describes no table, and the bytes every line took.
+    fn laid_as_described(
+        base: *const u8,
+        size: usize,
+        lines: &[SeqPlace],
+        counts: &RowCounts,
+    ) -> (Option<usize>, usize) {
+        let seq = core::mem::size_of::<BoundedVec<u8, 1, RowPolicy>>();
+        let base = NonNull::new(base.cast_mut()).expect("a value lies somewhere");
+        let mut first = None;
+        let mut offset = 0;
+        let mut spans: Vec<(core::ops::Range<usize>, core::ops::Range<usize>)> = Vec::new();
+        for line in lines {
+            // SAFETY: each line names a sequence of the value at `base` that a walk lent its rows,
+            // and nothing writes the value during the call.
+            let (at, room) = unsafe { seq_rows(base, line) };
+            let at = at.expect("a lent table has rows").as_ptr() as usize;
+            let start = *first.get_or_insert(at);
+            assert_eq!(
+                at - start,
+                offset,
+                "the rows lie where the count of the lines before says"
+            );
+            assert_eq!(room as usize, counts.of(line), "the table holds its count");
+            let span = Arena::stride_bytes(counts.of(line), line.stride as usize).expect("small");
+            let place = line.seq as usize..line.seq as usize + seq;
+            assert!(place.end <= size, "a sequence lies in what is described");
+            for (other_place, other_rows) in &spans {
+                assert!(
+                    place.end <= other_place.start || other_place.end <= place.start,
+                    "no two lines name one sequence"
+                );
+                assert!(
+                    at + span <= other_rows.start || other_rows.end <= at,
+                    "no two tables' rows meet"
+                );
+            }
+            spans.push((place, at..at + span));
+            offset += span;
+        }
+        (first, offset)
     }
 
     fn face(registry: &mut Registry, id: FaceId) -> &mut FaceTables {
@@ -2447,8 +2599,17 @@ mod tests {
     }
 
     /// The face's peer tables hold one `Final`, have no room for a second, and have room again
-    /// once what is owed is taken: the rows the arena lent stay with the table.
+    /// once what is owed is taken: the rows the arena lent stay with the table. A build that
+    /// answers no query describes no `Final` of a face's (`described`), whose stage then has no
+    /// room.
     fn holds_one_final(face: &mut FaceTables) {
+        if !cfg!(feature = "queryable") {
+            assert!(
+                !face.peer.finals.has_room(),
+                "no Final is owed where nothing answers a query"
+            );
+            return;
+        }
         assert!(face.peer.finals.has_room(), "a row was lent");
         face.peer.finals.owe(1, QosLevel::DEFAULT);
         assert!(!face.peer.finals.has_room(), "the one row holds the Final");
@@ -2636,7 +2797,7 @@ mod tests {
     /// dial face and on a face that takes a lent set as it comes (a group's): the interest's row
     /// holds its key, so the answer staged for it names what it asked. A side whose rows were lent
     /// after it was handed the key arena keeps it.
-    #[cfg(feature = "interest-answer")]
+    #[cfg(wz_interest_answer)]
     #[test]
     fn a_faces_peer_interest_keeps_its_key_in_the_sessions_key_arena() {
         use wz_session_core::key_arena::block_bytes;
@@ -2701,16 +2862,13 @@ mod tests {
     #[cfg(feature = "liveliness")]
     #[test]
     fn the_dial_face_stages_a_liveliness_answer_in_its_lent_row() {
-        use wz_session_core::declare::local_token::DeclResponseItem;
+        use wz_session_core::declare::local_token::LocalTokenRegistry;
 
         let mut held = held(1);
-        let staging = &mut face(&mut held.registry, DIAL_FACE).peer.pending_declares;
-        assert!(staging
-            .push(DeclResponseItem::Final { interest_id: 1 })
-            .is_ok());
-        assert!(staging
-            .push(DeclResponseItem::Final { interest_id: 2 })
-            .is_err());
+        let none = LocalTokenRegistry::new();
+        let staging = &mut face(&mut held.registry, DIAL_FACE).peer.token_answers;
+        assert!(staging.stage(&none, None, 1).is_ok());
+        assert!(staging.stage(&none, None, 2).is_err());
     }
 
     /// An accepted face takes the set the open lent where it lies, empties it there when it goes,
@@ -2953,103 +3111,281 @@ mod tests {
         );
     }
 
-    /// A set built where it lies and lent its rows there is the set the tables lent by value make:
-    /// the same bytes of the arena, and the rows that bound it.
+    /// Every table of the registry lies where the registry's description counts it, lent by one
+    /// walk: the application's lists and tables, the sets' table and the index of their holders
+    /// with a row for each set, the tokens owed and the session's own gets where the build keeps
+    /// them; no two tables meet, and the plan's count of the lines is what the walk took. The dial
+    /// face's set lies as its own description counts it from the first byte past the registry's
+    /// rows, the reserve the sets to come are built in lies right before those, and a set built
+    /// there when a face comes lies as the same description counts it. Turned red by a line of the
+    /// registry's or a set's description at another offset or count than the table it names (the
+    /// sets' line counted as another table's, the index's line left out), by a walk that lends in
+    /// another order than its description, or by a span lent between the walks.
     #[test]
-    fn a_set_lent_in_place_is_the_set_lent_by_value() {
-        let limits = SessionLimits::defaults();
-        let gets = RequesterRows {
-            queries: 1,
-            liveliness_gets: 0,
-        };
-        let peer = PeerRows {
-            pending_declares: 1,
-            replies: 1,
-            reply_bytes: 64,
-            finals: 1,
-        };
-        // The pools are lent from an arena of their own, so the two arenas compared hold the sets'
-        // rows alone. Shared, as a session of many faces lends them.
-        let pool_rows = PeerPoolRows {
-            aliases: 1,
-            remote_decls: 1,
-            interests: 1,
+    fn every_table_of_the_registry_lies_where_its_description_counts_it() {
+        let pools = PeerPoolRows {
+            aliases: 16,
+            remote_decls: 16,
+            interests: 16,
             shared: true,
         };
-        let mut by_value_arena =
-            SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
-        let by_value_keys = by_value_arena
-            .arena_mut()
-            .lend_keys(256, limits.max_keyexpr_bytes_held())
-            .expect("the arena holds the key arena");
-        let mut arena =
-            SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
-        let keys = arena
-            .arena_mut()
-            .lend_keys(256, limits.max_keyexpr_bytes_held())
-            .expect("the arena holds the key arena");
-        // A set's tables reach the rows of their pools through the key arena they keep their keys
-        // in, which names the pools lent with it: pools of their own for each key arena.
-        let mut pool_arena =
-            SessionArena::of_bytes(1 << 16, &AllocatorMemory).expect("the host has the memory");
-        let mut by_value_pools = PeerPools::lent(pool_arena.arena_mut(), by_value_keys, pool_rows)
-            .expect("the arena has the pools");
-        let mut pools = PeerPools::lent(pool_arena.arena_mut(), keys, pool_rows)
-            .expect("the arena has the pools");
-        let by_value_gets =
-            Gets::lent(by_value_arena.arena_mut(), by_value_keys, gets, &limits).expect("rows");
-        let mut by_value_peer = Peer::lent(
-            by_value_arena.arena_mut(),
-            by_value_keys,
-            peer,
-            &mut by_value_pools,
-            &limits,
-        )
-        .expect("rows");
-        // The table of sets lies in an arena of its own, so `arena` counts the set's rows alone.
-        let mut sets_arena = SessionArena::of_bytes(
-            FACE_SET_BYTES + wz_session_core::bounded::ARENA_ALIGN,
-            &AllocatorMemory,
-        )
-        .expect("the host has the memory");
-        let mut sets: BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy> = sets_arena
-            .arena_mut()
-            .lend(1)
-            .expect("the arena has a row for the set");
-        lend_set(
-            &mut sets,
-            arena.arena_mut(),
-            keys,
-            &mut pools,
-            gets,
-            peer,
-            &limits,
-        )
-        .expect("the arena has the rows");
-        assert_eq!(
-            arena.arena_mut().high_water(),
-            by_value_arena.arena_mut().high_water(),
-            "the same tables lent in the same order take the same bytes"
+        let mut held = held_with(3, pools);
+        let counts = registry_counts(3, pools);
+        let lines = Registry::LINES;
+        let (registry_rows, registry_bytes) = laid_as_described(
+            (&held.registry as *const Registry).cast::<u8>(),
+            core::mem::size_of::<Registry>(),
+            lines.seq_lines(),
+            &counts,
         );
-        let set = &mut sets[0];
+        let registry_rows = registry_rows.expect("the registry describes its table of sets");
+        assert_eq!(
+            seq_bytes(lines.seq_lines(), &counts),
+            Some(registry_bytes),
+            "the count of the lines is what the walk took"
+        );
+        let peers = test_peers(3, pools, true);
+        assert_eq!(
+            held.registry.holders.rows(),
+            &[DIAL_FACE, NO_FACE, NO_FACE],
+            "a holder for each set, the dial role's face first"
+        );
+        let gets = test_gets(3).rows;
+        let set_counts = FaceTables::counts(gets, peers.rows);
+        let (set_rows, set_bytes) = laid_as_described(
+            (&held.registry.sets[0] as *const FaceTables).cast::<u8>(),
+            core::mem::size_of::<FaceTables>(),
+            FaceTables::LINES.seq_lines(),
+            &set_counts,
+        );
+        // A build whose sets keep no row of their own (no query asked or answered, no staging of
+        // the answers to a peer's interests) describes no line of a set.
+        if let Some(set_rows) = set_rows {
+            assert_eq!(
+                set_rows,
+                registry_rows + registry_bytes,
+                "the dial face's set follows the registry's rows"
+            );
+        }
+        assert_eq!(
+            FaceTables::arena_bytes(gets, peers.rows),
+            SubscriberPeer::<RowPolicy>::compose_bytes().map(|compose| set_bytes + compose),
+            "a set takes its lines and the row its peer's side composes keys in"
+        );
+        holds_one_final(face(&mut held.registry, DIAL_FACE));
+        held.registry
+            .add_face(5)
+            .expect("the open reserved a place for the face");
+        let (built_rows, built_bytes) = laid_as_described(
+            (&held.registry.sets[1] as *const FaceTables).cast::<u8>(),
+            core::mem::size_of::<FaceTables>(),
+            FaceTables::LINES.seq_lines(),
+            &set_counts,
+        );
+        assert_eq!(
+            built_bytes, set_bytes,
+            "every set is lent by one description"
+        );
+        if let Some(built_rows) = built_rows {
+            assert_eq!(
+                built_rows + held.registry.spares.arena.bytes(),
+                registry_rows,
+                "the reserve lies right before the registry's rows"
+            );
+        }
+        holds_one_final(face(&mut held.registry, 5));
+    }
+
+    /// What the arena's plan reports of the build's registry is the registry's description read by
+    /// part: each part the lines of the counts it names, every other line lent none under them,
+    /// each what its table's own description counts, and together what the open's walk lends; a
+    /// set's gets and its peer's tables the set's lines of their counts, together the set. Turned
+    /// red by a part read off other lines than the ones the open walks, by the index's line lent by
+    /// the sets' count (the held faces' row then found nowhere, the parts short of the walk), or by
+    /// a peer's part without the row its side composes keys in.
+    #[test]
+    fn the_plans_parts_of_the_registry_are_the_lines_of_their_counts() {
+        // The build's own registry: of one face where the build takes none beside its dial role's.
+        let takes_faces = cfg!(any(feature = "listen", feature = "group"));
+        let faces = if takes_faces { 3 } else { 1 };
+        let pools = PeerPoolRows {
+            aliases: 16,
+            remote_decls: 16,
+            interests: 16,
+            shared: faces > 1,
+        };
+        let held = held_of::<BuildHolders>(faces, pools, true);
+        let counts = registry_counts(faces, pools);
+        let (_, walked) = laid_as_described(
+            (&held.registry as *const RegistryOf<BuildHolders>).cast::<u8>(),
+            core::mem::size_of::<RegistryOf<BuildHolders>>(),
+            RegistryOf::<BuildHolders>::LINES.seq_lines(),
+            &counts,
+        );
+
+        let watchers =
+            App::decl_watcher_rows(&SessionLimits::defaults()).expect("the build's watchers");
+        let lists = registry_bytes(&RowCounts::NONE.with(RowCount::DeclWatchers, watchers));
+        assert_eq!(
+            lists,
+            App::arena_bytes(watchers),
+            "the lists are the engine's own observer's"
+        );
+        let tables_rows = observer_rows();
+        let tables = registry_bytes(&tables_rows.counts());
+        assert_eq!(
+            tables,
+            CoopTables::arena_bytes(&tables_rows),
+            "the tables are the session's one table set"
+        );
+        assert_eq!(
+            registry_row_bytes(RowCount::FaceSets),
+            Some(core::mem::size_of::<FaceTables>()),
+            "a row of the sets' table is a set"
+        );
+        assert_eq!(
+            registry_row_bytes(RowCount::HeldSets),
+            takes_faces.then_some(core::mem::size_of::<FaceId>()),
+            "a row of the index names a face, in a build that keeps one"
+        );
+        #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+        assert_eq!(
+            registry_row_bytes(RowCount::OwedTokens),
+            Some(core::mem::size_of::<
+                wz_session_core::declare::liveliness_subscriber::PeerTokens<RowPolicy>,
+            >())
+        );
+        #[cfg(not(all(feature = "liveliness", any(feature = "listen", feature = "group"))))]
+        assert_eq!(registry_row_bytes(RowCount::OwedTokens), None);
+        let gets = test_gets(faces).rows;
+        let own = registry_bytes(&gets.counts()).expect("small");
+        #[cfg(feature = "local-queryable")]
+        assert_eq!(
+            Some(own),
+            set_get_bytes(gets),
+            "the session's own gets are described as a set's"
+        );
+        #[cfg(not(feature = "local-queryable"))]
+        assert_eq!(
+            own, 0,
+            "no gets beside the sets' where the session answers none"
+        );
+
+        let peers = test_peers(faces, pools, true);
+        let table = |count, rows| {
+            registry_row_bytes(count).map_or(0, |stride| {
+                Arena::stride_bytes(rows, stride).expect("small")
+            })
+        };
+        let parts = [
+            lists.expect("small"),
+            tables.expect("small"),
+            table(RowCount::FaceSets, peers.sets()),
+            table(RowCount::HeldSets, peers.sets()),
+            table(RowCount::OwedTokens, peers.owed_tokens()),
+            own,
+        ];
+        assert_eq!(
+            parts.iter().sum::<usize>(),
+            walked,
+            "the parts add up to what the open's walk lent"
+        );
+
+        assert_eq!(
+            set_peer_bytes(peers.rows),
+            Peer::arena_bytes(PeerRows {
+                finals: if cfg!(feature = "queryable") {
+                    peers.rows.finals
+                } else {
+                    0
+                },
+                ..peers.rows
+            }),
+            "a face's peer tables are the set's lines of the peer's counts and its compose row"
+        );
         #[cfg(feature = "query")]
-        assert_eq!(
-            set.gets.replies.has_room(),
-            by_value_gets.replies.has_room()
-        );
+        let set_gets = {
+            assert_eq!(
+                set_get_bytes(gets),
+                Gets::arena_bytes(gets),
+                "a face's gets are the set's lines of the gets' counts"
+            );
+            set_get_bytes(gets).expect("small")
+        };
         #[cfg(not(feature = "query"))]
+        let set_gets = 0;
         assert_eq!(
-            set.gets, by_value_gets,
-            "a build that asks no query lends neither a table of gets"
+            set_peer_bytes(peers.rows).map(|peer| peer + set_gets),
+            FaceTables::arena_bytes(gets, peers.rows),
+            "a set's two parts are the set"
         );
-        set.peer.finals.owe(1, QosLevel::DEFAULT);
-        by_value_peer.finals.owe(1, QosLevel::DEFAULT);
+    }
+
+    /// A session of its dial role's face alone keeps no index of the sets' holders: its registry's
+    /// description is that of a session that adds faces but for the index's line, and its tables
+    /// and its one set lie as that counts them. Turned red by a line for the index in the form that
+    /// keeps none, which would lend rows nothing reads, or by a set lent apart from the registry.
+    #[test]
+    fn a_registry_of_one_face_lies_where_its_description_counts_it() {
+        let pools = PeerPoolRows {
+            aliases: 1,
+            remote_decls: 2,
+            interests: 1,
+            shared: false,
+        };
+        let held = held_of::<OneHolder>(1, pools, true);
+        let lines = RegistryOf::<OneHolder>::LINES;
         assert_eq!(
-            (set.peer.finals.has_room(), set.peer.finals.owed()),
-            (by_value_peer.finals.has_room(), by_value_peer.finals.owed()),
-            "one row of Finals either way"
+            lines.seq_lines().len() + 1,
+            Registry::LINES.seq_lines().len(),
+            "the index's line alone is left out"
         );
-        assert!(!set.peer.finals.has_room());
+        let (registry_rows, registry_bytes) = laid_as_described(
+            (&held.registry as *const RegistryOf<OneHolder>).cast::<u8>(),
+            core::mem::size_of::<RegistryOf<OneHolder>>(),
+            lines.seq_lines(),
+            &registry_counts(1, pools),
+        );
+        let registry_rows = registry_rows.expect("the registry describes its table of sets");
+        let peers = test_peers(1, pools, true);
+        let (set_rows, _) = laid_as_described(
+            (&held.registry.sets[0] as *const FaceTables).cast::<u8>(),
+            core::mem::size_of::<FaceTables>(),
+            FaceTables::LINES.seq_lines(),
+            &FaceTables::counts(test_gets(1).rows, peers.rows),
+        );
+        if let Some(set_rows) = set_rows {
+            assert_eq!(set_rows, registry_rows + registry_bytes);
+        }
+        assert_eq!(held.registry.holders.rows(), &[DIAL_FACE]);
+    }
+
+    /// The walk refuses a count past a line's room as a table past its bound: an open that counts
+    /// one subscription past the build's bound of the application's subscriptions table is refused
+    /// before any face is lent. The CONTROL is the same open counting the table's own rows. Turned
+    /// red by a subscriptions' line of another room, or by a walk that lends a line past its room.
+    #[test]
+    fn a_count_past_a_lines_room_refuses_the_open() {
+        let pools = PeerPoolRows {
+            aliases: 16,
+            remote_decls: 16,
+            interests: 16,
+            shared: false,
+        };
+        let past = wz_session_core::caps::MAX_SUBSCRIPTIONS + 1;
+        let rows = wz_session_core::session_tables::TableRows {
+            subscribers: past,
+            ..observer_rows()
+        };
+        assert!(matches!(
+            try_held_of::<ManyHolders>(1, pools, true, rows),
+            Err(LendRefused::OverCeiling { rows, ceiling })
+                if rows == past && ceiling == wz_session_core::caps::MAX_SUBSCRIPTIONS
+        ));
+        assert!(
+            try_held_of::<ManyHolders>(1, pools, true, observer_rows()).is_ok(),
+            "CONTROL: an open that counts none"
+        );
     }
 
     /// A face past the sets the open lent is refused and nothing is lent or held for it: the
@@ -3093,7 +3429,7 @@ mod tests {
         let mut held = held(3);
         let lent = held.arena.arena_mut().high_water();
         assert_eq!(
-            (held.registry.sets.len(), held.registry.places()),
+            (held.registry.sets.len(), held.registry.face_places()),
             (1, 3),
             "the dial role's set alone is built at the open"
         );
@@ -3316,7 +3652,7 @@ mod tests {
         assert_eq!(face_ids(&held.registry), vec![DIAL_FACE, 9]);
         assert_eq!(walked(&held.registry), lying_at(&held.registry, &[0, 1]));
         assert_eq!(
-            (held.registry.sets.len(), held.registry.places()),
+            (held.registry.sets.len(), held.registry.face_places()),
             (4, 5),
             "a set for each place a face took, none made or dropped as faces went"
         );
@@ -3624,7 +3960,7 @@ mod tests {
             .add_face(6)
             .expect("the open lent a set for the face");
         assert_eq!(
-            (held.registry.places(), held.registry.sets.len()),
+            (held.registry.face_places(), held.registry.sets.len()),
             (16, 3),
             "CONTROL: sixteen places were reserved, a set built at each a face took"
         );

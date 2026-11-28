@@ -183,7 +183,7 @@ fn the_second_record_of_a_frame_sees_what_the_first_callback_did() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let received = Arc::new(AtomicUsize::new(0));
-    let own: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::default();
+    let own: Arc<Mutex<Option<wz_capi_port::EntityRow>>> = Arc::default();
     let session = EngineHold::downgrade(&engine);
     let declares_before = router.seen(|s| s.declares);
     let id = engine
@@ -487,7 +487,7 @@ fn a_put_of_the_sessions_own_hands_every_row_its_hold_found() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let seen: Arc<Mutex<Vec<(u8, bool)>>> = Arc::default();
-    let later: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::default();
+    let later: Arc<Mutex<Option<wz_capi_port::EntityRow>>> = Arc::default();
     let session = EngineHold::downgrade(&engine);
     let second = EngineHold::downgrade(&engine);
     engine
@@ -865,7 +865,7 @@ fn a_frame_of_n_records_is_read_in_one_take() {
 fn an_undeclaration_inside_the_reads_step_is_told_once() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let own: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::default();
+    let own: Arc<Mutex<Option<wz_capi_port::EntityRow>>> = Arc::default();
     let session = EngineHold::downgrade(&engine);
     let declares_before = router.seen(|s| s.declares);
     let id = engine

@@ -36,7 +36,7 @@ use core::ffi::c_void;
 use wz_capi_port::cancellation::CancellationToken;
 #[cfg(feature = "liveliness-get")]
 use wz_capi_port::lodge::Strong;
-use wz_capi_port::TokenId;
+use wz_capi_port::EntityRow;
 #[cfg(feature = "liveliness-get")]
 use wz_capi_port::WireKey;
 use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
@@ -106,56 +106,61 @@ impl z_owned_liveliness_token_t {
     }
 }
 
-/// Behind a `z_owned_liveliness_token_t` handle: the registry entry to retract.
+/// Behind a `z_owned_liveliness_token_t` handle: the registry entry to retract. It lies in a place
+/// of its session's, whose lender holds the session's engine
+/// (`crate::object_slot::entity_engine`).
 ///
-/// Dropping this UNDECLARES on every face, which is what makes
+/// Letting go of it UNDECLARES on every face, which is what makes
 /// [`z_liveliness_token_drop`] notify subscribers (pico's contract, above). The
-/// retraction lives in `Drop` rather than in the export so that both the
-/// explicit `z_liveliness_undeclare_token` and the implicit `z_drop` take the
-/// identical path — the two must not be able to diverge.
+/// retraction is made by [`z_liveliness_undeclare_token`] alone, which the
+/// implicit `z_drop` calls, so the two take the identical path and cannot
+/// diverge.
 ///
 /// The session's record of the token holds the whole-key declaration pico makes for it until the
 /// token is retracted, so its retraction follows the token's; the door keeps no copy of the key.
 pub(crate) struct TokenState {
+    /// The session's engine on the tokio engine, whose places are its pools' and hold none.
+    #[cfg(feature = "engine-tokio")]
     shared: EngineHold,
-    id: TokenId,
+    row: EntityRow,
 }
 
-impl TokenState {
-    /// Declare a token on `keyexpr`: the whole key's declaration, then the token
-    /// announced on it and retracted naming the key.
-    ///
-    /// R2959 — pico declares the whole key, announces the token on that
-    /// declaration, and names it again in the retraction
-    /// (`vendor/zenoh-pico/src/net/liveliness.c` @
-    /// `_Z_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &ke, keyexpr));` and
-    /// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
-    ///
-    /// `existing` is the caller's own key when it is already a declaration,
-    /// which is shared rather than declared again.
-    pub(crate) fn declare(
-        session: &PicoSession,
-        keyexpr: &str,
-        existing: Option<&DeclaredKeyexpr>,
-    ) -> Result<Self, ZResult> {
-        let key = EntityKey::whole(&session.engine, keyexpr, existing)?;
-        let id = session
-            .engine
-            .declare_liveliness_token_on_wire(keyexpr, key.wire(), Some(key.retraction_key()))
-            .map_err(|refused| refusal_code(refused, Door::Token))?;
-        // The session's record holds the declaration from here on: the door's hold goes.
-        drop(key);
-        Ok(Self {
-            shared: session.engine.clone(),
-            id,
-        })
+/// A token reaches its session's engine through its place, whose lender keeps the one count.
+impl crate::object_slot::SessionEntity for TokenState {
+    #[cfg(not(feature = "engine-tokio"))]
+    type Placed = Self;
+
+    #[cfg(feature = "engine-tokio")]
+    fn kept_engine(&self) -> &EngineHold {
+        &self.shared
     }
 }
 
-impl Drop for TokenState {
-    fn drop(&mut self) {
-        self.shared.undeclare_liveliness_token(self.id);
-    }
+/// Declare a token on `keyexpr`: the whole key's declaration, then the token
+/// announced on it and retracted naming the key. Answers the token's row, which its owner
+/// retracts on the session's engine (`undeclare_liveliness_token`).
+///
+/// R2959 — pico declares the whole key, announces the token on that
+/// declaration, and names it again in the retraction
+/// (`vendor/zenoh-pico/src/net/liveliness.c` @
+/// `_Z_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &ke, keyexpr));` and
+/// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
+///
+/// `existing` is the caller's own key when it is already a declaration,
+/// which is shared rather than declared again.
+pub(crate) fn declare_token(
+    session: PicoSession<'_>,
+    keyexpr: &str,
+    existing: Option<&DeclaredKeyexpr>,
+) -> Result<EntityRow, ZResult> {
+    let key = EntityKey::whole(session.engine, keyexpr, existing)?;
+    let row = session
+        .engine
+        .declare_liveliness_token_on_wire(keyexpr, key.wire(), Some(key.retraction_key()))
+        .map_err(|refused| refusal_code(refused, Door::Token))?;
+    // The session's record holds the declaration from here on: the door's hold goes.
+    drop(key);
+    Ok(row)
 }
 
 /// Default token options (pico `z_liveliness_token_options_default`).
@@ -221,8 +226,13 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         ) else {
             return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let state = match TokenState::declare(PicoSession::of(handle), ke, declared_of(keyexpr)) {
-            Ok(token) => slot.fill(token),
+        let session = PicoSession::of(handle);
+        let state = match declare_token(session, ke, declared_of(keyexpr)) {
+            Ok(row) => slot.fill(TokenState {
+                #[cfg(feature = "engine-tokio")]
+                shared: EngineHold::clone(session.engine),
+                row,
+            }),
             Err(rc) => return rc,
         };
         *token = z_owned_liveliness_token_t {
@@ -245,10 +255,11 @@ pub unsafe extern "C" fn z_liveliness_undeclare_token(
         }
         let handle = (*token)._this.handle;
         if !handle.is_null() {
-            // The retraction is `TokenState::drop`, so this is the same path
-            // `z_liveliness_token_drop` takes — deliberately, so an explicit
+            // `z_liveliness_token_drop` takes this same path — deliberately, so an explicit
             // undeclare and an implicit one cannot drift apart.
-            crate::object_slot::release_entity(handle as *mut TokenState);
+            let state = handle as *mut TokenState;
+            crate::object_slot::entity_engine(state).undeclare_liveliness_token((*state).row);
+            crate::object_slot::release_entity(state);
             (*token)._this = z_owned_liveliness_token_t::null_value();
         }
         Z_OK

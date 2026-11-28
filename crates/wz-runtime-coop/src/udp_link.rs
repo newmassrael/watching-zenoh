@@ -46,7 +46,6 @@ use wz_session_core::byte_cells::ByteBuf;
 use wz_session_core::byte_cells::ByteSource;
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use wz_session_core::byte_cells::{CellFlag, LentByteCells};
-use wz_session_core::caps;
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 use wz_session_core::datagram_peer::is_init_syn;
 use wz_session_core::datagram_peer::{ForeignCounts, PeerBinding};
@@ -367,17 +366,37 @@ pub const fn dial_bind(local: IpAddr, peer: SocketAddr) -> SocketAddr {
     SocketAddr::new(ip, 0)
 }
 
-/// Whether a link of `proto` from `local` to `peer` names both its ends in the rows its faces are
-/// read in, at most [`MAX_LOCATOR_LEN`](caps::MAX_LOCATOR_LEN) bytes each
-/// (`wz_session_core::face::RowText`): this engine refuses a link that does not where it admits
-/// it, so no row of its faces is ever held on the heap. Every IPv4 end fits; a bound that holds
-/// the longest IPv6 end answers at compile time, and only a shorter one writes the ends to measure
-/// them.
+/// Whether a link of `proto` from `local` to `peer` names both its ends in the pair of locators a
+/// reader of the build keeps them in, held to
+/// [`LinkEndpoints::BOUND`](wz_session_core::link::LinkEndpoints::BOUND): this engine refuses a
+/// link that does not where it admits it, so no link stands with an end its reports would refuse.
+/// A face's row holds an IP end as its address, so a build whose pair is of `String`s admits
+/// every IP link.
 pub fn ends_fit(proto: LinkProto, local: SocketAddr, peer: SocketAddr) -> bool {
-    caps::MAX_LOCATOR_LEN >= LONGEST_IP_LOCATOR_LEN
-        || [local, peer]
-            .into_iter()
-            .all(|at| IpLocator { proto, at }.text().demanded() <= caps::MAX_LOCATOR_LEN)
+    ends_fit_within(
+        wz_session_core::link::LinkEndpoints::BOUND,
+        proto,
+        local,
+        peer,
+    )
+}
+
+/// Whether both ends of a link of `proto` from `local` to `peer` are written in at most `bound`
+/// bytes each, every pair when there is no bound. Every IPv4 end fits a bound the build admits; a
+/// bound that holds the longest IPv6 end answers at compile time, and only a shorter one writes the
+/// ends to measure them.
+fn ends_fit_within(
+    bound: Option<usize>,
+    proto: LinkProto,
+    local: SocketAddr,
+    peer: SocketAddr,
+) -> bool {
+    bound.is_none_or(|bound| {
+        bound >= LONGEST_IP_LOCATOR_LEN
+            || [local, peer]
+                .into_iter()
+                .all(|at| IpLocator { proto, at }.text().demanded() <= bound)
+    })
 }
 
 /// Whether a datagram link over `socket` to `peer` names both its ends in the rows of the build
@@ -648,8 +667,9 @@ impl<S: DatagramSocket, B: RxStore, T: TxStore, W: InputWaiter> UdpDriver<S, B, 
     // (`Self::next_admitted`) and the wait's that reads as it waits (`Self::wait_for_datagram`).
     #[inline(never)]
     fn admit(&self, from: SocketAddr, datagram: &[u8]) -> bool {
-        // An accepting link takes the first `InitSyn`'s source as its peer: one whose locator no
-        // row of the build holds is not taken, so no session stands on a link it cannot name.
+        // An accepting link takes the first `InitSyn`'s source as its peer: one whose locator the
+        // build's pair of locators does not hold is not taken, so no session stands on a link it
+        // cannot name.
         if self.binding.peer().is_none() && !ends_fit(LinkProto::Udp, self.socket.local(), from) {
             return false;
         }
@@ -1756,6 +1776,132 @@ impl<S: DatagramSocket, N: CountKind, P: PortSource<N::Flag>> DatagramSocket for
     }
 }
 
+/// The socket of a datagram link of a stack that listens on `udp/`: a socket of the link's own (a
+/// dial's, an acceptor's bound to its port) or its peer's share of a port ([`PortPeer`]), over
+/// the memory `P` the port's kind keeps ([`PortSource`]). Every
+/// datagram link of such a stack holds one, so the driver over it is one body whichever kind a
+/// link holds ([`UdpDriver`] is generic over its socket, and a type of socket for each kind would
+/// be a copy of the driver for each); each call is a match on the kind, and none adds a call.
+///
+/// The constants are the platform socket's: a share has no receive timeout of its own and says so
+/// when asked (`set_receive_timeout`), and the link then waits the tick as it would over the share.
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+pub enum LinkSocket<
+    S: DatagramSocket,
+    N: CountKind = OneTask,
+    P: PortSource<N::Flag> = <N as CountKind>::Ports,
+> {
+    /// A socket of the link's own.
+    Own(S),
+    /// The link's peer's share of a port.
+    Port(PortPeer<S, N, P>),
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl<S: DatagramSocket, N: CountKind, P: PortSource<N::Flag>> DatagramSocket
+    for LinkSocket<S, N, P>
+{
+    type Error = PortPeerError<S::Error>;
+
+    type Waits = S::Waits;
+
+    const CARRIED: bool = S::CARRIED;
+
+    const IPV6: bool = S::IPV6;
+
+    const NAMES_INPUT_WAIT: bool = S::NAMES_INPUT_WAIT;
+
+    const CAN_SET_RECEIVE_TIMEOUT: bool = S::CAN_SET_RECEIVE_TIMEOUT;
+
+    const RESOLVES: bool = S::RESOLVES;
+
+    /// A socket of its own: a share is made by its port's listener and never bound.
+    fn bind(at: SocketAddr) -> Result<Self, Self::Error> {
+        S::bind(at).map(Self::Own).map_err(PortPeerError::Socket)
+    }
+
+    fn refuses_address(error: &Self::Error) -> bool {
+        match error {
+            PortPeerError::Socket(error) => S::refuses_address(error),
+            PortPeerError::Unbound => false,
+        }
+    }
+
+    fn address_in_use(error: &Self::Error) -> bool {
+        match error {
+            PortPeerError::Socket(error) => S::address_in_use(error),
+            PortPeerError::Unbound => false,
+        }
+    }
+
+    fn resolve(name: &crate::locator_text::NamedHost<'_>, found: &mut [SocketAddr]) -> usize {
+        S::resolve(name, found)
+    }
+
+    fn local(&self) -> SocketAddr {
+        match self {
+            Self::Own(socket) => socket.local(),
+            Self::Port(share) => share.local(),
+        }
+    }
+
+    fn send_to(&self, to: SocketAddr, bytes: &[u8]) -> Result<(), Self::Error> {
+        match self {
+            Self::Own(socket) => socket.send_to(to, bytes).map_err(PortPeerError::Socket),
+            Self::Port(share) => share.send_to(to, bytes),
+        }
+    }
+
+    fn wait_readable(&self, timeout_ms: c_int) {
+        match self {
+            Self::Own(socket) => socket.wait_readable(timeout_ms),
+            Self::Port(share) => share.wait_readable(timeout_ms),
+        }
+    }
+
+    fn times_out(&self) -> bool {
+        match self {
+            Self::Own(socket) => socket.times_out(),
+            Self::Port(share) => share.times_out(),
+        }
+    }
+
+    fn set_receive_timeout(&self, ms: c_int) -> bool {
+        match self {
+            Self::Own(socket) => socket.set_receive_timeout(ms),
+            Self::Port(share) => share.set_receive_timeout(ms),
+        }
+    }
+
+    fn recv_waiting(&self, buf: &mut [u8]) -> Result<Option<Received>, Self::Error> {
+        match self {
+            Self::Own(socket) => socket.recv_waiting(buf).map_err(PortPeerError::Socket),
+            Self::Port(share) => share.recv_waiting(buf),
+        }
+    }
+
+    fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, Self::Error> {
+        match self {
+            Self::Own(socket) => socket.try_recv(buf).map_err(PortPeerError::Socket),
+            Self::Port(share) => share.try_recv(buf),
+        }
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        match self {
+            Self::Own(socket) => socket.input_wait(),
+            Self::Port(share) => share.input_wait(),
+        }
+    }
+
+    fn holds_datagram(&self) -> bool {
+        match self {
+            Self::Own(socket) => socket.holds_datagram(),
+            Self::Port(share) => share.holds_datagram(),
+        }
+    }
+}
+
 /// The rows and the slots of a stack's ports over memory leaked for a test, as a session's arena
 /// lends them: `peers` peer rows, `slots` slots of `bytes` and as many queue rows, and the table
 /// of the slots, to read which are held.
@@ -2329,6 +2475,58 @@ mod tests {
         );
     }
 
+    /// A link over a socket of its own and one over a port's peer's share are one driver type
+    /// (`LinkSocket`), each kind reading its own datagrams: the own socket's off the socket, the
+    /// share's as its port sorted them. A share answers for itself where the port's socket would
+    /// answer otherwise: it has no blocking read and no receive timeout of its own, so its link
+    /// waits the tick and the port's socket is never armed for it. Turned red by a kind that reads
+    /// through the other's path, or by a share that forwards a timeout to its port's socket.
+    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[test]
+    fn one_driver_reads_a_socket_of_its_own_and_a_ports_share_alike() {
+        fn link(socket: LinkSocket<Loop>) -> UdpDriver<LinkSocket<Loop>, Vec<u8>, HeapTx> {
+            UdpDriver::initiator_with_buffers(socket, PEER, 64, HeapTx::new(2, 32))
+        }
+
+        fn armable() -> Loop {
+            Loop {
+                timeouts: true,
+                can_arm: true,
+                ..Loop::default()
+            }
+        }
+
+        let socket = armable();
+        queued(&socket, b"own");
+        let own = link(LinkSocket::Own(socket));
+        assert_eq!(received(&own).as_deref(), Some(&b"own"[..]));
+        assert!(own.socket.times_out(), "the socket's own answer");
+        assert!(own.socket.set_receive_timeout(8), "the socket's own answer");
+
+        let (ports, _slots) = leaked_ports(1, 4, 64);
+        let book = shared_book::<OneTask, Option<LentPorts>>(Some(ports))
+            .expect("the heap has room")
+            .expect("a book over what was lent");
+        let port = shared(LentPort::in_book(armable(), &book).expect("a slot to read into"));
+        queued(&port.socket, SYN);
+        let share = UdpPort::take_fresh(&port)
+            .expect("the socket reads")
+            .expect("the share of the peer whose InitSyn came");
+        let shared_link = link(LinkSocket::Port(share));
+        assert_eq!(received(&shared_link).as_deref(), Some(SYN));
+        queued(&port.socket, b"put");
+        assert_eq!(received(&shared_link).as_deref(), Some(&b"put"[..]));
+        assert!(
+            !shared_link.socket.times_out(),
+            "a share reads what was sorted"
+        );
+        assert!(!shared_link.socket.set_receive_timeout(8));
+        assert!(
+            !port.socket.arms.borrow().contains(&8),
+            "the port's socket is not armed for one peer"
+        );
+    }
+
     /// A datagram is the bytes the socket reported, cut to the buffer it was read into.
     #[test]
     fn a_datagram_is_cut_to_the_buffer_it_was_read_into() {
@@ -2418,13 +2616,14 @@ mod tests {
     }
 
     /// The text of every IP locator is written whole, the longest IPv6 end too, and a link is
-    /// admitted exactly when both its ends fit a row of the build: every IPv4 link, and an IPv6
-    /// one as its text's length says (every one under the default bound, which holds the longest;
-    /// the widest one refused under a bound below it, which the build of a short bound runs).
-    /// Turned red by a text that cuts an end, or by an admission that answers otherwise than the
-    /// length.
+    /// admitted exactly when the bound of the build's pair of locators holds both its ends: every
+    /// link where the pair states no bound, and under a bound every IPv4 link and an IPv6 one as
+    /// its text's length says (the widest one refused under a bound below it). Turned red by a
+    /// text that cuts an end, by a bound applied where the pair states none (a build of a short
+    /// `MAX_LOCATOR_LEN` without `session-slot` refusing the widest IPv6 link), or by an
+    /// admission that answers otherwise than the length.
     #[test]
-    fn a_link_is_admitted_exactly_when_both_its_ends_fit_a_row() {
+    fn a_link_is_admitted_exactly_when_its_pairs_bound_holds_both_ends() {
         use crate::session_drive::LONGEST_IP_LOCATOR_LEN;
         use core::net::SocketAddrV6;
         let widest_v4 = SocketAddr::from(([255, 255, 255, 255], 65535));
@@ -2440,9 +2639,27 @@ mod tests {
         for proto in [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls] {
             let v6 = Locator::ip(proto, widest_v6).text();
             assert_eq!(v6.finish().map(str::len), Ok(LONGEST_IP_LOCATOR_LEN));
+            assert!(
+                ends_fit_within(None, proto, widest_v6, widest_v6),
+                "no bound"
+            );
+            let short = Some(LONGEST_IP_LOCATOR_LEN - 1);
+            assert!(
+                ends_fit_within(short, proto, widest_v4, widest_v4),
+                "every IPv4 link"
+            );
+            assert!(ends_fit_within(short, proto, short_v6, short_v6));
+            assert!(!ends_fit_within(short, proto, widest_v4, widest_v6));
+            assert!(!ends_fit_within(short, proto, widest_v6, widest_v4));
+            assert!(ends_fit_within(
+                Some(LONGEST_IP_LOCATOR_LEN),
+                proto,
+                widest_v6,
+                widest_v6
+            ));
+            let fits = wz_session_core::link::LinkEndpoints::BOUND
+                .is_none_or(|bound| LONGEST_IP_LOCATOR_LEN <= bound);
             assert!(ends_fit(proto, widest_v4, widest_v4), "every IPv4 link");
-            assert!(ends_fit(proto, short_v6, short_v6));
-            let fits = LONGEST_IP_LOCATOR_LEN <= caps::MAX_LOCATOR_LEN;
             assert_eq!(ends_fit(proto, widest_v4, widest_v6), fits);
             assert_eq!(ends_fit(proto, widest_v6, widest_v4), fits);
         }

@@ -23,7 +23,7 @@ use wz_session_core::limits::{SessionLimits, CAPACITY_LIMITS, SESSION_LIMITS};
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::publish_options::PublishOptions;
-use wz_session_core::session_actions::{BatchLendCounts, FrameLendCounts};
+use wz_session_core::transport_tx::{BatchLendCounts, FrameLendCounts};
 
 use super::entity_tables::{lowered, open_under};
 use super::{
@@ -292,7 +292,7 @@ fn held_plan(
         &mut plan,
         &crate::engine::OpenHolds {
             #[cfg(not(wz_on_use))]
-            cells: crate::engine::link_cells::<PosixClock>(&links),
+            cells: crate::engine::link_cells::<PosixClock, _>(&links),
             #[cfg(not(wz_on_use))]
             rooms: crate::engine::link_rooms_bytes::<crate::tests::PosixLinks>(),
             held,
@@ -393,13 +393,16 @@ fn a_limit_lowered_at_open_lowers_its_row() {
 }
 
 /// The watchers' lists of the application's observer take the row the plan lays out for them: the
-/// session's `MAX_DECL_OBSERVERS` rows of each list, as the observer lent under the same limits
-/// takes them, so a lowered value lowers the row. Turned red by a plan that leaves the lists out,
-/// or an observer that lends them other rows than the plan counts. A build of the region's form
+/// registry's lines of the lists, lent the session's `MAX_DECL_OBSERVERS` rows each, as the
+/// registry's walk lends them under the same limits, so a lowered value lowers the row. Turned red
+/// by a plan that leaves the lists out or counts them at another limit's rows. That the lines are
+/// the engine's own observer's is the registry's test
+/// (`the_plans_parts_of_the_registry_are_the_lines_of_their_counts`). A build of the region's form
 /// lends no list from its arena (`crate::region::StateRegion`).
 #[cfg(wz_lent)]
 #[test]
 fn the_plan_lays_out_the_watcher_lists_the_limits_state() {
+    use wz_session_core::bounded::{RowCount, RowCounts};
     use wz_session_core::slot_observer::{HeapSinks, SlotObserverOf};
     type App = SlotObserverOf<HeapSinks, Lent>;
     let built =
@@ -408,7 +411,9 @@ fn the_plan_lays_out_the_watcher_lists_the_limits_state() {
     let rows = App::decl_watcher_rows(&SessionLimits::defaults()).expect("the build's value");
     assert_eq!(rows, caps::MAX_DECL_OBSERVERS);
     assert_eq!(watchers.count, 1, "one row of the lists' spans");
-    assert_eq!(Some(watchers.entry_bytes), App::decl_watcher_bytes(rows));
+    let lists =
+        |rows| crate::engine::registry_bytes(&RowCounts::NONE.with(RowCount::DeclWatchers, rows));
+    assert_eq!(Some(watchers.entry_bytes), lists(rows));
     assert!(
         watchers.entry_bytes > 0,
         "a build that reads what a peer declares has watchers"
@@ -418,7 +423,7 @@ fn the_plan_lays_out_the_watcher_lists_the_limits_state() {
         let plan = ArenaPlan::of(&client_config(), &one).expect("lays an arena out");
         assert_eq!(
             Some(row(&plan, "declaration watchers").entry_bytes),
-            App::decl_watcher_bytes(1)
+            lists(1)
         );
         assert!(plan.reserved_bytes() < built.reserved_bytes());
     }
@@ -1520,7 +1525,7 @@ fn each_faces_peer_tables_take_the_values_the_open_resolved() {
         // `MAX_PENDING_DECLARES` sizes the answers staged for a peer's Interests
         // (`interest-answer`) and for its liveliness Interests (`liveliness`): a build of neither
         // stages none, and its row does not move with the limit.
-        #[cfg(any(feature = "interest-answer", feature = "liveliness"))]
+        #[cfg(any(wz_interest_answer, feature = "liveliness"))]
         assert!(
             tables(&at_one) < tables(&built),
             "the staging lent fewer rows"
@@ -1545,7 +1550,7 @@ fn the_peers_interest_pool_is_laid_out_only_where_the_build_keeps_their_rows() {
         max_faces: 3,
         ..client_config()
     });
-    #[cfg(feature = "interest-answer")]
+    #[cfg(wz_interest_answer)]
     {
         let plan =
             ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
@@ -2007,9 +2012,8 @@ fn a_session_rejoins_as_many_chains_at_once_as_its_config_states() {
     }
 }
 
-/// The ends of the session's legs, the rows of their callbacks and the session's note of each leg
-/// pending are lent a row for each get every table of pending gets holds: a leg takes one of
-/// each, and none is held anywhere else.
+/// The ends of the session's legs and the rows of their callbacks are lent a row for each get
+/// every table of pending gets holds: a leg takes one of each, and none is held anywhere else.
 #[cfg(feature = "query")]
 #[test]
 fn the_plan_lends_a_row_for_the_end_of_each_get() {
@@ -2027,12 +2031,7 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
     // A build of the region's form keeps these rows in its region at the build's bound
     // (`StatePlaces::tables`): its arena lays out none of them.
     #[cfg(not(wz_lent))]
-    for part in [
-        "ended legs",
-        "leg callbacks",
-        "pending legs",
-        "held replies",
-    ] {
+    for part in ["ended legs", "leg callbacks", "held replies"] {
         assert!(
             plan.rows().all(|laid| laid.part() != part),
             "the region holds the {part}"
@@ -2042,8 +2041,8 @@ fn the_plan_lends_a_row_for_the_end_of_each_get() {
     the_arena_lends_a_row_for_the_end_of_each_get(&plan, legs);
 }
 
-/// The rows of the ends of `legs` legs, their callbacks, the session's notes of them and the
-/// replies the gets hold, as `plan` lays them out where the arena lends them.
+/// The rows of the ends of `legs` legs, their callbacks and the replies the gets hold, as `plan`
+/// lays them out where the arena lends them.
 #[cfg(all(feature = "query", wz_lent))]
 fn the_arena_lends_a_row_for_the_end_of_each_get(plan: &ArenaPlan, legs: usize) {
     assert_eq!(row(plan, "ended legs").count, legs);
@@ -2056,18 +2055,15 @@ fn the_arena_lends_a_row_for_the_end_of_each_get(plan: &ArenaPlan, legs: usize) 
         row(plan, "leg callbacks").entry_bytes,
         core::mem::size_of::<Option<crate::engine::LegRow>>()
     );
-    assert_eq!(row(plan, "pending legs").count, legs);
-    assert_eq!(
-        row(plan, "pending legs").entry_bytes,
-        core::mem::size_of::<crate::engine::PendingGet>()
-    );
     // The replies held to their Finals are a row each, as many as the session holds at once, of
     // the rows the engine lends them (`HeldReplies::lent`).
     let held = row(plan, "held replies");
     assert_eq!(held.count, plan.session().held_replies());
     assert_eq!(
         held.span(),
-        wz_session_core::reply_hold::HeldReplies::<u64, Lent>::arena_bytes(held.count)
+        wz_session_core::reply_hold::HeldReplies::<crate::engine::LegId, Lent>::arena_bytes(
+            held.count
+        )
     );
 }
 
@@ -2825,16 +2821,9 @@ fn the_pico_preset_holds_an_advanced_subscribers_two_liveliness_subscribers() {
 }
 
 /// The parts of an arena held once for each face: the tables of what its peer writes and is owed,
-/// its table of pending gets, and the ends of their legs, their callbacks and the session's note
-/// of each.
+/// its table of pending gets, and the ends of their legs and their callbacks.
 #[cfg(feature = "listen")]
-const FACE_PARTS: [&str; 5] = [
-    "peer tables",
-    "pending gets",
-    "ended legs",
-    "leg callbacks",
-    "pending legs",
-];
+const FACE_PARTS: [&str; 4] = ["peer tables", "pending gets", "ended legs", "leg callbacks"];
 
 /// The parts of an arena held once for the session whose size follows its faces: the pools of what
 /// the faces' peers write, each one area.

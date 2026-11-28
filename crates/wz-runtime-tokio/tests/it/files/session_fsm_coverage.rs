@@ -8,8 +8,7 @@
 //   1. Listener path (Accepting branch):
 //        Init -> inbound.start -> AwaitingInitSyn
 //        AwaitingInitSyn -> init_syn.received -> SentInitAck
-//        SentInitAck -> open_syn.received -> SentOpenAck
-//        SentOpenAck -> Established
+//        SentInitAck -> open_syn.received / send_open_ack -> Established
 //
 //   2. Failure / timeout paths (all converge on Closing or Closed):
 //        LinkOpening -> link.open_timeout -> Closing (reason=Generic)
@@ -70,7 +69,7 @@ fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy<SessionActio
 }
 
 // ── 1. Listener path: Init → AwaitingInitSyn → SentInitAck
-//                     → SentOpenAck → Established
+//                     → Established
 // R311fr — asserts start_keepalive_worker == 1 at Established.onentry;
 // that action only exists when transport-keepalive is on.
 #[cfg(feature = "transport-keepalive")]
@@ -95,8 +94,8 @@ fn r61_listener_path_inbound_to_established() {
     assert_eq!(t.send_init_ack_with_cookie, 1);
 
     engine.process_event(E::OpenSynReceived);
-    // SentOpenAck has an eventless transition to Established —
-    // the macrostep traverses both states in one process_event.
+    // The OpenSyn's own transition sends the OpenAck and enters
+    // Established in one process_event.
     assert_eq!(engine.get_current_state(), S::Established);
     let t = actions.trace_snapshot();
     assert_eq!(t.send_open_ack, 1);

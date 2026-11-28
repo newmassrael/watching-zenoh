@@ -421,14 +421,15 @@ impl<O> HeldReplies<O, crate::bounded::OnUse> {
 // (`ZeroSeqs`), and a hold that refused nothing is a zero count.
 unsafe impl<O, P: crate::bounded::ZeroSeqs> crate::bounded::ZeroEmpty for HeldReplies<O, P> {}
 
-impl<O> HeldReplies<O, crate::bounded::Region> {
-    /// The line of a region's description ([`place_seqs`](crate::bounded::place_seqs)) that places
-    /// this hold's rows: the hold at `at` in the region, its `MAX_PENDING_REPLIES` rows at `rows`.
+impl<O, P: crate::bounded::LaidOut> HeldReplies<O, P> {
+    /// The line of a description ([`place_seqs`](crate::bounded::place_seqs),
+    /// [`lend_seqs`](crate::bounded::lend_seqs)) of this hold's rows: the hold at `at`, and in a
+    /// region its `MAX_PENDING_REPLIES` rows at `rows`.
     pub const fn place(at: usize, rows: usize) -> crate::bounded::SeqPlace {
-        crate::bounded::SeqPlace::of_room::<
-            HeldReply<O, crate::bounded::Region>,
-            { caps::MAX_PENDING_REPLIES },
-        >(at.wrapping_add(core::mem::offset_of!(Self, rows)), rows)
+        crate::bounded::SeqPlace::of_room::<HeldReply<O, P>, { caps::MAX_PENDING_REPLIES }>(
+            at.wrapping_add(core::mem::offset_of!(Self, rows)),
+            rows,
+        )
     }
 }
 

@@ -109,7 +109,12 @@ impl EpochTime {
 /// Parse a `_time` value. `None` is a value upstream's parser refuses, and the caller then applies
 /// no time filter at all.
 pub fn parse(s: &str) -> Option<TimeRange> {
-    grammar::parse_range::<Wall>(s).ok()
+    parse_with(s, grammar::core_float)
+}
+
+/// [`parse`], the numbers read by `read`: a C library's own reader, where it has one.
+pub fn parse_with(s: &str, read: grammar::FloatRead) -> Option<TimeRange> {
+    grammar::parse_range_with::<Wall>(s, read).ok()
 }
 
 /// The range at `now`. An offset that lands outside what a [`WallTime`] holds is an UNBOUNDED

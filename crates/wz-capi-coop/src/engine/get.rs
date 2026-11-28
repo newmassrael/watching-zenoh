@@ -46,13 +46,13 @@ pub(crate) type Uncaptured = wz_session_core::get_plane::EveryReplyCaptured;
 pub(crate) type LegSink = wz_session_core::get_plane::LegSink<CoopCalls, Uncaptured>;
 /// What a consolidating get holds of its replies until its Final.
 pub(crate) type LegHold = wz_session_core::get_plane::LegHold<CoopCalls>;
-
-/// A leg the session has pending, with the key of the fan that cancels it when a token can: a row
-/// of a table the session's arena lent, one for each get its tables of pending gets hold.
-pub(crate) type PendingGet = wz_session_core::pending_get::PendingGet<FanKey>;
-pub(super) use wz_session_core::pending_get::GetKind;
+/// A get as its asker holds it while it issues the legs, which share its one callback.
+pub(super) type AskedGet<'p> = wz_session_core::get_plane::AskedGet<'p, CoopCalls>;
 
 impl GetCalls for CoopCalls {
+    /// A get is cancelled by the fan of the token it was asked under, when a token can.
+    type Fan = FanKey;
+
     fn call(callback: &ReplyCallback, reply: &dyn ReplyView) {
         callback.call(reply);
     }

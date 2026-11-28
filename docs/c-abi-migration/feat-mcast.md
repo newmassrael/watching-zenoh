@@ -6,7 +6,8 @@ and steps F2a and F8a and the decisions of section 4.1 land after it. Steps F4, 
 group's shell and its transmit pipeline) and the decision item D2 they keep are the transmit lane's;
 F3 follows F4, as the one sink it leaves is read by the group face F4 makes (section 3.1 reads why
 from the code). D2 is not taken with them: the first step of F7 (`mcast-tx1.md` T3) does not hold
-against the code as designed (`mcast-tx1.md` section 7).
+against the code as designed (`mcast-tx1.md` section 7); `mcast-tx1.md` section 9 designs F7 again
+as one transmit component a link and a group hold, and D2 as its group driver's answer.
 Nothing here was built or measured by this lane: every byte figure is **read** from the libraries
 the size ledger's `--per-feature` run kept (section 1), or is an **estimate** from the code, and
 says which. It extends `docs/c-abi-architecture.md` and the lanes beside it
@@ -150,7 +151,7 @@ the multicast transport, not on `pico-api-coop-nostd`, which reads `host-peer`.
 | item | decision | why | bytes, estimate, in the zenoh-pico preset |
 |---|---|---|---:|
 | D1 | landed: a capability, `multicast-locator-keys`: off, a group's `#ttl=`, `#bind=` and `#dscp=` are refused by name (`GroupLocatorError::KeyNotCarried`) and no socket is given a hop limit, a bound address or a traffic class | zenoh-pico reads `iface` and `join` alone. The egress pin is zenoh-pico's as well: it binds its send socket to the interface's address and names it the multicast interface (`vendor/zenoh-pico/src/link/transport/udp/udp_multicast_posix.c` @ `IP_MULTICAST_IF`), so it is no part of the switch; nor is `parse_dscp_value`, which a unicast locator's `#dscp=` reads (`locator::parse_socket_options`) | 500 to 2,000 |
-| D2 | the transmit lane's, with F7; not taken while T3 is not (`mcast-tx1.md` section 7) | the stage F7 reduces is what D2 keeps; the two are one change | - |
+| D2 | designed with F7 (`mcast-tx1.md` section 9.3): a capability, off in the zenoh-pico preset, where the group's driver waits for the socket inside the send; on, it holds the datagram the socket refused and answers the walk's wait for room as a full link does. Taken with `mcast-tx1.md` T3b | zenoh-pico's group send blocks on the socket (`vendor/zenoh-pico/src/transport/common/tx.c` @ `_z_link_send_wbuf(ztc->_link, &ztc->_wbuf, NULL)`); with one walk, D2 is the driver's answer and no line of the walk | 500 to 1,500 |
 | D3 | no capability: kept in every build | zenoh-pico does the part that costs: a member whose lease runs out is told to every interest of the session (`vendor/zenoh-pico/src/transport/multicast/lease.c` @ `_z_interest_peer_disconnected(s, &peer->common);`), and a write filter and a matching listener forget its targets by it (`vendor/zenoh-pico/src/net/filtering.c` @ `case _Z_INTEREST_MSG_TYPE_CONNECTION_DROPPED: {`). wz's filter forgets a member's subscriber only by its retraction, so a build without D3 would keep a departed member's subscriber in this node's filters where zenoh-pico's forget it. What zenoh-pico does not do (a liveliness subscriber told the tokens went, a Close read as a departure) is the same retraction, a branch of it; its containers are F8a's | - |
 | D4 | not yet a capability | the pico ABI opens every group under the Pico rule (`crates/wz-capi-pico/src/session.rs`, the group's `MulticastParams`); the Zenoh rule is two compares on the group's parameters (`multicast_join::judge_join` and the walk's room-first branch), and a member is one machine under either rule | under 300 |
 

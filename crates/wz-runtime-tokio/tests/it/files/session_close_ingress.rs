@@ -60,37 +60,38 @@ use wz_session_core::reconnect::SwappableLink;
 use wz_session_core::wire::{PushOwned, WireStorage};
 
 use wz_session_core::drive::{
-    check_requested_close, LifecycleKey, SessionLifecycleAuthority, SessionLifecycleInjector,
-    SessionOpener,
+    check_requested_close, LifecycleKey, SessionLifecycleInjector, SessionOpener,
 };
+use wz_session_core::lifecycle_monitor::{
+    CommanderGrant, HeapGrants, LogRecord, Monitor, Policy, VerbSet,
+};
+use wz_session_core::lifecycle_node::Verb;
 
-/// Admits every lifecycle command. The ANTI-VACUITY control for every refusing
-/// arm below: "the session did not close" proves nothing on its own, because the
-/// frame passes a resolver and a matcher that could each swallow it, so each
-/// refusal is paired with this one running the SAME frame through the SAME path.
-///
-/// R2720 — it overrides `admits_open` too, because the trait DEFAULTS that to
-/// `false`: an authority that admitted everything by saying nothing would make
-/// the open arms pass for the wrong reason.
-struct AdmitAll;
-
-impl SessionLifecycleAuthority for AdmitAll {
-    fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
-        true
-    }
-
-    fn admits_open(&self, _key: &LifecycleKey<'_>) -> bool {
-        true
-    }
+/// The grants of a node whose commander is the peer this witness's session proved
+/// ([`COMMANDER_SPKI`]'s zid): the close and open verbs, narrowed to `key` when one is given.
+fn commander_grants(key: Option<String>) -> HeapGrants {
+    HeapGrants::new(vec![CommanderGrant {
+        commander: zid_from_spki_der(COMMANDER_SPKI),
+        verbs: VerbSet::NONE.with(Verb::Close).with(Verb::Open),
+        key,
+    }])
+    .expect("one grant")
 }
 
-/// Refuses every lifecycle command — a host whose policy governs the whole rail.
-struct DenyAll;
+/// Grants the commanding peer every lifecycle command. The ANTI-VACUITY control
+/// for every refusing arm below: "the session did not close" proves nothing on
+/// its own, because the frame passes a resolver and a matcher that could each
+/// swallow it, so each refusal is paired with this one running the SAME frame
+/// through the SAME path. It grants the open verb too, so the open arms do not
+/// pass for want of a grant.
+fn admit_all() -> HeapGrants {
+    commander_grants(None)
+}
 
-impl SessionLifecycleAuthority for DenyAll {
-    fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
-        false
-    }
+/// Grants nothing: the monitor refuses every commander, as a host whose policy
+/// governs the whole rail.
+fn deny_all() -> HeapGrants {
+    HeapGrants::default()
 }
 
 /// Records the targets it was asked to open, so an arm can assert WHICH peer
@@ -108,27 +109,19 @@ impl SessionOpener for RecordingOpener {
     }
 }
 
-/// Admits closes on ONE TARGET and refuses every other. This is the authority
-/// that makes the witness say something the two blanket ones cannot: that the
-/// verdict is taken on the ARRIVING key rather than on the row's pattern or the
-/// event name.
-///
-/// R2718 — it now compares `key.peer_zid`, not the whole keyexpr, which is
-/// strictly stronger: "may close session X only" is a statement about the
-/// TARGET, and an authority that matched the whole string would also be
-/// refusing keys that name the same target through a different node or verb
-/// chunk. Before the grammar was parsed, every authority had to carry its own
-/// copy of it to say this much.
-struct AdmitOnly(&'static str);
+/// Grants the commanding peer closes and opens on ONE TARGET and nothing else:
+/// a grant narrowed to the key expression that names that target. This is the
+/// policy that makes the witness say something the two blanket ones cannot:
+/// that the decision is taken on the ARRIVING key rather than on the row's
+/// pattern or the event name.
+fn admit_only(target: &str) -> HeapGrants {
+    commander_grants(Some(format!("@/*/*/session/*/{target}")))
+}
 
-impl SessionLifecycleAuthority for AdmitOnly {
-    fn admits_close(&self, key: &LifecycleKey<'_>) -> bool {
-        key.peer_zid == self.0
-    }
-
-    fn admits_open(&self, key: &LifecycleKey<'_>) -> bool {
-        key.peer_zid == self.0
-    }
+/// The monitor of a node granted as `policy` states, its decisions written to
+/// the process's log.
+fn monitor(policy: &dyn Policy) -> Monitor<'_> {
+    Monitor::new(policy, &LogRecord)
 }
 
 /// The admin keyexpr this witness maps to the close verb. WHICH key is the
@@ -313,9 +306,9 @@ fn session_close_ingress_closes_a_running_session() {
     // The rail message arrives. The ingress cannot reach the engine, so all it
     // can do is stage the request.
     let outcome = frame_event(put_push(CLOSE_KEYEXPR));
-    let admit = AdmitAll;
+    let admit = admit_all();
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &admit, None);
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&admit), None);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
     assert_eq!(fired, 1, "the mapped row matched exactly once");
@@ -364,11 +357,12 @@ fn a_lifecycle_command_from_an_unverified_peer_is_refused() {
             .register_command(OPEN_KEYEXPR, OPEN_EVENT)
     });
 
-    let admit = AdmitAll;
+    let admit = admit_all();
     for keyexpr in [CLOSE_KEYEXPR, OPEN_KEYEXPR] {
         let outcome = frame_event(put_push(keyexpr));
         let fired = {
-            let mut injector = SessionLifecycleInjector::new(&actions, &admit, Some(&opener));
+            let mut injector =
+                SessionLifecycleInjector::new(&actions, monitor(&admit), Some(&opener));
             observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
         };
         assert_eq!(fired, 0, "{keyexpr}: a refused command is not an injection");
@@ -398,9 +392,9 @@ fn session_close_ingress_leaves_an_unmapped_message_alone() {
     });
 
     let outcome = frame_event(put_push("@/node-a/peer/session/something-else/peer-b"));
-    let admit = AdmitAll;
+    let admit = admit_all();
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &admit, None);
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&admit), None);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -454,9 +448,9 @@ fn session_close_ingress_closes_from_a_switchboard_document() {
     );
 
     let outcome = frame_event(put_push(DECLARED));
-    let admit = AdmitAll;
+    let admit = admit_all();
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &admit, None);
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&admit), None);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -502,9 +496,9 @@ fn a_documented_row_is_still_refused_by_the_authority() {
     );
 
     let outcome = frame_event(put_push(DECLARED));
-    let deny = DenyAll;
+    let deny = deny_all();
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &deny, None);
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&deny), None);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -521,9 +515,9 @@ fn a_documented_row_is_still_refused_by_the_authority() {
 /// the GRAMMAR's. An authority handed a key it cannot parse would be answering
 /// about a target it never read, so the injector refuses first.
 ///
-/// ⚠ The authority here ADMITS EVERYTHING, which is what makes this arm about
-/// the grammar: with `AdmitAll` bound, the only thing that can stop the close is
-/// the key's shape.
+/// ⚠ The policy here GRANTS EVERYTHING to the commander, which is what makes this
+/// arm about the grammar: with `admit_all` bound, the only thing that can stop the
+/// close is the key's shape.
 #[test]
 fn session_close_ingress_refuses_a_key_that_is_not_the_grammar() {
     let (actions, mut engine) = established_session();
@@ -534,9 +528,9 @@ fn session_close_ingress_refuses_a_key_that_is_not_the_grammar() {
     // Five chunks, not six — the shape every test in this file used before the
     // grammar was parsed, and the shape a deployment could reach for by analogy.
     let outcome = frame_event(put_push("@/wz/session/close/peer-b"));
-    let admit = AdmitAll;
+    let admit = admit_all();
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &admit, None);
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&admit), None);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -552,7 +546,7 @@ fn session_close_ingress_refuses_a_key_that_is_not_the_grammar() {
     let (actions, mut engine) = established_session();
     let outcome = frame_event(put_push(CLOSE_KEYEXPR));
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &admit, None);
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&admit), None);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
     assert_eq!(fired, 1);
@@ -576,9 +570,9 @@ fn session_close_ingress_hands_the_authority_the_parsed_target() {
     let outcome = frame_event(put_push(CLOSE_KEYEXPR));
     // Scoped to the TARGET chunk alone. An authority still comparing whole
     // keyexprs would refuse this, because `CLOSE_TARGET` is not `CLOSE_KEYEXPR`.
-    let only = AdmitOnly(CLOSE_TARGET);
+    let only = admit_only(CLOSE_TARGET);
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &only, None);
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&only), None);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -602,13 +596,13 @@ fn session_open_ingress_asks_the_opener_for_the_named_peer() {
     });
 
     let outcome = frame_event(put_push(OPEN_KEYEXPR));
-    let admit = AdmitAll;
+    let admit = admit_all();
     let opener = RecordingOpener {
         accept: true,
         ..Default::default()
     };
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &admit, Some(&opener));
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&admit), Some(&opener));
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -649,9 +643,9 @@ fn session_open_ingress_refuses_when_no_opener_is_bound() {
     });
 
     let outcome = frame_event(put_push(OPEN_KEYEXPR));
-    let admit = AdmitAll;
+    let admit = admit_all();
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &admit, None);
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&admit), None);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -663,10 +657,8 @@ fn session_open_ingress_refuses_when_no_opener_is_bound() {
     );
 }
 
-/// The authority answers the two verbs SEPARATELY. `DenyAll` overrides only
-/// `admits_close` and takes the trait's default for `admits_open` — which is
-/// `false` — so an authority written before this verb existed refuses it, and
-/// that default is what this arm pins.
+/// Default deny (decision D16): a policy that grants nothing refuses the open as
+/// it refuses the close, and a refused open never reaches the opener.
 #[test]
 fn an_authority_that_never_heard_of_open_refuses_it() {
     let (actions, _engine) = established_session();
@@ -678,13 +670,13 @@ fn an_authority_that_never_heard_of_open_refuses_it() {
     });
 
     let outcome = frame_event(put_push(OPEN_KEYEXPR));
-    let deny = DenyAll;
+    let deny = deny_all();
     let opener = RecordingOpener {
         accept: true,
         ..Default::default()
     };
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &deny, Some(&opener));
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&deny), Some(&opener));
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -709,13 +701,13 @@ fn an_opener_that_declines_is_not_counted_as_an_injection() {
     });
 
     let outcome = frame_event(put_push(OPEN_KEYEXPR));
-    let admit = AdmitAll;
+    let admit = admit_all();
     let opener = RecordingOpener {
         accept: false,
         ..Default::default()
     };
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &admit, Some(&opener));
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&admit), Some(&opener));
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -741,9 +733,9 @@ fn session_close_ingress_refuses_a_close_the_authority_denies() {
     });
 
     let outcome = frame_event(put_push(CLOSE_KEYEXPR));
-    let deny = DenyAll;
+    let deny = deny_all();
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &deny, None);
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&deny), None);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -779,9 +771,9 @@ fn session_close_ingress_cannot_be_reached_through_the_signal_path() {
     observer.with_app(|app_half| app_half.switchboard.register(CLOSE_KEYEXPR, CLOSE_EVENT));
 
     let outcome = frame_event(put_push(CLOSE_KEYEXPR));
-    let admit = AdmitAll;
+    let admit = admit_all();
     let fired = {
-        let mut injector = SessionLifecycleInjector::new(&actions, &admit, None);
+        let mut injector = SessionLifecycleInjector::new(&actions, monitor(&admit), None);
         observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
     };
 
@@ -820,9 +812,9 @@ fn session_close_ingress_judges_the_arriving_keyexpr_not_the_row() {
         let outcome = frame_event(put_push(keyexpr));
         // R2718 — the authority is scoped to the TARGET chunk, so this arm now
         // says the verdict follows `peer_zid` rather than the whole string.
-        let only = AdmitOnly("peer-a");
+        let only = admit_only("peer-a");
         let fired = {
-            let mut injector = SessionLifecycleInjector::new(&actions, &only, None);
+            let mut injector = SessionLifecycleInjector::new(&actions, monitor(&only), None);
             observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
         };
 
@@ -996,5 +988,82 @@ fn a_session_behind_the_reconnect_seam_is_verified_by_its_live_links_key() {
     assert!(
         !actions.peer_identity_verified(),
         "the new link proved nothing, and the old link's proof left with it"
+    );
+}
+
+/// Decision D16 on the Push: the commander the session proved commands only the
+/// verbs its grant lists, and the monitor records every decision with its subject,
+/// verb, object and reason. Red if the injector judged the open by the close's
+/// grant, or reached an effect without the record.
+#[test]
+fn a_commander_granted_close_alone_cannot_open_and_every_decision_is_recorded() {
+    use wz_session_core::lifecycle_monitor::{
+        Channel, Decided, Decision, DecisionRecord, Grounds, Refusal, Request, Subject,
+    };
+    #[derive(Default)]
+    struct Kept(RefCell<Vec<Decided>>);
+    impl DecisionRecord for Kept {
+        fn record(&self, request: &Request<'_>, decision: Decision) {
+            self.0.borrow_mut().push(Decided::of(request, decision));
+        }
+    }
+
+    let (actions, _engine) = established_session();
+    let mut observer = ApplicationLayerObserver::new();
+    observer.with_app(|app_half| {
+        app_half
+            .switchboard
+            .register_command(OPEN_KEYEXPR, OPEN_EVENT);
+        app_half
+            .switchboard
+            .register_command(CLOSE_KEYEXPR, CLOSE_EVENT)
+    });
+    let closer = HeapGrants::new(vec![CommanderGrant {
+        commander: zid_from_spki_der(COMMANDER_SPKI),
+        verbs: VerbSet::NONE.with(Verb::Close),
+        key: None,
+    }])
+    .expect("one grant");
+    let kept = Kept::default();
+    let opener = RecordingOpener {
+        accept: true,
+        ..Default::default()
+    };
+    let open = frame_event(put_push(OPEN_KEYEXPR));
+    let close = frame_event(put_push(CLOSE_KEYEXPR));
+    let fired = {
+        let mut injector =
+            SessionLifecycleInjector::new(&actions, Monitor::new(&closer, &kept), Some(&opener));
+        (
+            observer.dispatch_switchboard(IterationEvent::Poll(&open), &mut injector),
+            observer.dispatch_switchboard(IterationEvent::Poll(&close), &mut injector),
+        )
+    };
+
+    assert_eq!(fired, (0, 1), "the open is refused and the close runs");
+    assert!(opener.asked.borrow().is_empty());
+    let commander = Subject::Verified(zid_from_spki_der(COMMANDER_SPKI));
+    let rows: Vec<(Subject, Verb, Channel, Decision)> = kept
+        .0
+        .borrow()
+        .iter()
+        .map(|row| (row.subject, row.verb, row.channel, row.decision))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                commander,
+                Verb::Open,
+                Channel::Push,
+                Decision::Deny(Refusal::NotListed)
+            ),
+            (
+                commander,
+                Verb::Close,
+                Channel::Push,
+                Decision::Permit(Grounds::Granted)
+            ),
+        ]
     );
 }

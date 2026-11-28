@@ -511,18 +511,16 @@ fn a_lent_peers_interest_answers_drain_and_keep_their_rows() {
 #[cfg(feature = "liveliness-token")]
 #[test]
 fn a_lent_peers_liveliness_answers_drain_in_place() {
-    use wz_session_core::declare::local_token::DeclResponseItem;
+    use wz_session_core::declare::local_token::LocalTokenRegistry;
 
     let (mut observer, _seen) = slot();
     let mut peers = lent_peers(1);
     let mut requesters = Req::new();
     let sent = Sent::default();
+    let none = LocalTokenRegistry::new();
     for interest_id in [3u64, 4] {
         assert!(
-            peers
-                .pending_declares
-                .push(DeclResponseItem::Final { interest_id })
-                .is_ok(),
+            peers.token_answers.stage(&none, None, interest_id).is_ok(),
             "interest {interest_id}: the row is free"
         );
         observer.flush_pending(&mut peers, &mut requesters, &sent);
