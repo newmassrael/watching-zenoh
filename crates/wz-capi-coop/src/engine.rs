@@ -162,11 +162,14 @@ use wz_runtime_coop::session_drive::{
 use wz_runtime_coop::session_drive::{LinkWaits, WaitOn};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::sync::Lend;
-use wz_runtime_coop::transport::{
-    ActionsCell, LinkCalls, TransportFaces, TransportRefusal, TransportSession, WalkRefusal,
-    WireMaking,
-};
+// The cell a link's actions are placed in with their two halves, laid out where the arena holds
+// the links' cells.
+#[cfg(not(wz_on_use))]
+use wz_runtime_coop::transport::ActionsCell;
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
+use wz_runtime_coop::transport::{
+    LinkCalls, TransportFaces, TransportRefusal, TransportSession, WalkRefusal, WireMaking,
+};
 #[cfg(not(wz_on_use))]
 use wz_runtime_coop::RuntimePlace;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimeRows};
@@ -207,8 +210,6 @@ use wz_session_core::send_wire_error::SendWireError;
 #[cfg(all(feature = "listen", feature = "tx-probe"))]
 use wz_session_core::session_actions::Probed;
 use wz_session_core::session_actions::SessionLinkActions;
-#[cfg(not(wz_on_use))]
-use wz_session_core::session_actions::{LinkState, SessionCore};
 use wz_session_core::session_init_params::{
     CookieKey, HeldDrop, KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf,
     ZidError, ZID_MAX,

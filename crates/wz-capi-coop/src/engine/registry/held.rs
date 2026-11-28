@@ -75,13 +75,7 @@ impl HeldPlaces {
     /// The rows the table keeps of `sets` places: a mark for each past the dial role's, whose
     /// mark is no row. What the registry's description lends its line (`RowCount::HeldSets`) and
     /// a plan counts of it (`crate::arena::ArenaPart::HeldFaces`).
-    #[cfg(any(
-        wz_lent,
-        all(
-            wz_on_use,
-            any(feature = "listen", feature = "group", all(test, wz_lent))
-        )
-    ))]
+    #[cfg(any(wz_lent, all(wz_on_use, any(feature = "listen", feature = "group"))))]
     pub(super) const fn rows_of(sets: usize) -> usize {
         sets.saturating_sub(1)
     }
@@ -138,7 +132,7 @@ impl HeldPlaces {
     /// takes nothing.
     #[cfg(wz_on_use)]
     pub(super) fn counted(sets: usize) -> Result<Self, ArenaRefused> {
-        #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
+        #[cfg(any(feature = "listen", feature = "group"))]
         {
             let past = Self::rows_of(sets);
             let mut past_dial = PastDial::counted(past);
@@ -151,7 +145,7 @@ impl HeldPlaces {
             }
             Ok(Self { past_dial })
         }
-        #[cfg(not(any(feature = "listen", feature = "group", all(test, wz_lent))))]
+        #[cfg(not(any(feature = "listen", feature = "group")))]
         {
             debug_assert_eq!(sets, 1, "a session of one face counts one set");
             Ok(Self { past_dial: [] })
