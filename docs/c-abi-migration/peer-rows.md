@@ -1252,6 +1252,21 @@ engine imports neither; `ActionsCell` is imported where the arena lays the links
 are lent, or taken on use by a build that adds faces: the lent and on-use policies are one choice
 of `build.rs`, so a test's lent arm never meets the on-use one and its gate names neither.
 
+**The Final rows of a set in a build that answers no query.** Main's description of a set
+(`FaceTables::places`, `described.rs`) has a line for the peer's `Final`s only with `queryable`,
+since a session owes a Final only to a query a queryable of its own was handed
+(`Registry::pin_lent_query`); the lane lent them through `PeerTables::lend_rows` in every build.
+The merge keeps main's description, which is right and smaller, so the side that was wrong is the
+registry's tests that owed a Final in every build to mark a set as a face's: in the lent builds
+without `queryable` (`listen`; `group,app-transport,threads`) they put a value in a stage no
+arena lent rows to. Main's own copies of those tests are the same, so its lent builds without
+`queryable` meet them too (read, not run). The tests now mark a set by what the face's peer
+declares, which every build keeps (`a_session_of_one_face_holds_its_dial_role_s_face_alone`,
+`an_accepted_face_takes_a_lent_set_where_it_lies_and_gives_it_back_there`), and read the Final
+row as the build describes it (`OWES_FINALS`, as `holds_one_final` did:
+`a_session_that_dials_nothing_keeps_its_one_set_for_the_face_that_comes`,
+`faces_that_go_leave_the_pools_as_full_as_before`).
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)
