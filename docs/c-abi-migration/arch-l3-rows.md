@@ -1071,8 +1071,8 @@ planes' dispatch of a face's other records, where a snapshot's DeclFinal ends it
 engine's word of ended gets stayed unset, so the read's delivery handed nothing out, and the end
 waited for the next look at the face that notes (`life_turn`), which a face that brings nothing
 more makes only when its life or the snapshot's deadline comes due: past the five seconds a test
-reads for, so the tests read it as never. This is the red of `tests::snapshot` in the direct form
-(`query,liveliness-get` and `query,liveliness-get,tables-on-use`). Every planes' dispatch of
+reads for, so the tests read it as never. It was taken for the red of `tests::snapshot` in the
+direct form; that red is the stand-in's, below, and this note stands on its own. Every planes' dispatch of
 the direct read now goes through `CoopEngine::dispatch_records`, which notes in the hold it
 dispatches under: the declaration's (`hand_lent_declare`), the frame's (`FramePayload`, whose
 owned records may carry a Final or a DeclFinal) and the rest's. Of the three only the first is
@@ -1089,6 +1089,37 @@ Expected size and Ir: a Push, a plain-put frame and a reply take none of these a
 receive of samples does not move. A record of the other arms (a declaration, an interest, an empty
 frame) reads the tables' count of ended gets once more in a build of `query`; the pico-compare
 cases move by those few instructions where they read such a record.
+
+**The stand-in answers a snapshot whatever the build under test answers** (`test(capi-coop):
+Answer a tokens Interest from the stand-in in any build`). The red of `tests::snapshot` in
+`query,liveliness-get` and `query,liveliness-get,tables-on-use` was not the engine's. Read end to
+end, the snapshot's leg is held under `snapshot_leg` of the interest id the link mints at its
+issue, the id the Interest carries; the peer's DeclFinal echoes that id
+(`snapshot_final_view`), and `end_snapshot_leg` looks it up through the same `snapshot_leg`; the
+face's leg owes one Final (`GetLegs::hold`); the row begins with the asker's leg, counts the
+face's (`add_leg`), the walk's last hold ends the asker's and the DeclFinal the face's, the last
+setting `GetEnd::Answered` for a snapshot as for a query. What never came is the DeclFinal: the
+router stand-in is a session core built with the features of the build under test, and since
+`interest-answer` took the token answers under it (`feat(session-core): Answer a peer's Interest
+only under interest-answer`) a stand-in of a build without it stages no answer to any tokens
+Interest. The snapshot tests then pass only in a build that answers (`group` brings
+`interest-answer`), and a deadline, a cancel and a lost link end a snapshot in every build, which
+is the pattern the red showed. A router answers a tokens Interest whatever its asker is built
+with, so the stand-in now does so itself where its session core does not
+(`answer_token_interests`, `all(liveliness, not(interest-answer))`): it stages the answer with
+the session core's own `TokenAnswers` over the tokens it holds and its peer's key aliases, after
+the dispatch of each event, and sends each token declaration and the DeclFinal on its link. A
+build with `interest-answer` keeps the observer's own answer and compiles none of it, so no
+Interest is answered twice (the session core's `interest-answer` follows the crate's in every
+feature set read with `cargo tree`). A history subscriber of a `liveliness` build without
+`interest-answer` is answered by the same path. Tests: the four snapshot tests of the red, now
+answered in the builds they failed in; and
+`session_tables::tests::a_snapshot_of_one_face_ends_with_its_askers_leg_and_the_faces_final`
+in the session core, which drives a snapshot's row through its begin, one face's leg held under
+its Interest's id, the asker's end and the face's one Final, and asserts it ends answered (red if
+`add_leg` counts no leg, or a face's leg owes a second Final). Expected size and Ir: the change is
+in the test crate's stand-in and a session-core unit test; no library text moves and the
+pico-compare cases do not move.
 
 ## 7. The receive
 
