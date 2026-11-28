@@ -6,7 +6,7 @@
 //! places over the rows it lays out beside them (`placed`) and a plan walks, each line lent the
 //! arena's next span (`Registry::new`, `FaceTables::lend`). The tables' own descriptions are the
 //! session core's (`SessionTables::places`, `SlotObserverOf::places`, `PeerTables::places`,
-//! `Requesters::places`); these join them at the offsets the registry and a set keep them at, so
+//! `GetLegs::places`); these join them at the offsets the registry and a set keep them at, so
 //! where a table lies and how many rows it is lent is one fact, read by both forms.
 //!
 //! A plan walks the registry's own lines and the dial face's set at the open, and the set of each
@@ -22,46 +22,85 @@ use core::mem::offset_of;
 #[cfg(wz_lent)]
 use core::ptr::NonNull;
 
+#[cfg(feature = "query")]
+use wz_session_core::bounded::ZeroEmpty;
 #[cfg(wz_lent)]
 use wz_session_core::bounded::{seq_bytes, Arena, LendRefused, RowCounts, TableLender};
 use wz_session_core::bounded::{RegionLines, RowCount, SeqPlace};
+#[cfg(feature = "query")]
+use wz_session_core::get_legs::{GetLegs, GetLegsRows, GET_LEGS_LINES};
 #[cfg(wz_lent)]
 use wz_session_core::key_arena::{lend_region, KeySpace};
-#[cfg(wz_lent)]
-use wz_session_core::limits::SessionLimits;
 #[cfg(wz_lent)]
 use wz_session_core::peer_tables::PeerRows;
 use wz_session_core::peer_tables::{PeerTableRows, PEER_TABLE_LINES};
 #[cfg(wz_lent)]
 use wz_session_core::pubsub::SubscriberPeer;
 #[cfg(feature = "query")]
-use wz_session_core::reply_sink::ConsolidatingSink;
+use wz_session_core::session_tables::PendingGetHandle;
 use wz_session_core::session_tables::SESSION_TABLE_LINES;
 #[cfg(wz_lent)]
 use wz_session_core::slot_observer::RequesterRows;
 use wz_session_core::slot_observer::SLOT_OBSERVER_LINES;
-#[cfg(feature = "query")]
-use wz_session_core::slot_observer::{RequesterRegionRows, REQUESTER_LINES};
 
 use super::held::HeldPlaces;
 #[cfg(feature = "query")]
 use super::Gets;
 use super::{App, FaceTables, Peer, Registry};
 use crate::engine::CoopTables;
-#[cfg(feature = "query")]
-use crate::engine::{LegHold, LegSink};
-#[cfg(wz_lent)]
+#[cfg(any(feature = "query", wz_lent))]
 use crate::RowPolicy;
 
-/// The rows a region keeps for one set's requesters, or for the session's own gets.
+/// The rows a region keeps for the legs one set holds of the session's gets, or the session's own
+/// queryables hold: its queries' and, with `liveliness-get`, its snapshots'.
 #[cfg(feature = "query")]
-pub(super) type GetRows = RequesterRegionRows<ConsolidatingSink<LegSink, LegHold>, LegSink>;
+pub(super) struct GetRows {
+    legs: GetLegsRows<PendingGetHandle>,
+    #[cfg(feature = "liveliness-get")]
+    snapshots: GetLegsRows<PendingGetHandle, { super::SNAPSHOT_LEGS }>,
+}
 
-/// The lines one set's requesters take in a description: none in a build that asks nothing.
+// SAFETY: each field is rows of `MaybeUninit` (`ZeroEmpty`), holding no value until placed.
 #[cfg(feature = "query")]
-const GET_LINES: usize = REQUESTER_LINES;
+unsafe impl ZeroEmpty for GetRows {}
+
+/// The lines one set's legs take in a description: a table of legs each for its queries and its
+/// snapshots, none in a build that asks nothing.
+#[cfg(all(feature = "query", not(feature = "liveliness-get")))]
+const GET_LINES: usize = GET_LEGS_LINES;
+#[cfg(all(feature = "query", feature = "liveliness-get"))]
+const GET_LINES: usize = 2 * GET_LEGS_LINES;
 #[cfg(not(feature = "query"))]
 const GET_LINES: usize = 0;
+
+#[cfg(feature = "query")]
+impl Gets {
+    /// The description of a set's legs at `at` and, in a region, their [`GetRows`] at `rows`:
+    /// each table of legs, lent by a plan the count of its kind of get on one face (a face's
+    /// `RowCount::Queries` and `RowCount::LivelinessGets`). A leg keeps no key and the tables
+    /// state no quota (the session's table of gets bounds them), so nothing holds them to the
+    /// limits after.
+    const fn places(at: usize, rows: usize) -> RegionLines<GET_LINES> {
+        let lines = RegionLines::EMPTY.with(
+            &GetLegs::<PendingGetHandle, RowPolicy>::places(
+                at.wrapping_add(offset_of!(Gets, legs)),
+                rows.wrapping_add(offset_of!(GetRows, legs)),
+                RowCount::Queries,
+            ),
+            0,
+        );
+        #[cfg(feature = "liveliness-get")]
+        let lines = lines.with(
+            &GetLegs::<PendingGetHandle, RowPolicy, { super::SNAPSHOT_LEGS }>::places(
+                at.wrapping_add(offset_of!(Gets, snapshots)),
+                rows.wrapping_add(offset_of!(GetRows, snapshots)),
+                RowCount::LivelinessGets,
+            ),
+            0,
+        );
+        lines
+    }
+}
 
 /// The rows a region keeps for one set of face tables: its peer's stagings, the Finals owed to its
 /// peer's queries, and its pending gets. A plan keeps none, and reads no line's offset into them.
@@ -134,16 +173,16 @@ impl FaceTables {
     /// Lend a set of no rows its rows where it lies, from `arena`, by one walk of its description:
     /// `gets` rows of its gets and `peer` of its peer's stagings and Finals, each line the
     /// arena's next span, each table's keys kept in `keys`, the session's key arena; then the row
-    /// its peer's side composes keys in, which a region keeps inline; and its gets held to
-    /// `limits`, as its peer's tables were when the set was made. Refused when the arena has not
-    /// the rows; the set stays whole, with what was lent before the refusal.
+    /// its peer's side composes keys in, which a region keeps inline. Its legs state no quota of
+    /// their own (the session's table of gets bounds them), and its peer's tables were held to the
+    /// session's limits when the set was made. Refused when the arena has not the rows; the set
+    /// stays whole, with what was lent before the refusal.
     pub(super) fn lend(
         &mut self,
         arena: &mut Arena,
         keys: KeySpace,
         gets: RequesterRows,
         peer: PeerRows,
-        limits: &SessionLimits,
     ) -> Result<(), LendRefused> {
         let mut lend = TableLender::new(arena);
         // SAFETY: the description is this type's (`Self::places`): each line names a table of the
@@ -162,10 +201,6 @@ impl FaceTables {
         }
         lend.finish()?;
         self.peer.subscribers.lend_compose_row(arena)?;
-        #[cfg(feature = "query")]
-        self.gets.limit_to(limits);
-        #[cfg(not(feature = "query"))]
-        let _ = limits;
         Ok(())
     }
 }

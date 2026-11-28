@@ -47,6 +47,7 @@
 
 use core::cell::{OnceCell, UnsafeCell};
 use core::convert::Infallible;
+use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -98,6 +99,13 @@ pub trait TokenCall: RoundCall {
 
     /// Hand `sample` to the row's callback.
     fn hand(&self, sample: LivelinessSample<'_>);
+}
+
+/// A call of a get's callback, begun on the get's row as a reply was let through to it, which the
+/// reply is handed to.
+pub trait ReplyCall: RoundCall {
+    /// Hand `reply` to the get's callback.
+    fn hand(&self, reply: &dyn ReplyView);
 }
 
 /// What a declaration watch is told.
@@ -153,10 +161,8 @@ pub trait RoundCalls: 'static {
     type Queryable: RoundCall;
     /// A call of a declaration watch's sink.
     type Watch: WatchCall;
-    /// The leg of a get a reply is held for: the place of the row its callback lies in.
-    type Leg: Copy;
-    /// A leg's callback, as its holders hand it back once its row's last count is given back.
-    type ReplyCallback;
+    /// A call of a get's callback.
+    type Get: ReplyCall;
     /// Whether the round holds tokens' appearances and retractions.
     type Tokens: Presence;
     /// Whether the round holds replies to the session's gets.
@@ -357,21 +363,12 @@ impl RecordForm for crate::row_callback::OneThread {
 }
 
 /// What the session's planes are made of in an engine's own types beyond what its round owes:
-/// whether the session's own queryables answer its gets, whether a thread that holds the session's
-/// lock may take the callback a reply reaches, and the locks the planes keep their state and their
-/// queues under. The get plane ([`crate::get_plane`]) and the query plane
-/// ([`crate::query_plane`]) read them.
+/// whether the session's own queryables answer its gets, and the locks the planes keep their state
+/// and their queues under. The query plane ([`crate::query_plane`]) reads them.
 pub trait PlaneCalls: RoundCalls {
     /// Whether the session's own queryables answer a get of the session on the thread that holds
-    /// the session's lock: the query plane notes the calls the get begins, and the get plane
-    /// captures the callback the answer reaches, which [`Self::Captures`] keeps.
+    /// the session's lock: the query plane notes the calls the get begins.
     type LocalAnswers: Presence;
-    /// Whether the get plane keeps a capture ([`crate::get_plane::GetPlane::capture`]): the
-    /// callback a reply handed to the sinks reaches is taken out for the thread that holds the
-    /// session's lock, to hand it the reply itself once it lets go. Present where the session's
-    /// own queryables answer its gets, and where the session's read hands each record out as it is
-    /// read, so a peer's reply is handed by the read and not held in the round.
-    type Captures: Presence;
     /// The locks of the planes' state and of the queues every delivery looks at
     /// ([`Queued`](crate::plane_lock::Queued)).
     type Queues: LockFamily;
@@ -407,6 +404,12 @@ impl TokenCall for Infallible {
     }
 
     fn hand(&self, _sample: LivelinessSample<'_>) {
+        match *self {}
+    }
+}
+
+impl ReplyCall for Infallible {
+    fn hand(&self, _reply: &dyn ReplyView) {
         match *self {}
     }
 }
@@ -599,7 +602,7 @@ enum Held<C: RoundCalls> {
     /// A token's appearance or retraction, for the callbacks of the liveliness subscribers it
     /// matched.
     Liveliness(<C::Tokens as Presence>::Record<HeldToken>),
-    /// A reply, for the callback of the leg of the get it answers.
+    /// A reply, for the callback of the get it was let through to.
     Reply(<C::Replies as Presence>::Record<HeldReply>),
     /// A query, for the callbacks of the queryables it reached.
     Query(<C::Queries as Presence>::Record<HeldQuery>),
@@ -721,8 +724,8 @@ enum Owed<C: RoundCalls> {
     Subscriber(C::Subscriber),
     /// A liveliness subscriber's.
     Liveliness(C::Liveliness),
-    /// A get's leg's: a count of the row of its callback ([`LegHolders`]).
-    Reply(C::Leg),
+    /// A get's: the call begun on its row as the reply was let through to it.
+    Reply(C::Get),
     /// A queryable's: the call begun on its row as the query reached it.
     Query(C::Queryable),
     /// A declaration watch's: the call begun on its row as the event reached it.
@@ -762,10 +765,10 @@ impl<C: RoundCalls> Owed<C> {
         }
     }
 
-    /// The leg, when it is a leg's callback.
-    fn reply(&self) -> Option<C::Leg> {
+    /// The call, when it is of a get's callback.
+    fn reply(&self) -> Option<&C::Get> {
         match self {
-            Self::Reply(leg) => Some(*leg),
+            Self::Reply(call) => Some(call),
             _ => None,
         }
     }
@@ -1236,26 +1239,6 @@ pub trait AnswersQueries<C: RoundCalls> {
     fn answer_query(&self, call: &C::Queryable, query: &dyn QueryView, generation: u64);
 }
 
-/// What holds the callbacks of the legs of the session's gets, each in a row held by count: a
-/// record of the round that owes a leg a reply holds one count of its row from when it is written
-/// to when its call is ended, so the callback outlives every reply held for it.
-pub trait LegHolders<C: RoundCalls>: Send + Sync {
-    /// Take one more count of `leg`'s row: `false` when it names none.
-    fn hold(&self, leg: C::Leg) -> bool;
-
-    /// Hand `reply` to `leg`'s callback, which a count the caller holds keeps; the callback is
-    /// called with none of the holders' locks held.
-    fn call(&self, leg: C::Leg, reply: &dyn ReplyView);
-
-    /// Give back one count of `leg`'s row: its callback, taken out of the row, when that was the
-    /// last count, for the caller to drop with no lock held.
-    fn release(&self, leg: C::Leg) -> Option<C::ReplyCallback>;
-}
-
-/// The holders of the legs' callbacks, once the session told the round of them, which outlive
-/// every use the round makes of them ([`Round::calls_legs_of`]).
-type Legs<C> = Option<NonNull<dyn LegHolders<C>>>;
-
 /// The datagram of a group a record of the round reads, its first byte and its length.
 type GroupRead = Option<(*const u8, usize)>;
 
@@ -1319,24 +1302,23 @@ impl RowReleases {
     }
 }
 
-/// What the round's ends of calls leave the session to let go of ([`RowReleases`]), and the
-/// holders of the legs' callbacks its replies' records hold counts of. Written by whoever ends a
-/// call: a delivery emptying the round with no lock of the session held, the session's own put
-/// after its calls, the session refusing a record under its lock.
+/// What the round's ends of calls leave the session to let go of ([`RowReleases`]), of the calls
+/// `C` names. Written by whoever ends a call: a delivery emptying the round with no lock of the
+/// session held, the session's own put after its calls, the session refusing a record under its
+/// lock.
 struct Released<C: RoundCalls> {
     /// Whether a row waits and the drops under way, which the session reads
     /// ([`Round::releases`]).
     rows: RowReleases,
-    /// The rows of the legs' callbacks the replies' records hold counts of, once the session told
-    /// the round of them ([`Round::calls_legs_of`]): a round never told holds no reply.
-    legs: <C::Replies as Presence>::Table<Legs<C>>,
+    /// The calls [`Self::settle`] ends are `C`'s; no field holds one.
+    calls: PhantomData<fn(C)>,
 }
 
 impl<C: RoundCalls> Released<C> {
     fn new() -> Self {
         Self {
             rows: RowReleases::new(),
-            legs: <C::Replies as Presence>::empty::<Legs<C>>(),
+            calls: PhantomData,
         }
     }
 
@@ -1368,11 +1350,11 @@ impl<C: RoundCalls> Released<C> {
         }
     }
 
-    /// The holders of the legs' callbacks, once the session told the round of them.
-    fn legs(&self) -> Option<&dyn LegHolders<C>> {
-        let legs = <C::Replies as Presence>::get::<Legs<C>>(&self.legs).and_then(|legs| *legs)?;
-        // SAFETY: the holders outlive every use the round makes of them (`Round::calls_legs_of`).
-        Some(unsafe { legs.as_ref() })
+    /// [`Self::end`] for a call of a get's callback.
+    fn end_reply(&self, call: C::Get) {
+        if call.end() {
+            self.mark();
+        }
     }
 
     /// Say that a row waits ([`RowReleases::mark`]).
@@ -1385,13 +1367,7 @@ impl<C: RoundCalls> Released<C> {
         match owed {
             Owed::Subscriber(call) => self.end(call),
             Owed::Liveliness(call) => self.end_liveliness(call),
-            Owed::Reply(leg) => {
-                // The record's count; the callback goes here, with no lock held, when it was the
-                // last.
-                if let Some(legs) = self.legs() {
-                    drop(legs.release(leg));
-                }
-            }
+            Owed::Reply(call) => self.end_reply(call),
             Owed::Query(call) => self.end_query(call),
             Owed::DeclWatch(call) => self.end_watch(call),
         }
@@ -1491,9 +1467,8 @@ impl<C: RoundCalls> Answering<C> {
 // filling, and by the one delivery that took it while it is delivering; `lending`, `rejoining`,
 // `kept`, `reading`, `kept_rx` and `capturing` by the holder of the session's lock alone, so the
 // kept buffers, whose claims belong to the session's task, are let go of on that task alone;
-// `answering` behind its own lock, naming the engine, whose answering is made for any thread, as
-// is the holder of the legs' rows `released` names, whose other fields are atomics; every
-// other field is an atomic or never written after the round is made. A call the table owes reads a row its table keeps where it lies until the call ends,
+// `answering` behind its own lock, naming the engine, whose answering is made for any thread;
+// `released` of atomics alone; every other field is an atomic or never written after the round is made. A call the table owes reads a row its table keeps where it lies until the call ends,
 // through a sink that is `Send` and `Sync`; every other callback it owes is `Send` and `Sync`; and
 // the parts it reads lie where the link, the kept buffers and the arena keep them while it holds
 // them.
@@ -1621,19 +1596,6 @@ impl<C: RoundCalls> Round<C> {
     /// once, before the round is shared; a round never told copies every key.
     pub fn reads_keys_in(&mut self, keys: KeySpace) {
         self.table.get_mut().key_space = Some(keys);
-    }
-
-    /// Hold the replies offered from here on for the callbacks `legs` holds, by a count of each
-    /// leg's row. Told once, before the round is shared.
-    ///
-    /// # Safety
-    /// `legs` stands for as long as the round reaches it: until the round's calls are ended
-    /// ([`Self::let_go`]) or the round is dropped, whichever is first, and it is reached from any
-    /// thread a delivery runs on.
-    pub unsafe fn calls_legs_of(&mut self, legs: NonNull<dyn LegHolders<C>>) {
-        if let Some(held) = <C::Replies as Presence>::get_mut::<Legs<C>>(&mut self.released.legs) {
-            *held = Some(legs);
-        }
     }
 
     /// The table, to write, while it is empty or filling: `None` once it is sealed or handed out.
@@ -2215,27 +2177,27 @@ impl<C: RoundCalls> Round<C> {
         })
     }
 
-    /// Hold `view`, a reply, for leg `leg`, whose callback answers it, each part read where it lies
-    /// or written into the table, with a count of the leg's row ([`LegHolders`]). A reply is the
-    /// answer a get waits for: one that finds no room is counted with the records that hold their
-    /// sender.
+    /// Hold `view`, a reply, for `call`, begun on the row of the get it was let through to, each
+    /// part read where it lies or written into the table; the call is ended as the round is
+    /// emptied, or at once when the reply is refused. A reply is the answer a get waits for: one
+    /// that finds no room is counted with the records that hold their sender.
     ///
     /// # Safety
     /// The caller holds the session's lock.
-    pub unsafe fn offer_reply(&self, leg: C::Leg, view: &dyn ReplyView) {
+    pub unsafe fn offer_reply(&self, call: C::Get, view: &dyn ReplyView) {
         // SAFETY: the caller's contract.
         let lending = unsafe { self.lending() };
         // SAFETY: the caller's contract.
         let Some(table) = (unsafe { self.writable() }) else {
             self.refuse(true);
+            self.released.end_reply(call);
             return;
         };
-        let Some(legs) = self.released.legs() else {
+        // A round whose build keeps no reply refuses it before any part is placed, as one with no
+        // room does.
+        if !<C::Replies as Presence>::KEPT || !Self::takes(table, 1) {
             self.refuse(true);
-            return;
-        };
-        if !Self::takes(table, 1) {
-            self.refuse(true);
+            self.released.end_reply(call);
             return;
         }
         let held = view.keyexpr_held();
@@ -2247,31 +2209,35 @@ impl<C: RoundCalls> Round<C> {
         };
         let Some(reply) = placed else {
             self.refuse_unplaced(true);
+            self.released.end_reply(call);
             return;
         };
         let key = reply.key;
         let Some(reply) = <C::Replies as Presence>::record(reply) else {
             self.refuse(true);
+            self.released.end_reply(call);
             return;
         };
-        if !legs.hold(leg) {
-            self.refuse(true);
-            return;
-        }
         let first = table.callbacks.len();
-        let entered = table
+        let entry = table
             .entries
-            .push(Entry::owing_one(Held::Reply(reply), first))
-            .is_ok();
-        if let (true, Some(held)) = (entered, held) {
+            .push(Entry::owing_one(Held::Reply(reply), first));
+        if let (Ok(()), Some(held)) = (&entry, held) {
             table.hold_key(key, held);
         }
-        let kept = entered && table.callbacks.push(Owed::Reply(leg)).is_ok();
-        if !kept {
-            // Refused after its count was taken: given back at once. The sink that offers the
-            // reply holds the row too, so this is never the count that lets the callback go.
-            drop(legs.release(leg));
-        }
+        let kept = match entry {
+            Ok(()) => match table.callbacks.push(Owed::Reply(call)) {
+                Ok(()) => true,
+                Err(full) => {
+                    self.released.settle(full.0);
+                    false
+                }
+            },
+            Err(_) => {
+                self.released.end_reply(call);
+                false
+            }
+        };
         debug_assert!(kept, "the table had the room its checks found");
         // SAFETY: the caller's contract: the session's lock is held.
         unsafe { self.filled(table) };
@@ -2671,7 +2637,7 @@ impl<C: RoundCalls> Round<C> {
         self.state.store(EMPTY, Ordering::Release);
     }
 
-    /// Whether the table holds nothing: what a leg's end waits for, so that it is told after every
+    /// Whether the table holds nothing: what a get's end waits for, so that it is told after every
     /// reply held before it.
     pub fn is_idle(&self) -> bool {
         self.state.load(Ordering::Acquire) == EMPTY
@@ -2776,11 +2742,8 @@ impl<C: RoundCalls> Round<C> {
                 Held::Reply(reply) => {
                     let reply = <C::Replies as Presence>::read::<HeldReply>(reply);
                     let view = RoundReply { reply, table };
-                    // A reply was held only for a round told of the legs (`Self::offer_reply`).
-                    if let Some(legs) = self.released.legs() {
-                        for leg in owed.iter().filter_map(Owed::reply) {
-                            legs.call(leg, &view);
-                        }
+                    for call in owed.iter().filter_map(Owed::reply) {
+                        call.hand(&view);
                     }
                 }
                 Held::Query(query) => {
@@ -2916,7 +2879,7 @@ impl<C: RoundCalls> Drop for Emptied<'_, C> {
     }
 }
 
-/// A reply of the round, read where its parts lie: what its leg's callback is handed.
+/// A reply of the round, read where its parts lie: what its get's callback is handed.
 struct RoundReply<'t, C: RoundCalls> {
     reply: &'t HeldReply,
     table: &'t Table<C>,

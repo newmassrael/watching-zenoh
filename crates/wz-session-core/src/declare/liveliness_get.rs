@@ -106,6 +106,113 @@ pub fn token_reply(interest_id: u64, keyexpr: &str) -> BorrowedReply<'_> {
     }
 }
 
+/// The pending snapshot `declare`, a record of a frame the copying receive decoded, ends: the
+/// interest id of a DeclFinal answering an Interest, `None` for any other declaration.
+#[cfg(feature = "alloc")]
+pub fn snapshot_final(declare: &DeclareOwned) -> Option<u64> {
+    match (declare.interest_id, &declare.body) {
+        (Some(interest_id), DeclareOwnedVariant::CodecZenohDeclFinal(_)) => Some(interest_id),
+        _ => None,
+    }
+}
+
+/// [`snapshot_final`] for a `Declare` the in-place receive path lends.
+#[cfg(all(
+    feature = "storage-profile",
+    feature = "codec-declare",
+    feature = "rx-lent-control"
+))]
+pub fn snapshot_final_view(declare: &wz_codecs::lent::Declare<'_>) -> Option<u64> {
+    match (declare.interest_id, &declare.body) {
+        (Some(interest_id), wz_codecs::lent::DeclareVariant::CodecZenohDeclFinal(_)) => {
+            Some(interest_id)
+        }
+        _ => None,
+    }
+}
+
+/// The alive token `declare`, a record of a frame the copying receive decoded, answers with the
+/// pending snapshot its interest id names, for a caller that keeps its snapshots itself and says
+/// which ids are pending (`pending`): its key, resolved over `peer_keyexpr_table`, written into
+/// `room`, and that interest id. `None` for a declaration that answers no pending snapshot or is
+/// no token, and for one whose key does not resolve or does not fit `room`, which the second
+/// counts in `oversize`.
+#[cfg(feature = "alloc")]
+pub fn claim_answering_token<'a, PS: Storage, OS: Storage>(
+    declare: &DeclareOwned,
+    pending: impl FnOnce(u64) -> bool,
+    peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
+    room: &mut dyn crate::wireexpr_resolve::KeyexprOut,
+    oversize: &mut u32,
+) -> Option<u64> {
+    let interest_id = declare.interest_id.filter(|&id| pending(id))?;
+    let DeclareOwnedVariant::CodecZenohDeclToken(decl) = &declare.body else {
+        return None;
+    };
+    let resolved = resolve_wireexpr_in(&decl.keyexpr.body, peer_keyexpr_table.into())?;
+    claim_into(interest_id, &resolved, room, oversize)
+}
+
+/// [`claim_answering_token`] for a `Declare` the in-place receive path lends, its key composed
+/// where its frame lies, so the claim takes no heap.
+#[cfg(all(
+    feature = "storage-profile",
+    feature = "codec-declare",
+    feature = "rx-lent-control"
+))]
+pub fn claim_answering_token_view<'a, 'f, PS: Storage, OS: Storage>(
+    declare: &wz_codecs::lent::Declare<'f>,
+    pending: impl FnOnce(u64) -> bool,
+    peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
+    room: &mut dyn crate::wireexpr_resolve::KeyexprOut,
+    oversize: &mut u32,
+) -> Option<u64> {
+    use wz_codecs::lent::DeclareVariant;
+    let interest_id = declare.interest_id.filter(|&id| pending(id))?;
+    let DeclareVariant::CodecZenohDeclToken(decl) = &declare.body else {
+        return None;
+    };
+    let mut composed = crate::wireexpr_resolve::KeyexprRow::new_static();
+    let resolved = match crate::wireexpr_resolve::resolve_wireexpr_view(
+        &decl.keyexpr.body,
+        peer_keyexpr_table.into(),
+        &mut composed,
+    ) {
+        Ok(resolved) => resolved?,
+        Err(_) => {
+            *oversize = oversize.saturating_add(1);
+            return None;
+        }
+    };
+    claim_into(interest_id, resolved, room, oversize)
+}
+
+/// `keyexpr`, the key of an alive token answering the pending snapshot `interest_id`, written
+/// into `room`, where the caller reads it while the frame it was read off is let go of; `None`,
+/// counted in `oversize`, for a key past `room`. The caller picks the room's policy: one of the
+/// static policy (`KeyexprRow`) takes no heap whatever the build's profile.
+#[cfg(any(
+    feature = "alloc",
+    all(
+        feature = "storage-profile",
+        feature = "codec-declare",
+        feature = "rx-lent-control"
+    )
+))]
+fn claim_into(
+    interest_id: u64,
+    keyexpr: &str,
+    room: &mut dyn crate::wireexpr_resolve::KeyexprOut,
+    oversize: &mut u32,
+) -> Option<u64> {
+    room.clear();
+    if room.push_str(keyexpr).is_err() {
+        *oversize = oversize.saturating_add(1);
+        return None;
+    }
+    Some(interest_id)
+}
+
 /// One outstanding liveliness get. Private to this module; consumers
 /// interact through [`LivelinessGetRegistry::register`] /
 /// [`LivelinessGetRegistry::unregister`] and the higher-level
@@ -672,12 +779,14 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         room: &mut dyn crate::wireexpr_resolve::KeyexprOut,
     ) -> Option<u64> {
-        let interest_id = declare.interest_id.filter(|&id| self.has_pending(id))?;
-        let DeclareOwnedVariant::CodecZenohDeclToken(decl) = &declare.body else {
-            return None;
-        };
-        let resolved = resolve_wireexpr_in(&decl.keyexpr.body, peer_keyexpr_table.into())?;
-        self.claim_into(interest_id, &resolved, room)
+        let pending = declare.interest_id.is_some_and(|id| self.has_pending(id));
+        claim_answering_token(
+            declare,
+            |_| pending,
+            peer_keyexpr_table,
+            room,
+            &mut self.oversize,
+        )
     }
 
     /// [`Self::claim_token`] for a `Declare` the in-place receive path lends, its key resolved as
@@ -693,51 +802,14 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
         room: &mut dyn crate::wireexpr_resolve::KeyexprOut,
     ) -> Option<u64> {
-        use wz_codecs::lent::DeclareVariant;
-        let interest_id = declare.interest_id.filter(|&id| self.has_pending(id))?;
-        let DeclareVariant::CodecZenohDeclToken(decl) = &declare.body else {
-            return None;
-        };
-        // Composed in the frame on every profile: a token read where it lies takes no heap.
-        let mut composed = crate::wireexpr_resolve::KeyexprRow::new_static();
-        let resolved = match crate::wireexpr_resolve::resolve_wireexpr_view(
-            &decl.keyexpr.body,
-            peer_keyexpr_table.into(),
-            &mut composed,
-        ) {
-            Ok(resolved) => resolved?,
-            Err(_) => {
-                self.oversize = self.oversize.saturating_add(1);
-                return None;
-            }
-        };
-        self.claim_into(interest_id, resolved, room)
-    }
-
-    /// `keyexpr`, the key of an alive token answering the pending get `interest_id`, written
-    /// into `room`, where the caller reads it while the frame it was read off is let go of;
-    /// `None`, counted, for a key past `room`. The caller picks the room's policy: one of the
-    /// static policy (`KeyexprRow`) takes no heap whatever the build's profile.
-    #[cfg(any(
-        feature = "alloc",
-        all(
-            feature = "storage-profile",
-            feature = "codec-declare",
-            feature = "rx-lent-control"
+        let pending = declare.interest_id.is_some_and(|id| self.has_pending(id));
+        claim_answering_token_view(
+            declare,
+            |_| pending,
+            peer_keyexpr_table,
+            room,
+            &mut self.oversize,
         )
-    ))]
-    fn claim_into(
-        &mut self,
-        interest_id: u64,
-        keyexpr: &str,
-        room: &mut dyn crate::wireexpr_resolve::KeyexprOut,
-    ) -> Option<u64> {
-        room.clear();
-        if room.push_str(keyexpr).is_err() {
-            self.oversize = self.oversize.saturating_add(1);
-            return None;
-        }
-        Some(interest_id)
     }
 
     /// [`Self::dispatch_iteration_event`] to the `DeclFinal`s of a frame the copying receive

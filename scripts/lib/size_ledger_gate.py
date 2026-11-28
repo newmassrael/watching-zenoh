@@ -3376,9 +3376,10 @@ def cmd_selftest() -> int:
     cases = pico_case_ids()
     expect("the committed ledger is well formed and names pico cases of the cost gate",
            isinstance(committed, dict) and ledger_findings(committed, cases) == [])
-    expect("the committed ledger holds the release client, the cooperative peer and the twin of "
-           "the Windows like-for-like library, and steps from the client",
-           {"pico-client-coop-nostd", "pico-peer-coop", "pico-api-coop-nostd"}
+    expect("the committed ledger holds the release client and its on-use form, the cooperative "
+           "peer and the twin of the Windows like-for-like library, and steps from the client",
+           {"pico-client-coop-nostd", "pico-client-coop-nostd-on-use", "pico-peer-coop",
+            "pico-api-coop-nostd"}
            <= set(ledger_cases(committed))
            and isinstance(committed, dict)
            and committed.get("base_case") == "pico-client-coop-nostd")

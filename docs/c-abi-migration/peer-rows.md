@@ -1267,6 +1267,54 @@ row as the build describes it (`OWES_FINALS`, as `holds_one_final` did:
 `a_session_that_dials_nothing_keeps_its_one_set_for_the_face_that_comes`,
 `faces_that_go_leave_the_pools_as_full_as_before`).
 
+### 7.15 Merge of integration k: the on-use chain source and the gets as rows over the table
+
+Integration k (`d92508b447`: main, heap-native's bounded on-use links and state block, L3's gets
+as rows) was merged into the lane, each side's behaviour kept. What each meeting came to:
+
+- **The faces' Routers** (`engine.rs`, `engine/direct.rs`, `engine/faces_added.rs`).
+  Heap-native made what a Router stages its chains in one value of the storage policy
+  (`ChainSource`: the lent table with the most chains one Router holds open, or on use the heap's
+  table of the same count), made into a Router by `chain_router`. The lane's one table of rows
+  takes it: `DirectFaces::lent_in` and `DirectFaces::counted` take `&ChainSource` where they took
+  the lent cells and the open count, each row's Router, the dial role's first, made by
+  `chain_router`. `Core::face_chains` is a `ChainSource` under the lane's gate (on use, `listen`
+  or `group`, links not tasks), since a group's row is made at its join in a build without
+  `listen`; `Core::face_router` stays beside the table, and heap-native's copy in
+  `faces_added.rs` is not kept. The session's own Router (`SessionLent::router`) is made by
+  `chain_router` only where the dial role's row lies inline, as the lane gates it. No face's Router
+  names the lent cells now, so the engine's import of `LentByteCells` returns to heap-native's
+  gate (the cache, the tests), and `Kept` leaves the on-use import as heap-native left it.
+- **The open's frame** (`engine.rs`). `SessionLent` keeps the lane's `face_rows` (every place,
+  the dial role's first) beside heap-native's arena held only where one is reserved.
+- **The arena's rows** (`arena.rs`). Each side's count stands: heap-native's `REASSEMBLY_ROWS` and
+  `HANDLE_ROWS` (none on use) and the lane's `DIRECT_FACE_ROWS` (a session with places past the
+  dial role's, `TAKES_FACES`) and `CELL_ROWS` of six (the halves beside each link's actions).
+- **The gets** (`engine/registry.rs`, `engine/ledger.rs`). L3 keeps a get's deadline on its row
+  of the session's tables, so the index of the gets' deadlines over the sets is gone: a set keeps
+  no due row, and the lane's test of that index
+  (`the_index_of_the_gets_deadlines_keeps_a_leaf_for_each_set`) goes with it. L3's
+  `end_legs_of` finds a lost face's set through the lane's marks (`held_at`), and its notes of
+  ended gets (`note_ended_gets`: after a reply's dispatch, after a face's records
+  `dispatch_records`, after the sweep, and in `DirectLinkIo::lose` after `lose_face_link`) sit
+  in the lane's read where L3 put them. L3's documentation names the lane's one `Registry`.
+
+**Held by** the tests already standing over each part, in the lent and the on-use forms:
+`tests::on_use::an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table` (the
+transport's chain source counted from the plan), `tests::on_use::an_on_use_face_takes_its_read_slot_at_its_places_first_face`
+and `tests::face_routers` (each row's own Router, made by `chain_router` at the open or at the
+place's first face), `tests::arena::each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own`,
+`tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime` (no row
+on use, the direct faces' and the reassembly buffers' among them),
+`arena::tests::the_cells_of_each_kind_held_are_lent_past_the_kinds_with_none` (three tables of
+cells), and `tests::direct_receive::a_get_its_final_ends_is_handed_out_by_the_read_that_read_the_final`
+(L3's note after a Final read where the face's row lies).
+
+**Expected.** No code beyond each side's: the zenoh-pico preset's cases make their one Router
+through `chain_router` over the lent table, as integration k does, and keep the lane's inline row;
+the receive path is k's plus the lane's, so its Ir moves by neither side's step more than each
+side measured alone.
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)

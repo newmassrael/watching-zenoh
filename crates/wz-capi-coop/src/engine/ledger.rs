@@ -7,9 +7,10 @@
 //! deadline and the counts as the last service left them, so a step that finds neither passed nor
 //! moved runs none of it, at the cost of one comparison of each.
 //!
-//! The gets' deadlines are the index the registry keeps (`Registry::dues`), which a read's wait
-//! reads; the ledger is only due by them: each leg held lowers its due time
-//! (`Ledger::owe_leg_due`), and each service settles it from the index.
+//! The gets' deadlines are the earliest the session's tables keep of a standing get
+//! (`SessionTables::next_get_deadline`), which a read's wait reads; the ledger is only due by them:
+//! each get begun lowers its due time (`Ledger::owe_leg_due`), and each service settles it from the
+//! tables.
 
 /// The counts of the changes the bookkeeping follows, kept where the changes are made: the moves
 /// of the faces' table and the writes of the faces' declaration tables.

@@ -1408,7 +1408,506 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   lodgings, the advanced cache's ring, and the count the engine keeps the arena by. The next steps
   of 3d take them in that order; the arena leaves with the last.
 
+### 7.28 3d, step 2: the reassembly chains on use, and the red of hn16
+
+- `3d8b5368d9` (the red of hn16): `OnceRows::get` and `made`, `rows`, `iter` and `OnceRow::get`
+  were compiled for `listen`, but their only readers outside the tests are the direct form's faces
+  (`engine/direct.rs`, `not(wz_round)`): a listening build that keeps the round compiled them with
+  no reader. `get` and `made` now read `all(feature = "listen", not(wz_round))`; `rows`, `iter`,
+  `OnceRow::get` and the `Ordering` import that or `all(test, feature = "std")`, where the
+  rooms' count of places made reads them.
+- `9dedb82d14`: `OwnStaging<SLOTS, CAP>` (`wz-session-core`, `chain_staging.rs`, `alloc`) is
+  the staging of a session whose tables take their memory on use: a chain takes a buffer of the
+  session's bound (`sized(bytes, chains)`, held to `CAP` and `SLOTS`) at its first fragment by a
+  fallible reservation (`Vec::try_reserve_exact`), never grows it, and gives it back when it ends;
+  a chain past the count of open chains or whose buffer the allocator refuses is refused and
+  counted (`refused`), which the Router answers as pool exhaustion, as zenoh-pico drops a chain
+  whose `_z_wbuf_make` fails. No spare buffer is kept after a chain ends: holding the bound for
+  idle chains is the lent form's resident cost, which the on-use form exists not to pay.
+  `KeptBytes` holds a table's cell or an owned buffer (`KeptBytes::own`), read where it lies; a
+  kept chain moves its buffer into it, so the chain's place is free at once and the buffer is the
+  delivery's. The bound this keeps: a Router's chains open are held to its share up to
+  `LENT_CHAINS`, as in the lent form; a message kept by the round is not counted against them (the
+  round keeps one at a time), so where a session lowers `REASSEMBLY_CHAINS` below
+  `SESSION_CHAIN_BUFFERS`, a chain that starts while a message is kept begins on use where the lent
+  table, one buffer held by the kept message, refuses it. D12's cost: one match on a rejoined
+  message's read (`KeptBytes::as_slice`, twice a message) and one on its drop.
+- `5a7c446e01`: `ChainStore` (`wz-runtime-coop`, `reassembly_rx.rs`) names, for a storage
+  policy, a Router's staging and the source the session holds to make it: `Lent` stages in the
+  table the open lent (`LentChainTable { cells, chains }`, `SessionChains`), `OnUse` in each
+  chain's own buffer (`HeapChains { bytes, chains }`, `OwnSessionChains`).
+  `SessionReassembly<P, S = SessionChains>` and `session_reassembly` are generic over the staging;
+  the transport's Router is staged as `TransportFaces::Policy` says (`Policy: Storage +
+  ChainStore`, `RouterOf<T>`), so the one fact (the policy) chooses both the endpoints' texts' rows
+  and the chains' buffers.
+- `1d678048fc`: the engine holds `ChainSource` (`<StatePolicy as ChainStore>::Source`) in its
+  transport tables and makes every Router of it (`chain_router`): the session's one Router, each
+  direct face's at the open (D12) or at its place's first face (on use). The plan lays out the
+  reassembly flags and buffers in D12 alone (`REASSEMBLY_ROWS`, the `put_table` in `lay_out`) and
+  counts the chains in both (`ArenaPlan::reassembly`), which size `HeapChains` on use.
+- Tests. wz-session-core `reassembly_dispatch::tests`:
+  `an_own_staging_takes_a_buffer_when_a_chain_starts_and_none_past_its_count` (red if `acquire`
+  passes the count, refuses uncounted, or `release` does not free the place),
+  `an_own_chain_stages_what_its_filler_wrote` (red if a chain is held to `CAP` and not to its
+  capacity, or a commit past the reservation is taken), `a_chain_past_the_own_bound_is_refused`
+  (red if the staging is sized to `CAP`), `a_kept_own_chain_is_handed_up_where_it_was_staged` (red
+  if `keep` copies, or holds the place while the buffer is kept); `byte_cells::tests`
+  `kept_bytes_of_an_own_buffer_are_read_where_it_lies` (red if `own` copies). wz-runtime-coop
+  `reassembly_rx::tests::an_on_use_router_stages_each_chain_in_a_buffer_of_its_own` (red if
+  `ChainStore for OnUse` sizes to the build's ceiling, or a kept message holds a place).
+  wz-capi-coop `tests::on_use::an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table`
+  (new; red if `TransportRows::lent_from` lends a table of chains on use, which `finish` refuses,
+  or sizes `HeapChains` off the plan), `an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts`
+  (the reassembly rows now among those not laid out; CONTROL the plan's count of chains);
+  `tests::arena` `the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_count_and_length`
+  is the lent form's alone, and `each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own`
+  reads the plan's count in both forms and the row in D12. `a_session_rejoins_as_many_chains_at_once_as_its_config_states`
+  runs on use unchanged: a share of one opens one chain at a time on either staging. The
+  allocator's refusal of a chain's buffer has no test: no allocator of the tests refuses a buffer
+  of the session's bound.
+- What the on-use arena still lays out after this step: the links' cells where the plan holds
+  them (none on use), the ABI's handle, entity places and lodgings, the advanced cache's ring, and
+  the count the engine keeps the arena by.
+
+### 7.29 3d, steps 3 and 4: the caches' ring and the ABI's places on use
+
+- `59685c9a0d`: the ring the advanced publishers' caches keep their samples in is held as the
+  form holds it (`CacheRing`, `engine/cache_ring.rs`, new): the span the open claimed in the
+  arena (D12, `CacheSpan`, now the lent forms' alone), or, on use, `ADVANCED_CACHE_BYTES` of its
+  own taken zeroed by a fallible reservation at the caches' first use and kept for the engine's
+  life. A refused reservation hands an empty span, which `CacheStore::in_ring` refuses as a ring
+  that holds no record (the ABI's `CacheRingUnavailable`, pico's out of memory); a later use
+  asks again, and a ring once taken stands, so no cache made over it sees it change. The plan
+  counts the ring in both forms and lays its rows out in D12 alone (`CACHE_RING_ROWS`).
+- `898e504334`: the ABI's places (N4's share in the engine) are lent by the same
+  `PlaceLender`, so the ABI (`wz-capi-pico`) is unchanged. On use: an entity's place is an
+  allocation of its own taken at `claim_place`, at most as many of a kind at once as the session
+  keeps rows of the kind (`EntityPlaces::counted` from the plan's `PlaceRows` and `EntityRows`),
+  aligned to `ARENA_ALIGN` as the arena's are, its allocation recording the lending table's
+  address first so `give_back_place` refuses a place another session lent, as the arena's table
+  does by its span; the handle's place is `OwnHandle`, the plan's bytes zeroed at the open and
+  held by the session's state; each lodging is a cell of its own (`LodgingPlaces::lend`, its head
+  the cell's layout, given back by the last count from any thread). The plan records the layouts
+  and counts in both forms and lays out the handle, entity place and lodging rows in D12 alone
+  (`HANDLE_ROWS`, `ENTITY_PLACE_ROWS`, `LODGING_ROWS`). The lodgings on use are bounded by the
+  plan's layout and the values the ABI lodges (one hub and one watch a session, one watcher a
+  transport events listener), not by a table: no lodging outlives what lodged it by more than
+  its counts, and none keeps memory of the session's.
+- Tests. wz-capi-coop `engine::cache_ring::tests::an_on_use_ring_takes_its_bytes_zeroed_at_its_first_use_and_keeps_them`
+  (on use; red if the ring is taken at the open, taken again at each use, or not zeroed);
+  `tests::an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches` runs on use unchanged.
+  `arena::tests::an_on_use_plan_holds_the_abis_places_and_lends_each_of_its_own` (on use; red if
+  `lay_held` lays a row, `EntityPlaces::counted` reads another kind's count, `give_back` takes
+  another table's place, or the handle's place is not zeroed);
+  `lodging::tests::an_on_use_lodging_place_is_a_cell_of_its_own_given_back_by_its_last_count`
+  (on use). `tests::an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena` asserts
+  the place in the arena in D12 and apart from it on use (`arena_holds`), the arena two spans
+  larger in D12 and the same on use; `tests::an_open_lends_a_place_for_each_row_of_an_entity_kind_from_its_own_arena`
+  runs on use, the same-address relend read in D12 alone. The D12 tests of the places' rows
+  (`arena::tests` three, `tests::arena` five) are the lent forms'. No test refuses an allocation:
+  no allocator of the tests refuses one.
+- What the on-use arena still lays out after these steps: the links' cells where the plan holds
+  them (none on use) and the count the engine keeps the arena by (`ArenaKeep`); the arena and its
+  count are the next and last step of 3d.
+
+### 7.30 The reds of hn19 and the kept message's bound on use
+
+- `5db4e1ab42` (the red of hn19): `TransportRows::lent_from` took the open's lender in every form,
+  and on use read none of it once every transport table was counted (the endpoints' texts, the
+  chains, the kept publishes): every on-use build failed on the unused parameter. The lend is now
+  the lent forms' alone (`not(wz_on_use)`), and on use `TransportRows::counted` makes the same
+  tables from the plan's counts with no lender; the open and the on-use tests (`tests::on_use`
+  two, `tests::arena` the kept publishes') take the transport without reserving an arena for it.
+- `425e22cf54`: the window 7.28 left open is closed. The form chooses where a chain's buffer
+  comes from, never how many are admitted: on use the chains are counted against a table of the
+  lent table's count (`HeapByteCells`, `wz-session-core` `byte_cells.rs`, `alloc`), the plan's
+  `REASSEMBLY_CHAINS` for each face read where it lies, which the session's Routers share as they
+  share a lent table. A buffer is taken of the allocator at its claim (`OwnBuf`) and holds a count
+  of the table until it drops, so a rejoined message kept by its reader (`KeptBytes::own`) holds
+  its buffer out of the table as a lent cell is held, and a chain that starts meanwhile is refused
+  where the lent table refuses it. `OwnStaging::over(&HeapByteCells, chains)` mirrors
+  `LentStaging::over` (its `available` the smaller of its chains left and the table's buffers
+  free); `HeapChains::try_sized(bytes, buffers, chains)` takes the table's count at the open, the
+  one allocation the on-use transport makes there, refused as `ArenaRefused::NoMemory`
+  (`HeapByteCells::COUNT_BYTES`). The count and each handle are cells, as the lent table's flags
+  are (one task claims and releases); the count lies in an allocation of its own, held by every
+  handle and every buffer lent, so no holder points at memory another owner may let go first.
+- Tests. wz-runtime-coop `reassembly_rx::tests::both_forms_count_a_kept_message_against_the_sessions_chains`
+  (new; the same scenario over the lent table and the on-use one, `LENT_CHAINS` and
+  `SESSION_CHAIN_BUFFERS` buffers: B refused over the first in both and begun over the second in
+  both, CONTROL the lent outcome; red if `OwnStaging::keep` gives the buffer back or its `take`
+  reads its own count alone); `an_on_use_router_stages_each_chain_in_a_buffer_of_its_own` over a
+  table of `SESSION_CHAIN_BUFFERS`. wz-session-core `byte_cells::tests::a_heap_table_lends_as_many_buffers_as_a_lent_table_of_its_count`
+  (new; red if `claim` passes the count or `OwnBuf`'s drop gives nothing back);
+  `kept_bytes_of_an_own_buffer_are_read_where_it_lies` now also reads the buffer out of its
+  table while kept; `reassembly_dispatch::tests::a_kept_own_chain_is_handed_up_where_it_was_staged`
+  adds the table of one buffer, where the next chain is refused while the message is kept, and the
+  three other own-staging tests stage over a table. wz-capi-coop
+  `tests::on_use::an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table` reads the
+  table's count (the plan's chains) beside the length and each Router's share.
+
+### 7.31 3d, the last step: no arena on use
+
+- `f90e925543`: the on-use form reserves no arena. With every tenant housed (7.27 to 7.30), the
+  arena held nothing but the count the engine kept it by (`ArenaKeep`); that count, the arena
+  (`SessionArena`), its lender (`TableLender`), the lend bodies of the state's plain tables
+  (`SessionRows::lent_from`, `StateTables`) and the runtime's span (`ArenaPlan::holding_runtime`,
+  `lay_runtime`, `runtime_bytes`, `RUNTIME_ROWS` none) are not compiled on use, and `lay_keep`
+  is gone. The engine's claim is made with no count of any memory (`SharedClaim::made` in
+  `wz-runtime-coop` `kept.rs`, replacing `made_with` and `last_kept_boxed`, which had no other
+  user): nothing it holds lies in memory another owner gives back. The open's memory
+  (`OpenStorage::memory`) stays meaningful in every form: on use it reserves the one block the
+  open takes, the session's state (`OwnBlock::take(memory)`, given back to that memory), as it
+  reserves the arena in D12, so a host ABI's fresh pages (`HostPages`, `reserves_zeroed`) give
+  the state as they give the arena, written by none of the take. `CoopEngine::arena_bytes` reads
+  none on use. The plan keeps its counts, the on-use constructors' one input (`ArenaPlan::count`,
+  `tables`, `peers`, `gets`, `session`, `reassembly`).
+- Tests. wz-capi-coop `engine::state_places::tests::an_on_use_state_block_is_reserved_from_the_opens_memory_and_given_back_to_it`
+  (new, on use; red if the block is taken of the allocator and not the memory, a zeroed memory's
+  block is written, or another's is left as it lay);
+  `tests::on_use::an_on_use_open_asks_its_memory_for_its_state_alone` (one block, the state's,
+  where it asked for the arena alone; red if an arena is reserved on use or the state taken of the
+  allocator); `tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime`
+  now asserts no row and no byte at all, CONTROL the plan's count of chains (red if any table is
+  laid out on use). Two on-use tests that read the arena are gone with it
+  (`an_on_use_engine_and_its_rooms_lie_apart_from_its_arena`,
+  `an_on_use_sessions_link_admission_lies_apart_from_its_arena`: with no arena the property is
+  the type's). The lent forms' alone: `tests::arena`
+  `the_reservation_is_the_plan_and_lending_every_row_fills_it` and
+  `an_open_holding_the_handle_reserves_the_plan_with_its_place` (which on use had read the
+  handle's place as a row since `898e504334`), `tests::admission_heap`'s arena test,
+  `arena::tests` two of the arena's own block; `tests::an_open_asked_for_a_handle_lends_its_place_from_the_sessions_arena`
+  reads the arena in D12 alone. The round's tests lend from a leaked `Arena`
+  (`arena::leaked_arena`, test and `wz_round`) in every form. wz-runtime-coop `kept::tests`:
+  `a_claimed_value_is_made_where_its_claim_lies_and_dropped_by_its_last_holder` replaces the
+  memory-count test; `a_claim_let_go_of_before_its_value_is_made_drops_no_value` over `made`.
+- What 3d leaves: the plan's `holding_cells`, `holding_rooms` and `holding_engine` are still
+  compiled on use (a test lays every row, `a_plan_with_every_row_holds_exactly_arena_rows`), though
+  the on-use open lays none of them; they are the D12 forms' API and go with the next pass over the
+  plan's public surface.
+
+### 7.32 N5 prepared: the pico ABI's feature and the on-use client's size case
+
+- `8d3ca8c52b`: `wz-capi-pico` names the form, `tables-on-use = ["wz-capi-coop?/tables-on-use"]`,
+  off in every build and preset (11.2); no source of the ABI reads it, so the census of public
+  features has no site of it, and the non-default legs gate reads it as a forward of the engine's
+  leg (`EXEMPT`, `forward`).
+- `e143a83856`: `capability_cost_gate.py` gains `pico-client-coop-nostd-on-use` (10.2, 11.3):
+  the D12 client's package, profile, configuration files, exports and forbidden patterns, its
+  features `os-host,link-udp,tables-on-use`, REQUIRED of it the on-use column's one body
+  (`ON_USE_ROWS`, `wz_session_core::on_use::take_rows`), `HEAP_ABORT` forbidden as in its twin.
+  Its budget is `None`, which `--check` refuses with the budget the reading sets: the case lands
+  unread, and the main session's first `--measure` writes the budget, its
+  `deploy/pico_host_ceiling.json` row, its `deploy/size_ledger.json` case and
+  `size_ledger_gate.py`'s selftest set (line 3381). Left for that reading, as 11.3 says: the D12
+  lay-out witness REQUIRED of `pico-client-coop-nostd` and FORBIDDEN here (read off the D12
+  library's `nm`), and `ON_USE_ROWS` FORBIDDEN in the D12 pico cases once the D12 `nm` shows no
+  `take_rows`.
+
+### 7.33 The reds of hn21
+
+- `an_open_holding_the_handle_reserves_the_plan_with_its_place` (red on use at `d0cce9c186`):
+  the lent forms' alone since `f90e925543` (7.31), which gates it `not(wz_on_use)`; nothing
+  further.
+- `c849c5897b`: `tests::arena::an_open_s_plan_lays_out_a_listed_plan_s_sums_and_lists_no_row`
+  (`runtime-plan`, so on use with `listen`) took as its CONTROL that the listed plan lists rows,
+  which no plan does on use, each table taking its own memory (7.31). Its CONTROL is now the
+  plan's count of chains, which both forms count, and the rows CONTROL the lent form's; the sums
+  and `take_on` are held in both forms.
+- `62167084dc`: the on-use ring of the caches (7.29) took its bytes as a reserve and a resize by
+  zero, which clippy refuses (`slow_vector_initialization`, `tables-on-use,advanced`). Its bytes
+  are now `wz_runtime_coop::link_storage::zeroed_bytes`, the runtime's one fallible zeroed take,
+  which every heap buffer of a link, a port and a group already takes by (now `pub`, for the
+  engine), so a refused take leaves the ring empty as before. The test that holds it is
+  `engine::cache_ring::tests::an_on_use_ring_takes_its_bytes_zeroed_at_its_first_use_and_keeps_them`
+  (unchanged; red if the ring is not zeroed, taken at the open or taken again at each use).
+
+### 7.34 The reds of hn22
+
+- `6fb3b5d4fc`: `tests::arena` imported `BoundedVec` and `Lent` in every form, and since
+  `f90e925543` only tests of an arena read them (the reservation test and the lent tables'
+  sizes); the import is `not(wz_on_use)`, the forms that reserve one.
+- `7f5cda0bbe`: `CoopEngine::rooms_place` (test, `std`, on use) lost its one reader with the
+  on-use arena tests 7.31 removed; it is gone.
+- `5a728e6395`: `OwnBuf::written` (`wz-session-core` `byte_cells.rs`) is written through by a
+  chain's staging alone (`chain_staging`, `reassembly`) and by the module's tests; a build with
+  `alloc` and no `reassembly` (`wz-runtime-coop` `alloc,session-unicast`) compiled it unread.
+  It is `any(test, feature = "reassembly")`.
+
+### 7.35 N5's first reading: the on-use client against its D12 twin
+
+- The main session's `--measure` at `ce63a0f7bd` (GNU ld 2.42): `pico-client-coop-nostd` 237,978
+  bytes of text, `pico-client-coop-nostd-on-use` 241,680, both 443 exports, against zenoh-pico's
+  329,664 (0.72x and 0.73x). `839961f86e` writes the reading where 10.2 and 11.3 said it goes: the
+  case's budget 246,600 (the gate's own figure), its ceiling row locked at WIN on that reading, its
+  ledger case with every area unfilled (the ledger's rule: rows are set from `--measure`, never
+  by hand), and the ledger selftest's set of the cases it must hold.
+- The on-use client is 3,702 bytes (1.6%) over its twin. What it adds and what it drops, by the
+  code (not yet by a reading): it drops the arena's reservation and lender (`SessionArena`,
+  `TableLender`, `ArenaKept` and its last-holder body, the lend bodies of the state's tables) and
+  the lent staging and cells; it adds the first-use column's bodies (`FirstUse`, its first take
+  per row type around the shared out-of-line `take_rows` and `give_rows`), the staging of a chain
+  in its own buffer (`OwnStaging`, a growing `Vec`, and `HeapByteCells`' count, one allocation
+  with a holders' count), the places taken one by one (`OwnBlock`, `OwnHandle`, `RoomPlaces`,
+  the entity places of `PlaceLender` each an allocation), and the links' buffers of the heap
+  (`HeapBuffers` through `zeroed_bytes`). Only one staging form is linked in either build
+  (`ChainStore` is chosen by the policy's type), so no form carries the other's code.
+- Which of it can go is read, not guessed: `size_ledger_gate.py --per-feature` steps from the
+  ledger's base case to this one by exactly `tables-on-use` and prints what it adds to each area
+  on each side, and the two libraries' `nm --size-sort` name the bodies. The candidates the
+  reading decides: (1) the per-type `FirstUse` bodies, where the first take could move into one
+  non-generic body as `take_rows` did, leaving each type its row stride alone; (2) `OwnStaging`'s
+  `Vec` growth paths, where a buffer whose room is taken whole at its claim needs no grow path
+  (`extend_from_slice` within reserved room, written as a copy into the reserved tail); (3)
+  `HeapByteCells`' separate count allocation, if one holder can own it. Each that the reading
+  shows smaller is taken (the measured-gain rule); none is changed before it is read.
+
+### 7.36 The reds of hn24, and N5's areas
+
+- `10cb0b947a`: two `tests::arena` tests whose premise was the arena `f90e925543` removed on use.
+  `an_open_whose_arena_the_memory_refuses_dials_nothing` is restated for the on-use open: its
+  plan reserves no arena (asserted, CONTROL) and the one block it asks the memory for is its state,
+  so the refusal names `size_of::<OwnState>()` (`crate::engine::OwnState`, now `pub(crate)` for
+  this). `a_region_with_the_engines_places_holds_every_row_an_open_lays_out` is the arena forms'
+  alone: on use neither plan lays out a row or a byte, which
+  `tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime` holds.
+- `55cbf7bb77`: the size ledger's rows of `pico-client-coop-nostd-on-use` from the main session's
+  reading of 2026-11-28: sessions 67,318 / 27,508 (ratchet 2.4473), doors 40,291 / 19,034 (2.1168),
+  transport 24,976 / 13,951 (1.7903), driver 23,076 / 16,049 (1.4379), each the reading's ratio
+  rounded up as the rule asks; keyexpr, codec and language read WIN and are locked.
+  `--per-feature` gives `tables-on-use` +3,534 function bytes: sessions +6,798, doors +922,
+  language -4,075, the other areas about none.
+
+### 7.37 The on-use sessions area: what the reading showed, and what was taken
+
+- `17db2be753`: every on-use column takes its rows by one body. `FirstUse<T, N>::take_memory`
+  was out of line and generic, one copy for each row type the client links; it is replaced by
+  `on_use::take_column(&mut Option<NonNull<u8>>, size, align, count)`, which knows no row type
+  (`take_rows` is inlined into it, no longer a body of its own). A column keeps its rows untyped
+  and reads them as `T` where it reads them (`FirstUse::base`, a `T`'s dangling place for rows of
+  no bytes, whose mark is no place of a `T`). Removes every `FirstUse<T, N>::take_memory`
+  instance and `take_rows`; adds `take_column` and three argument loads at each column's
+  first-take call. Test: `on_use::tests::one_body_takes_every_columns_rows_and_marks_rows_of_no_bytes`
+  (red if the mark is read as a row's place, or a refusal marked taken).
+- `d6e0898b3a`: an own chain buffer is written within its room alone. `OwnBuf` lent its
+  `Vec` (`written`), so `OwnStaging`'s `append` (`extend_from_slice`), `buf` (`resize`) and
+  `commit` carried `Vec`'s growth path though the room was reserved whole at the claim.
+  `OwnBuf::append`, `lend_tail` and `truncate` write in the spare capacity the claim took,
+  bounded by the table's length, and refuse past it. Removes from `OwnStaging`'s three bodies the
+  inlined grow branch (`RawVecInner::reserve` and its `do_reserve_and_handle` call,
+  `extend_with`); `RawVec`'s out-of-line grow bodies leave the library only if no other `Vec<u8>`
+  of the client grows. Receive Ir on use: the fragment's copy has no capacity check before it;
+  unchanged in D12, which links neither. Test:
+  `byte_cells::tests::an_own_buffer_is_written_within_its_room_and_never_grows` (red if a write
+  grows the buffer, a refused write writes part, or a lent tail is not zeroed).
+- Not taken: `HeapByteCells`' count in an allocation of its own. Its premise, one holder that
+  outlives every buffer, is not one wz holds: a rejoined message's buffer is kept by the round
+  (`Round::end_rejoined`) apart from the transport that owns the table, and no drop order ties
+  the two, so the count is held by every handle and every buffer and given back by the last
+  (7.30). Its code is the count's take, a clone and a drop.
+- Left for the next reading: the rest of the sessions area's +6,798 bytes is the per-type bodies
+  of the first-use columns themselves (`push`, `remove`, `retain`, drops), against D12's lent
+  bodies of the same tables, and the counted tables' constructors. The two libraries' `nm
+  --size-sort` after these two commits names which of them is over its D12 twin.
+
+### 7.38 The on-use listener's outbound slots: the red on main
+
+- The red (`tests::tx_pool::a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_does_not`,
+  `listen,tables-on-use`, deterministic, on main too): on use each link held slots of its own
+  and the plan counted no `TX_POOL_SLOTS` (`pooled_buffers` read `LINKS_SHARE_POOLS`, false on
+  use, for both pools; `tx_pool_short` answered never), so the session's bound of the links that
+  hold a frame at once was the lent form's alone, and a droppable publish found a slot while the
+  slow link held the one the session states.
+- `2c9bb35b02`: one bound, both forms. `pooled_buffers` counts the outbound slots for every
+  listening build (the receive pool stays the lent form's), `TransportRows::tx_slots` and
+  `tx_pool_short` read it on use too. The links' account of a shared pool is one type,
+  `PoolClaim` (`wz-runtime-coop` `link_storage.rs`), which `PooledTx` (a slot of the arena's
+  pool) and the new `HeapLinkTx::Bounded` (a slot of the link's own, sent from only while the
+  link holds one of a count of no bytes) both hold. The count's flags lie in the on-use state
+  (`OwnState::tx_slots`, `TX_POOL_SLOTS` of them, zero is free), which outlives every link
+  (`Core::_state` last); the open hands them to the links' source where the slots are fewer than
+  the links (`TransportRows::bound_links`, `HeapBuffers::bounded`). A session that accepts no
+  link (`session-unicast-accept` off) keeps `HeapTx` as its links' store, so the on-use client
+  of the size case is unchanged. `LentByteCells::over` is public (unsafe, its contract as before)
+  and its handles compare by identity.
+- Tests: wz-runtime-coop
+  `link_storage::tests::heap_links_bounded_by_their_sessions_slots_take_one_for_a_grant` (new;
+  red if the bound is read by no link or its claim counts nothing; CONTROL the unbounded source);
+  wz-capi-coop `tests::on_use::an_on_use_listeners_links_are_bounded_by_the_slots_they_share`
+  (new, `listen`; red if the plan counts no slots on use, `tx_pool_short` answers never, or the
+  source is not bounded); `an_on_use_sessions_links_take_their_batch_of_the_heap` reads the
+  shared slots in a listening build.
+
+### 7.39 Integration j merged in, and the D12 client's budget set from its reading
+
+- `2437f25819` merges `origin/main` (`39fd76b09c`, integration j, which carries this lane at
+  `3d8b5368d9`) into the lane, not a rebase (`docs/c-abi-migration/int-j-merges.md` records
+  main's side). Two files needed a decision:
+  - `crates/wz-capi-coop/src/arena.rs`: main imports `RowCount` and `RowCounts` under
+    `wz_lent` (the registry's described row bytes, `registry_row_bytes`, `registry_bytes`); the
+    lane moved `TableLender` under `not(wz_on_use)` and added `HeapByteCells` under
+    `wz_on_use`. All three kept, each under its own cfg; `Arena`, `LendRefused` and
+    `ARENA_ALIGN` stay bare.
+  - `crates/wz-capi-coop/src/tests/on_use.rs`: main's port to the simulated world
+    (`70f473f0a7`: `opened`, `Sim::steps_until`, `StandIn::push`) is the form, and the lane's
+    changes since `3d8b5368d9` are written in it. The engine-and-rooms test and the link
+    admission test stay removed (an on-use open reserves no arena, 7.31); the plan, config-plan and
+    links' batch tests take the lane's assertions; the chains test and the listener's slot bound
+    test read the plan and the counted transport alone, no harness; the open test is the lane's
+    (one block, the state's, and no arena) opened by `Sim::open_made_in`. `EngineHold` stays
+    imported, `opened` returning it. The listener test main moved to `tests/on_use_listen.rs`
+    is one the lane did not change.
+- `26fa754c65`: `pico-client-coop-nostd`'s C1cs budget was 1,049,200 against a reading of
+  237,978. That figure is `pico-client-coop`'s budget of 2026-11-21 (the client built with
+  `std`), which `7d46216e63` gave the case when it added it, as a ceiling the form sat under
+  until its first reading set its own; the reading of 7.35 never replaced it. It is now
+  `budget_for(237,978)` = 242,800, the gate's own figure, with the reading in its comment. The
+  case's ceiling row stays locked at WIN and states that reading (0.72x zenoh-pico's 329,664,
+  read in the same run as the on-use case's row, whose toolchain string it shares).
+- `31a66c68e9`: `pico-client-coop-nostd-on-use`'s budget ratchets down the same way, 246,600
+  (set from its first reading, 241,680) to `budget_for(240,432)` = 245,300, the reading of
+  `33bd90da25`; its note keeps the first reading. Its ceiling row is unchanged (locked at WIN).
+- Tests: none added. `tests::on_use` runs 10 tests under `tables-on-use` and 12 under
+  `listen,tables-on-use`, with the one of `tests::on_use_listen` that the same filter matches.
+  The budget's margin is 2 percent over a reading of `33bd90da25`; what main's merged-in work
+  adds to the D12 client is read by the first `--measure` of the merged tree.
+
 ## 8. What the main session runs
+
+- The merge of integration j and the D12 budget (`2437f25819`, `26fa754c65`), not built or run
+  by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --features
+  tables-on-use --lib tests::on_use` (10), `--features listen,tables-on-use --lib tests::on_use`
+  (13: 12 and `tests::on_use_listen`'s one), the hn26 set, and clippy of wz-capi-coop under
+  `tables-on-use`, `listen,tables-on-use` and the default set; `python3
+  scripts/lib/capability_cost_gate.py --selftest` and `--measure pico-client-coop-nostd
+  pico-client-coop-nostd-on-use`. Size: the merge moves what main moved; the budget moves no
+  byte.
+
+- The on-use listener's outbound slots (`2c9bb35b02`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --features listen,tables-on-use --lib
+  tests::tx_pool` and `--features listen --lib tests::tx_pool`; `--features listen,tables-on-use
+  --lib tests::on_use` (one more), `--features tables-on-use --lib`, `--features threads,tables-on-use
+  --lib` and the default set's `--lib`; `cargo test --manifest-path crates/Cargo.toml -p
+  wz-runtime-coop --features alloc,session-unicast,listen --lib link_storage` (one more) and
+  `--features alloc,session-unicast --lib link_storage` (count unchanged); clippy of
+  wz-runtime-coop in both of those sets, of wz-session-core `--features alloc`, of wz-capi-coop
+  `--features listen,tables-on-use` and `--features tables-on-use`, and the non-default features
+  gate. Size: the on-use pico client (no `listen`) unchanged; D12 unchanged but for `PooledTx`'s
+  bookkeeping moved into `PoolClaim` (same code); on-use listeners carry `HeapLinkTx`'s match.
+
+- The reds of hn24, N5's areas and the sessions area's two gains (`10cb0b947a`, `55cbf7bb77`,
+  `17db2be753`, `d6e0898b3a`), not built or run by this lane. `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features tables-on-use --lib`, `--features
+  listen,tables-on-use --lib`, `--features threads,tables-on-use --lib` and the default set's
+  `--lib tests::arena`; `cargo test --manifest-path crates/Cargo.toml -p wz-session-core
+  --features alloc --lib on_use` (one more), `--features alloc --lib byte_cells` (one more),
+  `--features alloc,reassembly --lib chain_staging` and `--lib reassembly_dispatch` (counts
+  unchanged); `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-coop --features
+  alloc,session-unicast,reassembly --lib reassembly_rx`; clippy of wz-session-core `--features
+  alloc` and `--features alloc,reassembly`, of wz-capi-coop `--features tables-on-use`, and the
+  non-default features gate. Then `python3 scripts/lib/size_ledger_gate.py --check` and
+  `--per-feature` for the on-use case, and `capability_cost_gate.py --measure
+  pico-client-coop-nostd-on-use`. Size: on use smaller by one `take_memory` body for each row
+  type linked, and by `OwnStaging`'s inlined grow branches; D12 unchanged (it links neither).
+  Receive Ir (pico-compare, D12): unchanged.
+
+- The reds of hn22 and N5's figures (`6fb3b5d4fc`, `7f5cda0bbe`, `5a728e6395`, `839961f86e`), not
+  built or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
+  --features tables-on-use --lib`, `--features listen,tables-on-use --lib` and `--features
+  threads,tables-on-use --lib`; clippy of wz-capi-coop `--features tables-on-use` and `--features
+  listen,tables-on-use`; `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-coop
+  --features alloc,session-unicast --lib kept` and its clippy; `cargo test --manifest-path
+  crates/Cargo.toml -p wz-session-core --features alloc --lib byte_cells`. Then
+  `python3 scripts/lib/capability_cost_gate.py --selftest`, `python3
+  scripts/lib/size_ledger_gate.py --selftest`, and `--measure pico-client-coop-nostd-on-use` of
+  the size ledger, whose rows fill the case's unfilled areas; `--per-feature` attributes the
+  3,702 bytes (7.35). Size and receive Ir: unchanged (dead code and a test import).
+
+- The reds of hn21 (`62167084dc`, `c849c5897b`), not built or run by this lane. `cargo clippy
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --features tables-on-use,advanced
+  --all-targets -- -D warnings`, `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
+  --features tables-on-use,advanced --lib cache_ring` (one), `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features listen,tables-on-use --lib tests::arena` and
+  `--features tables-on-use --lib`, the default set's `--lib tests::arena` (count unchanged),
+  clippy of wz-runtime-coop `--features alloc,session-unicast`, and the non-default features
+  gate. Size and receive Ir: unchanged in D12; on use the ring's zeroing is the runtime's
+  `write_bytes` where it was `resize`'s fill, the same bytes written.
+
+- N5 prepared (`8d3ca8c52b`, `e143a83856`), not built or run by this lane. `cargo build
+  --manifest-path crates/Cargo.toml -p wz-capi-pico --no-default-features --features
+  os-host,link-udp,tables-on-use`, then `python3 scripts/lib/capability_cost_gate.py --measure
+  pico-client-coop-nostd-on-use pico-client-coop-nostd` (the first reading: the budget and the
+  ceiling row it prints, and the D12 twin read beside it for the step), `python3
+  scripts/lib/capability_cost_gate.py --selftest` and `python3
+  scripts/lib/nondefault_feature_legs_gate.py --check`. Size: the case's first figure is the
+  measurement section 4 is read against (the on-use client against `pico-client-coop-nostd`).
+
+- 3d, the last step: no arena on use (`f90e925543`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --features tables-on-use --lib` (one more in
+  `engine::state_places`; `tests::on_use` two fewer; `tests::arena` two fewer, `arena::tests`
+  two fewer), `--features listen,tables-on-use --lib`, `--features udp-listen,tables-on-use
+  --lib tests::arena`, `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --features
+  tables-on-use --test engine_rows` and `--test no_engine_rows` (one block per open, the state's),
+  the default set's `--lib` (unchanged) and `cargo test --manifest-path crates/Cargo.toml -p
+  wz-runtime-coop --features alloc,session-unicast --lib kept` (count unchanged). With
+  `WZ_COOP_VALUE_LOCKS=off` and `threads,tables-on-use` the round's tests (`leaked_arena`).
+  Clippy of wz-runtime-coop (`--features alloc,session-unicast`) and wz-capi-coop in its default
+  set, `--features tables-on-use`, `--features listen,tables-on-use`, `--features
+  udp-listen,tables-on-use`, `--features group-host`, and `--features runtime-plan`. Size: D12
+  unchanged (`SessionArena`'s code as it was; `SharedClaim` is on use alone); on use smaller by
+  the arena's reservation, lender, `ArenaKept`, its last-holder body and the claim's count (one
+  retain and one give-back fewer), larger by nothing (the state's block was taken already; the
+  zeroing is a `write_bytes` where `alloc_zeroed` was). Receive Ir: unchanged (nothing of the
+  arena is read on the receive).
+
+- The reds of hn19 and the kept message's bound on use (`5db4e1ab42`, `425e22cf54`), not built or
+  run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --features
+  alloc,reassembly --lib byte_cells` (one more) and `--lib reassembly_dispatch` (count unchanged);
+  `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-coop --features
+  alloc,session-unicast,reassembly --lib reassembly_rx` (one more); `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features tables-on-use --lib tests::on_use` and `--features
+  listen,tables-on-use --lib tests::arena` (counts unchanged, now compiling), the default set's
+  `--lib` (unchanged). Clippy of wz-session-core (`--features alloc,reassembly` and
+  `--no-default-features --features reassembly`), wz-runtime-coop (`--features
+  alloc,session-unicast,reassembly`) and wz-capi-coop in its default set, `--features
+  tables-on-use`, `--features listen,tables-on-use`, `--features udp-listen,tables-on-use` and
+  `--features group-host`. Size: D12 none (the lent arm's code unchanged, `KeptBytes`'s own arm
+  holds a handle beside its buffer); on use one small allocation at the open (the chains' count),
+  a count's read and write at each chain's start and end and at a kept message's drop. Receive Ir:
+  an unfragmented receive unchanged; on use a rejoined message two cell updates more.
+
+- 3d, steps 3 and 4, the caches' ring and the ABI's places on use (`59685c9a0d`, `898e504334`),
+  not built or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
+  --features tables-on-use --lib` (three more: `cache_ring`, `lodging`, `arena::tests`; three fewer
+  in `arena::tests` and the lodging table's two, the lent forms'), `--features
+  tables-on-use,advanced` if the advanced set builds with it (`tests::an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches`
+  on use), `--features listen,tables-on-use --lib tests::arena` (five fewer), and `cargo test
+  --manifest-path crates/Cargo.toml -p wz-capi-coop --lib` in the default set (unchanged). Clippy
+  of wz-capi-coop in the default set, `--features tables-on-use`, `--features
+  listen,tables-on-use`, `--features udp-listen,tables-on-use`, `--features group-host` and with
+  `advanced` beside `tables-on-use`; and `cargo test --manifest-path crates/Cargo.toml -p
+  wz-capi-pico` (the ABI unchanged). Size: D12 none but a newtype (`CacheRing`); on use the
+  arena smaller by the handle, entity place, lodging and ring rows, the code larger by the
+  per-kind allocation (`EntityPlaces::claim`, `give_back`), `OwnHandle` and the lodging cell,
+  smaller by the lent places' lend and `claim_handle`. Receive Ir: unchanged (no place is taken on
+  the receive).
+
+- 3d, step 2, the reassembly chains on use (`9dedb82d14`, `5a7c446e01`, `1d678048fc`) and the
+  red of hn16 (`3d8b5368d9`), not built or run by this lane. `cargo test --manifest-path
+  crates/Cargo.toml -p wz-session-core --features alloc,reassembly --lib reassembly_dispatch` (four
+  more) and `--lib byte_cells` (one more); `cargo test --manifest-path crates/Cargo.toml -p
+  wz-runtime-coop --features alloc,session-unicast,reassembly --lib reassembly_rx` (one more);
+  `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --features tables-on-use --lib
+  tests::on_use` (one more) and `--features listen,tables-on-use --lib tests::arena` (one fewer:
+  the lent table's test is the lent form's), `--lib tests::arena` in the default set (unchanged).
+  Clippy of wz-session-core (`--features alloc,reassembly` and the `fixed` set), wz-runtime-coop
+  (`--features alloc,session-unicast,reassembly`) and wz-capi-coop in its default set,
+  `--features tables-on-use`, `--features listen,tables-on-use`, `--features
+  udp-listen,tables-on-use` and `--features group-host`. Size: D12 a few bytes more (the
+  discriminant and match of `KeptBytes`); the on-use client smaller by the reassembly rows' lay-out
+  and lend and by `LentStaging`'s instantiation, larger by `OwnStaging`'s (one fallible
+  reservation and `Vec` appends, the allocator's code already linked). Receive Ir: an unfragmented
+  receive unchanged; a rejoined message two matches more in D12.
 
 - 3d, step 1, the endpoints' texts (`5b46c5a67b`), not built or run by this lane. `cargo test
   --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast --lib
@@ -1998,8 +2497,10 @@ The order that builds at each step:
    `PlaceRows::lent_from`, `SessionRows::lent_from`) are not compiled in it; the counts the plan
    reads off the limits (`ArenaPlan::count`, `tables`, `peers`, `gets`, `session`) stay, the
    on-use constructors' only input. The size case reads group A's figure here. Written, step 1
-   (7.27): the endpoints' texts by the state's policy, counted on use; the reassembly chains, the
-   ABI's places, the cache's ring and the arena's count are next.
+   (7.27): the endpoints' texts by the state's policy, counted on use; step 2 (7.28): the
+   reassembly chains by the policy's `ChainStore`, each chain's own buffer on use; steps 3 and 4
+   (7.29): the cache's ring and the ABI's places of the allocator, through the same
+   `PlaceLender`; the last (7.31): no arena on use, the open's memory reserving the state alone.
 6. The zenoh-pico preset's own library on use (11.1, R1 to R4), and N5 once R1 builds (11.2).
 
 The pushes of the tables step 2's second half counts, and of the tables beside them in the same

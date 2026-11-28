@@ -6,7 +6,7 @@
 width of Windows: x64 and x86.
 
     pico_windows_package.py --build OUT --profile ID [--arch x64|x86] [--form single|split]
-    pico_windows_package.py --build OUT --preset ORIGINAL [--arch x64|x86] [--form single]
+    pico_windows_package.py --build OUT --preset ORIGINAL [--with FEATURE] [--arch x64|x86] [--form single]
     pico_windows_package.py --measure [--arch x64|x86]
     pico_windows_package.py --size-plan ZIP PLAN
     pico_windows_package.py --size-judge ZIP READING-DIR
@@ -37,7 +37,12 @@ profile's package says the profile, and its manifest states `preset` where a pro
 `profile` (the other key null), which `perf_matrix.py windows-plan` reads. Its regression test
 (`--test`) holds it to its manifest, compiles the layout pins and reads each DLL's imports and
 exports; the examples and the check program call wz's own doors, which the preset is built without,
-so they are not run on it, and `--size-plan` and `--release` refuse it.
+so they are not run on it, and `--size-plan` and `--release` refuse it. `--with FEATURE` (preset only)
+adds features of `wz-capi-pico` to that build and nothing else: its limits, policies and conformance
+statement stay the preset's. The manifest states them (`with`, written only when there are any) and the
+name says `<ORIGINAL>-preset-with-<FEATURE>`. The performance matrix measures arm W's udp cells on the
+preset with `udp-listen` (`perf_matrix.py windows-plan` takes that package beside the preset's), because
+the preset itself has no `udp/` listener, as zenoh-pico's peer has none.
 
 `--form` names the form of the library, both when it names none: `single`, the one DLL
 `wz_capi_pico.dll` the default build makes, the core and the doors of the additional features in it;
@@ -393,9 +398,22 @@ def package_name(version: str, build: str, arch: str, commit: str, form: str = "
     return f"{CRATE}-{version}-{build}-windows-{arch}{shape}-{STDLIBS[0]}-{commit[:10]}"
 
 
-def preset_word(original: str) -> str:
-    """The word a package's name gives the own default build in wz of `original`."""
-    return f"{original}-preset"
+def preset_word(original: str, with_features: tuple[str, ...] | list[str] = ()) -> str:
+    """The word a package's name gives the own default build in wz of `original`, with the features
+    `--with` added to it (`manifest_with`) named after it."""
+    return f"{original}-preset" + "".join(f"-with-{feature}" for feature in with_features)
+
+
+def manifest_with(manifest: dict) -> list[str]:
+    """The features a package's manifest states were added to its preset (`with`, absent when none).
+    A value that is no list of feature names, one with a name twice, and one on a manifest that states
+    no preset are refused."""
+    added = manifest.get("with", [])
+    if not isinstance(added, list) or not all(isinstance(f, str) and f for f in added) or len(set(added)) != len(added):
+        raise Refusal(f"the manifest's `with` is no list of distinct feature names ({added!r})")
+    if added and manifest.get("preset") is None:
+        raise Refusal("the manifest adds features to no preset; a profile's build is its own")
+    return added
 
 
 def manifest_preset(manifest: dict) -> str | None:
@@ -417,7 +435,7 @@ def manifest_preset(manifest: dict) -> str | None:
 def build_word(manifest: dict) -> str:
     """The word a package's name gives the build its manifest states (`manifest_preset`)."""
     preset = manifest_preset(manifest)
-    return str(manifest["profile"]) if preset is None else preset_word(preset)
+    return str(manifest["profile"]) if preset is None else preset_word(preset, manifest_with(manifest))
 
 
 def form_of(manifest: dict) -> str:
@@ -1120,15 +1138,17 @@ def resolve_profile(decl: dict, profile: str) -> dict:
         raise Refusal(f"profile {profile} does not resolve: {err}") from err
     statement = wz_config.resolved_statement(decl, "pico", kconf, {"kind": "presets", "inputs": [path.name]})
     return {"features": features, "env": parse_env_lines(env_lines), "statement": statement,
-            "profile": profile, "preset": None, "word": profile, "said": f"profile `{profile}`"}
+            "profile": profile, "preset": None, "with": [], "word": profile, "said": f"profile `{profile}`"}
 
 
-def resolve_preset(decl: dict, original: str) -> dict:
+def resolve_preset(decl: dict, original: str, with_features: tuple[str, ...] = ()) -> dict:
     """The build of `original`'s own default build in wz (`resolve_build`): its defconfig alone,
     resolved strictly by the pinned interpreter with no preset merged onto it, as a host bench
     resolves arm W (`wz_config.pico_bench_configuration`), and read as `resolve_profile` reads a
     profile: the limits and policies it gives the build, and its capabilities on the engine it
-    chooses. An original not built through the pico ABI is refused."""
+    chooses; with `with_features` (`--with`), those features of wz-capi-pico over it and nothing else, as
+    `perf_matrix.py wz-arm --features` builds a bench arm over the preset. An original not built through
+    the pico ABI, a feature the crate does not have and one the preset already has are refused."""
     if original not in PRESETS:
         raise Refusal(f"`{original}` is no original built through the pico ABI ({', '.join(PRESETS)})")
     defconfig = wz_config.defconfig_path(original)
@@ -1139,19 +1159,32 @@ def resolve_preset(decl: dict, original: str) -> dict:
     except wz_config.PresetError as err:
         raise Refusal(f"{defconfig.name} does not resolve: {err}") from err
     statement = wz_config.resolved_statement(decl, "pico", kconf, {"kind": "presets", "inputs": [defconfig.name]})
-    return {"features": features, "env": parse_env_lines(env_lines), "statement": statement,
-            "profile": None, "preset": original, "word": preset_word(original),
-            "said": f"{original}'s own default build in wz (`configs/{defconfig.name}`)"}
+    table = wz_config.manifest_features(wz_config.MANIFESTS["pico"])
+    for feature in with_features:
+        if feature not in table:
+            raise Refusal(f"`{feature}` is no feature of wz-capi-pico, so `--with` cannot add it")
+        if feature in features:
+            raise Refusal(f"{original}'s preset already has `{feature}`, so `--with` adds nothing")
+    added = list(with_features)
+    said = f"{original}'s own default build in wz (`configs/{defconfig.name}`)"
+    return {"features": [*features, *added], "env": parse_env_lines(env_lines), "statement": statement,
+            "profile": None, "preset": original, "with": added, "word": preset_word(original, added),
+            "said": said + (f" with {', '.join(added)}" if added else "")}
 
 
-def resolve_build(decl: dict, option: str, name: str) -> dict:
+def resolve_build(decl: dict, option: str, name: str, with_features: tuple[str, ...] = ()) -> dict:
     """The build `--build`'s `--profile ID` (`resolve_profile`) or `--preset ORIGINAL`
-    (`resolve_preset`) names: its features, the environment of its limits and policies, its
-    conformance statement, the `profile` and `preset` its manifest states (one of them None), the
-    `word` its package's name gives it and what it is in words (`said`)."""
+    (`resolve_preset`, with the features `--with` adds) names: its features, the environment of its limits
+    and policies, its conformance statement, the `profile` and `preset` its manifest states (one of them
+    None), the features added to a preset (`with`), the `word` its package's name gives it and what it is
+    in words (`said`). `--with` beside a profile is refused: a profile's build is its own."""
     if option not in BUILD_OPTIONS:
         raise Refusal(f"`{option}` names no build ({', '.join(BUILD_OPTIONS)})")
-    return resolve_profile(decl, name) if option == "--profile" else resolve_preset(decl, name)
+    if option == "--profile":
+        if with_features:
+            raise Refusal("`--with` adds features to a preset; a profile's build is its own")
+        return resolve_profile(decl, name)
+    return resolve_preset(decl, name, with_features)
 
 
 def arm_header(decl: dict, features: list[str], env: dict[str, str]) -> str:
@@ -1166,6 +1199,26 @@ def arm_header(decl: dict, features: list[str], env: dict[str, str]) -> str:
     if conflicts:
         raise Refusal("the rendered header does not read back as the build: " + "; ".join(conflicts))
     return header
+
+
+def with_selection(options: list[str]) -> tuple[list[str], tuple[str, ...]]:
+    """`--build`'s options without `--with F` (at most once, F one or more feature names joined by commas),
+    and the features it names, none when it is not given. `--with` given twice, without its value, or with
+    an empty name or a name twice is refused."""
+    rest: list[str] = []
+    added: tuple[str, ...] | None = None
+    words = list(options)
+    while words:
+        word = words.pop(0)
+        if word != "--with":
+            rest.append(word)
+            continue
+        if added is not None or not words:
+            raise Refusal("`--with` is given once, with the features it adds (--with F[,F...])")
+        added = tuple(words.pop(0).split(","))
+        if not all(added) or len(set(added)) != len(added):
+            raise Refusal(f"`--with {','.join(added)}` names no feature, or one twice")
+    return rest, added or ()
 
 
 def build_selection(options: list[str], made: tuple[str, ...] = tuple(FORMS)) -> tuple[list[str], list[str]]:
@@ -1265,9 +1318,10 @@ def copy_library(report: str, library: str, where: str, stage: pathlib.Path) -> 
     return dll
 
 
-def build(out: pathlib.Path, option: str, name: str, arch: str, form: str) -> pathlib.Path:
-    """The package of the build `option` and `name` give (`resolve_build`) for `arch` in `form`,
-    written to `out`; its zip."""
+def build(out: pathlib.Path, option: str, name: str, arch: str, form: str,
+          with_features: tuple[str, ...] = ()) -> pathlib.Path:
+    """The package of the build `option` and `name` give (`resolve_build`, with the features `--with` adds
+    to a preset) for `arch` in `form`, written to `out`; its zip."""
     if sys.platform != "win32":
         raise Refusal("the package is built on a Windows host: its DLL, import library and symbols are "
                       "the MSVC toolchain's")
@@ -1281,7 +1335,7 @@ def build(out: pathlib.Path, option: str, name: str, arch: str, form: str) -> pa
         raise Refusal(f"the environment states {', '.join(stated)}; the package's build is its profile's "
                       "alone, so unset them")
     decl = wz_config.load_decl()
-    plan = resolve_build(decl, option, name)
+    plan = resolve_build(decl, option, name, with_features)
     if plan["preset"] is not None and form not in RELEASE_FORMS:
         raise Refusal(f"{plan['preset']}'s preset is made in the form a release ships "
                       f"({', '.join(RELEASE_FORMS)}), the one the performance matrix measures")
@@ -1412,6 +1466,9 @@ def build(out: pathlib.Path, option: str, name: str, arch: str, form: str) -> pa
         "toolchain": {"rustc": rust["release"]},
         "statement_digest": plan["statement"]["digest"],
         "features": features,
+        # The features added to a preset (`--with`), stated only when there are any, so the manifest of
+        # every other build is as it was.
+        **({"with": plan["with"]} if plan["with"] else {}),
         "files": file_rows(stage),
     }
     (stage / MANIFEST).write_text(render_json(manifest), encoding="utf-8", newline="\n")
@@ -2230,7 +2287,31 @@ def selftest() -> int:
            and manifest_preset({"profile": None, "preset": "zenoh-pico"}) == "zenoh-pico")
     expect("a package's name gives its build the profile, or the preset's word",
            build_word({"profile": "host-peer-ext", "preset": None}) == "host-peer-ext"
-           and build_word({"profile": None, "preset": "zenoh-pico"}) == "zenoh-pico-preset")
+           and build_word({"profile": None, "preset": "zenoh-pico"}) == "zenoh-pico-preset"
+           and build_word({"profile": None, "preset": "zenoh-pico", "with": ["udp-listen"]})
+           == "zenoh-pico-preset-with-udp-listen")
+    expect("a manifest's added features are a list of distinct names on a preset, none when absent",
+           manifest_with({"profile": None, "preset": "zenoh-pico"}) == []
+           and manifest_with({"profile": None, "preset": "zenoh-pico", "with": ["udp-listen"]}) == ["udp-listen"])
+    for manifest in ({"profile": "host-peer-ext", "preset": None, "with": ["udp-listen"]},
+                     {"profile": None, "preset": "zenoh-pico", "with": "udp-listen"},
+                     {"profile": None, "preset": "zenoh-pico", "with": ["a", "a"]},
+                     {"profile": None, "preset": "zenoh-pico", "with": [""]}):
+        try:
+            manifest_with(manifest)
+            expect(f"the added features of {manifest} are refused", False)
+        except Refusal:
+            pass
+    expect("--with is taken out of --build's options and the rest is left as given",
+           with_selection(["--arch", "x64", "--with", "udp-listen"]) == (["--arch", "x64"], ("udp-listen",))
+           and with_selection(["--form", "single"]) == (["--form", "single"], ())
+           and with_selection(["--with", "a,b"]) == ([], ("a", "b")))
+    for options in (["--with"], ["--with", "a", "--with", "b"], ["--with", "a,,b"], ["--with", "a,a"]):
+        try:
+            with_selection(options)
+            expect(f"--build's options {options} are refused", False)
+        except Refusal:
+            pass
     for manifest, word in (({}, "neither"), ({"profile": "../x"}, "neither"),
                            ({"profile": "host-peer-ext", "preset": "zenoh-pico"}, "a build is one"),
                            ({"profile": None, "preset": "zenoh-c"}, "zenoh-c")):
@@ -2715,12 +2796,13 @@ def main(argv: list[str]) -> int:
         if len(argv) == 2 and argv[1] == "--selftest":
             return selftest()
         if len(argv) >= 5 and argv[1] == "--build" and argv[3] in BUILD_OPTIONS:
-            arches, forms = build_selection(argv[5:], tuple(FORMS) if argv[3] == "--profile" else RELEASE_FORMS)
+            options, added = with_selection(argv[5:])
+            arches, forms = build_selection(options, tuple(FORMS) if argv[3] == "--profile" else RELEASE_FORMS)
             out = pathlib.Path(argv[2]).resolve()
             out.mkdir(parents=True, exist_ok=True)
             for arch in arches:
                 for form in forms:
-                    build(out, argv[3], argv[4], arch, form)
+                    build(out, argv[3], argv[4], arch, form, added)
             return 0
         if len(argv) >= 2 and argv[1] == "--measure":
             for arch in measure_selection(argv[2:]):

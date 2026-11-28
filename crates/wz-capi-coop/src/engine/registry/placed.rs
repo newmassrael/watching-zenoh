@@ -167,9 +167,7 @@ impl RegistryRegion {
         // SAFETY: the caller's contract. Every field of the registry is written here or holds its
         // empty value already: the application's tables, the sets' table and the count of the
         // faces' writes at zero bytes, each set and the session's own gets by `write_parts`, and
-        // the delivery and the watches here, each once, whole, before the registry is read. The
-        // own gets' row of the index of the gets' deadlines is valid at zero bytes, and
-        // `index_dues` writes it with the sets' rows before the index is read.
+        // the delivery and the watches here, each once, whole, before the registry is read.
         unsafe {
             let registry = addr_of_mut!((*at.as_ptr()).registry).cast::<Registry>();
             ptr::write(addr_of_mut!((*registry).delivery), delivery);
@@ -182,13 +180,6 @@ impl RegistryRegion {
             let mut held = RegionField::new(NonNull::new_unchecked(registry));
             held.app.limit_to(limits);
             held.app.tables.limit_to(tables);
-            #[cfg(feature = "query")]
-            for set in held.sets.iter_mut() {
-                set.gets.limit_to(limits);
-            }
-            #[cfg(feature = "local-queryable")]
-            held.local.limit_to(limits);
-            held.index_dues();
             Ok(held)
         }
     }

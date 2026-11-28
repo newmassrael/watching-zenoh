@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 use super::GetLegs;
-use crate::bounded::{Arena, Lent, ARENA_ALIGN};
+use crate::bounded::{Arena, Lent, RowCount, ARENA_ALIGN};
 use crate::reply_sink::{BorrowedReply, ReplyKind};
 use crate::wire_id::{request_id_at, RequestId};
 use core::ptr::NonNull;
@@ -109,6 +109,25 @@ fn a_table_lent_one_row_refuses_a_second_leg_until_the_first_ends() {
     assert!(legs.hold(request_id_at(2, 0), 2), "the row is free again");
 }
 
+/// A table of a kind of get bound below the queries' (`N`, a liveliness snapshot's) is lent its
+/// bound's rows and refused one past them, and its region rows are that bound's. Turned red by a
+/// table bound by `MAX_PENDING_QUERIES` whatever its kind, which lends the row past `N` and lays
+/// out the queries' rows.
+#[test]
+fn a_table_of_legs_is_bound_by_its_kind_of_get() {
+    use crate::bounded::Region;
+    const N: usize = 1;
+    let bytes = GetLegs::<u8, Lent, N>::arena_bytes(N + 1).expect("two rows");
+    let mut past = arena(bytes);
+    assert!(GetLegs::<u8, Lent, N>::lent(&mut past, N + 1).is_err());
+    let mut within = arena(bytes);
+    let mut legs = GetLegs::<u8, Lent, N>::lent(&mut within, N).expect("the bound's rows");
+    assert!(legs.hold(request_id_at(1, 0), 1));
+    assert!(!legs.hold(request_id_at(1, 1), 2), "no row past the bound");
+    let lines = GetLegs::<u8, Region, N>::places(0, 64, RowCount::LivelinessGets);
+    assert_eq!(lines.seq_lines()[0].room as usize, N);
+}
+
 /// A leg owing a Final of each of a group's members ends at the last of them, handed back once,
 /// and a Final past the last finds nothing; a leg owing none is not held. Turned red by a leg that
 /// ends at its first Final (`end_leg` not counting), or by one held owing none.
@@ -148,16 +167,22 @@ fn a_table_counted_one_row_refuses_a_second_leg_until_the_first_ends() {
 
 /// The description of a table of the region policy names its legs' rows at the build's bound,
 /// the table inside itself and the rows inside the rows laid out for them, and no handle to the
-/// key arena. Turned red by a line of the wrong bound or rows placed outside `GetLegsRows`.
+/// key arena, lent by a plan the count it is described with. Turned red by a line of the wrong
+/// bound, rows placed outside `GetLegsRows`, or a line a plan lends the build's bound.
 #[test]
 fn region_legs_describe_their_rows_inside_their_rows() {
     use crate::bounded::Region;
     const AT: usize = 64;
     const ROWS: usize = AT + core::mem::size_of::<GetLegs<u8, Region>>();
-    let lines = GetLegs::<u8, Region>::places(AT, ROWS);
+    let lines = GetLegs::<u8, Region>::places(AT, ROWS, RowCount::Queries);
     let seqs = lines.seq_lines();
     assert_eq!(seqs.len(), super::GET_LEGS_LINES);
     assert_eq!(seqs[0].room as usize, crate::caps::MAX_PENDING_QUERIES);
+    assert_eq!(
+        seqs[0].count,
+        RowCount::Queries,
+        "a plan lends it its kind's count"
+    );
     assert_eq!(lines.key_lines().len(), 0, "a leg keeps no key");
     let end = ROWS + core::mem::size_of::<super::GetLegsRows<u8>>();
     assert!(

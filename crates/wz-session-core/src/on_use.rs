@@ -7,7 +7,7 @@
 //! # The column
 //!
 //! A [`FirstUse`] is made with its count and no memory. Its first value takes all its count's rows
-//! in one allocation, made and given back by one body for every row type (`take_rows`,
+//! in one allocation, taken and given back by one body for every row type (`take_column`,
 //! `give_rows`); it never grows, so a row stays where it was put while it stands, and a value past
 //! the count, or one the allocator refuses, is handed back as a value past a fixed table's capacity
 //! is. A column never pushed to takes nothing, and a read, a removal or a clear takes nothing either.
@@ -63,8 +63,7 @@ fn rows_layout(size: usize, align: usize, rows: usize) -> Option<Layout> {
 
 /// The memory of `rows` rows of `size` bytes each, aligned to `align`: one allocation, or `None`
 /// where the allocator refuses it, where it is past the address space, or where it is of no bytes
-/// (a column of no rows, or of rows of no bytes, takes no memory). One body for every row type.
-#[inline(never)]
+/// (a column of no rows, or of rows of no bytes, takes no memory).
 fn take_rows(size: usize, align: usize, rows: usize) -> Option<NonNull<u8>> {
     let layout = rows_layout(size, align, rows)?;
     if layout.size() == 0 {
@@ -87,12 +86,27 @@ unsafe fn give_rows(at: NonNull<u8>, size: usize, align: usize, rows: usize) {
     }
 }
 
+/// Take a column's rows into `rows`, `count` rows of `size` bytes aligned to `align` at once,
+/// and say whether they are taken: rows of no bytes take none and are marked taken by a dangling
+/// place, and `false`, nothing taken, where the allocator refuses. One body for every row type,
+/// out of line, so a push inlines one compare and reaches it by a call only at its column's first
+/// value.
+#[inline(never)]
+fn take_column(rows: &mut Option<NonNull<u8>>, size: usize, align: usize, count: usize) -> bool {
+    if size == 0 {
+        *rows = Some(NonNull::dangling());
+        return true;
+    }
+    *rows = take_rows(size, align, count);
+    rows.is_some()
+}
+
 /// The sequence of the on-use policy: at most `count` values, at most `N`, in rows taken from the
 /// allocator at the first value, all at once (see the module).
 pub struct FirstUse<T, const N: usize> {
-    /// The rows, once the first value took them: `None` before, and a dangling place for rows of
-    /// no bytes, which take none.
-    rows: Option<NonNull<T>>,
+    /// The rows, once the first value took them (`take_column`, which knows no row type): `None`
+    /// before, and a dangling mark for rows of no bytes, which take none.
+    rows: Option<NonNull<u8>>,
     /// The rows that hold values: never more than `count`.
     len: u32,
     /// The rows the first value takes, and the most values the column holds.
@@ -139,12 +153,13 @@ impl<T, const N: usize> FirstUse<T, N> {
         self.len as usize
     }
 
-    /// The first row: aligned and not null before the rows are taken too, when no value lies there.
+    /// The first row: aligned and not null before the rows are taken too, when no value lies there,
+    /// and for rows of no bytes, whose mark is no place of a `T`.
     #[inline(always)]
     fn base(&self) -> NonNull<T> {
         match self.rows {
-            Some(rows) => rows,
-            None => NonNull::dangling(),
+            Some(rows) if core::mem::size_of::<T>() != 0 => rows.cast::<T>(),
+            _ => NonNull::dangling(),
         }
     }
 
@@ -159,25 +174,13 @@ impl<T, const N: usize> FirstUse<T, N> {
         if more == 0 || self.rows.is_some() {
             return true;
         }
-        self.take_memory()
-    }
-
-    /// Take the column's rows, all of its count at once. Out of line, so a push inlines one compare
-    /// and reaches this by a call only at its column's first value.
-    #[inline(never)]
-    fn take_memory(&mut self) -> bool {
-        let size = core::mem::size_of::<T>();
-        if size == 0 {
-            self.rows = Some(NonNull::dangling());
-            return true;
-        }
-        match take_rows(size, core::mem::align_of::<T>(), self.count()) {
-            Some(rows) => {
-                self.rows = Some(rows.cast::<T>());
-                true
-            }
-            None => false,
-        }
+        let count = self.count();
+        take_column(
+            &mut self.rows,
+            core::mem::size_of::<T>(),
+            core::mem::align_of::<T>(),
+            count,
+        )
     }
 
     /// The next row, for `write` to build a value in where the column keeps it, counted as held
@@ -238,11 +241,11 @@ impl<T, const N: usize> FirstUse<T, N> {
 impl<T, const N: usize> Drop for FirstUse<T, N> {
     fn drop(&mut self) {
         self.drop_from(0);
-        if let Some(rows) = self.rows {
-            // SAFETY: `take_memory` took these rows for the column's count, which never changes, by
+        if self.rows.is_some() {
+            // SAFETY: `take_column` took these rows for the column's count, which never changes, by
             // `take_rows` of the same three, or took none (rows of no bytes), for which the layout is
             // of no bytes and nothing is given back.
-            unsafe { give_rows_of::<T>(rows, self.count()) };
+            unsafe { give_rows_of::<T>(self.base(), self.count()) };
         }
     }
 }
@@ -408,7 +411,7 @@ impl<T, const N: usize> IntoIterator for FirstUse<T, N> {
         // gives the rows back.
         let column = core::mem::ManuallyDrop::new(self);
         FirstUseIntoIter {
-            rows: column.rows,
+            rows: column.rows.map(|_| column.base()),
             next: 0,
             end: column.len(),
             count: column.count(),
@@ -1160,6 +1163,48 @@ mod tests {
         assert!(take_rows(8, 8, 0).is_none());
     }
 
+    /// The one body that takes a column's rows marks rows of no bytes taken without asking the
+    /// allocator, takes rows of a size whole, and leaves nothing marked where the allocator
+    /// refuses; a column of rows of no bytes reads its values at a place aligned for them. Turned
+    /// red by a mark read as a place of a row (`FirstUse::base` casting it), or a refusal marked
+    /// taken.
+    #[test]
+    fn one_body_takes_every_columns_rows_and_marks_rows_of_no_bytes() {
+        let mut rows = None;
+        assert!(
+            take_column(&mut rows, 0, 8, 4),
+            "rows of no bytes are taken"
+        );
+        assert!(rows.is_some(), "and marked");
+
+        let mut refused = None;
+        let taken = crate::test_heap::refused(|| take_column(&mut refused, 8, 8, 2));
+        assert!(!taken, "a refused allocation is no rows");
+        assert!(refused.is_none(), "and marks nothing");
+
+        let mut sized = None;
+        assert!(
+            take_column(&mut sized, 8, 8, 2),
+            "CONTROL: the allocator has room"
+        );
+        let at = sized.expect("the rows");
+        assert_eq!(at.as_ptr() as usize % 8, 0, "aligned for the rows");
+        // SAFETY: `take_column` took these rows by `take_rows` of the same three.
+        unsafe { give_rows(at, 8, 8, 2) };
+
+        let mut empty = FirstUse::<[u64; 0], 4>::counted(2);
+        assert!(empty.push([]).is_ok());
+        assert!(empty.push([]).is_ok());
+        assert!(empty.holds_rows());
+        assert_eq!(empty.as_slice().len(), 2);
+        assert_eq!(
+            empty.as_slice().as_ptr() as usize % core::mem::align_of::<u64>(),
+            0,
+            "values of no bytes lie at a place aligned for them"
+        );
+        assert_eq!(empty.into_iter().count(), 2);
+    }
+
     /// A key reads back whole and is counted as the block the key arena would give it, until it is
     /// let go of. Turned red by a key that copies part of its text, or that is counted for other
     /// bytes than the arena's block.
@@ -1366,7 +1411,7 @@ mod tests {
     /// A column whose first value the heap has no room for hands the value back and takes nothing,
     /// and its next value, the heap having room again, takes the rows; a key the heap has no room
     /// for is no room, counted, with none of its bytes kept against the budget. Turned red by a
-    /// column that answers a refused `take_memory` as rows taken, or by a key whose refused
+    /// column that answers a refused `take_column` as rows taken, or by a key whose refused
     /// allocation leaves its bytes counted (`HeapKey::make` without its `refund`).
     #[test]
     fn what_the_heap_has_no_room_for_is_handed_back_and_takes_nothing() {

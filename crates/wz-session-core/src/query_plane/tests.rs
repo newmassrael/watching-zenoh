@@ -61,8 +61,7 @@ impl RoundCalls for Local {
     type Liveliness = Infallible;
     type Queryable = Begun;
     type Watch = core::convert::Infallible;
-    type Leg = u32;
-    type ReplyCallback = ();
+    type Get = Infallible;
     type Tokens = Absent;
     type Replies = Absent;
     type Queries = Absent;
@@ -77,7 +76,6 @@ impl RoundCalls for Local {
 
 impl PlaneCalls for Local {
     type LocalAnswers = Present;
-    type Captures = Present;
     type Queues = StdLocks;
 }
 
@@ -89,8 +87,7 @@ impl RoundCalls for Linked {
     type Liveliness = Infallible;
     type Queryable = Begun;
     type Watch = core::convert::Infallible;
-    type Leg = u32;
-    type ReplyCallback = ();
+    type Get = Infallible;
     type Tokens = Absent;
     type Replies = Absent;
     type Queries = Absent;
@@ -105,7 +102,6 @@ impl RoundCalls for Linked {
 
 impl PlaneCalls for Linked {
     type LocalAnswers = Absent;
-    type Captures = Absent;
     type Queues = StdLocks;
 }
 
@@ -117,8 +113,7 @@ impl RoundCalls for LinkedOnUse {
     type Liveliness = Infallible;
     type Queryable = Begun;
     type Watch = core::convert::Infallible;
-    type Leg = u32;
-    type ReplyCallback = ();
+    type Get = Infallible;
     type Tokens = Absent;
     type Replies = Absent;
     type Queries = Absent;
@@ -133,7 +128,6 @@ impl RoundCalls for LinkedOnUse {
 
 impl PlaneCalls for LinkedOnUse {
     type LocalAnswers = Absent;
-    type Captures = Absent;
     type Queues = StdLocks;
 }
 

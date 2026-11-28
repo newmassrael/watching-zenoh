@@ -416,6 +416,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
                         .session
                         .registry
                         .dispatch_reply(self.records.face, record);
+                    // The Final may have ended its get: the delivery after the read hands it out.
+                    self.engine.note_ended_gets(&held.0);
                 }
                 self.records.after_pushes = true;
                 return;
@@ -449,8 +451,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
                 let Some(mut held) = self.engine.live() else {
                     return;
                 };
-                self.records.dispatch(
-                    &mut held.0.session.registry,
+                self.engine.dispatch_records(
+                    &mut held,
+                    self.records,
                     event,
                     Planes::BesideSubscribers,
                 );
@@ -474,8 +477,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
                 let Some(mut held) = self.engine.live() else {
                     return;
                 };
-                self.records
-                    .dispatch(&mut held.0.session.registry, event, Planes::All);
+                self.engine
+                    .dispatch_records(&mut held, self.records, event, Planes::All);
             }
         }
         self.engine.deliver();
@@ -1763,22 +1766,20 @@ pub(super) struct DirectFaces<L: CoopLinks + 'static, C: ClockSource + 'static> 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C> {
     /// The rows of the table, `rows` of them lent from `arena` and one at least: the face of the
     /// face table's place `n` in the row `n`, the dial role's first, each with a Router of its
-    /// own under `policy`, staging at most `open` chains at once in `chains`, lent through a
-    /// cell of its own. Refused past what the arena has left.
+    /// own under `policy`, staging its chains as `chains` says, lent through a cell of its own.
+    /// Refused past what the arena has left.
     #[cfg(all(any(feature = "listen", feature = "group"), not(wz_on_use)))]
     pub(super) fn lent_in(
         arena: &mut Arena,
         rows: usize,
         policy: &SessionPolicy,
-        chains: &LentByteCells,
-        open: usize,
+        chains: &ChainSource,
     ) -> Result<FaceSlots<L, C>, LendRefused> {
         // The first row is the dial role's, which every table holds (`Self::dial`).
         let rows = rows.max(1);
         let mut table = arena.lend::<DirectFace<L, C>, { usize::MAX }>(rows)?;
         for at in 0..rows {
-            let router: SessionReassembly =
-                session_reassembly(policy, SessionChains::over(chains, open));
+            let router = chain_router(policy, chains);
             let write = move |row: &mut MaybeUninit<DirectFace<L, C>>| {
                 // SAFETY: the row is aligned and valid for writes of a face, holds none, and is
                 // kept where it lies by the table for as long as the face is.
@@ -1794,20 +1795,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
 
     /// The rows of the table where the session's tables take their memory on use, `rows` of them
     /// and one at least, the dial role's alone made: its face in the row `0`, with a Router of its
-    /// own under `policy`, staging at most `open` chains at once in `chains`. Each other row's
-    /// face is made at its place's first face or its group's join (`Self::made_at`). Refused when
-    /// the allocator has no room for the rows or for the dial role's face.
+    /// own under `policy`, staging its chains as `chains` says. Each other row's face is made at
+    /// its place's first face or its group's join (`Self::made_at`). Refused when the allocator
+    /// has no room for the rows or for the dial role's face.
     #[cfg(all(any(feature = "listen", feature = "group"), wz_on_use))]
     pub(super) fn counted(
         rows: usize,
         policy: &SessionPolicy,
-        chains: &LentByteCells,
-        open: usize,
+        chains: &ChainSource,
     ) -> Result<FaceSlots<L, C>, ArenaRefused> {
         // The first row is the dial role's, which every table holds (`Self::dial`).
         let table = OnceRows::counted(rows.max(1))?;
-        let router: SessionReassembly =
-            session_reassembly(policy, SessionChains::over(chains, open));
+        let router = chain_router(policy, chains);
         // SAFETY: `init_at` leaves a whole face in the allocation the row hands it, which the row
         // keeps where it lies until the table is dropped.
         let dial = unsafe { table.made(0, |place| DirectFace::<L, C>::init_at(place, 0, router)) };
@@ -2110,8 +2109,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// face's read slot is made at its place's first face or its group's join
     /// (`DirectFaces::made_at`).
     pub(super) fn face_router(&self) -> SessionReassembly {
-        let (chains, open) = &self.face_chains;
-        session_reassembly(&self.policy, SessionChains::over(chains, *open))
+        chain_router(&self.policy, &self.face_chains)
     }
 }
 
@@ -2199,6 +2197,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> LinkIo for Direct
         }
         if let Some(id) = self.slot.face_id(self.core) {
             self.core.lose_face_link(at, id);
+            // A get whose last leg the face held ended with it: the delivery after the read hands
+            // it out.
+            #[cfg(feature = "query")]
+            self.engine.note_ended_gets(self.core);
         }
         self.slot.drop_link(&self.face.site);
         if ends_session {
@@ -3286,6 +3288,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 slot.router.sweep(now_ms);
             }
             core.sweep_gets(now_us);
+            // A get the sweep timed out is handed out by the delivery after the read.
+            #[cfg(feature = "query")]
+            self.note_ended_gets(core);
             let moved = if moves_link {
                 #[cfg(test)]
                 core.link_polls.set(core.link_polls.get() + 1);
@@ -3598,11 +3603,30 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .session
             .registry
             .take_lent_token(face, record, &mut news);
-        records.dispatch(&mut held.0.session.registry, event, Planes::All);
+        self.dispatch_records(&mut held, records, event, Planes::All);
         drop(held);
         if told {
             self.hand_token_row_by_row(&news, false);
         }
+    }
+
+    /// Dispatch `event`, a record or a frame of the face `records` reads, to the planes `planes`
+    /// names under the hold `held`, and note in that same hold a get whose last leg a Final of it
+    /// ended (`Self::note_ended_gets`): a DeclFinal lent with a declaration, or a Final or a
+    /// DeclFinal among the owned records of a frame. The delivery after the record hands the get
+    /// out, not a later look at the face, which a face that brings nothing more may not make
+    /// before the get's deadline.
+    #[inline(always)]
+    fn dispatch_records<A: RecordActions>(
+        &self,
+        held: &mut LiveCore<'_, L, C>,
+        records: &FaceRecords<A>,
+        event: IterationEvent<'_, '_>,
+        planes: Planes,
+    ) {
+        records.dispatch(&mut held.0.session.registry, event, planes);
+        #[cfg(feature = "query")]
+        self.note_ended_gets(&held.0);
     }
 
     /// Begin the handshake of the link the last dial made: what the life is told of it.

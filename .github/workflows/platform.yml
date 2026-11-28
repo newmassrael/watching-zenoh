@@ -1519,6 +1519,39 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The preset with `udp-listen`: arm W's udp cells of the performance matrix on Windows run on it, since
+  # the preset has no udp/ listener, as zenoh-pico's peer has none (docs/pico-perf-matrix.md sections 1
+  # and 6; `perf_matrix.py windows-plan` takes it beside the preset's package).
+  package-windows-preset-udp:
+    name: pico library package x64 zenoh-pico preset with udp-listen (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    if: ${{ inputs.host == '' || inputs.host == 'both' || inputs.host == 'windows' }}
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: build the package and run its regression test
+        id: package
+        uses: ./.github/actions/pico-windows-package
+        with:
+          arch: x64
+          form: single
+          preset: zenoh-pico
+          with: udp-listen
+
+      - name: Upload the package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico-windows-preset-zenoh-pico-with-udp-listen-x64
+          path: |
+            ${{ steps.package.outputs.directory }}/*.zip
+            ${{ steps.package.outputs.directory }}/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+
   # zenoh-pico's own API tests and example programs on the DLL a release ships
   # (scripts/lib/pico_upstream_programs.py; docs/release-proof-pico-windows.md, item W03): the
   # package without `std` of each width, as `package-windows` built it and its regression test

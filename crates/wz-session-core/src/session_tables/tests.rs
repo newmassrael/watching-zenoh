@@ -114,7 +114,8 @@ fn rows() -> TableRows {
         queriers: caps::MAX_QUERIERS,
         matching_listeners: caps::MAX_MATCHING_LISTENERS,
         key_listeners: caps::MAX_MATCHING_LISTENERS,
-        pending_gets: caps::MAX_PENDING_QUERIES,
+        pending_queries: caps::MAX_PENDING_QUERIES,
+        pending_snapshots: PENDING_GET_ROWS - caps::MAX_PENDING_QUERIES,
         held_replies: caps::MAX_PENDING_REPLIES,
     }
 }
@@ -484,6 +485,7 @@ fn every_kind_with_a_callback_is_let_go_by_its_last_call() {
         .unwrap();
     let get = tables
         .begin_get(
+            GetKind::Query,
             ReplyAcceptance::Matching("g"),
             ConsolidationMode::None,
             1,
@@ -1364,6 +1366,7 @@ fn a_get_is_found_by_its_request_and_ended_by_its_last_leg_or_its_deadline() {
     let mut tables = Tables::new();
     let first = tables
         .begin_get(
+            GetKind::Query,
             ReplyAcceptance::Matching("k"),
             ConsolidationMode::Latest,
             2,
@@ -1372,7 +1375,14 @@ fn a_get_is_found_by_its_request_and_ended_by_its_last_leg_or_its_deadline() {
         )
         .unwrap();
     let second = tables
-        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 50, 8)
+        .begin_get(
+            GetKind::Query,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            50,
+            8,
+        )
         .unwrap();
     assert_ne!(first.request, second.request);
     let (found, row) = tables.pending_get(first.request).unwrap();
@@ -1453,6 +1463,7 @@ fn a_get_counts_the_legs_added_to_it_and_ends_at_the_last() {
     let mut tables = Tables::new();
     let get = tables
         .begin_get(
+            GetKind::Query,
             ReplyAcceptance::Any,
             ConsolidationMode::None,
             1,
@@ -1497,6 +1508,7 @@ fn a_gets_gate_admits_its_key_and_every_err() {
     let mut tables = Tables::new();
     let gated = tables
         .begin_get(
+            GetKind::Query,
             ReplyAcceptance::Matching("a/b"),
             ConsolidationMode::None,
             1,
@@ -1505,7 +1517,14 @@ fn a_gets_gate_admits_its_key_and_every_err() {
         )
         .unwrap();
     let any = tables
-        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 0, 2)
+        .begin_get(
+            GetKind::Query,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            0,
+            2,
+        )
         .unwrap();
     let gated = tables.pending_get(gated.request).unwrap().1;
     assert!(gated.admits(&reply("a/b", ReplyKind::Put)));
@@ -1521,15 +1540,36 @@ fn a_request_id_skips_the_ones_still_pending() {
     let mut tables = Tables::new();
     tables.next_request = u32::MAX;
     let last = tables
-        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 0, 1)
+        .begin_get(
+            GetKind::Query,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            0,
+            1,
+        )
         .unwrap();
     let wrapped = tables
-        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 0, 2)
+        .begin_get(
+            GetKind::Query,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            0,
+            2,
+        )
         .unwrap();
     assert_eq!((last.request, wrapped.request), (u32::MAX, 0));
     tables.next_request = u32::MAX;
     let next = tables
-        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 0, 3)
+        .begin_get(
+            GetKind::Query,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            0,
+            3,
+        )
         .unwrap();
     assert_eq!(next.request, 1);
 }
@@ -1538,11 +1578,13 @@ fn a_request_id_skips_the_ones_still_pending() {
 fn a_full_get_table_refuses_and_hands_the_callback_back() {
     let mut tables = Tables::new();
     tables.limit_to(&TableRows {
-        pending_gets: 0,
+        pending_queries: 0,
+        pending_snapshots: 0,
         ..rows()
     });
     let refused = tables
         .begin_get(
+            GetKind::Query,
             ReplyAcceptance::Matching("k"),
             ConsolidationMode::None,
             1,
@@ -1562,6 +1604,7 @@ fn a_get_retired_while_its_call_ran_is_let_go_by_the_walk_once_the_call_ended() 
     let mut tables = latched_tables();
     let get = tables
         .begin_get(
+            GetKind::Query,
             ReplyAcceptance::Any,
             ConsolidationMode::None,
             1,
@@ -1604,6 +1647,7 @@ fn a_walk_finds_each_get_its_pick_names_standing_or_ended() {
     let mut begin = |callback| {
         tables
             .begin_get(
+                GetKind::Query,
                 ReplyAcceptance::Any,
                 ConsolidationMode::None,
                 1,
@@ -1643,6 +1687,7 @@ fn a_walk_retires_each_get_its_pick_names_once_and_marks_it_first() {
     let mut begin = |callback| {
         tables
             .begin_get(
+                GetKind::Query,
                 ReplyAcceptance::Any,
                 ConsolidationMode::None,
                 1,
@@ -1678,6 +1723,7 @@ fn a_walk_retires_each_get_its_pick_names_once_and_marks_it_first() {
     let mut held = latched_tables();
     let get = held
         .begin_get(
+            GetKind::Query,
             ReplyAcceptance::Any,
             ConsolidationMode::None,
             1,
@@ -1720,10 +1766,10 @@ fn a_latest_get_holds_its_replies_until_they_are_taken_and_retires_with_the_rest
     let mut tables = Tables::new();
     let latest = ConsolidationMode::Latest;
     let first = tables
-        .begin_get(ReplyAcceptance::Any, latest, 1, 0, 1)
+        .begin_get(GetKind::Query, ReplyAcceptance::Any, latest, 1, 0, 1)
         .unwrap();
     let second = tables
-        .begin_get(ReplyAcceptance::Any, latest, 1, 0, 2)
+        .begin_get(GetKind::Query, ReplyAcceptance::Any, latest, 1, 0, 2)
         .unwrap();
     assert!(matches!(
         tables.admit_reply(first.handle, &reply("a", b"one")),
@@ -1771,6 +1817,7 @@ fn a_reply_is_admitted_by_its_gets_gate_mode_and_standing() {
     let mut tables = latched_tables();
     let plain = tables
         .begin_get(
+            GetKind::Query,
             ReplyAcceptance::Matching("a/*"),
             ConsolidationMode::None,
             1,
@@ -1780,6 +1827,7 @@ fn a_reply_is_admitted_by_its_gets_gate_mode_and_standing() {
         .unwrap();
     let latest = tables
         .begin_get(
+            GetKind::Query,
             ReplyAcceptance::Any,
             ConsolidationMode::Latest,
             1,
@@ -1839,6 +1887,7 @@ fn a_get_whose_gate_is_too_long_is_refused_and_spends_no_request_id() {
     let long = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
     let refused = tables
         .begin_get(
+            GetKind::Query,
             ReplyAcceptance::Matching(&long),
             ConsolidationMode::None,
             1,
@@ -1883,7 +1932,8 @@ fn small_rows() -> TableRows {
         queriers: 0,
         matching_listeners: 1,
         key_listeners: 1,
-        pending_gets: 1,
+        pending_queries: 1,
+        pending_snapshots: 0,
         held_replies: 1,
     }
 }
@@ -2016,6 +2066,157 @@ fn lent_tables_past_a_build_bound_are_refused() {
         SessionTables::<Calls, Lent>::lent(&mut arena, keys(64), &rows),
         Err(LendRefused::OverCeiling { .. })
     ));
+}
+
+/// The gets' table holds a row for each query and, where the build asks for liveliness snapshots,
+/// each snapshot pending at once (`PENDING_GET_ROWS`), and refuses a row past them. Turned red by
+/// a table bound to the queries alone, which refuses the snapshots' rows of a build that asks for
+/// them.
+#[test]
+fn the_gets_table_holds_a_row_for_each_query_and_snapshot_pending() {
+    #[cfg(feature = "liveliness-get")]
+    assert_eq!(
+        PENDING_GET_ROWS,
+        caps::MAX_PENDING_QUERIES + caps::MAX_PENDING_LIVELINESS_GETS
+    );
+    #[cfg(not(feature = "liveliness-get"))]
+    assert_eq!(PENDING_GET_ROWS, caps::MAX_PENDING_QUERIES);
+    let within = TableRows {
+        pending_queries: caps::MAX_PENDING_QUERIES,
+        pending_snapshots: PENDING_GET_ROWS - caps::MAX_PENDING_QUERIES,
+        ..small_rows()
+    };
+    assert_eq!(within.pending_gets(), PENDING_GET_ROWS);
+    let bytes = SessionTables::<Calls, Lent>::arena_bytes(&within).unwrap();
+    let mut whole = arena(bytes);
+    assert!(SessionTables::<Calls, Lent>::lent(&mut whole, keys(64), &within).is_ok());
+    let past = TableRows {
+        pending_snapshots: within.pending_snapshots + 1,
+        ..within
+    };
+    let mut refused = arena(1 << 16);
+    assert!(matches!(
+        SessionTables::<Calls, Lent>::lent(&mut refused, keys(64), &past),
+        Err(LendRefused::OverCeiling { .. })
+    ));
+}
+
+/// Each kind of get is held to its own bound in the one table of them, whatever room the other
+/// kind leaves: a query past `pending_queries` is refused while the snapshots' rows stand free,
+/// and a snapshot past `pending_snapshots` while the queries' do, each refused before its callback
+/// is taken (`has_room_for_get`), and the row a retired get gives back holds the next of its kind.
+/// The CONTROL is the first of each kind, held. Turned red by a table bound by its rows alone, which
+/// holds a second query in a snapshot's row.
+#[cfg(feature = "liveliness-get")]
+#[test]
+fn each_kind_of_get_is_held_to_its_own_bound_in_the_one_table() {
+    let mut tables = Tables::new();
+    tables.limit_to(&TableRows {
+        pending_queries: 1,
+        pending_snapshots: 1,
+        ..rows()
+    });
+    let any = |tables: &mut Tables, kind, callback| {
+        tables.begin_get(
+            kind,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            u64::MAX,
+            callback,
+        )
+    };
+    let query = any(&mut tables, GetKind::Query, 1).expect("CONTROL: the first query is held");
+    assert!(!tables.has_room_for_get(GetKind::Query));
+    assert!(tables.has_room_for_get(GetKind::Snapshot));
+    let refused = any(&mut tables, GetKind::Query, 2).unwrap_err();
+    assert_eq!(
+        (refused.why, refused.callback),
+        (RegisterError::TableFull, 2)
+    );
+    any(&mut tables, GetKind::Snapshot, 3).expect("CONTROL: the first snapshot is held");
+    assert!(!tables.has_room_for_get(GetKind::Snapshot));
+    let refused = any(&mut tables, GetKind::Snapshot, 4).unwrap_err();
+    assert_eq!(
+        (refused.why, refused.callback),
+        (RegisterError::TableFull, 4)
+    );
+    assert!(tables.retire_get(query.handle).is_some());
+    assert!(tables.has_room_for_get(GetKind::Query));
+    any(&mut tables, GetKind::Query, 5).expect("the row the query gave back holds the next");
+}
+
+/// A snapshot asked of one face ends answered at that face's DeclFinal, its legs counted as the
+/// engine counts them: begun with the asker's own leg, one leg more for the face, held there under
+/// the id its Interest carries; the asker's end leaves the face's leg owed, and the one Final the
+/// face owes ends that leg and, with it, the snapshot, which the tables then owe as ended. The
+/// CONTROL is the snapshot after the asker's end: standing, with no end owed. Turned red by a
+/// snapshot's row that counts a leg no face holds, or a face's leg held owing more than its Final.
+#[cfg(feature = "liveliness-get")]
+#[test]
+fn a_snapshot_of_one_face_ends_with_its_askers_leg_and_the_faces_final() {
+    let mut tables = Tables::new();
+    tables.limit_to(&rows());
+    let snapshot = tables
+        .begin_get(
+            GetKind::Snapshot,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            u64::MAX,
+            1,
+        )
+        .expect("a snapshot's row")
+        .handle;
+    let interest_id: u64 = 9;
+    let mut face: crate::get_legs::GetLegs<PendingGetHandle> = Default::default();
+    assert!(tables.add_leg(snapshot), "the face's leg is counted");
+    assert!(
+        face.hold(crate::wire_id::interest_id_as_read(interest_id), snapshot),
+        "and held under its Interest's id"
+    );
+    assert_eq!(
+        tables.end_leg(snapshot),
+        Some(LegEnded::Owed(1)),
+        "the asker's own leg ends"
+    );
+    assert!(
+        !tables.owes_ended_get(),
+        "CONTROL: the snapshot stands for its face's Final"
+    );
+    let ended = face
+        .end_leg(crate::wire_id::interest_id_as_read(interest_id))
+        .expect("the face's one Final ends its leg");
+    assert_eq!(ended, snapshot);
+    assert!(face.is_empty());
+    assert_eq!(tables.end_leg(ended), Some(LegEnded::Over));
+    assert!(tables.owes_ended_get());
+    assert_eq!(
+        tables.next_ended_get(&mut 0),
+        Some((snapshot, GetEnd::Answered))
+    );
+}
+
+/// A build that asks for no liveliness snapshot holds queries alone: a snapshot finds no row
+/// whatever the table has free. The CONTROL is a query, held.
+#[cfg(not(feature = "liveliness-get"))]
+#[test]
+fn a_build_without_snapshots_holds_no_snapshot() {
+    let mut tables = Tables::new();
+    tables.limit_to(&rows());
+    assert!(tables.has_room_for_get(GetKind::Query), "CONTROL");
+    assert!(!tables.has_room_for_get(GetKind::Snapshot));
+    let refused = tables
+        .begin_get(
+            GetKind::Snapshot,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            u64::MAX,
+            1,
+        )
+        .unwrap_err();
+    assert_eq!(refused.why, RegisterError::TableFull);
 }
 
 /// A table refused past its build bound leaves the tables after it rowless: the arena keeps the
@@ -2200,7 +2401,14 @@ fn tables_that_keep_no_optional_kind_lend_none_and_refuse_each() {
         RegisterError::TableFull
     );
     let refused = tables
-        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 10, 5)
+        .begin_get(
+            GetKind::Query,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            10,
+            5,
+        )
         .unwrap_err();
     assert_eq!(
         (refused.why, refused.callback),
@@ -2218,7 +2426,14 @@ fn tables_that_keep_no_optional_kind_lend_none_and_refuse_each() {
         .declare_write_filter(Plane::Subscribers, "w", false)
         .is_ok());
     assert!(control
-        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 10, 5)
+        .begin_get(
+            GetKind::Query,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            10,
+            5
+        )
         .is_ok());
 }
 
@@ -4361,7 +4576,8 @@ fn the_tables_bytes_are_the_same_in_a_const_as_at_run_time() {
         queriers: 1,
         matching_listeners: 1,
         key_listeners: 1,
-        pending_gets: 2,
+        pending_queries: 2,
+        pending_snapshots: 0,
         held_replies: 2,
     };
     const AT_BUILD: Option<usize> = SessionTables::<Calls, Lent>::arena_bytes(&ROWS);
@@ -5711,13 +5927,34 @@ fn an_on_use_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last
 fn the_tables_count_the_ended_gets_until_each_is_retired() {
     let mut tables = Tables::new();
     let answered = tables
-        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 100, 7)
+        .begin_get(
+            GetKind::Query,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            100,
+            7,
+        )
         .unwrap();
     let timed = tables
-        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 50, 8)
+        .begin_get(
+            GetKind::Query,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            50,
+            8,
+        )
         .unwrap();
     let cancelled = tables
-        .begin_get(ReplyAcceptance::Any, ConsolidationMode::None, 1, 70, 9)
+        .begin_get(
+            GetKind::Query,
+            ReplyAcceptance::Any,
+            ConsolidationMode::None,
+            1,
+            70,
+            9,
+        )
         .unwrap();
     assert!(!tables.owes_ended_get(), "no get ended");
     assert!(tables.retire_get(cancelled.handle).is_some());

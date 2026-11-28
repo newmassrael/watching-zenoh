@@ -231,6 +231,16 @@ impl<T> Removal<T> {
             Self::AfterCalls => None,
         }
     }
+
+    /// What `part` keeps of the row handed back now, the rest let go of here: what a caller
+    /// whose rows hold values it may let go of only under its lock (a key of an arena that lock
+    /// guards) keeps of a row to drop after the lock. A row pinned is no row yet.
+    pub fn map<U>(self, part: impl FnOnce(T) -> U) -> Removal<U> {
+        match self {
+            Self::Taken(row) => Removal::Taken(part(row)),
+            Self::AfterCalls => Removal::AfterCalls,
+        }
+    }
 }
 
 /// What discarding a row did ([`SlotMap::discard`], [`Entry::discard`]).

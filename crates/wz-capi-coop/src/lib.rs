@@ -117,9 +117,10 @@ compile_error!(
 mod admission_gate;
 // The memory a session's open reserves for what its limits size, and the rows it is laid out by.
 pub mod arena;
-// The calls the engine's rows are made through, as the round, the queries' plane and the gets'
-// plane name them: only a build that keeps one of them names them.
-#[cfg(any(wz_round, feature = "query", feature = "queryable"))]
+// The calls the engine's rows are made through, as the round and the queries' plane name them:
+// only a build that keeps one of them names them. A get's call is its row's, read by the round
+// where the build keeps one and by the read that hands each record out otherwise.
+#[cfg(any(wz_round, feature = "queryable"))]
 mod calls;
 mod engine;
 // The places a session's arena lends for values lodged by counts, given back from any thread.
@@ -194,13 +195,13 @@ mod form_precedence_tests {
         assert_eq!(<RowPolicy as Storage>::TAKEN, Taken::AtFirstUse);
     }
 }
-/// The storage policy of the tables the session core's planes and round keep for the engine (the
-/// ends of its gets' legs and their callbacks, the replies its gets hold, the Finals its queryables
-/// hold and the requests they refused, the round's records, callbacks and keys, the publishes it
-/// keeps for its other faces), of its note of each leg pending and of the texts of its endpoints
-/// (`wz_runtime_coop::transport::TransportFaces::Policy`): lent, where the open lends them from its
-/// arena or the region places them, whichever policy the registry's tables are of; and taken at
-/// each table's first row where the tables take their memory on use.
+/// The storage policy of the tables the session core's queries' plane and round keep for the
+/// engine (the Finals its queryables hold and the requests they refused, the round's records,
+/// callbacks and keys, the publishes it keeps for its other faces) and of the texts of its
+/// endpoints (`wz_runtime_coop::transport::TransportFaces::Policy`): lent, where the open lends
+/// them from its arena or the region places them, whichever policy the registry's tables are of;
+/// and taken at each table's first row where the tables take their memory on use. A get's rows
+/// are the registry's, of its policy (`RowPolicy`).
 #[cfg(not(wz_on_use))]
 pub(crate) type StatePolicy = wz_session_core::bounded::Lent;
 /// See the form of a build whose tables take their memory at the open.
