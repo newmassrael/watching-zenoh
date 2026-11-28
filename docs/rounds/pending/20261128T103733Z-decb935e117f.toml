@@ -1,0 +1,22 @@
+impact = ["watching-zenoh/local-ci-gates"]
+decision = '''
+Repay six of the eight round-fed gate reds main carried at 163c093cd2 (the gates the landing queue does not run and hosted Layer C0 judges), and the reach gate's red on the determinism gate added beside them; the other two (limit_read, feature_public_surface) are already green on integration m and stay its to land.
+'''
+changes = '''
+round_fed_gate_reach: python_selftest_determinism.py is a DEFERRED row (549s for 222 selftests run twice at load 34-40); hosted Layer C0 runs both its legs.
+host_lock_gate: the multilink link set is one type, LinkSet<R> in session_actions.rs; transport_tx.rs borrows it by that name instead of spelling std's lock out three times, and the allowed count of session_actions.rs drops from 2 to 1.
+narrow_vle_read_census: the push_read.rs adjudications move to body_read.rs, the readers they became; the Request and Response ids of request_read.rs and response_read.rs are adjudicated REFUSE (Zenoh080Bounded<RequestId> upstream), as dissect's walk_request and walk_response.
+silent_skip_gate: an_on_use_alias_table_is_counted_to_its_quota asserts the refusals of a one-value domain, as the limits tests do, instead of returning unread.
+nondefault_feature_legs_gate: legs turn on scout-group-socket and scout-rx-verdicts (wz-capi-coop scout::tests::, wz-session-core scouting_host::) and multicast-send-hold (wz-session-mcu group_drive::).
+logic_census_coverage_gate: ten files added since the last rows are placed and cited by slice rows (S1 24, S2 69, S5 C5 and M1, S7 9, 14, 117, 131); the get_plane.rs rows go with the file.
+completeness_gate: c.partial-atoms locked at 0 and inventory entry debt-completeness-partial-atoms set deprecated (closed); a.pico-api.wz-passes 15 to 16.
+'''
+verification = '''
+The 195 entries of the hook's round_fed_gates array run one by one on the tip: 193 exit 0; limit_read_gate --check and feature_public_surface_census --check exit 1, both 0 on int-1128m d196abee68.
+cargo check -p wz-session-core --features transport-multilink --tests: exit 0.
+New legs run: wz-capi-coop scout::tests:: 15 passed, wz-session-core scouting_host:: 10 passed, wz-session-mcu group_drive:: 49 passed; the alias quota test 1 passed.
+validate-workspace: T1 orphan 14 (+0), T3 warn 4, ledger entries 4752 before the round.
+'''
+carry = '''
+limit_read_gate and feature_public_surface_census stay red on main until integration m lands its fixes (924ae39288, b34b34ff42 and the posix census row).
+'''
