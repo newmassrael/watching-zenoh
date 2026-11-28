@@ -7,7 +7,7 @@ Python of the tree's floor). The gate stays on Linux: this writes a reading of t
 'perf_matrix.py run' writes, its record's platform windows-x64, which 'perf_matrix.py --gate' judges
 against deploy/pico_perf_ceiling_windows.json.
 
-  perf_matrix.ps1 -Mode all -Plan plan.json -PicoSource DIR|ZIP -Package ZIP -Probe perf_probe.c -Work DIR
+  perf_matrix.ps1 -Mode all -Plan plan.json -PicoSource DIR|ZIP -Package ZIP -UdpPackage ZIP -Probe perf_probe.c -Work DIR
                   [-ClientCpus 4-7] [-ServerCpus 8-11] [-Reps 3] [-Sizes 8,64,1024] [-Transports tcp,udp,multicast]
                   [-Batching off,on] [-Workloads rtt,thr] [-Pings 20000] [-GroupInterface {GUID}]
   perf_matrix.ps1 -Mode idle-cpus [-IdleSeconds 10] [-PerSide 4]
@@ -52,6 +52,7 @@ param(
     [string]$Plan = '',
     [string]$PicoSource = '',
     [string]$Package = '',
+    [string]$UdpPackage = '',
     [string]$Probe = '',
     [string]$Work = '',
     [int]$Reps = 3,
@@ -746,6 +747,13 @@ function Get-NotApplicable([string]$arm, [string]$transport) {
     return Get-Prop $script:PlanDoc.not_applicable "$arm/$transport"
 }
 
+# binary_name of perf_matrix.py, under the bin directory: arm W's udp cells run on its udp build, in a directory
+# of its own beside its own DLL (Invoke-Build). The program transport is not run on Windows.
+function Get-ProbeBinary([string]$arm, [string]$transport) {
+    if ($arm -eq 'W' -and $transport -eq 'udp') { return 'udp\perf_probe_Wudp.exe' }
+    return "perf_probe_$arm.exe"
+}
+
 function Invoke-MatrixCell([string]$arm, [string]$transport, [bool]$batching, [string]$workload, [int]$size,
                            [int]$rep) {
     $cell = [ordered]@{ arm = $arm; transport = $transport; batching = $batching; workload = $workload; size = $size;
@@ -757,7 +765,7 @@ function Invoke-MatrixCell([string]$arm, [string]$transport, [bool]$batching, [s
     }
     $mark = if ($batching) { 'b' } else { 'n' }
     $tag = "r$rep-$arm-$transport-$mark-$workload-$size"
-    $result = Invoke-Timed "perf_probe_$arm.exe" $transport $batching $workload $size $tag
+    $result = Invoke-Timed (Get-ProbeBinary $arm $transport) $transport $batching $workload $size $tag
     if ($result.Status -eq 'measured') {
         $cell['status'] = 'measured'; $cell['figures'] = $result.Figures; $cell['foreign_share'] = $result.Foreign
         $cell['irq_share'] = $result.Irq
@@ -980,7 +988,8 @@ function Reset-Directory([string]$path) {
 }
 
 function Invoke-Build {
-    foreach ($given in @(@('-PicoSource', $PicoSource), @('-Package', $Package), @('-Probe', $Probe))) {
+    foreach ($given in @(@('-PicoSource', $PicoSource), @('-Package', $Package), @('-UdpPackage', $UdpPackage),
+                         @('-Probe', $Probe))) {
         if (-not $given[1] -or -not (Test-Path -LiteralPath $given[1])) { Fail "$($given[0]) names nothing ('$($given[1])')" }
     }
     $picoTree = (Resolve-Path -LiteralPath $PicoSource).Path
@@ -1028,6 +1037,26 @@ function Invoke-Build {
         Copy-Item -LiteralPath (Join-Path $top "release\bin\$library.dll") -Destination $script:BinDir
     }
 
+    # Arm W's udp build: arm W's build with the udp/ listener, which the plan held to arm W's (windows_udp_plan),
+    # and no other. Its DLL has arm W's name, so its probe and its DLL lie in a directory of their own, where the
+    # probe loads the DLL beside it (perf_probe_Wudp on Linux, with its own run path).
+    $udpDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $UdpPackage).Hash.ToLowerInvariant()
+    if ($udpDigest -ne $script:PlanDoc.udp_package.sha256) {
+        Fail "$UdpPackage is not the udp package the plan was made from (sha256 $udpDigest, the plan's $($script:PlanDoc.udp_package.sha256))"
+    }
+    $udpUnpacked = Join-Path $script:WorkDir 'package-udp'
+    Reset-Directory $udpUnpacked
+    Expand-Archive -LiteralPath $UdpPackage -DestinationPath $udpUnpacked
+    $udpTops = @(Get-ChildItem -LiteralPath $udpUnpacked -Directory)
+    if ($udpTops.Count -ne 1) { Fail "$UdpPackage is not one package directory" }
+    $udpTop = $udpTops[0].FullName
+    $udpManifest = Get-Content -Raw -LiteralPath (Join-Path $udpTop 'manifest.json') | ConvertFrom-Json
+    if ($udpManifest.target -ne $script:PlanDoc.package.target) { Fail "the udp package's target $($udpManifest.target) is not the plan's" }
+    Reset-Directory $script:UdpBinDir
+    foreach ($library in @($udpManifest.libraries)) {
+        Copy-Item -LiteralPath (Join-Path $udpTop "release\bin\$library.dll") -Destination $script:UdpBinDir
+    }
+
     # Arm P: pico configured as capability_cost_gate.pico_reference_tree configures it, in a fresh tree, since
     # CMake keeps the flags of the first configure of a directory.
     $build = Join-Path $script:WorkDir 'pico-build'
@@ -1059,15 +1088,17 @@ function Invoke-Build {
     # probe states the counts its roles hold (PERF_WZ_ARM, perf_probe.c), by the zext.h its package ships.
     $cl = 'cl /nologo /std:c11 /experimental:c11atomics /O2 /MD /DZENOH_WINDOWS'
     $arms = @(
-        @{ Arm = 'P'; Defines = ''; Include = $includeP; Libraries = @($implib[0].FullName) },
-        @{ Arm = 'W'; Defines = ' /DPERF_WZ_ARM'; Include = (Join-Path $top 'include');
-           Libraries = @(@($manifest.libraries) | ForEach-Object { Join-Path $top "release\lib\$_.lib" }) }
+        @{ Arm = 'P'; Defines = ''; Include = $includeP; Libraries = @($implib[0].FullName); Dir = $script:BinDir },
+        @{ Arm = 'W'; Defines = ' /DPERF_WZ_ARM'; Include = (Join-Path $top 'include'); Dir = $script:BinDir;
+           Libraries = @(@($manifest.libraries) | ForEach-Object { Join-Path $top "release\lib\$_.lib" }) },
+        @{ Arm = 'Wudp'; Defines = ' /DPERF_WZ_ARM'; Include = (Join-Path $udpTop 'include'); Dir = $script:UdpBinDir;
+           Libraries = @(@($udpManifest.libraries) | ForEach-Object { Join-Path $udpTop "release\lib\$_.lib" }) }
     )
     foreach ($arm in $arms) {
         $objects = Join-Path $script:WorkDir "obj-$($arm.Arm)"
         Reset-Directory $objects
         $libraries = ($arm.Libraries | ForEach-Object { $Q + $_ + $Q }) -join ' '
-        $exe = Join-Path $script:BinDir "perf_probe_$($arm.Arm).exe"
+        $exe = Join-Path $arm.Dir "perf_probe_$($arm.Arm).exe"
         $line = $cl + $arm.Defines + ' /I' + $Q + $arm.Include + $Q + ' ' + $Q + $probeSource + $Q + ' ' + $libraries +
                 ' ws2_32.lib psapi.lib /Fo:' + $Q + (Join-Path $objects 'perf_probe.obj') + $Q + ' /Fe:' + $Q + $exe + $Q
         $log = Join-Path $script:WorkDir "build-probe-$($arm.Arm).log"
@@ -1091,6 +1122,8 @@ function Invoke-Build {
         reference_build_rule = 'none: the Linux build rule (build_normalization.py) has no MSVC counterpart'
         probe_compile = "$cl ws2_32.lib psapi.lib"
         wz_features = $script:PlanDoc.wz_features
+        wz_udp_features = $script:PlanDoc.wz_udp_features
+        wz_udp_package = $script:PlanDoc.udp_package
         wz_engine = $script:PlanDoc.wz_engine
         wz_stdlib = $script:PlanDoc.wz_stdlib
         wz_preset = $script:PlanDoc.wz_preset
@@ -1181,6 +1214,8 @@ function Invoke-Run {
     foreach ($arm in @('P', 'W')) {
         if (-not (Test-Path -LiteralPath (Join-Path $script:BinDir "perf_probe_$arm.exe"))) { Fail "$script:BinDir lacks perf_probe_$arm.exe" }
     }
+    $udpProbe = Join-Path $script:BinDir (Get-ProbeBinary 'W' 'udp')
+    if (-not (Test-Path -LiteralPath $udpProbe)) { Fail "$udpProbe is not there: run -Mode build first" }
     $transportList = Get-Words $Transports
     $workloadList = Get-Words $Workloads
     $batchings = Get-Words $Batching
@@ -1360,10 +1395,11 @@ if ($Mode -eq 'idle-cpus') {
 if (-not $Plan -or -not (Test-Path -LiteralPath $Plan)) { Fail "-Plan names no plan ('$Plan'); make one with perf_matrix.py windows-plan" }
 if (-not $Work) { Fail '-Work names no directory' }
 $script:PlanDoc = Get-Content -Raw -LiteralPath $Plan | ConvertFrom-Json
-if ($script:PlanDoc.schema -ne 'wz-pico-perf-windows-plan/3') { Fail "$Plan is not a plan of schema wz-pico-perf-windows-plan/3; make it again with perf_matrix.py windows-plan" }
+if ($script:PlanDoc.schema -ne 'wz-pico-perf-windows-plan/4') { Fail "$Plan is not a plan of schema wz-pico-perf-windows-plan/4; make it again with perf_matrix.py windows-plan" }
 if (-not (Test-Path -LiteralPath $Work)) { [void](New-Item -ItemType Directory -Path $Work) }
 $script:WorkDir = (Resolve-Path -LiteralPath $Work).Path
 $script:BinDir = Join-Path $script:WorkDir 'bin'
+$script:UdpBinDir = Join-Path $script:BinDir 'udp'
 if ($Mode -eq 'all' -or $Mode -eq 'build') { Invoke-Build }
 if ($Mode -eq 'all' -or $Mode -eq 'run') { Invoke-Run }
 exit 0
